@@ -200,6 +200,9 @@ class WhisperCppBackend(TranscriptionBackend):
             "--temperature", str(self.temperature),
             # Temperature fallback: if decoding fails, increment temperature and retry
             "--temperature-inc", str(self.temperature_fallback),
+            # Performance optimizations
+            "--no-prints",  # Suppress progress output (faster)
+            "--no-fallback",  # Don't retry with temperature (faster, slight accuracy tradeoff)
         ]
         
         # Add language flag (skip if auto-detect)
@@ -417,6 +420,11 @@ class FasterWhisperBackend(TranscriptionBackend):
                 best_of=self.best_of,
                 temperature=self.temperature,
                 vad_filter=False,  # Disabled - was cutting off words
+                # Performance optimizations
+                condition_on_previous_text=True,  # Use previous output as context
+                no_speech_threshold=0.5,  # Skip silence faster
+                compression_ratio_threshold=2.4,  # Reject bad outputs faster
+                word_timestamps=False,  # Disable if not needed (saves ~10%)
             )
             
             # Collect all segments into text
