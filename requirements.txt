@@ -1,9 +1,20 @@
+# Wayfinder Voice - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# UI Framework
 customtkinter>=5.2.0
+
+# Audio Recording
 sounddevice>=0.4.6
 numpy>=1.24.0
+
+# Input Device Monitoring (Linux)
 evdev>=1.6.0
+
+# System Tray
 pystray>=0.19.0
 Pillow>=10.0.0
 
-
-
+# Optional: D-Bus for Wayland GlobalShortcuts
+# dbus-python  # Usually system-installed
+# PyGObject    # Usually system-installed
