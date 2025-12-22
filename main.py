@@ -1395,7 +1395,7 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to configure transcription prompt."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Transcription Prompt")
-        dialog.geometry("550x580")
+        dialog.geometry("550x720")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
@@ -1438,15 +1438,34 @@ class WayfinderApp(ctk.CTk):
         
         prompt_var = ctk.StringVar(value=current_preset or "Custom")
         
-        # Preset buttons frame
-        presets_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=10)
+        # Preset buttons frame (scrollable for many presets)
+        presets_frame = ctk.CTkScrollableFrame(
+            inner, 
+            fg_color=COLORS["bg_card"], 
+            corner_radius=10,
+            height=200,
+        )
         presets_frame.pack(fill="x", pady=(0, 15))
+        
+        preset_buttons = {}
         
         def on_preset_select(preset_name):
             prompt_var.set(preset_name)
             if preset_name in preset_prompts:
                 custom_text.delete("1.0", "end")
                 custom_text.insert("1.0", preset_prompts[preset_name])
+            # Update button styling to show selection
+            for name, btn in preset_buttons.items():
+                if name == preset_name:
+                    btn.configure(
+                        fg_color=COLORS["accent_dim"],
+                        text_color=COLORS["text_bright"],
+                    )
+                else:
+                    btn.configure(
+                        fg_color=COLORS["bg_hover"],
+                        text_color=COLORS["text_primary"],
+                    )
         
         for name in preset_prompts.keys():
             is_selected = name == current_preset
@@ -1462,6 +1481,7 @@ class WayfinderApp(ctk.CTk):
                 command=lambda n=name: on_preset_select(n),
             )
             btn.pack(fill="x", padx=10, pady=5)
+            preset_buttons[name] = btn
         
         # Custom prompt section
         ctk.CTkLabel(
