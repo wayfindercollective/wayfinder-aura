@@ -248,60 +248,82 @@ class AppState(Enum):
     PASTING = auto()
 
 
-# Wayfinder OS Color Palette - Premium dark theme with cyan accents
+# === Nano Banana Design System ===
+# Premium dark theme with depth, layered surfaces, and electric teal accents
+
 COLORS = {
-    # Backgrounds - deep space dark with subtle warmth
-    "bg_base": "#0D0D12",           # Near-black base
-    "bg_dark": "#0D0D12",           # Alias for compatibility
-    "bg_card": "#141419",           # Card surfaces
-    "bg_surface": "#141419",        # Alias
-    "bg_hover": "#1E1E26",          # Hover states
-    "bg_elevated": "#252530",       # Elevated elements
+    # Background layers (midnight blue gradient base)
+    "bg_base": "#0F172A",           # Deep midnight blue - app background
+    "bg_dark": "#0F172A",           # Alias for compatibility
+    "bg_surface": "#1E293B",        # Elevated surface layer
+    "bg_card": "#1E293B",           # Card background
+    "bg_hover": "#334155",          # Hover states
+    "bg_elevated": "#475569",       # Elevated/pressed elements
+    "bg_input": "#0F172A",          # Input fields (frosted glass effect)
     
-    # Accent - Wayfinder cyan
-    "accent": "#00D4FF",            # Primary cyan
-    "accent_cyan": "#00D4FF",       # Alias
-    "accent_glow": "#0099BB",       # Glow/shadow color
-    "accent_dim": "#007799",        # Dimmed accent
+    # Accent - Electric Teal with glow capabilities
+    "accent": "#06B6D4",            # Primary cyan-teal
+    "accent_cyan": "#06B6D4",       # Alias for compatibility
+    "accent_glow": "#0891B2",       # Glow/shadow color
+    "accent_hover": "#22D3EE",      # Lighter on hover
+    "accent_dim": "#0891B2",        # Pressed/active state
     
-    # State colors - refined palette
-    "accent_green": "#00E5A0",      # Success/ready - softer green
-    "accent_red": "#FF4466",        # Recording - coral red
-    "accent_yellow": "#FFB830",     # Processing - warm amber
-    "accent_blue": "#00D4FF",       # Typing - matches accent
+    # State colors - refined semantic palette
+    "state_ready": "#06B6D4",       # Cyan - ready/idle
+    "state_recording": "#F43F5E",   # Rose - recording (warm, urgent)
+    "state_processing": "#F59E0B",  # Amber - processing
+    "state_typing": "#10B981",      # Emerald - typing/success
     
-    # Text hierarchy
-    "text_bright": "#FFFFFF",       # Maximum contrast
-    "text_primary": "#E8E8F0",      # Primary text
-    "text_secondary": "#8888A0",    # Secondary text
-    "text_muted": "#505068",        # Muted/disabled
+    # Legacy state color aliases for compatibility
+    "accent_green": "#10B981",      # Emerald - success/typing
+    "accent_red": "#F43F5E",        # Rose - recording
+    "accent_yellow": "#F59E0B",     # Amber - processing
+    "accent_blue": "#06B6D4",       # Cyan - matches accent
     
-    # Borders and dividers
-    "border": "#2A2A3A",            # Subtle borders
-    "border_glow": "#00D4FF33",     # Glowing border (with alpha)
+    # Text hierarchy - clear contrast levels
+    "text_bright": "#F8FAFC",       # Maximum contrast (headings)
+    "text_primary": "#E2E8F0",      # Primary body text
+    "text_secondary": "#94A3B8",    # Secondary/labels
+    "text_muted": "#64748B",        # Disabled/hints
+    
+    # Borders and dividers - subtle depth cues
+    "border": "#334155",            # Standard borders
+    "border_subtle": "#1E293B",     # Very subtle borders
+    "border_glow": "#06B6D433",     # Glowing border (with alpha)
+}
+
+# Corner radius design tokens for consistent rounded corners
+RADIUS = {
+    "sm": 8,    # Small elements (toggles, chips, badges)
+    "md": 12,   # Buttons, inputs, dropdowns
+    "lg": 16,   # Cards, panels
+    "xl": 24,   # Hero sections, modals
 }
 
 STATE_COLORS = {
-    AppState.IDLE: COLORS["accent"],           # Cyan when ready
-    AppState.RECORDING: COLORS["accent_red"],   # Red when recording
-    AppState.PROCESSING: COLORS["accent_yellow"], # Amber when processing
-    AppState.PASTING: COLORS["accent_green"],   # Green when typing
+    AppState.IDLE: COLORS["state_ready"],        # Cyan when ready
+    AppState.RECORDING: COLORS["state_recording"], # Rose when recording
+    AppState.PROCESSING: COLORS["state_processing"], # Amber when processing
+    AppState.PASTING: COLORS["state_typing"],    # Emerald when typing
 }
 
 STATE_LABELS = {
-    AppState.IDLE: "Ready",
-    AppState.RECORDING: "Listening",
-    AppState.PROCESSING: "Processing",
-    AppState.PASTING: "Typing",
+    AppState.IDLE: "Ready to Record",
+    AppState.RECORDING: "Listening...",
+    AppState.PROCESSING: "Processing...",
+    AppState.PASTING: "Typing...",
 }
 
 
 # === Tooltip Helper ===
 
 class ToolTip:
-    """Hover tooltip for CustomTkinter widgets."""
+    """
+    Modern hover tooltip for CustomTkinter widgets.
+    Styled to match Nano Banana design system.
+    """
     
-    def __init__(self, widget, text, delay=400):
+    def __init__(self, widget, text, delay=300):
         self.widget = widget
         self.text = text
         self.delay = delay
@@ -325,50 +347,57 @@ class ToolTip:
         if self.tooltip_window:
             return
         
-        # Create tooltip window first to get its dimensions
+        # Create tooltip window
         self.tooltip_window = tw = ctk.CTkToplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_attributes("-topmost", True)
+        tw.configure(fg_color=COLORS["bg_surface"])
         
-        # Tooltip frame with styling
+        # Modern tooltip frame with subtle styling
         frame = ctk.CTkFrame(
             tw,
-            fg_color=COLORS["bg_elevated"],
-            corner_radius=8,
+            fg_color=COLORS["bg_surface"],
+            corner_radius=RADIUS["sm"],
             border_width=1,
             border_color=COLORS["border"],
         )
         frame.pack(fill="both", expand=True)
         
+        # Tooltip content
         label = ctk.CTkLabel(
             frame,
             text=self.text,
-            font=("Inter", 11),
-            text_color=COLORS["text_secondary"],
-            wraplength=280,
+            font=("Inter", 12),
+            text_color=COLORS["text_primary"],
+            wraplength=260,
             justify="left",
-            padx=12,
-            pady=8,
         )
-        label.pack()
+        label.pack(padx=12, pady=10)
         
-        # Position the tooltip ABOVE the widget with clearance
+        # Position tooltip above widget
         tw.update_idletasks()
         tw_width = tw.winfo_width()
         tw_height = tw.winfo_height()
         screen_width = tw.winfo_screenwidth()
+        screen_height = tw.winfo_screenheight()
         
-        x = self.widget.winfo_rootx()
-        # Position above the widget with 8px gap
-        y = self.widget.winfo_rooty() - tw_height - 8
+        # Center above widget
+        widget_x = self.widget.winfo_rootx()
+        widget_width = self.widget.winfo_width()
+        x = widget_x + (widget_width - tw_width) // 2
         
-        # Adjust if tooltip would go off-screen horizontally
-        if x + tw_width > screen_width:
+        # Position above with gap
+        y = self.widget.winfo_rooty() - tw_height - 6
+        
+        # Keep on screen horizontally
+        if x < 10:
+            x = 10
+        elif x + tw_width > screen_width - 10:
             x = screen_width - tw_width - 10
         
-        # If tooltip would go above screen top, show below instead
-        if y < 0:
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        # If would go off top, show below
+        if y < 10:
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
         
         tw.wm_geometry(f"+{x}+{y}")
     
@@ -1629,6 +1658,160 @@ class FloatingIndicator:
         self.follow_job = None
 
 
+# === PyQt6 Glassmorphic Overlay Controller ===
+
+class OverlayController:
+    """
+    Controls the PyQt6 glassmorphic status overlay subprocess.
+    
+    The overlay runs in a separate process to avoid event loop conflicts
+    with the main CustomTkinter application. Communication is via JSON
+    messages over stdin/stdout.
+    """
+    
+    def __init__(self, audio_level_callback=None):
+        self._process: subprocess.Popen | None = None
+        self._audio_level_callback = audio_level_callback
+        self._audio_poll_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._current_state = "hidden"
+        self._lock = threading.Lock()
+    
+    def _start_process(self) -> bool:
+        """Start the overlay subprocess if not already running."""
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                return True  # Already running
+            
+            try:
+                # Find the overlay script
+                script_path = Path(__file__).parent / "status_overlay.py"
+                if not script_path.exists():
+                    print(f"Overlay script not found: {script_path}")
+                    return False
+                
+                # Start subprocess
+                self._process = subprocess.Popen(
+                    ["python3", str(script_path)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,  # Line buffered
+                )
+                
+                # Wait for ready signal
+                try:
+                    response = self._process.stdout.readline()
+                    if response:
+                        data = json.loads(response)
+                        if data.get("status") == "ready":
+                            return True
+                except:
+                    pass
+                
+                return True
+            except Exception as e:
+                print(f"Failed to start overlay: {e}")
+                return False
+    
+    def _send_command(self, cmd: dict) -> bool:
+        """Send a command to the overlay subprocess."""
+        with self._lock:
+            if self._process is None or self._process.poll() is not None:
+                return False
+            
+            try:
+                line = json.dumps(cmd) + "\n"
+                self._process.stdin.write(line)
+                self._process.stdin.flush()
+                return True
+            except Exception as e:
+                print(f"Failed to send overlay command: {e}")
+                return False
+    
+    def _start_audio_polling(self):
+        """Start background thread to poll audio levels."""
+        if self._audio_poll_thread is not None and self._audio_poll_thread.is_alive():
+            return
+        
+        self._stop_event.clear()
+        self._audio_poll_thread = threading.Thread(target=self._audio_poll_loop, daemon=True)
+        self._audio_poll_thread.start()
+    
+    def _stop_audio_polling(self):
+        """Stop audio level polling."""
+        self._stop_event.set()
+        if self._audio_poll_thread is not None:
+            self._audio_poll_thread.join(timeout=0.5)
+            self._audio_poll_thread = None
+    
+    def _audio_poll_loop(self):
+        """Background loop to send audio levels to overlay."""
+        while not self._stop_event.is_set():
+            if self._current_state == "listening" and self._audio_level_callback:
+                try:
+                    level = self._audio_level_callback()
+                    self._send_command({"cmd": "level", "value": level})
+                except:
+                    pass
+            self._stop_event.wait(0.016)  # ~60 Hz
+    
+    def show(self, state: str = "listening"):
+        """
+        Show the overlay with the specified state.
+        
+        Args:
+            state: One of "listening", "processing", "ready"
+        """
+        if not self._start_process():
+            return
+        
+        self._current_state = state
+        self._send_command({"cmd": "show", "state": state})
+        
+        if state == "listening":
+            self._start_audio_polling()
+    
+    def update(self, state: str):
+        """Update the overlay to a new state."""
+        if self._process is None or self._process.poll() is not None:
+            self.show(state)
+            return
+        
+        old_state = self._current_state
+        self._current_state = state
+        self._send_command({"cmd": "show", "state": state})
+        
+        if state == "listening" and old_state != "listening":
+            self._start_audio_polling()
+        elif state != "listening" and old_state == "listening":
+            self._stop_audio_polling()
+    
+    def hide(self):
+        """Hide the overlay."""
+        self._stop_audio_polling()
+        self._current_state = "hidden"
+        self._send_command({"cmd": "hide"})
+    
+    def quit(self):
+        """Shut down the overlay subprocess."""
+        self._stop_audio_polling()
+        self._send_command({"cmd": "quit"})
+        
+        with self._lock:
+            if self._process is not None:
+                try:
+                    self._process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
+                self._process = None
+    
+    def set_audio_level_callback(self, callback):
+        """Set the callback function for getting audio levels."""
+        self._audio_level_callback = callback
+
+
 # === Main Application ===
 
 class WayfinderApp(ctk.CTk):
@@ -1667,8 +1850,12 @@ class WayfinderApp(ctk.CTk):
         self._recording_start_time: float | None = None
         self._duration_update_job: str | None = None
         
-        # Floating status indicator
+        # Floating status indicator (legacy CTk fallback)
         self.indicator: FloatingIndicator | None = None
+        
+        # PyQt6 glassmorphic overlay controller (preferred)
+        self.overlay_controller: OverlayController | None = None
+        self._use_pyqt_overlay = False  # Will be set based on PyQt6 availability
         
         # Dialog tracking to prevent multiple instances
         self._device_settings_dialog: ctk.CTkToplevel | None = None
@@ -1687,6 +1874,18 @@ class WayfinderApp(ctk.CTk):
                 pass
             return 0.0
         
+        # Try to use PyQt6 overlay (preferred for glassmorphism)
+        try:
+            import PyQt6
+            self.overlay_controller = OverlayController(audio_level_callback=get_audio_level)
+            self._use_pyqt_overlay = True
+            self.log("✨ Using PyQt6 glassmorphic overlay")
+        except ImportError:
+            # Fallback to CTk indicator
+            self._use_pyqt_overlay = False
+            self.log("⚠ PyQt6 not available, using fallback indicator")
+        
+        # Always create fallback indicator (used when PyQt overlay unavailable)
         self.indicator = FloatingIndicator(
             self, 
             target_fps=self.config.get("indicator_fps", 0),
@@ -1698,8 +1897,10 @@ class WayfinderApp(ctk.CTk):
         self.start_hotkey_listener()
         self.poll_events()
         
-        # Log indicator FPS info
-        if self.indicator:
+        # Log indicator info
+        if self._use_pyqt_overlay:
+            self.log("🎯 Overlay: PyQt6 glassmorphic (60 Hz)")
+        elif self.indicator:
             self.log(f"🎯 Indicator refresh: {self.indicator.get_fps_info()}")
         
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
@@ -1781,12 +1982,27 @@ class WayfinderApp(ctk.CTk):
         return int(base_size * self.ui_scale)
 
     def setup_ui(self) -> None:
-        # Font families with fallbacks (Exo 2 for headers, Inter for body)
-        self.font_header = ("Exo 2", "Rajdhani", "Segoe UI", "Ubuntu")
-        self.font_body = ("Inter", "DM Sans", "Segoe UI", "Ubuntu")
-        self.font_mono = ("JetBrains Mono", "Fira Code", "Consolas", "monospace")
+        # === Nano Banana Typography System ===
+        # Premium font stack with distinct weights for hierarchy
+        self.font_display = ("Manrope", "Plus Jakarta Sans", "SF Pro Display", "Segoe UI Variable", "Ubuntu")
+        self.font_header = ("Manrope", "Plus Jakarta Sans", "SF Pro Display", "Segoe UI", "Ubuntu")
+        self.font_body = ("Inter", "SF Pro Text", "Segoe UI", "system-ui", "Ubuntu")
+        self.font_mono = ("JetBrains Mono", "SF Mono", "Cascadia Code", "Consolas", "monospace")
         
-        # Main container - will hold gradient background
+        # Font size tokens for consistent hierarchy
+        self.font_sizes = {
+            "display": 24,      # Main title
+            "title": 20,        # Section titles
+            "heading": 16,      # Card headings
+            "body": 14,         # Body text, labels
+            "small": 12,        # Secondary text
+            "caption": 10,      # Captions, hints
+        }
+        
+        # Track last transcription for Dictate tab
+        self.last_transcription = ""
+        
+        # Main container with gradient background
         self.main_container = ctk.CTkFrame(self, fg_color=COLORS["bg_base"])
         self.main_container.pack(fill="both", expand=True)
         
@@ -1799,547 +2015,35 @@ class WayfinderApp(ctk.CTk):
         self.bg_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.main_container.bind("<Configure>", self._draw_gradient_bg)
         
-        # Scrollable content frame - allows fluid resizing
-        self.scroll_container = ctk.CTkScrollableFrame(
-            self.main_container,
-            fg_color="transparent",
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
-        )
-        self.scroll_container.pack(fill="both", expand=True, padx=20, pady=16)
+        # Content frame (non-scrollable for header + hero, tabs handle their own scrolling)
+        content = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=20, pady=16)
         
-        # Main content inside scrollable frame
-        main = ctk.CTkFrame(self.scroll_container, fg_color="transparent")
-        main.pack(fill="both", expand=True, padx=4)
+        # === Header ===
+        self._create_header(content)
         
-        # === Header - Horizontal "WAYFINDER VOICE" ===
-        header = ctk.CTkFrame(main, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 16))
+        # === Hero Section (Always visible) ===
+        self._create_hero_section(content)
         
-        # Title container for horizontal layout
-        title_frame = ctk.CTkFrame(header, fg_color="transparent")
-        title_frame.pack(side="left")
+        # === Tab Bar ===
+        self._create_tab_bar(content)
         
-        # "WAYFINDER" in silver/gray
-        ctk.CTkLabel(
-            title_frame,
-            text="WAYFINDER",
-            font=(self.font_header[0], 20, "bold"),
-            text_color="#B8B8C8",  # Silver gray
-        ).pack(side="left")
+        # === Tab Content Container ===
+        self.tab_content_container = ctk.CTkFrame(content, fg_color="transparent")
+        self.tab_content_container.pack(fill="both", expand=True)
         
-        # "VOICE" in accent cyan
-        ctk.CTkLabel(
-            title_frame,
-            text=" VOICE",
-            font=(self.font_header[0], 20, "bold"),
-            text_color=COLORS["accent"],
-        ).pack(side="left")
+        # Create tab frames
+        self.tab_frames = {}
+        self.active_tab = "dictate"
         
-        # Close button - minimal
-        ctk.CTkButton(
-            header,
-            text="×",
-            width=28,
-            height=28,
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_muted"],
-            font=(self.font_body[0], 20),
-            corner_radius=8,
-            command=self.hide_to_tray,
-        ).pack(side="right")
+        self._create_dictate_tab()
+        self._create_settings_tab()
+        self._create_history_tab()
         
-        # === Compact Status Card with Subtle Glow ===
-        # Container to center the status card with max width
-        status_container = ctk.CTkFrame(main, fg_color="transparent")
-        status_container.pack(fill="x", pady=(0, 12))
+        # Show initial tab
+        self._switch_tab("dictate")
         
-        self.status_card = ctk.CTkFrame(
-            status_container,
-            fg_color=COLORS["bg_card"],
-            corner_radius=16,
-            border_width=1,
-            border_color=COLORS["border"],
-            width=420,
-            height=80,
-        )
-        self.status_card.pack(pady=0)
-        self.status_card.pack_propagate(False)  # Maintain fixed size
-        
-        status_inner = ctk.CTkFrame(self.status_card, fg_color="transparent")
-        status_inner.pack(fill="both", expand=True, padx=18, pady=14)
-        
-        # Compact glowing dot indicator
-        self.status_canvas = ctk.CTkCanvas(
-            status_inner,
-            width=44,
-            height=44,
-            bg=COLORS["bg_card"],
-            highlightthickness=0,
-        )
-        self.status_canvas.pack(side="left")
-        
-        # Draw compact glowing indicator
-        self._draw_status_indicator(STATE_COLORS[AppState.IDLE])
-        
-        # Status text - more compact
-        status_text = ctk.CTkFrame(status_inner, fg_color="transparent")
-        status_text.pack(side="left", padx=14, fill="both", expand=True)
-        
-        self.status_label = ctk.CTkLabel(
-            status_text,
-            text="Ready",
-            font=(self.font_header[0], 20, "bold"),
-            text_color=STATE_COLORS[AppState.IDLE],
-            anchor="w",
-        )
-        self.status_label.pack(anchor="w")
-        
-        self.hotkey_label = ctk.CTkLabel(
-            status_text,
-            text=f"Press {self.get_hotkey_display()} to record",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["text_secondary"],
-            anchor="w",
-        )
-        self.hotkey_label.pack(anchor="w", pady=(2, 0))
-        
-        # === Record Button - Premium styling with tooltip ===
-        # Container to center the button with max width
-        btn_container = ctk.CTkFrame(main, fg_color="transparent")
-        btn_container.pack(fill="x", pady=(0, 24))
-        
-        self.record_btn = ctk.CTkButton(
-            btn_container,
-            text="Start Listening",
-            font=(self.font_body[0], 17, "bold"),
-            width=420,
-            height=58,
-            corner_radius=16,
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=self.on_record_button,
-        )
-        self.record_btn.pack()
-        
-        # Add tooltip explaining the record functionality
-        ToolTip(
-            self.record_btn,
-            f"Toggle {self.get_hotkey_display()}\n\nWhen recording stops, text is automatically\ninjected into any focused text field in Linux."
-        )
-        
-        # === Settings Section ===
-        settings_header = ctk.CTkFrame(main, fg_color="transparent")
-        settings_header.pack(fill="x", pady=(0, 6))
-        
-        ctk.CTkLabel(
-            settings_header,
-            text="SETTINGS",
-            font=(self.font_body[0], 10, "bold"),
-            text_color=COLORS["text_muted"],
-        ).pack(side="left")
-        
-        # Settings card with subtle styling
-        settings_card = ctk.CTkFrame(
-            main,
-            fg_color=COLORS["bg_card"],
-            corner_radius=14,
-            border_width=1,
-            border_color=COLORS["border"],
-        )
-        settings_card.pack(fill="x", pady=(0, 14))
-        
-        # Hotkey setting
-        self.hotkey_btn = self.create_setting_row(
-            settings_card,
-            "Hotkey",
-            self.get_hotkey_display(),
-            self.open_hotkey_settings,
-            tooltip=SETTING_TOOLTIPS["hotkey"],
-        )
-        
-        # Microphone/Audio input device setting
-        mic_display = self.get_microphone_display()
-        self.mic_btn = self.create_setting_row(
-            settings_card,
-            "Microphone",
-            mic_display,
-            self.open_microphone_settings,
-            tooltip=SETTING_TOOLTIPS["microphone"],
-        )
-        
-        # Typing speed setting
-        speed = self.config.get("typing_speed", "instant")
-        speed_display = speed.replace("_", " ").title()
-        self.speed_btn = self.create_setting_row(
-            settings_card,
-            "Typing Speed",
-            speed_display,
-            self.open_speed_settings,
-            tooltip=SETTING_TOOLTIPS["typing_speed"],
-        )
-        
-        # Model setting
-        model_display = self.get_model_display()
-        self.model_btn = self.create_setting_row(
-            settings_card,
-            "Whisper Model",
-            model_display,
-            self.open_model_settings,
-            tooltip=SETTING_TOOLTIPS["whisper_model"],
-        )
-        
-        # Prompt setting
-        prompt_display = self.get_prompt_display()
-        self.prompt_btn = self.create_setting_row(
-            settings_card,
-            "Prompt",
-            prompt_display,
-            self.open_prompt_settings,
-            tooltip=SETTING_TOOLTIPS["prompt"],
-        )
-        
-        # Start minimized setting
-        self.start_min_var = ctk.BooleanVar(value=self.config.get("start_minimized", True))
-        self.create_toggle_row(
-            settings_card,
-            "Start minimized to tray",
-            self.start_min_var,
-            self.toggle_start_minimized,
-            tooltip=SETTING_TOOLTIPS["start_minimized"],
-        )
-        
-        # UI Scale setting
-        scale_display = f"{int(self.ui_scale * 100)}%"
-        self.scale_btn = self.create_setting_row(
-            settings_card,
-            "UI Scale",
-            scale_display,
-            self.open_scale_settings,
-            tooltip=SETTING_TOOLTIPS["ui_scale"],
-        )
-        
-        # === Collapsible Advanced Settings ===
-        self.advanced_expanded = False
-        
-        advanced_header = ctk.CTkFrame(main, fg_color="transparent")
-        advanced_header.pack(fill="x", pady=(0, 8))
-        
-        advanced_toggle_btn = ctk.CTkButton(
-            advanced_header,
-            text="▶  ADVANCED",
-            font=(self.font_body[0], 10, "bold"),
-            text_color=COLORS["text_muted"],
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            anchor="w",
-            height=24,
-            command=self.toggle_advanced_settings,
-        )
-        advanced_toggle_btn.pack(side="left")
-        self.advanced_toggle_btn = advanced_toggle_btn
-        
-        # Advanced container (collapsible) - flows naturally in main scroll
-        self.advanced_container = ctk.CTkFrame(main, fg_color="transparent")
-        # Initially collapsed - don't pack
-        
-        advanced_card = ctk.CTkFrame(
-            self.advanced_container,
-            fg_color=COLORS["bg_card"],
-            corner_radius=14,
-            border_width=1,
-            border_color=COLORS["border"],
-        )
-        advanced_card.pack(fill="x", pady=(0, 8))
-        
-        # Accuracy settings label
-        ctk.CTkLabel(
-            advanced_card,
-            text="Accuracy",
-            font=(self.font_body[0], 11, "bold"),
-            text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=16, pady=(12, 4))
-        
-        # Accuracy Mode dropdown
-        accuracy_mode = self.config.get("accuracy_mode", "balanced")
-        self.accuracy_mode_var = ctk.StringVar(value=accuracy_mode)
-        self.accuracy_mode_dropdown = self.create_dropdown_row(
-            advanced_card,
-            "Accuracy Mode",
-            ["fast", "balanced", "high"],
-            self.accuracy_mode_var,
-            self.on_accuracy_mode_changed,
-            tooltip=SETTING_TOOLTIPS["accuracy_mode"],
-            width=140,
-        )
-        
-        # Beam size dropdown
-        beam_size = self.config.get("beam_size", 5)
-        self.beam_size_var = ctk.StringVar(value=str(beam_size))
-        self.beam_size_dropdown = self.create_dropdown_row(
-            advanced_card,
-            "Beam Size",
-            ["1", "2", "3", "4", "5", "6", "7", "8", "10", "12"],
-            self.beam_size_var,
-            self.on_beam_size_changed,
-            tooltip=SETTING_TOOLTIPS["beam_size"],
-            width=100,
-        )
-        
-        # Language dropdown
-        language = self.config.get("language", "en")
-        self.language_var = ctk.StringVar(value=language)
-        self.language_dropdown = self.create_dropdown_row(
-            advanced_card,
-            "Language",
-            ["en", "auto", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko"],
-            self.language_var,
-            self.on_language_changed,
-            tooltip=SETTING_TOOLTIPS["language"],
-            width=100,
-        )
-        
-        # Audio preprocessing level dropdown
-        preprocess_level = self.config.get("audio_preprocessing", "light")
-        # Handle legacy boolean values
-        if preprocess_level is True:
-            preprocess_level = "light"
-        elif preprocess_level is False:
-            preprocess_level = "off"
-        
-        preprocess_row = ctk.CTkFrame(advanced_card, fg_color="transparent")
-        preprocess_row.pack(fill="x", padx=16, pady=10)
-        
-        # Configure grid for proportional scaling
-        preprocess_row.grid_columnconfigure(0, weight=0)  # Label column - fixed
-        preprocess_row.grid_columnconfigure(1, weight=1, minsize=160)  # Dropdown column - grows
-        
-        # Left side: label + info icon (matches create_setting_row style)
-        left_frame = ctk.CTkFrame(preprocess_row, fg_color="transparent")
-        left_frame.grid(row=0, column=0, sticky="w")
-        
-        ctk.CTkLabel(
-            left_frame,
-            text="Audio Processing",
-            font=(self.font_body[0], 14),
-            text_color=COLORS["text_primary"],
-        ).pack(side="left")
-        
-        info_label = ctk.CTkLabel(
-            left_frame,
-            text="ⓘ",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["text_muted"],
-            cursor="hand2",
-        )
-        info_label.pack(side="left", padx=(6, 0))
-        info_label.bind("<Button-1>", lambda e: self.show_preprocessing_help())
-        
-        # Right side: description + dropdown (styled like other buttons)
-        right_frame = ctk.CTkFrame(preprocess_row, fg_color="transparent")
-        right_frame.grid(row=0, column=1, sticky="e", padx=(20, 0))
-        
-        # Brief description label
-        self.preprocess_desc_label = ctk.CTkLabel(
-            right_frame,
-            text=self._get_preprocess_desc(preprocess_level),
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_muted"],
-            anchor="e",
-        )
-        self.preprocess_desc_label.pack(side="left", padx=(0, 10))
-        
-        self.preprocess_var = ctk.StringVar(value=preprocess_level)
-        self.preprocess_dropdown = ctk.CTkOptionMenu(
-            right_frame,
-            values=["off", "light", "medium", "heavy"],
-            variable=self.preprocess_var,
-            command=self.on_preprocessing_changed,
-            fg_color=COLORS["bg_hover"],
-            button_color=COLORS["bg_elevated"],
-            button_hover_color=COLORS["accent_dim"],
-            dropdown_fg_color=COLORS["bg_card"],
-            dropdown_hover_color=COLORS["bg_hover"],
-            dropdown_text_color=COLORS["text_primary"],
-            text_color=COLORS["accent"],
-            font=(self.font_body[0], 15),
-            dropdown_font=(self.font_body[0], 15),
-            width=180,
-            height=50,
-            corner_radius=12,
-        )
-        self.preprocess_dropdown.pack(side="right")
-        
-        # Punctuation toggle (optional - most models already punctuate well)
-        self.punctuation_var = ctk.BooleanVar(value=self.config.get("ensure_punctuation", False))
-        self.create_toggle_row(
-            advanced_card,
-            "Additional Punctuation",
-            self.punctuation_var,
-            self.toggle_punctuation,
-            tooltip=SETTING_TOOLTIPS["ensure_punctuation"],
-        )
-        
-        # Chunk processing settings label
-        ctk.CTkLabel(
-            advanced_card,
-            text="Chunk Processing",
-            font=(self.font_body[0], 11, "bold"),
-            text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=16, pady=(14, 6))
-        
-        # Chunk processing toggle
-        self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
-        self.create_toggle_row(
-            advanced_card,
-            "Chunk Processing",
-            self.chunked_var,
-            self.toggle_chunked_mode,
-            tooltip=SETTING_TOOLTIPS["chunked_mode"],
-        )
-        
-        # Segment length dropdown
-        chunk_duration = self.config.get("chunk_duration", 30)
-        self.chunk_duration_var = ctk.StringVar(value=str(chunk_duration))
-        self.chunk_duration_dropdown = self.create_dropdown_row(
-            advanced_card,
-            "Segment Length",
-            ["15", "20", "30", "45", "60", "90", "120"],
-            self.chunk_duration_var,
-            self.on_chunk_duration_changed,
-            tooltip=SETTING_TOOLTIPS["chunk_duration"],
-            width=100,
-        )
-        
-        # GPU Acceleration settings label
-        ctk.CTkLabel(
-            advanced_card,
-            text="GPU Acceleration",
-            font=(self.font_body[0], 11, "bold"),
-            text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=16, pady=(14, 6))
-        
-        # Transcription backend dropdown
-        backend = self.config.get("transcription_backend", "whisper_cpp")
-        self.backend_var = ctk.StringVar(value=backend)
-        self.backend_dropdown = self.create_dropdown_row(
-            advanced_card,
-            "Backend",
-            ["whisper_cpp", "faster_whisper"],
-            self.backend_var,
-            self.on_backend_changed,
-            tooltip=SETTING_TOOLTIPS["backend"],
-            width=160,
-        )
-        
-        # GPU toggle
-        self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", False))
-        self.create_toggle_row(
-            advanced_card,
-            "GPU Acceleration",
-            self.gpu_var,
-            self.toggle_gpu,
-            tooltip=SETTING_TOOLTIPS["gpu_acceleration"],
-        )
-        
-        # GPU layers dropdown (only relevant for whisper.cpp)
-        gpu_layers = self.config.get("gpu_layers", 0)
-        self.gpu_layers_var = ctk.StringVar(value="auto" if gpu_layers == 0 else str(gpu_layers))
-        self.gpu_layers_dropdown = self.create_dropdown_row(
-            advanced_card,
-            "GPU Layers",
-            ["auto", "1", "4", "8", "16", "24", "32", "48", "64", "99"],
-            self.gpu_layers_var,
-            self.on_gpu_layers_changed,
-            tooltip=SETTING_TOOLTIPS["gpu_layers"],
-            width=100,
-        )
-        
-        # Devices settings label
-        ctk.CTkLabel(
-            advanced_card,
-            text="Devices",
-            font=(self.font_body[0], 11, "bold"),
-            text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=16, pady=(14, 6))
-        
-        # Hotkey devices setting (keyboards/mice that can trigger the hotkey)
-        device_count = len(get_all_input_devices())
-        enabled = self.config.get("enabled_input_devices", [])
-        device_text = f"All ({device_count})  ▼" if not enabled else f"{len(enabled)} selected  ▼"
-        self.devices_btn = self.create_setting_row(
-            advanced_card,
-            "Hotkey Devices",
-            device_text,
-            self.open_device_settings,
-            tooltip=SETTING_TOOLTIPS["hotkey_devices"],
-        )
-        
-        # === Collapsible Activity Log ===
-        self.log_expanded = False
-        
-        # Log header (always visible)
-        self.log_header_frame = ctk.CTkFrame(main, fg_color="transparent")
-        self.log_header_frame.pack(fill="x", pady=(0, 6))
-        
-        # Clickable header to expand/collapse
-        log_toggle_btn = ctk.CTkButton(
-            self.log_header_frame,
-            text="▶  ACTIVITY",
-            font=(self.font_body[0], 10, "bold"),
-            text_color=COLORS["text_muted"],
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            anchor="w",
-            height=24,
-            command=self.toggle_activity_log,
-        )
-        log_toggle_btn.pack(side="left")
-        self.log_toggle_btn = log_toggle_btn
-        
-        ctk.CTkButton(
-            self.log_header_frame,
-            text="Clear",
-            width=44,
-            height=22,
-            font=(self.font_body[0], 9),
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_muted"],
-            corner_radius=5,
-            command=self.clear_log,
-        ).pack(side="right")
-        
-        # Log container (collapsible)
-        self.log_container = ctk.CTkFrame(main, fg_color="transparent")
-        # Initially collapsed - don't pack
-        
-        self.log_frame = ctk.CTkFrame(
-            self.log_container,
-            fg_color=COLORS["bg_card"],
-            corner_radius=10,
-            border_width=1,
-            border_color=COLORS["border"],
-        )
-        self.log_frame.pack(fill="both", expand=True)
-        
-        self.log_textbox = ctk.CTkTextbox(
-            self.log_frame,
-            font=(self.font_mono[0], 9),
-            fg_color="transparent",
-            text_color=COLORS["text_secondary"],
-            wrap="word",
-            activate_scrollbars=True,
-            height=100,
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
-        )
-        self.log_textbox.pack(fill="both", expand=True, padx=10, pady=10)
-        self.log_textbox.configure(state="disabled")
-        
-        # Initial log
+        # Initial log entries
         self.log("✓ Wayfinder Voice started")
         self.log(f"⌨ Hotkey: {self.get_hotkey_display()}")
         
@@ -2355,14 +2059,761 @@ class WayfinderApp(ctk.CTk):
         else:
             self.log(f"⚪ GPU: Not detected (using CPU)")
         
-        # Log thread recommendation if system has fewer cores
         threads_config = self.config.get("threads", 6)
         if cpu_count < threads_config:
             optimal = get_optimal_thread_count()
             self.log(f"💡 Tip: {cpu_count} CPU cores detected, consider setting threads to {optimal}")
     
+    def _create_header(self, parent) -> None:
+        """Create the app header with title and close button."""
+        header = ctk.CTkFrame(parent, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 12))
+        
+        # Title container
+        title_frame = ctk.CTkFrame(header, fg_color="transparent")
+        title_frame.pack(side="left")
+        
+        # "WAYFINDER" in silver
+        ctk.CTkLabel(
+            title_frame,
+            text="WAYFINDER",
+            font=(self.font_display[0], self.font_sizes["title"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        
+        # "VOICE" in accent
+        ctk.CTkLabel(
+            title_frame,
+            text=" VOICE",
+            font=(self.font_display[0], self.font_sizes["title"], "bold"),
+            text_color=COLORS["accent"],
+        ).pack(side="left")
+        
+        # Close button
+        ctk.CTkButton(
+            header,
+            text="×",
+            width=32,
+            height=32,
+            fg_color="transparent",
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_muted"],
+            font=(self.font_body[0], 22),
+            corner_radius=RADIUS["sm"],
+            command=self.hide_to_tray,
+        ).pack(side="right")
+    
+    def _create_hero_section(self, parent) -> None:
+        """Create the hero section with visualizer and mic button."""
+        # Hero card with premium styling
+        self.hero_frame = ctk.CTkFrame(
+            parent,
+            fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["xl"],
+            border_width=1,
+            border_color=COLORS["border_subtle"],
+        )
+        self.hero_frame.pack(fill="x", pady=(0, 16))
+        
+        hero_inner = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
+        hero_inner.pack(fill="x", padx=24, pady=20)
+        
+        # === Waveform Visualizer Canvas ===
+        self.hero_canvas = ctk.CTkCanvas(
+            hero_inner,
+            height=80,
+            bg=COLORS["bg_card"],
+            highlightthickness=0,
+        )
+        self.hero_canvas.pack(fill="x", pady=(0, 16))
+        
+        # Initialize animation state
+        self._hero_wave_time = 0.0
+        self._hero_audio_level = 0.0
+        self._hero_animation_job = None
+        self._idle_breath_job = None
+        
+        # Draw initial idle waveform
+        self._draw_hero_waveform()
+        
+        # === Mic Button Container (centered) ===
+        mic_container = ctk.CTkFrame(hero_inner, fg_color="transparent")
+        mic_container.pack()
+        
+        # Glowing mic button canvas
+        self.mic_button_canvas = ctk.CTkCanvas(
+            mic_container,
+            width=80,
+            height=80,
+            bg=COLORS["bg_card"],
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.mic_button_canvas.pack()
+        self.mic_button_canvas.bind("<Button-1>", lambda e: self.on_record_button())
+        
+        # Draw the mic button
+        self._draw_mic_button(STATE_COLORS[AppState.IDLE])
+        
+        # Status text below button
+        self.status_label = ctk.CTkLabel(
+            hero_inner,
+            text=STATE_LABELS[AppState.IDLE],
+            font=(self.font_header[0], self.font_sizes["heading"], "bold"),
+            text_color=STATE_COLORS[AppState.IDLE],
+        )
+        self.status_label.pack(pady=(12, 0))
+        
+        # Hotkey hint
+        self.hotkey_label = ctk.CTkLabel(
+            hero_inner,
+            text=f"Press {self.get_hotkey_display()} to toggle",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        )
+        self.hotkey_label.pack(pady=(4, 0))
+    
+    def _draw_mic_button(self, color: str) -> None:
+        """Draw the glowing circular mic button."""
+        canvas = self.mic_button_canvas
+        canvas.delete("all")
+        
+        size = 80
+        cx, cy = size // 2, size // 2
+        
+        # Parse color for glow
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        
+        # Background color for blending
+        bg_r, bg_g, bg_b = int(COLORS["bg_card"][1:3], 16), int(COLORS["bg_card"][3:5], 16), int(COLORS["bg_card"][5:7], 16)
+        
+        # Outer glow layers
+        glow_layers = [
+            (36, 0.08),
+            (32, 0.15),
+            (28, 0.25),
+        ]
+        
+        for radius, intensity in glow_layers:
+            gr = int(bg_r + (r - bg_r) * intensity)
+            gg = int(bg_g + (g - bg_g) * intensity)
+            gb = int(bg_b + (b - bg_b) * intensity)
+            glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+            canvas.create_oval(
+                cx - radius, cy - radius,
+                cx + radius, cy + radius,
+                fill=glow_color,
+                outline="",
+            )
+        
+        # Main button circle
+        canvas.create_oval(
+            cx - 24, cy - 24,
+            cx + 24, cy + 24,
+            fill=color,
+            outline="",
+        )
+        
+        # Microphone icon (simple representation)
+        # Mic body
+        canvas.create_rectangle(
+            cx - 6, cy - 12,
+            cx + 6, cy + 4,
+            fill=COLORS["bg_base"],
+            outline="",
+        )
+        # Mic rounded top
+        canvas.create_oval(
+            cx - 6, cy - 16,
+            cx + 6, cy - 8,
+            fill=COLORS["bg_base"],
+            outline="",
+        )
+        # Mic stand
+        canvas.create_arc(
+            cx - 10, cy - 4,
+            cx + 10, cy + 12,
+            start=180, extent=180,
+            style="arc",
+            outline=COLORS["bg_base"],
+            width=2,
+        )
+        canvas.create_line(
+            cx, cy + 12, cx, cy + 18,
+            fill=COLORS["bg_base"],
+            width=2,
+        )
+    
+    def _draw_hero_waveform(self) -> None:
+        """Draw the hero section waveform visualization."""
+        canvas = self.hero_canvas
+        canvas.delete("all")
+        
+        import math
+        
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        
+        if w <= 1:
+            w = 400  # Default width before first render
+        if h <= 1:
+            h = 80
+        
+        center_y = h // 2
+        max_amp = h // 2 - 4
+        
+        # Get current color based on state
+        color = STATE_COLORS.get(self.app_state, COLORS["accent"])
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        
+        # Background color for blending
+        bg_r = int(COLORS["bg_card"][1:3], 16)
+        bg_g = int(COLORS["bg_card"][3:5], 16)
+        bg_b = int(COLORS["bg_card"][5:7], 16)
+        
+        # Calculate amplitude based on audio level
+        audio_level = self._hero_audio_level
+        base_breath = 0.1 + 0.05 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.5))
+        voice_boost = (audio_level ** 0.7) * 0.9
+        amplitude_factor = min(1.0, base_breath + voice_boost)
+        
+        # Draw layered waves
+        wave_configs = [
+            (0.015, 0.0, 0.15),   # Slow background
+            (0.025, 1.2, 0.25),   # Medium
+            (0.04, 2.4, 0.4),     # Faster
+        ]
+        
+        for freq, phase_offset, alpha in wave_configs:
+            blend_r = int(bg_r + (r - bg_r) * alpha)
+            blend_g = int(bg_g + (g - bg_g) * alpha)
+            blend_b = int(bg_b + (b - bg_b) * alpha)
+            wave_color = f"#{blend_r:02x}{blend_g:02x}{blend_b:02x}"
+            
+            points = []
+            for x in range(0, w + 1, 3):
+                # Multiple sine waves combined
+                wave1 = math.sin(x * freq + self._hero_wave_time + phase_offset)
+                wave2 = math.sin(x * freq * 1.5 + self._hero_wave_time * 0.7 + phase_offset) * 0.5
+                wave3 = math.sin(x * freq * 0.5 + self._hero_wave_time * 1.3 + phase_offset) * 0.3
+                combined = (wave1 + wave2 + wave3) / 1.8
+                
+                y = center_y + combined * max_amp * amplitude_factor
+                points.extend([x, y])
+            
+            if len(points) >= 4:
+                canvas.create_line(points, fill=wave_color, width=2, smooth=True)
+        
+        # Draw center line (very subtle)
+        center_line_color = f"#{int(bg_r + (r - bg_r) * 0.1):02x}{int(bg_g + (g - bg_g) * 0.1):02x}{int(bg_b + (b - bg_b) * 0.1):02x}"
+        canvas.create_line(0, center_y, w, center_y, fill=center_line_color, width=1)
+    
+    def _create_tab_bar(self, parent) -> None:
+        """Create the tab navigation bar."""
+        tab_bar = ctk.CTkFrame(parent, fg_color="transparent")
+        tab_bar.pack(fill="x", pady=(0, 12))
+        
+        # Tab button container (centered)
+        tab_container = ctk.CTkFrame(tab_bar, fg_color=COLORS["bg_surface"], corner_radius=RADIUS["md"])
+        tab_container.pack()
+        
+        self.tab_buttons = {}
+        tabs = [
+            ("dictate", "🎤  Dictate"),
+            ("settings", "⚙️  Settings"),
+            ("history", "📋  History"),
+        ]
+        
+        for tab_id, tab_label in tabs:
+            btn = ctk.CTkButton(
+                tab_container,
+                text=tab_label,
+                font=(self.font_body[0], self.font_sizes["body"]),
+                fg_color="transparent",
+                hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_secondary"],
+                height=36,
+                corner_radius=RADIUS["sm"],
+                command=lambda t=tab_id: self._switch_tab(t),
+            )
+            btn.pack(side="left", padx=2, pady=2)
+            self.tab_buttons[tab_id] = btn
+    
+    def _switch_tab(self, tab_id: str) -> None:
+        """Switch to the specified tab."""
+        # Update button styles
+        for tid, btn in self.tab_buttons.items():
+            if tid == tab_id:
+                btn.configure(
+                    fg_color=COLORS["accent"],
+                    text_color=COLORS["bg_base"],
+                    hover_color=COLORS["accent_hover"],
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=COLORS["text_secondary"],
+                    hover_color=COLORS["bg_hover"],
+                )
+        
+        # Hide all tabs, show selected
+        for tid, frame in self.tab_frames.items():
+            if tid == tab_id:
+                frame.pack(fill="both", expand=True)
+            else:
+                frame.pack_forget()
+        
+        self.active_tab = tab_id
+    
+    def _create_dictate_tab(self) -> None:
+        """Create the Dictate tab content."""
+        frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        self.tab_frames["dictate"] = frame
+        
+        # Scrollable content
+        scroll = ctk.CTkScrollableFrame(
+            frame,
+            fg_color="transparent",
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        scroll.pack(fill="both", expand=True)
+        
+        # Last transcription card
+        trans_card = ctk.CTkFrame(
+            scroll,
+            fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["lg"],
+            border_width=1,
+            border_color=COLORS["border_subtle"],
+        )
+        trans_card.pack(fill="x", pady=(0, 12))
+        
+        # Card header
+        header = ctk.CTkFrame(trans_card, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(12, 8))
+        
+        ctk.CTkLabel(
+            header,
+            text="LAST TRANSCRIPTION",
+            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left")
+        
+        # Copy button
+        self.copy_btn = ctk.CTkButton(
+            header,
+            text="Copy",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            width=60,
+            height=24,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            corner_radius=RADIUS["sm"],
+            command=self._copy_last_transcription,
+        )
+        self.copy_btn.pack(side="right")
+        
+        # Transcription text
+        self.transcription_label = ctk.CTkLabel(
+            trans_card,
+            text="No transcription yet. Press the mic button or use your hotkey to start recording.",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_secondary"],
+            wraplength=380,
+            justify="left",
+            anchor="w",
+        )
+        self.transcription_label.pack(fill="x", padx=16, pady=(0, 16))
+        
+        # Quick tips card
+        tips_card = ctk.CTkFrame(
+            scroll,
+            fg_color=COLORS["bg_surface"],
+            corner_radius=RADIUS["lg"],
+        )
+        tips_card.pack(fill="x")
+        
+        tips_inner = ctk.CTkFrame(tips_card, fg_color="transparent")
+        tips_inner.pack(fill="x", padx=16, pady=12)
+        
+        ctk.CTkLabel(
+            tips_inner,
+            text="💡 Quick Tips",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w")
+        
+        tips = [
+            f"• Press {self.get_hotkey_display()} to start/stop recording",
+            "• Speak clearly and pause at punctuation",
+            "• Text is automatically typed into any focused field",
+        ]
+        
+        for tip in tips:
+            ctk.CTkLabel(
+                tips_inner,
+                text=tip,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", pady=(4, 0))
+    
+    def _copy_last_transcription(self) -> None:
+        """Copy the last transcription to clipboard."""
+        if self.last_transcription:
+            self.clipboard_clear()
+            self.clipboard_append(self.last_transcription)
+            self.log("📋 Transcription copied to clipboard")
+    
+    def _create_settings_tab(self) -> None:
+        """Create the Settings tab content."""
+        frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        self.tab_frames["settings"] = frame
+        
+        # Scrollable content
+        scroll = ctk.CTkScrollableFrame(
+            frame,
+            fg_color="transparent",
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        scroll.pack(fill="both", expand=True)
+        
+        # Main settings card
+        settings_card = ctk.CTkFrame(
+            scroll,
+            fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["lg"],
+            border_width=1,
+            border_color=COLORS["border_subtle"],
+        )
+        settings_card.pack(fill="x", pady=(0, 12))
+        
+        # Hotkey setting
+        self.hotkey_btn = self.create_setting_row(
+            settings_card,
+            "Hotkey",
+            self.get_hotkey_display(),
+            self.open_hotkey_settings,
+            tooltip=SETTING_TOOLTIPS["hotkey"],
+        )
+        
+        # Microphone setting
+        mic_display = self.get_microphone_display()
+        self.mic_btn = self.create_setting_row(
+            settings_card,
+            "Microphone",
+            mic_display,
+            self.open_microphone_settings,
+            tooltip=SETTING_TOOLTIPS["microphone"],
+        )
+        
+        # Typing speed
+        speed = self.config.get("typing_speed", "instant")
+        speed_display = speed.replace("_", " ").title()
+        self.speed_btn = self.create_setting_row(
+            settings_card,
+            "Typing Speed",
+            speed_display,
+            self.open_speed_settings,
+            tooltip=SETTING_TOOLTIPS["typing_speed"],
+        )
+        
+        # Whisper model
+        model_display = self.get_model_display()
+        self.model_btn = self.create_setting_row(
+            settings_card,
+            "Whisper Model",
+            model_display,
+            self.open_model_settings,
+            tooltip=SETTING_TOOLTIPS["whisper_model"],
+        )
+        
+        # Prompt
+        prompt_display = self.get_prompt_display()
+        self.prompt_btn = self.create_setting_row(
+            settings_card,
+            "Prompt",
+            prompt_display,
+            self.open_prompt_settings,
+            tooltip=SETTING_TOOLTIPS["prompt"],
+        )
+        
+        # Start minimized toggle
+        self.start_min_var = ctk.BooleanVar(value=self.config.get("start_minimized", True))
+        self.create_toggle_row(
+            settings_card,
+            "Start minimized to tray",
+            self.start_min_var,
+            self.toggle_start_minimized,
+            tooltip=SETTING_TOOLTIPS["start_minimized"],
+        )
+        
+        # UI Scale
+        scale_display = f"{int(self.ui_scale * 100)}%"
+        self.scale_btn = self.create_setting_row(
+            settings_card,
+            "UI Scale",
+            scale_display,
+            self.open_scale_settings,
+            tooltip=SETTING_TOOLTIPS["ui_scale"],
+        )
+        
+        # === Advanced Settings Button ===
+        advanced_btn = ctk.CTkButton(
+            scroll,
+            text="Advanced Settings →",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            fg_color=COLORS["bg_surface"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_secondary"],
+            height=44,
+            corner_radius=RADIUS["md"],
+            command=self._show_advanced_settings,
+        )
+        advanced_btn.pack(fill="x")
+        
+        # Store reference to scroll frame for advanced settings
+        self._settings_scroll = scroll
+    
+    def _show_advanced_settings(self) -> None:
+        """Show the advanced settings dialog."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Advanced Settings")
+        dialog.geometry("500x650")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        # Header
+        header = ctk.CTkFrame(dialog, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(16, 12))
+        
+        ctk.CTkLabel(
+            header,
+            text="Advanced Settings",
+            font=(self.font_header[0], self.font_sizes["title"], "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+        
+        ctk.CTkButton(
+            header,
+            text="×",
+            width=32,
+            height=32,
+            fg_color="transparent",
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_muted"],
+            font=(self.font_body[0], 20),
+            corner_radius=RADIUS["sm"],
+            command=dialog.destroy,
+        ).pack(side="right")
+        
+        # Scrollable content
+        scroll = ctk.CTkScrollableFrame(
+            dialog,
+            fg_color="transparent",
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        scroll.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        
+        # === Accuracy Section ===
+        self._create_advanced_section_header(scroll, "Accuracy")
+        
+        accuracy_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
+        accuracy_card.pack(fill="x", pady=(0, 16))
+        
+        accuracy_mode = self.config.get("accuracy_mode", "balanced")
+        self.accuracy_mode_var = ctk.StringVar(value=accuracy_mode)
+        self.accuracy_mode_dropdown = self.create_dropdown_row(
+            accuracy_card, "Accuracy Mode", ["fast", "balanced", "high"],
+            self.accuracy_mode_var, self.on_accuracy_mode_changed,
+            tooltip=SETTING_TOOLTIPS["accuracy_mode"], width=140,
+        )
+        
+        beam_size = self.config.get("beam_size", 5)
+        self.beam_size_var = ctk.StringVar(value=str(beam_size))
+        self.beam_size_dropdown = self.create_dropdown_row(
+            accuracy_card, "Beam Size", ["1", "2", "3", "4", "5", "6", "7", "8", "10", "12"],
+            self.beam_size_var, self.on_beam_size_changed,
+            tooltip=SETTING_TOOLTIPS["beam_size"], width=100,
+        )
+        
+        language = self.config.get("language", "en")
+        self.language_var = ctk.StringVar(value=language)
+        self.language_dropdown = self.create_dropdown_row(
+            accuracy_card, "Language",
+            ["en", "auto", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko"],
+            self.language_var, self.on_language_changed,
+            tooltip=SETTING_TOOLTIPS["language"], width=100,
+        )
+        
+        # Audio preprocessing
+        preprocess_level = self.config.get("audio_preprocessing", "light")
+        if preprocess_level is True:
+            preprocess_level = "light"
+        elif preprocess_level is False:
+            preprocess_level = "off"
+        self.preprocess_var = ctk.StringVar(value=preprocess_level)
+        self.preprocess_dropdown = self.create_dropdown_row(
+            accuracy_card, "Audio Processing", ["off", "light", "medium", "heavy"],
+            self.preprocess_var, self.on_preprocessing_changed,
+            tooltip=SETTING_TOOLTIPS["audio_preprocessing"], width=120,
+        )
+        
+        self.punctuation_var = ctk.BooleanVar(value=self.config.get("ensure_punctuation", False))
+        self.create_toggle_row(
+            accuracy_card, "Additional Punctuation",
+            self.punctuation_var, self.toggle_punctuation,
+            tooltip=SETTING_TOOLTIPS["ensure_punctuation"],
+        )
+        
+        # === Chunk Processing Section ===
+        self._create_advanced_section_header(scroll, "Chunk Processing")
+        
+        chunk_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
+        chunk_card.pack(fill="x", pady=(0, 16))
+        
+        self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
+        self.create_toggle_row(
+            chunk_card, "Enable Chunked Processing",
+            self.chunked_var, self.toggle_chunked_mode,
+            tooltip=SETTING_TOOLTIPS["chunked_mode"],
+        )
+        
+        chunk_duration = self.config.get("chunk_duration", 30)
+        self.chunk_duration_var = ctk.StringVar(value=str(chunk_duration))
+        self.chunk_duration_dropdown = self.create_dropdown_row(
+            chunk_card, "Segment Length (s)", ["15", "20", "30", "45", "60", "90", "120"],
+            self.chunk_duration_var, self.on_chunk_duration_changed,
+            tooltip=SETTING_TOOLTIPS["chunk_duration"], width=100,
+        )
+        
+        # === GPU Acceleration Section ===
+        self._create_advanced_section_header(scroll, "GPU Acceleration")
+        
+        gpu_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
+        gpu_card.pack(fill="x", pady=(0, 16))
+        
+        backend = self.config.get("transcription_backend", "whisper_cpp")
+        self.backend_var = ctk.StringVar(value=backend)
+        self.backend_dropdown = self.create_dropdown_row(
+            gpu_card, "Backend", ["whisper_cpp", "faster_whisper"],
+            self.backend_var, self.on_backend_changed,
+            tooltip=SETTING_TOOLTIPS["backend"], width=160,
+        )
+        
+        self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", False))
+        self.create_toggle_row(
+            gpu_card, "GPU Acceleration",
+            self.gpu_var, self.toggle_gpu,
+            tooltip=SETTING_TOOLTIPS["gpu_acceleration"],
+        )
+        
+        gpu_layers = self.config.get("gpu_layers", 0)
+        self.gpu_layers_var = ctk.StringVar(value="auto" if gpu_layers == 0 else str(gpu_layers))
+        self.gpu_layers_dropdown = self.create_dropdown_row(
+            gpu_card, "GPU Layers", ["auto", "1", "4", "8", "16", "24", "32", "48", "64", "99"],
+            self.gpu_layers_var, self.on_gpu_layers_changed,
+            tooltip=SETTING_TOOLTIPS["gpu_layers"], width=100,
+        )
+        
+        # === Devices Section ===
+        self._create_advanced_section_header(scroll, "Input Devices")
+        
+        devices_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
+        devices_card.pack(fill="x")
+        
+        device_count = len(get_all_input_devices())
+        enabled = self.config.get("enabled_input_devices", [])
+        device_text = f"All ({device_count})" if not enabled else f"{len(enabled)} selected"
+        self.devices_btn = self.create_setting_row(
+            devices_card, "Hotkey Devices", device_text,
+            self.open_device_settings,
+            tooltip=SETTING_TOOLTIPS["hotkey_devices"],
+        )
+    
+    def _create_advanced_section_header(self, parent, text: str) -> None:
+        """Create a section header for advanced settings."""
+        ctk.CTkLabel(
+            parent,
+            text=text.upper(),
+            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", pady=(0, 8))
+    
+    def _create_history_tab(self) -> None:
+        """Create the History tab content."""
+        frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        self.tab_frames["history"] = frame
+        
+        # Header with clear button
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 8))
+        
+        ctk.CTkLabel(
+            header,
+            text="ACTIVITY LOG",
+            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left")
+        
+        ctk.CTkButton(
+            header,
+            text="Clear",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            width=60,
+            height=24,
+            fg_color=COLORS["bg_surface"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_secondary"],
+            corner_radius=RADIUS["sm"],
+            command=self.clear_log,
+        ).pack(side="right")
+        
+        # Log card
+        log_card = ctk.CTkFrame(
+            frame,
+            fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["lg"],
+            border_width=1,
+            border_color=COLORS["border_subtle"],
+        )
+        log_card.pack(fill="both", expand=True)
+        
+        self.log_textbox = ctk.CTkTextbox(
+            log_card,
+            font=(self.font_mono[0], self.font_sizes["small"]),
+            fg_color="transparent",
+            text_color=COLORS["text_secondary"],
+            wrap="word",
+            activate_scrollbars=True,
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        self.log_textbox.pack(fill="both", expand=True, padx=12, pady=12)
+        self.log_textbox.configure(state="disabled")
+        
+        # Legacy compatibility
+        self.log_expanded = True
+        self.log_container = log_card
+        self.log_frame = log_card
+        
+        # Keep legacy toggle methods working
+        self.advanced_expanded = False
+        self.advanced_container = ctk.CTkFrame(frame, fg_color="transparent")
+        self.advanced_toggle_btn = ctk.CTkButton(frame, text="")
+        self.log_toggle_btn = ctk.CTkButton(frame, text="")
+        self.log_header_frame = header
+    
     def _draw_gradient_bg(self, event=None):
-        """Draw radial gradient background with cyan glow."""
+        """Draw radial gradient background with electric teal glow."""
         canvas = self.bg_canvas
         w = canvas.winfo_width()
         h = canvas.winfo_height()
@@ -2372,26 +2823,26 @@ class WayfinderApp(ctk.CTk):
         
         canvas.delete("gradient")
         
-        # Base color
-        base_r, base_g, base_b = 13, 13, 18  # #0D0D12
+        # Base color - midnight blue (#0F172A)
+        base_r, base_g, base_b = 15, 23, 42
         
-        # Glow color (cyan)
-        glow_r, glow_g, glow_b = 0, 60, 80  # Subtle cyan tint
+        # Glow color - electric teal tint
+        glow_r, glow_g, glow_b = 6, 90, 100
         
         # Create radial gradient effect using concentric ovals
-        cx, cy = w // 2, h // 3  # Center the glow higher up
-        max_radius = int(max(w, h) * 0.8)
+        cx, cy = w // 2, h // 4  # Center the glow in upper area (hero section)
+        max_radius = int(max(w, h) * 0.7)
         
-        steps = 30
+        steps = 25
         for i in range(steps, 0, -1):
             ratio = i / steps
             radius = int(max_radius * ratio)
             
             # Blend colors based on distance from center
-            blend = (1 - ratio) ** 2  # Quadratic falloff
-            r = int(base_r + (glow_r - base_r) * blend * 0.3)
-            g = int(base_g + (glow_g - base_g) * blend * 0.5)
-            b = int(base_b + (glow_b - base_b) * blend * 0.5)
+            blend = (1 - ratio) ** 2.5  # Sharper falloff for more dramatic glow
+            r = int(base_r + (glow_r - base_r) * blend * 0.2)
+            g = int(base_g + (glow_g - base_g) * blend * 0.3)
+            b = int(base_b + (glow_b - base_b) * blend * 0.35)
             
             color = f"#{r:02x}{g:02x}{b:02x}"
             canvas.create_oval(
@@ -2405,61 +2856,6 @@ class WayfinderApp(ctk.CTk):
         # Make sure gradient is behind everything
         canvas.tag_lower("gradient")
     
-    def _draw_status_indicator(self, color: str):
-        """Draw compact status indicator with pleasant subtle glow."""
-        canvas = self.status_canvas
-        canvas.delete("all")
-        
-        size = 44  # Compact size
-        cx, cy = size // 2, size // 2
-        
-        # Parse color for glow layers
-        r = int(color[1:3], 16)
-        g = int(color[3:5], 16)
-        b = int(color[5:7], 16)
-        
-        # Blend with background for soft glow effect
-        bg_r, bg_g, bg_b = 30, 32, 38  # COLORS["bg_card"] approximate
-        
-        # Soft outer glow layers (pleasant, not harsh)
-        glow_layers = [
-            (18, 0.12),  # Outermost - very subtle
-            (14, 0.20),  # Middle - soft
-            (10, 0.35),  # Inner - more visible
-        ]
-        
-        for radius, intensity in glow_layers:
-            # Blend color with background for soft glow
-            gr = int(bg_r + (r - bg_r) * intensity)
-            gg = int(bg_g + (g - bg_g) * intensity)
-            gb = int(bg_b + (b - bg_b) * intensity)
-            glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
-            
-            canvas.create_oval(
-                cx - radius, cy - radius,
-                cx + radius, cy + radius,
-                fill=glow_color,
-                outline="",
-                tags="glow",
-            )
-        
-        # Main filled circle
-        canvas.create_oval(
-            cx - 8, cy - 8,
-            cx + 8, cy + 8,
-            fill=color,
-            outline="",
-            tags="center",
-        )
-        
-        # Subtle highlight for depth
-        canvas.create_oval(
-            cx - 4, cy - 5,
-            cx + 1, cy - 1,
-            fill="#ffffff",
-            outline="",
-            tags="highlight",
-        )
     
     def toggle_activity_log(self):
         """Toggle the activity log expanded/collapsed state."""
@@ -2638,79 +3034,69 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⚙ GPU acceleration: {status}")
 
     def create_setting_row(self, parent, label, value, command, tooltip=None):
+        """Create a modernized setting row with frosted glass styling."""
+        # Row container with subtle padding
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=10)
+        row.pack(fill="x", padx=16, pady=8)
         
-        # Configure grid for proportional scaling
-        row.grid_columnconfigure(0, weight=0)  # Label column - fixed
-        row.grid_columnconfigure(1, weight=1, minsize=160)  # Button column - grows
+        row.grid_columnconfigure(0, weight=1)  # Label column - grows
+        row.grid_columnconfigure(1, weight=0)  # Button column - fixed
         
-        # Left side: label + optional info icon
-        left_frame = ctk.CTkFrame(row, fg_color="transparent")
-        left_frame.grid(row=0, column=0, sticky="w")
-        
-        ctk.CTkLabel(
-            left_frame,
+        # Label with tooltip on hover (no separate info icon)
+        label_widget = ctk.CTkLabel(
+            row,
             text=label,
-            font=(self.font_body[0], 14),
-            text_color=COLORS["text_primary"],
-        ).pack(side="left")
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_secondary"],
+        )
+        label_widget.grid(row=0, column=0, sticky="w")
         
+        # Apply tooltip to entire row if provided
         if tooltip:
-            info_label = ctk.CTkLabel(
-                left_frame,
-                text="ⓘ",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_muted"],
-                cursor="question_arrow",
-            )
-            info_label.pack(side="left", padx=(6, 0))
-            ToolTip(info_label, tooltip)
+            ToolTip(label_widget, tooltip)
         
+        # Modern frosted glass button
         btn = ctk.CTkButton(
             row,
             text=value,
-            font=(self.font_body[0], 15),
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
+            font=(self.font_body[0], self.font_sizes["body"]),
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_hover"],
             text_color=COLORS["accent"],
-            height=50,
-            corner_radius=12,
+            height=40,
+            corner_radius=RADIUS["md"],
+            border_width=1,
+            border_color=COLORS["border_subtle"],
             command=command,
         )
-        btn.grid(row=0, column=1, sticky="e", padx=(20, 0))
+        btn.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        
+        if tooltip:
+            ToolTip(btn, tooltip)
+        
         return btn
 
     def create_toggle_row(self, parent, label, variable, command, tooltip=None):
-        row = ctk.CTkFrame(parent, fg_color="transparent", height=50)
-        row.pack(fill="x", padx=16, pady=10)
+        """Create a modernized toggle row with slim pill-style switch."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=8)
         
-        # Configure grid for alignment with setting rows
-        row.grid_columnconfigure(0, weight=1)  # Label takes available space
-        row.grid_columnconfigure(1, weight=0)  # Switch column - fixed
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=0)
         
-        # Left side: label + optional info icon
-        left_frame = ctk.CTkFrame(row, fg_color="transparent")
-        left_frame.grid(row=0, column=0, sticky="w")
-        
-        ctk.CTkLabel(
-            left_frame,
+        # Label with integrated tooltip
+        label_widget = ctk.CTkLabel(
+            row,
             text=label,
-            font=(self.font_body[0], 14),
-            text_color=COLORS["text_primary"],
-        ).pack(side="left")
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_secondary"],
+        )
+        label_widget.grid(row=0, column=0, sticky="w")
         
         if tooltip:
-            info_label = ctk.CTkLabel(
-                left_frame,
-                text="ⓘ",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_muted"],
-                cursor="question_arrow",
-            )
-            info_label.pack(side="left", padx=(6, 0))
-            ToolTip(info_label, tooltip)
+            ToolTip(label_widget, tooltip)
         
+        # Modern slim pill-style toggle
         switch = ctk.CTkSwitch(
             row,
             text="",
@@ -2719,61 +3105,53 @@ class WayfinderApp(ctk.CTk):
             progress_color=COLORS["accent"],
             button_color=COLORS["text_bright"],
             button_hover_color=COLORS["text_primary"],
-            switch_width=56,
-            switch_height=30,
+            fg_color=COLORS["bg_input"],
+            switch_width=44,      # Slimmer width
+            switch_height=24,     # Slimmer height
+            corner_radius=12,     # Full pill shape
         )
-        switch.grid(row=0, column=1, sticky="e", padx=(20, 0))
+        switch.grid(row=0, column=1, sticky="e", padx=(16, 0))
 
     def create_dropdown_row(self, parent, label, values, variable, command, tooltip=None, width=140):
-        """Create a setting row with a dropdown menu instead of a button."""
+        """Create a modernized dropdown row with frosted glass styling."""
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=10)
+        row.pack(fill="x", padx=16, pady=8)
         
-        # Configure grid for proportional scaling
-        row.grid_columnconfigure(0, weight=0)  # Label column - fixed
-        row.grid_columnconfigure(1, weight=1, minsize=160)  # Dropdown column - grows
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=0)
         
-        # Left side: label + optional info icon
-        left_frame = ctk.CTkFrame(row, fg_color="transparent")
-        left_frame.grid(row=0, column=0, sticky="w")
-        
-        ctk.CTkLabel(
-            left_frame,
+        # Label with integrated tooltip
+        label_widget = ctk.CTkLabel(
+            row,
             text=label,
-            font=(self.font_body[0], 14),
-            text_color=COLORS["text_primary"],
-        ).pack(side="left")
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_secondary"],
+        )
+        label_widget.grid(row=0, column=0, sticky="w")
         
         if tooltip:
-            info_label = ctk.CTkLabel(
-                left_frame,
-                text="ⓘ",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_muted"],
-                cursor="question_arrow",
-            )
-            info_label.pack(side="left", padx=(6, 0))
-            ToolTip(info_label, tooltip)
+            ToolTip(label_widget, tooltip)
         
+        # Modern frosted glass dropdown
         dropdown = ctk.CTkOptionMenu(
             row,
             values=values,
             variable=variable,
             command=command,
-            fg_color=COLORS["bg_hover"],
-            button_color=COLORS["bg_elevated"],
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["bg_hover"],
             button_hover_color=COLORS["accent_dim"],
-            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_fg_color=COLORS["bg_surface"],
             dropdown_hover_color=COLORS["bg_hover"],
             dropdown_text_color=COLORS["text_primary"],
             text_color=COLORS["accent"],
-            font=(self.font_body[0], 15),
-            dropdown_font=(self.font_body[0], 15),
-            width=max(width, 180),
-            height=50,
-            corner_radius=12,
+            font=(self.font_body[0], self.font_sizes["body"]),
+            dropdown_font=(self.font_body[0], self.font_sizes["body"]),
+            width=max(width, 120),
+            height=40,
+            corner_radius=RADIUS["md"],
         )
-        dropdown.grid(row=0, column=1, sticky="e", padx=(20, 0))
+        dropdown.grid(row=0, column=1, sticky="e", padx=(16, 0))
         return dropdown
 
     def toggle_start_minimized(self):
@@ -5348,6 +5726,12 @@ class WayfinderApp(ctk.CTk):
         self.after(0, self.on_record_button)
 
     def quit_app(self, icon=None, item=None):
+        # Clean up overlay controller if running
+        if self.overlay_controller:
+            try:
+                self.overlay_controller.quit()
+            except:
+                pass
         os.kill(os.getpid(), signal.SIGKILL)
 
     # === State Management ===
@@ -5356,42 +5740,136 @@ class WayfinderApp(ctk.CTk):
         self.app_state = new_state
         color = STATE_COLORS[new_state]
         
-        # Redraw the enhanced status indicator with new color
-        self._draw_status_indicator(color)
+        # Update mic button with new state color
+        self._draw_mic_button(color)
+        
+        # Update status label
         self.status_label.configure(text=STATE_LABELS[new_state], text_color=color)
         
-        # Update status card border for subtle glow effect
+        # Update hero frame border for subtle glow effect
         if new_state == AppState.IDLE:
-            self.status_card.configure(border_color=COLORS["border"])
+            self.hero_frame.configure(border_color=COLORS["border_subtle"])
+            self._stop_hero_animation()
         else:
-            # Subtle glow border matching state color
-            self.status_card.configure(border_color=color)
+            self.hero_frame.configure(border_color=color)
+            self._start_hero_animation()
+        
+        # Redraw waveform with new state color
+        self._draw_hero_waveform()
         
         self.update_tray(new_state)
-        self.update_record_button(new_state)
-
-    def update_record_button(self, state: AppState):
-        if state == AppState.IDLE:
-            self.record_btn.configure(
-                text="Start Listening",
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_glow"],
-                state="normal",
-            )
-        elif state == AppState.RECORDING:
-            self.record_btn.configure(
-                text="Stop Listening",
-                fg_color=COLORS["accent_red"],
-                hover_color="#CC3355",
-                state="normal",
-            )
+    
+    # === Hero Animation System ===
+    
+    def _start_hero_animation(self):
+        """Start the hero waveform animation loop."""
+        # Stop idle breathing first
+        self._stop_idle_breath()
+        
+        if hasattr(self, '_hero_animation_job') and self._hero_animation_job:
+            return  # Already running
+        self._animate_hero()
+    
+    def _stop_hero_animation(self):
+        """Stop the hero waveform animation loop."""
+        if hasattr(self, '_hero_animation_job') and self._hero_animation_job:
+            self.after_cancel(self._hero_animation_job)
+            self._hero_animation_job = None
+        # Reset to idle state
+        self._hero_audio_level = 0.0
+        self._draw_hero_waveform()
+    
+    def _animate_hero(self):
+        """Animation frame for hero waveform - runs at ~30fps."""
+        # Update animation time
+        self._hero_wave_time += 0.15
+        
+        # Get current audio level from active recorder
+        target_level = 0.0
+        try:
+            if hasattr(self, 'chunked_recorder') and self.chunked_recorder and self.chunked_recorder.is_recording():
+                target_level = self.chunked_recorder.get_audio_level()
+            elif hasattr(self, 'recorder') and self.recorder and self.recorder.is_recording():
+                target_level = self.recorder.get_audio_level()
+        except:
+            pass
+        
+        # Smooth the audio level (exponential moving average)
+        self._hero_audio_level = self._hero_audio_level * 0.7 + target_level * 0.3
+        
+        # Redraw waveform
+        self._draw_hero_waveform()
+        
+        # Pulse the mic button during recording
+        if self.app_state == AppState.RECORDING:
+            import math
+            pulse = 0.9 + 0.1 * math.sin(self._hero_wave_time * 2)
+            self._draw_mic_button_with_pulse(STATE_COLORS[self.app_state], pulse)
+        
+        # Schedule next frame if still active
+        if self.app_state != AppState.IDLE:
+            self._hero_animation_job = self.after(33, self._animate_hero)  # ~30fps
         else:
-            self.record_btn.configure(
-                text="Processing...",
-                fg_color=COLORS["accent_yellow"],
-                hover_color="#CC9520",
-                state="disabled",
+            self._hero_animation_job = None
+    
+    def _draw_mic_button_with_pulse(self, color: str, pulse: float = 1.0):
+        """Draw mic button with pulse effect for recording state."""
+        canvas = self.mic_button_canvas
+        canvas.delete("all")
+        
+        size = 80
+        cx, cy = size // 2, size // 2
+        
+        # Parse color
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        
+        bg_r = int(COLORS["bg_card"][1:3], 16)
+        bg_g = int(COLORS["bg_card"][3:5], 16)
+        bg_b = int(COLORS["bg_card"][5:7], 16)
+        
+        # Pulsing glow layers
+        glow_layers = [
+            (int(38 * pulse), 0.06 * pulse),
+            (int(34 * pulse), 0.12 * pulse),
+            (int(30 * pulse), 0.22 * pulse),
+        ]
+        
+        for radius, intensity in glow_layers:
+            gr = int(bg_r + (r - bg_r) * intensity)
+            gg = int(bg_g + (g - bg_g) * intensity)
+            gb = int(bg_b + (b - bg_b) * intensity)
+            glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+            canvas.create_oval(
+                cx - radius, cy - radius,
+                cx + radius, cy + radius,
+                fill=glow_color,
+                outline="",
             )
+        
+        # Main button circle
+        button_radius = int(24 * (0.95 + 0.05 * pulse))
+        canvas.create_oval(
+            cx - button_radius, cy - button_radius,
+            cx + button_radius, cy + button_radius,
+            fill=color,
+            outline="",
+        )
+        
+        # Stop icon during recording (square instead of mic)
+        sq_size = 8
+        canvas.create_rectangle(
+            cx - sq_size, cy - sq_size,
+            cx + sq_size, cy + sq_size,
+            fill=COLORS["bg_base"],
+            outline="",
+        )
+    
+    # Legacy method for compatibility
+    def _draw_status_indicator(self, color: str):
+        """Legacy method - redirects to mic button drawing."""
+        self._draw_mic_button(color)
 
     def on_record_button(self):
         self.on_hotkey()
@@ -5463,8 +5941,10 @@ class WayfinderApp(ctk.CTk):
         try:
             self.log("🎤 Listening...")
             
-            # Show floating indicator
-            if self.indicator:
+            # Show floating indicator / overlay
+            if self._use_pyqt_overlay and self.overlay_controller:
+                self.overlay_controller.show("listening")
+            elif self.indicator:
                 self.indicator.show("Listening...", COLORS["accent_red"])
             
             # Check if chunked mode is enabled
@@ -5558,8 +6038,10 @@ class WayfinderApp(ctk.CTk):
             self._duration_update_job = None
         self._recording_start_time = None
         
-        # Update floating indicator to processing
-        if self.indicator:
+        # Update floating indicator / overlay to processing
+        if self._use_pyqt_overlay and self.overlay_controller:
+            self.overlay_controller.update("processing")
+        elif self.indicator:
             self.indicator.update("Processing...", COLORS["accent_yellow"])
         
         self.update_state(AppState.PROCESSING)
@@ -5759,6 +6241,15 @@ class WayfinderApp(ctk.CTk):
         if not text.strip():
             self.on_error("No speech detected")
             return
+        
+        # Store and display in Dictate tab
+        self.last_transcription = text.strip()
+        if hasattr(self, 'transcription_label'):
+            self.transcription_label.configure(
+                text=self.last_transcription,
+                text_color=COLORS["text_primary"],
+            )
+        
         self.update_state(AppState.PASTING)
         self.executor.submit(self.do_inject, text)
 
@@ -5772,15 +6263,19 @@ class WayfinderApp(ctk.CTk):
 
     def on_injection_done(self):
         self.log("✓ Text inserted")
-        # Hide floating indicator
-        if self.indicator:
+        # Hide floating indicator / overlay
+        if self._use_pyqt_overlay and self.overlay_controller:
+            self.overlay_controller.hide()
+        elif self.indicator:
             self.indicator.hide()
         self.update_state(AppState.IDLE)
 
     def on_error(self, message):
         self.log(f"⚠ {message}")
-        # Hide floating indicator
-        if self.indicator:
+        # Hide floating indicator / overlay
+        if self._use_pyqt_overlay and self.overlay_controller:
+            self.overlay_controller.hide()
+        elif self.indicator:
             self.indicator.hide()
         self.update_state(AppState.IDLE)
 

@@ -4,6 +4,10 @@
 # UI Framework
 customtkinter>=5.2.0
 
+# Glassmorphic Status Overlay (PyQt6)
+# Premium overlay with blur effects, animations, and squircle shape
+PyQt6>=6.5.0
+
 # Audio Recording
 sounddevice>=0.4.6
 numpy>=1.24.0
