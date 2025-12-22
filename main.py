@@ -209,11 +209,7 @@ class ToolTip:
         if self.tooltip_window:
             return
         
-        # Get widget position
-        x = self.widget.winfo_rootx()
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
-        
-        # Create tooltip window
+        # Create tooltip window first to get its dimensions
         self.tooltip_window = tw = ctk.CTkToplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_attributes("-topmost", True)
@@ -240,14 +236,23 @@ class ToolTip:
         )
         label.pack()
         
-        # Position the tooltip
+        # Position the tooltip ABOVE the widget with clearance
         tw.update_idletasks()
         tw_width = tw.winfo_width()
+        tw_height = tw.winfo_height()
         screen_width = tw.winfo_screenwidth()
         
-        # Adjust if tooltip would go off-screen
+        x = self.widget.winfo_rootx()
+        # Position above the widget with 8px gap
+        y = self.widget.winfo_rooty() - tw_height - 8
+        
+        # Adjust if tooltip would go off-screen horizontally
         if x + tw_width > screen_width:
             x = screen_width - tw_width - 10
+        
+        # If tooltip would go above screen top, show below instead
+        if y < 0:
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
         
         tw.wm_geometry(f"+{x}+{y}")
     
@@ -588,13 +593,61 @@ def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callbac
 
 # === Floating Status Indicator ===
 
+def get_monitor_refresh_rate() -> int:
+    """
+    Detect the monitor's refresh rate.
+    Returns the refresh rate in Hz, or 60 as fallback.
+    """
+    # Try xrandr first (works on X11 and XWayland)
+    try:
+        result = subprocess.run(
+            ["xrandr", "--current"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            # Parse xrandr output for current refresh rate
+            # Look for lines with "*" which indicates current mode
+            for line in result.stdout.split('\n'):
+                if '*' in line:
+                    # Extract refresh rate - format like "1920x1080 60.00*+"
+                    import re
+                    match = re.search(r'(\d+\.?\d*)\*', line)
+                    if match:
+                        rate = float(match.group(1))
+                        return int(round(rate))
+    except:
+        pass
+    
+    # Try kscreen-doctor for KDE Plasma
+    try:
+        result = subprocess.run(
+            ["kscreen-doctor", "-o"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            import re
+            # Look for refresh rate in output
+            match = re.search(r'@(\d+)(?:Hz)?', result.stdout)
+            if match:
+                return int(match.group(1))
+    except:
+        pass
+    
+    # Fallback to 60Hz
+    return 60
+
+
 class FloatingIndicator:
     """
     A floating status indicator that appears near the cursor.
     Shows "Listening..." during recording and "Processing..." during transcription.
     """
     
-    def __init__(self, parent: ctk.CTk):
+    def __init__(self, parent: ctk.CTk, target_fps: int = 0):
         self.parent = parent
         self.window: ctk.CTkToplevel | None = None
         self.label: ctk.CTkLabel | None = None
@@ -604,6 +657,25 @@ class FloatingIndicator:
         self._visible = False
         self._window_width = 0
         self._window_height = 0
+        
+        # Determine target FPS
+        if target_fps <= 0:
+            # Auto-detect from monitor
+            self._target_fps = get_monitor_refresh_rate()
+            self._fps_auto_detected = True
+        else:
+            self._target_fps = target_fps
+            self._fps_auto_detected = False
+        
+        # Calculate frame interval in milliseconds
+        self._frame_interval_ms = max(1, int(1000 / self._target_fps))
+    
+    def get_fps_info(self) -> str:
+        """Return a string describing the current FPS setting."""
+        if self._fps_auto_detected:
+            return f"{self._target_fps} Hz (auto-detected)"
+        else:
+            return f"{self._target_fps} Hz (manual)"
         
     def show(self, text: str = "Listening...", color: str = COLORS["accent_red"]) -> None:
         """Show the floating indicator with the given text."""
@@ -811,9 +883,9 @@ class FloatingIndicator:
         except:
             pass
         
-        # Schedule next update (30fps for smooth following)
+        # Schedule next update at target FPS (synced to monitor refresh rate)
         if self.window:
-            self.follow_job = self.window.after(33, self._follow_step)
+            self.follow_job = self.window.after(self._frame_interval_ms, self._follow_step)
             
     def _stop_follow(self) -> None:
         """Stop following the cursor."""
@@ -863,12 +935,16 @@ class WayfinderApp(ctk.CTk):
         self.indicator: FloatingIndicator | None = None
         
         self.setup_window()
-        self.indicator = FloatingIndicator(self)
+        self.indicator = FloatingIndicator(self, target_fps=self.config.get("indicator_fps", 0))
         self.setup_tray()
         self.setup_ui()
         self.setup_scaling_shortcuts()
         self.start_hotkey_listener()
         self.poll_events()
+        
+        # Log indicator FPS info
+        if self.indicator:
+            self.log(f"🎯 Indicator refresh: {self.indicator.get_fps_info()}")
         
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         
