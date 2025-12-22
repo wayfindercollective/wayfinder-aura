@@ -1851,17 +1851,24 @@ class WayfinderApp(ctk.CTk):
         ).pack(side="right")
         
         # === Compact Status Card with Subtle Glow ===
+        # Container to center the status card with max width
+        status_container = ctk.CTkFrame(main, fg_color="transparent")
+        status_container.pack(fill="x", pady=(0, 12))
+        
         self.status_card = ctk.CTkFrame(
-            main,
+            status_container,
             fg_color=COLORS["bg_card"],
-            corner_radius=12,
+            corner_radius=16,
             border_width=1,
             border_color=COLORS["border"],
+            width=420,
+            height=80,
         )
-        self.status_card.pack(fill="x", pady=(0, 12))
+        self.status_card.pack(pady=0)
+        self.status_card.pack_propagate(False)  # Maintain fixed size
         
         status_inner = ctk.CTkFrame(self.status_card, fg_color="transparent")
-        status_inner.pack(fill="x", padx=14, pady=12)
+        status_inner.pack(fill="both", expand=True, padx=18, pady=14)
         
         # Compact glowing dot indicator
         self.status_canvas = ctk.CTkCanvas(
@@ -1899,18 +1906,23 @@ class WayfinderApp(ctk.CTk):
         self.hotkey_label.pack(anchor="w", pady=(2, 0))
         
         # === Record Button - Premium styling with tooltip ===
+        # Container to center the button with max width
+        btn_container = ctk.CTkFrame(main, fg_color="transparent")
+        btn_container.pack(fill="x", pady=(0, 24))
+        
         self.record_btn = ctk.CTkButton(
-            main,
+            btn_container,
             text="Start Listening",
             font=(self.font_body[0], 17, "bold"),
+            width=420,
             height=58,
-            corner_radius=14,
+            corner_radius=16,
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
             command=self.on_record_button,
         )
-        self.record_btn.pack(fill="x", pady=(0, 24))
+        self.record_btn.pack()
         
         # Add tooltip explaining the record functionality
         ToolTip(
