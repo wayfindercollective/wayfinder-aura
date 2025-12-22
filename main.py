@@ -946,9 +946,9 @@ class FloatingIndicator:
         screen_w = self.parent.winfo_screenwidth()
         screen_h = self.parent.winfo_screenheight()
         
-        # Center horizontally, position above taskbar (typically ~60px from bottom)
+        # Center horizontally, position just above taskbar
         pos_x = (screen_w - self._window_width) // 2
-        pos_y = screen_h - self._window_height - 70  # 70px above bottom for taskbar
+        pos_y = screen_h - self._window_height - 52  # Resting just on top of taskbar (~48px)
         
         self.window.geometry(f"+{pos_x}+{pos_y}")
         self._is_centered = True
