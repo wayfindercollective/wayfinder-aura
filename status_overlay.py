@@ -500,22 +500,14 @@ class GlassmorphicOverlay(QWidget):
     
     def _setup_window(self):
         """Configure window flags for overlay behavior."""
-        # Dialog + Tool combination works on KDE Wayland without taskbar
+        # Simple flags that work reliably on Wayland/KDE
         self.setWindowFlags(
-            Qt.WindowType.Dialog |  # Modal-like behavior
-            Qt.WindowType.Tool |  # Utility window, no taskbar
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.NoDropShadowWindowHint
+            Qt.WindowType.BypassWindowManagerHint  # Bypass WM for true always-on-top
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        
-        # Skip taskbar hint
-        try:
-            self.setAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeNotification)
-        except:
-            pass
         
         # X11-specific: don't accept focus
         try:
