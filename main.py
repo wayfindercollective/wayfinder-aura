@@ -2572,70 +2572,54 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["ui_scale"],
         )
         
-        # === Advanced Settings Button ===
-        advanced_btn = ctk.CTkButton(
-            scroll,
-            text="Advanced Settings →",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            fg_color=COLORS["bg_surface"],
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_secondary"],
-            height=44,
-            corner_radius=RADIUS["md"],
-            command=self._show_advanced_settings,
-        )
-        advanced_btn.pack(fill="x")
+        # === Collapsible Advanced Settings ===
+        self.advanced_expanded = False
         
-        # Store reference to scroll frame for advanced settings
+        # Advanced header with toggle
+        advanced_header = ctk.CTkFrame(scroll, fg_color="transparent")
+        advanced_header.pack(fill="x", pady=(16, 8))
+        
+        self.advanced_toggle_btn = ctk.CTkButton(
+            advanced_header,
+            text="▶  ADVANCED",
+            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+            text_color=COLORS["text_muted"],
+            fg_color="transparent",
+            hover_color=COLORS["bg_hover"],
+            anchor="w",
+            height=28,
+            command=self._toggle_advanced_inline,
+        )
+        self.advanced_toggle_btn.pack(side="left")
+        
+        # Advanced container (collapsible)
+        self.advanced_container = ctk.CTkFrame(scroll, fg_color="transparent")
+        # Initially collapsed - don't pack
+        
+        # Build advanced settings content
+        self._build_advanced_settings_content(self.advanced_container)
+        
+        # Store reference to scroll frame
         self._settings_scroll = scroll
     
-    def _show_advanced_settings(self) -> None:
-        """Show the advanced settings dialog."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Advanced Settings")
-        dialog.geometry("500x650")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.grab_set()
+    def _toggle_advanced_inline(self):
+        """Toggle the advanced settings expanded/collapsed state."""
+        self.advanced_expanded = not self.advanced_expanded
         
-        # Header
-        header = ctk.CTkFrame(dialog, fg_color="transparent")
-        header.pack(fill="x", padx=20, pady=(16, 12))
-        
-        ctk.CTkLabel(
-            header,
-            text="Advanced Settings",
-            font=(self.font_header[0], self.font_sizes["title"], "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(side="left")
-        
-        ctk.CTkButton(
-            header,
-            text="×",
-            width=32,
-            height=32,
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_muted"],
-            font=(self.font_body[0], 20),
-            corner_radius=RADIUS["sm"],
-            command=dialog.destroy,
-        ).pack(side="right")
-        
-        # Scrollable content
-        scroll = ctk.CTkScrollableFrame(
-            dialog,
-            fg_color="transparent",
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
-        )
-        scroll.pack(fill="both", expand=True, padx=20, pady=(0, 16))
-        
+        if self.advanced_expanded:
+            self.advanced_toggle_btn.configure(text="▼  ADVANCED")
+            self.advanced_container.pack(fill="x", pady=(0, 8))
+        else:
+            self.advanced_toggle_btn.configure(text="▶  ADVANCED")
+            self.advanced_container.pack_forget()
+    
+    def _build_advanced_settings_content(self, parent):
+        """Build the advanced settings content inside the given container."""
         # === Accuracy Section ===
-        self._create_advanced_section_header(scroll, "Accuracy")
+        self._create_advanced_section_header(parent, "Accuracy")
         
-        accuracy_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
-        accuracy_card.pack(fill="x", pady=(0, 16))
+        accuracy_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
+        accuracy_card.pack(fill="x", pady=(0, 12))
         
         accuracy_mode = self.config.get("accuracy_mode", "balanced")
         self.accuracy_mode_var = ctk.StringVar(value=accuracy_mode)
@@ -2683,10 +2667,10 @@ class WayfinderApp(ctk.CTk):
         )
         
         # === Chunk Processing Section ===
-        self._create_advanced_section_header(scroll, "Chunk Processing")
+        self._create_advanced_section_header(parent, "Chunk Processing")
         
-        chunk_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
-        chunk_card.pack(fill="x", pady=(0, 16))
+        chunk_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
+        chunk_card.pack(fill="x", pady=(0, 12))
         
         self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
         self.create_toggle_row(
@@ -2704,10 +2688,10 @@ class WayfinderApp(ctk.CTk):
         )
         
         # === GPU Acceleration Section ===
-        self._create_advanced_section_header(scroll, "GPU Acceleration")
+        self._create_advanced_section_header(parent, "GPU Acceleration")
         
-        gpu_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
-        gpu_card.pack(fill="x", pady=(0, 16))
+        gpu_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
+        gpu_card.pack(fill="x", pady=(0, 12))
         
         backend = self.config.get("transcription_backend", "whisper_cpp")
         self.backend_var = ctk.StringVar(value=backend)
@@ -2733,9 +2717,9 @@ class WayfinderApp(ctk.CTk):
         )
         
         # === Devices Section ===
-        self._create_advanced_section_header(scroll, "Input Devices")
+        self._create_advanced_section_header(parent, "Input Devices")
         
-        devices_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
+        devices_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
         devices_card.pack(fill="x")
         
         device_count = len(get_all_input_devices())
@@ -2877,15 +2861,8 @@ class WayfinderApp(ctk.CTk):
             self.log_container.pack_forget()
     
     def toggle_advanced_settings(self):
-        """Toggle the advanced settings expanded/collapsed state."""
-        self.advanced_expanded = not self.advanced_expanded
-        
-        if self.advanced_expanded:
-            self.advanced_toggle_btn.configure(text="▼  ADVANCED")
-            self.advanced_container.pack(fill="x", pady=(0, 10))
-        else:
-            self.advanced_toggle_btn.configure(text="▶  ADVANCED")
-            self.advanced_container.pack_forget()
+        """Toggle the advanced settings expanded/collapsed state (legacy method)."""
+        self._toggle_advanced_inline()
     
     def _get_preprocess_desc(self, level: str) -> str:
         """Get brief description for audio processing level with latency."""
