@@ -150,3 +150,4 @@ flatpak-builder --user --install --force-clean build-dir io.github.user.Wayfinde
 flatpak run io.github.user.WayfinderVoice 2>&1 | tee app.log
 ```
 
+

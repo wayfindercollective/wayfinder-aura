@@ -11,3 +11,4 @@ Keywords=voice;dictation;speech;whisper;transcription;speech-to-text;
 StartupNotify=true
 StartupWMClass=wayfinder-voice
 
+

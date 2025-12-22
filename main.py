@@ -1144,63 +1144,63 @@ class FloatingIndicator:
         
         self.window.configure(fg_color=shadow_color)
         
-        # Outer glow/shadow frame - fully rounded pill
+        # Outer glow/shadow frame - tight rounded pill
         self.glow_frame = ctk.CTkFrame(
             self.window,
             fg_color=shadow_color,
-            corner_radius=28,
+            corner_radius=20,
             border_width=2,
             border_color=outer_glow_color,
         )
         self.glow_frame.pack(padx=0, pady=0)
         
-        # Main pill-shaped frame - compact and rounded
+        # Main pill-shaped frame - ultra compact
         self.main_frame = ctk.CTkFrame(
             self.glow_frame,
             fg_color=pill_bg,
-            corner_radius=24,
+            corner_radius=16,
             border_width=2,
             border_color=color,
         )
-        self.main_frame.pack(padx=3, pady=3)
+        self.main_frame.pack(padx=2, pady=2)
         
-        # Inner content - compact vertical layout
-        inner = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        inner.pack(padx=14, pady=10)
+        # Content container with waveform as background
+        content = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        content.pack(padx=10, pady=6)
         
-        # Top row: dot + label (compact)
-        top_row = ctk.CTkFrame(inner, fg_color="transparent")
-        top_row.pack(fill="x")
+        # Single row: dot + label + waveform all together
+        row = ctk.CTkFrame(content, fg_color="transparent")
+        row.pack()
         
-        # Glowing status indicator dot
+        # Glowing status indicator dot (smaller)
         self.dot_canvas = ctk.CTkCanvas(
-            top_row,
-            width=22,
-            height=22,
+            row,
+            width=18,
+            height=18,
             bg=pill_bg,
             highlightthickness=0,
         )
-        self.dot_canvas.pack(side="left", padx=(0, 8))
+        self.dot_canvas.pack(side="left", padx=(0, 6))
         self._draw_dot(color)
         
         # Label with status text
         self.label = ctk.CTkLabel(
-            top_row,
+            row,
             text=text,
-            font=("SF Pro Display", 13, "bold") if self._font_exists("SF Pro Display") else ("Inter", 13, "bold"),
+            font=("SF Pro Display", 12, "bold") if self._font_exists("SF Pro Display") else ("Inter", 12, "bold"),
             text_color=COLORS["text_bright"],
         )
-        self.label.pack(side="left")
+        self.label.pack(side="left", padx=(0, 4))
         
-        # Voice-reactive waveform - wider and more prominent
+        # Voice-reactive waveform - right next to text, fills remaining space
         self.wave_canvas = ctk.CTkCanvas(
-            inner,
-            width=160,
-            height=32,
+            row,
+            width=90,
+            height=18,
             bg=pill_bg,
             highlightthickness=0,
         )
-        self.wave_canvas.pack(pady=(6, 0))
+        self.wave_canvas.pack(side="left")
         self._draw_waveform(color)
         
         self.current_color = color
@@ -1324,8 +1324,8 @@ class FloatingIndicator:
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
         
-        # Canvas is 22x22 (compact design)
-        canvas_size = 22
+        # Canvas is 18x18 (ultra compact)
+        canvas_size = 18
         cx, cy = canvas_size // 2, canvas_size // 2
         
         # Background color for blending (pill_bg = #18181f)
@@ -1334,7 +1334,7 @@ class FloatingIndicator:
         # Expanding ring animation - ring grows outward and fades
         ring_progress = self._ring_phase % 1.0  # 0 to 1
         if ring_progress > 0:
-            ring_radius = 5 + ring_progress * 8  # Expands from 5 to 13 (fits 22px canvas)
+            ring_radius = 4 + ring_progress * 6  # Expands from 4 to 10 (fits 18px canvas)
             ring_alpha = 0.6 * (1 - ring_progress)  # Fades out as it expands
             
             if ring_alpha > 0.05:
@@ -1347,17 +1347,17 @@ class FloatingIndicator:
                     cx - ring_radius, cy - ring_radius,
                     cx + ring_radius, cy + ring_radius,
                     outline=ring_color,
-                    width=2,
+                    width=1.5,
                     fill="",
                 )
         
-        # Draw intensified outer glow layers (sized for 22px canvas)
+        # Draw intensified outer glow layers (sized for 18px canvas)
         glow_configs = [
-            (10, 0.15),   # Outermost - subtle halo
-            (8, 0.25),    # Outer glow
-            (6, 0.4),     # Middle glow  
-            (4.5, 0.55),  # Inner glow
-            (3.5, 0.7),   # Core glow
+            (8, 0.15),    # Outermost - subtle halo
+            (6.5, 0.25),  # Outer glow
+            (5, 0.4),     # Middle glow  
+            (3.5, 0.55),  # Inner glow
+            (2.5, 0.7),   # Core glow
         ]
         
         for base_radius, alpha in glow_configs:
@@ -1378,7 +1378,7 @@ class FloatingIndicator:
             )
         
         # Draw bright core (scales more dramatically)
-        core_radius = 3 * scale
+        core_radius = 2.5 * scale
         self.dot_canvas.create_oval(
             cx - core_radius, cy - core_radius,
             cx + core_radius, cy + core_radius,
@@ -1387,8 +1387,8 @@ class FloatingIndicator:
         )
         
         # Add bright highlight spot for premium look
-        highlight_radius = 1.2 * scale
-        highlight_offset = -0.8 * scale
+        highlight_radius = 1 * scale
+        highlight_offset = -0.6 * scale
         # Lighter version of color for highlight
         hr = min(255, r + 60)
         hg = min(255, g + 60)
@@ -1405,7 +1405,7 @@ class FloatingIndicator:
         )
     
     def _draw_waveform(self, color: str) -> None:
-        """Draw a voice-reactive waveform animation."""
+        """Draw a HYPER voice-reactive waveform - exaggerated and grandiose!"""
         if not self.wave_canvas:
             return
             
@@ -1413,10 +1413,11 @@ class FloatingIndicator:
         
         import math
         
-        # Canvas dimensions (wider for better visual impact)
-        width = 160
-        height = 32
+        # Canvas dimensions (compact, inline with text)
+        width = 90
+        height = 18
         center_y = height // 2
+        max_amp = height // 2  # Full amplitude - waves can touch the very edges!
         
         # Parse color for wave layers
         r = int(color[1:3], 16)
@@ -1426,38 +1427,43 @@ class FloatingIndicator:
         # Background color for alpha blending (pill_bg = #18181f)
         bg_r, bg_g, bg_b = 24, 24, 31
         
-        # Voice reactivity - combines audio level with breathing animation
-        # Audio level provides immediate response, breathing provides base motion
+        # HYPER voice-reactive - exaggerated response!
         audio_level = self._current_audio_level
-        base_breath = 0.3 + 0.3 * (0.5 + 0.5 * math.sin(self._wave_breath))
         
-        # Voice amplitude: audio level boosts the waveform significantly
-        voice_boost = audio_level * 2.5  # Strong response to voice
+        # Slightly larger base motion
+        base_breath = 0.15 + 0.12 * (0.5 + 0.5 * math.sin(self._wave_breath))
+        
+        # MASSIVE voice response - exponential curve for dramatic effect
+        # Even more sensitive - fills space faster
+        voice_boost = (audio_level ** 0.6) * 15.0  # More exponential + bigger multiplier!
         amplitude_factor = base_breath + voice_boost
-        amplitude_factor = min(1.5, amplitude_factor)  # Cap at 1.5x
         
-        # Draw multiple layered sine waves with voice reactivity
+        # Cap at 1.0 which = max_amp (fills the entire space edge to edge)
+        amplitude_factor = min(1.0, amplitude_factor)
+        
+        # Draw layered sine waves - dramatic and flowing
         wave_configs = [
-            # (frequency, phase_offset, base_amplitude, alpha)
-            (0.035, 0.0, 10, 0.2),     # Slow background wave
-            (0.06, 1.2, 8, 0.3),       # Medium wave
-            (0.095, 2.5, 6, 0.45),     # Faster wave
-            (0.14, 0.8, 5, 0.6),       # Quick detail wave
+            # (frequency, phase_offset, alpha)
+            (0.07, 0.0, 0.2),       # Slow background wave
+            (0.11, 1.0, 0.35),      # Medium wave
+            (0.16, 2.2, 0.5),       # Faster wave
+            (0.22, 0.7, 0.65),      # Quick wave
         ]
         
-        for freq, phase_offset, base_amp, alpha in wave_configs:
-            # Calculate amplitude with voice reactivity
-            amp = base_amp * amplitude_factor
+        for freq, phase_offset, alpha in wave_configs:
+            # All waves use the same amplitude factor - fills the space!
+            amp = max_amp * amplitude_factor
             
             # Build wave points
             points = []
             for x in range(0, width + 1, 2):
                 # Combine sine waves for organic motion
                 y = center_y + amp * math.sin(freq * x + self._wave_time + phase_offset)
-                # Add secondary harmonic for complexity
-                y += (amp * 0.25) * math.sin(freq * 2.3 * x + self._wave_time * 1.7 + phase_offset)
-                # Add subtle third harmonic for richness
-                y += (amp * 0.1) * math.sin(freq * 3.7 * x + self._wave_time * 0.9 + phase_offset * 1.5)
+                # Add harmonics for richness
+                y += (amp * 0.4) * math.sin(freq * 2.3 * x + self._wave_time * 1.6 + phase_offset)
+                y += (amp * 0.2) * math.sin(freq * 3.7 * x + self._wave_time * 2.1 + phase_offset * 0.5)
+                # Clamp to canvas bounds (allow touching edges)
+                y = max(0, min(height, y))
                 points.append((x, y))
             
             # Blend color with background for alpha effect
@@ -1474,15 +1480,17 @@ class FloatingIndicator:
                     fill=wave_color,
                     width=2,
                     smooth=True,
-                    splinesteps=12,
+                    splinesteps=10,
                 )
         
-        # Draw center line highlight (brightest, most voice-reactive)
-        highlight_amp = 8 * amplitude_factor
+        # Draw center line highlight (brightest, fills space when loud)
+        highlight_amp = max_amp * amplitude_factor
         highlight_points = []
         for x in range(0, width + 1, 2):
-            y = center_y + highlight_amp * math.sin(0.08 * x + self._wave_time * 1.3)
-            y += (highlight_amp * 0.3) * math.sin(0.16 * x + self._wave_time * 2.1 + 1.0)
+            y = center_y + highlight_amp * math.sin(0.13 * x + self._wave_time * 1.4)
+            y += (highlight_amp * 0.5) * math.sin(0.26 * x + self._wave_time * 2.0 + 0.8)
+            # Clamp to canvas bounds (allow touching edges)
+            y = max(0, min(height, y))
             highlight_points.append((x, y))
         
         if len(highlight_points) >= 2:
@@ -1492,7 +1500,7 @@ class FloatingIndicator:
                 fill=color,
                 width=2,
                 smooth=True,
-                splinesteps=12,
+                splinesteps=10,
             )
         
     def _start_pulse(self) -> None:
@@ -1512,27 +1520,27 @@ class FloatingIndicator:
         if self._audio_level_callback:
             try:
                 raw_level = self._audio_level_callback()
-                # Smooth the audio level for pleasant visual (fast attack, slower decay)
+                # INSTANT response - no smoothing on attack for maximum impact!
                 if raw_level > self._current_audio_level:
-                    # Fast attack - respond quickly to voice
-                    self._current_audio_level = self._current_audio_level * 0.3 + raw_level * 0.7
+                    # Instant attack - respond IMMEDIATELY!
+                    self._current_audio_level = raw_level
                 else:
-                    # Slower decay - smooth fade out
-                    self._current_audio_level = self._current_audio_level * 0.85 + raw_level * 0.15
+                    # Moderate decay - keeps energy visible
+                    self._current_audio_level = self._current_audio_level * 0.75 + raw_level * 0.25
             except:
-                self._current_audio_level *= 0.9  # Decay if error
+                self._current_audio_level *= 0.85  # Decay if error
         else:
-            self._current_audio_level *= 0.9  # Decay if no callback
+            self._current_audio_level *= 0.85  # Decay if no callback
         
         # Sinusoidal easing for smooth breathing effect
         # Maps pulse_state (0-59) to a smooth sine wave
         t = self.pulse_state / 60.0 * 2 * math.pi
         ease = 0.5 + 0.5 * math.sin(t)  # 0 to 1 smooth
         
-        # Dramatic scale range: 0.6 to 1.4 (133% variation)
-        # Add voice reactivity to dot scale too
-        voice_scale_boost = self._current_audio_level * 0.3
-        scale = 0.6 + ease * 0.8 + voice_scale_boost
+        # Dramatic scale range: 0.7 to 1.3
+        # Add strong voice reactivity to dot scale
+        voice_scale_boost = self._current_audio_level * 0.5
+        scale = 0.7 + ease * 0.6 + voice_scale_boost
         
         # Update ring animation phase (completes a ring every ~1.5 seconds)
         self._ring_phase = (self._ring_phase + 0.022) % 1.0
@@ -1661,6 +1669,9 @@ class WayfinderApp(ctk.CTk):
         
         # Floating status indicator
         self.indicator: FloatingIndicator | None = None
+        
+        # Dialog tracking to prevent multiple instances
+        self._device_settings_dialog: ctk.CTkToplevel | None = None
         
         self.setup_window()
         
@@ -1922,11 +1933,11 @@ class WayfinderApp(ctk.CTk):
         settings_card = ctk.CTkFrame(
             main,
             fg_color=COLORS["bg_card"],
-            corner_radius=12,
+            corner_radius=14,
             border_width=1,
             border_color=COLORS["border"],
         )
-        settings_card.pack(fill="x", pady=(0, 12))
+        settings_card.pack(fill="x", pady=(0, 14))
         
         # Hotkey setting
         self.hotkey_btn = self.create_setting_row(
@@ -2025,10 +2036,10 @@ class WayfinderApp(ctk.CTk):
         advanced_card = ctk.CTkScrollableFrame(
             self.advanced_container,
             fg_color=COLORS["bg_card"],
-            corner_radius=12,
+            corner_radius=14,
             border_width=1,
             border_color=COLORS["border"],
-            height=400,  # Taller to show all settings including Recording section
+            height=450,  # Taller to show all settings including Recording section
             scrollbar_button_color=COLORS["bg_hover"],
             scrollbar_button_hover_color=COLORS["accent_dim"],
         )
@@ -2038,9 +2049,9 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             advanced_card,
             text="Accuracy",
-            font=(self.font_body[0], 9, "bold"),
+            font=(self.font_body[0], 11, "bold"),
             text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=14, pady=(10, 3))
+        ).pack(anchor="w", padx=16, pady=(12, 4))
         
         # Accuracy Mode preset selector
         accuracy_mode = self.config.get("accuracy_mode", "balanced")
@@ -2083,11 +2094,15 @@ class WayfinderApp(ctk.CTk):
             preprocess_level = "off"
         
         preprocess_row = ctk.CTkFrame(advanced_card, fg_color="transparent")
-        preprocess_row.pack(fill="x", padx=18, pady=11)
+        preprocess_row.pack(fill="x", padx=16, pady=10)
+        
+        # Configure grid for proportional scaling
+        preprocess_row.grid_columnconfigure(0, weight=0)  # Label column - fixed
+        preprocess_row.grid_columnconfigure(1, weight=1, minsize=160)  # Dropdown column - grows
         
         # Left side: label + info icon (matches create_setting_row style)
         left_frame = ctk.CTkFrame(preprocess_row, fg_color="transparent")
-        left_frame.pack(side="left")
+        left_frame.grid(row=0, column=0, sticky="w")
         
         ctk.CTkLabel(
             left_frame,
@@ -2099,7 +2114,7 @@ class WayfinderApp(ctk.CTk):
         info_label = ctk.CTkLabel(
             left_frame,
             text="ⓘ",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], 11),
             text_color=COLORS["text_muted"],
             cursor="hand2",
         )
@@ -2108,13 +2123,13 @@ class WayfinderApp(ctk.CTk):
         
         # Right side: description + dropdown (styled like other buttons)
         right_frame = ctk.CTkFrame(preprocess_row, fg_color="transparent")
-        right_frame.pack(side="right")
+        right_frame.grid(row=0, column=1, sticky="e", padx=(20, 0))
         
         # Brief description label
         self.preprocess_desc_label = ctk.CTkLabel(
             right_frame,
             text=self._get_preprocess_desc(preprocess_level),
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], 12),
             text_color=COLORS["text_muted"],
             anchor="e",
         )
@@ -2133,10 +2148,10 @@ class WayfinderApp(ctk.CTk):
             dropdown_hover_color=COLORS["bg_hover"],
             dropdown_text_color=COLORS["text_primary"],
             text_color=COLORS["accent"],
-            font=(self.font_body[0], 12),
-            width=100,
-            height=32,
-            corner_radius=8,
+            font=(self.font_body[0], 14),
+            width=120,
+            height=46,
+            corner_radius=10,
         )
         self.preprocess_dropdown.pack(side="right")
         
@@ -2154,9 +2169,9 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             advanced_card,
             text="Recording",
-            font=(self.font_body[0], 10, "bold"),
+            font=(self.font_body[0], 11, "bold"),
             text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=18, pady=(12, 4))
+        ).pack(anchor="w", padx=16, pady=(14, 6))
         
         # Chunked mode toggle
         self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
@@ -2182,9 +2197,9 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             advanced_card,
             text="GPU Acceleration",
-            font=(self.font_body[0], 10, "bold"),
+            font=(self.font_body[0], 11, "bold"),
             text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=18, pady=(12, 4))
+        ).pack(anchor="w", padx=16, pady=(14, 6))
         
         # Transcription backend setting
         backend = self.config.get("transcription_backend", "whisper_cpp")
@@ -2222,9 +2237,9 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             advanced_card,
             text="Devices",
-            font=(self.font_body[0], 10, "bold"),
+            font=(self.font_body[0], 11, "bold"),
             text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=18, pady=(12, 4))
+        ).pack(anchor="w", padx=16, pady=(14, 6))
         
         # Hotkey devices setting (keyboards/mice that can trigger the hotkey)
         device_count = len(get_all_input_devices())
@@ -2546,16 +2561,20 @@ class WayfinderApp(ctk.CTk):
 
     def create_setting_row(self, parent, label, value, command, tooltip=None):
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=14, pady=7)
+        row.pack(fill="x", padx=16, pady=10)
+        
+        # Configure grid for proportional scaling
+        row.grid_columnconfigure(0, weight=0)  # Label column - fixed
+        row.grid_columnconfigure(1, weight=1, minsize=160)  # Button column - grows
         
         # Left side: label + optional info icon
         left_frame = ctk.CTkFrame(row, fg_color="transparent")
-        left_frame.pack(side="left")
+        left_frame.grid(row=0, column=0, sticky="w")
         
         ctk.CTkLabel(
             left_frame,
             text=label,
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], 14),
             text_color=COLORS["text_primary"],
         ).pack(side="left")
         
@@ -2563,39 +2582,43 @@ class WayfinderApp(ctk.CTk):
             info_label = ctk.CTkLabel(
                 left_frame,
                 text="ⓘ",
-                font=(self.font_body[0], 10),
+                font=(self.font_body[0], 11),
                 text_color=COLORS["text_muted"],
                 cursor="question_arrow",
             )
-            info_label.pack(side="left", padx=(5, 0))
+            info_label.pack(side="left", padx=(6, 0))
             ToolTip(info_label, tooltip)
         
         btn = ctk.CTkButton(
             row,
             text=value,
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], 14),
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["accent"],
-            height=28,
-            corner_radius=7,
+            height=46,
+            corner_radius=10,
             command=command,
         )
-        btn.pack(side="right")
+        btn.grid(row=0, column=1, sticky="e", padx=(20, 0))
         return btn
 
     def create_toggle_row(self, parent, label, variable, command, tooltip=None):
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=14, pady=7)
+        row = ctk.CTkFrame(parent, fg_color="transparent", height=46)
+        row.pack(fill="x", padx=16, pady=10)
+        
+        # Configure grid for alignment with setting rows
+        row.grid_columnconfigure(0, weight=1)  # Label takes available space
+        row.grid_columnconfigure(1, weight=0)  # Switch column - fixed
         
         # Left side: label + optional info icon
         left_frame = ctk.CTkFrame(row, fg_color="transparent")
-        left_frame.pack(side="left")
+        left_frame.grid(row=0, column=0, sticky="w")
         
         ctk.CTkLabel(
             left_frame,
             text=label,
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], 14),
             text_color=COLORS["text_primary"],
         ).pack(side="left")
         
@@ -2603,11 +2626,11 @@ class WayfinderApp(ctk.CTk):
             info_label = ctk.CTkLabel(
                 left_frame,
                 text="ⓘ",
-                font=(self.font_body[0], 10),
+                font=(self.font_body[0], 11),
                 text_color=COLORS["text_muted"],
                 cursor="question_arrow",
             )
-            info_label.pack(side="left", padx=(5, 0))
+            info_label.pack(side="left", padx=(6, 0))
             ToolTip(info_label, tooltip)
         
         switch = ctk.CTkSwitch(
@@ -2618,8 +2641,10 @@ class WayfinderApp(ctk.CTk):
             progress_color=COLORS["accent"],
             button_color=COLORS["text_bright"],
             button_hover_color=COLORS["text_primary"],
+            switch_width=50,
+            switch_height=26,
         )
-        switch.pack(side="right")
+        switch.grid(row=0, column=1, sticky="e", padx=(20, 0))
 
     def toggle_start_minimized(self):
         self.config["start_minimized"] = self.start_min_var.get()
@@ -3689,12 +3714,33 @@ class WayfinderApp(ctk.CTk):
 
     def open_device_settings(self):
         """Open dialog to manage which devices can trigger the hotkey."""
+        # Check if dialog already exists and is still open
+        if self._device_settings_dialog is not None:
+            try:
+                if self._device_settings_dialog.winfo_exists():
+                    # Dialog exists, just focus it
+                    self._device_settings_dialog.lift()
+                    self._device_settings_dialog.focus_force()
+                    return
+            except:
+                pass
+            # Dialog was destroyed, clear reference
+            self._device_settings_dialog = None
+        
         dialog = ctk.CTkToplevel(self)
+        self._device_settings_dialog = dialog
         dialog.title("Hotkey Devices")
         dialog.geometry("500x500")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        
+        # Clear reference when dialog is closed
+        def on_dialog_close():
+            self._device_settings_dialog = None
+            dialog.destroy()
+        
+        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -3833,6 +3879,7 @@ class WayfinderApp(ctk.CTk):
             self.stop_event = threading.Event()
             self.start_hotkey_listener()
             
+            self._device_settings_dialog = None
             dialog.destroy()
         
         ctk.CTkButton(
@@ -3856,7 +3903,7 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
-            command=dialog.destroy,
+            command=on_dialog_close,
         ).pack(fill="x")
 
     def open_speed_settings(self):
@@ -5055,7 +5102,7 @@ class WayfinderApp(ctk.CTk):
         
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
-    def get_tray_icon(self, state: AppState) -> Image.Image:
+    def get_tray_icon(self, state: AppState, pulse_scale: float = 1.0) -> Image.Image:
         """Create a bold, obvious tray icon with full color fill."""
         color = STATE_COLORS[state]
         size = 64
@@ -5082,8 +5129,17 @@ class WayfinderApp(ctk.CTk):
             draw.ellipse([22, 18, 42, 46], fill=(255, 255, 255, 200))
             draw.rectangle([28, 42, 36, 52], fill=(255, 255, 255, 200))
         elif state == AppState.RECORDING:
-            # Pulsing dot for listening
-            draw.ellipse([18, 18, 46, 46], fill=(255, 255, 255, 230))
+            # Animated pulsing dot for listening!
+            # pulse_scale goes from 0.0 to 1.0
+            # At 0.0 (min): 15% of square = ~8px diameter, offset = 28
+            # At 1.0 (max): 80% of square = ~45px diameter, offset = 10
+            min_offset = 28  # Small dot
+            max_offset = 10  # Large dot
+            offset = int(min_offset - (min_offset - max_offset) * pulse_scale)
+            draw.ellipse(
+                [offset, offset, size - offset, size - offset], 
+                fill=(255, 255, 255, 230)
+            )
         elif state == AppState.PROCESSING:
             # Gear/spinner symbol
             draw.ellipse([20, 20, 44, 44], outline=(255, 255, 255, 230), width=4)
@@ -5100,6 +5156,50 @@ class WayfinderApp(ctk.CTk):
         if self.tray_icon:
             self.tray_icon.icon = self.get_tray_icon(state)
             self.tray_icon.title = f"Wayfinder Voice - {STATE_LABELS[state]}"
+        
+        # Start/stop tray pulse animation based on state
+        if state == AppState.RECORDING:
+            self._start_tray_pulse()
+        else:
+            self._stop_tray_pulse()
+    
+    def _start_tray_pulse(self):
+        """Start the tray icon pulsing animation."""
+        if not hasattr(self, '_tray_pulse_job'):
+            self._tray_pulse_job = None
+        if not hasattr(self, '_tray_pulse_phase'):
+            self._tray_pulse_phase = 0.0
+        self._tray_pulse_step()
+    
+    def _tray_pulse_step(self):
+        """Animate one step of the tray icon pulse."""
+        if self.app_state != AppState.RECORDING:
+            return
+        
+        import math
+        
+        # Update phase for smooth sine wave pulse
+        self._tray_pulse_phase += 0.15  # Speed of pulse
+        
+        # Sine wave from 0 to 1 (smooth in-out)
+        pulse_scale = 0.5 + 0.5 * math.sin(self._tray_pulse_phase)
+        
+        # Update tray icon with new pulse scale
+        if self.tray_icon:
+            self.tray_icon.icon = self.get_tray_icon(AppState.RECORDING, pulse_scale)
+        
+        # Schedule next step (~20fps for tray icon)
+        self._tray_pulse_job = self.after(50, self._tray_pulse_step)
+    
+    def _stop_tray_pulse(self):
+        """Stop the tray icon pulsing animation."""
+        if hasattr(self, '_tray_pulse_job') and self._tray_pulse_job:
+            try:
+                self.after_cancel(self._tray_pulse_job)
+            except:
+                pass
+            self._tray_pulse_job = None
+        self._tray_pulse_phase = 0.0
 
     def show_from_tray(self):
         self.after(0, self._show_window)
