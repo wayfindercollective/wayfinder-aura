@@ -1,10 +1,14 @@
 # Flatpak manifest for Wayfinder Voice
 # 
-# Build locally:
+# Quick test build:
 #   flatpak-builder --user --install --force-clean build-dir io.github.user.WayfinderVoice.yml
 #
-# IMPORTANT: Before submitting to Flathub, change "io.github.user" to your actual
-# GitHub username in reverse-DNS format (e.g., io.github.johndoe.WayfinderVoice)
+# For Flathub submission:
+#   1. Change "io.github.user" to your GitHub username
+#   2. Generate python-deps.json with flatpak-pip-generator
+#   3. Verify all SHA256 hashes
+#
+# App ID format: io.github.YOURUSERNAME.WayfinderVoice
 
 app-id: io.github.user.WayfinderVoice
 runtime: org.freedesktop.Platform
@@ -13,26 +17,26 @@ sdk: org.freedesktop.Sdk
 command: wayfinder-voice
 
 finish-args:
-  # Display access
+  # Display
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
   
-  # Audio recording
+  # Audio recording (PipeWire/PulseAudio)
   - --socket=pulseaudio
   
-  # D-Bus for portals
+  # D-Bus for system integration
   - --talk-name=org.freedesktop.portal.Desktop
   - --talk-name=org.freedesktop.portal.GlobalShortcuts
   - --talk-name=org.freedesktop.portal.RemoteDesktop
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
   
-  # Config and cache
+  # App config storage
   - --filesystem=xdg-config/wayfinder-voice:create
   - --filesystem=xdg-cache/wayfinder-voice:create
   
-  # Whisper models (read-only access to common locations)
+  # Whisper model access (user's own models)
   - --filesystem=~/.local/share/whisper.cpp:ro
   - --filesystem=~/whisper.cpp/models:ro
   
@@ -47,7 +51,7 @@ cleanup:
   - '*.la'
 
 modules:
-  # SDL2 for audio (required by sounddevice)
+  # PortAudio for sounddevice
   - name: portaudio
     buildsystem: cmake-ninja
     config-opts:
@@ -57,7 +61,7 @@ modules:
         url: https://github.com/PortAudio/portaudio/archive/refs/tags/v19.7.0.tar.gz
         sha256: 5af29ba58bbdbb7bbcefaaecc77ec8fc413f0db6f4c4e286c40c8c405c8d64db
 
-  # whisper.cpp - Speech recognition
+  # whisper.cpp - The transcription engine
   - name: whisper-cpp
     buildsystem: cmake-ninja
     config-opts:
@@ -72,15 +76,15 @@ modules:
     post-install:
       - install -Dm755 bin/whisper-cli ${FLATPAK_DEST}/bin/whisper-cli
 
-  # Download default whisper model
-  - name: whisper-model
+  # Bundled whisper model (small.en for free tier)
+  - name: whisper-model-small
     buildsystem: simple
     build-commands:
       - install -Dm644 ggml-small.en.bin ${FLATPAK_DEST}/share/whisper-models/ggml-small.en.bin
     sources:
       - type: file
         url: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
-        sha256: 58057f5c15e1e8ab6c2d4ded92ff5b2effe11e988a70587f93e2a3a7d4d59f0b
+        sha256: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1c71f7f2c8
         dest-filename: ggml-small.en.bin
 
   # wtype for Wayland text injection
@@ -91,45 +95,99 @@ modules:
         url: https://github.com/atx/wtype.git
         tag: v0.4
 
-  # Python dependencies from pip
-  # Generate python-deps.json with: ./generate-pip-sources.sh
-  - name: python-deps
+  # ydotool for X11/Wayland text injection fallback
+  - name: ydotool
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    sources:
+      - type: git
+        url: https://github.com/ReimuNotMoe/ydotool.git
+        tag: v1.0.4
+
+  # Python dependencies - using shared modules approach
+  # For full offline build, replace with generated python3-*.json files
+  - name: python3-numpy
     buildsystem: simple
     build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} customtkinter sounddevice numpy scipy pystray Pillow
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} numpy
     sources:
-      # This section should be replaced with generated python-deps.json
-      # For now, install from PyPI during build (requires network)
-      - type: shell
-        commands:
-          - pip3 download --dest=. customtkinter sounddevice numpy scipy pystray Pillow
+      - type: file
+        url: https://files.pythonhosted.org/packages/b9/14/78635daab4b07c0f84afb6c0f5d4e3de2ddca68c88669f79018557e38069/numpy-2.2.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 7ef2e1253ee87a185a92b55eb5e4e0cdc4e36854fe6d0d5d1d2cd96e1a1f6b6a
+
+  - name: python3-pillow
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} Pillow
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/38/0d/84200ed6a871ce386ddc82904bfadc0c6b28b0c0ec78176871a4679e40b3/pillow-11.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
+        sha256: 00177a63030d612148e659b55ba99527803288cea7c75fb05766ab7981a8c1b7
+
+  - name: python3-pystray
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} pystray
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/83/7e/dc8b0ad4b7fbb57e2e9dcce5b4ee0b6ae1e7c42907250b6774637499c93e/pystray-0.19.5-py3-none-any.whl
+        sha256: c69a1fadc3a14ab47f1e69680779cf546739e3624a8ada00eb9ada0bd76f3ec5
+
+  - name: python3-sounddevice
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} sounddevice
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/80/2d/b04ae180312b81e861d6eb3d682e7e04d8c8fb557c5009648da68e7cae0d/sounddevice-0.5.1-py3-none-any.whl
+        sha256: e2017f182888c25e496db66a522831d3a2d1bb7e4086e6b124a76541e4b5618c
+
+  - name: python3-customtkinter
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} customtkinter
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/41/99/2e03457dc6bb45c058e2f9b15aac86c498f8e20e74a0aa3fc9ff197aa6c6/customtkinter-5.2.2-py3-none-any.whl
+        sha256: 28896b95abe8a0e67a55fb6f74ce54815e3a85aae5dd890e1f7026cb56dfded2
+
+  - name: python3-scipy
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} scipy
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/56/46/2449e6e646f0b10a6e87d8464ae27061583310f0d9830c1c1e5f7e0746f4/scipy-1.14.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 631f07b3734d34aced009aaf6fedfd0eb3498a97e581c3b1e5f14a04164a456d
 
   # Main application
   - name: wayfinder-voice
     buildsystem: simple
     build-commands:
-      # Install Python source files
+      # Python source files
       - install -Dm755 main.py ${FLATPAK_DEST}/lib/wayfinder-voice/main.py
       - install -Dm644 recorder.py ${FLATPAK_DEST}/lib/wayfinder-voice/recorder.py
       - install -Dm644 transcriber.py ${FLATPAK_DEST}/lib/wayfinder-voice/transcriber.py
       - install -Dm644 injector.py ${FLATPAK_DEST}/lib/wayfinder-voice/injector.py
       - install -Dm644 trigger_record.py ${FLATPAK_DEST}/lib/wayfinder-voice/trigger_record.py
+      - install -Dm644 license.py ${FLATPAK_DEST}/lib/wayfinder-voice/license.py
       
-      # Install assets
+      # Assets
       - install -Dm644 assets/icon.png ${FLATPAK_DEST}/lib/wayfinder-voice/assets/icon.png
       
-      # Install launcher
+      # Launcher script
       - install -Dm755 flatpak/wayfinder-voice-launcher.sh ${FLATPAK_DEST}/bin/wayfinder-voice
       
-      # Install icon (multiple sizes for different contexts)
+      # Icons
       - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.user.WayfinderVoice.png
       - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.user.WayfinderVoice.png
       - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/64x64/apps/io.github.user.WayfinderVoice.png
       
-      # Install desktop file
+      # Desktop file
       - install -Dm644 flatpak/io.github.user.WayfinderVoice.desktop ${FLATPAK_DEST}/share/applications/io.github.user.WayfinderVoice.desktop
       
-      # Install AppStream metadata
+      # AppStream metadata
       - install -Dm644 flatpak/io.github.user.WayfinderVoice.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.user.WayfinderVoice.metainfo.xml
     sources:
       - type: dir
