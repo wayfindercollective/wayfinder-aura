@@ -12,6 +12,8 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from enum import Enum, auto
@@ -409,6 +411,224 @@ SETTING_TOOLTIPS = {
     "gpu_acceleration": "Use GPU for transcription.\n🚀 Enabled: 3-10x faster than CPU (requires CUDA/ROCm/Vulkan)",
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
 }
+
+
+# === Model Download Definitions ===
+
+# whisper.cpp GGML models (from Hugging Face)
+WHISPER_CPP_MODELS = {
+    "tiny.en": {
+        "name": "Tiny (English)",
+        "size": "75 MB",
+        "size_bytes": 75_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+        "filename": "ggml-tiny.en.bin",
+        "speed": "⚡ Fastest • ~0.5s GPU | ~2s CPU",
+    },
+    "base.en": {
+        "name": "Base (English)",
+        "size": "142 MB",
+        "size_bytes": 142_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+        "filename": "ggml-base.en.bin",
+        "speed": "⚡ Fast • ~1s GPU | ~4s CPU",
+    },
+    "small.en": {
+        "name": "Small (English)",
+        "size": "466 MB",
+        "size_bytes": 466_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+        "filename": "ggml-small.en.bin",
+        "speed": "🟡 Good • ~1.5s GPU | ~6s CPU",
+    },
+    "medium.en": {
+        "name": "Medium (English)",
+        "size": "1.5 GB",
+        "size_bytes": 1_500_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
+        "filename": "ggml-medium.en.bin",
+        "speed": "🔴 Slow • ~3s GPU | ~12s CPU",
+    },
+    "large-v3-turbo": {
+        "name": "Large v3 Turbo ⭐",
+        "size": "1.6 GB",
+        "size_bytes": 1_600_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+        "filename": "ggml-large-v3-turbo.bin",
+        "speed": "🚀 Best balance • ~2s GPU | ~8s CPU",
+        "recommended": True,
+    },
+    "large-v3-turbo-q5_0": {
+        "name": "Large v3 Turbo Q5 (Quantized)",
+        "size": "547 MB",
+        "size_bytes": 547_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+        "filename": "ggml-large-v3-turbo-q5_0.bin",
+        "speed": "🚀 Fast+Small • ~2s GPU | ~6s CPU",
+    },
+    "tiny": {
+        "name": "Tiny (Multi-lang)",
+        "size": "75 MB",
+        "size_bytes": 75_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+        "filename": "ggml-tiny.bin",
+        "speed": "⚡ Fastest • Multi-language",
+    },
+    "base": {
+        "name": "Base (Multi-lang)",
+        "size": "142 MB",
+        "size_bytes": 142_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        "filename": "ggml-base.bin",
+        "speed": "⚡ Fast • Multi-language",
+    },
+    "small": {
+        "name": "Small (Multi-lang)",
+        "size": "466 MB",
+        "size_bytes": 466_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        "filename": "ggml-small.bin",
+        "speed": "🟡 Good • Multi-language",
+    },
+    "medium": {
+        "name": "Medium (Multi-lang)",
+        "size": "1.5 GB",
+        "size_bytes": 1_500_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+        "filename": "ggml-medium.bin",
+        "speed": "🔴 Slow • Multi-language",
+    },
+    "large-v3": {
+        "name": "Large v3 (Best Quality)",
+        "size": "3.0 GB",
+        "size_bytes": 3_000_000_000,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+        "filename": "ggml-large-v3.bin",
+        "speed": "🔴 Slowest • Best accuracy",
+    },
+}
+
+# Faster-Whisper models (auto-downloaded by library, but we can list them)
+FASTER_WHISPER_MODELS = {
+    "tiny": {"name": "Tiny", "size": "~75 MB", "speed": "⚡ Fastest"},
+    "base": {"name": "Base", "size": "~142 MB", "speed": "⚡ Fast"},
+    "small": {"name": "Small", "size": "~466 MB", "speed": "🟡 Good"},
+    "medium": {"name": "Medium", "size": "~1.5 GB", "speed": "🔴 Slow"},
+    "large-v3-turbo": {"name": "Large v3 Turbo ⭐", "size": "~1.6 GB", "speed": "🚀 Best", "recommended": True},
+    "large-v3": {"name": "Large v3", "size": "~3 GB", "speed": "🔴 Slowest"},
+}
+
+
+class ModelDownloader:
+    """Downloads whisper models with progress tracking."""
+    
+    def __init__(self, models_dir: Path = None):
+        self.models_dir = models_dir or (Path.home() / "whisper.cpp" / "models")
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        self._cancel_requested = False
+        self._current_download = None
+    
+    def get_installed_models(self) -> list[str]:
+        """Get list of installed model IDs."""
+        installed = []
+        for model_id, info in WHISPER_CPP_MODELS.items():
+            if (self.models_dir / info["filename"]).exists():
+                installed.append(model_id)
+        return installed
+    
+    def is_installed(self, model_id: str) -> bool:
+        """Check if a model is already downloaded."""
+        if model_id not in WHISPER_CPP_MODELS:
+            return False
+        return (self.models_dir / WHISPER_CPP_MODELS[model_id]["filename"]).exists()
+    
+    def get_model_path(self, model_id: str) -> Path | None:
+        """Get the path to an installed model."""
+        if model_id not in WHISPER_CPP_MODELS:
+            return None
+        path = self.models_dir / WHISPER_CPP_MODELS[model_id]["filename"]
+        return path if path.exists() else None
+    
+    def download_model(
+        self, 
+        model_id: str, 
+        progress_callback: callable = None,
+        complete_callback: callable = None,
+        error_callback: callable = None,
+    ) -> None:
+        """Download a model in a background thread."""
+        if model_id not in WHISPER_CPP_MODELS:
+            if error_callback:
+                error_callback(f"Unknown model: {model_id}")
+            return
+        
+        self._cancel_requested = False
+        model_info = WHISPER_CPP_MODELS[model_id]
+        
+        def download_thread():
+            try:
+                url = model_info["url"]
+                filename = model_info["filename"]
+                dest_path = self.models_dir / filename
+                temp_path = self.models_dir / f"{filename}.downloading"
+                
+                # Create request with headers
+                request = urllib.request.Request(url)
+                request.add_header("User-Agent", "Wayfinder-Voice/1.0")
+                
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    total_size = int(response.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    chunk_size = 1024 * 1024  # 1MB chunks
+                    
+                    with open(temp_path, "wb") as f:
+                        while True:
+                            if self._cancel_requested:
+                                temp_path.unlink(missing_ok=True)
+                                if error_callback:
+                                    error_callback("Download cancelled")
+                                return
+                            
+                            chunk = response.read(chunk_size)
+                            if not chunk:
+                                break
+                            
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            if progress_callback and total_size > 0:
+                                progress = downloaded / total_size
+                                progress_callback(progress, downloaded, total_size)
+                
+                # Move temp file to final destination
+                temp_path.rename(dest_path)
+                
+                if complete_callback:
+                    complete_callback(str(dest_path))
+                    
+            except urllib.error.URLError as e:
+                if error_callback:
+                    error_callback(f"Network error: {e.reason}")
+            except Exception as e:
+                if error_callback:
+                    error_callback(f"Download failed: {str(e)}")
+        
+        self._current_download = threading.Thread(target=download_thread, daemon=True)
+        self._current_download.start()
+    
+    def cancel_download(self):
+        """Cancel the current download."""
+        self._cancel_requested = True
+    
+    def delete_model(self, model_id: str) -> bool:
+        """Delete a downloaded model."""
+        if model_id not in WHISPER_CPP_MODELS:
+            return False
+        path = self.models_dir / WHISPER_CPP_MODELS[model_id]["filename"]
+        if path.exists():
+            path.unlink()
+            return True
+        return False
 
 
 def get_audio_input_devices() -> list[dict]:
@@ -2289,134 +2509,316 @@ class WayfinderApp(ctk.CTk):
         return models
 
     def open_model_settings(self):
-        """Open dialog to select whisper model."""
+        """Open dialog to select or download whisper models."""
         dialog = ctk.CTkToplevel(self)
-        dialog.title("Whisper Model")
-        dialog.geometry("500x520")
+        dialog.title("Whisper Models")
+        dialog.geometry("580x680")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
         
+        # Initialize model downloader
+        downloader = ModelDownloader()
+        
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
         
+        # Header with tabs
+        header = ctk.CTkFrame(inner, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 15))
+        
         ctk.CTkLabel(
-            inner,
-            text="Select Model",
+            header,
+            text="Whisper Models",
             font=(self.font_header[0], 22, "bold"),
             text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 5))
+        ).pack(anchor="w")
         
         ctk.CTkLabel(
-            inner,
-            text="Larger models are more accurate but slower.\nTime estimates are per 10 seconds of audio.",
-            font=(self.font_body[0], 12),
+            header,
+            text="Select an installed model or download new ones.\nTime estimates are per 10 seconds of audio.",
+            font=(self.font_body[0], 11),
             text_color=COLORS["text_secondary"],
             justify="left",
-        ).pack(anchor="w", pady=(0, 20))
+        ).pack(anchor="w", pady=(5, 0))
         
-        # Get available models
-        models = self.get_available_models()
+        # Tab buttons
+        tab_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        tab_frame.pack(fill="x", pady=(0, 10))
+        
+        current_tab = ctk.StringVar(value="installed")
+        
+        # Content frame that will be refreshed
+        content_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        content_frame.pack(fill="both", expand=True)
+        
         current_path = os.path.expanduser(self.config.get("model_path", ""))
-        
-        if not models:
-            ctk.CTkLabel(
-                inner,
-                text="No models found!\n\nDownload models with:\ncd ~/whisper.cpp/models\n./download-ggml-model.sh small.en",
-                font=(self.font_body[0], 13),
-                text_color=COLORS["accent_red"],
-                justify="left",
-            ).pack(pady=30)
-            return
-        
-        # Model selection
         model_var = ctk.StringVar(value=current_path)
         
-        scroll_frame = ctk.CTkScrollableFrame(
-            inner,
-            fg_color=COLORS["bg_card"],
-            corner_radius=12,
-            height=280,
-        )
-        scroll_frame.pack(fill="both", expand=True, pady=(0, 20))
+        def show_installed_tab():
+            current_tab.set("installed")
+            for widget in content_frame.winfo_children():
+                widget.destroy()
+            
+            installed_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
+            download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
+            
+            models = self.get_available_models()
+            
+            if not models:
+                empty_frame = ctk.CTkFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12)
+                empty_frame.pack(fill="both", expand=True, pady=10)
+                
+                ctk.CTkLabel(
+                    empty_frame,
+                    text="📦 No models installed yet",
+                    font=(self.font_body[0], 16, "bold"),
+                    text_color=COLORS["text_primary"],
+                ).pack(pady=(40, 10))
+                
+                ctk.CTkLabel(
+                    empty_frame,
+                    text="Click 'Download Models' to get started!",
+                    font=(self.font_body[0], 12),
+                    text_color=COLORS["text_muted"],
+                ).pack(pady=(0, 10))
+                
+                ctk.CTkButton(
+                    empty_frame,
+                    text="⬇️ Download Models",
+                    font=(self.font_body[0], 14, "bold"),
+                    height=40,
+                    corner_radius=10,
+                    fg_color=COLORS["accent"],
+                    hover_color=COLORS["accent_glow"],
+                    text_color="#000000",
+                    command=show_download_tab,
+                ).pack(pady=(10, 40))
+                return
+            
+            scroll = ctk.CTkScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=320)
+            scroll.pack(fill="both", expand=True, pady=(0, 15))
+            
+            for model in models:
+                is_current = os.path.expanduser(model["path"]) == current_path
+                
+                frame = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=8)
+                frame.pack(fill="x", pady=3, padx=5)
+                
+                radio = ctk.CTkRadioButton(
+                    frame, text="", variable=model_var, value=model["path"],
+                    width=20, fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                )
+                radio.pack(side="left", padx=(10, 5), pady=10)
+                
+                info = ctk.CTkFrame(frame, fg_color="transparent")
+                info.pack(side="left", fill="x", expand=True, pady=8)
+                
+                ctk.CTkLabel(
+                    info, text=model["name"],
+                    font=(self.font_body[0], 14, "bold" if is_current else "normal"),
+                    text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
+                    anchor="w",
+                ).pack(anchor="w")
+                
+                ctk.CTkLabel(
+                    info, text=f"{model['speed']} • {model['size']}",
+                    font=(self.font_body[0], 11), text_color=COLORS["text_muted"], anchor="w",
+                ).pack(anchor="w")
+            
+            # Save button
+            def save():
+                selected = model_var.get()
+                if selected.startswith(str(Path.home())):
+                    selected = "~" + selected[len(str(Path.home())):]
+                self.config["model_path"] = selected
+                save_config(self.config)
+                self.model_btn.configure(text=self.get_model_display())
+                self.log(f"⚙ Model: {self.get_model_display()}")
+                dialog.destroy()
+            
+            ctk.CTkButton(
+                content_frame, text="Save & Apply",
+                font=(self.font_body[0], 15, "bold"), height=50, corner_radius=12,
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
+                command=save,
+            ).pack(fill="x", pady=(0, 5))
         
-        for model in models:
-            is_current = os.path.expanduser(model["path"]) == current_path
+        def show_download_tab():
+            current_tab.set("download")
+            for widget in content_frame.winfo_children():
+                widget.destroy()
             
-            frame = ctk.CTkFrame(
-                scroll_frame,
-                fg_color=COLORS["bg_hover"] if is_current else "transparent",
-                corner_radius=8,
-            )
-            frame.pack(fill="x", pady=3, padx=5)
+            installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
+            download_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
             
-            radio = ctk.CTkRadioButton(
-                frame,
-                text="",
-                variable=model_var,
-                value=model["path"],
-                width=20,
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_glow"],
-            )
-            radio.pack(side="left", padx=(10, 5), pady=10)
+            scroll = ctk.CTkScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=380)
+            scroll.pack(fill="both", expand=True, pady=(0, 10))
             
-            info_frame = ctk.CTkFrame(frame, fg_color="transparent")
-            info_frame.pack(side="left", fill="x", expand=True, pady=8)
+            # Group models by category
+            english_models = ["tiny.en", "base.en", "small.en", "medium.en"]
+            turbo_models = ["large-v3-turbo", "large-v3-turbo-q5_0"]
+            multi_models = ["tiny", "base", "small", "medium", "large-v3"]
+            
+            def add_section(title, model_ids):
+                ctk.CTkLabel(
+                    scroll, text=title,
+                    font=(self.font_body[0], 11, "bold"),
+                    text_color=COLORS["text_muted"],
+                ).pack(anchor="w", padx=15, pady=(12, 5))
+                
+                for model_id in model_ids:
+                    if model_id not in WHISPER_CPP_MODELS:
+                        continue
+                    info = WHISPER_CPP_MODELS[model_id]
+                    is_installed = downloader.is_installed(model_id)
+                    
+                    frame = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=8)
+                    frame.pack(fill="x", pady=2, padx=5)
+                    
+                    # Info section
+                    info_frame = ctk.CTkFrame(frame, fg_color="transparent")
+                    info_frame.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+                    
+                    name_row = ctk.CTkFrame(info_frame, fg_color="transparent")
+                    name_row.pack(anchor="w")
+                    
+                    ctk.CTkLabel(
+                        name_row, text=info["name"],
+                        font=(self.font_body[0], 13, "bold"),
+                        text_color=COLORS["accent"] if is_installed else COLORS["text_primary"],
+                    ).pack(side="left")
+                    
+                    if info.get("recommended"):
+                        ctk.CTkLabel(
+                            name_row, text=" RECOMMENDED",
+                            font=(self.font_body[0], 9, "bold"),
+                            text_color=COLORS["accent_green"],
+                        ).pack(side="left", padx=(8, 0))
+                    
+                    ctk.CTkLabel(
+                        info_frame, text=f"{info['speed']} • {info['size']}",
+                        font=(self.font_body[0], 10), text_color=COLORS["text_muted"],
+                    ).pack(anchor="w")
+                    
+                    # Action button
+                    btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
+                    btn_frame.pack(side="right", padx=10)
+                    
+                    if is_installed:
+                        ctk.CTkLabel(
+                            btn_frame, text="✓ Installed",
+                            font=(self.font_body[0], 11),
+                            text_color=COLORS["accent_green"],
+                        ).pack(pady=10)
+                    else:
+                        def make_download_handler(mid=model_id, frm=frame):
+                            return lambda: start_download(mid, frm)
+                        
+                        ctk.CTkButton(
+                            btn_frame, text="Download",
+                            font=(self.font_body[0], 11), width=80, height=28,
+                            corner_radius=6, fg_color=COLORS["bg_elevated"],
+                            hover_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
+                            command=make_download_handler(),
+                        ).pack(pady=8)
+            
+            add_section("⭐ RECOMMENDED", turbo_models)
+            add_section("🇺🇸 ENGLISH ONLY (Optimized)", english_models)
+            add_section("🌍 MULTI-LANGUAGE", multi_models)
+        
+        def start_download(model_id: str, parent_frame):
+            """Start downloading a model with progress UI."""
+            info = WHISPER_CPP_MODELS[model_id]
+            
+            # Create download progress dialog
+            progress_dialog = ctk.CTkToplevel(dialog)
+            progress_dialog.title(f"Downloading {info['name']}")
+            progress_dialog.geometry("400x200")
+            progress_dialog.configure(fg_color=COLORS["bg_base"])
+            progress_dialog.transient(dialog)
+            progress_dialog.grab_set()
+            
+            pd_inner = ctk.CTkFrame(progress_dialog, fg_color="transparent")
+            pd_inner.pack(fill="both", expand=True, padx=30, pady=30)
             
             ctk.CTkLabel(
-                info_frame,
-                text=model["name"],
-                font=(self.font_body[0], 14, "bold" if is_current else "normal"),
-                text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
-                anchor="w",
-            ).pack(anchor="w")
+                pd_inner, text=f"Downloading {info['name']}",
+                font=(self.font_body[0], 16, "bold"),
+                text_color=COLORS["text_bright"],
+            ).pack(pady=(0, 5))
             
             ctk.CTkLabel(
-                info_frame,
-                text=f"{model['speed']} • {model['size']}",
+                pd_inner, text=f"Size: {info['size']}",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_secondary"],
+            ).pack(pady=(0, 15))
+            
+            progress_bar = ctk.CTkProgressBar(pd_inner, width=340, height=20, corner_radius=10)
+            progress_bar.pack(pady=(0, 10))
+            progress_bar.set(0)
+            
+            status_label = ctk.CTkLabel(
+                pd_inner, text="Starting download...",
                 font=(self.font_body[0], 11),
                 text_color=COLORS["text_muted"],
-                anchor="w",
-            ).pack(anchor="w")
-        
-        # Save button
-        def save():
-            selected_path = model_var.get()
-            # Store with ~ for portability
-            if selected_path.startswith(str(Path.home())):
-                selected_path = "~" + selected_path[len(str(Path.home())):]
+            )
+            status_label.pack()
             
-            self.config["model_path"] = selected_path
-            save_config(self.config)
+            cancel_btn = ctk.CTkButton(
+                pd_inner, text="Cancel",
+                font=(self.font_body[0], 12), width=100, height=32,
+                fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_secondary"],
+                command=lambda: [downloader.cancel_download(), progress_dialog.destroy()],
+            )
+            cancel_btn.pack(pady=(15, 0))
             
-            self.model_btn.configure(text=self.get_model_display())
-            self.log(f"⚙ Model: {self.get_model_display()}")
-            dialog.destroy()
+            def on_progress(progress, downloaded, total):
+                def update():
+                    progress_bar.set(progress)
+                    mb_done = downloaded / (1024 * 1024)
+                    mb_total = total / (1024 * 1024)
+                    status_label.configure(text=f"{mb_done:.1f} MB / {mb_total:.1f} MB ({progress*100:.0f}%)")
+                progress_dialog.after(0, update)
+            
+            def on_complete(path):
+                def update():
+                    progress_dialog.destroy()
+                    self.log(f"✓ Downloaded: {info['name']}")
+                    # Refresh the download tab
+                    show_download_tab()
+                progress_dialog.after(0, update)
+            
+            def on_error(error):
+                def update():
+                    status_label.configure(text=f"Error: {error}", text_color=COLORS["accent_red"])
+                    cancel_btn.configure(text="Close")
+                progress_dialog.after(0, update)
+            
+            downloader.download_model(model_id, on_progress, on_complete, on_error)
         
-        ctk.CTkButton(
-            inner,
-            text="Save & Apply",
-            font=(self.font_body[0], 15, "bold"),
-            height=50,
-            corner_radius=12,
-            fg_color=COLORS["accent"],
+        # Tab buttons
+        installed_btn = ctk.CTkButton(
+            tab_frame, text="📁 Installed",
+            font=(self.font_body[0], 13), width=120, height=36,
+            corner_radius=8, fg_color=COLORS["accent"], text_color="#000000",
             hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=save,
-        ).pack(fill="x", pady=(0, 10))
+            command=show_installed_tab,
+        )
+        installed_btn.pack(side="left", padx=(0, 8))
         
-        ctk.CTkButton(
-            inner,
-            text="Cancel",
-            font=(self.font_body[0], 13),
-            height=40,
-            corner_radius=10,
-            fg_color=COLORS["bg_hover"],
+        download_btn = ctk.CTkButton(
+            tab_frame, text="⬇️ Download Models",
+            font=(self.font_body[0], 13), width=140, height=36,
+            corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
             hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=dialog.destroy,
-        ).pack(fill="x")
+            command=show_download_tab,
+        )
+        download_btn.pack(side="left")
+        
+        # Show installed tab initially
+        show_installed_tab()
 
     def open_prompt_settings(self):
         """Open dialog to configure transcription prompt and vocabulary."""
