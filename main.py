@@ -407,6 +407,187 @@ class ToolTip:
             self.tooltip_window = None
 
 
+class SmoothScrollableFrame(ctk.CTkScrollableFrame):
+    """
+    Premium scrollable frame with Mac-like smooth scrolling.
+    Features:
+    - Momentum-based scrolling (continues after release)
+    - Elastic bounce at boundaries
+    - Smooth easing animations
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # Physics parameters for smooth scrolling
+        self._velocity = 0.0
+        self._friction = 0.92  # Deceleration factor (higher = more glide)
+        self._bounce_strength = 0.4  # How much to bounce back
+        self._bounce_damping = 0.6  # How quickly bounce settles
+        self._scroll_multiplier = 1.2  # Scroll sensitivity
+        self._min_velocity = 0.5  # Stop threshold
+        
+        # State tracking
+        self._is_animating = False
+        self._overscroll = 0.0  # How far past boundary
+        self._last_scroll_time = 0
+        self._scroll_history = []  # Track recent scroll events for momentum
+        
+        # Get the internal canvas for custom scroll handling
+        self._parent_canvas = self._parent_frame.master
+        
+        # Bind custom scroll events (override default behavior)
+        self._parent_canvas.bind("<MouseWheel>", self._on_smooth_scroll, add=False)
+        self._parent_canvas.bind("<Button-4>", self._on_smooth_scroll, add=False)
+        self._parent_canvas.bind("<Button-5>", self._on_smooth_scroll, add=False)
+        
+        # Also bind to the frame itself
+        self.bind("<MouseWheel>", self._on_smooth_scroll, add=False)
+        self.bind("<Button-4>", self._on_smooth_scroll, add=False)
+        self.bind("<Button-5>", self._on_smooth_scroll, add=False)
+    
+    def _on_smooth_scroll(self, event):
+        """Handle scroll with momentum and bounce."""
+        import time
+        current_time = time.time()
+        
+        # Determine scroll delta
+        if hasattr(event, 'delta'):
+            # Windows/Mac - delta is typically 120 per notch
+            delta = event.delta / 120.0 * 40 * self._scroll_multiplier
+        elif event.num == 4:
+            # Linux scroll up
+            delta = 40 * self._scroll_multiplier
+        elif event.num == 5:
+            # Linux scroll down
+            delta = -40 * self._scroll_multiplier
+        else:
+            return
+        
+        # Track scroll history for momentum calculation
+        self._scroll_history.append((current_time, delta))
+        # Keep only recent history (last 100ms)
+        self._scroll_history = [(t, d) for t, d in self._scroll_history 
+                                if current_time - t < 0.1]
+        
+        # Calculate velocity from recent scrolls
+        if len(self._scroll_history) > 1:
+            total_delta = sum(d for _, d in self._scroll_history)
+            time_span = self._scroll_history[-1][0] - self._scroll_history[0][0]
+            if time_span > 0:
+                self._velocity = total_delta / (time_span * 60)  # Normalize to ~60fps
+            else:
+                self._velocity = delta * 0.5
+        else:
+            self._velocity = delta * 0.5
+        
+        # Cap velocity
+        max_velocity = 80
+        self._velocity = max(-max_velocity, min(max_velocity, self._velocity))
+        
+        # Start animation loop if not already running
+        if not self._is_animating:
+            self._is_animating = True
+            self._animate_scroll()
+        
+        return "break"  # Prevent default scroll
+    
+    def _get_scroll_bounds(self):
+        """Get current scroll position and limits."""
+        try:
+            # Get scroll region
+            scroll_region = self._parent_canvas.cget("scrollregion")
+            if not scroll_region:
+                return 0, 0, 0
+            
+            # Parse scroll region
+            parts = scroll_region.split()
+            if len(parts) >= 4:
+                content_height = float(parts[3]) - float(parts[1])
+            else:
+                content_height = 0
+            
+            canvas_height = self._parent_canvas.winfo_height()
+            max_scroll = max(0, content_height - canvas_height)
+            
+            # Get current position
+            current_pos = self._parent_canvas.canvasy(0)
+            
+            return current_pos, max_scroll, content_height
+        except:
+            return 0, 0, 0
+    
+    def _animate_scroll(self):
+        """Animation loop for smooth scrolling with bounce."""
+        if not self._is_animating:
+            return
+        
+        current_pos, max_scroll, content_height = self._get_scroll_bounds()
+        
+        # Check if we're past boundaries
+        at_top = current_pos <= 0
+        at_bottom = current_pos >= max_scroll and max_scroll > 0
+        
+        # Apply velocity
+        if abs(self._velocity) > self._min_velocity or abs(self._overscroll) > 1:
+            # Calculate new position
+            new_pos = current_pos - self._velocity
+            
+            # Handle overscroll (elastic bounce)
+            if new_pos < 0:
+                # Past top
+                self._overscroll = new_pos
+                # Rubber band - resistance increases with distance
+                resistance = 1.0 / (1.0 + abs(self._overscroll) * 0.01)
+                self._velocity *= resistance * 0.5
+                new_pos = self._overscroll * 0.3  # Show some overscroll visually
+            elif new_pos > max_scroll and max_scroll > 0:
+                # Past bottom
+                self._overscroll = new_pos - max_scroll
+                resistance = 1.0 / (1.0 + abs(self._overscroll) * 0.01)
+                self._velocity *= resistance * 0.5
+                new_pos = max_scroll + self._overscroll * 0.3
+            else:
+                self._overscroll = 0
+            
+            # Apply friction
+            self._velocity *= self._friction
+            
+            # Bounce back if overscrolled
+            if self._overscroll != 0 and abs(self._velocity) < 5:
+                # Snap back with easing
+                bounce_force = -self._overscroll * self._bounce_strength
+                self._velocity += bounce_force
+                self._velocity *= self._bounce_damping
+            
+            # Apply scroll
+            try:
+                if content_height > 0:
+                    fraction = max(0, min(1, new_pos / content_height))
+                    self._parent_canvas.yview_moveto(fraction)
+            except:
+                pass
+            
+            # Continue animation
+            self.after(16, self._animate_scroll)  # ~60fps
+        else:
+            # Animation complete - ensure we're not stuck overscrolled
+            self._is_animating = False
+            self._velocity = 0
+            
+            if self._overscroll != 0:
+                # Final snap to boundary
+                try:
+                    if self._overscroll < 0:
+                        self._parent_canvas.yview_moveto(0)
+                    else:
+                        if content_height > 0:
+                            self._parent_canvas.yview_moveto(max_scroll / content_height)
+                except:
+                    pass
+                self._overscroll = 0
+
+
 # Setting tooltip descriptions with latency indicators
 # ═══════════════════════════════════════════════════════════════════════════════
 # LATENCY GUIDE: ⚡ = none, 🟢 = <10ms, 🟡 = 10-100ms, 🔴 = 100ms+, 🚀 = speedup
@@ -2360,7 +2541,7 @@ class WayfinderApp(ctk.CTk):
         
         # Each tab has unique color accent
         tabs = [
-            ("dictate", "🎙", "Dictate", "#22D3EE"),    # Cyan
+            ("dictate", "∿", "Dictate", "#22D3EE"),     # Cyan - sine wave
             ("settings", "⚙", "Settings", "#A78BFA"),   # Purple
             ("history", "◷", "History", "#34D399"),     # Green
         ]
@@ -2389,11 +2570,11 @@ class WayfinderApp(ctk.CTk):
             icon_lbl = ctk.CTkLabel(
                 inner,
                 text=icon,
-                font=(self.font_body[0], 22),
+                font=(self.font_body[0], 26),
                 text_color=color,
-                width=30,
+                width=32,
             )
-            icon_lbl.pack(side="left", padx=(0, 8))
+            icon_lbl.pack(side="left", padx=(0, 10))
             
             # Text label
             text_lbl = ctk.CTkLabel(
