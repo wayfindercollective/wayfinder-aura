@@ -2033,23 +2033,32 @@ class WayfinderApp(ctk.CTk):
         # === Hero Section (Always visible) ===
         self._create_hero_section(content)
         
-        # === Tab Bar ===
-        self._create_tab_bar(content)
+        # === Main Body: Sidebar + Content ===
+        body_container = ctk.CTkFrame(content, fg_color="transparent")
+        body_container.pack(fill="both", expand=True)
+        
+        # Configure grid for sidebar layout
+        body_container.grid_columnconfigure(0, weight=0, minsize=120)  # Sidebar fixed width
+        body_container.grid_columnconfigure(1, weight=1)  # Content expands
+        body_container.grid_rowconfigure(0, weight=1)
+        
+        # === Sidebar Navigation ===
+        self._create_sidebar(body_container)
         
         # === Tab Content Container ===
-        self.tab_content_container = ctk.CTkFrame(content, fg_color="transparent")
-        self.tab_content_container.pack(fill="both", expand=True)
+        self.tab_content_container = ctk.CTkFrame(body_container, fg_color="transparent")
+        self.tab_content_container.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
         
         # Create tab frames
         self.tab_frames = {}
-        self.active_tab = "dictate"
+        self.active_tab = "settings"
         
         self._create_dictate_tab()
         self._create_settings_tab()
         self._create_history_tab()
         
-        # Show initial tab
-        self._switch_tab("dictate")
+        # Show initial tab (Settings shows content, Dictate is clean)
+        self._switch_tab("settings")
         
         # Initial log entries
         self.log("✓ Wayfinder Voice started")
@@ -2328,46 +2337,53 @@ class WayfinderApp(ctk.CTk):
             if len(points) >= 4:
                 canvas.create_line(points, fill=wave_color, width=line_width, smooth=True)
     
-    def _create_tab_bar(self, parent) -> None:
-        """Create the tab navigation bar."""
-        tab_bar = ctk.CTkFrame(parent, fg_color="transparent")
-        tab_bar.pack(fill="x", pady=(0, 12))
+    def _create_sidebar(self, parent) -> None:
+        """Create the vertical sidebar navigation."""
+        sidebar = ctk.CTkFrame(
+            parent,
+            fg_color="transparent",
+            width=120,
+        )
+        sidebar.grid(row=0, column=0, sticky="nsw")
+        sidebar.grid_propagate(False)
         
-        # Tab button container (centered)
-        tab_container = ctk.CTkFrame(tab_bar, fg_color=COLORS["bg_surface"], corner_radius=RADIUS["md"])
-        tab_container.pack()
+        # Nav items container
+        nav_container = ctk.CTkFrame(sidebar, fg_color="transparent")
+        nav_container.pack(fill="x", pady=(4, 0))
         
         self.tab_buttons = {}
         tabs = [
-            ("dictate", "🎤  Dictate"),
-            ("settings", "⚙️  Settings"),
-            ("history", "📋  History"),
+            ("dictate", "🎤", "Dictate"),
+            ("settings", "⚙️", "Settings"),
+            ("history", "🕒", "History"),
         ]
         
-        for tab_id, tab_label in tabs:
+        for tab_id, icon, label in tabs:
             btn = ctk.CTkButton(
-                tab_container,
-                text=tab_label,
+                nav_container,
+                text=f"{icon}  {label}",
                 font=(self.font_body[0], self.font_sizes["body"]),
                 fg_color="transparent",
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_secondary"],
-                height=36,
+                height=40,
+                width=110,
                 corner_radius=RADIUS["sm"],
+                anchor="w",
                 command=lambda t=tab_id: self._switch_tab(t),
             )
-            btn.pack(side="left", padx=2, pady=2)
+            btn.pack(fill="x", pady=2)
             self.tab_buttons[tab_id] = btn
     
     def _switch_tab(self, tab_id: str) -> None:
         """Switch to the specified tab."""
-        # Update button styles
+        # Update button styles for sidebar
         for tid, btn in self.tab_buttons.items():
             if tid == tab_id:
                 btn.configure(
-                    fg_color=COLORS["accent"],
-                    text_color=COLORS["bg_base"],
-                    hover_color=COLORS["accent_hover"],
+                    fg_color=COLORS["bg_surface"],
+                    text_color=COLORS["accent"],
+                    hover_color=COLORS["bg_surface"],
                 )
             else:
                 btn.configure(
