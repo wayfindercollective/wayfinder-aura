@@ -68,11 +68,22 @@ DEFAULT_CONFIG = {
     "no_speech_threshold": 0.6,  # Silence detection threshold
     "temperature": 0.0,  # Sampling temperature (0.0 = greedy/deterministic)
     "audio_preprocessing": True,  # Enable gain normalization and noise filtering
+    # Vocabulary and hallucination suppression
+    "custom_vocabulary": [],  # User's personal terms appended to prompt
+    "suppress_tokens": True,  # Suppress common hallucination tokens
+    "suppress_blank": True,  # Suppress blank/silence outputs
     # Chunked recording settings
     "chunked_mode": True,  # Enable chunked processing for long recordings
     "chunk_duration": 30,  # Seconds per chunk
     "chunk_overlap": 2,  # Overlap seconds to avoid word cuts
     "max_recording_duration": 0,  # 0 = unlimited
+    # GPU acceleration settings
+    "transcription_backend": "whisper_cpp",  # whisper_cpp | faster_whisper
+    "use_gpu": False,  # Enable GPU acceleration
+    "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
+    # Faster-Whisper specific settings
+    "faster_whisper_model": "small",  # tiny, base, small, medium, large-v3
+    "faster_whisper_compute_type": "float16",  # float16, int8, int8_float16
 }
 
 KEY_CODES = {
@@ -897,6 +908,43 @@ class WayfinderApp(ctk.CTk):
             self.open_chunk_settings,
         )
         
+        # GPU Acceleration settings label
+        ctk.CTkLabel(
+            advanced_card,
+            text="GPU Acceleration",
+            font=(self.font_body[0], 10, "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=18, pady=(12, 4))
+        
+        # Transcription backend setting
+        backend = self.config.get("transcription_backend", "whisper_cpp")
+        backend_display = "whisper.cpp" if backend == "whisper_cpp" else "Faster-Whisper"
+        self.backend_btn = self.create_setting_row(
+            advanced_card,
+            "Backend",
+            backend_display,
+            self.open_backend_settings,
+        )
+        
+        # GPU toggle
+        self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", False))
+        self.create_toggle_row(
+            advanced_card,
+            "Enable GPU Acceleration",
+            self.gpu_var,
+            self.toggle_gpu,
+        )
+        
+        # GPU layers setting (only relevant for whisper.cpp)
+        gpu_layers = self.config.get("gpu_layers", 0)
+        layers_display = "Auto (all)" if gpu_layers == 0 else str(gpu_layers)
+        self.gpu_layers_btn = self.create_setting_row(
+            advanced_card,
+            "GPU Layers",
+            layers_display,
+            self.open_gpu_layers_settings,
+        )
+        
         # === Collapsible Activity Log ===
         self.log_expanded = False
         
@@ -1095,6 +1143,13 @@ class WayfinderApp(ctk.CTk):
         mode = "chunked (unlimited)" if self.chunked_var.get() else "simple"
         self.log(f"⚙ Recording mode: {mode}")
 
+    def toggle_gpu(self):
+        """Toggle GPU acceleration."""
+        self.config["use_gpu"] = self.gpu_var.get()
+        save_config(self.config)
+        status = "enabled" if self.gpu_var.get() else "disabled"
+        self.log(f"⚙ GPU acceleration: {status}")
+
     def create_setting_row(self, parent, label, value, command):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=18, pady=11)
@@ -1221,14 +1276,30 @@ class WayfinderApp(ctk.CTk):
         return f"Custom: {prompt}" if prompt else "None"
 
     def get_preset_prompts(self) -> dict:
-        """Return preset prompt options."""
+        """Return preset prompt options.
+        
+        Note: Prompts work best as comma-separated vocabulary lists, not sentences.
+        Whisper treats the prompt as "previous transcript context" so listing
+        terms you'll say helps the model recognize them.
+        """
         return {
+            # General purpose
             "General Dictation": "Hello, this is a dictation with proper punctuation and grammar.",
-            "Technical/Code": "Technical documentation and code discussion with proper terminology, variable names, and programming concepts.",
-            "Conversational": "Casual conversation with natural speech patterns, filler words, and informal language.",
-            "Medical": "Medical transcription with proper medical terminology, drug names, dosages, and anatomical terms.",
-            "Legal": "Legal document dictation with proper legal terminology, case citations, and formal language.",
-            "Business": "Professional business communication with industry terminology, acronyms, and formal tone.",
+            "Conversational": "Okay, so, you know, like, actually, basically, I mean, right, anyway.",
+            
+            # Technical prompts - vocabulary style
+            "Technical/Linux": "Linux, Fedora, Bazzite, Wayfinder, sudo, grep, bash, terminal, CLI, SSH, systemd, dnf, flatpak, GNOME, KDE, Wayland.",
+            "Technical/Code": "Python, TypeScript, JavaScript, React, API, JSON, async, await, function, const, import, export, npm, git, commit, merge, PR.",
+            "Technical/AI-ML": "whisper.cpp, ggml, LLM, GPT, transformer, model, inference, CUDA, tensor, embedding, tokenizer, fine-tuning, quantization.",
+            
+            # Work/Business prompts
+            "Work Mode": "Revenue management, commission tracker, sales pipeline, quarterly review, stakeholders, deliverables, KPIs, ROI, metrics, forecast.",
+            "Business Email": "Dear, regards, please find attached, following up, as discussed, let me know, happy to help, best regards, sincerely.",
+            
+            # Specialized
+            "Automotive": "Subaru WRX STI, Tesla Model 3 Performance, FSD, autopilot, horsepower, torque, AWD, turbo, EV, regenerative braking, range.",
+            "Medical": "Diagnosis, prognosis, mg, mL, BID, TID, PRN, CBC, MRI, CT scan, hypertension, diabetes, prescription, contraindicated.",
+            "Legal": "Plaintiff, defendant, hereby, whereas, pursuant to, jurisdiction, affidavit, deposition, statute, liability, damages, counsel.",
         }
 
     def get_available_models(self) -> list[dict]:
@@ -1392,10 +1463,10 @@ class WayfinderApp(ctk.CTk):
         ).pack(fill="x")
 
     def open_prompt_settings(self):
-        """Open dialog to configure transcription prompt."""
+        """Open dialog to configure transcription prompt and vocabulary."""
         dialog = ctk.CTkToplevel(self)
-        dialog.title("Transcription Prompt")
-        dialog.geometry("550x720")
+        dialog.title("Transcription Prompt & Vocabulary")
+        dialog.geometry("580x880")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
@@ -1503,12 +1574,43 @@ class WayfinderApp(ctk.CTk):
         custom_text.pack(fill="x", pady=(0, 15))
         custom_text.insert("1.0", current_prompt)
         
+        # My Vocabulary section (always appended to active prompt)
+        ctk.CTkLabel(
+            inner,
+            text="My Vocabulary:",
+            font=(self.font_body[0], 13, "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(5, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Personal terms always added to your prompt (comma-separated)",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w", pady=(0, 8))
+        
+        vocab_text = ctk.CTkTextbox(
+            inner,
+            font=(self.font_body[0], 12),
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["accent"],
+            corner_radius=10,
+            height=60,
+            wrap="word",
+        )
+        vocab_text.pack(fill="x", pady=(0, 10))
+        
+        # Load existing vocabulary
+        current_vocab = self.config.get("custom_vocabulary", [])
+        if current_vocab:
+            vocab_text.insert("1.0", ", ".join(current_vocab))
+        
         # Tip
         tip_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_hover"], corner_radius=8)
-        tip_frame.pack(fill="x", pady=(0, 20))
+        tip_frame.pack(fill="x", pady=(0, 15))
         ctk.CTkLabel(
             tip_frame,
-            text="💡 Tip: Include example phrases, technical terms, or names\n    that appear frequently in your dictation.",
+            text="💡 Vocabulary is appended to your prompt. Add names, jargon,\n    and technical terms (e.g. Bazzite, WRX STI, FSD, whisper.cpp)",
             font=(self.font_body[0], 11),
             text_color=COLORS["text_secondary"],
             justify="left",
@@ -1518,10 +1620,20 @@ class WayfinderApp(ctk.CTk):
         def save():
             new_prompt = custom_text.get("1.0", "end").strip()
             self.config["prompt"] = new_prompt
+            
+            # Parse vocabulary (comma-separated, strip whitespace)
+            vocab_raw = vocab_text.get("1.0", "end").strip()
+            if vocab_raw:
+                vocab_list = [v.strip() for v in vocab_raw.split(",") if v.strip()]
+            else:
+                vocab_list = []
+            self.config["custom_vocabulary"] = vocab_list
+            
             save_config(self.config)
             
             self.prompt_btn.configure(text=self.get_prompt_display())
-            self.log(f"⚙ Prompt updated: {self.get_prompt_display()}")
+            vocab_count = len(self.config.get("custom_vocabulary", []))
+            self.log(f"⚙ Prompt updated: {self.get_prompt_display()} (+{vocab_count} vocab terms)")
             dialog.destroy()
         
         ctk.CTkButton(
@@ -2426,6 +2538,340 @@ class WayfinderApp(ctk.CTk):
             save_config(self.config)
             self.chunk_btn.configure(text=f"{chunk_var.get()}s")
             self.log(f"⚙ Chunk duration: {chunk_var.get()}s")
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            inner,
+            text="Save",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=save,
+        ).pack(fill="x", pady=(0, 10))
+        
+        ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(fill="x")
+
+    def open_backend_settings(self):
+        """Open dialog to select transcription backend."""
+        from transcriber import WhisperCppBackend, FasterWhisperBackend
+        
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Transcription Backend")
+        dialog.geometry("500x580")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Select Backend",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Choose which transcription engine to use.",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w", pady=(0, 20))
+        
+        current = self.config.get("transcription_backend", "whisper_cpp")
+        backend_var = ctk.StringVar(value=current)
+        
+        # Check availability
+        whisper_cpp = WhisperCppBackend(
+            whisper_binary=self.config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli"),
+        )
+        faster_whisper = FasterWhisperBackend()
+        
+        backends = [
+            {
+                "id": "whisper_cpp",
+                "name": "whisper.cpp",
+                "desc": "Fast C++ implementation. Supports Vulkan GPU.",
+                "available": whisper_cpp.is_available(),
+                "gpu": whisper_cpp.supports_gpu(),
+            },
+            {
+                "id": "faster_whisper",
+                "name": "Faster-Whisper",
+                "desc": "Python library with CTranslate2. Supports ROCm/CUDA.",
+                "available": faster_whisper.is_available(),
+                "gpu": faster_whisper.supports_gpu(),
+            },
+        ]
+        
+        scroll_frame = ctk.CTkScrollableFrame(
+            inner,
+            fg_color=COLORS["bg_card"],
+            corner_radius=12,
+            height=280,
+        )
+        scroll_frame.pack(fill="both", expand=True, pady=(0, 20))
+        
+        for backend in backends:
+            frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+            frame.pack(fill="x", padx=10, pady=8)
+            
+            # Radio button
+            radio = ctk.CTkRadioButton(
+                frame,
+                text="",
+                variable=backend_var,
+                value=backend["id"],
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_dim"],
+                state="normal" if backend["available"] else "disabled",
+            )
+            radio.pack(side="left", padx=(5, 10))
+            
+            # Info container
+            info = ctk.CTkFrame(frame, fg_color="transparent")
+            info.pack(side="left", fill="x", expand=True)
+            
+            # Name row
+            name_row = ctk.CTkFrame(info, fg_color="transparent")
+            name_row.pack(fill="x")
+            
+            name_color = COLORS["text_primary"] if backend["available"] else COLORS["text_muted"]
+            ctk.CTkLabel(
+                name_row,
+                text=backend["name"],
+                font=(self.font_body[0], 14, "bold"),
+                text_color=name_color,
+            ).pack(side="left")
+            
+            # Status badges
+            if backend["available"]:
+                ctk.CTkLabel(
+                    name_row,
+                    text="✓",
+                    font=(self.font_body[0], 11),
+                    text_color=COLORS["accent_green"],
+                ).pack(side="left", padx=5)
+            else:
+                ctk.CTkLabel(
+                    name_row,
+                    text="Not installed",
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["accent_red"],
+                ).pack(side="left", padx=5)
+            
+            if backend["gpu"]:
+                ctk.CTkLabel(
+                    name_row,
+                    text="GPU ✓",
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["accent"],
+                ).pack(side="left", padx=5)
+            
+            # Description
+            ctk.CTkLabel(
+                info,
+                text=backend["desc"],
+                font=(self.font_body[0], 11),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w")
+        
+        # Faster-Whisper specific settings (shown when selected)
+        fw_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=12)
+        fw_frame.pack(fill="x", pady=(0, 15))
+        
+        ctk.CTkLabel(
+            fw_frame,
+            text="Faster-Whisper Model",
+            font=(self.font_body[0], 12, "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=15, pady=(10, 5))
+        
+        fw_model_var = ctk.StringVar(value=self.config.get("faster_whisper_model", "small"))
+        fw_model_menu = ctk.CTkOptionMenu(
+            fw_frame,
+            values=["tiny", "base", "small", "medium", "large-v3"],
+            variable=fw_model_var,
+            fg_color=COLORS["bg_hover"],
+            button_color=COLORS["bg_elevated"],
+            button_hover_color=COLORS["accent_dim"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"],
+        )
+        fw_model_menu.pack(padx=15, pady=(0, 10), anchor="w")
+        
+        ctk.CTkLabel(
+            fw_frame,
+            text="Compute Type",
+            font=(self.font_body[0], 12, "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=15, pady=(5, 5))
+        
+        fw_compute_var = ctk.StringVar(value=self.config.get("faster_whisper_compute_type", "float16"))
+        fw_compute_menu = ctk.CTkOptionMenu(
+            fw_frame,
+            values=["float16", "int8", "int8_float16"],
+            variable=fw_compute_var,
+            fg_color=COLORS["bg_hover"],
+            button_color=COLORS["bg_elevated"],
+            button_hover_color=COLORS["accent_dim"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"],
+        )
+        fw_compute_menu.pack(padx=15, pady=(0, 15), anchor="w")
+        
+        def save():
+            self.config["transcription_backend"] = backend_var.get()
+            self.config["faster_whisper_model"] = fw_model_var.get()
+            self.config["faster_whisper_compute_type"] = fw_compute_var.get()
+            save_config(self.config)
+            
+            display = "whisper.cpp" if backend_var.get() == "whisper_cpp" else "Faster-Whisper"
+            self.backend_btn.configure(text=display)
+            self.log(f"⚙ Backend: {display}")
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            inner,
+            text="Save",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=save,
+        ).pack(fill="x", pady=(0, 10))
+        
+        ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(fill="x")
+
+    def open_gpu_layers_settings(self):
+        """Open dialog to configure GPU layers for whisper.cpp."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("GPU Layers")
+        dialog.geometry("420x450")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="GPU Layers",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Number of model layers to offload to GPU.\n0 = Auto (offload all layers for maximum speed).",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", pady=(0, 20))
+        
+        # Current value display
+        current = self.config.get("gpu_layers", 0)
+        display_text = "Auto (all)" if current == 0 else str(current)
+        value_label = ctk.CTkLabel(
+            inner,
+            text=display_text,
+            font=(self.font_header[0], 36, "bold"),
+            text_color=COLORS["accent"],
+        )
+        value_label.pack(pady=(0, 15))
+        
+        # Slider (0 = auto, then 1-99)
+        layers_var = ctk.IntVar(value=current)
+        
+        def on_change(value):
+            val = int(float(value))
+            layers_var.set(val)
+            if val == 0:
+                value_label.configure(text="Auto (all)")
+            else:
+                value_label.configure(text=str(val))
+        
+        slider = ctk.CTkSlider(
+            inner,
+            from_=0,
+            to=64,
+            variable=layers_var,
+            command=on_change,
+            width=300,
+            height=20,
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+        )
+        slider.pack(pady=(0, 5))
+        
+        # Labels
+        labels_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        labels_frame.pack(fill="x", pady=(0, 15))
+        ctk.CTkLabel(labels_frame, text="Auto", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="left")
+        ctk.CTkLabel(labels_frame, text="64", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="right")
+        
+        # Preset buttons
+        presets_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        presets_frame.pack(fill="x", pady=(0, 20))
+        
+        for val, label in [(0, "Auto"), (16, "16"), (32, "32"), (48, "48")]:
+            ctk.CTkButton(
+                presets_frame,
+                text=label,
+                width=60,
+                height=30,
+                font=(self.font_body[0], 11),
+                fg_color=COLORS["bg_hover"],
+                hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_primary"],
+                corner_radius=6,
+                command=lambda v=val: (layers_var.set(v), on_change(v)),
+            ).pack(side="left", padx=5)
+        
+        # Note about whisper.cpp
+        ctk.CTkLabel(
+            inner,
+            text="Note: Only applies when using whisper.cpp backend\nwith GPU acceleration enabled.",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+            justify="center",
+        ).pack(pady=(10, 15))
+        
+        def save():
+            self.config["gpu_layers"] = layers_var.get()
+            save_config(self.config)
+            display = "Auto (all)" if layers_var.get() == 0 else str(layers_var.get())
+            self.gpu_layers_btn.configure(text=display)
+            self.log(f"⚙ GPU layers: {display}")
             dialog.destroy()
         
         ctk.CTkButton(

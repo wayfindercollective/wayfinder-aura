@@ -154,6 +154,84 @@ Wayland blocks direct input monitoring. Use:
 1. Socket method with KDE shortcut calling `trigger_record.py`
 2. Or configure in System Settings → Shortcuts
 
+## GPU Acceleration
+
+Wayfinder Voice supports GPU acceleration for faster transcription. Two backends are available:
+
+### Option 1: whisper.cpp with Vulkan (Recommended for AMD)
+
+Rebuild whisper.cpp with Vulkan support for AMD GPU acceleration:
+
+```bash
+# Install Vulkan SDK (Fedora/Bazzite)
+sudo dnf install vulkan-headers vulkan-loader-devel vulkan-validation-layers
+
+# Rebuild whisper.cpp
+cd ~/whisper.cpp
+rm -rf build
+cmake -B build -DGGML_VULKAN=ON
+cmake --build build --config Release -j$(nproc)
+
+# Verify GPU support
+./build/bin/whisper-cli --help | grep -i gpu
+# Should show -ngl flag
+```
+
+After rebuilding, enable GPU in Wayfinder Voice settings:
+1. Open Settings → Advanced → GPU Acceleration
+2. Enable "GPU Acceleration"
+3. GPU Layers: "Auto (all)" for maximum speed
+
+### Option 2: Faster-Whisper with ROCm (AMD) or CUDA (NVIDIA)
+
+For the Faster-Whisper backend with PyTorch GPU support:
+
+```bash
+# AMD GPU (ROCm)
+pip install torch --index-url https://download.pytorch.org/whl/rocm6.0
+
+# NVIDIA GPU (CUDA)
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# Install Faster-Whisper
+pip install faster-whisper
+```
+
+Configure in Wayfinder Voice:
+1. Open Settings → Advanced → GPU Acceleration
+2. Set Backend to "Faster-Whisper"
+3. Enable "GPU Acceleration"
+4. Choose model size and compute type
+
+### Performance Comparison
+
+| Backend | CPU (6 threads) | GPU (AMD RX 7000) |
+|---------|-----------------|-------------------|
+| whisper.cpp small | ~3-5s/10s audio | ~0.5-1s/10s audio |
+| Faster-Whisper small | ~2-3s/10s audio | ~0.3-0.8s/10s audio |
+
+### Troubleshooting GPU
+
+**Vulkan not detected:**
+```bash
+# Check Vulkan devices
+vulkaninfo --summary
+# Should show your AMD GPU
+```
+
+**ROCm not working:**
+```bash
+# Verify ROCm installation
+rocminfo
+# Check PyTorch sees GPU
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+**Out of VRAM:**
+- Use a smaller model (tiny, base)
+- Reduce GPU layers (set specific number instead of Auto)
+- Use int8 compute type for Faster-Whisper
+
 ## Future Improvements
 
 - [ ] Mac/Windows platform support

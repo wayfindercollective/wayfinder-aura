@@ -21,3 +21,9 @@ Pillow>=10.0.0
 # Optional: D-Bus for Wayland GlobalShortcuts
 # dbus-python  # Usually system-installed
 # PyGObject    # Usually system-installed
+
+# Optional: GPU-accelerated transcription with Faster-Whisper
+# Requires PyTorch with ROCm (AMD) or CUDA (NVIDIA) support
+# Install PyTorch first: pip install torch --index-url https://download.pytorch.org/whl/rocm6.0
+# Then install faster-whisper:
+# faster-whisper>=1.0.0
