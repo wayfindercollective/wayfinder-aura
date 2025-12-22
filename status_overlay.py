@@ -500,12 +500,11 @@ class GlassmorphicOverlay(QWidget):
     
     def _setup_window(self):
         """Configure window flags for overlay behavior."""
-        # Use flags that work well on KDE Plasma / Wayland
-        # SplashScreen type stays on top without taskbar entry
+        # Use ToolTip type - no taskbar entry, stays on top, no focus
         self.setWindowFlags(
+            Qt.WindowType.ToolTip |  # No taskbar, no focus, always on top
             Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.SplashScreen  # Best for always-on-top overlays
+            Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
