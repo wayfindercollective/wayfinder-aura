@@ -2344,13 +2344,15 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_surface"],
             corner_radius=RADIUS["lg"],
             width=180,
+            height=380,  # Fixed height to match content area
         )
-        sidebar.grid(row=0, column=0, sticky="nsw")
+        sidebar.grid(row=0, column=0, sticky="nw")  # Don't stretch vertically
         sidebar.grid_propagate(False)
+        sidebar.pack_propagate(False)
         
-        # Nav items container
+        # Nav items container - fills the sidebar height
         nav_container = ctk.CTkFrame(sidebar, fg_color="transparent")
-        nav_container.pack(fill="x", padx=8, pady=12)
+        nav_container.pack(fill="both", expand=True, padx=12, pady=16)
         
         self.tab_buttons = {}
         tabs = [
@@ -2363,16 +2365,15 @@ class WayfinderApp(ctk.CTk):
             btn = ctk.CTkButton(
                 nav_container,
                 text=f"{icon}  {label}",
-                font=(self.font_body[0], self.font_sizes["heading"]),
+                font=(self.font_body[0], self.font_sizes["title"]),
                 fg_color="transparent",
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_secondary"],
-                height=52,
                 corner_radius=RADIUS["md"],
                 anchor="w",
                 command=lambda t=tab_id: self._switch_tab(t),
             )
-            btn.pack(fill="x", pady=4)
+            btn.pack(fill="both", expand=True, pady=6)
             self.tab_buttons[tab_id] = btn
     
     def _switch_tab(self, tab_id: str) -> None:
@@ -2586,15 +2587,8 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["start_minimized"],
         )
         
-        # UI Scale
-        scale_display = f"{int(self.ui_scale * 100)}%"
-        self.scale_btn = self.create_setting_row(
-            settings_card,
-            "UI Scale",
-            scale_display,
-            self.open_scale_settings,
-            tooltip=SETTING_TOOLTIPS["ui_scale"],
-        )
+        # UI Scale - inline slider with real-time adjustment
+        self._create_scale_slider_row(settings_card)
         
         # === Collapsible Advanced Settings ===
         self.advanced_expanded = False
@@ -3075,6 +3069,89 @@ class WayfinderApp(ctk.CTk):
             ToolTip(btn, tooltip)
         
         return btn
+
+    def _create_scale_slider_row(self, parent):
+        """Create inline UI scale slider with real-time adjustment."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=8)
+        
+        row.grid_columnconfigure(0, weight=0)  # Label column
+        row.grid_columnconfigure(1, weight=1)  # Slider column - grows
+        row.grid_columnconfigure(2, weight=0)  # Value display column
+        
+        # Label
+        label_widget = ctk.CTkLabel(
+            row,
+            text="UI Scale",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_secondary"],
+        )
+        label_widget.grid(row=0, column=0, sticky="w")
+        
+        tooltip_text = SETTING_TOOLTIPS.get("ui_scale", "")
+        if tooltip_text:
+            ToolTip(label_widget, tooltip_text)
+        
+        # Value display (right side, shows percentage)
+        self.scale_value_label = ctk.CTkLabel(
+            row,
+            text=f"{int(self.ui_scale * 100)}%",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["accent"],
+            width=60,
+        )
+        self.scale_value_label.grid(row=0, column=2, sticky="e", padx=(10, 0))
+        
+        # Slider in the middle
+        self.scale_slider_var = ctk.DoubleVar(value=self.ui_scale)
+        
+        # Debounce timer for applying scale
+        self._scale_apply_timer = None
+        
+        def on_slider_change(value):
+            """Update display and schedule scale application."""
+            value = float(value)
+            # Snap to nearest 5%
+            snapped = round(value * 20) / 20
+            self.scale_value_label.configure(text=f"{int(snapped * 100)}%")
+            
+            # Cancel any pending apply
+            if self._scale_apply_timer is not None:
+                try:
+                    self.after_cancel(self._scale_apply_timer)
+                except:
+                    pass
+            
+            # Schedule apply after a short delay (debounce)
+            self._scale_apply_timer = self.after(150, lambda: self._apply_live_scale(snapped))
+        
+        self.scale_slider = ctk.CTkSlider(
+            row,
+            from_=0.7,
+            to=2.5,
+            variable=self.scale_slider_var,
+            command=on_slider_change,
+            height=18,
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+            button_hover_color=COLORS["text_primary"],
+            fg_color=COLORS["bg_input"],
+        )
+        self.scale_slider.grid(row=0, column=1, sticky="ew", padx=(20, 10))
+        
+        if tooltip_text:
+            ToolTip(self.scale_slider, tooltip_text)
+    
+    def _apply_live_scale(self, new_scale):
+        """Apply UI scale change in real-time."""
+        if abs(new_scale - self.ui_scale) < 0.01:
+            return  # No significant change
+        
+        self.ui_scale = new_scale
+        self.config["ui_scale"] = new_scale
+        save_config(self.config)
+        self._apply_scale()
+        self.log(f"⚙ UI Scale: {int(new_scale * 100)}%")
 
     def create_toggle_row(self, parent, label, variable, command, tooltip=None):
         """Create a modernized toggle row with slim pill-style switch."""
@@ -4498,121 +4575,6 @@ class WayfinderApp(ctk.CTk):
             text_color="#000000",
             command=save,
         ).pack(fill="x", pady=(25, 10))
-        
-        ctk.CTkButton(
-            inner,
-            text="Cancel",
-            font=(self.font_body[0], 13),
-            height=40,
-            corner_radius=10,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=dialog.destroy,
-        ).pack(fill="x")
-
-    def open_scale_settings(self):
-        """Open dialog to adjust UI scale."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("UI Scale")
-        dialog.geometry("400x320")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        ctk.CTkLabel(
-            inner,
-            text="UI Scale",
-            font=(self.font_header[0], 22, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 5))
-        
-        ctk.CTkLabel(
-            inner,
-            text="Adjust the size of text and controls.\nUse Ctrl+Plus/Minus for quick adjustments.",
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_secondary"],
-            justify="left",
-        ).pack(anchor="w", pady=(0, 20))
-        
-        # Current scale display
-        scale_label = ctk.CTkLabel(
-            inner,
-            text=f"{int(self.ui_scale * 100)}%",
-            font=(self.font_header[0], 36, "bold"),
-            text_color=COLORS["accent"],
-        )
-        scale_label.pack(pady=(0, 15))
-        
-        # Scale slider
-        scale_var = ctk.DoubleVar(value=self.ui_scale)
-        
-        def on_scale_change(value):
-            scale_label.configure(text=f"{int(float(value) * 100)}%")
-        
-        slider = ctk.CTkSlider(
-            inner,
-            from_=0.7,
-            to=2.5,
-            variable=scale_var,
-            command=on_scale_change,
-            width=300,
-            height=20,
-            progress_color=COLORS["accent"],
-            button_color=COLORS["text_bright"],
-            button_hover_color=COLORS["text_primary"],
-        )
-        slider.pack(pady=(0, 5))
-        
-        # Scale labels
-        labels_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        labels_frame.pack(fill="x", pady=(0, 20))
-        ctk.CTkLabel(labels_frame, text="70%", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="left")
-        ctk.CTkLabel(labels_frame, text="250%", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="right")
-        
-        # Preset buttons
-        presets_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        presets_frame.pack(fill="x", pady=(0, 20))
-        
-        for preset in [100, 125, 150, 175, 200]:
-            ctk.CTkButton(
-                presets_frame,
-                text=f"{preset}%",
-                width=50,
-                height=30,
-                font=(self.font_body[0], 11),
-                fg_color=COLORS["bg_hover"] if int(self.ui_scale * 100) != preset else COLORS["accent_dim"],
-                hover_color=COLORS["bg_elevated"],
-                text_color=COLORS["text_primary"],
-                corner_radius=6,
-                command=lambda p=preset: (scale_var.set(p/100), on_scale_change(p/100)),
-            ).pack(side="left", padx=3)
-        
-        # Apply button
-        def apply_scale():
-            new_scale = scale_var.get()
-            self.ui_scale = new_scale
-            self.config["ui_scale"] = new_scale
-            save_config(self.config)
-            self._apply_scale()
-            self.scale_btn.configure(text=f"{int(new_scale * 100)}%")
-            self.log(f"⚙ UI Scale: {int(new_scale * 100)}%")
-            dialog.destroy()
-        
-        ctk.CTkButton(
-            inner,
-            text="Apply",
-            font=(self.font_body[0], 15, "bold"),
-            height=50,
-            corner_radius=12,
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=apply_scale,
-        ).pack(fill="x", pady=(0, 10))
         
         ctk.CTkButton(
             inner,
