@@ -1690,25 +1690,32 @@ class OverlayController:
                     print(f"Overlay script not found: {script_path}")
                     return False
                 
+                # Use the same Python interpreter that's running this script
+                import sys
+                python_exe = sys.executable
+                
                 # Start subprocess
                 self._process = subprocess.Popen(
-                    ["python3", str(script_path)],
+                    [python_exe, str(script_path)],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,  # Capture errors for debugging
                     text=True,
                     bufsize=1,  # Line buffered
                 )
                 
-                # Wait for ready signal
-                try:
+                # Wait for ready signal with timeout
+                import select
+                ready, _, _ = select.select([self._process.stdout], [], [], 2.0)
+                if ready:
                     response = self._process.stdout.readline()
                     if response:
-                        data = json.loads(response)
-                        if data.get("status") == "ready":
-                            return True
-                except:
-                    pass
+                        try:
+                            data = json.loads(response)
+                            if data.get("status") == "ready":
+                                return True
+                        except json.JSONDecodeError:
+                            pass
                 
                 return True
             except Exception as e:

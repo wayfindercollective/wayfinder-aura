@@ -501,15 +501,20 @@ class GlassmorphicOverlay(QWidget):
     def _setup_window(self):
         """Configure window flags for overlay behavior."""
         # Use flags that work well on KDE Plasma / Wayland
+        # SplashScreen type stays on top without taskbar entry
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool |  # No taskbar entry
-            Qt.WindowType.BypassWindowManagerHint  # Ensures it stays on top
+            Qt.WindowType.SplashScreen  # Best for always-on-top overlays
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WidgetAttribute.WA_X11DoNotAcceptFocus)
+        
+        # X11-specific: don't accept focus
+        try:
+            self.setAttribute(Qt.WidgetAttribute.WA_X11DoNotAcceptFocus)
+        except:
+            pass
         
         # Try to enable blur on KDE Plasma
         self._request_blur()
@@ -521,13 +526,14 @@ class GlassmorphicOverlay(QWidget):
         # Timer to periodically raise window (ensures stay-on-top on all compositors)
         self._raise_timer = QTimer(self)
         self._raise_timer.timeout.connect(self._ensure_on_top)
-        self._raise_timer.setInterval(500)  # Every 500ms
+        self._raise_timer.setInterval(100)  # Every 100ms for more aggressive stay-on-top
     
     def _ensure_on_top(self):
         """Ensure window stays on top of other windows."""
         if self.isVisible():
+            # Re-apply stay on top hint and raise
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             self.raise_()
-            self.activateWindow()
     
     def _request_blur(self):
         """Request backdrop blur from compositor."""
@@ -588,23 +594,18 @@ class GlassmorphicOverlay(QWidget):
         self._render_timer.setInterval(16)  # ~60 FPS
     
     def _position_at_bottom(self):
-        """Position overlay at bottom center of screen."""
+        """Position overlay at bottom center of screen, just above taskbar."""
         screen = QApplication.primaryScreen()
         if screen:
-            # Use full screen geometry and position above typical taskbar
-            geometry = screen.geometry()
+            # availableGeometry excludes taskbars/panels
             available = screen.availableGeometry()
             
-            # Calculate center X
-            x = geometry.x() + (geometry.width() - self.width()) // 2
+            # Center horizontally in available area
+            x = available.x() + (available.width() - self.width()) // 2
             
-            # Position at bottom, accounting for taskbar
-            # Use available geometry bottom if different from full geometry (taskbar present)
-            taskbar_height = geometry.height() - available.height()
-            if taskbar_height < 20:
-                taskbar_height = 48  # Default taskbar height estimate
-            
-            y = geometry.y() + geometry.height() - self.height() - taskbar_height - 12
+            # Position at the very bottom of available area (just above taskbar)
+            # Small offset (8px) so it doesn't touch the taskbar
+            y = available.y() + available.height() - self.height() - 8
             
             self.move(x, y)
     
