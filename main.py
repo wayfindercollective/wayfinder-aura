@@ -61,17 +61,18 @@ DEFAULT_CONFIG = {
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
     # Accuracy enhancement settings
-    "beam_size": 5,  # Beam search size (higher = more accurate, slower)
-    "best_of": 3,  # Number of best candidates to consider
+    "beam_size": 8,  # Beam search size (higher = more accurate, slower)
+    "best_of": 5,  # Number of best candidates to consider
     "language": "en",  # Language code: "en", "auto" for auto-detect
-    "entropy_threshold": 2.4,  # Filter low-confidence outputs
-    "no_speech_threshold": 0.6,  # Silence detection threshold
+    "entropy_threshold": 2.8,  # Filter low-confidence outputs (higher = accept more)
+    "no_speech_threshold": 0.5,  # Silence detection threshold (lower = more sensitive)
     "temperature": 0.0,  # Sampling temperature (0.0 = greedy/deterministic)
+    "temperature_fallback": 0.2,  # Fallback temperature if greedy decoding produces poor results
+    "accuracy_mode": "balanced",  # fast | balanced | high
     "audio_preprocessing": True,  # Enable gain normalization and noise filtering
     # Vocabulary and hallucination suppression
     "custom_vocabulary": [],  # User's personal terms appended to prompt
-    "suppress_tokens": True,  # Suppress common hallucination tokens
-    "suppress_blank": True,  # Suppress blank/silence outputs
+    "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
     # Chunked recording settings
     "chunked_mode": True,  # Enable chunked processing for long recordings
     "chunk_duration": 30,  # Seconds per chunk
@@ -1056,8 +1057,18 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=18, pady=(12, 4))
         
+        # Accuracy Mode preset selector
+        accuracy_mode = self.config.get("accuracy_mode", "balanced")
+        mode_display = {"fast": "Fast", "balanced": "Balanced", "high": "High Accuracy"}.get(accuracy_mode, "Balanced")
+        self.accuracy_mode_btn = self.create_setting_row(
+            advanced_card,
+            "Accuracy Mode",
+            mode_display,
+            self.open_accuracy_mode_settings,
+        )
+        
         # Beam size setting
-        beam_size = self.config.get("beam_size", 5)
+        beam_size = self.config.get("beam_size", 8)
         self.beam_btn = self.create_setting_row(
             advanced_card,
             "Beam Size",
@@ -2442,6 +2453,148 @@ class WayfinderApp(ctk.CTk):
             text_color="#000000",
             command=apply_scale,
         ).pack(fill="x", pady=(0, 10))
+        
+        ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(fill="x")
+
+    def open_accuracy_mode_settings(self):
+        """Open dialog to select accuracy mode preset."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Accuracy Mode")
+        dialog.geometry("450x520")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Accuracy Mode",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Choose a preset that balances speed and accuracy.\nHigher accuracy = slower transcription.",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", pady=(0, 20))
+        
+        # Mode presets with their settings
+        modes = {
+            "fast": {
+                "label": "Fast",
+                "desc": "Quick results, may miss some words",
+                "settings": {
+                    "beam_size": 3,
+                    "best_of": 2,
+                    "entropy_threshold": 2.4,
+                    "no_speech_threshold": 0.6,
+                    "temperature_fallback": 0.0,
+                    "suppress_nst": True,
+                }
+            },
+            "balanced": {
+                "label": "Balanced",
+                "desc": "Good accuracy with reasonable speed (default)",
+                "settings": {
+                    "beam_size": 8,
+                    "best_of": 5,
+                    "entropy_threshold": 2.8,
+                    "no_speech_threshold": 0.5,
+                    "temperature_fallback": 0.2,
+                    "suppress_nst": False,
+                }
+            },
+            "high": {
+                "label": "High Accuracy",
+                "desc": "Best accuracy, slower processing",
+                "settings": {
+                    "beam_size": 10,
+                    "best_of": 8,
+                    "entropy_threshold": 3.0,
+                    "no_speech_threshold": 0.4,
+                    "temperature_fallback": 0.3,
+                    "suppress_nst": False,
+                }
+            },
+        }
+        
+        current_mode = self.config.get("accuracy_mode", "balanced")
+        mode_var = ctk.StringVar(value=current_mode)
+        mode_buttons = {}
+        
+        def on_mode_select(mode_key):
+            mode_var.set(mode_key)
+            for key, btn in mode_buttons.items():
+                if key == mode_key:
+                    btn.configure(fg_color=COLORS["accent_dim"], text_color=COLORS["text_bright"])
+                else:
+                    btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
+        
+        for mode_key, mode_info in modes.items():
+            is_selected = mode_key == current_mode
+            frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=10)
+            frame.pack(fill="x", pady=5)
+            
+            btn = ctk.CTkButton(
+                frame,
+                text=f"{mode_info['label']}\n{mode_info['desc']}",
+                font=(self.font_body[0], 13),
+                height=60,
+                fg_color=COLORS["accent_dim"] if is_selected else COLORS["bg_hover"],
+                hover_color=COLORS["accent_glow"] if is_selected else COLORS["bg_elevated"],
+                text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
+                corner_radius=8,
+                command=lambda m=mode_key: on_mode_select(m),
+            )
+            btn.pack(fill="x", padx=5, pady=5)
+            mode_buttons[mode_key] = btn
+        
+        # Apply button
+        def apply_mode():
+            selected = mode_var.get()
+            mode_settings = modes[selected]["settings"]
+            
+            # Apply all settings from the preset
+            self.config["accuracy_mode"] = selected
+            for key, value in mode_settings.items():
+                self.config[key] = value
+            
+            save_config(self.config)
+            
+            # Update UI
+            mode_display = modes[selected]["label"]
+            self.accuracy_mode_btn.configure(text=mode_display)
+            self.beam_btn.configure(text=str(self.config["beam_size"]))
+            
+            self.log(f"⚙ Accuracy mode: {mode_display}")
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            inner,
+            text="Apply",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=apply_mode,
+        ).pack(fill="x", pady=(20, 10))
         
         ctk.CTkButton(
             inner,

@@ -55,15 +55,16 @@ class WhisperCppBackend(TranscriptionBackend):
         use_gpu: bool = False,
         gpu_layers: int = 0,
         # Accuracy enhancement parameters
-        beam_size: int = 5,
-        best_of: int = 3,
+        beam_size: int = 8,
+        best_of: int = 5,
         language: str = "en",
-        entropy_threshold: float = 2.4,
-        no_speech_threshold: float = 0.6,
+        entropy_threshold: float = 2.8,
+        no_speech_threshold: float = 0.5,
         temperature: float = 0.0,
+        temperature_fallback: float = 0.2,  # Increment if decoding fails
         # Vocabulary and suppression
         custom_vocabulary: list = None,
-        suppress_nst: bool = True,  # Suppress non-speech tokens
+        suppress_nst: bool = False,  # Suppress non-speech tokens (can drop words)
     ):
         self.whisper_binary = os.path.expanduser(whisper_binary)
         self.model_path = os.path.expanduser(model_path)
@@ -78,6 +79,7 @@ class WhisperCppBackend(TranscriptionBackend):
         self.entropy_threshold = entropy_threshold
         self.no_speech_threshold = no_speech_threshold
         self.temperature = temperature
+        self.temperature_fallback = temperature_fallback
         self.custom_vocabulary = custom_vocabulary or []
         self.suppress_nst = suppress_nst
         
@@ -173,6 +175,8 @@ class WhisperCppBackend(TranscriptionBackend):
             "--entropy-thold", str(self.entropy_threshold),
             "--no-speech-thold", str(self.no_speech_threshold),
             "--temperature", str(self.temperature),
+            # Temperature fallback: if decoding fails, increment temperature and retry
+            "--temperature-inc", str(self.temperature_fallback),
         ]
         
         # Add language flag (skip if auto-detect)
@@ -421,15 +425,16 @@ def get_backend(config: dict) -> TranscriptionBackend:
             timeout=config.get("timeout", 120),
             use_gpu=config.get("use_gpu", False),
             gpu_layers=config.get("gpu_layers", 0),
-            beam_size=config.get("beam_size", 5),
-            best_of=config.get("best_of", 3),
+            beam_size=config.get("beam_size", 8),
+            best_of=config.get("best_of", 5),
             language=config.get("language", "en"),
-            entropy_threshold=config.get("entropy_threshold", 2.4),
-            no_speech_threshold=config.get("no_speech_threshold", 0.6),
+            entropy_threshold=config.get("entropy_threshold", 2.8),
+            no_speech_threshold=config.get("no_speech_threshold", 0.5),
             temperature=config.get("temperature", 0.0),
+            temperature_fallback=config.get("temperature_fallback", 0.2),
             # Vocabulary and suppression
             custom_vocabulary=config.get("custom_vocabulary", []),
-            suppress_nst=config.get("suppress_nst", True),
+            suppress_nst=config.get("suppress_nst", False),
         )
 
 

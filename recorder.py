@@ -62,10 +62,11 @@ def preprocess_audio(audio_data: np.ndarray, sample_rate: int, enable: bool = Tr
         except Exception:
             pass  # Skip filtering on error
     
-    # 2. Noise gate - reduce very quiet sections
-    # Calculate RMS in small windows
-    noise_floor = 0.01  # -40dB
-    audio = np.where(np.abs(audio) < noise_floor, audio * 0.1, audio)
+    # 2. Noise gate - reduce very quiet sections (soft gate to preserve speech edges)
+    # -50dB threshold is gentler than -40dB to avoid cutting off soft consonants
+    noise_floor = 0.003  # -50dB (was 0.01 / -40dB)
+    gate_reduction = 0.3  # Reduce to 30% instead of 10% (gentler)
+    audio = np.where(np.abs(audio) < noise_floor, audio * gate_reduction, audio)
     
     # 3. Gain normalization to -3dB peak (0.707)
     peak = np.max(np.abs(audio))
