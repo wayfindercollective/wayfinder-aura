@@ -2029,19 +2029,16 @@ class WayfinderApp(ctk.CTk):
         advanced_toggle_btn.pack(side="left")
         self.advanced_toggle_btn = advanced_toggle_btn
         
-        # Advanced container (collapsible) - use scrollable frame for all options
+        # Advanced container (collapsible) - flows naturally in main scroll
         self.advanced_container = ctk.CTkFrame(main, fg_color="transparent")
         # Initially collapsed - don't pack
         
-        advanced_card = ctk.CTkScrollableFrame(
+        advanced_card = ctk.CTkFrame(
             self.advanced_container,
             fg_color=COLORS["bg_card"],
             corner_radius=14,
             border_width=1,
             border_color=COLORS["border"],
-            height=450,  # Taller to show all settings including Recording section
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
         )
         advanced_card.pack(fill="x", pady=(0, 8))
         
@@ -2053,36 +2050,43 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=16, pady=(12, 4))
         
-        # Accuracy Mode preset selector
+        # Accuracy Mode dropdown
         accuracy_mode = self.config.get("accuracy_mode", "balanced")
-        mode_display = {"fast": "Fast", "balanced": "Balanced", "high": "High Accuracy"}.get(accuracy_mode, "Balanced")
-        self.accuracy_mode_btn = self.create_setting_row(
+        self.accuracy_mode_var = ctk.StringVar(value=accuracy_mode)
+        self.accuracy_mode_dropdown = self.create_dropdown_row(
             advanced_card,
             "Accuracy Mode",
-            mode_display,
-            self.open_accuracy_mode_settings,
+            ["fast", "balanced", "high"],
+            self.accuracy_mode_var,
+            self.on_accuracy_mode_changed,
             tooltip=SETTING_TOOLTIPS["accuracy_mode"],
+            width=140,
         )
         
-        # Beam size setting
-        beam_size = self.config.get("beam_size", 8)
-        self.beam_btn = self.create_setting_row(
+        # Beam size dropdown
+        beam_size = self.config.get("beam_size", 5)
+        self.beam_size_var = ctk.StringVar(value=str(beam_size))
+        self.beam_size_dropdown = self.create_dropdown_row(
             advanced_card,
             "Beam Size",
-            str(beam_size),
-            self.open_beam_settings,
+            ["1", "2", "3", "4", "5", "6", "7", "8", "10", "12"],
+            self.beam_size_var,
+            self.on_beam_size_changed,
             tooltip=SETTING_TOOLTIPS["beam_size"],
+            width=100,
         )
         
-        # Language setting
+        # Language dropdown
         language = self.config.get("language", "en")
-        lang_display = "English" if language == "en" else "Auto-detect" if language == "auto" else language.upper()
-        self.language_btn = self.create_setting_row(
+        self.language_var = ctk.StringVar(value=language)
+        self.language_dropdown = self.create_dropdown_row(
             advanced_card,
             "Language",
-            lang_display,
-            self.open_language_settings,
+            ["en", "auto", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko"],
+            self.language_var,
+            self.on_language_changed,
             tooltip=SETTING_TOOLTIPS["language"],
+            width=100,
         )
         
         # Audio preprocessing level dropdown
@@ -2183,14 +2187,17 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["chunked_mode"],
         )
         
-        # Chunk duration setting
+        # Chunk duration dropdown
         chunk_duration = self.config.get("chunk_duration", 30)
-        self.chunk_btn = self.create_setting_row(
+        self.chunk_duration_var = ctk.StringVar(value=str(chunk_duration))
+        self.chunk_duration_dropdown = self.create_dropdown_row(
             advanced_card,
             "Chunk Duration",
-            f"{chunk_duration}s",
-            self.open_chunk_settings,
+            ["15", "20", "30", "45", "60", "90", "120"],
+            self.chunk_duration_var,
+            self.on_chunk_duration_changed,
             tooltip=SETTING_TOOLTIPS["chunk_duration"],
+            width=100,
         )
         
         # GPU Acceleration settings label
@@ -2201,15 +2208,17 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=16, pady=(14, 6))
         
-        # Transcription backend setting
+        # Transcription backend dropdown
         backend = self.config.get("transcription_backend", "whisper_cpp")
-        backend_display = "whisper.cpp" if backend == "whisper_cpp" else "Faster-Whisper"
-        self.backend_btn = self.create_setting_row(
+        self.backend_var = ctk.StringVar(value=backend)
+        self.backend_dropdown = self.create_dropdown_row(
             advanced_card,
             "Backend",
-            backend_display,
-            self.open_backend_settings,
+            ["whisper_cpp", "faster_whisper"],
+            self.backend_var,
+            self.on_backend_changed,
             tooltip=SETTING_TOOLTIPS["backend"],
+            width=160,
         )
         
         # GPU toggle
@@ -2222,15 +2231,17 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["gpu_acceleration"],
         )
         
-        # GPU layers setting (only relevant for whisper.cpp)
+        # GPU layers dropdown (only relevant for whisper.cpp)
         gpu_layers = self.config.get("gpu_layers", 0)
-        layers_display = "Auto (all)" if gpu_layers == 0 else str(gpu_layers)
-        self.gpu_layers_btn = self.create_setting_row(
+        self.gpu_layers_var = ctk.StringVar(value="auto" if gpu_layers == 0 else str(gpu_layers))
+        self.gpu_layers_dropdown = self.create_dropdown_row(
             advanced_card,
             "GPU Layers",
-            layers_display,
-            self.open_gpu_layers_settings,
+            ["auto", "1", "4", "8", "16", "24", "32", "48", "64", "99"],
+            self.gpu_layers_var,
+            self.on_gpu_layers_changed,
             tooltip=SETTING_TOOLTIPS["gpu_layers"],
+            width=100,
         )
         
         # Devices settings label
@@ -2244,7 +2255,7 @@ class WayfinderApp(ctk.CTk):
         # Hotkey devices setting (keyboards/mice that can trigger the hotkey)
         device_count = len(get_all_input_devices())
         enabled = self.config.get("enabled_input_devices", [])
-        device_text = f"All ({device_count})" if not enabled else f"{len(enabled)} selected"
+        device_text = f"All ({device_count})  ▼" if not enabled else f"{len(enabled)} selected  ▼"
         self.devices_btn = self.create_setting_row(
             advanced_card,
             "Hotkey Devices",
@@ -2478,6 +2489,60 @@ class WayfinderApp(ctk.CTk):
             self.preprocess_desc_label.configure(text=self._get_preprocess_desc(value))
         self.log(f"⚙ Audio processing: {value}")
     
+    def on_accuracy_mode_changed(self, value: str):
+        """Handle accuracy mode change from dropdown."""
+        self.config["accuracy_mode"] = value
+        # Apply preset settings
+        presets = {
+            "fast": {"beam_size": 1, "best_of": 1},
+            "balanced": {"beam_size": 5, "best_of": 3},
+            "high": {"beam_size": 8, "best_of": 5},
+        }
+        if value in presets:
+            for key, val in presets[value].items():
+                self.config[key] = val
+            # Update beam size dropdown to reflect preset
+            if hasattr(self, 'beam_size_var'):
+                self.beam_size_var.set(str(presets[value]["beam_size"]))
+        save_config(self.config)
+        self.log(f"⚙ Accuracy mode: {value}")
+    
+    def on_beam_size_changed(self, value: str):
+        """Handle beam size change from dropdown."""
+        self.config["beam_size"] = int(value)
+        save_config(self.config)
+        self.log(f"⚙ Beam size: {value}")
+    
+    def on_language_changed(self, value: str):
+        """Handle language change from dropdown."""
+        self.config["language"] = value
+        save_config(self.config)
+        lang_name = "English" if value == "en" else "Auto-detect" if value == "auto" else value.upper()
+        self.log(f"⚙ Language: {lang_name}")
+    
+    def on_chunk_duration_changed(self, value: str):
+        """Handle chunk duration change from dropdown."""
+        self.config["chunk_duration"] = int(value)
+        save_config(self.config)
+        self.log(f"⚙ Chunk duration: {value}s")
+    
+    def on_backend_changed(self, value: str):
+        """Handle transcription backend change from dropdown."""
+        self.config["transcription_backend"] = value
+        save_config(self.config)
+        display = "whisper.cpp" if value == "whisper_cpp" else "Faster-Whisper"
+        self.log(f"⚙ Backend: {display}")
+    
+    def on_gpu_layers_changed(self, value: str):
+        """Handle GPU layers change from dropdown."""
+        if value == "auto":
+            self.config["gpu_layers"] = 0
+        else:
+            self.config["gpu_layers"] = int(value)
+        save_config(self.config)
+        display = "Auto (all)" if value == "auto" else value
+        self.log(f"⚙ GPU layers: {display}")
+    
     def show_preprocessing_help(self):
         """Show help dialog explaining audio processing levels."""
         dialog = ctk.CTkToplevel(self)
@@ -2645,6 +2710,57 @@ class WayfinderApp(ctk.CTk):
             switch_height=26,
         )
         switch.grid(row=0, column=1, sticky="e", padx=(20, 0))
+
+    def create_dropdown_row(self, parent, label, values, variable, command, tooltip=None, width=140):
+        """Create a setting row with a dropdown menu instead of a button."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=10)
+        
+        # Configure grid for proportional scaling
+        row.grid_columnconfigure(0, weight=0)  # Label column - fixed
+        row.grid_columnconfigure(1, weight=1, minsize=160)  # Dropdown column - grows
+        
+        # Left side: label + optional info icon
+        left_frame = ctk.CTkFrame(row, fg_color="transparent")
+        left_frame.grid(row=0, column=0, sticky="w")
+        
+        ctk.CTkLabel(
+            left_frame,
+            text=label,
+            font=(self.font_body[0], 14),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        
+        if tooltip:
+            info_label = ctk.CTkLabel(
+                left_frame,
+                text="ⓘ",
+                font=(self.font_body[0], 11),
+                text_color=COLORS["text_muted"],
+                cursor="question_arrow",
+            )
+            info_label.pack(side="left", padx=(6, 0))
+            ToolTip(info_label, tooltip)
+        
+        dropdown = ctk.CTkOptionMenu(
+            row,
+            values=values,
+            variable=variable,
+            command=command,
+            fg_color=COLORS["bg_hover"],
+            button_color=COLORS["bg_elevated"],
+            button_hover_color=COLORS["accent_dim"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_hover"],
+            dropdown_text_color=COLORS["text_primary"],
+            text_color=COLORS["accent"],
+            font=(self.font_body[0], 14),
+            width=width,
+            height=46,
+            corner_radius=10,
+        )
+        dropdown.grid(row=0, column=1, sticky="e", padx=(20, 0))
+        return dropdown
 
     def toggle_start_minimized(self):
         self.config["start_minimized"] = self.start_min_var.get()
@@ -3867,9 +3983,9 @@ class WayfinderApp(ctk.CTk):
             
             # Update button text
             if not self.config["enabled_input_devices"]:
-                self.devices_btn.configure(text=f"All ({len(all_devices)})")
+                self.devices_btn.configure(text=f"All ({len(all_devices)})  ▼")
             else:
-                self.devices_btn.configure(text=f"{len(selected)} selected")
+                self.devices_btn.configure(text=f"{len(selected)} selected  ▼")
             
             self.log(f"⚙ Input devices updated: {len(selected)} enabled")
             self.log("↻ Restarting hotkey listener...")
