@@ -788,13 +788,27 @@ class FloatingIndicator:
         
         # Create the floating window
         self.window = ctk.CTkToplevel(self.parent)
-        self.window.title("")
+        self.window.title("Wayfinder Status")
         self.window.overrideredirect(True)  # Borderless
         self.window.attributes("-topmost", True)  # Always on top
         
         # Try to set transparency (may not work on all compositors)
         try:
             self.window.attributes("-alpha", 0.95)
+        except:
+            pass
+        
+        # Additional hints for Wayland/KDE to keep window on top
+        try:
+            # Set window type hint for better stacking on KDE
+            self.window.attributes("-type", "notification")
+        except:
+            pass
+        
+        try:
+            # Lift window and make it stay on top
+            self.window.lift()
+            self.window.focus_force()
         except:
             pass
         
@@ -974,6 +988,10 @@ class FloatingIndicator:
             x = self.parent.winfo_pointerx()
             y = self.parent.winfo_pointery()
             self._update_position(x, y)
+            
+            # Periodically re-assert topmost to fight Wayland stacking
+            self.window.attributes("-topmost", True)
+            self.window.lift()
         except:
             pass
         
