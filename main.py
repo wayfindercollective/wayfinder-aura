@@ -398,8 +398,8 @@ SETTING_TOOLTIPS = {
     "audio_preprocessing": "Audio signal processing before transcription.\n🟢 Off: 0ms | Light: +2ms | Medium: +5ms | Heavy: +10ms",
     
     # 🟡 Moderate latency impact (10-100ms)
-    "chunked_mode": "Process in segments for unlimited recording length.\n🟡 Latency: +50-100ms overhead per chunk boundary",
-    "chunk_duration": "Seconds per audio chunk (when chunked mode is on).\n🟡 Shorter = faster feedback, more overhead | 15s = balanced",
+    "chunked_mode": "Split long recordings into segments, transcribe each,\nand splice results together. Enables unlimited length.\n🟡 Latency: +50-100ms overhead per segment boundary",
+    "chunk_duration": "Length of each audio segment (seconds).\nShorter = faster feedback but more splice points.\n🟡 15-30s recommended for best balance",
     
     # 🔴 MAJOR latency impact - These are the biggest factors
     "whisper_model": "AI model size - the #1 factor in transcription speed.\n🔴 GPU: Tiny ~0.5s | Base ~1s | Small ~1.5s | Medium ~3s | Large ~6s | Turbo ~2s\n🔴 CPU: Tiny ~2s | Base ~4s | Small ~6s | Medium ~12s | Large ~25s | Turbo ~8s",
@@ -2169,30 +2169,30 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["ensure_punctuation"],
         )
         
-        # Chunked recording settings label
+        # Chunk processing settings label
         ctk.CTkLabel(
             advanced_card,
-            text="Recording",
+            text="Chunk Processing",
             font=(self.font_body[0], 11, "bold"),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=16, pady=(14, 6))
         
-        # Chunked mode toggle
+        # Chunk processing toggle
         self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
         self.create_toggle_row(
             advanced_card,
-            "Chunked Recording",
+            "Chunk Processing",
             self.chunked_var,
             self.toggle_chunked_mode,
             tooltip=SETTING_TOOLTIPS["chunked_mode"],
         )
         
-        # Chunk duration dropdown
+        # Segment length dropdown
         chunk_duration = self.config.get("chunk_duration", 30)
         self.chunk_duration_var = ctk.StringVar(value=str(chunk_duration))
         self.chunk_duration_dropdown = self.create_dropdown_row(
             advanced_card,
-            "Chunk Duration",
+            "Segment Length",
             ["15", "20", "30", "45", "60", "90", "120"],
             self.chunk_duration_var,
             self.on_chunk_duration_changed,
@@ -2521,10 +2521,10 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⚙ Language: {lang_name}")
     
     def on_chunk_duration_changed(self, value: str):
-        """Handle chunk duration change from dropdown."""
+        """Handle segment length change from dropdown."""
         self.config["chunk_duration"] = int(value)
         save_config(self.config)
-        self.log(f"⚙ Chunk duration: {value}s")
+        self.log(f"⚙ Segment length: {value}s")
     
     def on_backend_changed(self, value: str):
         """Handle transcription backend change from dropdown."""
