@@ -485,6 +485,203 @@ def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callbac
         return False
 
 
+# === Floating Status Indicator ===
+
+class FloatingIndicator:
+    """
+    A floating status indicator that appears near the cursor.
+    Shows "Listening..." during recording and "Processing..." during transcription.
+    """
+    
+    def __init__(self, parent: ctk.CTk):
+        self.parent = parent
+        self.window: ctk.CTkToplevel | None = None
+        self.label: ctk.CTkLabel | None = None
+        self.pulse_job: str | None = None
+        self.pulse_state = 0
+        self._visible = False
+        
+    def show(self, text: str = "Listening...", color: str = COLORS["accent_red"]) -> None:
+        """Show the floating indicator with the given text."""
+        if self._visible and self.window:
+            self.update(text, color)
+            return
+            
+        # Get cursor position (works via XWayland on Wayland)
+        try:
+            x = self.parent.winfo_pointerx()
+            y = self.parent.winfo_pointery()
+        except:
+            # Fallback: center of screen
+            x = self.parent.winfo_screenwidth() // 2
+            y = 100
+        
+        # Create the floating window
+        self.window = ctk.CTkToplevel(self.parent)
+        self.window.title("")
+        self.window.overrideredirect(True)  # Borderless
+        self.window.attributes("-topmost", True)  # Always on top
+        
+        # Try to set transparency (may not work on all compositors)
+        try:
+            self.window.attributes("-alpha", 0.95)
+        except:
+            pass
+        
+        # Configure the window
+        self.window.configure(fg_color=COLORS["bg_card"])
+        
+        # Create a frame with rounded appearance
+        frame = ctk.CTkFrame(
+            self.window,
+            fg_color=COLORS["bg_card"],
+            corner_radius=12,
+            border_width=2,
+            border_color=color,
+        )
+        frame.pack(padx=2, pady=2)
+        
+        # Status indicator dot
+        self.dot_canvas = ctk.CTkCanvas(
+            frame,
+            width=12,
+            height=12,
+            bg=COLORS["bg_card"],
+            highlightthickness=0,
+        )
+        self.dot_canvas.pack(side="left", padx=(12, 6), pady=12)
+        self._draw_dot(color)
+        
+        # Label with status text
+        self.label = ctk.CTkLabel(
+            frame,
+            text=text,
+            font=("Inter", 14, "bold"),
+            text_color=COLORS["text_bright"],
+        )
+        self.label.pack(side="left", padx=(0, 16), pady=12)
+        
+        self.current_color = color
+        
+        # Position near cursor (offset slightly so it doesn't cover click target)
+        self.window.update_idletasks()
+        width = self.window.winfo_width()
+        height = self.window.winfo_height()
+        
+        # Position to the right and below cursor
+        pos_x = x + 20
+        pos_y = y + 20
+        
+        # Keep on screen
+        screen_w = self.parent.winfo_screenwidth()
+        screen_h = self.parent.winfo_screenheight()
+        if pos_x + width > screen_w:
+            pos_x = x - width - 20
+        if pos_y + height > screen_h:
+            pos_y = y - height - 20
+            
+        self.window.geometry(f"+{pos_x}+{pos_y}")
+        
+        self._visible = True
+        self._start_pulse()
+        
+    def update(self, text: str, color: str | None = None) -> None:
+        """Update the indicator text and optionally color."""
+        if not self._visible or not self.window:
+            self.show(text, color or COLORS["accent_yellow"])
+            return
+            
+        if self.label:
+            self.label.configure(text=text)
+            
+        if color and color != self.current_color:
+            self.current_color = color
+            self._draw_dot(color)
+            # Update border color
+            for widget in self.window.winfo_children():
+                if isinstance(widget, ctk.CTkFrame):
+                    widget.configure(border_color=color)
+                    
+    def hide(self) -> None:
+        """Hide and destroy the floating indicator."""
+        self._stop_pulse()
+        self._visible = False
+        
+        if self.window:
+            try:
+                self.window.destroy()
+            except:
+                pass
+            self.window = None
+            self.label = None
+            self.dot_canvas = None
+            
+    def _draw_dot(self, color: str, scale: float = 1.0) -> None:
+        """Draw the status indicator dot."""
+        if not self.dot_canvas:
+            return
+            
+        self.dot_canvas.delete("all")
+        
+        # Parse color
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        
+        # Draw glow (larger, faded circle)
+        size = int(10 * scale)
+        offset = (12 - size) // 2
+        glow_color = f"#{r//3:02x}{g//3:02x}{b//3:02x}"
+        self.dot_canvas.create_oval(
+            offset - 1, offset - 1,
+            offset + size + 1, offset + size + 1,
+            fill=glow_color,
+            outline="",
+        )
+        
+        # Draw main dot
+        inner_size = int(8 * scale)
+        inner_offset = (12 - inner_size) // 2
+        self.dot_canvas.create_oval(
+            inner_offset, inner_offset,
+            inner_offset + inner_size, inner_offset + inner_size,
+            fill=color,
+            outline="",
+        )
+        
+    def _start_pulse(self) -> None:
+        """Start the pulsing animation."""
+        self._pulse_step()
+        
+    def _pulse_step(self) -> None:
+        """Animate one pulse step."""
+        if not self._visible:
+            return
+            
+        self.pulse_state = (self.pulse_state + 1) % 20
+        
+        # Create a subtle pulse effect (scale between 0.8 and 1.2)
+        if self.pulse_state < 10:
+            scale = 0.8 + (self.pulse_state * 0.04)
+        else:
+            scale = 1.2 - ((self.pulse_state - 10) * 0.04)
+            
+        self._draw_dot(self.current_color, scale)
+        
+        # Schedule next step
+        if self.window:
+            self.pulse_job = self.window.after(50, self._pulse_step)
+            
+    def _stop_pulse(self) -> None:
+        """Stop the pulsing animation."""
+        if self.pulse_job and self.window:
+            try:
+                self.window.after_cancel(self.pulse_job)
+            except:
+                pass
+        self.pulse_job = None
+
+
 # === Main Application ===
 
 class WayfinderApp(ctk.CTk):
@@ -519,7 +716,11 @@ class WayfinderApp(ctk.CTk):
         self._recording_start_time: float | None = None
         self._duration_update_job: str | None = None
         
+        # Floating status indicator
+        self.indicator: FloatingIndicator | None = None
+        
         self.setup_window()
+        self.indicator = FloatingIndicator(self)
         self.setup_tray()
         self.setup_ui()
         self.setup_scaling_shortcuts()
@@ -833,16 +1034,17 @@ class WayfinderApp(ctk.CTk):
         advanced_toggle_btn.pack(side="left")
         self.advanced_toggle_btn = advanced_toggle_btn
         
-        # Advanced container (collapsible)
+        # Advanced container (collapsible) - use scrollable frame for all options
         self.advanced_container = ctk.CTkFrame(main, fg_color="transparent")
         # Initially collapsed - don't pack
         
-        advanced_card = ctk.CTkFrame(
+        advanced_card = ctk.CTkScrollableFrame(
             self.advanced_container,
             fg_color=COLORS["bg_card"],
             corner_radius=14,
             border_width=1,
             border_color=COLORS["border"],
+            height=300,  # Fixed height with scroll
         )
         advanced_card.pack(fill="x", pady=(0, 10))
         
@@ -1313,10 +1515,13 @@ class WayfinderApp(ctk.CTk):
             "ggml-base.en.bin": ("Base (English)", "142MB", "⚡⚡⚡ Fast"),
             "ggml-small.en.bin": ("Small (English)", "466MB", "⚡⚡ Good"),
             "ggml-medium.en.bin": ("Medium (English)", "1.5GB", "⚡ Slow"),
+            "ggml-large-v3-turbo.bin": ("Large v3 Turbo", "1.6GB", "🚀 Fast+Accurate"),
+            "ggml-large-v3-turbo-q5_0.bin": ("Large v3 Turbo Q5", "547MB", "🚀 Fast+Accurate"),
             "ggml-tiny.bin": ("Tiny (Multi-lang)", "75MB", "⚡⚡⚡⚡ Fastest"),
             "ggml-base.bin": ("Base (Multi-lang)", "142MB", "⚡⚡⚡ Fast"),
             "ggml-small.bin": ("Small (Multi-lang)", "466MB", "⚡⚡ Good"),
             "ggml-medium.bin": ("Medium (Multi-lang)", "1.5GB", "⚡ Slow"),
+            "ggml-large-v3.bin": ("Large v3", "3GB", "🎯 Most Accurate"),
             "ggml-large.bin": ("Large (Multi-lang)", "3GB", "🐌 Slowest"),
         }
         
@@ -3135,6 +3340,10 @@ class WayfinderApp(ctk.CTk):
         try:
             self.log("🎤 Listening...")
             
+            # Show floating indicator
+            if self.indicator:
+                self.indicator.show("Listening...", COLORS["accent_red"])
+            
             # Check if chunked mode is enabled
             if self.config.get("chunked_mode", True):
                 self._start_chunked_recording()
@@ -3212,6 +3421,10 @@ class WayfinderApp(ctk.CTk):
             self.after_cancel(self._duration_update_job)
             self._duration_update_job = None
         self._recording_start_time = None
+        
+        # Update floating indicator to processing
+        if self.indicator:
+            self.indicator.update("Processing...", COLORS["accent_yellow"])
         
         self.update_state(AppState.PROCESSING)
         
@@ -3423,10 +3636,16 @@ class WayfinderApp(ctk.CTk):
 
     def on_injection_done(self):
         self.log("✓ Text inserted")
+        # Hide floating indicator
+        if self.indicator:
+            self.indicator.hide()
         self.update_state(AppState.IDLE)
 
     def on_error(self, message):
         self.log(f"⚠ {message}")
+        # Hide floating indicator
+        if self.indicator:
+            self.indicator.hide()
         self.update_state(AppState.IDLE)
 
 
