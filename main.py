@@ -1016,7 +1016,7 @@ class FloatingIndicator:
     Shows "Listening..." during recording and "Processing..." during transcription.
     """
     
-    def __init__(self, parent: ctk.CTk, target_fps: int = 0):
+    def __init__(self, parent: ctk.CTk, target_fps: int = 0, audio_level_callback=None):
         self.parent = parent
         self.window: ctk.CTkToplevel | None = None
         self.label: ctk.CTkLabel | None = None
@@ -1027,11 +1027,28 @@ class FloatingIndicator:
         self._window_width = 0
         self._window_height = 0
         
+        # Callback to get audio level for voice-reactive waveform
+        self._audio_level_callback = audio_level_callback
+        self._current_audio_level = 0.0  # Smoothed audio level
+        
+        # UI element references
+        self.dot_canvas = None
+        self.wave_canvas = None
+        self.glow_frame = None
+        self.main_frame = None
+        
         # Track cursor position for stuck detection
         self._last_cursor_x = 0
         self._last_cursor_y = 0
         self._stuck_count = 0
         self._is_centered = False
+        
+        # Waveform animation state
+        self._wave_time = 0.0  # Animation time for phase shifting
+        self._wave_breath = 0.0  # Breathing amplitude modulation
+        
+        # Ring animation state for enhanced pulsing dot
+        self._ring_phase = 0.0
         
         # Determine target FPS
         if target_fps <= 0:
@@ -1044,6 +1061,10 @@ class FloatingIndicator:
         
         # Calculate frame interval in milliseconds
         self._frame_interval_ms = max(1, int(1000 / self._target_fps))
+    
+    def set_audio_level_callback(self, callback):
+        """Set the callback function for getting audio levels."""
+        self._audio_level_callback = callback
     
     def get_fps_info(self) -> str:
         """Return a string describing the current FPS setting."""
@@ -1107,43 +1128,80 @@ class FloatingIndicator:
         except:
             pass
         
-        # Make window background match the pill - no visible container
-        pill_bg = "#1a1a22"  # Slightly lighter than pure black, matches the pill
-        self.window.configure(fg_color=pill_bg)
+        # Premium compact design colors
+        pill_bg = "#18181f"  # Slightly darker for premium feel
+        shadow_color = "#08080a"  # Deep shadow for depth
         
-        # Single pill-shaped frame with colored glow border
-        self.main_frame = ctk.CTkFrame(
+        # Parse accent color for dynamic glow
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        # Create a dimmer version for outer glow
+        glow_r = int(r * 0.25 + 8)
+        glow_g = int(g * 0.25 + 8)
+        glow_b = int(b * 0.25 + 8)
+        outer_glow_color = f"#{glow_r:02x}{glow_g:02x}{glow_b:02x}"
+        
+        self.window.configure(fg_color=shadow_color)
+        
+        # Outer glow/shadow frame - fully rounded pill
+        self.glow_frame = ctk.CTkFrame(
             self.window,
+            fg_color=shadow_color,
+            corner_radius=28,
+            border_width=2,
+            border_color=outer_glow_color,
+        )
+        self.glow_frame.pack(padx=0, pady=0)
+        
+        # Main pill-shaped frame - compact and rounded
+        self.main_frame = ctk.CTkFrame(
+            self.glow_frame,
             fg_color=pill_bg,
-            corner_radius=22,
+            corner_radius=24,
             border_width=2,
             border_color=color,
         )
-        self.main_frame.pack(padx=0, pady=0)
+        self.main_frame.pack(padx=3, pady=3)
         
-        # Inner content
+        # Inner content - compact vertical layout
         inner = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        inner.pack(padx=16, pady=12)
+        inner.pack(padx=14, pady=10)
+        
+        # Top row: dot + label (compact)
+        top_row = ctk.CTkFrame(inner, fg_color="transparent")
+        top_row.pack(fill="x")
         
         # Glowing status indicator dot
         self.dot_canvas = ctk.CTkCanvas(
-            inner,
-            width=18,
-            height=18,
+            top_row,
+            width=22,
+            height=22,
             bg=pill_bg,
             highlightthickness=0,
         )
-        self.dot_canvas.pack(side="left", padx=(0, 10))
+        self.dot_canvas.pack(side="left", padx=(0, 8))
         self._draw_dot(color)
         
         # Label with status text
         self.label = ctk.CTkLabel(
-            inner,
+            top_row,
             text=text,
-            font=("SF Pro Display", 14, "bold") if self._font_exists("SF Pro Display") else ("Inter", 14, "bold"),
+            font=("SF Pro Display", 13, "bold") if self._font_exists("SF Pro Display") else ("Inter", 13, "bold"),
             text_color=COLORS["text_bright"],
         )
-        self.label.pack(side="left", padx=(0, 2))
+        self.label.pack(side="left")
+        
+        # Voice-reactive waveform - wider and more prominent
+        self.wave_canvas = ctk.CTkCanvas(
+            inner,
+            width=160,
+            height=32,
+            bg=pill_bg,
+            highlightthickness=0,
+        )
+        self.wave_canvas.pack(pady=(6, 0))
+        self._draw_waveform(color)
         
         self.current_color = color
         
@@ -1171,7 +1229,23 @@ class FloatingIndicator:
         if color and color != self.current_color:
             self.current_color = color
             self._draw_dot(color)
-            # Update border color on the main frame
+            self._draw_waveform(color)
+            
+            # Calculate new outer glow color
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            glow_r = int(r * 0.3 + 10)
+            glow_g = int(g * 0.3 + 10)
+            glow_b = int(b * 0.3 + 10)
+            outer_glow_color = f"#{glow_r:02x}{glow_g:02x}{glow_b:02x}"
+            
+            # Update border colors on both frames
+            if hasattr(self, 'glow_frame') and self.glow_frame:
+                try:
+                    self.glow_frame.configure(border_color=outer_glow_color)
+                except:
+                    pass
             if hasattr(self, 'main_frame') and self.main_frame:
                 try:
                     self.main_frame.configure(border_color=color)
@@ -1184,6 +1258,11 @@ class FloatingIndicator:
         self._stop_follow()
         self._visible = False
         
+        # Reset animation state
+        self._wave_time = 0.0
+        self._wave_breath = 0.0
+        self._ring_phase = 0.0
+        
         if self.window:
             try:
                 self.window.destroy()
@@ -1192,6 +1271,9 @@ class FloatingIndicator:
             self.window = None
             self.label = None
             self.dot_canvas = None
+            self.wave_canvas = None
+            self.glow_frame = None
+            self.main_frame = None
     
     def _update_position(self, x: int, y: int) -> None:
         """Update window position near the given cursor coordinates."""
@@ -1229,10 +1311,12 @@ class FloatingIndicator:
         self._is_centered = True
             
     def _draw_dot(self, color: str, scale: float = 1.0) -> None:
-        """Draw a glowing status indicator dot."""
+        """Draw an enhanced glowing status indicator with pulsing ring."""
         if not self.dot_canvas:
             return
             
+        import math
+        
         self.dot_canvas.delete("all")
         
         # Parse color
@@ -1240,60 +1324,232 @@ class FloatingIndicator:
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
         
-        # Canvas is 18x18
-        canvas_size = 18
+        # Canvas is 22x22 (compact design)
+        canvas_size = 22
+        cx, cy = canvas_size // 2, canvas_size // 2
         
-        # Background color for blending (pill_bg = #1a1a22)
-        bg_r, bg_g, bg_b = 26, 26, 34
+        # Background color for blending (pill_bg = #18181f)
+        bg_r, bg_g, bg_b = 24, 24, 31
         
-        # Draw outer glow layers (soft fade)
-        for i, alpha in enumerate([0.12, 0.2, 0.35, 0.5]):
-            glow_size = int((16 - i * 2.5) * scale)
-            offset = (canvas_size - glow_size) // 2
-            # Mix with background
+        # Expanding ring animation - ring grows outward and fades
+        ring_progress = self._ring_phase % 1.0  # 0 to 1
+        if ring_progress > 0:
+            ring_radius = 5 + ring_progress * 8  # Expands from 5 to 13 (fits 22px canvas)
+            ring_alpha = 0.6 * (1 - ring_progress)  # Fades out as it expands
+            
+            if ring_alpha > 0.05:
+                ring_r = int(r * ring_alpha + bg_r * (1 - ring_alpha))
+                ring_g = int(g * ring_alpha + bg_g * (1 - ring_alpha))
+                ring_b = int(b * ring_alpha + bg_b * (1 - ring_alpha))
+                ring_color = f"#{ring_r:02x}{ring_g:02x}{ring_b:02x}"
+                
+                self.dot_canvas.create_oval(
+                    cx - ring_radius, cy - ring_radius,
+                    cx + ring_radius, cy + ring_radius,
+                    outline=ring_color,
+                    width=2,
+                    fill="",
+                )
+        
+        # Draw intensified outer glow layers (sized for 22px canvas)
+        glow_configs = [
+            (10, 0.15),   # Outermost - subtle halo
+            (8, 0.25),    # Outer glow
+            (6, 0.4),     # Middle glow  
+            (4.5, 0.55),  # Inner glow
+            (3.5, 0.7),   # Core glow
+        ]
+        
+        for base_radius, alpha in glow_configs:
+            # Scale the glow with the pulse
+            glow_radius = base_radius * scale
+            
+            # Mix color with background for alpha effect
             gr = int(r * alpha + bg_r * (1 - alpha))
             gg = int(g * alpha + bg_g * (1 - alpha))
             gb = int(b * alpha + bg_b * (1 - alpha))
             glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+            
             self.dot_canvas.create_oval(
-                offset, offset,
-                offset + glow_size, offset + glow_size,
+                cx - glow_radius, cy - glow_radius,
+                cx + glow_radius, cy + glow_radius,
                 fill=glow_color,
                 outline="",
             )
         
-        # Draw bright core
-        core_size = int(7 * scale)
-        core_offset = (canvas_size - core_size) // 2
+        # Draw bright core (scales more dramatically)
+        core_radius = 3 * scale
         self.dot_canvas.create_oval(
-            core_offset, core_offset,
-            core_offset + core_size, core_offset + core_size,
+            cx - core_radius, cy - core_radius,
+            cx + core_radius, cy + core_radius,
             fill=color,
             outline="",
         )
+        
+        # Add bright highlight spot for premium look
+        highlight_radius = 1.2 * scale
+        highlight_offset = -0.8 * scale
+        # Lighter version of color for highlight
+        hr = min(255, r + 60)
+        hg = min(255, g + 60)
+        hb = min(255, b + 60)
+        highlight_color = f"#{hr:02x}{hg:02x}{hb:02x}"
+        
+        self.dot_canvas.create_oval(
+            cx + highlight_offset - highlight_radius,
+            cy + highlight_offset - highlight_radius,
+            cx + highlight_offset + highlight_radius,
+            cy + highlight_offset + highlight_radius,
+            fill=highlight_color,
+            outline="",
+        )
+    
+    def _draw_waveform(self, color: str) -> None:
+        """Draw a voice-reactive waveform animation."""
+        if not self.wave_canvas:
+            return
+            
+        self.wave_canvas.delete("all")
+        
+        import math
+        
+        # Canvas dimensions (wider for better visual impact)
+        width = 160
+        height = 32
+        center_y = height // 2
+        
+        # Parse color for wave layers
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        
+        # Background color for alpha blending (pill_bg = #18181f)
+        bg_r, bg_g, bg_b = 24, 24, 31
+        
+        # Voice reactivity - combines audio level with breathing animation
+        # Audio level provides immediate response, breathing provides base motion
+        audio_level = self._current_audio_level
+        base_breath = 0.3 + 0.3 * (0.5 + 0.5 * math.sin(self._wave_breath))
+        
+        # Voice amplitude: audio level boosts the waveform significantly
+        voice_boost = audio_level * 2.5  # Strong response to voice
+        amplitude_factor = base_breath + voice_boost
+        amplitude_factor = min(1.5, amplitude_factor)  # Cap at 1.5x
+        
+        # Draw multiple layered sine waves with voice reactivity
+        wave_configs = [
+            # (frequency, phase_offset, base_amplitude, alpha)
+            (0.035, 0.0, 10, 0.2),     # Slow background wave
+            (0.06, 1.2, 8, 0.3),       # Medium wave
+            (0.095, 2.5, 6, 0.45),     # Faster wave
+            (0.14, 0.8, 5, 0.6),       # Quick detail wave
+        ]
+        
+        for freq, phase_offset, base_amp, alpha in wave_configs:
+            # Calculate amplitude with voice reactivity
+            amp = base_amp * amplitude_factor
+            
+            # Build wave points
+            points = []
+            for x in range(0, width + 1, 2):
+                # Combine sine waves for organic motion
+                y = center_y + amp * math.sin(freq * x + self._wave_time + phase_offset)
+                # Add secondary harmonic for complexity
+                y += (amp * 0.25) * math.sin(freq * 2.3 * x + self._wave_time * 1.7 + phase_offset)
+                # Add subtle third harmonic for richness
+                y += (amp * 0.1) * math.sin(freq * 3.7 * x + self._wave_time * 0.9 + phase_offset * 1.5)
+                points.append((x, y))
+            
+            # Blend color with background for alpha effect
+            wr = int(r * alpha + bg_r * (1 - alpha))
+            wg = int(g * alpha + bg_g * (1 - alpha))
+            wb = int(b * alpha + bg_b * (1 - alpha))
+            wave_color = f"#{wr:02x}{wg:02x}{wb:02x}"
+            
+            # Draw as smooth line
+            if len(points) >= 2:
+                flat_points = [coord for point in points for coord in point]
+                self.wave_canvas.create_line(
+                    *flat_points,
+                    fill=wave_color,
+                    width=2,
+                    smooth=True,
+                    splinesteps=12,
+                )
+        
+        # Draw center line highlight (brightest, most voice-reactive)
+        highlight_amp = 8 * amplitude_factor
+        highlight_points = []
+        for x in range(0, width + 1, 2):
+            y = center_y + highlight_amp * math.sin(0.08 * x + self._wave_time * 1.3)
+            y += (highlight_amp * 0.3) * math.sin(0.16 * x + self._wave_time * 2.1 + 1.0)
+            highlight_points.append((x, y))
+        
+        if len(highlight_points) >= 2:
+            flat_highlight = [coord for point in highlight_points for coord in point]
+            self.wave_canvas.create_line(
+                *flat_highlight,
+                fill=color,
+                width=2,
+                smooth=True,
+                splinesteps=12,
+            )
         
     def _start_pulse(self) -> None:
         """Start the pulsing animation."""
         self._pulse_step()
         
     def _pulse_step(self) -> None:
-        """Animate one pulse step."""
+        """Animate one pulse step with smooth sinusoidal easing and voice reactivity."""
         if not self._visible:
             return
-            
-        self.pulse_state = (self.pulse_state + 1) % 20
         
-        # Create a subtle pulse effect (scale between 0.8 and 1.2)
-        if self.pulse_state < 10:
-            scale = 0.8 + (self.pulse_state * 0.04)
+        import math
+            
+        self.pulse_state = (self.pulse_state + 1) % 60  # 60 steps for ~2 second cycle at 30fps
+        
+        # Get audio level from callback (voice reactivity)
+        if self._audio_level_callback:
+            try:
+                raw_level = self._audio_level_callback()
+                # Smooth the audio level for pleasant visual (fast attack, slower decay)
+                if raw_level > self._current_audio_level:
+                    # Fast attack - respond quickly to voice
+                    self._current_audio_level = self._current_audio_level * 0.3 + raw_level * 0.7
+                else:
+                    # Slower decay - smooth fade out
+                    self._current_audio_level = self._current_audio_level * 0.85 + raw_level * 0.15
+            except:
+                self._current_audio_level *= 0.9  # Decay if error
         else:
-            scale = 1.2 - ((self.pulse_state - 10) * 0.04)
-            
-        self._draw_dot(self.current_color, scale)
+            self._current_audio_level *= 0.9  # Decay if no callback
         
-        # Schedule next step
+        # Sinusoidal easing for smooth breathing effect
+        # Maps pulse_state (0-59) to a smooth sine wave
+        t = self.pulse_state / 60.0 * 2 * math.pi
+        ease = 0.5 + 0.5 * math.sin(t)  # 0 to 1 smooth
+        
+        # Dramatic scale range: 0.6 to 1.4 (133% variation)
+        # Add voice reactivity to dot scale too
+        voice_scale_boost = self._current_audio_level * 0.3
+        scale = 0.6 + ease * 0.8 + voice_scale_boost
+        
+        # Update ring animation phase (completes a ring every ~1.5 seconds)
+        self._ring_phase = (self._ring_phase + 0.022) % 1.0
+        
+        # Update waveform animation time (continuous scrolling)
+        self._wave_time += 0.08
+        
+        # Update breathing amplitude for waveform (slower breath cycle)
+        self._wave_breath += 0.04
+        
+        # Redraw both the dot and waveform
+        self._draw_dot(self.current_color, scale)
+        self._draw_waveform(self.current_color)
+        
+        # Schedule next step at ~30fps for buttery smooth animation
         if self.window:
-            self.pulse_job = self.window.after(50, self._pulse_step)
+            self.pulse_job = self.window.after(33, self._pulse_step)
             
     def _stop_pulse(self) -> None:
         """Stop the pulsing animation."""
@@ -1407,7 +1663,24 @@ class WayfinderApp(ctk.CTk):
         self.indicator: FloatingIndicator | None = None
         
         self.setup_window()
-        self.indicator = FloatingIndicator(self, target_fps=self.config.get("indicator_fps", 0))
+        
+        # Create indicator with voice-reactive callback
+        def get_audio_level():
+            """Get current audio level from the active recorder."""
+            try:
+                if hasattr(self, 'chunked_recorder') and self.chunked_recorder and self.chunked_recorder.is_recording():
+                    return self.chunked_recorder.get_audio_level()
+                elif hasattr(self, 'recorder') and self.recorder and self.recorder.is_recording():
+                    return self.recorder.get_audio_level()
+            except:
+                pass
+            return 0.0
+        
+        self.indicator = FloatingIndicator(
+            self, 
+            target_fps=self.config.get("indicator_fps", 0),
+            audio_level_callback=get_audio_level
+        )
         self.setup_tray()
         self.setup_ui()
         self.setup_scaling_shortcuts()
