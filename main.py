@@ -48,7 +48,7 @@ ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
 
 DEFAULT_CONFIG = {
     "whisper_binary": "~/whisper.cpp/build/bin/whisper-cli",
-    "model_path": "~/whisper.cpp/models/ggml-small.bin",
+    "model_path": "~/whisper.cpp/models/ggml-large-v3-turbo.bin",
     "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
     "hotkey_modifiers": [],
     "audio_device": None,
@@ -75,15 +75,15 @@ DEFAULT_CONFIG = {
     "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
     # Chunked recording settings
     "chunked_mode": True,  # Enable chunked processing for long recordings
-    "chunk_duration": 30,  # Seconds per chunk
+    "chunk_duration": 15,  # Seconds per chunk (shorter = faster feedback)
     "chunk_overlap": 2,  # Overlap seconds to avoid word cuts
     "max_recording_duration": 0,  # 0 = unlimited
     # GPU acceleration settings
     "transcription_backend": "whisper_cpp",  # whisper_cpp | faster_whisper
-    "use_gpu": False,  # Enable GPU acceleration
+    "use_gpu": True,  # Enable GPU acceleration
     "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
     # Faster-Whisper specific settings
-    "faster_whisper_model": "small",  # tiny, base, small, medium, large-v3
+    "faster_whisper_model": "large-v3-turbo",  # tiny, base, small, medium, large-v3, large-v3-turbo
     "faster_whisper_compute_type": "float16",  # float16, int8, int8_float16
     # Floating indicator settings
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
