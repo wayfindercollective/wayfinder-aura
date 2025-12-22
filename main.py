@@ -1346,40 +1346,40 @@ class WayfinderApp(ctk.CTk):
             command=self.hide_to_tray,
         ).pack(side="right")
         
-        # === Status Card with Glow ===
-        status_card = ctk.CTkFrame(
+        # === Compact Status Card with Subtle Glow ===
+        self.status_card = ctk.CTkFrame(
             main,
             fg_color=COLORS["bg_card"],
-            corner_radius=14,
+            corner_radius=12,
             border_width=1,
             border_color=COLORS["border"],
         )
-        status_card.pack(fill="x", pady=(0, 14))
+        self.status_card.pack(fill="x", pady=(0, 12))
         
-        status_inner = ctk.CTkFrame(status_card, fg_color="transparent")
-        status_inner.pack(fill="x", padx=18, pady=18)
+        status_inner = ctk.CTkFrame(self.status_card, fg_color="transparent")
+        status_inner.pack(fill="x", padx=14, pady=12)
         
-        # Enhanced status indicator with ring design
+        # Compact glowing dot indicator
         self.status_canvas = ctk.CTkCanvas(
             status_inner,
-            width=72,
-            height=72,
+            width=44,
+            height=44,
             bg=COLORS["bg_card"],
             highlightthickness=0,
         )
         self.status_canvas.pack(side="left")
         
-        # Draw multi-layer glowing ring indicator
+        # Draw compact glowing indicator
         self._draw_status_indicator(STATE_COLORS[AppState.IDLE])
         
-        # Status text
+        # Status text - more compact
         status_text = ctk.CTkFrame(status_inner, fg_color="transparent")
-        status_text.pack(side="left", padx=24, fill="both", expand=True)
+        status_text.pack(side="left", padx=14, fill="both", expand=True)
         
         self.status_label = ctk.CTkLabel(
             status_text,
             text="Ready",
-            font=(self.font_header[0], 28, "bold"),
+            font=(self.font_header[0], 20, "bold"),
             text_color=STATE_COLORS[AppState.IDLE],
             anchor="w",
         )
@@ -1388,13 +1388,13 @@ class WayfinderApp(ctk.CTk):
         self.hotkey_label = ctk.CTkLabel(
             status_text,
             text=f"Press {self.get_hotkey_display()} to record",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], 11),
             text_color=COLORS["text_secondary"],
             anchor="w",
         )
-        self.hotkey_label.pack(anchor="w", pady=(6, 0))
+        self.hotkey_label.pack(anchor="w", pady=(2, 0))
         
-        # === Record Button - Premium styling ===
+        # === Record Button - Premium styling with tooltip ===
         self.record_btn = ctk.CTkButton(
             main,
             text="Start Listening",
@@ -1407,6 +1407,12 @@ class WayfinderApp(ctk.CTk):
             command=self.on_record_button,
         )
         self.record_btn.pack(fill="x", pady=(0, 24))
+        
+        # Add tooltip explaining the record functionality
+        Tooltip(
+            self.record_btn,
+            f"Toggle {self.get_hotkey_display()}\n\nWhen recording stops, text is automatically\ninjected into any focused text field in Linux."
+        )
         
         # === Settings Section ===
         settings_header = ctk.CTkFrame(main, fg_color="transparent")
@@ -1868,53 +1874,56 @@ class WayfinderApp(ctk.CTk):
         canvas.tag_lower("gradient")
     
     def _draw_status_indicator(self, color: str):
-        """Draw enhanced ring-style status indicator with glow."""
+        """Draw compact status indicator with pleasant subtle glow."""
         canvas = self.status_canvas
         canvas.delete("all")
         
-        size = 72  # Smaller, more compact
+        size = 44  # Compact size
         cx, cy = size // 2, size // 2
         
-        # Parse color for glow
+        # Parse color for glow layers
         r = int(color[1:3], 16)
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
         
-        # Outer glow rings (fading out) - adjusted for smaller size
-        for i in range(3, 0, -1):
-            alpha = 0.15 / i
-            glow_color = f"#{int(r*alpha):02x}{int(g*alpha):02x}{int(b*alpha):02x}"
-            offset = i * 3
+        # Blend with background for soft glow effect
+        bg_r, bg_g, bg_b = 30, 32, 38  # COLORS["bg_card"] approximate
+        
+        # Soft outer glow layers (pleasant, not harsh)
+        glow_layers = [
+            (18, 0.12),  # Outermost - very subtle
+            (14, 0.20),  # Middle - soft
+            (10, 0.35),  # Inner - more visible
+        ]
+        
+        for radius, intensity in glow_layers:
+            # Blend color with background for soft glow
+            gr = int(bg_r + (r - bg_r) * intensity)
+            gg = int(bg_g + (g - bg_g) * intensity)
+            gb = int(bg_b + (b - bg_b) * intensity)
+            glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+            
             canvas.create_oval(
-                cx - 28 - offset, cy - 28 - offset,
-                cx + 28 + offset, cy + 28 + offset,
-                outline=glow_color,
-                width=2,
+                cx - radius, cy - radius,
+                cx + radius, cy + radius,
+                fill=glow_color,
+                outline="",
                 tags="glow",
             )
         
-        # Main ring (thicker)
+        # Main filled circle
         canvas.create_oval(
-            cx - 24, cy - 24,
-            cx + 24, cy + 24,
-            outline=color,
-            width=4,
-            tags="ring",
-        )
-        
-        # Inner filled circle
-        canvas.create_oval(
-            cx - 14, cy - 14,
-            cx + 14, cy + 14,
+            cx - 8, cy - 8,
+            cx + 8, cy + 8,
             fill=color,
             outline="",
             tags="center",
         )
         
-        # Highlight dot
+        # Subtle highlight for depth
         canvas.create_oval(
-            cx - 6, cy - 10,
-            cx + 2, cy - 3,
+            cx - 4, cy - 5,
+            cx + 1, cy - 1,
             fill="#ffffff",
             outline="",
             tags="highlight",
@@ -4429,6 +4438,14 @@ class WayfinderApp(ctk.CTk):
         # Redraw the enhanced status indicator with new color
         self._draw_status_indicator(color)
         self.status_label.configure(text=STATE_LABELS[new_state], text_color=color)
+        
+        # Update status card border for subtle glow effect
+        if new_state == AppState.IDLE:
+            self.status_card.configure(border_color=COLORS["border"])
+        else:
+            # Subtle glow border matching state color
+            self.status_card.configure(border_color=color)
+        
         self.update_tray(new_state)
         self.update_record_button(new_state)
 
