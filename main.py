@@ -123,6 +123,100 @@ def save_config(config: dict) -> None:
         json.dump(config, f, indent=2)
 
 
+# === GPU Detection ===
+
+class GPUInfo:
+    """Detected GPU information."""
+    def __init__(self, vendor: str, name: str, driver: str = ""):
+        self.vendor = vendor  # "nvidia", "amd", "intel", "unknown"
+        self.name = name
+        self.driver = driver
+    
+    @property
+    def is_nvidia(self) -> bool:
+        return self.vendor == "nvidia"
+    
+    @property
+    def is_amd(self) -> bool:
+        return self.vendor == "amd"
+    
+    @property
+    def is_intel(self) -> bool:
+        return self.vendor == "intel"
+
+
+def detect_gpu() -> GPUInfo:
+    """
+    Detect the primary GPU on the system.
+    
+    Returns:
+        GPUInfo with vendor, name, and driver information.
+    """
+    try:
+        # Try lspci first (most reliable on Linux)
+        result = subprocess.run(
+            ["lspci", "-nn"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        
+        if result.returncode == 0:
+            lines = result.stdout.lower()
+            
+            # Check for discrete GPUs first (VGA/3D controllers)
+            for line in result.stdout.split("\n"):
+                line_lower = line.lower()
+                if "vga" in line_lower or "3d" in line_lower or "display" in line_lower:
+                    if "nvidia" in line_lower:
+                        return GPUInfo("nvidia", line.split(":")[-1].strip(), "nvidia")
+                    elif "amd" in line_lower or "radeon" in line_lower or "advanced micro" in line_lower:
+                        return GPUInfo("amd", line.split(":")[-1].strip(), "amdgpu")
+                    elif "intel" in line_lower:
+                        return GPUInfo("intel", line.split(":")[-1].strip(), "i915")
+        
+        # Fallback: Check /sys for GPU info
+        gpu_path = Path("/sys/class/drm")
+        if gpu_path.exists():
+            for card in gpu_path.iterdir():
+                if card.name.startswith("card") and not card.name.endswith("-"):
+                    vendor_file = card / "device" / "vendor"
+                    if vendor_file.exists():
+                        vendor_id = vendor_file.read_text().strip()
+                        if vendor_id == "0x10de":  # NVIDIA
+                            return GPUInfo("nvidia", "NVIDIA GPU", "nvidia")
+                        elif vendor_id == "0x1002":  # AMD
+                            return GPUInfo("amd", "AMD GPU", "amdgpu")
+                        elif vendor_id == "0x8086":  # Intel
+                            return GPUInfo("intel", "Intel GPU", "i915")
+        
+    except Exception:
+        pass
+    
+    return GPUInfo("unknown", "Unknown GPU", "")
+
+
+def get_optimal_thread_count() -> int:
+    """Get optimal thread count based on CPU cores."""
+    try:
+        cpu_count = os.cpu_count() or 4
+        # Use ~75% of cores, minimum 2, maximum 16
+        return max(2, min(16, int(cpu_count * 0.75)))
+    except Exception:
+        return 4
+
+
+# Cache GPU info at module load
+_cached_gpu_info: GPUInfo | None = None
+
+def get_gpu_info() -> GPUInfo:
+    """Get cached GPU info."""
+    global _cached_gpu_info
+    if _cached_gpu_info is None:
+        _cached_gpu_info = detect_gpu()
+    return _cached_gpu_info
+
+
 # === State Machine ===
 
 class AppState(Enum):
@@ -1511,6 +1605,24 @@ class WayfinderApp(ctk.CTk):
         # Initial log
         self.log("✓ Wayfinder Voice started")
         self.log(f"⌨ Hotkey: {self.get_hotkey_display()}")
+        
+        # Log detected hardware
+        gpu_info = get_gpu_info()
+        cpu_count = os.cpu_count() or 4
+        if gpu_info.is_nvidia:
+            self.log(f"🟢 GPU: NVIDIA detected (use Faster-Whisper + CUDA)")
+        elif gpu_info.is_amd:
+            self.log(f"🔴 GPU: AMD detected (Vulkan ready)")
+        elif gpu_info.is_intel:
+            self.log(f"🔵 GPU: Intel detected (CPU mode recommended)")
+        else:
+            self.log(f"⚪ GPU: Not detected (using CPU)")
+        
+        # Log thread recommendation if system has fewer cores
+        threads_config = self.config.get("threads", 6)
+        if cpu_count < threads_config:
+            optimal = get_optimal_thread_count()
+            self.log(f"💡 Tip: {cpu_count} CPU cores detected, consider setting threads to {optimal}")
     
     def _draw_gradient_bg(self, event=None):
         """Draw radial gradient background with cyan glow."""
@@ -3320,7 +3432,7 @@ class WayfinderApp(ctk.CTk):
         
         dialog = ctk.CTkToplevel(self)
         dialog.title("Transcription Backend")
-        dialog.geometry("500x580")
+        dialog.geometry("500x680")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
@@ -3340,7 +3452,47 @@ class WayfinderApp(ctk.CTk):
             text="Choose which transcription engine to use.",
             font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(0, 20))
+        ).pack(anchor="w", pady=(0, 10))
+        
+        # Show detected GPU info
+        gpu_info = get_gpu_info()
+        gpu_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=10)
+        gpu_frame.pack(fill="x", pady=(0, 15))
+        
+        gpu_label_frame = ctk.CTkFrame(gpu_frame, fg_color="transparent")
+        gpu_label_frame.pack(fill="x", padx=15, pady=10)
+        
+        # GPU icon based on vendor
+        if gpu_info.is_nvidia:
+            gpu_icon = "🟢"
+            gpu_vendor_text = "NVIDIA GPU detected"
+            gpu_rec = "Recommended: Faster-Whisper with CUDA for best GPU performance"
+        elif gpu_info.is_amd:
+            gpu_icon = "🔴"
+            gpu_vendor_text = "AMD GPU detected"
+            gpu_rec = "Recommended: whisper.cpp with Vulkan (current setup)"
+        elif gpu_info.is_intel:
+            gpu_icon = "🔵"
+            gpu_vendor_text = "Intel GPU detected"
+            gpu_rec = "Note: Limited GPU support. CPU mode recommended."
+        else:
+            gpu_icon = "⚪"
+            gpu_vendor_text = "GPU not detected"
+            gpu_rec = "Running in CPU mode"
+        
+        ctk.CTkLabel(
+            gpu_label_frame,
+            text=f"{gpu_icon} {gpu_vendor_text}",
+            font=(self.font_body[0], 13, "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w")
+        
+        ctk.CTkLabel(
+            gpu_label_frame,
+            text=gpu_rec,
+            font=(self.font_body[0], 11),
+            text_color=COLORS["accent"] if gpu_info.is_nvidia or gpu_info.is_amd else COLORS["text_muted"],
+        ).pack(anchor="w", pady=(2, 0))
         
         current = self.config.get("transcription_backend", "whisper_cpp")
         backend_var = ctk.StringVar(value=current)
@@ -3351,20 +3503,33 @@ class WayfinderApp(ctk.CTk):
         )
         faster_whisper = FasterWhisperBackend()
         
+        # Customize descriptions based on GPU
+        if gpu_info.is_nvidia:
+            whisper_cpp_desc = "C++ implementation. Requires CUDA rebuild for NVIDIA GPU."
+            faster_whisper_desc = "Python library with CUDA support. ★ Best for NVIDIA"
+        elif gpu_info.is_amd:
+            whisper_cpp_desc = "Fast C++ implementation. ★ Best for AMD (Vulkan)"
+            faster_whisper_desc = "Python library. Supports ROCm for AMD GPU."
+        else:
+            whisper_cpp_desc = "Fast C++ implementation. Lightweight."
+            faster_whisper_desc = "Python library with CTranslate2."
+        
         backends = [
             {
                 "id": "whisper_cpp",
                 "name": "whisper.cpp",
-                "desc": "Fast C++ implementation. Supports Vulkan GPU.",
+                "desc": whisper_cpp_desc,
                 "available": whisper_cpp.is_available(),
                 "gpu": whisper_cpp.supports_gpu(),
+                "recommended": gpu_info.is_amd,
             },
             {
                 "id": "faster_whisper",
                 "name": "Faster-Whisper",
-                "desc": "Python library with CTranslate2. Supports ROCm/CUDA.",
+                "desc": faster_whisper_desc,
                 "available": faster_whisper.is_available(),
                 "gpu": faster_whisper.supports_gpu(),
+                "recommended": gpu_info.is_nvidia,
             },
         ]
         
@@ -3407,6 +3572,16 @@ class WayfinderApp(ctk.CTk):
                 font=(self.font_body[0], 14, "bold"),
                 text_color=name_color,
             ).pack(side="left")
+            
+            # Recommended badge (based on GPU detection)
+            if backend.get("recommended"):
+                rec_badge = ctk.CTkLabel(
+                    name_row,
+                    text="★ Recommended",
+                    font=(self.font_body[0], 10, "bold"),
+                    text_color=COLORS["accent_yellow"],
+                )
+                rec_badge.pack(side="left", padx=8)
             
             # Status badges
             if backend["available"]:
@@ -3485,6 +3660,32 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_primary"],
         )
         fw_compute_menu.pack(padx=15, pady=(0, 15), anchor="w")
+        
+        # NVIDIA-specific setup help
+        if gpu_info.is_nvidia:
+            nvidia_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_hover"], corner_radius=10)
+            nvidia_frame.pack(fill="x", pady=(0, 15))
+            
+            ctk.CTkLabel(
+                nvidia_frame,
+                text="🟢 NVIDIA CUDA Setup",
+                font=(self.font_body[0], 12, "bold"),
+                text_color=COLORS["accent_green"],
+            ).pack(anchor="w", padx=15, pady=(10, 5))
+            
+            setup_text = (
+                "To enable GPU acceleration with Faster-Whisper:\n"
+                "  pip install torch --index-url https://download.pytorch.org/whl/cu121\n"
+                "  pip install faster-whisper\n\n"
+                "Then select Faster-Whisper above and enable GPU in Advanced settings."
+            )
+            ctk.CTkLabel(
+                nvidia_frame,
+                text=setup_text,
+                font=("Consolas", 10) if os.name == "nt" else ("monospace", 10),
+                text_color=COLORS["text_secondary"],
+                justify="left",
+            ).pack(anchor="w", padx=15, pady=(0, 10))
         
         def save():
             self.config["transcription_backend"] = backend_var.get()
