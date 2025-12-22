@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Config (contains user-specific paths)
+# Uncomment if you don't want to track config:
+# ~/.config/wayfinder-voice/
+
+# Temp files
+*.tmp
+*.log
+recordings/
+
