@@ -2126,14 +2126,14 @@ class WayfinderApp(ctk.CTk):
         hero_inner = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
         hero_inner.pack(fill="x", padx=24, pady=20)
         
-        # === Waveform Visualizer Canvas ===
+        # === Waveform Visualizer Canvas - Large for dramatic waves ===
         self.hero_canvas = ctk.CTkCanvas(
             hero_inner,
-            height=80,
+            height=120,  # Taller for big dramatic waves
             bg=COLORS["bg_card"],
             highlightthickness=0,
         )
-        self.hero_canvas.pack(fill="x", pady=(0, 16))
+        self.hero_canvas.pack(fill="x", pady=(0, 12))
         
         # Initialize animation state
         self._hero_wave_time = 0.0
@@ -2257,7 +2257,7 @@ class WayfinderApp(ctk.CTk):
         )
     
     def _draw_hero_waveform(self) -> None:
-        """Draw the hero section waveform visualization."""
+        """Draw dramatic, full-height waveform visualization like the reference image."""
         canvas = self.hero_canvas
         canvas.delete("all")
         
@@ -2267,12 +2267,13 @@ class WayfinderApp(ctk.CTk):
         h = canvas.winfo_height()
         
         if w <= 1:
-            w = 400  # Default width before first render
+            w = 400
         if h <= 1:
-            h = 80
+            h = 100
         
         center_y = h // 2
-        max_amp = h // 2 - 4
+        # Use nearly full height for dramatic effect
+        max_amp = (h // 2) - 2
         
         # Get current color based on state
         color = STATE_COLORS.get(self.app_state, COLORS["accent"])
@@ -2285,43 +2286,52 @@ class WayfinderApp(ctk.CTk):
         bg_g = int(COLORS["bg_card"][3:5], 16)
         bg_b = int(COLORS["bg_card"][5:7], 16)
         
-        # Calculate amplitude based on audio level
+        # Calculate amplitude - BIG waves even at idle
         audio_level = self._hero_audio_level
-        # Gentle breathing oscillation: ranges from 0.2 to 0.35 for visible idle motion
-        base_breath = 0.2 + 0.15 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.5))
-        voice_boost = (audio_level ** 0.7) * 0.75
+        # Large breathing oscillation for dramatic idle motion (0.5 to 0.8 range)
+        base_breath = 0.5 + 0.3 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.4))
+        voice_boost = (audio_level ** 0.6) * 0.5
         amplitude_factor = min(1.0, base_breath + voice_boost)
         
-        # Draw layered waves
+        # Multiple dramatic wave layers - like the reference image
         wave_configs = [
-            (0.015, 0.0, 0.15),   # Slow background
-            (0.025, 1.2, 0.25),   # Medium
-            (0.04, 2.4, 0.4),     # Faster
+            # (frequency, phase_offset, alpha, line_width, amplitude_mult)
+            (0.008, 0.0, 0.12, 2, 1.0),      # Very slow, large background wave
+            (0.012, 0.8, 0.18, 2, 0.9),      # Slow wave
+            (0.018, 1.6, 0.28, 2, 0.85),     # Medium-slow
+            (0.025, 2.4, 0.40, 2, 0.75),     # Medium wave
+            (0.035, 3.2, 0.55, 3, 0.65),     # Medium-fast
+            (0.050, 4.0, 0.75, 3, 0.5),      # Fast wave - most visible
         ]
         
-        for freq, phase_offset, alpha in wave_configs:
+        for freq, phase_offset, alpha, line_width, amp_mult in wave_configs:
+            # Blend color with background based on alpha
             blend_r = int(bg_r + (r - bg_r) * alpha)
             blend_g = int(bg_g + (g - bg_g) * alpha)
             blend_b = int(bg_b + (b - bg_b) * alpha)
             wave_color = f"#{blend_r:02x}{blend_g:02x}{blend_b:02x}"
             
             points = []
-            for x in range(0, w + 1, 3):
-                # Multiple sine waves combined
-                wave1 = math.sin(x * freq + self._hero_wave_time + phase_offset)
-                wave2 = math.sin(x * freq * 1.5 + self._hero_wave_time * 0.7 + phase_offset) * 0.5
-                wave3 = math.sin(x * freq * 0.5 + self._hero_wave_time * 1.3 + phase_offset) * 0.3
-                combined = (wave1 + wave2 + wave3) / 1.8
+            for x in range(0, w + 1, 2):  # Finer resolution
+                # Complex wave combining multiple frequencies for organic look
+                t = self._hero_wave_time
                 
-                y = center_y + combined * max_amp * amplitude_factor
+                # Primary wave
+                wave1 = math.sin(x * freq + t + phase_offset)
+                # Harmonics for complexity
+                wave2 = math.sin(x * freq * 2.1 + t * 0.8 + phase_offset) * 0.4
+                wave3 = math.sin(x * freq * 0.7 + t * 1.2 + phase_offset) * 0.35
+                wave4 = math.sin(x * freq * 3.3 + t * 0.5 + phase_offset) * 0.15
+                
+                # Combine waves
+                combined = (wave1 + wave2 + wave3 + wave4) / 1.9
+                
+                # Apply amplitude
+                y = center_y + combined * max_amp * amplitude_factor * amp_mult
                 points.extend([x, y])
             
             if len(points) >= 4:
-                canvas.create_line(points, fill=wave_color, width=2, smooth=True)
-        
-        # Draw center line (very subtle)
-        center_line_color = f"#{int(bg_r + (r - bg_r) * 0.1):02x}{int(bg_g + (g - bg_g) * 0.1):02x}{int(bg_b + (b - bg_b) * 0.1):02x}"
-        canvas.create_line(0, center_y, w, center_y, fill=center_line_color, width=1)
+                canvas.create_line(points, fill=wave_color, width=line_width, smooth=True)
     
     def _create_tab_bar(self, parent) -> None:
         """Create the tab navigation bar."""
