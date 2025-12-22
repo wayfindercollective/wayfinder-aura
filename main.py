@@ -2152,10 +2152,11 @@ class WayfinderApp(ctk.CTk):
             dropdown_hover_color=COLORS["bg_hover"],
             dropdown_text_color=COLORS["text_primary"],
             text_color=COLORS["accent"],
-            font=(self.font_body[0], 14),
-            width=120,
-            height=46,
-            corner_radius=10,
+            font=(self.font_body[0], 15),
+            dropdown_font=(self.font_body[0], 15),
+            width=180,
+            height=50,
+            corner_radius=12,
         )
         self.preprocess_dropdown.pack(side="right")
         
@@ -2657,19 +2658,19 @@ class WayfinderApp(ctk.CTk):
         btn = ctk.CTkButton(
             row,
             text=value,
-            font=(self.font_body[0], 14),
+            font=(self.font_body[0], 15),
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["accent"],
-            height=46,
-            corner_radius=10,
+            height=50,
+            corner_radius=12,
             command=command,
         )
         btn.grid(row=0, column=1, sticky="e", padx=(20, 0))
         return btn
 
     def create_toggle_row(self, parent, label, variable, command, tooltip=None):
-        row = ctk.CTkFrame(parent, fg_color="transparent", height=46)
+        row = ctk.CTkFrame(parent, fg_color="transparent", height=50)
         row.pack(fill="x", padx=16, pady=10)
         
         # Configure grid for alignment with setting rows
@@ -2706,8 +2707,8 @@ class WayfinderApp(ctk.CTk):
             progress_color=COLORS["accent"],
             button_color=COLORS["text_bright"],
             button_hover_color=COLORS["text_primary"],
-            switch_width=50,
-            switch_height=26,
+            switch_width=56,
+            switch_height=30,
         )
         switch.grid(row=0, column=1, sticky="e", padx=(20, 0))
 
@@ -2754,10 +2755,11 @@ class WayfinderApp(ctk.CTk):
             dropdown_hover_color=COLORS["bg_hover"],
             dropdown_text_color=COLORS["text_primary"],
             text_color=COLORS["accent"],
-            font=(self.font_body[0], 14),
-            width=width,
-            height=46,
-            corner_radius=10,
+            font=(self.font_body[0], 15),
+            dropdown_font=(self.font_body[0], 15),
+            width=max(width, 180),
+            height=50,
+            corner_radius=12,
         )
         dropdown.grid(row=0, column=1, sticky="e", padx=(20, 0))
         return dropdown
