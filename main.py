@@ -1755,7 +1755,7 @@ class WayfinderApp(ctk.CTk):
             corner_radius=12,
             border_width=1,
             border_color=COLORS["border"],
-            height=250,  # Slightly shorter for compactness
+            height=400,  # Taller to show all settings including Recording section
             scrollbar_button_color=COLORS["bg_hover"],
             scrollbar_button_hover_color=COLORS["accent_dim"],
         )
