@@ -376,26 +376,38 @@ class ToolTip:
             self.tooltip_window = None
 
 
-# Setting tooltip descriptions
+# Setting tooltip descriptions with latency indicators
+# ═══════════════════════════════════════════════════════════════════════════════
+# LATENCY GUIDE: ⚡ = none, 🟢 = <10ms, 🟡 = 10-100ms, 🔴 = 100ms+, 🚀 = speedup
+# ═══════════════════════════════════════════════════════════════════════════════
 SETTING_TOOLTIPS = {
-    "hotkey": "The keyboard shortcut to start/stop voice recording. Press and release to toggle.",
-    "microphone": "Select which microphone/audio input device to use for voice recording.",
-    "input_devices": "Which input devices to listen for the hotkey. Select specific devices or use all available.",
-    "typing_speed": "How fast the transcribed text is typed out. Instant pastes immediately, others simulate typing.",
-    "whisper_model": "The Whisper AI model for transcription. Larger models are more accurate but slower.",
-    "prompt": "Initial text that guides the transcription style. Helps with punctuation and formatting.",
-    "start_minimized": "Start the app minimized to the system tray instead of showing the main window.",
-    "ui_scale": "Adjust the size of the user interface for different screen sizes or preferences.",
-    "accuracy_mode": "Preset balancing speed vs accuracy. Fast is quicker, High Accuracy uses more processing.",
-    "beam_size": "Search width for transcription. Higher values explore more possibilities but take longer.",
-    "language": "The language for transcription. English is optimized, Auto-detect works for multiple languages.",
-    "audio_preprocessing": "Audio processing level. Light = gain only (recommended). Medium adds filtering. Heavy adds noise gate (may cut words).",
-    "ensure_punctuation": "Automatically ensure proper punctuation (periods, commas, capitalization) in all transcriptions.",
-    "chunked_mode": "Process long recordings in segments. Prevents memory issues and allows progressive output.",
-    "chunk_duration": "Length of each audio segment when using chunked recording. Shorter chunks use less memory.",
-    "backend": "The transcription engine. whisper.cpp is lightweight, Faster-Whisper has better GPU support.",
-    "gpu_acceleration": "Use your GPU for faster transcription. Requires compatible hardware and drivers.",
-    "gpu_layers": "How many model layers to run on GPU. Auto uses all layers, or set a specific number.",
+    # ⚡ No latency impact - UI/configuration only
+    "hotkey": "The keyboard shortcut to start/stop voice recording.\n⚡ Latency: None",
+    "microphone": "Select which microphone/audio input device to use.\n⚡ Latency: None",
+    "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\n⚡ Latency: None",
+    "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
+    "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
+    "prompt": "Initial text that guides transcription style.\n⚡ Latency: None (processed at model load)",
+    "language": "The language for transcription. English is most optimized.\n⚡ Latency: None",
+    
+    # 🟢 Minimal latency impact (<10ms per invocation)
+    "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
+    "ensure_punctuation": "Auto-fix punctuation (periods, commas, caps).\n🟢 Latency: +1-3ms (negligible regex processing)",
+    "audio_preprocessing": "Audio signal processing before transcription.\n🟢 Off: 0ms | Light: +2ms | Medium: +5ms | Heavy: +10ms",
+    
+    # 🟡 Moderate latency impact (10-100ms)
+    "chunked_mode": "Process in segments for unlimited recording length.\n🟡 Latency: +50-100ms overhead per chunk boundary",
+    "chunk_duration": "Seconds per audio chunk (when chunked mode is on).\n🟡 Shorter = faster feedback, more overhead | 15s = balanced",
+    
+    # 🔴 MAJOR latency impact - These are the biggest factors
+    "whisper_model": "AI model size - the #1 factor in transcription speed.\n🔴 GPU: Tiny ~0.5s | Base ~1s | Small ~1.5s | Medium ~3s | Large ~6s | Turbo ~2s\n🔴 CPU: Tiny ~2s | Base ~4s | Small ~6s | Medium ~12s | Large ~25s | Turbo ~8s",
+    "accuracy_mode": "Speed vs accuracy preset - affects beam search depth.\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)",
+    "beam_size": "Search width for finding best transcription.\n🔴 1 = fastest (-50%) | 5 = balanced | 10 = slowest (+100%)",
+    
+    # GPU/Backend - Can dramatically change all timings
+    "backend": "Transcription engine selection.\n⚙️ whisper.cpp: CPU-optimized, lower memory\n⚙️ Faster-Whisper: Better GPU utilization (up to 10x faster)",
+    "gpu_acceleration": "Use GPU for transcription.\n🚀 Enabled: 3-10x faster than CPU (requires CUDA/ROCm/Vulkan)",
+    "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
 }
 
 
@@ -1249,12 +1261,12 @@ class WayfinderApp(ctk.CTk):
     
     def _apply_scale(self):
         """Apply the current scale to all UI elements."""
-        # Update window size
-        base_w, base_h = 480, 720
+        # Update window size - more flexible
+        base_w, base_h = 440, 680
         new_w = int(base_w * self.ui_scale)
         new_h = int(base_h * self.ui_scale)
         self.geometry(f"{new_w}x{new_h}")
-        self.minsize(int(400 * self.ui_scale), int(600 * self.ui_scale))
+        self.minsize(int(320 * self.ui_scale), int(400 * self.ui_scale))
         
         # Update CustomTkinter widget scaling
         ctk.set_widget_scaling(self.ui_scale)
@@ -1283,13 +1295,22 @@ class WayfinderApp(ctk.CTk):
         self.bg_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.main_container.bind("<Configure>", self._draw_gradient_bg)
         
-        # Content frame on top of gradient
-        main = ctk.CTkFrame(self.main_container, fg_color="transparent")
-        main.pack(fill="both", expand=True, padx=24, pady=20)
+        # Scrollable content frame - allows fluid resizing
+        self.scroll_container = ctk.CTkScrollableFrame(
+            self.main_container,
+            fg_color="transparent",
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        self.scroll_container.pack(fill="both", expand=True, padx=20, pady=16)
+        
+        # Main content inside scrollable frame
+        main = ctk.CTkFrame(self.scroll_container, fg_color="transparent")
+        main.pack(fill="both", expand=True, padx=4)
         
         # === Header - Horizontal "WAYFINDER VOICE" ===
         header = ctk.CTkFrame(main, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 24))
+        header.pack(fill="x", pady=(0, 16))
         
         # Title container for horizontal layout
         title_frame = ctk.CTkFrame(header, fg_color="transparent")
@@ -1299,7 +1320,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             title_frame,
             text="WAYFINDER",
-            font=(self.font_header[0], 26, "bold"),
+            font=(self.font_header[0], 20, "bold"),
             text_color="#B8B8C8",  # Silver gray
         ).pack(side="left")
         
@@ -1307,7 +1328,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             title_frame,
             text=" VOICE",
-            font=(self.font_header[0], 26, "bold"),
+            font=(self.font_header[0], 20, "bold"),
             text_color=COLORS["accent"],
         ).pack(side="left")
         
@@ -1315,8 +1336,8 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             header,
             text="×",
-            width=36,
-            height=36,
+            width=28,
+            height=28,
             fg_color="transparent",
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_muted"],
@@ -1329,20 +1350,20 @@ class WayfinderApp(ctk.CTk):
         status_card = ctk.CTkFrame(
             main,
             fg_color=COLORS["bg_card"],
-            corner_radius=16,
+            corner_radius=14,
             border_width=1,
             border_color=COLORS["border"],
         )
-        status_card.pack(fill="x", pady=(0, 20))
+        status_card.pack(fill="x", pady=(0, 14))
         
         status_inner = ctk.CTkFrame(status_card, fg_color="transparent")
-        status_inner.pack(fill="x", padx=24, pady=28)
+        status_inner.pack(fill="x", padx=18, pady=18)
         
         # Enhanced status indicator with ring design
         self.status_canvas = ctk.CTkCanvas(
             status_inner,
-            width=90,
-            height=90,
+            width=72,
+            height=72,
             bg=COLORS["bg_card"],
             highlightthickness=0,
         )
@@ -1389,12 +1410,12 @@ class WayfinderApp(ctk.CTk):
         
         # === Settings Section ===
         settings_header = ctk.CTkFrame(main, fg_color="transparent")
-        settings_header.pack(fill="x", pady=(0, 8))
+        settings_header.pack(fill="x", pady=(0, 6))
         
         ctk.CTkLabel(
             settings_header,
             text="SETTINGS",
-            font=(self.font_body[0], 11, "bold"),
+            font=(self.font_body[0], 10, "bold"),
             text_color=COLORS["text_muted"],
         ).pack(side="left")
         
@@ -1402,11 +1423,11 @@ class WayfinderApp(ctk.CTk):
         settings_card = ctk.CTkFrame(
             main,
             fg_color=COLORS["bg_card"],
-            corner_radius=14,
+            corner_radius=12,
             border_width=1,
             border_color=COLORS["border"],
         )
-        settings_card.pack(fill="x", pady=(0, 20))
+        settings_card.pack(fill="x", pady=(0, 12))
         
         # Hotkey setting
         self.hotkey_btn = self.create_setting_row(
@@ -1425,18 +1446,6 @@ class WayfinderApp(ctk.CTk):
             mic_display,
             self.open_microphone_settings,
             tooltip=SETTING_TOOLTIPS["microphone"],
-        )
-        
-        # Input devices setting (for hotkey detection)
-        device_count = len(get_all_input_devices())
-        enabled = self.config.get("enabled_input_devices", [])
-        device_text = f"All ({device_count})" if not enabled else f"{len(enabled)} selected"
-        self.devices_btn = self.create_setting_row(
-            settings_card,
-            "Input Devices",
-            device_text,
-            self.open_device_settings,
-            tooltip=SETTING_TOOLTIPS["input_devices"],
         )
         
         # Typing speed setting
@@ -1499,12 +1508,12 @@ class WayfinderApp(ctk.CTk):
         advanced_toggle_btn = ctk.CTkButton(
             advanced_header,
             text="▶  ADVANCED",
-            font=(self.font_body[0], 11, "bold"),
+            font=(self.font_body[0], 10, "bold"),
             text_color=COLORS["text_muted"],
             fg_color="transparent",
             hover_color=COLORS["bg_hover"],
             anchor="w",
-            height=28,
+            height=24,
             command=self.toggle_advanced_settings,
         )
         advanced_toggle_btn.pack(side="left")
@@ -1517,20 +1526,22 @@ class WayfinderApp(ctk.CTk):
         advanced_card = ctk.CTkScrollableFrame(
             self.advanced_container,
             fg_color=COLORS["bg_card"],
-            corner_radius=14,
+            corner_radius=12,
             border_width=1,
             border_color=COLORS["border"],
-            height=300,  # Fixed height with scroll
+            height=250,  # Slightly shorter for compactness
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
         )
-        advanced_card.pack(fill="x", pady=(0, 10))
+        advanced_card.pack(fill="x", pady=(0, 8))
         
         # Accuracy settings label
         ctk.CTkLabel(
             advanced_card,
             text="Accuracy",
-            font=(self.font_body[0], 10, "bold"),
+            font=(self.font_body[0], 9, "bold"),
             text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=18, pady=(12, 4))
+        ).pack(anchor="w", padx=14, pady=(10, 3))
         
         # Accuracy Mode preset selector
         accuracy_mode = self.config.get("accuracy_mode", "balanced")
@@ -1708,23 +1719,43 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["gpu_layers"],
         )
         
+        # Devices settings label
+        ctk.CTkLabel(
+            advanced_card,
+            text="Devices",
+            font=(self.font_body[0], 10, "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=18, pady=(12, 4))
+        
+        # Hotkey devices setting (keyboards/mice that can trigger the hotkey)
+        device_count = len(get_all_input_devices())
+        enabled = self.config.get("enabled_input_devices", [])
+        device_text = f"All ({device_count})" if not enabled else f"{len(enabled)} selected"
+        self.devices_btn = self.create_setting_row(
+            advanced_card,
+            "Hotkey Devices",
+            device_text,
+            self.open_device_settings,
+            tooltip=SETTING_TOOLTIPS["hotkey_devices"],
+        )
+        
         # === Collapsible Activity Log ===
         self.log_expanded = False
         
         # Log header (always visible)
         self.log_header_frame = ctk.CTkFrame(main, fg_color="transparent")
-        self.log_header_frame.pack(fill="x", pady=(0, 8))
+        self.log_header_frame.pack(fill="x", pady=(0, 6))
         
         # Clickable header to expand/collapse
         log_toggle_btn = ctk.CTkButton(
             self.log_header_frame,
             text="▶  ACTIVITY",
-            font=(self.font_body[0], 11, "bold"),
+            font=(self.font_body[0], 10, "bold"),
             text_color=COLORS["text_muted"],
             fg_color="transparent",
             hover_color=COLORS["bg_hover"],
             anchor="w",
-            height=28,
+            height=24,
             command=self.toggle_activity_log,
         )
         log_toggle_btn.pack(side="left")
@@ -1733,13 +1764,13 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             self.log_header_frame,
             text="Clear",
-            width=50,
-            height=24,
-            font=(self.font_body[0], 10),
+            width=44,
+            height=22,
+            font=(self.font_body[0], 9),
             fg_color="transparent",
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_muted"],
-            corner_radius=6,
+            corner_radius=5,
             command=self.clear_log,
         ).pack(side="right")
         
@@ -1750,7 +1781,7 @@ class WayfinderApp(ctk.CTk):
         self.log_frame = ctk.CTkFrame(
             self.log_container,
             fg_color=COLORS["bg_card"],
-            corner_radius=12,
+            corner_radius=10,
             border_width=1,
             border_color=COLORS["border"],
         )
@@ -1758,14 +1789,16 @@ class WayfinderApp(ctk.CTk):
         
         self.log_textbox = ctk.CTkTextbox(
             self.log_frame,
-            font=(self.font_mono[0], 10),
+            font=(self.font_mono[0], 9),
             fg_color="transparent",
             text_color=COLORS["text_secondary"],
             wrap="word",
             activate_scrollbars=True,
-            height=120,
+            height=100,
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
         )
-        self.log_textbox.pack(fill="both", expand=True, padx=12, pady=12)
+        self.log_textbox.pack(fill="both", expand=True, padx=10, pady=10)
         self.log_textbox.configure(state="disabled")
         
         # Initial log
@@ -1839,7 +1872,7 @@ class WayfinderApp(ctk.CTk):
         canvas = self.status_canvas
         canvas.delete("all")
         
-        size = 90
+        size = 72  # Smaller, more compact
         cx, cy = size // 2, size // 2
         
         # Parse color for glow
@@ -1847,32 +1880,32 @@ class WayfinderApp(ctk.CTk):
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
         
-        # Outer glow rings (fading out)
-        for i in range(4, 0, -1):
+        # Outer glow rings (fading out) - adjusted for smaller size
+        for i in range(3, 0, -1):
             alpha = 0.15 / i
             glow_color = f"#{int(r*alpha):02x}{int(g*alpha):02x}{int(b*alpha):02x}"
-            offset = i * 4
+            offset = i * 3
             canvas.create_oval(
-                cx - 38 - offset, cy - 38 - offset,
-                cx + 38 + offset, cy + 38 + offset,
+                cx - 28 - offset, cy - 28 - offset,
+                cx + 28 + offset, cy + 28 + offset,
                 outline=glow_color,
-                width=3,
+                width=2,
                 tags="glow",
             )
         
         # Main ring (thicker)
         canvas.create_oval(
-            cx - 32, cy - 32,
-            cx + 32, cy + 32,
+            cx - 24, cy - 24,
+            cx + 24, cy + 24,
             outline=color,
-            width=5,
+            width=4,
             tags="ring",
         )
         
         # Inner filled circle
         canvas.create_oval(
-            cx - 18, cy - 18,
-            cx + 18, cy + 18,
+            cx - 14, cy - 14,
+            cx + 14, cy + 14,
             fill=color,
             outline="",
             tags="center",
@@ -1880,8 +1913,8 @@ class WayfinderApp(ctk.CTk):
         
         # Highlight dot
         canvas.create_oval(
-            cx - 8, cy - 12,
-            cx + 2, cy - 4,
+            cx - 6, cy - 10,
+            cx + 2, cy - 3,
             fill="#ffffff",
             outline="",
             tags="highlight",
@@ -1910,12 +1943,12 @@ class WayfinderApp(ctk.CTk):
             self.advanced_container.pack_forget()
     
     def _get_preprocess_desc(self, level: str) -> str:
-        """Get brief description for audio processing level."""
+        """Get brief description for audio processing level with latency."""
         descs = {
-            "off": "Raw audio",
-            "light": "Volume only",
-            "medium": "Filter noise",
-            "heavy": "Full cleanup",
+            "off": "Raw audio • 0ms",
+            "light": "Volume only • +2ms",
+            "medium": "Filter noise • +5ms",
+            "heavy": "Full cleanup • +10ms",
         }
         return descs.get(level, "")
     
@@ -1945,10 +1978,10 @@ class WayfinderApp(ctk.CTk):
         ).pack(pady=(20, 15))
         
         levels = [
-            ("off", "No processing", "Raw audio passed directly to Whisper. Use if words are being cut off."),
-            ("light", "Light (Recommended)", "Only adjusts volume levels. Preserves all speech including soft sounds."),
-            ("medium", "Medium", "Adds a filter to remove low rumble/hum. Good for noisy environments."),
-            ("heavy", "Heavy", "Adds noise gate that reduces quiet sounds. May cut off soft consonants."),
+            ("off", "Off — 0ms latency", "Raw audio passed directly to Whisper. Use if words are being cut off."),
+            ("light", "Light (Recommended) — +2ms", "Only adjusts volume levels. Preserves all speech including soft sounds."),
+            ("medium", "Medium — +5ms", "Adds a filter to remove low rumble/hum. Good for noisy environments."),
+            ("heavy", "Heavy — +10ms", "Adds noise gate that reduces quiet sounds. May cut off soft consonants."),
         ]
         
         for value, title, desc in levels:
@@ -2011,7 +2044,7 @@ class WayfinderApp(ctk.CTk):
 
     def create_setting_row(self, parent, label, value, command, tooltip=None):
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=18, pady=11)
+        row.pack(fill="x", padx=14, pady=7)
         
         # Left side: label + optional info icon
         left_frame = ctk.CTkFrame(row, fg_color="transparent")
@@ -2020,7 +2053,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             left_frame,
             text=label,
-            font=(self.font_body[0], 14),
+            font=(self.font_body[0], 13),
             text_color=COLORS["text_primary"],
         ).pack(side="left")
         
@@ -2028,22 +2061,22 @@ class WayfinderApp(ctk.CTk):
             info_label = ctk.CTkLabel(
                 left_frame,
                 text="ⓘ",
-                font=(self.font_body[0], 12),
+                font=(self.font_body[0], 10),
                 text_color=COLORS["text_muted"],
                 cursor="question_arrow",
             )
-            info_label.pack(side="left", padx=(6, 0))
+            info_label.pack(side="left", padx=(5, 0))
             ToolTip(info_label, tooltip)
         
         btn = ctk.CTkButton(
             row,
             text=value,
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], 11),
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["accent"],
-            height=32,
-            corner_radius=8,
+            height=28,
+            corner_radius=7,
             command=command,
         )
         btn.pack(side="right")
@@ -2051,7 +2084,7 @@ class WayfinderApp(ctk.CTk):
 
     def create_toggle_row(self, parent, label, variable, command, tooltip=None):
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=18, pady=11)
+        row.pack(fill="x", padx=14, pady=7)
         
         # Left side: label + optional info icon
         left_frame = ctk.CTkFrame(row, fg_color="transparent")
@@ -2060,7 +2093,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             left_frame,
             text=label,
-            font=(self.font_body[0], 14),
+            font=(self.font_body[0], 13),
             text_color=COLORS["text_primary"],
         ).pack(side="left")
         
@@ -2068,11 +2101,11 @@ class WayfinderApp(ctk.CTk):
             info_label = ctk.CTkLabel(
                 left_frame,
                 text="ⓘ",
-                font=(self.font_body[0], 12),
+                font=(self.font_body[0], 10),
                 text_color=COLORS["text_muted"],
                 cursor="question_arrow",
             )
-            info_label.pack(side="left", padx=(6, 0))
+            info_label.pack(side="left", padx=(5, 0))
             ToolTip(info_label, tooltip)
         
         switch = ctk.CTkSwitch(
@@ -2217,20 +2250,20 @@ class WayfinderApp(ctk.CTk):
         models_dir = Path.home() / "whisper.cpp" / "models"
         models = []
         
-        # Define model info
+        # Define model info with latency estimates (GPU / CPU for 10s audio)
         model_info = {
-            "ggml-tiny.en.bin": ("Tiny (English)", "75MB", "⚡⚡⚡⚡ Fastest"),
-            "ggml-base.en.bin": ("Base (English)", "142MB", "⚡⚡⚡ Fast"),
-            "ggml-small.en.bin": ("Small (English)", "466MB", "⚡⚡ Good"),
-            "ggml-medium.en.bin": ("Medium (English)", "1.5GB", "⚡ Slow"),
-            "ggml-large-v3-turbo.bin": ("Large v3 Turbo", "1.6GB", "🚀 Fast+Accurate"),
-            "ggml-large-v3-turbo-q5_0.bin": ("Large v3 Turbo Q5", "547MB", "🚀 Fast+Accurate"),
-            "ggml-tiny.bin": ("Tiny (Multi-lang)", "75MB", "⚡⚡⚡⚡ Fastest"),
-            "ggml-base.bin": ("Base (Multi-lang)", "142MB", "⚡⚡⚡ Fast"),
-            "ggml-small.bin": ("Small (Multi-lang)", "466MB", "⚡⚡ Good"),
-            "ggml-medium.bin": ("Medium (Multi-lang)", "1.5GB", "⚡ Slow"),
-            "ggml-large-v3.bin": ("Large v3", "3GB", "🎯 Most Accurate"),
-            "ggml-large.bin": ("Large (Multi-lang)", "3GB", "🐌 Slowest"),
+            "ggml-tiny.en.bin": ("Tiny (English)", "75MB", "⚡ GPU: ~0.5s | CPU: ~2s"),
+            "ggml-base.en.bin": ("Base (English)", "142MB", "⚡ GPU: ~1s | CPU: ~4s"),
+            "ggml-small.en.bin": ("Small (English)", "466MB", "🟡 GPU: ~1.5s | CPU: ~6s"),
+            "ggml-medium.en.bin": ("Medium (English)", "1.5GB", "🔴 GPU: ~3s | CPU: ~12s"),
+            "ggml-large-v3-turbo.bin": ("Large v3 Turbo ⭐", "1.6GB", "🚀 GPU: ~2s | CPU: ~8s"),
+            "ggml-large-v3-turbo-q5_0.bin": ("Large v3 Turbo Q5", "547MB", "🚀 GPU: ~2s | CPU: ~6s"),
+            "ggml-tiny.bin": ("Tiny (Multi-lang)", "75MB", "⚡ GPU: ~0.5s | CPU: ~2s"),
+            "ggml-base.bin": ("Base (Multi-lang)", "142MB", "⚡ GPU: ~1s | CPU: ~4s"),
+            "ggml-small.bin": ("Small (Multi-lang)", "466MB", "🟡 GPU: ~1.5s | CPU: ~6s"),
+            "ggml-medium.bin": ("Medium (Multi-lang)", "1.5GB", "🔴 GPU: ~3s | CPU: ~12s"),
+            "ggml-large-v3.bin": ("Large v3", "3GB", "🔴 GPU: ~6s | CPU: ~25s"),
+            "ggml-large.bin": ("Large (Multi-lang)", "3GB", "🐌 GPU: ~6s | CPU: ~25s"),
         }
         
         for filename, (name, size, speed) in model_info.items():
@@ -2267,9 +2300,10 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             inner,
-            text="Larger models are more accurate but slower.",
+            text="Larger models are more accurate but slower.\nTime estimates are per 10 seconds of audio.",
             font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
+            justify="left",
         ).pack(anchor="w", pady=(0, 20))
         
         # Get available models
@@ -2970,9 +3004,9 @@ class WayfinderApp(ctk.CTk):
         # Chunked recorder will be recreated when needed with new device
 
     def open_device_settings(self):
-        """Open dialog to manage which input devices to monitor."""
+        """Open dialog to manage which devices can trigger the hotkey."""
         dialog = ctk.CTkToplevel(self)
-        dialog.title("Input Devices")
+        dialog.title("Hotkey Devices")
         dialog.geometry("500x500")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
@@ -2983,14 +3017,14 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             inner,
-            text="Input Devices",
+            text="⌨️ Hotkey Devices",
             font=(self.font_header[0], 22, "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
-            text="Select which devices can trigger the hotkey.\nUseful for gaming mice, keypads, and multiple keyboards.",
+            text="Select which keyboards, mice, or keypads can trigger the hotkey.\nUseful for gaming peripherals with extra keys.",
             font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
             justify="left",
@@ -3382,8 +3416,8 @@ class WayfinderApp(ctk.CTk):
         # Note: beam_size > 5 and best_of > 5 cause exponential slowdown
         modes = {
             "fast": {
-                "label": "Fast",
-                "desc": "Quick results, may miss some words",
+                "label": "⚡ Fast",
+                "desc": "Quick results • ~40% faster • May miss some words",
                 "settings": {
                     "beam_size": 1,
                     "best_of": 1,
@@ -3394,8 +3428,8 @@ class WayfinderApp(ctk.CTk):
                 }
             },
             "balanced": {
-                "label": "Balanced",
-                "desc": "Good accuracy with reasonable speed (default)",
+                "label": "⚖️ Balanced",
+                "desc": "Good accuracy • Baseline speed • Recommended",
                 "settings": {
                     "beam_size": 5,
                     "best_of": 3,
@@ -3406,8 +3440,8 @@ class WayfinderApp(ctk.CTk):
                 }
             },
             "high": {
-                "label": "High Accuracy",
-                "desc": "Better accuracy, ~2x slower",
+                "label": "🎯 High Accuracy",
+                "desc": "Better accuracy • ~60% slower • Best results",
                 "settings": {
                     "beam_size": 5,
                     "best_of": 5,
@@ -3515,7 +3549,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             inner,
-            text="Higher values = more accurate but slower.\nDefault: 5, Max recommended: 10",
+            text="Higher values = more accurate but slower.\n\n⏱️ 1 = fastest (-50%) | 5 = baseline | 10 = slowest (+100%)",
             font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
             justify="left",
@@ -3556,9 +3590,9 @@ class WayfinderApp(ctk.CTk):
         presets_frame.pack(fill="x", pady=(10, 20))
         
         presets = [
-            ("Fast (1)", 1),
-            ("Balanced (5)", 5),
-            ("Accurate (10)", 10),
+            ("⚡ Fast (1)", 1),
+            ("⚖️ Balanced (5)", 5),
+            ("🎯 Accurate (10)", 10),
         ]
         for label, value in presets:
             ctk.CTkButton(
@@ -3717,7 +3751,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             inner,
-            text="How long each audio segment is during chunked recording.\nShorter chunks = faster feedback, longer = better context.",
+            text="How long each audio segment is during chunked recording.\nShorter = faster feedback | Longer = better context\n\n⏱️ Processing: 10s≈1-2s delay | 30s≈2-4s delay | 60s≈4-8s delay",
             font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
             justify="left",
@@ -3759,15 +3793,21 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(labels_frame, text="10s", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="left")
         ctk.CTkLabel(labels_frame, text="60s", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="right")
         
-        # Preset buttons
+        # Preset buttons with latency hints
         presets_frame = ctk.CTkFrame(inner, fg_color="transparent")
         presets_frame.pack(fill="x", pady=(0, 20))
         
-        for val in [15, 30, 45, 60]:
+        preset_labels = {
+            15: "15s ⚡",  # Fast feedback
+            30: "30s ⚖️",  # Balanced
+            45: "45s",
+            60: "60s 🎯",  # Best context
+        }
+        for val, label in preset_labels.items():
             ctk.CTkButton(
                 presets_frame,
-                text=f"{val}s",
-                width=60,
+                text=label,
+                width=70,
                 height=30,
                 font=(self.font_body[0], 11),
                 fg_color=COLORS["bg_hover"],
@@ -3844,23 +3884,23 @@ class WayfinderApp(ctk.CTk):
         gpu_label_frame = ctk.CTkFrame(gpu_frame, fg_color="transparent")
         gpu_label_frame.pack(fill="x", padx=15, pady=10)
         
-        # GPU icon based on vendor
+        # GPU icon based on vendor with latency estimates
         if gpu_info.is_nvidia:
             gpu_icon = "🟢"
             gpu_vendor_text = "NVIDIA GPU detected"
-            gpu_rec = "Recommended: Faster-Whisper with CUDA for best GPU performance"
+            gpu_rec = "⚡ 3-10x faster with Faster-Whisper + CUDA"
         elif gpu_info.is_amd:
             gpu_icon = "🔴"
             gpu_vendor_text = "AMD GPU detected"
-            gpu_rec = "Recommended: whisper.cpp with Vulkan (current setup)"
+            gpu_rec = "⚡ 2-5x faster with whisper.cpp + Vulkan"
         elif gpu_info.is_intel:
             gpu_icon = "🔵"
             gpu_vendor_text = "Intel GPU detected"
-            gpu_rec = "Note: Limited GPU support. CPU mode recommended."
+            gpu_rec = "🟡 Limited GPU support. CPU mode recommended."
         else:
             gpu_icon = "⚪"
             gpu_vendor_text = "GPU not detected"
-            gpu_rec = "Running in CPU mode"
+            gpu_rec = "🔴 Running in CPU mode (slower)"
         
         ctk.CTkLabel(
             gpu_label_frame,
@@ -3885,16 +3925,16 @@ class WayfinderApp(ctk.CTk):
         )
         faster_whisper = FasterWhisperBackend()
         
-        # Customize descriptions based on GPU
+        # Customize descriptions based on GPU with latency info
         if gpu_info.is_nvidia:
-            whisper_cpp_desc = "C++ implementation. Requires CUDA rebuild for NVIDIA GPU."
-            faster_whisper_desc = "Python library with CUDA support. ★ Best for NVIDIA"
+            whisper_cpp_desc = "C++ implementation. Requires CUDA rebuild.\n🟡 ~2-4x slower than Faster-Whisper on NVIDIA"
+            faster_whisper_desc = "Python library with CUDA support.\n🚀 ★ Best for NVIDIA • 3-10x faster than CPU"
         elif gpu_info.is_amd:
-            whisper_cpp_desc = "Fast C++ implementation. ★ Best for AMD (Vulkan)"
-            faster_whisper_desc = "Python library. Supports ROCm for AMD GPU."
+            whisper_cpp_desc = "Fast C++ implementation.\n🚀 ★ Best for AMD • Vulkan acceleration"
+            faster_whisper_desc = "Python library. Supports ROCm.\n🟡 ROCm setup required for GPU"
         else:
-            whisper_cpp_desc = "Fast C++ implementation. Lightweight."
-            faster_whisper_desc = "Python library with CTranslate2."
+            whisper_cpp_desc = "Fast C++ implementation. Lightweight.\n⚡ Good for CPU-only systems"
+            faster_whisper_desc = "Python library with CTranslate2.\n🟡 Moderate CPU performance"
         
         backends = [
             {
@@ -4008,10 +4048,18 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=15, pady=(10, 5))
         
+        # Add latency hint for model selection
+        ctk.CTkLabel(
+            fw_frame,
+            text="⏱️ tiny ~0.5s | base ~1s | small ~1.5s | turbo ⭐~2s | large ~6s",
+            font=(self.font_body[0], 10),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=15, pady=(0, 5))
+        
         fw_model_var = ctk.StringVar(value=self.config.get("faster_whisper_model", "small"))
         fw_model_menu = ctk.CTkOptionMenu(
             fw_frame,
-            values=["tiny", "base", "small", "medium", "large-v3"],
+            values=["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"],
             variable=fw_model_var,
             fg_color=COLORS["bg_hover"],
             button_color=COLORS["bg_elevated"],
@@ -4028,6 +4076,14 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], 12, "bold"),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=15, pady=(5, 5))
+        
+        # Add latency hint for compute types
+        ctk.CTkLabel(
+            fw_frame,
+            text="⏱️ float16 = fastest (GPU) | int8 = -30% VRAM | int8_float16 = balanced",
+            font=(self.font_body[0], 10),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=15, pady=(0, 5))
         
         fw_compute_var = ctk.StringVar(value=self.config.get("faster_whisper_compute_type", "float16"))
         fw_compute_menu = ctk.CTkOptionMenu(
@@ -4125,7 +4181,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             inner,
-            text="Number of model layers to offload to GPU.\n0 = Auto (offload all layers for maximum speed).",
+            text="Number of model layers to offload to GPU.\n0 = Auto (all layers → maximum speed, more VRAM)\n\n⏱️ More layers = faster | Fewer = saves VRAM",
             font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
             justify="left",
@@ -4176,7 +4232,7 @@ class WayfinderApp(ctk.CTk):
         presets_frame = ctk.CTkFrame(inner, fg_color="transparent")
         presets_frame.pack(fill="x", pady=(0, 20))
         
-        for val, label in [(0, "Auto"), (16, "16"), (32, "32"), (48, "48")]:
+        for val, label in [(0, "⚡ Auto"), (16, "16"), (32, "32"), (48, "48")]:
             ctk.CTkButton(
                 presets_frame,
                 text=label,
