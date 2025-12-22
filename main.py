@@ -1881,16 +1881,17 @@ class WayfinderApp(ctk.CTk):
                 pass
             return 0.0
         
-        # Try to use PyQt6 overlay (preferred for glassmorphism)
-        try:
-            import PyQt6
-            self.overlay_controller = OverlayController(audio_level_callback=get_audio_level)
-            self._use_pyqt_overlay = True
-            self.log("✨ Using PyQt6 glassmorphic overlay")
-        except ImportError:
-            # Fallback to CTk indicator
-            self._use_pyqt_overlay = False
-            self.log("⚠ PyQt6 not available, using fallback indicator")
+        # PyQt6 overlay disabled - using reliable CTk indicator
+        # To re-enable: set _use_pyqt_overlay = True and uncomment below
+        self._use_pyqt_overlay = False
+        # try:
+        #     import PyQt6
+        #     self.overlay_controller = OverlayController(audio_level_callback=get_audio_level)
+        #     self._use_pyqt_overlay = True
+        #     self.log("✨ Using PyQt6 glassmorphic overlay")
+        # except ImportError:
+        #     self._use_pyqt_overlay = False
+        #     self.log("⚠ PyQt6 not available, using fallback indicator")
         
         # Always create fallback indicator (used when PyQt overlay unavailable)
         self.indicator = FloatingIndicator(
