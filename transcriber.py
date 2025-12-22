@@ -106,6 +106,7 @@ class WhisperCppBackend(TranscriptionBackend):
         """
         Check if the whisper.cpp binary was compiled with GPU support.
         Runs whisper-cli --help and checks for GPU-related flags.
+        In Vulkan builds, GPU is enabled by default and --no-gpu disables it.
         """
         if self._gpu_supported is not None:
             return self._gpu_supported
@@ -122,8 +123,14 @@ class WhisperCppBackend(TranscriptionBackend):
                 timeout=5,
             )
             # Check for GPU-related flags in help output
+            # Vulkan builds have --no-gpu (GPU on by default)
+            # Older builds might have -ngl or --gpu-layers
             help_text = result.stdout + result.stderr
-            self._gpu_supported = "-ngl" in help_text or "--gpu-layers" in help_text
+            self._gpu_supported = (
+                "--no-gpu" in help_text or 
+                "-ngl" in help_text or 
+                "--gpu-layers" in help_text
+            )
             return self._gpu_supported
         except Exception:
             self._gpu_supported = False
@@ -177,12 +184,10 @@ class WhisperCppBackend(TranscriptionBackend):
         if self.suppress_nst:
             cmd.append("--suppress-nst")
         
-        # Add GPU acceleration flags if enabled and supported
-        if self.use_gpu and self.supports_gpu():
-            # -ngl specifies number of layers to offload to GPU
-            # 0 or 99+ means offload all layers
-            layers = self.gpu_layers if self.gpu_layers > 0 else 99
-            cmd.extend(["-ngl", str(layers)])
+        # GPU is enabled by default in Vulkan builds of whisper.cpp
+        # Use --no-gpu to disable it if user doesn't want GPU acceleration
+        if not self.use_gpu:
+            cmd.append("--no-gpu")
 
         try:
             result = subprocess.run(
