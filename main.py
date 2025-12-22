@@ -421,11 +421,11 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
         
         # Physics parameters for smooth scrolling
         self._velocity = 0.0
-        self._friction = 0.92  # Deceleration factor (higher = more glide)
-        self._bounce_strength = 0.4  # How much to bounce back
-        self._bounce_damping = 0.6  # How quickly bounce settles
-        self._scroll_multiplier = 1.2  # Scroll sensitivity
-        self._min_velocity = 0.5  # Stop threshold
+        self._friction = 0.93  # Deceleration factor (higher = more glide)
+        self._bounce_strength = 0.35  # How much to bounce back
+        self._bounce_damping = 0.65  # How quickly bounce settles
+        self._scroll_multiplier = 1.0  # Scroll sensitivity
+        self._min_velocity = 0.3  # Stop threshold
         
         # State tracking
         self._is_animating = False
@@ -437,14 +437,30 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
         self._parent_canvas = self._parent_frame.master
         
         # Bind custom scroll events (override default behavior)
-        self._parent_canvas.bind("<MouseWheel>", self._on_smooth_scroll, add=False)
-        self._parent_canvas.bind("<Button-4>", self._on_smooth_scroll, add=False)
-        self._parent_canvas.bind("<Button-5>", self._on_smooth_scroll, add=False)
+        self._bind_scroll_to_widget(self._parent_canvas)
+        self._bind_scroll_to_widget(self)
+        self._bind_scroll_to_widget(self._parent_frame)
         
-        # Also bind to the frame itself
-        self.bind("<MouseWheel>", self._on_smooth_scroll, add=False)
-        self.bind("<Button-4>", self._on_smooth_scroll, add=False)
-        self.bind("<Button-5>", self._on_smooth_scroll, add=False)
+        # Bind to all children when they're added
+        self.bind("<Map>", self._bind_all_children)
+        self.after(100, self._bind_all_children)
+    
+    def _bind_scroll_to_widget(self, widget):
+        """Bind smooth scroll events to a widget."""
+        widget.bind("<MouseWheel>", self._on_smooth_scroll, add="+")
+        widget.bind("<Button-4>", self._on_smooth_scroll, add="+")
+        widget.bind("<Button-5>", self._on_smooth_scroll, add="+")
+    
+    def _bind_all_children(self, event=None):
+        """Recursively bind scroll events to all children."""
+        def bind_recursive(widget):
+            try:
+                self._bind_scroll_to_widget(widget)
+                for child in widget.winfo_children():
+                    bind_recursive(child)
+            except:
+                pass
+        bind_recursive(self)
     
     def _on_smooth_scroll(self, event):
         """Handle scroll with momentum and bounce."""
@@ -2624,8 +2640,8 @@ class WayfinderApp(ctk.CTk):
         frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
         self.tab_frames["dictate"] = frame
         
-        # Scrollable content
-        scroll = ctk.CTkScrollableFrame(
+        # Scrollable content with smooth Mac-like scrolling
+        scroll = SmoothScrollableFrame(
             frame,
             fg_color="transparent",
             scrollbar_button_color=COLORS["bg_hover"],
@@ -2725,8 +2741,8 @@ class WayfinderApp(ctk.CTk):
         frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
         self.tab_frames["settings"] = frame
         
-        # Scrollable content
-        scroll = ctk.CTkScrollableFrame(
+        # Scrollable content with smooth Mac-like scrolling
+        scroll = SmoothScrollableFrame(
             frame,
             fg_color="transparent",
             scrollbar_button_color=COLORS["bg_hover"],
