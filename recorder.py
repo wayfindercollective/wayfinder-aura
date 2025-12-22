@@ -23,24 +23,29 @@ except ImportError:
     SCIPY_AVAILABLE = False
 
 
-def preprocess_audio(audio_data: np.ndarray, sample_rate: int, enable: bool = True) -> np.ndarray:
+def preprocess_audio(
+    audio_data: np.ndarray, 
+    sample_rate: int, 
+    level: str = "light"
+) -> np.ndarray:
     """
-    Preprocess audio for better transcription accuracy.
+    Preprocess audio for transcription.
     
-    Applies:
-    - Gain normalization to -3dB peak
-    - High-pass filter at 80Hz to remove low-frequency rumble
-    - Simple noise gate to reduce background noise
+    Levels:
+    - "off": No processing at all (raw audio)
+    - "light": Only gain normalization (recommended for most cases)
+    - "medium": Gain normalization + gentle high-pass filter
+    - "heavy": Full processing including noise gate (may cut off words)
     
     Args:
         audio_data: Audio samples as float32 array
         sample_rate: Sample rate in Hz
-        enable: Whether to apply preprocessing
+        level: Processing level - "off", "light", "medium", "heavy"
         
     Returns:
         Preprocessed audio data
     """
-    if not enable:
+    if level == "off" or not level:
         return audio_data
     
     # Work with a copy
@@ -50,29 +55,29 @@ def preprocess_audio(audio_data: np.ndarray, sample_rate: int, enable: bool = Tr
     if audio.ndim > 1:
         audio = audio.flatten()
     
-    # 1. High-pass filter at 80Hz (remove rumble/noise)
-    if SCIPY_AVAILABLE:
-        try:
-            # Butterworth high-pass filter
-            nyquist = sample_rate / 2
-            cutoff = 80 / nyquist
-            if cutoff < 1:  # Ensure valid cutoff
-                b, a = butter(2, cutoff, btype='high')
-                audio = filtfilt(b, a, audio).astype(np.float32)
-        except Exception:
-            pass  # Skip filtering on error
-    
-    # 2. Noise gate - reduce very quiet sections (soft gate to preserve speech edges)
-    # -50dB threshold is gentler than -40dB to avoid cutting off soft consonants
-    noise_floor = 0.003  # -50dB (was 0.01 / -40dB)
-    gate_reduction = 0.3  # Reduce to 30% instead of 10% (gentler)
-    audio = np.where(np.abs(audio) < noise_floor, audio * gate_reduction, audio)
-    
-    # 3. Gain normalization to -3dB peak (0.707)
+    # Gain normalization - applied for all levels except "off"
+    # Normalize to -3dB peak (0.707) to ensure good signal level
     peak = np.max(np.abs(audio))
     if peak > 0.001:  # Avoid division by near-zero
         target_peak = 0.707  # -3dB
         audio = audio * (target_peak / peak)
+    
+    # Medium and Heavy: High-pass filter at 80Hz (remove rumble/noise)
+    if level in ("medium", "heavy") and SCIPY_AVAILABLE:
+        try:
+            nyquist = sample_rate / 2
+            cutoff = 80 / nyquist
+            if cutoff < 1:
+                b, a = butter(2, cutoff, btype='high')
+                audio = filtfilt(b, a, audio).astype(np.float32)
+        except Exception:
+            pass
+    
+    # Heavy only: Noise gate (can cut off soft consonants - use with caution!)
+    if level == "heavy":
+        noise_floor = 0.002  # -54dB - very gentle threshold
+        gate_reduction = 0.5  # Only reduce to 50%, don't kill the signal
+        audio = np.where(np.abs(audio) < noise_floor, audio * gate_reduction, audio)
     
     # Ensure output shape matches input
     if audio_data.ndim > 1:
@@ -89,7 +94,7 @@ class AudioRecorder:
         sample_rate: int = 16000, 
         channels: int = 1, 
         device: int | None = None,
-        preprocessing: bool = True,
+        preprocessing: bool | str = "light",
     ):
         """
         Initialize the audio recorder.
@@ -98,12 +103,22 @@ class AudioRecorder:
             sample_rate: Audio sample rate in Hz (default 16000 for whisper)
             channels: Number of audio channels (default 1 for mono)
             device: Audio input device index (None for default)
-            preprocessing: Enable audio preprocessing (normalization, filtering)
+            preprocessing: Audio preprocessing level:
+                - False or "off": No processing
+                - True or "light": Only gain normalization (recommended)
+                - "medium": Normalization + high-pass filter
+                - "heavy": Full processing with noise gate
         """
         self.sample_rate = sample_rate
         self.channels = channels
         self.device = device
-        self.preprocessing = preprocessing
+        # Convert bool to level string for backwards compatibility
+        if preprocessing is True:
+            self.preprocessing = "light"
+        elif preprocessing is False:
+            self.preprocessing = "off"
+        else:
+            self.preprocessing = preprocessing
         self.frames: list[np.ndarray] = []
         self.stream: sd.InputStream | None = None
         self._temp_file: tempfile.NamedTemporaryFile | None = None
@@ -127,12 +142,13 @@ class AudioRecorder:
         )
         self.stream.start()
 
-    def stop(self, apply_preprocessing: bool | None = None) -> str:
+    def stop(self, apply_preprocessing: bool | str | None = None) -> str:
         """
         Stop recording and save to a temporary WAV file.
 
         Args:
             apply_preprocessing: Override instance preprocessing setting
+                Can be bool (True="light", False="off") or level string
             
         Returns:
             Path to the temporary WAV file containing the recording.
@@ -148,10 +164,16 @@ class AudioRecorder:
         # Concatenate all frames
         audio_data = np.concatenate(self.frames, axis=0)
         
-        # Apply preprocessing if enabled
-        do_preprocess = apply_preprocessing if apply_preprocessing is not None else self.preprocessing
-        if do_preprocess:
-            audio_data = preprocess_audio(audio_data, self.sample_rate)
+        # Determine preprocessing level
+        level = apply_preprocessing if apply_preprocessing is not None else self.preprocessing
+        if level is True:
+            level = "light"
+        elif level is False:
+            level = "off"
+        
+        # Apply preprocessing
+        if level and level != "off":
+            audio_data = preprocess_audio(audio_data, self.sample_rate, level=level)
 
         # Convert float32 [-1.0, 1.0] to int16
         audio_int16 = (audio_data * 32767).astype(np.int16)
@@ -226,7 +248,7 @@ class ChunkedRecorder:
         sample_rate: int = 16000,
         channels: int = 1,
         device: int | None = None,
-        preprocessing: bool = True,
+        preprocessing: bool | str = "light",
         chunk_duration: float = 30.0,
         chunk_overlap: float = 2.0,
         on_chunk_ready: Callable[[str, int], None] | None = None,
@@ -238,7 +260,11 @@ class ChunkedRecorder:
             sample_rate: Audio sample rate in Hz (default 16000 for whisper)
             channels: Number of audio channels (default 1 for mono)
             device: Audio input device index (None for default)
-            preprocessing: Enable audio preprocessing
+            preprocessing: Audio preprocessing level:
+                - False or "off": No processing
+                - True or "light": Only gain normalization (recommended)
+                - "medium": Normalization + high-pass filter
+                - "heavy": Full processing with noise gate
             chunk_duration: Duration of each chunk in seconds
             chunk_overlap: Overlap between chunks in seconds
             on_chunk_ready: Callback when a chunk is ready (path, chunk_index)
@@ -246,7 +272,13 @@ class ChunkedRecorder:
         self.sample_rate = sample_rate
         self.channels = channels
         self.device = device
-        self.preprocessing = preprocessing
+        # Convert bool to level string for backwards compatibility
+        if preprocessing is True:
+            self.preprocessing = "light"
+        elif preprocessing is False:
+            self.preprocessing = "off"
+        else:
+            self.preprocessing = preprocessing
         self.chunk_duration = chunk_duration
         self.chunk_overlap = chunk_overlap
         self.on_chunk_ready = on_chunk_ready
@@ -338,9 +370,9 @@ class ChunkedRecorder:
     def _save_chunk(self, audio_data: np.ndarray) -> str | None:
         """Save a chunk to a temporary WAV file."""
         try:
-            # Apply preprocessing if enabled
-            if self.preprocessing:
-                audio_data = preprocess_audio(audio_data, self.sample_rate)
+            # Apply preprocessing based on level
+            if self.preprocessing and self.preprocessing != "off":
+                audio_data = preprocess_audio(audio_data, self.sample_rate, level=self.preprocessing)
             
             # Convert float32 to int16
             audio_int16 = (audio_data * 32767).astype(np.int16)

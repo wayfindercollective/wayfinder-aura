@@ -19,8 +19,13 @@ class TranscriptionBackend(ABC):
     """Abstract base class for transcription backends."""
     
     @abstractmethod
-    def transcribe(self, audio_path: str) -> str:
-        """Transcribe an audio file to text."""
+    def transcribe(self, audio_path: str, context: str = "") -> str:
+        """Transcribe an audio file to text.
+        
+        Args:
+            audio_path: Path to the audio file
+            context: Optional context from previous transcription for continuity
+        """
         pass
     
     @abstractmethod
@@ -86,16 +91,33 @@ class WhisperCppBackend(TranscriptionBackend):
         # Cache GPU support check
         self._gpu_supported: Optional[bool] = None
     
-    def _build_prompt(self) -> str:
-        """Build the final prompt by combining base prompt with custom vocabulary."""
-        if not self.custom_vocabulary:
-            return self.prompt
+    def _build_prompt(self, context: str = "") -> str:
+        """
+        Build the final prompt intelligently based on available context.
         
-        # Append custom vocabulary terms to the prompt
-        vocab_str = ", ".join(self.custom_vocabulary)
-        if self.prompt:
-            return f"{self.prompt} {vocab_str}."
-        return vocab_str
+        Strategy:
+        - First chunk (no context): Use base prompt + custom vocabulary
+        - Subsequent chunks: Use chunk context + custom vocabulary
+          (real speech is better context than a generic prompt)
+        """
+        parts = []
+        
+        if context:
+            # We have real context from previous chunk - use it instead of base prompt
+            # This gives Whisper actual speech patterns to continue from
+            context_snippet = context.strip()[-200:] if len(context) > 200 else context.strip()
+            parts.append(context_snippet)
+        else:
+            # First chunk - use base prompt to establish style
+            if self.prompt:
+                parts.append(self.prompt)
+        
+        # Always include custom vocabulary (user's specific terms/names)
+        if self.custom_vocabulary:
+            vocab_str = ", ".join(self.custom_vocabulary)
+            parts.append(vocab_str)
+        
+        return " ".join(parts) if parts else ""
     
     def get_name(self) -> str:
         return "whisper.cpp"
@@ -138,12 +160,13 @@ class WhisperCppBackend(TranscriptionBackend):
             self._gpu_supported = False
             return False
     
-    def transcribe(self, audio_path: str) -> str:
+    def transcribe(self, audio_path: str, context: str = "") -> str:
         """
         Transcribe an audio file using whisper.cpp.
         
         Args:
             audio_path: Path to the WAV file to transcribe
+            context: Optional context from previous transcription for continuity
             
         Returns:
             Transcribed text string
@@ -159,8 +182,8 @@ class WhisperCppBackend(TranscriptionBackend):
         if not Path(audio_path).exists():
             raise TranscriptionError(f"Audio file not found: {audio_path}")
 
-        # Build the final prompt with custom vocabulary
-        final_prompt = self._build_prompt()
+        # Build the final prompt with custom vocabulary and context
+        final_prompt = self._build_prompt(context)
         
         cmd = [
             self.whisper_binary,
@@ -272,15 +295,31 @@ class FasterWhisperBackend(TranscriptionBackend):
         self._model = None
         self._gpu_supported: Optional[bool] = None
     
-    def _build_prompt(self) -> str:
-        """Build the final prompt by combining base prompt with custom vocabulary."""
-        if not self.custom_vocabulary:
-            return self.prompt
+    def _build_prompt(self, context: str = "") -> str:
+        """
+        Build the final prompt intelligently based on available context.
         
-        vocab_str = ", ".join(self.custom_vocabulary)
-        if self.prompt:
-            return f"{self.prompt} {vocab_str}."
-        return vocab_str
+        Strategy:
+        - First chunk (no context): Use base prompt + custom vocabulary
+        - Subsequent chunks: Use chunk context + custom vocabulary
+        """
+        parts = []
+        
+        if context:
+            # Real context from previous chunk takes priority
+            context_snippet = context.strip()[-200:] if len(context) > 200 else context.strip()
+            parts.append(context_snippet)
+        else:
+            # First chunk - use base prompt
+            if self.prompt:
+                parts.append(self.prompt)
+        
+        # Always include custom vocabulary
+        if self.custom_vocabulary:
+            vocab_str = ", ".join(self.custom_vocabulary)
+            parts.append(vocab_str)
+        
+        return " ".join(parts) if parts else ""
     
     def get_name(self) -> str:
         return "Faster-Whisper"
@@ -338,12 +377,13 @@ class FasterWhisperBackend(TranscriptionBackend):
         except Exception as e:
             raise TranscriptionError(f"Failed to load Faster-Whisper model: {e}")
     
-    def transcribe(self, audio_path: str) -> str:
+    def transcribe(self, audio_path: str, context: str = "") -> str:
         """
         Transcribe an audio file using Faster-Whisper.
         
         Args:
             audio_path: Path to the audio file to transcribe
+            context: Optional context from previous transcription for continuity
             
         Returns:
             Transcribed text string
@@ -366,8 +406,8 @@ class FasterWhisperBackend(TranscriptionBackend):
             # Prepare transcription options
             language = self.language if self.language.lower() != "auto" else None
             
-            # Build prompt with custom vocabulary
-            final_prompt = self._build_prompt()
+            # Build prompt with custom vocabulary and context
+            final_prompt = self._build_prompt(context)
             
             segments, info = model.transcribe(
                 audio_path,
@@ -376,7 +416,7 @@ class FasterWhisperBackend(TranscriptionBackend):
                 beam_size=self.beam_size,
                 best_of=self.best_of,
                 temperature=self.temperature,
-                vad_filter=True,  # Voice activity detection
+                vad_filter=False,  # Disabled - was cutting off words
             )
             
             # Collect all segments into text
@@ -438,7 +478,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
         )
 
 
-def transcribe_with_config(audio_path: str, config: dict) -> str:
+def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> str:
     """
     Transcribe using settings from config dictionary.
     This is the main entry point for transcription.
@@ -446,12 +486,13 @@ def transcribe_with_config(audio_path: str, config: dict) -> str:
     Args:
         audio_path: Path to the WAV file to transcribe
         config: Configuration dictionary with transcription settings
+        context: Optional context from previous transcription (helps continuity)
 
     Returns:
         Transcribed text string
     """
     backend = get_backend(config)
-    return backend.transcribe(audio_path)
+    return backend.transcribe(audio_path, context=context)
 
 
 # Legacy function for backwards compatibility

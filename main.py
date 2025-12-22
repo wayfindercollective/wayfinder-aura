@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
     "temperature": 0.0,  # Sampling temperature (0.0 = greedy/deterministic)
     "temperature_fallback": 0.0,  # Temperature increment for retries (0 = no retries)
     "accuracy_mode": "balanced",  # fast | balanced | high
-    "audio_preprocessing": True,  # Enable gain normalization and noise filtering
+    "audio_preprocessing": "light",  # off | light | medium | heavy
     # Vocabulary and hallucination suppression
     "custom_vocabulary": [],  # User's personal terms appended to prompt
     "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
@@ -274,7 +274,7 @@ SETTING_TOOLTIPS = {
     "accuracy_mode": "Preset balancing speed vs accuracy. Fast is quicker, High Accuracy uses more processing.",
     "beam_size": "Search width for transcription. Higher values explore more possibilities but take longer.",
     "language": "The language for transcription. English is optimized, Auto-detect works for multiple languages.",
-    "audio_preprocessing": "Apply gain normalization and noise filtering to improve audio quality before transcription.",
+    "audio_preprocessing": "Audio processing level. Light = gain only (recommended). Medium adds filtering. Heavy adds noise gate (may cut words).",
     "chunked_mode": "Process long recordings in segments. Prevents memory issues and allows progressive output.",
     "chunk_duration": "Length of each audio segment when using chunked recording. Shorter chunks use less memory.",
     "backend": "The transcription engine. whisper.cpp is lightweight, Faster-Whisper has better GPU support.",
@@ -912,7 +912,7 @@ class WayfinderApp(ctk.CTk):
         self.recorder = AudioRecorder(
             sample_rate=self.config["sample_rate"],
             device=self.config["audio_device"],
-            preprocessing=self.config.get("audio_preprocessing", True),
+            preprocessing=self.config.get("audio_preprocessing", "light"),
         )
         
         # Chunked recorder for indefinite recording
@@ -1314,15 +1314,71 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["language"],
         )
         
-        # Audio preprocessing toggle
-        self.preprocess_var = ctk.BooleanVar(value=self.config.get("audio_preprocessing", True))
-        self.create_toggle_row(
-            advanced_card,
-            "Audio Preprocessing",
-            self.preprocess_var,
-            self.toggle_preprocessing,
-            tooltip=SETTING_TOOLTIPS["audio_preprocessing"],
+        # Audio preprocessing level dropdown
+        preprocess_level = self.config.get("audio_preprocessing", "light")
+        # Handle legacy boolean values
+        if preprocess_level is True:
+            preprocess_level = "light"
+        elif preprocess_level is False:
+            preprocess_level = "off"
+        
+        preprocess_row = ctk.CTkFrame(advanced_card, fg_color="transparent")
+        preprocess_row.pack(fill="x", padx=18, pady=11)
+        
+        # Left side: label + info icon (matches create_setting_row style)
+        left_frame = ctk.CTkFrame(preprocess_row, fg_color="transparent")
+        left_frame.pack(side="left")
+        
+        ctk.CTkLabel(
+            left_frame,
+            text="Audio Processing",
+            font=(self.font_body[0], 14),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        
+        info_label = ctk.CTkLabel(
+            left_frame,
+            text="ⓘ",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_muted"],
+            cursor="hand2",
         )
+        info_label.pack(side="left", padx=(6, 0))
+        info_label.bind("<Button-1>", lambda e: self.show_preprocessing_help())
+        
+        # Right side: description + dropdown (styled like other buttons)
+        right_frame = ctk.CTkFrame(preprocess_row, fg_color="transparent")
+        right_frame.pack(side="right")
+        
+        # Brief description label
+        self.preprocess_desc_label = ctk.CTkLabel(
+            right_frame,
+            text=self._get_preprocess_desc(preprocess_level),
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+            anchor="e",
+        )
+        self.preprocess_desc_label.pack(side="left", padx=(0, 10))
+        
+        self.preprocess_var = ctk.StringVar(value=preprocess_level)
+        self.preprocess_dropdown = ctk.CTkOptionMenu(
+            right_frame,
+            values=["off", "light", "medium", "heavy"],
+            variable=self.preprocess_var,
+            command=self.on_preprocessing_changed,
+            fg_color=COLORS["bg_hover"],
+            button_color=COLORS["bg_elevated"],
+            button_hover_color=COLORS["accent_dim"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_hover"],
+            dropdown_text_color=COLORS["text_primary"],
+            text_color=COLORS["accent"],
+            font=(self.font_body[0], 12),
+            width=100,
+            height=32,
+            corner_radius=8,
+        )
+        self.preprocess_dropdown.pack(side="right")
         
         # Chunked recording settings label
         ctk.CTkLabel(
@@ -1575,11 +1631,82 @@ class WayfinderApp(ctk.CTk):
             self.advanced_toggle_btn.configure(text="▶  ADVANCED")
             self.advanced_container.pack_forget()
     
-    def toggle_preprocessing(self):
-        """Toggle audio preprocessing."""
-        self.config["audio_preprocessing"] = self.preprocess_var.get()
+    def _get_preprocess_desc(self, level: str) -> str:
+        """Get brief description for audio processing level."""
+        descs = {
+            "off": "Raw audio",
+            "light": "Volume only",
+            "medium": "Filter noise",
+            "heavy": "Full cleanup",
+        }
+        return descs.get(level, "")
+    
+    def on_preprocessing_changed(self, value: str):
+        """Handle audio preprocessing level change."""
+        self.config["audio_preprocessing"] = value
         save_config(self.config)
-        self.log(f"⚙ Audio preprocessing: {'on' if self.preprocess_var.get() else 'off'}")
+        # Update description label
+        if hasattr(self, 'preprocess_desc_label'):
+            self.preprocess_desc_label.configure(text=self._get_preprocess_desc(value))
+        self.log(f"⚙ Audio processing: {value}")
+    
+    def show_preprocessing_help(self):
+        """Show help dialog explaining audio processing levels."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Audio Processing Help")
+        dialog.geometry("420x300")
+        dialog.configure(fg_color=COLORS["bg_dark"])
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        ctk.CTkLabel(
+            dialog,
+            text="Audio Processing Levels",
+            font=(self.font_body[0], 16, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(pady=(20, 15))
+        
+        levels = [
+            ("off", "No processing", "Raw audio passed directly to Whisper. Use if words are being cut off."),
+            ("light", "Light (Recommended)", "Only adjusts volume levels. Preserves all speech including soft sounds."),
+            ("medium", "Medium", "Adds a filter to remove low rumble/hum. Good for noisy environments."),
+            ("heavy", "Heavy", "Adds noise gate that reduces quiet sounds. May cut off soft consonants."),
+        ]
+        
+        for value, title, desc in levels:
+            frame = ctk.CTkFrame(dialog, fg_color=COLORS["bg_card"], corner_radius=8)
+            frame.pack(fill="x", padx=20, pady=4)
+            
+            # Highlight current selection
+            current = self.config.get("audio_preprocessing", "light")
+            if current == value:
+                frame.configure(border_width=1, border_color=COLORS["accent"])
+            
+            ctk.CTkLabel(
+                frame,
+                text=title,
+                font=(self.font_body[0], 13, "bold"),
+                text_color=COLORS["accent"] if current == value else COLORS["text_primary"],
+            ).pack(anchor="w", padx=12, pady=(8, 2))
+            
+            ctk.CTkLabel(
+                frame,
+                text=desc,
+                font=(self.font_body[0], 11),
+                text_color=COLORS["text_secondary"],
+                wraplength=360,
+            ).pack(anchor="w", padx=12, pady=(0, 8))
+        
+        ctk.CTkButton(
+            dialog,
+            text="Close",
+            command=dialog.destroy,
+            fg_color=COLORS["bg_elevated"],
+            hover_color=COLORS["bg_hover"],
+            font=(self.font_body[0], 12),
+            height=32,
+            width=80,
+        ).pack(pady=15)
         # Update recorder
         self.recorder.preprocessing = self.preprocess_var.get()
     
@@ -3742,9 +3869,10 @@ class WayfinderApp(ctk.CTk):
         elif event_type == EventType.INJECTION_ERROR:
             self.on_error(f"Injection: {data}")
         elif event_type == EventType.CHUNK_TRANSCRIBED:
-            chunk_index, text = data
+            chunk_index, text, had_context = data if len(data) == 3 else (*data, False)
             preview = text[:30] + "..." if len(text) > 30 else text
-            self.log(f"✓ Chunk {chunk_index + 1}: \"{preview}\"")
+            context_indicator = " →" if had_context else ""
+            self.log(f"✓ Chunk {chunk_index + 1}{context_indicator}: \"{preview}\"")
         elif event_type == EventType.CHUNKED_TRANSCRIPTION_DONE:
             self.on_transcription_done(data)
 
@@ -3793,7 +3921,7 @@ class WayfinderApp(ctk.CTk):
         self.chunked_recorder = ChunkedRecorder(
             sample_rate=self.config["sample_rate"],
             device=self.config["audio_device"],
-            preprocessing=self.config.get("audio_preprocessing", True),
+            preprocessing=self.config.get("audio_preprocessing", "light"),
             chunk_duration=self.config.get("chunk_duration", 30),
             chunk_overlap=self.config.get("chunk_overlap", 2),
             on_chunk_ready=on_chunk_ready,
@@ -3803,14 +3931,27 @@ class WayfinderApp(ctk.CTk):
     def _transcribe_chunk(self, chunk_path: str, chunk_index: int):
         """Transcribe a single chunk in the background."""
         try:
-            text = transcribe_with_config(chunk_path, self.config)
+            # Get context from previous chunk for continuity
+            context = ""
+            if chunk_index > 0:
+                with self.chunk_transcription_lock:
+                    if len(self.chunk_transcriptions) >= chunk_index:
+                        prev_text = self.chunk_transcriptions[chunk_index - 1]
+                        if prev_text:
+                            context = prev_text
+            
+            text = transcribe_with_config(chunk_path, self.config, context=context)
             with self.chunk_transcription_lock:
                 # Ensure list is large enough
                 while len(self.chunk_transcriptions) <= chunk_index:
                     self.chunk_transcriptions.append("")
                 self.chunk_transcriptions[chunk_index] = text.strip()
             
-            self.event_queue.put((EventType.CHUNK_TRANSCRIBED, (chunk_index, text)))
+            # Log with context indicator for chunks after the first
+            if chunk_index > 0 and context:
+                self.event_queue.put((EventType.CHUNK_TRANSCRIBED, (chunk_index, text, True)))  # True = had context
+            else:
+                self.event_queue.put((EventType.CHUNK_TRANSCRIBED, (chunk_index, text, False)))
         except Exception as e:
             self.log(f"⚠ Chunk {chunk_index + 1} error: {e}")
     
