@@ -832,37 +832,30 @@ class FloatingIndicator:
         except:
             pass
         
-        # Configure the window with transparent-ish background
-        self.window.configure(fg_color=COLORS["bg_base"])
+        # Make window background match the pill - no visible container
+        pill_bg = "#1a1a22"  # Slightly lighter than pure black, matches the pill
+        self.window.configure(fg_color=pill_bg)
         
-        # Create outer glow frame
-        glow_frame = ctk.CTkFrame(
+        # Single pill-shaped frame with colored glow border
+        self.main_frame = ctk.CTkFrame(
             self.window,
-            fg_color=COLORS["bg_base"],
-            corner_radius=20,
-        )
-        glow_frame.pack(padx=4, pady=4)
-        
-        # Create main pill-shaped frame with glow border
-        frame = ctk.CTkFrame(
-            glow_frame,
-            fg_color=COLORS["bg_card"],
-            corner_radius=16,
+            fg_color=pill_bg,
+            corner_radius=22,
             border_width=2,
             border_color=color,
         )
-        frame.pack(padx=3, pady=3)
+        self.main_frame.pack(padx=0, pady=0)
         
-        # Inner content frame
-        inner = ctk.CTkFrame(frame, fg_color="transparent")
-        inner.pack(padx=14, pady=10)
+        # Inner content
+        inner = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        inner.pack(padx=16, pady=12)
         
-        # Glowing status indicator dot (larger canvas for glow effect)
+        # Glowing status indicator dot
         self.dot_canvas = ctk.CTkCanvas(
             inner,
-            width=20,
-            height=20,
-            bg=COLORS["bg_card"],
+            width=18,
+            height=18,
+            bg=pill_bg,
             highlightthickness=0,
         )
         self.dot_canvas.pack(side="left", padx=(0, 10))
@@ -872,10 +865,10 @@ class FloatingIndicator:
         self.label = ctk.CTkLabel(
             inner,
             text=text,
-            font=("SF Pro Display", 15, "bold") if self._font_exists("SF Pro Display") else ("Inter", 15, "bold"),
+            font=("SF Pro Display", 14, "bold") if self._font_exists("SF Pro Display") else ("Inter", 14, "bold"),
             text_color=COLORS["text_bright"],
         )
-        self.label.pack(side="left", padx=(0, 4))
+        self.label.pack(side="left", padx=(0, 2))
         
         self.current_color = color
         
@@ -903,20 +896,12 @@ class FloatingIndicator:
         if color and color != self.current_color:
             self.current_color = color
             self._draw_dot(color)
-            # Update border color on the main frame (nested inside glow_frame)
-            self._update_border_color(self.window, color)
-    
-    def _update_border_color(self, widget, color: str) -> None:
-        """Recursively find and update border color on frames."""
-        for child in widget.winfo_children():
-            if isinstance(child, ctk.CTkFrame):
+            # Update border color on the main frame
+            if hasattr(self, 'main_frame') and self.main_frame:
                 try:
-                    # Try to update border - will work on frames with borders
-                    child.configure(border_color=color)
+                    self.main_frame.configure(border_color=color)
                 except:
                     pass
-                # Check children too
-                self._update_border_color(child, color)
                     
     def hide(self) -> None:
         """Hide and destroy the floating indicator."""
@@ -980,17 +965,20 @@ class FloatingIndicator:
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
         
-        # Canvas is 20x20, center is at 10,10
-        cx, cy = 10, 10
+        # Canvas is 18x18
+        canvas_size = 18
+        
+        # Background color for blending (pill_bg = #1a1a22)
+        bg_r, bg_g, bg_b = 26, 26, 34
         
         # Draw outer glow layers (soft fade)
-        for i, alpha in enumerate([0.1, 0.15, 0.25, 0.4]):
-            glow_size = int((18 - i * 3) * scale)
-            offset = (20 - glow_size) // 2
+        for i, alpha in enumerate([0.12, 0.2, 0.35, 0.5]):
+            glow_size = int((16 - i * 2.5) * scale)
+            offset = (canvas_size - glow_size) // 2
             # Mix with background
-            gr = int(r * alpha + 13 * (1 - alpha))  # bg_card is ~#141419
-            gg = int(g * alpha + 20 * (1 - alpha))
-            gb = int(b * alpha + 25 * (1 - alpha))
+            gr = int(r * alpha + bg_r * (1 - alpha))
+            gg = int(g * alpha + bg_g * (1 - alpha))
+            gb = int(b * alpha + bg_b * (1 - alpha))
             glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
             self.dot_canvas.create_oval(
                 offset, offset,
@@ -1000,8 +988,8 @@ class FloatingIndicator:
             )
         
         # Draw bright core
-        core_size = int(8 * scale)
-        core_offset = (20 - core_size) // 2
+        core_size = int(7 * scale)
+        core_offset = (canvas_size - core_size) // 2
         self.dot_canvas.create_oval(
             core_offset, core_offset,
             core_offset + core_size, core_offset + core_size,
