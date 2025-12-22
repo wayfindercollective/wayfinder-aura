@@ -185,3 +185,5 @@ MIT License - See LICENSE file
 - [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) - Modern UI
 - UI Design inspired by Wayfinder OS
 
+
+

@@ -3,14 +3,35 @@ Text injection module for Wayfinder Voice.
 Handles text injection on Wayland using ydotool.
 """
 
+import os
 import subprocess
 import shutil
+from pathlib import Path
 
 
 class InjectionError(Exception):
     """Raised when text injection fails."""
 
     pass
+
+
+def _get_ydotool_env() -> dict:
+    """Get environment with correct ydotool socket path."""
+    env = os.environ.copy()
+    
+    # Check common socket locations (varies by distro/setup)
+    socket_paths = [
+        "/run/ydotool/ydotool.sock",  # System service (Bazzite/Fedora)
+        f"/run/user/{os.getuid()}/.ydotool_socket",  # User service
+        "/tmp/.ydotool_socket",  # Fallback
+    ]
+    
+    for socket_path in socket_paths:
+        if Path(socket_path).exists():
+            env["YDOTOOL_SOCKET"] = socket_path
+            break
+    
+    return env
 
 
 # Typing speed presets: (key_delay_ms, key_hold_ms)
@@ -58,11 +79,15 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
             "--", text
         ]
         
+        # Get environment with correct socket path
+        env = _get_ydotool_env()
+        
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=120,
+            env=env,
         )
         
         if result.returncode != 0:
