@@ -2873,8 +2873,10 @@ class WayfinderApp(ctk.CTk):
             "General Dictation": "Hello, this is a dictation with proper punctuation and grammar.",
             "Conversational": "Okay, so, you know, like, actually, basically, I mean, right, anyway.",
             
+            # Casual/relaxed style
+            "Casual": "yeah, nah, kinda, gonna, wanna, gotta, lemme, dunno, cool, awesome, honestly, literally, basically, like, right, haha, lol...",
+            
             # Technical prompts - vocabulary style
-            "Technical/Linux": "Linux, Fedora, Bazzite, Wayfinder, sudo, grep, bash, terminal, CLI, SSH, systemd, dnf, flatpak, GNOME, KDE, Wayland.",
             "Technical/Code": "Python, TypeScript, JavaScript, React, API, JSON, async, await, function, const, import, export, npm, git, commit, merge, PR.",
             "Technical/AI-ML": "whisper.cpp, ggml, LLM, GPT, transformer, model, inference, CUDA, tensor, embedding, tokenizer, fine-tuning, quantization.",
             
