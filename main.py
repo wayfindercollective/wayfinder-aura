@@ -85,6 +85,8 @@ DEFAULT_CONFIG = {
     # Faster-Whisper specific settings
     "faster_whisper_model": "small",  # tiny, base, small, medium, large-v3
     "faster_whisper_compute_type": "float16",  # float16, int8, int8_float16
+    # Floating indicator settings
+    "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
 }
 
 KEY_CODES = {
@@ -175,6 +177,104 @@ STATE_LABELS = {
     AppState.RECORDING: "Listening",
     AppState.PROCESSING: "Processing",
     AppState.PASTING: "Typing",
+}
+
+
+# === Tooltip Helper ===
+
+class ToolTip:
+    """Hover tooltip for CustomTkinter widgets."""
+    
+    def __init__(self, widget, text, delay=400):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.tooltip_window = None
+        self.scheduled_id = None
+        
+        widget.bind("<Enter>", self.on_enter)
+        widget.bind("<Leave>", self.on_leave)
+        widget.bind("<ButtonPress>", self.on_leave)
+    
+    def on_enter(self, event=None):
+        self.scheduled_id = self.widget.after(self.delay, self.show_tooltip)
+    
+    def on_leave(self, event=None):
+        if self.scheduled_id:
+            self.widget.after_cancel(self.scheduled_id)
+            self.scheduled_id = None
+        self.hide_tooltip()
+    
+    def show_tooltip(self):
+        if self.tooltip_window:
+            return
+        
+        # Get widget position
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        
+        # Create tooltip window
+        self.tooltip_window = tw = ctk.CTkToplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_attributes("-topmost", True)
+        
+        # Tooltip frame with styling
+        frame = ctk.CTkFrame(
+            tw,
+            fg_color=COLORS["bg_elevated"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border"],
+        )
+        frame.pack(fill="both", expand=True)
+        
+        label = ctk.CTkLabel(
+            frame,
+            text=self.text,
+            font=("Inter", 11),
+            text_color=COLORS["text_secondary"],
+            wraplength=280,
+            justify="left",
+            padx=12,
+            pady=8,
+        )
+        label.pack()
+        
+        # Position the tooltip
+        tw.update_idletasks()
+        tw_width = tw.winfo_width()
+        screen_width = tw.winfo_screenwidth()
+        
+        # Adjust if tooltip would go off-screen
+        if x + tw_width > screen_width:
+            x = screen_width - tw_width - 10
+        
+        tw.wm_geometry(f"+{x}+{y}")
+    
+    def hide_tooltip(self):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+
+
+# Setting tooltip descriptions
+SETTING_TOOLTIPS = {
+    "hotkey": "The keyboard shortcut to start/stop voice recording. Press and release to toggle.",
+    "input_devices": "Which input devices to listen for the hotkey. Select specific devices or use all available.",
+    "typing_speed": "How fast the transcribed text is typed out. Instant pastes immediately, others simulate typing.",
+    "whisper_model": "The Whisper AI model for transcription. Larger models are more accurate but slower.",
+    "prompt": "Initial text that guides the transcription style. Helps with punctuation and formatting.",
+    "start_minimized": "Start the app minimized to the system tray instead of showing the main window.",
+    "ui_scale": "Adjust the size of the user interface for different screen sizes or preferences.",
+    "accuracy_mode": "Preset balancing speed vs accuracy. Fast is quicker, High Accuracy uses more processing.",
+    "beam_size": "Search width for transcription. Higher values explore more possibilities but take longer.",
+    "language": "The language for transcription. English is optimized, Auto-detect works for multiple languages.",
+    "audio_preprocessing": "Apply gain normalization and noise filtering to improve audio quality before transcription.",
+    "chunked_mode": "Process long recordings in segments. Prevents memory issues and allows progressive output.",
+    "chunk_duration": "Length of each audio segment when using chunked recording. Shorter chunks use less memory.",
+    "backend": "The transcription engine. whisper.cpp is lightweight, Faster-Whisper has better GPU support.",
+    "gpu_acceleration": "Use your GPU for faster transcription. Requires compatible hardware and drivers.",
+    "gpu_layers": "How many model layers to run on GPU. Auto uses all layers, or set a specific number.",
 }
 
 
@@ -499,8 +599,11 @@ class FloatingIndicator:
         self.window: ctk.CTkToplevel | None = None
         self.label: ctk.CTkLabel | None = None
         self.pulse_job: str | None = None
+        self.follow_job: str | None = None
         self.pulse_state = 0
         self._visible = False
+        self._window_width = 0
+        self._window_height = 0
         
     def show(self, text: str = "Listening...", color: str = COLORS["accent_red"]) -> None:
         """Show the floating indicator with the given text."""
@@ -566,25 +669,15 @@ class FloatingIndicator:
         
         # Position near cursor (offset slightly so it doesn't cover click target)
         self.window.update_idletasks()
-        width = self.window.winfo_width()
-        height = self.window.winfo_height()
+        self._window_width = self.window.winfo_width()
+        self._window_height = self.window.winfo_height()
         
-        # Position to the right and below cursor
-        pos_x = x + 20
-        pos_y = y + 20
-        
-        # Keep on screen
-        screen_w = self.parent.winfo_screenwidth()
-        screen_h = self.parent.winfo_screenheight()
-        if pos_x + width > screen_w:
-            pos_x = x - width - 20
-        if pos_y + height > screen_h:
-            pos_y = y - height - 20
-            
-        self.window.geometry(f"+{pos_x}+{pos_y}")
+        # Initial position
+        self._update_position(x, y)
         
         self._visible = True
         self._start_pulse()
+        self._start_follow()
         
     def update(self, text: str, color: str | None = None) -> None:
         """Update the indicator text and optionally color."""
@@ -606,6 +699,7 @@ class FloatingIndicator:
     def hide(self) -> None:
         """Hide and destroy the floating indicator."""
         self._stop_pulse()
+        self._stop_follow()
         self._visible = False
         
         if self.window:
@@ -616,6 +710,25 @@ class FloatingIndicator:
             self.window = None
             self.label = None
             self.dot_canvas = None
+    
+    def _update_position(self, x: int, y: int) -> None:
+        """Update window position near the given cursor coordinates."""
+        if not self.window:
+            return
+            
+        # Position to the right and below cursor
+        pos_x = x + 20
+        pos_y = y + 20
+        
+        # Keep on screen
+        screen_w = self.parent.winfo_screenwidth()
+        screen_h = self.parent.winfo_screenheight()
+        if pos_x + self._window_width > screen_w:
+            pos_x = x - self._window_width - 20
+        if pos_y + self._window_height > screen_h:
+            pos_y = y - self._window_height - 20
+            
+        self.window.geometry(f"+{pos_x}+{pos_y}")
             
     def _draw_dot(self, color: str, scale: float = 1.0) -> None:
         """Draw the status indicator dot."""
@@ -681,6 +794,35 @@ class FloatingIndicator:
             except:
                 pass
         self.pulse_job = None
+    
+    def _start_follow(self) -> None:
+        """Start following the cursor."""
+        self._follow_step()
+        
+    def _follow_step(self) -> None:
+        """Update position to follow cursor."""
+        if not self._visible or not self.window:
+            return
+            
+        try:
+            x = self.parent.winfo_pointerx()
+            y = self.parent.winfo_pointery()
+            self._update_position(x, y)
+        except:
+            pass
+        
+        # Schedule next update (30fps for smooth following)
+        if self.window:
+            self.follow_job = self.window.after(33, self._follow_step)
+            
+    def _stop_follow(self) -> None:
+        """Stop following the cursor."""
+        if self.follow_job and self.window:
+            try:
+                self.window.after_cancel(self.follow_job)
+            except:
+                pass
+        self.follow_job = None
 
 
 # === Main Application ===
@@ -956,6 +1098,7 @@ class WayfinderApp(ctk.CTk):
             "Hotkey",
             self.get_hotkey_display(),
             self.open_hotkey_settings,
+            tooltip=SETTING_TOOLTIPS["hotkey"],
         )
         
         # Input devices setting
@@ -967,6 +1110,7 @@ class WayfinderApp(ctk.CTk):
             "Input Devices",
             device_text,
             self.open_device_settings,
+            tooltip=SETTING_TOOLTIPS["input_devices"],
         )
         
         # Typing speed setting
@@ -977,6 +1121,7 @@ class WayfinderApp(ctk.CTk):
             "Typing Speed",
             speed_display,
             self.open_speed_settings,
+            tooltip=SETTING_TOOLTIPS["typing_speed"],
         )
         
         # Model setting
@@ -986,6 +1131,7 @@ class WayfinderApp(ctk.CTk):
             "Whisper Model",
             model_display,
             self.open_model_settings,
+            tooltip=SETTING_TOOLTIPS["whisper_model"],
         )
         
         # Prompt setting
@@ -995,6 +1141,7 @@ class WayfinderApp(ctk.CTk):
             "Prompt",
             prompt_display,
             self.open_prompt_settings,
+            tooltip=SETTING_TOOLTIPS["prompt"],
         )
         
         # Start minimized setting
@@ -1004,6 +1151,7 @@ class WayfinderApp(ctk.CTk):
             "Start minimized to tray",
             self.start_min_var,
             self.toggle_start_minimized,
+            tooltip=SETTING_TOOLTIPS["start_minimized"],
         )
         
         # UI Scale setting
@@ -1013,6 +1161,7 @@ class WayfinderApp(ctk.CTk):
             "UI Scale",
             scale_display,
             self.open_scale_settings,
+            tooltip=SETTING_TOOLTIPS["ui_scale"],
         )
         
         # === Collapsible Advanced Settings ===
@@ -1065,6 +1214,7 @@ class WayfinderApp(ctk.CTk):
             "Accuracy Mode",
             mode_display,
             self.open_accuracy_mode_settings,
+            tooltip=SETTING_TOOLTIPS["accuracy_mode"],
         )
         
         # Beam size setting
@@ -1074,6 +1224,7 @@ class WayfinderApp(ctk.CTk):
             "Beam Size",
             str(beam_size),
             self.open_beam_settings,
+            tooltip=SETTING_TOOLTIPS["beam_size"],
         )
         
         # Language setting
@@ -1084,6 +1235,7 @@ class WayfinderApp(ctk.CTk):
             "Language",
             lang_display,
             self.open_language_settings,
+            tooltip=SETTING_TOOLTIPS["language"],
         )
         
         # Audio preprocessing toggle
@@ -1093,6 +1245,7 @@ class WayfinderApp(ctk.CTk):
             "Audio Preprocessing",
             self.preprocess_var,
             self.toggle_preprocessing,
+            tooltip=SETTING_TOOLTIPS["audio_preprocessing"],
         )
         
         # Chunked recording settings label
@@ -1107,9 +1260,10 @@ class WayfinderApp(ctk.CTk):
         self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
         self.create_toggle_row(
             advanced_card,
-            "Chunked Recording (for long dictation)",
+            "Chunked Recording",
             self.chunked_var,
             self.toggle_chunked_mode,
+            tooltip=SETTING_TOOLTIPS["chunked_mode"],
         )
         
         # Chunk duration setting
@@ -1119,6 +1273,7 @@ class WayfinderApp(ctk.CTk):
             "Chunk Duration",
             f"{chunk_duration}s",
             self.open_chunk_settings,
+            tooltip=SETTING_TOOLTIPS["chunk_duration"],
         )
         
         # GPU Acceleration settings label
@@ -1137,15 +1292,17 @@ class WayfinderApp(ctk.CTk):
             "Backend",
             backend_display,
             self.open_backend_settings,
+            tooltip=SETTING_TOOLTIPS["backend"],
         )
         
         # GPU toggle
         self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", False))
         self.create_toggle_row(
             advanced_card,
-            "Enable GPU Acceleration",
+            "GPU Acceleration",
             self.gpu_var,
             self.toggle_gpu,
+            tooltip=SETTING_TOOLTIPS["gpu_acceleration"],
         )
         
         # GPU layers setting (only relevant for whisper.cpp)
@@ -1156,6 +1313,7 @@ class WayfinderApp(ctk.CTk):
             "GPU Layers",
             layers_display,
             self.open_gpu_layers_settings,
+            tooltip=SETTING_TOOLTIPS["gpu_layers"],
         )
         
         # === Collapsible Activity Log ===
@@ -1363,16 +1521,31 @@ class WayfinderApp(ctk.CTk):
         status = "enabled" if self.gpu_var.get() else "disabled"
         self.log(f"⚙ GPU acceleration: {status}")
 
-    def create_setting_row(self, parent, label, value, command):
+    def create_setting_row(self, parent, label, value, command, tooltip=None):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=18, pady=11)
         
+        # Left side: label + optional info icon
+        left_frame = ctk.CTkFrame(row, fg_color="transparent")
+        left_frame.pack(side="left")
+        
         ctk.CTkLabel(
-            row,
+            left_frame,
             text=label,
             font=(self.font_body[0], 14),
             text_color=COLORS["text_primary"],
         ).pack(side="left")
+        
+        if tooltip:
+            info_label = ctk.CTkLabel(
+                left_frame,
+                text="ⓘ",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_muted"],
+                cursor="question_arrow",
+            )
+            info_label.pack(side="left", padx=(6, 0))
+            ToolTip(info_label, tooltip)
         
         btn = ctk.CTkButton(
             row,
@@ -1388,16 +1561,31 @@ class WayfinderApp(ctk.CTk):
         btn.pack(side="right")
         return btn
 
-    def create_toggle_row(self, parent, label, variable, command):
+    def create_toggle_row(self, parent, label, variable, command, tooltip=None):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=18, pady=11)
         
+        # Left side: label + optional info icon
+        left_frame = ctk.CTkFrame(row, fg_color="transparent")
+        left_frame.pack(side="left")
+        
         ctk.CTkLabel(
-            row,
+            left_frame,
             text=label,
             font=(self.font_body[0], 14),
             text_color=COLORS["text_primary"],
         ).pack(side="left")
+        
+        if tooltip:
+            info_label = ctk.CTkLabel(
+                left_frame,
+                text="ⓘ",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_muted"],
+                cursor="question_arrow",
+            )
+            info_label.pack(side="left", padx=(6, 0))
+            ToolTip(info_label, tooltip)
         
         switch = ctk.CTkSwitch(
             row,
