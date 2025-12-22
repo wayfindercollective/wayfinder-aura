@@ -89,7 +89,7 @@ DEFAULT_CONFIG = {
     "temperature_fallback": 0.0,  # Temperature increment for retries (0 = no retries)
     "accuracy_mode": "balanced",  # fast | balanced | high
     "audio_preprocessing": "light",  # off | light | medium | heavy
-    "ensure_punctuation": True,  # Ensure proper punctuation in transcriptions
+    "ensure_punctuation": False,  # Additional punctuation fixes (optional, most models do this well)
     # Vocabulary and hallucination suppression
     "custom_vocabulary": [],  # User's personal terms appended to prompt
     "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
@@ -392,7 +392,7 @@ SETTING_TOOLTIPS = {
     
     # 🟢 Minimal latency impact (<10ms per invocation)
     "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
-    "ensure_punctuation": "Auto-fix punctuation (periods, commas, caps).\n🟢 Latency: +1-3ms (negligible regex processing)",
+    "ensure_punctuation": "Extra punctuation fixes if model output lacks periods/caps.\n🟢 Latency: +1-3ms (optional, most models handle this well)",
     "audio_preprocessing": "Audio signal processing before transcription.\n🟢 Off: 0ms | Light: +2ms | Medium: +5ms | Heavy: +10ms",
     
     # 🟡 Moderate latency impact (10-100ms)
@@ -1641,11 +1641,11 @@ class WayfinderApp(ctk.CTk):
         )
         self.preprocess_dropdown.pack(side="right")
         
-        # Punctuation toggle
-        self.punctuation_var = ctk.BooleanVar(value=self.config.get("ensure_punctuation", True))
+        # Punctuation toggle (optional - most models already punctuate well)
+        self.punctuation_var = ctk.BooleanVar(value=self.config.get("ensure_punctuation", False))
         self.create_toggle_row(
             advanced_card,
-            "Ensure Punctuation",
+            "Additional Punctuation",
             self.punctuation_var,
             self.toggle_punctuation,
             tooltip=SETTING_TOOLTIPS["ensure_punctuation"],
