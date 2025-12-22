@@ -1008,40 +1008,51 @@ class FloatingIndicator:
         self._follow_step()
         
     def _follow_step(self) -> None:
-        """Update position to follow cursor."""
+        """Update position - currently centered, mouse follow code preserved for future."""
         if not self._visible or not self.window:
             return
-            
+        
+        # For now, just keep centered above taskbar (more reliable on Wayland)
+        # Mouse following code preserved below for future use
+        if not self._is_centered:
+            self._center_above_taskbar()
+        
+        # Keep window on top
         try:
-            x = self.parent.winfo_pointerx()
-            y = self.parent.winfo_pointery()
-            
-            # Check if cursor position is "stuck" (not changing = likely over native Wayland app)
-            if x == self._last_cursor_x and y == self._last_cursor_y:
-                self._stuck_count += 1
-            else:
-                self._stuck_count = 0
-                self._last_cursor_x = x
-                self._last_cursor_y = y
-            
-            # If stuck for ~0.5 seconds (15 frames at 30fps), center above taskbar
-            if self._stuck_count > 15:
-                if not self._is_centered:
-                    self._center_above_taskbar()
-            else:
-                self._update_position(x, y)
-            
-            # Periodically re-assert topmost to fight Wayland stacking
             self.window.attributes("-topmost", True)
             self.window.lift()
         except:
-            # On any error, fall back to centered
-            if not self._is_centered:
-                self._center_above_taskbar()
+            pass
         
-        # Schedule next update at target FPS (synced to monitor refresh rate)
+        # Schedule next update (slower rate since we're not following mouse)
         if self.window:
-            self.follow_job = self.window.after(self._frame_interval_ms, self._follow_step)
+            self.follow_job = self.window.after(100, self._follow_step)
+        
+        # === MOUSE FOLLOWING CODE (disabled for now, enable later if needed) ===
+        # try:
+        #     x = self.parent.winfo_pointerx()
+        #     y = self.parent.winfo_pointery()
+        #     
+        #     # Check if cursor position is "stuck" (not changing = likely over native Wayland app)
+        #     if x == self._last_cursor_x and y == self._last_cursor_y:
+        #         self._stuck_count += 1
+        #     else:
+        #         self._stuck_count = 0
+        #         self._last_cursor_x = x
+        #         self._last_cursor_y = y
+        #     
+        #     # If stuck for ~0.5 seconds, center above taskbar
+        #     if self._stuck_count > 15:
+        #         if not self._is_centered:
+        #             self._center_above_taskbar()
+        #     else:
+        #         self._update_position(x, y)
+        #     
+        #     self.window.attributes("-topmost", True)
+        #     self.window.lift()
+        # except:
+        #     if not self._is_centered:
+        #         self._center_above_taskbar()
             
     def _stop_follow(self) -> None:
         """Stop following the cursor."""
