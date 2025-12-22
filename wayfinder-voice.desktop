@@ -8,6 +8,7 @@ Terminal=false
 Categories=Utility;Audio;
 Keywords=voice;dictation;speech;whisper;transcription;
 StartupNotify=true
+StartupWMClass=wayfinder-voice
 Actions=toggle-recording;
 
 [Desktop Action toggle-recording]

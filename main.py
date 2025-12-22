@@ -752,6 +752,12 @@ class FloatingIndicator:
         self._window_width = 0
         self._window_height = 0
         
+        # Track cursor position for stuck detection
+        self._last_cursor_x = 0
+        self._last_cursor_y = 0
+        self._stuck_count = 0
+        self._is_centered = False
+        
         # Determine target FPS
         if target_fps <= 0:
             # Auto-detect from monitor
@@ -776,11 +782,17 @@ class FloatingIndicator:
         if self._visible and self.window:
             self.update(text, color)
             return
+        
+        # Reset tracking state
+        self._stuck_count = 0
+        self._is_centered = False
             
         # Get cursor position (works via XWayland on Wayland)
         try:
             x = self.parent.winfo_pointerx()
             y = self.parent.winfo_pointery()
+            self._last_cursor_x = x
+            self._last_cursor_y = y
         except:
             # Fallback: center of screen
             x = self.parent.winfo_screenwidth() // 2
@@ -909,6 +921,22 @@ class FloatingIndicator:
             pos_y = y - self._window_height - 20
             
         self.window.geometry(f"+{pos_x}+{pos_y}")
+        self._is_centered = False
+    
+    def _center_above_taskbar(self) -> None:
+        """Center the indicator above the taskbar (fallback for native Wayland apps)."""
+        if not self.window:
+            return
+        
+        screen_w = self.parent.winfo_screenwidth()
+        screen_h = self.parent.winfo_screenheight()
+        
+        # Center horizontally, position above taskbar (typically ~60px from bottom)
+        pos_x = (screen_w - self._window_width) // 2
+        pos_y = screen_h - self._window_height - 70  # 70px above bottom for taskbar
+        
+        self.window.geometry(f"+{pos_x}+{pos_y}")
+        self._is_centered = True
             
     def _draw_dot(self, color: str, scale: float = 1.0) -> None:
         """Draw the status indicator dot."""
@@ -987,13 +1015,29 @@ class FloatingIndicator:
         try:
             x = self.parent.winfo_pointerx()
             y = self.parent.winfo_pointery()
-            self._update_position(x, y)
+            
+            # Check if cursor position is "stuck" (not changing = likely over native Wayland app)
+            if x == self._last_cursor_x and y == self._last_cursor_y:
+                self._stuck_count += 1
+            else:
+                self._stuck_count = 0
+                self._last_cursor_x = x
+                self._last_cursor_y = y
+            
+            # If stuck for ~0.5 seconds (15 frames at 30fps), center above taskbar
+            if self._stuck_count > 15:
+                if not self._is_centered:
+                    self._center_above_taskbar()
+            else:
+                self._update_position(x, y)
             
             # Periodically re-assert topmost to fight Wayland stacking
             self.window.attributes("-topmost", True)
             self.window.lift()
         except:
-            pass
+            # On any error, fall back to centered
+            if not self._is_centered:
+                self._center_above_taskbar()
         
         # Schedule next update at target FPS (synced to monitor refresh rate)
         if self.window:
@@ -1014,6 +1058,10 @@ class FloatingIndicator:
 class WayfinderApp(ctk.CTk):
     def __init__(self):
         super().__init__()
+        
+        # Set WM_CLASS so Linux desktop environments show the correct icon
+        # This must match the .desktop file's StartupWMClass
+        self.tk.call('tk', 'appname', 'wayfinder-voice')
         
         self.config = load_config()
         self.app_state = AppState.IDLE
