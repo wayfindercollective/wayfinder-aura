@@ -2038,7 +2038,7 @@ class WayfinderApp(ctk.CTk):
         body_container.pack(fill="both", expand=True)
         
         # Configure grid for sidebar layout
-        body_container.grid_columnconfigure(0, weight=0, minsize=120)  # Sidebar fixed width
+        body_container.grid_columnconfigure(0, weight=0, minsize=180)  # Sidebar fixed width
         body_container.grid_columnconfigure(1, weight=1)  # Content expands
         body_container.grid_rowconfigure(0, weight=1)
         
@@ -2341,15 +2341,16 @@ class WayfinderApp(ctk.CTk):
         """Create the vertical sidebar navigation."""
         sidebar = ctk.CTkFrame(
             parent,
-            fg_color="transparent",
-            width=120,
+            fg_color=COLORS["bg_surface"],
+            corner_radius=RADIUS["lg"],
+            width=180,
         )
         sidebar.grid(row=0, column=0, sticky="nsw")
         sidebar.grid_propagate(False)
         
         # Nav items container
         nav_container = ctk.CTkFrame(sidebar, fg_color="transparent")
-        nav_container.pack(fill="x", pady=(4, 0))
+        nav_container.pack(fill="x", padx=8, pady=12)
         
         self.tab_buttons = {}
         tabs = [
@@ -2362,17 +2363,16 @@ class WayfinderApp(ctk.CTk):
             btn = ctk.CTkButton(
                 nav_container,
                 text=f"{icon}  {label}",
-                font=(self.font_body[0], self.font_sizes["body"]),
+                font=(self.font_body[0], self.font_sizes["heading"]),
                 fg_color="transparent",
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_secondary"],
-                height=40,
-                width=110,
-                corner_radius=RADIUS["sm"],
+                height=52,
+                corner_radius=RADIUS["md"],
                 anchor="w",
                 command=lambda t=tab_id: self._switch_tab(t),
             )
-            btn.pack(fill="x", pady=2)
+            btn.pack(fill="x", pady=4)
             self.tab_buttons[tab_id] = btn
     
     def _switch_tab(self, tab_id: str) -> None:
@@ -2381,9 +2381,9 @@ class WayfinderApp(ctk.CTk):
         for tid, btn in self.tab_buttons.items():
             if tid == tab_id:
                 btn.configure(
-                    fg_color=COLORS["bg_surface"],
+                    fg_color=COLORS["bg_card"],
                     text_color=COLORS["accent"],
-                    hover_color=COLORS["bg_surface"],
+                    hover_color=COLORS["bg_card"],
                 )
             else:
                 btn.configure(
