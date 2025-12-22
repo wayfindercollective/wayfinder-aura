@@ -2549,11 +2549,10 @@ class WayfinderApp(ctk.CTk):
         
         # Nav items container - fills the sidebar height
         nav_container = ctk.CTkFrame(sidebar, fg_color="transparent")
-        nav_container.pack(fill="both", expand=True, padx=10, pady=16)
+        nav_container.pack(fill="both", expand=True, padx=8, pady=12)
         
         self.tab_buttons = {}
-        self.tab_icons = {}
-        self.tab_labels = {}
+        self.tab_colors = {}
         
         # Each tab has unique color accent
         tabs = [
@@ -2563,68 +2562,43 @@ class WayfinderApp(ctk.CTk):
         ]
         
         for tab_id, icon, label, color in tabs:
-            # Container frame for each nav item
-            btn_frame = ctk.CTkFrame(nav_container, fg_color="transparent")
-            btn_frame.pack(fill="both", expand=True, pady=4)
-            
-            # The actual button
+            # Big clickable button - entire area is clickable
             btn = ctk.CTkButton(
-                btn_frame,
-                text="",
+                nav_container,
+                text=f"  {icon}   {label}",
+                font=(self.font_body[0], self.font_sizes["heading"]),
                 fg_color="transparent",
                 hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_secondary"],
                 corner_radius=RADIUS["md"],
+                anchor="w",
                 command=lambda t=tab_id: self._switch_tab(t),
             )
-            btn.pack(fill="both", expand=True)
-            
-            # Inner layout frame for icon + text alignment
-            inner = ctk.CTkFrame(btn, fg_color="transparent")
-            inner.place(relx=0.08, rely=0.5, anchor="w")
-            
-            # Icon label with unique color
-            icon_lbl = ctk.CTkLabel(
-                inner,
-                text=icon,
-                font=(self.font_body[0], 26),
-                text_color=color,
-                width=32,
-            )
-            icon_lbl.pack(side="left", padx=(0, 10))
-            
-            # Text label
-            text_lbl = ctk.CTkLabel(
-                inner,
-                text=label,
-                font=(self.font_body[0], self.font_sizes["heading"]),
-                text_color=COLORS["text_secondary"],
-            )
-            text_lbl.pack(side="left")
+            btn.pack(fill="both", expand=True, pady=4)
             
             self.tab_buttons[tab_id] = btn
-            self.tab_icons[tab_id] = (icon_lbl, color)
-            self.tab_labels[tab_id] = text_lbl
+            self.tab_colors[tab_id] = color
     
     def _switch_tab(self, tab_id: str) -> None:
         """Switch to the specified tab."""
         # Update button styles for sidebar
         for tid, btn in self.tab_buttons.items():
-            icon_lbl, icon_color = self.tab_icons[tid]
-            text_lbl = self.tab_labels[tid]
+            color = self.tab_colors[tid]
             
             if tid == tab_id:
+                # Selected state - show colored background indent
                 btn.configure(
                     fg_color=COLORS["bg_card"],
                     hover_color=COLORS["bg_card"],
+                    text_color=color,  # Use the tab's unique color
                 )
-                # Brighten the active tab's text
-                text_lbl.configure(text_color=COLORS["text_primary"])
             else:
+                # Unselected state
                 btn.configure(
                     fg_color="transparent",
                     hover_color=COLORS["bg_hover"],
+                    text_color=COLORS["text_secondary"],
                 )
-                text_lbl.configure(text_color=COLORS["text_secondary"])
         
         # Hide all tabs, show selected
         for tid, frame in self.tab_frames.items():
