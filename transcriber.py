@@ -21,6 +21,13 @@ def transcribe(
     prompt: str = "Hello, this is a dictation with proper punctuation and grammar.",
     threads: int = 6,
     timeout: int = 120,
+    # Accuracy enhancement parameters
+    beam_size: int = 5,
+    best_of: int = 3,
+    language: str = "en",
+    entropy_threshold: float = 2.4,
+    no_speech_threshold: float = 0.6,
+    temperature: float = 0.0,
 ) -> str:
     """
     Transcribe an audio file using whisper.cpp.
@@ -32,6 +39,12 @@ def transcribe(
         prompt: Initial prompt for better punctuation/grammar
         threads: Number of CPU threads to use
         timeout: Maximum seconds to wait for transcription
+        beam_size: Beam search size (higher = more accurate, slower)
+        best_of: Number of best candidates to consider
+        language: Language code (e.g., "en", "auto" for auto-detect)
+        entropy_threshold: Entropy threshold for filtering low-confidence outputs
+        no_speech_threshold: Threshold for detecting silence/no speech
+        temperature: Sampling temperature (0.0 for greedy decoding)
 
     Returns:
         Transcribed text string
@@ -62,7 +75,22 @@ def transcribe(
         prompt,
         "-t",
         str(threads),
+        # Accuracy enhancement flags
+        "--beam-size",
+        str(beam_size),
+        "--best-of",
+        str(best_of),
+        "--entropy-thold",
+        str(entropy_threshold),
+        "--no-speech-thold",
+        str(no_speech_threshold),
+        "--temperature",
+        str(temperature),
     ]
+    
+    # Add language flag (skip if auto-detect)
+    if language and language.lower() != "auto":
+        cmd.extend(["--language", language])
 
     try:
         result = subprocess.run(
@@ -130,6 +158,13 @@ def transcribe_with_config(audio_path: str, config: dict) -> str:
         ),
         threads=config.get("threads", 6),
         timeout=config.get("timeout", 120),
+        # Accuracy enhancement parameters
+        beam_size=config.get("beam_size", 5),
+        best_of=config.get("best_of", 3),
+        language=config.get("language", "en"),
+        entropy_threshold=config.get("entropy_threshold", 2.4),
+        no_speech_threshold=config.get("no_speech_threshold", 0.6),
+        temperature=config.get("temperature", 0.0),
     )
 
 

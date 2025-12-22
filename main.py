@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from enum import Enum, auto
@@ -34,7 +35,7 @@ except ImportError:
     DBUS_AVAILABLE = False
 
 from injector import inject_text, InjectionError
-from recorder import AudioRecorder
+from recorder import AudioRecorder, ChunkedRecorder
 from transcriber import transcribe_with_config, TranscriptionError
 
 
@@ -59,6 +60,19 @@ DEFAULT_CONFIG = {
     "start_minimized": False,
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
+    # Accuracy enhancement settings
+    "beam_size": 5,  # Beam search size (higher = more accurate, slower)
+    "best_of": 3,  # Number of best candidates to consider
+    "language": "en",  # Language code: "en", "auto" for auto-detect
+    "entropy_threshold": 2.4,  # Filter low-confidence outputs
+    "no_speech_threshold": 0.6,  # Silence detection threshold
+    "temperature": 0.0,  # Sampling temperature (0.0 = greedy/deterministic)
+    "audio_preprocessing": True,  # Enable gain normalization and noise filtering
+    # Chunked recording settings
+    "chunked_mode": True,  # Enable chunked processing for long recordings
+    "chunk_duration": 30,  # Seconds per chunk
+    "chunk_overlap": 2,  # Overlap seconds to avoid word cuts
+    "max_recording_duration": 0,  # 0 = unlimited
 }
 
 KEY_CODES = {
@@ -158,6 +172,8 @@ class EventType(Enum):
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()
     INJECTION_ERROR = auto()
+    CHUNK_TRANSCRIBED = auto()  # A chunk was transcribed during recording
+    CHUNKED_TRANSCRIPTION_DONE = auto()  # All chunks transcribed
 
 
 # === Tray Icon ===
@@ -468,15 +484,29 @@ class WayfinderApp(ctk.CTk):
         self.app_state = AppState.IDLE
         self.event_queue = queue.Queue()
         self.stop_event = threading.Event()
+        
+        # Standard recorder for short recordings
         self.recorder = AudioRecorder(
             sample_rate=self.config["sample_rate"],
             device=self.config["audio_device"],
+            preprocessing=self.config.get("audio_preprocessing", True),
         )
+        
+        # Chunked recorder for indefinite recording
+        self.chunked_recorder: ChunkedRecorder | None = None
+        self.chunk_transcriptions: list[str] = []
+        self.transcription_executor = ThreadPoolExecutor(max_workers=2)
+        self.chunk_transcription_lock = threading.Lock()
+        
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.logs = []
         
         # UI scaling for high-DPI screens (saved in config)
         self.ui_scale = self.config.get("ui_scale", 1.0)
+        
+        # Recording duration tracking
+        self._recording_start_time: float | None = None
+        self._duration_update_job: str | None = None
         
         self.setup_window()
         self.setup_tray()
@@ -745,6 +775,15 @@ class WayfinderApp(ctk.CTk):
             self.open_model_settings,
         )
         
+        # Prompt setting
+        prompt_display = self.get_prompt_display()
+        self.prompt_btn = self.create_setting_row(
+            settings_card,
+            "Prompt",
+            prompt_display,
+            self.open_prompt_settings,
+        )
+        
         # Start minimized setting
         self.start_min_var = ctk.BooleanVar(value=self.config.get("start_minimized", True))
         self.create_toggle_row(
@@ -761,6 +800,101 @@ class WayfinderApp(ctk.CTk):
             "UI Scale",
             scale_display,
             self.open_scale_settings,
+        )
+        
+        # === Collapsible Advanced Settings ===
+        self.advanced_expanded = False
+        
+        advanced_header = ctk.CTkFrame(main, fg_color="transparent")
+        advanced_header.pack(fill="x", pady=(0, 8))
+        
+        advanced_toggle_btn = ctk.CTkButton(
+            advanced_header,
+            text="▶  ADVANCED",
+            font=(self.font_body[0], 11, "bold"),
+            text_color=COLORS["text_muted"],
+            fg_color="transparent",
+            hover_color=COLORS["bg_hover"],
+            anchor="w",
+            height=28,
+            command=self.toggle_advanced_settings,
+        )
+        advanced_toggle_btn.pack(side="left")
+        self.advanced_toggle_btn = advanced_toggle_btn
+        
+        # Advanced container (collapsible)
+        self.advanced_container = ctk.CTkFrame(main, fg_color="transparent")
+        # Initially collapsed - don't pack
+        
+        advanced_card = ctk.CTkFrame(
+            self.advanced_container,
+            fg_color=COLORS["bg_card"],
+            corner_radius=14,
+            border_width=1,
+            border_color=COLORS["border"],
+        )
+        advanced_card.pack(fill="x", pady=(0, 10))
+        
+        # Accuracy settings label
+        ctk.CTkLabel(
+            advanced_card,
+            text="Accuracy",
+            font=(self.font_body[0], 10, "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=18, pady=(12, 4))
+        
+        # Beam size setting
+        beam_size = self.config.get("beam_size", 5)
+        self.beam_btn = self.create_setting_row(
+            advanced_card,
+            "Beam Size",
+            str(beam_size),
+            self.open_beam_settings,
+        )
+        
+        # Language setting
+        language = self.config.get("language", "en")
+        lang_display = "English" if language == "en" else "Auto-detect" if language == "auto" else language.upper()
+        self.language_btn = self.create_setting_row(
+            advanced_card,
+            "Language",
+            lang_display,
+            self.open_language_settings,
+        )
+        
+        # Audio preprocessing toggle
+        self.preprocess_var = ctk.BooleanVar(value=self.config.get("audio_preprocessing", True))
+        self.create_toggle_row(
+            advanced_card,
+            "Audio Preprocessing",
+            self.preprocess_var,
+            self.toggle_preprocessing,
+        )
+        
+        # Chunked recording settings label
+        ctk.CTkLabel(
+            advanced_card,
+            text="Recording",
+            font=(self.font_body[0], 10, "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=18, pady=(12, 4))
+        
+        # Chunked mode toggle
+        self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
+        self.create_toggle_row(
+            advanced_card,
+            "Chunked Recording (for long dictation)",
+            self.chunked_var,
+            self.toggle_chunked_mode,
+        )
+        
+        # Chunk duration setting
+        chunk_duration = self.config.get("chunk_duration", 30)
+        self.chunk_btn = self.create_setting_row(
+            advanced_card,
+            "Chunk Duration",
+            f"{chunk_duration}s",
+            self.open_chunk_settings,
         )
         
         # === Collapsible Activity Log ===
@@ -934,6 +1068,32 @@ class WayfinderApp(ctk.CTk):
         else:
             self.log_toggle_btn.configure(text="▶  ACTIVITY")
             self.log_container.pack_forget()
+    
+    def toggle_advanced_settings(self):
+        """Toggle the advanced settings expanded/collapsed state."""
+        self.advanced_expanded = not self.advanced_expanded
+        
+        if self.advanced_expanded:
+            self.advanced_toggle_btn.configure(text="▼  ADVANCED")
+            self.advanced_container.pack(fill="x", pady=(0, 10))
+        else:
+            self.advanced_toggle_btn.configure(text="▶  ADVANCED")
+            self.advanced_container.pack_forget()
+    
+    def toggle_preprocessing(self):
+        """Toggle audio preprocessing."""
+        self.config["audio_preprocessing"] = self.preprocess_var.get()
+        save_config(self.config)
+        self.log(f"⚙ Audio preprocessing: {'on' if self.preprocess_var.get() else 'off'}")
+        # Update recorder
+        self.recorder.preprocessing = self.preprocess_var.get()
+    
+    def toggle_chunked_mode(self):
+        """Toggle chunked recording mode."""
+        self.config["chunked_mode"] = self.chunked_var.get()
+        save_config(self.config)
+        mode = "chunked (unlimited)" if self.chunked_var.get() else "simple"
+        self.log(f"⚙ Recording mode: {mode}")
 
     def create_setting_row(self, parent, label, value, command):
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1046,6 +1206,30 @@ class WayfinderApp(ctk.CTk):
         elif "medium" in model_path:
             return "Medium (Multi)"
         return "Unknown"
+
+    def get_prompt_display(self) -> str:
+        """Get display name for current prompt."""
+        prompt = self.config.get("prompt", "")
+        # Check for preset prompts
+        preset_prompts = self.get_preset_prompts()
+        for name, text in preset_prompts.items():
+            if prompt == text:
+                return name
+        # Custom prompt - show truncated version
+        if len(prompt) > 20:
+            return f"Custom: {prompt[:17]}..."
+        return f"Custom: {prompt}" if prompt else "None"
+
+    def get_preset_prompts(self) -> dict:
+        """Return preset prompt options."""
+        return {
+            "General Dictation": "Hello, this is a dictation with proper punctuation and grammar.",
+            "Technical/Code": "Technical documentation and code discussion with proper terminology, variable names, and programming concepts.",
+            "Conversational": "Casual conversation with natural speech patterns, filler words, and informal language.",
+            "Medical": "Medical transcription with proper medical terminology, drug names, dosages, and anatomical terms.",
+            "Legal": "Legal document dictation with proper legal terminology, case citations, and formal language.",
+            "Business": "Professional business communication with industry terminology, acronyms, and formal tone.",
+        }
 
     def get_available_models(self) -> list[dict]:
         """Scan for available whisper models."""
@@ -1181,6 +1365,143 @@ class WayfinderApp(ctk.CTk):
             
             self.model_btn.configure(text=self.get_model_display())
             self.log(f"⚙ Model: {self.get_model_display()}")
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            inner,
+            text="Save & Apply",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=save,
+        ).pack(fill="x", pady=(0, 10))
+        
+        ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(fill="x")
+
+    def open_prompt_settings(self):
+        """Open dialog to configure transcription prompt."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Transcription Prompt")
+        dialog.geometry("550x580")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Transcription Prompt",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="The prompt helps Whisper understand context and improves accuracy.\nUse domain-specific vocabulary for better results.",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", pady=(0, 20))
+        
+        # Preset prompts section
+        ctk.CTkLabel(
+            inner,
+            text="Preset Prompts:",
+            font=(self.font_body[0], 13, "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(0, 8))
+        
+        preset_prompts = self.get_preset_prompts()
+        current_prompt = self.config.get("prompt", "")
+        
+        # Find if current is a preset
+        current_preset = None
+        for name, text in preset_prompts.items():
+            if text == current_prompt:
+                current_preset = name
+                break
+        
+        prompt_var = ctk.StringVar(value=current_preset or "Custom")
+        
+        # Preset buttons frame
+        presets_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=10)
+        presets_frame.pack(fill="x", pady=(0, 15))
+        
+        def on_preset_select(preset_name):
+            prompt_var.set(preset_name)
+            if preset_name in preset_prompts:
+                custom_text.delete("1.0", "end")
+                custom_text.insert("1.0", preset_prompts[preset_name])
+        
+        for name in preset_prompts.keys():
+            is_selected = name == current_preset
+            btn = ctk.CTkButton(
+                presets_frame,
+                text=name,
+                font=(self.font_body[0], 11),
+                height=32,
+                fg_color=COLORS["accent_dim"] if is_selected else COLORS["bg_hover"],
+                hover_color=COLORS["accent_glow"] if is_selected else COLORS["bg_elevated"],
+                text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
+                corner_radius=6,
+                command=lambda n=name: on_preset_select(n),
+            )
+            btn.pack(fill="x", padx=10, pady=5)
+        
+        # Custom prompt section
+        ctk.CTkLabel(
+            inner,
+            text="Custom Prompt:",
+            font=(self.font_body[0], 13, "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(10, 8))
+        
+        custom_text = ctk.CTkTextbox(
+            inner,
+            font=(self.font_body[0], 12),
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["text_primary"],
+            corner_radius=10,
+            height=100,
+            wrap="word",
+        )
+        custom_text.pack(fill="x", pady=(0, 15))
+        custom_text.insert("1.0", current_prompt)
+        
+        # Tip
+        tip_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_hover"], corner_radius=8)
+        tip_frame.pack(fill="x", pady=(0, 20))
+        ctk.CTkLabel(
+            tip_frame,
+            text="💡 Tip: Include example phrases, technical terms, or names\n    that appear frequently in your dictation.",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(padx=12, pady=10)
+        
+        # Save button
+        def save():
+            new_prompt = custom_text.get("1.0", "end").strip()
+            self.config["prompt"] = new_prompt
+            save_config(self.config)
+            
+            self.prompt_btn.configure(text=self.get_prompt_display())
+            self.log(f"⚙ Prompt updated: {self.get_prompt_display()}")
             dialog.destroy()
         
         ctk.CTkButton(
@@ -1797,6 +2118,320 @@ class WayfinderApp(ctk.CTk):
             command=dialog.destroy,
         ).pack(fill="x")
 
+    def open_beam_settings(self):
+        """Open dialog to configure beam search size."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Beam Search Size")
+        dialog.geometry("400x380")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Beam Search Size",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Higher values = more accurate but slower.\nDefault: 5, Max recommended: 10",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", pady=(0, 20))
+        
+        # Current value display
+        current = self.config.get("beam_size", 5)
+        value_label = ctk.CTkLabel(
+            inner,
+            text=str(current),
+            font=(self.font_header[0], 36, "bold"),
+            text_color=COLORS["accent"],
+        )
+        value_label.pack(pady=(0, 15))
+        
+        # Slider
+        beam_var = ctk.IntVar(value=current)
+        
+        def on_change(value):
+            beam_var.set(int(float(value)))
+            value_label.configure(text=str(int(float(value))))
+        
+        slider = ctk.CTkSlider(
+            inner,
+            from_=1,
+            to=10,
+            variable=beam_var,
+            command=on_change,
+            width=300,
+            height=20,
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+        )
+        slider.pack(pady=(0, 5))
+        
+        # Preset buttons
+        presets_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        presets_frame.pack(fill="x", pady=(10, 20))
+        
+        presets = [
+            ("Fast (1)", 1),
+            ("Balanced (5)", 5),
+            ("Accurate (10)", 10),
+        ]
+        for label, value in presets:
+            ctk.CTkButton(
+                presets_frame,
+                text=label,
+                width=100,
+                height=30,
+                font=(self.font_body[0], 11),
+                fg_color=COLORS["bg_hover"],
+                hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_primary"],
+                corner_radius=6,
+                command=lambda v=value: (beam_var.set(v), on_change(v)),
+            ).pack(side="left", padx=5)
+        
+        def save():
+            self.config["beam_size"] = beam_var.get()
+            save_config(self.config)
+            self.beam_btn.configure(text=str(beam_var.get()))
+            self.log(f"⚙ Beam size: {beam_var.get()}")
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            inner,
+            text="Save",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=save,
+        ).pack(fill="x", pady=(0, 10))
+        
+        ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(fill="x")
+
+    def open_language_settings(self):
+        """Open dialog to configure transcription language."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Language")
+        dialog.geometry("400x400")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Language",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Force a specific language for better accuracy,\nor use auto-detect for multilingual support.",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", pady=(0, 20))
+        
+        languages = [
+            ("English", "en"),
+            ("Auto-detect", "auto"),
+            ("Spanish", "es"),
+            ("French", "fr"),
+            ("German", "de"),
+            ("Italian", "it"),
+            ("Portuguese", "pt"),
+            ("Japanese", "ja"),
+            ("Chinese", "zh"),
+        ]
+        
+        current_lang = self.config.get("language", "en")
+        lang_var = ctk.StringVar(value=current_lang)
+        
+        for label, code in languages:
+            ctk.CTkRadioButton(
+                inner,
+                text=label,
+                variable=lang_var,
+                value=code,
+                font=(self.font_body[0], 14),
+                text_color=COLORS["text_primary"],
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_glow"],
+            ).pack(anchor="w", pady=4)
+        
+        def save():
+            self.config["language"] = lang_var.get()
+            save_config(self.config)
+            lang_display = dict(languages).get(lang_var.get(), lang_var.get().upper())
+            # Reverse lookup for display
+            for label, code in languages:
+                if code == lang_var.get():
+                    lang_display = label
+                    break
+            self.language_btn.configure(text=lang_display)
+            self.log(f"⚙ Language: {lang_display}")
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            inner,
+            text="Save",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=save,
+        ).pack(fill="x", pady=(20, 10))
+        
+        ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(fill="x")
+
+    def open_chunk_settings(self):
+        """Open dialog to configure chunk duration."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Chunk Duration")
+        dialog.geometry("420x400")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Chunk Duration",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="How long each audio segment is during chunked recording.\nShorter chunks = faster feedback, longer = better context.",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", pady=(0, 20))
+        
+        # Current value display
+        current = self.config.get("chunk_duration", 30)
+        value_label = ctk.CTkLabel(
+            inner,
+            text=f"{current}s",
+            font=(self.font_header[0], 36, "bold"),
+            text_color=COLORS["accent"],
+        )
+        value_label.pack(pady=(0, 15))
+        
+        # Slider
+        chunk_var = ctk.IntVar(value=current)
+        
+        def on_change(value):
+            chunk_var.set(int(float(value)))
+            value_label.configure(text=f"{int(float(value))}s")
+        
+        slider = ctk.CTkSlider(
+            inner,
+            from_=10,
+            to=60,
+            variable=chunk_var,
+            command=on_change,
+            width=300,
+            height=20,
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+        )
+        slider.pack(pady=(0, 5))
+        
+        # Labels
+        labels_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        labels_frame.pack(fill="x", pady=(0, 15))
+        ctk.CTkLabel(labels_frame, text="10s", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="left")
+        ctk.CTkLabel(labels_frame, text="60s", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="right")
+        
+        # Preset buttons
+        presets_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        presets_frame.pack(fill="x", pady=(0, 20))
+        
+        for val in [15, 30, 45, 60]:
+            ctk.CTkButton(
+                presets_frame,
+                text=f"{val}s",
+                width=60,
+                height=30,
+                font=(self.font_body[0], 11),
+                fg_color=COLORS["bg_hover"],
+                hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_primary"],
+                corner_radius=6,
+                command=lambda v=val: (chunk_var.set(v), on_change(v)),
+            ).pack(side="left", padx=5)
+        
+        def save():
+            self.config["chunk_duration"] = chunk_var.get()
+            save_config(self.config)
+            self.chunk_btn.configure(text=f"{chunk_var.get()}s")
+            self.log(f"⚙ Chunk duration: {chunk_var.get()}s")
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            inner,
+            text="Save",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=save,
+        ).pack(fill="x", pady=(0, 10))
+        
+        ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(fill="x")
+
     # === Tray Functions ===
     
     def create_model_setter(self, model_name: str):
@@ -2017,6 +2652,12 @@ class WayfinderApp(ctk.CTk):
             self.on_injection_done()
         elif event_type == EventType.INJECTION_ERROR:
             self.on_error(f"Injection: {data}")
+        elif event_type == EventType.CHUNK_TRANSCRIBED:
+            chunk_index, text = data
+            preview = text[:30] + "..." if len(text) > 30 else text
+            self.log(f"✓ Chunk {chunk_index + 1}: \"{preview}\"")
+        elif event_type == EventType.CHUNKED_TRANSCRIPTION_DONE:
+            self.on_transcription_done(data)
 
     def on_hotkey(self):
         if self.app_state == AppState.IDLE:
@@ -2027,27 +2668,266 @@ class WayfinderApp(ctk.CTk):
     def start_recording(self):
         try:
             self.log("🎤 Listening...")
-            self.recorder.start()
+            
+            # Check if chunked mode is enabled
+            if self.config.get("chunked_mode", True):
+                self._start_chunked_recording()
+            else:
+                self.recorder.start()
+            
             self.update_state(AppState.RECORDING)
+            
+            # Start duration update timer
+            import time
+            self._recording_start_time = time.time()
+            self._update_recording_duration()
+            
         except Exception as e:
             self.on_error(f"Microphone: {e}")
+    
+    def _start_chunked_recording(self):
+        """Start recording with chunked processing for indefinite duration."""
+        self.chunk_transcriptions = []
+        
+        def on_chunk_ready(chunk_path: str, chunk_index: int):
+            """Called when a chunk is ready for transcription."""
+            self.log(f"📦 Chunk {chunk_index + 1} ready")
+            # Submit chunk for transcription in background
+            self.transcription_executor.submit(
+                self._transcribe_chunk, chunk_path, chunk_index
+            )
+        
+        self.chunked_recorder = ChunkedRecorder(
+            sample_rate=self.config["sample_rate"],
+            device=self.config["audio_device"],
+            preprocessing=self.config.get("audio_preprocessing", True),
+            chunk_duration=self.config.get("chunk_duration", 30),
+            chunk_overlap=self.config.get("chunk_overlap", 2),
+            on_chunk_ready=on_chunk_ready,
+        )
+        self.chunked_recorder.start()
+    
+    def _transcribe_chunk(self, chunk_path: str, chunk_index: int):
+        """Transcribe a single chunk in the background."""
+        try:
+            text = transcribe_with_config(chunk_path, self.config)
+            with self.chunk_transcription_lock:
+                # Ensure list is large enough
+                while len(self.chunk_transcriptions) <= chunk_index:
+                    self.chunk_transcriptions.append("")
+                self.chunk_transcriptions[chunk_index] = text.strip()
+            
+            self.event_queue.put((EventType.CHUNK_TRANSCRIBED, (chunk_index, text)))
+        except Exception as e:
+            self.log(f"⚠ Chunk {chunk_index + 1} error: {e}")
+    
+    def _update_recording_duration(self):
+        """Update the status label with recording duration."""
+        if self.app_state != AppState.RECORDING or self._recording_start_time is None:
+            return
+        
+        elapsed = time.time() - self._recording_start_time
+        minutes = int(elapsed // 60)
+        seconds = int(elapsed % 60)
+        
+        if minutes > 0:
+            duration_text = f"Listening... {minutes}m {seconds}s"
+        else:
+            duration_text = f"Listening... {seconds}s"
+        
+        self.status_label.configure(text=duration_text)
+        
+        # Schedule next update
+        self._duration_update_job = self.after(1000, self._update_recording_duration)
 
     def stop_recording_and_process(self):
+        # Cancel duration update timer
+        if self._duration_update_job:
+            self.after_cancel(self._duration_update_job)
+            self._duration_update_job = None
+        self._recording_start_time = None
+        
         self.update_state(AppState.PROCESSING)
+        
         try:
-            duration = self.recorder.get_duration()
-            self.log(f"⏱ Duration: {duration:.1f}s")
-            
-            if duration < self.config["min_recording_duration"]:
-                self.recorder.stop()
-                self.recorder.cleanup()
-                self.on_error("Too short - speak longer")
-                return
-            
-            audio_path = self.recorder.stop()
-            self.executor.submit(self.transcribe_and_inject, audio_path)
+            # Check which recorder was used
+            if self.chunked_recorder is not None and self.chunked_recorder.is_recording():
+                self._stop_chunked_recording()
+            else:
+                self._stop_simple_recording()
         except Exception as e:
             self.on_error(f"Processing: {e}")
+    
+    def _stop_simple_recording(self):
+        """Stop simple (non-chunked) recording and process."""
+        duration = self.recorder.get_duration()
+        self.log(f"⏱ Duration: {duration:.1f}s")
+        
+        if duration < self.config["min_recording_duration"]:
+            self.recorder.stop()
+            self.recorder.cleanup()
+            self.on_error("Too short - speak longer")
+            return
+        
+        audio_path = self.recorder.stop()
+        self.executor.submit(self.transcribe_and_inject, audio_path)
+    
+    def _stop_chunked_recording(self):
+        """Stop chunked recording and process all chunks."""
+        duration = self.chunked_recorder.get_duration()
+        chunk_count = self.chunked_recorder.get_chunk_count()
+        self.log(f"⏱ Duration: {duration:.1f}s ({chunk_count} chunks)")
+        
+        if duration < self.config["min_recording_duration"]:
+            self.chunked_recorder.stop()
+            self.chunked_recorder.cleanup()
+            self.chunked_recorder = None
+            self.on_error("Too short - speak longer")
+            return
+        
+        # Stop and get final chunk
+        final_path, all_paths = self.chunked_recorder.stop()
+        
+        # Submit final chunk for transcription if exists
+        if final_path:
+            final_index = chunk_count
+            self.log(f"📦 Final chunk ready")
+            self.transcription_executor.submit(
+                self._transcribe_chunk, final_path, final_index
+            )
+        
+        # Wait for all transcriptions to complete and combine
+        self.executor.submit(self._finalize_chunked_transcription, chunk_count + (1 if final_path else 0))
+    
+    def _finalize_chunked_transcription(self, expected_chunks: int):
+        """Wait for all chunks to be transcribed and combine them."""
+        # Wait for all chunks to be transcribed (with timeout)
+        timeout = 120  # 2 minutes max wait
+        start_time = time.time()
+        
+        while True:
+            with self.chunk_transcription_lock:
+                completed = len([t for t in self.chunk_transcriptions if t])
+            
+            if completed >= expected_chunks:
+                break
+            
+            if time.time() - start_time > timeout:
+                self.log(f"⚠ Timeout: only {completed}/{expected_chunks} chunks transcribed")
+                break
+            
+            time.sleep(0.5)
+        
+        # Combine all transcriptions with overlap deduplication
+        with self.chunk_transcription_lock:
+            combined_text = self._deduplicate_overlap_text(self.chunk_transcriptions)
+        
+        # Cleanup
+        if self.chunked_recorder:
+            self.chunked_recorder.cleanup()
+            self.chunked_recorder = None
+        
+        if combined_text.strip():
+            self.log(f"📝 \"{combined_text[:50]}{'...' if len(combined_text) > 50 else ''}\"")
+            self.event_queue.put((EventType.CHUNKED_TRANSCRIPTION_DONE, combined_text))
+        else:
+            self.event_queue.put((EventType.TRANSCRIPTION_ERROR, "No speech detected"))
+    
+    def _deduplicate_overlap_text(self, transcriptions: list[str]) -> str:
+        """
+        Combine chunk transcriptions while removing duplicated text at boundaries.
+        
+        Due to the overlap between chunks, some words/phrases may appear in both
+        the end of one chunk and the start of the next. This method removes such
+        duplicates to create a clean combined transcription.
+        
+        Args:
+            transcriptions: List of transcribed text from each chunk
+            
+        Returns:
+            Combined text with overlapping duplicates removed
+        """
+        if not transcriptions:
+            return ""
+        
+        # Filter out empty transcriptions
+        valid_transcriptions = [t.strip() for t in transcriptions if t and t.strip()]
+        
+        if not valid_transcriptions:
+            return ""
+        
+        if len(valid_transcriptions) == 1:
+            return valid_transcriptions[0]
+        
+        # Start with the first chunk
+        combined = valid_transcriptions[0]
+        
+        for i in range(1, len(valid_transcriptions)):
+            next_chunk = valid_transcriptions[i]
+            
+            if not next_chunk:
+                continue
+            
+            # Find overlap between end of combined and start of next_chunk
+            overlap = self._find_text_overlap(combined, next_chunk)
+            
+            if overlap:
+                # Skip the overlapping part from the next chunk
+                combined += " " + next_chunk[len(overlap):].lstrip()
+            else:
+                # No overlap found, just append with space
+                combined += " " + next_chunk
+        
+        # Clean up multiple spaces
+        import re
+        combined = re.sub(r'\s+', ' ', combined).strip()
+        
+        return combined
+    
+    def _find_text_overlap(self, text1: str, text2: str, min_words: int = 2, max_words: int = 15) -> str:
+        """
+        Find overlapping text between end of text1 and start of text2.
+        
+        Args:
+            text1: First text (look at the end)
+            text2: Second text (look at the start)
+            min_words: Minimum words for a valid overlap
+            max_words: Maximum words to check for overlap
+            
+        Returns:
+            The overlapping text, or empty string if no overlap found
+        """
+        # Split into words
+        words1 = text1.split()
+        words2 = text2.split()
+        
+        if len(words1) < min_words or len(words2) < min_words:
+            return ""
+        
+        # Check for overlapping sequences of words
+        # Start with longer sequences (more confident matches)
+        for overlap_len in range(min(max_words, len(words1), len(words2)), min_words - 1, -1):
+            # Get last N words of text1
+            end_of_text1 = " ".join(words1[-overlap_len:]).lower()
+            # Get first N words of text2
+            start_of_text2 = " ".join(words2[:overlap_len]).lower()
+            
+            if end_of_text1 == start_of_text2:
+                # Found overlap - return the actual text from text2 (preserves casing)
+                return " ".join(words2[:overlap_len])
+        
+        # Also check for partial word overlaps (fuzzy matching)
+        # This helps when transcription slightly differs at boundaries
+        for overlap_len in range(min(max_words, len(words1), len(words2)), min_words - 1, -1):
+            end_words = [w.lower().strip('.,!?;:') for w in words1[-overlap_len:]]
+            start_words = [w.lower().strip('.,!?;:') for w in words2[:overlap_len]]
+            
+            # Check if at least 80% of words match
+            matches = sum(1 for a, b in zip(end_words, start_words) if a == b)
+            if matches >= overlap_len * 0.8:
+                return " ".join(words2[:overlap_len])
+        
+        return ""
 
     def transcribe_and_inject(self, audio_path):
         try:
