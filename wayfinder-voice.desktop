@@ -2,7 +2,7 @@
 Type=Application
 Name=Wayfinder Voice
 Comment=Local voice dictation for Linux (Wayland)
-Exec=python3 /home/bazzite/Dev/wayfinder-voice/main.py
+Exec=/home/bazzite/Dev/wayfinder-voice/launch-wayfinder-voice.sh
 Icon=/home/bazzite/Dev/wayfinder-voice/assets/icon.png
 Terminal=false
 Categories=Utility;Audio;
