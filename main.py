@@ -4700,6 +4700,41 @@ class WayfinderApp(ctk.CTk):
 
     # === Tray Functions ===
     
+    def _create_model_tray_menu(self):
+        """Dynamically create model submenu showing only installed models."""
+        models = self.get_available_models()
+        
+        if not models:
+            # No models installed - show a message
+            return pystray.Menu(
+                pystray.MenuItem("No models installed", None, enabled=False),
+                pystray.MenuItem("Open app to download", self.show_from_tray),
+            )
+        
+        # Create menu items for each installed model
+        items = []
+        current_path = os.path.expanduser(self.config.get("model_path", ""))
+        
+        for model in models:
+            model_path = model["path"]
+            model_name = model["name"]
+            filename = model.get("filename", "")
+            
+            # Extract the model key from filename (e.g., "ggml-small.en.bin" -> "small.en")
+            model_key = filename.replace("ggml-", "").replace(".bin", "") if filename else ""
+            
+            # Create a checker function that captures the model path
+            def make_checker(mp):
+                return lambda item: os.path.expanduser(mp) == current_path
+            
+            items.append(pystray.MenuItem(
+                model_name,
+                self.create_model_setter(model_key),
+                checked=make_checker(model_path),
+            ))
+        
+        return pystray.Menu(*items)
+
     def create_model_setter(self, model_name: str):
         """Create a callback function for setting a specific model from tray menu."""
         def setter(icon=None, item=None):
@@ -4729,35 +4764,14 @@ class WayfinderApp(ctk.CTk):
             except:
                 pass
         
-        # Create menu with model submenu
+        # Create menu with dynamic model submenu (only installed models)
         menu = pystray.Menu(
             pystray.MenuItem("Show", self.show_from_tray, default=True),
             pystray.MenuItem("Record", self.tray_record),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "Model",
-                pystray.Menu(
-                    pystray.MenuItem(
-                        "Tiny (Fastest)",
-                        self.create_model_setter("tiny.en"),
-                        checked=lambda item: "tiny.en" in self.config.get("model_path", ""),
-                    ),
-                    pystray.MenuItem(
-                        "Base (Fast)", 
-                        self.create_model_setter("base.en"),
-                        checked=lambda item: "base.en" in self.config.get("model_path", ""),
-                    ),
-                    pystray.MenuItem(
-                        "Small (Balanced)",
-                        self.create_model_setter("small.en"),
-                        checked=lambda item: "small.en" in self.config.get("model_path", ""),
-                    ),
-                    pystray.MenuItem(
-                        "Medium (Accurate)",
-                        self.create_model_setter("medium.en"),
-                        checked=lambda item: "medium.en" in self.config.get("model_path", ""),
-                    ),
-                ),
+                self._create_model_tray_menu,
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self.quit_app),
