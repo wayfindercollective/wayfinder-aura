@@ -2126,14 +2126,14 @@ class WayfinderApp(ctk.CTk):
         hero_inner = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
         hero_inner.pack(fill="x", padx=24, pady=20)
         
-        # === Waveform Visualizer Canvas - Large for dramatic waves ===
+        # === Waveform Visualizer Canvas - MASSIVE dramatic waves ===
         self.hero_canvas = ctk.CTkCanvas(
             hero_inner,
-            height=120,  # Taller for big dramatic waves
+            height=180,  # Very tall for huge dramatic waves
             bg=COLORS["bg_card"],
             highlightthickness=0,
         )
-        self.hero_canvas.pack(fill="x", pady=(0, 12))
+        self.hero_canvas.pack(fill="x", pady=(0, 8))
         
         # Initialize animation state
         self._hero_wave_time = 0.0
@@ -2257,7 +2257,7 @@ class WayfinderApp(ctk.CTk):
         )
     
     def _draw_hero_waveform(self) -> None:
-        """Draw dramatic, full-height waveform visualization like the reference image."""
+        """Draw MASSIVE, full-height waveform visualization."""
         canvas = self.hero_canvas
         canvas.delete("all")
         
@@ -2269,11 +2269,11 @@ class WayfinderApp(ctk.CTk):
         if w <= 1:
             w = 400
         if h <= 1:
-            h = 100
+            h = 180
         
         center_y = h // 2
-        # Use nearly full height for dramatic effect
-        max_amp = (h // 2) - 2
+        # FULL HEIGHT - waves touch the edges
+        max_amp = (h // 2)
         
         # Get current color based on state
         color = STATE_COLORS.get(self.app_state, COLORS["accent"])
@@ -2286,22 +2286,21 @@ class WayfinderApp(ctk.CTk):
         bg_g = int(COLORS["bg_card"][3:5], 16)
         bg_b = int(COLORS["bg_card"][5:7], 16)
         
-        # Calculate amplitude - BIG waves even at idle
+        # Calculate amplitude - HUGE waves always
         audio_level = self._hero_audio_level
-        # Large breathing oscillation for dramatic idle motion (0.5 to 0.8 range)
-        base_breath = 0.5 + 0.3 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.4))
-        voice_boost = (audio_level ** 0.6) * 0.5
+        # Always big - ranges from 0.85 to 1.0 for constant dramatic motion
+        base_breath = 0.85 + 0.15 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.3))
+        voice_boost = (audio_level ** 0.5) * 0.15
         amplitude_factor = min(1.0, base_breath + voice_boost)
         
-        # Multiple dramatic wave layers - like the reference image
+        # Dramatic wave layers - BIG flowing waves
         wave_configs = [
             # (frequency, phase_offset, alpha, line_width, amplitude_mult)
-            (0.008, 0.0, 0.12, 2, 1.0),      # Very slow, large background wave
-            (0.012, 0.8, 0.18, 2, 0.9),      # Slow wave
-            (0.018, 1.6, 0.28, 2, 0.85),     # Medium-slow
-            (0.025, 2.4, 0.40, 2, 0.75),     # Medium wave
-            (0.035, 3.2, 0.55, 3, 0.65),     # Medium-fast
-            (0.050, 4.0, 0.75, 3, 0.5),      # Fast wave - most visible
+            (0.006, 0.0, 0.20, 2, 1.0),      # Huge slow wave
+            (0.010, 1.0, 0.35, 2, 0.95),     # Large wave  
+            (0.015, 2.0, 0.50, 3, 0.85),     # Medium-large
+            (0.022, 3.0, 0.70, 3, 0.70),     # Medium wave
+            (0.032, 4.0, 0.90, 3, 0.55),     # Smaller detail wave
         ]
         
         for freq, phase_offset, alpha, line_width, amp_mult in wave_configs:
@@ -2312,21 +2311,17 @@ class WayfinderApp(ctk.CTk):
             wave_color = f"#{blend_r:02x}{blend_g:02x}{blend_b:02x}"
             
             points = []
-            for x in range(0, w + 1, 2):  # Finer resolution
-                # Complex wave combining multiple frequencies for organic look
+            for x in range(0, w + 1, 2):
                 t = self._hero_wave_time
                 
-                # Primary wave
+                # Smooth flowing sine waves
                 wave1 = math.sin(x * freq + t + phase_offset)
-                # Harmonics for complexity
-                wave2 = math.sin(x * freq * 2.1 + t * 0.8 + phase_offset) * 0.4
-                wave3 = math.sin(x * freq * 0.7 + t * 1.2 + phase_offset) * 0.35
-                wave4 = math.sin(x * freq * 3.3 + t * 0.5 + phase_offset) * 0.15
+                wave2 = math.sin(x * freq * 1.8 + t * 0.7 + phase_offset) * 0.3
+                wave3 = math.sin(x * freq * 0.6 + t * 1.1 + phase_offset) * 0.25
                 
-                # Combine waves
-                combined = (wave1 + wave2 + wave3 + wave4) / 1.9
+                combined = (wave1 + wave2 + wave3) / 1.55
                 
-                # Apply amplitude
+                # Apply full amplitude
                 y = center_y + combined * max_amp * amplitude_factor * amp_mult
                 points.extend([x, y])
             
