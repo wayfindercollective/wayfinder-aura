@@ -1,0 +1,136 @@
+# Flatpak manifest for Wayfinder Voice
+# 
+# Build locally:
+#   flatpak-builder --user --install --force-clean build-dir io.github.user.WayfinderVoice.yml
+#
+# IMPORTANT: Before submitting to Flathub, change "io.github.user" to your actual
+# GitHub username in reverse-DNS format (e.g., io.github.johndoe.WayfinderVoice)
+
+app-id: io.github.user.WayfinderVoice
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: wayfinder-voice
+
+finish-args:
+  # Display access
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  
+  # Audio recording
+  - --socket=pulseaudio
+  
+  # D-Bus for portals
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --talk-name=org.freedesktop.portal.GlobalShortcuts
+  - --talk-name=org.freedesktop.portal.RemoteDesktop
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  
+  # Config and cache
+  - --filesystem=xdg-config/wayfinder-voice:create
+  - --filesystem=xdg-cache/wayfinder-voice:create
+  
+  # Whisper models (read-only access to common locations)
+  - --filesystem=~/.local/share/whisper.cpp:ro
+  - --filesystem=~/whisper.cpp/models:ro
+  
+  # GPU acceleration
+  - --device=dri
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - '*.a'
+  - '*.la'
+
+modules:
+  # SDL2 for audio (required by sounddevice)
+  - name: portaudio
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    sources:
+      - type: archive
+        url: https://github.com/PortAudio/portaudio/archive/refs/tags/v19.7.0.tar.gz
+        sha256: 5af29ba58bbdbb7bbcefaaecc77ec8fc413f0db6f4c4e286c40c8c405c8d64db
+
+  # whisper.cpp - Speech recognition
+  - name: whisper-cpp
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DWHISPER_BUILD_EXAMPLES=ON
+      - -DWHISPER_BUILD_TESTS=OFF
+      - -DBUILD_SHARED_LIBS=OFF
+    sources:
+      - type: git
+        url: https://github.com/ggerganov/whisper.cpp.git
+        tag: v1.7.2
+    post-install:
+      - install -Dm755 bin/whisper-cli ${FLATPAK_DEST}/bin/whisper-cli
+
+  # Download default whisper model
+  - name: whisper-model
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 ggml-small.en.bin ${FLATPAK_DEST}/share/whisper-models/ggml-small.en.bin
+    sources:
+      - type: file
+        url: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+        sha256: 58057f5c15e1e8ab6c2d4ded92ff5b2effe11e988a70587f93e2a3a7d4d59f0b
+        dest-filename: ggml-small.en.bin
+
+  # wtype for Wayland text injection
+  - name: wtype
+    buildsystem: meson
+    sources:
+      - type: git
+        url: https://github.com/atx/wtype.git
+        tag: v0.4
+
+  # Python dependencies from pip
+  # Generate python-deps.json with: ./generate-pip-sources.sh
+  - name: python-deps
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} customtkinter sounddevice numpy scipy pystray Pillow
+    sources:
+      # This section should be replaced with generated python-deps.json
+      # For now, install from PyPI during build (requires network)
+      - type: shell
+        commands:
+          - pip3 download --dest=. customtkinter sounddevice numpy scipy pystray Pillow
+
+  # Main application
+  - name: wayfinder-voice
+    buildsystem: simple
+    build-commands:
+      # Install Python source files
+      - install -Dm755 main.py ${FLATPAK_DEST}/lib/wayfinder-voice/main.py
+      - install -Dm644 recorder.py ${FLATPAK_DEST}/lib/wayfinder-voice/recorder.py
+      - install -Dm644 transcriber.py ${FLATPAK_DEST}/lib/wayfinder-voice/transcriber.py
+      - install -Dm644 injector.py ${FLATPAK_DEST}/lib/wayfinder-voice/injector.py
+      - install -Dm644 trigger_record.py ${FLATPAK_DEST}/lib/wayfinder-voice/trigger_record.py
+      
+      # Install assets
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/lib/wayfinder-voice/assets/icon.png
+      
+      # Install launcher
+      - install -Dm755 flatpak/wayfinder-voice-launcher.sh ${FLATPAK_DEST}/bin/wayfinder-voice
+      
+      # Install icon (multiple sizes for different contexts)
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.user.WayfinderVoice.png
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.user.WayfinderVoice.png
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/64x64/apps/io.github.user.WayfinderVoice.png
+      
+      # Install desktop file
+      - install -Dm644 flatpak/io.github.user.WayfinderVoice.desktop ${FLATPAK_DEST}/share/applications/io.github.user.WayfinderVoice.desktop
+      
+      # Install AppStream metadata
+      - install -Dm644 flatpak/io.github.user.WayfinderVoice.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.user.WayfinderVoice.metainfo.xml
+    sources:
+      - type: dir
+        path: ..

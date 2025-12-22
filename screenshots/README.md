@@ -1,0 +1,1 @@
+# Screenshots\n\nAdd screenshots here for the Flathub listing.\n\nRequired:\n- At least one screenshot showing the main UI\n- Recommended size: 1920x1080 or 1280x720\n- Format: PNG\n\nName them:\n- main-window.png\n- settings.png\n- recording.png

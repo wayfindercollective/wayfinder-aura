@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 
+  AppStream metadata for Wayfinder Voice
+  IMPORTANT: Change "io.github.user" to your actual GitHub username
+  Validate with: appstream-util validate io.github.user.WayfinderVoice.metainfo.xml
+-->
+<component type="desktop-application">
+  <id>io.github.user.WayfinderVoice</id>
+  
+  <name>Wayfinder Voice</name>
+  <summary>Local voice dictation using whisper.cpp</summary>
+  
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  
+  <developer id="io.github.user">
+    <name>Wayfinder Voice Developer</name>
+  </developer>
+  
+  <description>
+    <p>
+      Wayfinder Voice is a local voice dictation application for Linux. Press a hotkey, 
+      speak, and your words are typed wherever your cursor is. All processing happens 
+      on your machine using whisper.cpp — your voice never leaves your computer.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>100% Local &amp; Private — No cloud services, no data collection</li>
+      <li>Hotkey Triggered — Press a key to start/stop recording</li>
+      <li>Wayland &amp; X11 Support — Works on modern Linux desktops</li>
+      <li>System Tray Integration — Runs quietly in the background</li>
+      <li>Multiple Whisper Models — Choose speed vs accuracy (tiny → large)</li>
+      <li>Configurable Typing Speed — Instant paste or simulated typing</li>
+      <li>Beautiful Dark Theme — Premium UI inspired by Wayfinder OS</li>
+    </ul>
+    <p>
+      Perfect for writing emails, documents, code comments, chat messages, or any 
+      situation where speaking is faster than typing.
+    </p>
+  </description>
+  
+  <launchable type="desktop-id">io.github.user.WayfinderVoice.desktop</launchable>
+  
+  <screenshots>
+    <screenshot type="default">
+      <caption>Wayfinder Voice main interface showing recording status</caption>
+      <image>https://raw.githubusercontent.com/user/wayfinder-voice/main/screenshots/main-window.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Settings panel with model selection and hotkey configuration</caption>
+      <image>https://raw.githubusercontent.com/user/wayfinder-voice/main/screenshots/settings.png</image>
+    </screenshot>
+  </screenshots>
+  
+  <url type="homepage">https://github.com/user/wayfinder-voice</url>
+  <url type="bugtracker">https://github.com/user/wayfinder-voice/issues</url>
+  <url type="vcs-browser">https://github.com/user/wayfinder-voice</url>
+  
+  <content_rating type="oars-1.1" />
+  
+  <branding>
+    <color type="primary" scheme_preference="dark">#00D4FF</color>
+    <color type="primary" scheme_preference="light">#0099CC</color>
+  </branding>
+  
+  <categories>
+    <category>Utility</category>
+    <category>Audio</category>
+    <category>Accessibility</category>
+  </categories>
+  
+  <keywords>
+    <keyword>voice</keyword>
+    <keyword>dictation</keyword>
+    <keyword>speech</keyword>
+    <keyword>whisper</keyword>
+    <keyword>transcription</keyword>
+    <keyword>speech-to-text</keyword>
+    <keyword>accessibility</keyword>
+  </keywords>
+  
+  <provides>
+    <binary>wayfinder-voice</binary>
+  </provides>
+  
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  
+  <releases>
+    <release version="1.0.0" date="2024-12-22">
+      <description>
+        <p>Initial release of Wayfinder Voice</p>
+        <ul>
+          <li>Local voice dictation with whisper.cpp</li>
+          <li>Hotkey-triggered recording</li>
+          <li>Wayland and X11 support</li>
+          <li>System tray integration</li>
+          <li>Multiple whisper model support</li>
+          <li>Configurable typing speeds</li>
+          <li>Modern dark theme UI</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>
+

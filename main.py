@@ -41,14 +41,33 @@ from transcriber import transcribe_with_config, TranscriptionError
 
 # === Configuration ===
 
+# Detect Flatpak environment
+IS_FLATPAK = os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
+
 CONFIG_DIR = Path.home() / ".config" / "wayfinder-voice"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 SCRIPT_DIR = Path(__file__).parent.resolve()
-ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
+
+# Handle icon path for Flatpak vs regular install
+if IS_FLATPAK:
+    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.user.WayfinderVoice')}.png"
+    if not ICON_PATH.exists():
+        ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
+else:
+    ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
+
+# Default whisper paths - Flatpak uses bundled binary and models
+if IS_FLATPAK:
+    _default_whisper_binary = "/app/bin/whisper-cli"
+    _default_model_dir = os.environ.get("WHISPER_MODELS_DIR", "/app/share/whisper-models")
+    _default_model_path = f"{_default_model_dir}/ggml-small.en.bin"
+else:
+    _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
+    _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
 
 DEFAULT_CONFIG = {
-    "whisper_binary": "~/whisper.cpp/build/bin/whisper-cli",
-    "model_path": "~/whisper.cpp/models/ggml-large-v3-turbo.bin",
+    "whisper_binary": _default_whisper_binary,
+    "model_path": _default_model_path,
     "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
     "hotkey_modifiers": [],
     "audio_device": None,
@@ -70,6 +89,7 @@ DEFAULT_CONFIG = {
     "temperature_fallback": 0.0,  # Temperature increment for retries (0 = no retries)
     "accuracy_mode": "balanced",  # fast | balanced | high
     "audio_preprocessing": "light",  # off | light | medium | heavy
+    "ensure_punctuation": True,  # Ensure proper punctuation in transcriptions
     # Vocabulary and hallucination suppression
     "custom_vocabulary": [],  # User's personal terms appended to prompt
     "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
@@ -359,6 +379,7 @@ class ToolTip:
 # Setting tooltip descriptions
 SETTING_TOOLTIPS = {
     "hotkey": "The keyboard shortcut to start/stop voice recording. Press and release to toggle.",
+    "microphone": "Select which microphone/audio input device to use for voice recording.",
     "input_devices": "Which input devices to listen for the hotkey. Select specific devices or use all available.",
     "typing_speed": "How fast the transcribed text is typed out. Instant pastes immediately, others simulate typing.",
     "whisper_model": "The Whisper AI model for transcription. Larger models are more accurate but slower.",
@@ -369,12 +390,34 @@ SETTING_TOOLTIPS = {
     "beam_size": "Search width for transcription. Higher values explore more possibilities but take longer.",
     "language": "The language for transcription. English is optimized, Auto-detect works for multiple languages.",
     "audio_preprocessing": "Audio processing level. Light = gain only (recommended). Medium adds filtering. Heavy adds noise gate (may cut words).",
+    "ensure_punctuation": "Automatically ensure proper punctuation (periods, commas, capitalization) in all transcriptions.",
     "chunked_mode": "Process long recordings in segments. Prevents memory issues and allows progressive output.",
     "chunk_duration": "Length of each audio segment when using chunked recording. Shorter chunks use less memory.",
     "backend": "The transcription engine. whisper.cpp is lightweight, Faster-Whisper has better GPU support.",
     "gpu_acceleration": "Use your GPU for faster transcription. Requires compatible hardware and drivers.",
     "gpu_layers": "How many model layers to run on GPU. Auto uses all layers, or set a specific number.",
 }
+
+
+def get_audio_input_devices() -> list[dict]:
+    """Get all available audio input devices."""
+    import sounddevice as sd
+    devices = []
+    try:
+        all_devices = sd.query_devices()
+        for idx, device in enumerate(all_devices):
+            # Only include input devices (max_input_channels > 0)
+            if device.get("max_input_channels", 0) > 0:
+                devices.append({
+                    "index": idx,
+                    "name": device["name"],
+                    "channels": device["max_input_channels"],
+                    "sample_rate": int(device.get("default_samplerate", 16000)),
+                    "is_default": idx == sd.default.device[0],  # default input device
+                })
+    except Exception as e:
+        print(f"Error querying audio devices: {e}")
+    return devices
 
 
 class EventType(Enum):
@@ -1374,7 +1417,17 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["hotkey"],
         )
         
-        # Input devices setting
+        # Microphone/Audio input device setting
+        mic_display = self.get_microphone_display()
+        self.mic_btn = self.create_setting_row(
+            settings_card,
+            "Microphone",
+            mic_display,
+            self.open_microphone_settings,
+            tooltip=SETTING_TOOLTIPS["microphone"],
+        )
+        
+        # Input devices setting (for hotkey detection)
         device_count = len(get_all_input_devices())
         enabled = self.config.get("enabled_input_devices", [])
         device_text = f"All ({device_count})" if not enabled else f"{len(enabled)} selected"
@@ -1576,6 +1629,16 @@ class WayfinderApp(ctk.CTk):
             corner_radius=8,
         )
         self.preprocess_dropdown.pack(side="right")
+        
+        # Punctuation toggle
+        self.punctuation_var = ctk.BooleanVar(value=self.config.get("ensure_punctuation", True))
+        self.create_toggle_row(
+            advanced_card,
+            "Ensure Punctuation",
+            self.punctuation_var,
+            self.toggle_punctuation,
+            tooltip=SETTING_TOOLTIPS["ensure_punctuation"],
+        )
         
         # Chunked recording settings label
         ctk.CTkLabel(
@@ -1931,6 +1994,13 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
         mode = "chunked (unlimited)" if self.chunked_var.get() else "simple"
         self.log(f"⚙ Recording mode: {mode}")
+    
+    def toggle_punctuation(self):
+        """Toggle punctuation enforcement."""
+        self.config["ensure_punctuation"] = self.punctuation_var.get()
+        save_config(self.config)
+        status = "on" if self.punctuation_var.get() else "off"
+        self.log(f"⚙ Punctuation: {status}")
 
     def toggle_gpu(self):
         """Toggle GPU acceleration."""
@@ -2056,6 +2126,27 @@ class WayfinderApp(ctk.CTk):
             mods = "+".join(m.capitalize() for m in hotkey_modifiers)
             return f"{mods}+{key_name}"
         return key_name
+
+    def get_microphone_display(self) -> str:
+        """Get display name for current audio input device."""
+        device_id = self.config.get("audio_device")
+        if device_id is None:
+            return "System Default"
+        
+        # Find the device name
+        try:
+            devices = get_audio_input_devices()
+            for device in devices:
+                if device["index"] == device_id:
+                    # Truncate long names
+                    name = device["name"]
+                    if len(name) > 25:
+                        return name[:22] + "..."
+                    return name
+        except Exception:
+            pass
+        
+        return f"Device {device_id}"
 
     def get_model_display(self) -> str:
         """Get display name for current model."""
@@ -2689,6 +2780,194 @@ class WayfinderApp(ctk.CTk):
                                     return
         
         threading.Thread(target=detect_keys, daemon=True).start()
+
+    def open_microphone_settings(self):
+        """Open dialog to select audio input device (microphone)."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Select Microphone")
+        dialog.geometry("500x480")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="🎤 Select Microphone",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Choose which audio input device to use for voice recording.",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", pady=(0, 20))
+        
+        # Get all audio input devices
+        audio_devices = get_audio_input_devices()
+        current_device = self.config.get("audio_device")
+        
+        # Variable to track selection
+        selected_device = ctk.IntVar(value=-1 if current_device is None else current_device)
+        
+        # Scrollable frame for devices
+        scroll_frame = ctk.CTkScrollableFrame(
+            inner,
+            fg_color=COLORS["bg_card"],
+            corner_radius=12,
+            height=220,
+        )
+        scroll_frame.pack(fill="both", expand=True, pady=(0, 20))
+        
+        # System default option
+        default_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        default_frame.pack(fill="x", pady=5, padx=5)
+        
+        ctk.CTkRadioButton(
+            default_frame,
+            text="System Default",
+            variable=selected_device,
+            value=-1,
+            font=(self.font_body[0], 13, "bold"),
+            text_color=COLORS["text_bright"],
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+        ).pack(side="left")
+        
+        ctk.CTkLabel(
+            default_frame,
+            text="(Use system audio settings)",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left", padx=(10, 0))
+        
+        # Separator
+        ctk.CTkFrame(scroll_frame, fg_color=COLORS["border"], height=1).pack(fill="x", pady=10, padx=10)
+        
+        # List each audio device
+        for device in audio_devices:
+            row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+            row.pack(fill="x", pady=4, padx=5)
+            
+            # Radio button
+            rb = ctk.CTkRadioButton(
+                row,
+                text="",
+                variable=selected_device,
+                value=device["index"],
+                width=24,
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_glow"],
+            )
+            rb.pack(side="left")
+            
+            # Device info frame
+            info_frame = ctk.CTkFrame(row, fg_color="transparent")
+            info_frame.pack(side="left", fill="x", expand=True, padx=(5, 0))
+            
+            # Device name (truncated if needed)
+            name = device["name"]
+            display_name = name[:45] + "..." if len(name) > 45 else name
+            
+            # Mark default device
+            if device.get("is_default"):
+                display_name += " ★"
+            
+            name_label = ctk.CTkLabel(
+                info_frame,
+                text=display_name,
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_primary"],
+                anchor="w",
+            )
+            name_label.pack(anchor="w")
+            
+            # Device details (channels, sample rate)
+            details = f"{device['channels']}ch • {device['sample_rate']}Hz"
+            ctk.CTkLabel(
+                info_frame,
+                text=details,
+                font=(self.font_body[0], 10),
+                text_color=COLORS["text_secondary"],
+                anchor="w",
+            ).pack(anchor="w")
+        
+        if not audio_devices:
+            ctk.CTkLabel(
+                scroll_frame,
+                text="No audio input devices found!\n\nCheck your audio settings and make sure\na microphone is connected.",
+                font=(self.font_body[0], 13),
+                text_color=COLORS["accent_red"],
+                justify="center",
+            ).pack(pady=30)
+        
+        # Save button
+        def save():
+            device_idx = selected_device.get()
+            if device_idx == -1:
+                self.config["audio_device"] = None
+                device_name = "System Default"
+            else:
+                self.config["audio_device"] = device_idx
+                # Get device name for display
+                device_name = f"Device {device_idx}"
+                for d in audio_devices:
+                    if d["index"] == device_idx:
+                        device_name = d["name"]
+                        break
+            
+            save_config(self.config)
+            
+            # Update button text
+            self.mic_btn.configure(text=self.get_microphone_display())
+            
+            # Update recorder with new device
+            self.update_audio_device()
+            
+            self.log(f"🎤 Microphone: {device_name[:30]}...")
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            inner,
+            text="Save & Apply",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=save,
+        ).pack(fill="x", pady=(10, 10))
+        
+        ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(fill="x")
+
+    def update_audio_device(self):
+        """Update the recorder with the new audio device setting."""
+        device_id = self.config.get("audio_device")
+        
+        # Update standard recorder
+        self.recorder = AudioRecorder(
+            sample_rate=self.config["sample_rate"],
+            device=device_id,
+            preprocessing=self.config.get("audio_preprocessing", "light"),
+        )
+        
+        # Chunked recorder will be recreated when needed with new device
 
     def open_device_settings(self):
         """Open dialog to manage which input devices to monitor."""

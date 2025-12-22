@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Wayfinder Voice
+GenericName=Voice Dictation
+Comment=Local voice dictation using whisper.cpp - speak and your words are typed
+Exec=wayfinder-voice
+Icon=io.github.user.WayfinderVoice
+Terminal=false
+Categories=Utility;Audio;Accessibility;
+Keywords=voice;dictation;speech;whisper;transcription;speech-to-text;
+StartupNotify=true
+StartupWMClass=wayfinder-voice
+

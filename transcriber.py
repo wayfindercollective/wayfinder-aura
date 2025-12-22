@@ -478,6 +478,52 @@ def get_backend(config: dict) -> TranscriptionBackend:
         )
 
 
+def ensure_punctuation_postprocess(text: str) -> str:
+    """
+    Post-process transcription to ensure proper punctuation.
+    
+    Fixes common issues:
+    - Capitalizes first letter of text and after sentence endings
+    - Adds period at end if missing punctuation
+    - Cleans up spacing around punctuation
+    """
+    if not text or not text.strip():
+        return text
+    
+    import re
+    
+    text = text.strip()
+    
+    # Capitalize first letter
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    
+    # Capitalize after sentence-ending punctuation (. ! ?)
+    def capitalize_after_punct(match):
+        return match.group(1) + match.group(2).upper()
+    
+    text = re.sub(r'([.!?]\s+)([a-z])', capitalize_after_punct, text)
+    
+    # Ensure text ends with punctuation
+    if text and text[-1] not in '.!?':
+        # Check if it looks like a question
+        question_words = ['who', 'what', 'where', 'when', 'why', 'how', 'is', 'are', 'do', 'does', 'did', 'can', 'could', 'would', 'should', 'will']
+        first_word = text.split()[0].lower() if text.split() else ''
+        if first_word in question_words or '?' in text:
+            text += '?'
+        else:
+            text += '.'
+    
+    # Clean up spacing around punctuation
+    text = re.sub(r'\s+([.,!?;:])', r'\1', text)  # Remove space before punctuation
+    text = re.sub(r'([.,!?;:])([A-Za-z])', r'\1 \2', text)  # Add space after if missing
+    
+    # Clean up multiple spaces
+    text = re.sub(r'\s+', ' ', text)
+    
+    return text.strip()
+
+
 def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> str:
     """
     Transcribe using settings from config dictionary.
@@ -491,8 +537,25 @@ def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> 
     Returns:
         Transcribed text string
     """
+    # Build enhanced prompt if punctuation is enabled
+    ensure_punct = config.get("ensure_punctuation", True)
+    
+    if ensure_punct:
+        # Add punctuation hint to the prompt
+        original_prompt = config.get("prompt", "")
+        punct_hint = "Use proper punctuation including periods, commas, and capitalization."
+        if punct_hint not in original_prompt:
+            config = config.copy()  # Don't modify original
+            config["prompt"] = f"{original_prompt} {punct_hint}".strip()
+    
     backend = get_backend(config)
-    return backend.transcribe(audio_path, context=context)
+    text = backend.transcribe(audio_path, context=context)
+    
+    # Apply post-processing if punctuation is enabled
+    if ensure_punct and text:
+        text = ensure_punctuation_postprocess(text)
+    
+    return text
 
 
 # Legacy function for backwards compatibility
