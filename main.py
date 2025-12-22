@@ -1739,8 +1739,13 @@ class FloatingIndicator:
             return
         
         import math
-            
-        self.pulse_state = (self.pulse_state + 1) % 60  # 60 steps for ~2 second cycle at 30fps
+        
+        # Scale animation speed based on frame rate (normalized to 60fps baseline)
+        fps_scale = 60.0 / self._target_fps
+        
+        # Cycle through pulse states (2 second cycle regardless of frame rate)
+        cycle_steps = self._target_fps * 2  # 2 second cycle
+        self.pulse_state = (self.pulse_state + 1) % cycle_steps
         
         # Get audio level from callback (voice reactivity)
         if self._audio_level_callback:
@@ -1751,16 +1756,16 @@ class FloatingIndicator:
                     # Instant attack - respond IMMEDIATELY!
                     self._current_audio_level = raw_level
                 else:
-                    # Moderate decay - keeps energy visible
-                    self._current_audio_level = self._current_audio_level * 0.75 + raw_level * 0.25
+                    # Moderate decay - scaled for frame rate
+                    decay = 0.75 ** fps_scale
+                    self._current_audio_level = self._current_audio_level * decay + raw_level * (1 - decay)
             except:
-                self._current_audio_level *= 0.85  # Decay if error
+                self._current_audio_level *= 0.85 ** fps_scale  # Decay if error
         else:
-            self._current_audio_level *= 0.85  # Decay if no callback
+            self._current_audio_level *= 0.85 ** fps_scale  # Decay if no callback
         
         # Sinusoidal easing for smooth breathing effect
-        # Maps pulse_state (0-59) to a smooth sine wave
-        t = self.pulse_state / 60.0 * 2 * math.pi
+        t = self.pulse_state / cycle_steps * 2 * math.pi
         ease = 0.5 + 0.5 * math.sin(t)  # 0 to 1 smooth
         
         # Dramatic scale range: 0.7 to 1.3
@@ -1768,22 +1773,22 @@ class FloatingIndicator:
         voice_scale_boost = self._current_audio_level * 0.5
         scale = 0.7 + ease * 0.6 + voice_scale_boost
         
-        # Update ring animation phase (completes a ring every ~1.5 seconds)
-        self._ring_phase = (self._ring_phase + 0.022) % 1.0
+        # Update ring animation phase (scaled for frame rate)
+        self._ring_phase = (self._ring_phase + 0.022 * fps_scale) % 1.0
         
-        # Update waveform animation time (continuous scrolling)
-        self._wave_time += 0.08
+        # Update waveform animation time (scaled for frame rate - smooth at any fps)
+        self._wave_time += 0.08 * fps_scale
         
-        # Update breathing amplitude for waveform (slower breath cycle)
-        self._wave_breath += 0.04
+        # Update breathing amplitude for waveform (scaled for frame rate)
+        self._wave_breath += 0.04 * fps_scale
         
         # Redraw both the dot and waveform
         self._draw_dot(self.current_color, scale)
         self._draw_waveform(self.current_color)
         
-        # Schedule next step at ~30fps for buttery smooth animation
+        # Schedule next step at monitor refresh rate for buttery smooth animation
         if self.window:
-            self.pulse_job = self.window.after(33, self._pulse_step)
+            self.pulse_job = self.window.after(self._frame_interval_ms, self._pulse_step)
             
     def _stop_pulse(self) -> None:
         """Stop the pulsing animation."""
@@ -2102,11 +2107,12 @@ class WayfinderApp(ctk.CTk):
         self.start_hotkey_listener()
         self.poll_events()
         
-        # Log indicator info
+        # Log animation refresh rate info
         if self._use_pyqt_overlay:
             self.log("🎯 Overlay: PyQt6 glassmorphic (60 Hz)")
         elif self.indicator:
             self.log(f"🎯 Indicator refresh: {self.indicator.get_fps_info()}")
+        self.log(f"🎬 Animation refresh: {self._target_fps} Hz (monitor sync)")
         
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         
@@ -2346,6 +2352,11 @@ class WayfinderApp(ctk.CTk):
         self._hero_audio_level = 0.0
         self._hero_animation_job = None
         self._idle_breath_job = None
+        
+        # Detect monitor refresh rate for smooth animations
+        self._target_fps = get_monitor_refresh_rate()
+        self._frame_interval_ms = max(1, int(1000 / self._target_fps))
+        self._fps_scale = 60.0 / self._target_fps  # Scale factors normalized to 60fps
         
         # Draw initial idle waveform and start gentle breathing animation
         self._draw_hero_waveform()
@@ -3243,18 +3254,30 @@ class WayfinderApp(ctk.CTk):
         row.grid_columnconfigure(0, weight=1)  # Label column - grows
         row.grid_columnconfigure(1, weight=0)  # Button column - fixed
         
-        # Label with tooltip on hover (no separate info icon)
+        # Label container for text + info icon
+        label_container = ctk.CTkFrame(row, fg_color="transparent")
+        label_container.grid(row=0, column=0, sticky="w")
+        
+        # Label text
         label_widget = ctk.CTkLabel(
-            row,
+            label_container,
             text=label,
             font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_secondary"],
         )
-        label_widget.grid(row=0, column=0, sticky="w")
+        label_widget.pack(side="left")
         
-        # Apply tooltip to entire row if provided
+        # Info icon that shows tooltip is available
         if tooltip:
+            info_icon = ctk.CTkLabel(
+                label_container,
+                text="ⓘ",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_muted"],
+            )
+            info_icon.pack(side="left", padx=(6, 0))
             ToolTip(label_widget, tooltip)
+            ToolTip(info_icon, tooltip)
         
         # Modern frosted glass button
         btn = ctk.CTkButton(
@@ -3271,9 +3294,6 @@ class WayfinderApp(ctk.CTk):
             command=command,
         )
         btn.grid(row=0, column=1, sticky="e", padx=(16, 0))
-        
-        if tooltip:
-            ToolTip(btn, tooltip)
         
         return btn
 
@@ -3368,17 +3388,30 @@ class WayfinderApp(ctk.CTk):
         row.grid_columnconfigure(0, weight=1)
         row.grid_columnconfigure(1, weight=0)
         
-        # Label with integrated tooltip
+        # Label container for text + info icon
+        label_container = ctk.CTkFrame(row, fg_color="transparent")
+        label_container.grid(row=0, column=0, sticky="w")
+        
+        # Label text
         label_widget = ctk.CTkLabel(
-            row,
+            label_container,
             text=label,
             font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_secondary"],
         )
-        label_widget.grid(row=0, column=0, sticky="w")
+        label_widget.pack(side="left")
         
+        # Info icon that shows tooltip is available
         if tooltip:
+            info_icon = ctk.CTkLabel(
+                label_container,
+                text="ⓘ",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_muted"],
+            )
+            info_icon.pack(side="left", padx=(6, 0))
             ToolTip(label_widget, tooltip)
+            ToolTip(info_icon, tooltip)
         
         # Modern slim pill-style toggle
         switch = ctk.CTkSwitch(
@@ -3404,17 +3437,30 @@ class WayfinderApp(ctk.CTk):
         row.grid_columnconfigure(0, weight=1)
         row.grid_columnconfigure(1, weight=0)
         
-        # Label with integrated tooltip
+        # Label container for text + info icon
+        label_container = ctk.CTkFrame(row, fg_color="transparent")
+        label_container.grid(row=0, column=0, sticky="w")
+        
+        # Label text
         label_widget = ctk.CTkLabel(
-            row,
+            label_container,
             text=label,
             font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_secondary"],
         )
-        label_widget.grid(row=0, column=0, sticky="w")
+        label_widget.pack(side="left")
         
+        # Info icon that shows tooltip is available
         if tooltip:
+            info_icon = ctk.CTkLabel(
+                label_container,
+                text="ⓘ",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_muted"],
+            )
+            info_icon.pack(side="left", padx=(6, 0))
             ToolTip(label_widget, tooltip)
+            ToolTip(info_icon, tooltip)
         
         # Modern frosted glass dropdown
         dropdown = ctk.CTkOptionMenu(
@@ -5973,9 +6019,9 @@ class WayfinderApp(ctk.CTk):
             self._idle_breath_job = None
     
     def _animate_idle_breath(self):
-        """Animation frame for idle breathing waveform - runs at ~20fps for smooth gentle motion."""
-        # Slow, gentle time progression for calm wave motion
-        self._hero_wave_time += 0.04
+        """Animation frame for idle breathing waveform - runs at monitor refresh rate for buttery smooth motion."""
+        # Slow, gentle time progression for calm wave motion (scaled for frame rate)
+        self._hero_wave_time += 0.04 * self._fps_scale
         
         # No audio level in idle - pure breathing
         self._hero_audio_level = 0.0
@@ -5983,16 +6029,16 @@ class WayfinderApp(ctk.CTk):
         # Redraw waveform
         self._draw_hero_waveform()
         
-        # Schedule next frame if still in idle state
+        # Schedule next frame at monitor refresh rate for smooth gentle motion
         if self.app_state == AppState.IDLE:
-            self._idle_breath_job = self.after(50, self._animate_idle_breath)  # ~20fps for smooth gentle motion
+            self._idle_breath_job = self.after(self._frame_interval_ms, self._animate_idle_breath)
         else:
             self._idle_breath_job = None
     
     def _animate_hero(self):
-        """Animation frame for hero waveform - runs at ~30fps."""
-        # Update animation time
-        self._hero_wave_time += 0.15
+        """Animation frame for hero waveform - runs at monitor refresh rate for buttery smooth animation."""
+        # Update animation time (scaled for frame rate)
+        self._hero_wave_time += 0.15 * self._fps_scale
         
         # Get current audio level from active recorder
         target_level = 0.0
@@ -6004,8 +6050,9 @@ class WayfinderApp(ctk.CTk):
         except:
             pass
         
-        # Smooth the audio level (exponential moving average)
-        self._hero_audio_level = self._hero_audio_level * 0.7 + target_level * 0.3
+        # Smooth the audio level (exponential moving average, scaled for frame rate)
+        smooth_factor = 0.7 ** self._fps_scale
+        self._hero_audio_level = self._hero_audio_level * smooth_factor + target_level * (1 - smooth_factor)
         
         # Redraw waveform
         self._draw_hero_waveform()
@@ -6016,9 +6063,9 @@ class WayfinderApp(ctk.CTk):
             pulse = 0.9 + 0.1 * math.sin(self._hero_wave_time * 2)
             self._draw_mic_button_with_pulse(STATE_COLORS[self.app_state], pulse)
         
-        # Schedule next frame if still active
+        # Schedule next frame at monitor refresh rate for buttery smooth animation
         if self.app_state != AppState.IDLE:
-            self._hero_animation_job = self.after(33, self._animate_hero)  # ~30fps
+            self._hero_animation_job = self.after(self._frame_interval_ms, self._animate_hero)
         else:
             self._hero_animation_job = None
     
