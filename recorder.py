@@ -1,6 +1,7 @@
 """
 Audio recording module for Wayfinder Voice.
-Captures 16kHz mono audio using sounddevice with callback-based streaming.
+Captures audio using sounddevice with callback-based streaming.
+Automatically resamples to 16kHz for Whisper compatibility.
 Includes audio preprocessing for improved transcription accuracy.
 Supports chunked recording for indefinite duration sessions.
 """
@@ -15,12 +16,87 @@ from typing import Callable
 import numpy as np
 import sounddevice as sd
 
-# Try to import scipy for audio filtering
+# Try to import scipy for audio filtering and resampling
 try:
-    from scipy.signal import butter, filtfilt
+    from scipy.signal import butter, filtfilt, resample_poly
+    from math import gcd
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
+
+
+# Target sample rate for Whisper
+WHISPER_SAMPLE_RATE = 16000
+
+
+def get_supported_sample_rate(device: int | None = None, target_rate: int = 16000) -> int:
+    """
+    Find a supported sample rate for the given device.
+    
+    Args:
+        device: Audio device index (None for default)
+        target_rate: Preferred sample rate
+        
+    Returns:
+        Supported sample rate (may be different from target)
+    """
+    # Common sample rates to try, in order of preference
+    sample_rates_to_try = [target_rate, 44100, 48000, 22050, 32000, 96000]
+    
+    # Get device info
+    try:
+        if device is not None:
+            device_info = sd.query_devices(device)
+        else:
+            device_info = sd.query_devices(kind='input')
+        
+        # Try the device's default rate first
+        default_rate = int(device_info.get('default_samplerate', 44100))
+        if default_rate not in sample_rates_to_try:
+            sample_rates_to_try.insert(0, default_rate)
+    except Exception:
+        pass
+    
+    # Test each sample rate
+    for rate in sample_rates_to_try:
+        try:
+            # Test if this rate works by checking device compatibility
+            sd.check_input_settings(device=device, samplerate=rate, channels=1)
+            return rate
+        except sd.PortAudioError:
+            continue
+    
+    # Fallback to 44100 which is most universally supported
+    return 44100
+
+
+def resample_audio(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.ndarray:
+    """
+    Resample audio to target sample rate.
+    
+    Args:
+        audio: Audio data as numpy array
+        orig_rate: Original sample rate
+        target_rate: Target sample rate
+        
+    Returns:
+        Resampled audio
+    """
+    if orig_rate == target_rate:
+        return audio
+    
+    if SCIPY_AVAILABLE:
+        # Use scipy's polyphase resampling for high quality
+        g = gcd(orig_rate, target_rate)
+        up = target_rate // g
+        down = orig_rate // g
+        return resample_poly(audio, up, down).astype(np.float32)
+    else:
+        # Simple linear interpolation fallback
+        duration = len(audio) / orig_rate
+        target_length = int(duration * target_rate)
+        indices = np.linspace(0, len(audio) - 1, target_length)
+        return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
 
 
 def preprocess_audio(
@@ -100,7 +176,7 @@ class AudioRecorder:
         Initialize the audio recorder.
 
         Args:
-            sample_rate: Audio sample rate in Hz (default 16000 for whisper)
+            sample_rate: Target audio sample rate in Hz (default 16000 for whisper)
             channels: Number of audio channels (default 1 for mono)
             device: Audio input device index (None for default)
             preprocessing: Audio preprocessing level:
@@ -109,9 +185,10 @@ class AudioRecorder:
                 - "medium": Normalization + high-pass filter
                 - "heavy": Full processing with noise gate
         """
-        self.sample_rate = sample_rate
+        self.target_sample_rate = sample_rate  # What we want (for Whisper)
         self.channels = channels
         self.device = device
+        self.recording_sample_rate = None  # Will be set when starting
         # Convert bool to level string for backwards compatibility
         if preprocessing is True:
             self.preprocessing = "light"
@@ -123,6 +200,11 @@ class AudioRecorder:
         self.stream: sd.InputStream | None = None
         self._temp_file: tempfile.NamedTemporaryFile | None = None
 
+    @property
+    def sample_rate(self) -> int:
+        """Return the current/target sample rate."""
+        return self.recording_sample_rate or self.target_sample_rate
+
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:
         """Callback function for sounddevice stream."""
         if status:
@@ -133,8 +215,18 @@ class AudioRecorder:
     def start(self) -> None:
         """Start recording audio."""
         self.frames = []
+        
+        # Find a supported sample rate for this device
+        self.recording_sample_rate = get_supported_sample_rate(
+            device=self.device, 
+            target_rate=self.target_sample_rate
+        )
+        
+        if self.recording_sample_rate != self.target_sample_rate:
+            print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
+        
         self.stream = sd.InputStream(
-            samplerate=self.sample_rate,
+            samplerate=self.recording_sample_rate,
             channels=self.channels,
             device=self.device,
             dtype=np.float32,
@@ -164,6 +256,18 @@ class AudioRecorder:
         # Concatenate all frames
         audio_data = np.concatenate(self.frames, axis=0)
         
+        # Flatten if needed (mono)
+        if audio_data.ndim > 1:
+            audio_data = audio_data.flatten()
+        
+        # Resample to target rate if needed (16kHz for Whisper)
+        if self.recording_sample_rate and self.recording_sample_rate != self.target_sample_rate:
+            audio_data = resample_audio(
+                audio_data, 
+                self.recording_sample_rate, 
+                self.target_sample_rate
+            )
+        
         # Determine preprocessing level
         level = apply_preprocessing if apply_preprocessing is not None else self.preprocessing
         if level is True:
@@ -171,9 +275,9 @@ class AudioRecorder:
         elif level is False:
             level = "off"
         
-        # Apply preprocessing
+        # Apply preprocessing (using target sample rate)
         if level and level != "off":
-            audio_data = preprocess_audio(audio_data, self.sample_rate, level=level)
+            audio_data = preprocess_audio(audio_data, self.target_sample_rate, level=level)
 
         # Convert float32 [-1.0, 1.0] to int16
         audio_int16 = (audio_data * 32767).astype(np.int16)
@@ -182,11 +286,11 @@ class AudioRecorder:
         self._temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         temp_path = self._temp_file.name
 
-        # Write WAV file
+        # Write WAV file at target sample rate (16kHz for Whisper)
         with wave.open(temp_path, "wb") as wav_file:
             wav_file.setnchannels(self.channels)
             wav_file.setsampwidth(2)  # 16-bit = 2 bytes
-            wav_file.setframerate(self.sample_rate)
+            wav_file.setframerate(self.target_sample_rate)
             wav_file.writeframes(audio_int16.tobytes())
 
         return temp_path
@@ -241,6 +345,7 @@ class ChunkedRecorder:
     - Overlap between chunks to avoid cutting words
     - Background processing via callback
     - No maximum recording duration
+    - Automatic resampling to 16kHz for Whisper compatibility
     """
 
     def __init__(
@@ -257,7 +362,7 @@ class ChunkedRecorder:
         Initialize the chunked audio recorder.
 
         Args:
-            sample_rate: Audio sample rate in Hz (default 16000 for whisper)
+            sample_rate: Target audio sample rate in Hz (default 16000 for whisper)
             channels: Number of audio channels (default 1 for mono)
             device: Audio input device index (None for default)
             preprocessing: Audio preprocessing level:
@@ -269,7 +374,8 @@ class ChunkedRecorder:
             chunk_overlap: Overlap between chunks in seconds
             on_chunk_ready: Callback when a chunk is ready (path, chunk_index)
         """
-        self.sample_rate = sample_rate
+        self.target_sample_rate = sample_rate  # What we want (for Whisper)
+        self.recording_sample_rate = None  # Will be set when starting
         self.channels = channels
         self.device = device
         # Convert bool to level string for backwards compatibility
@@ -298,9 +404,14 @@ class ChunkedRecorder:
         self._chunk_thread: threading.Thread | None = None
         self._temp_files: list[str] = []
         
-        # Calculate samples
+        # Calculate samples (will be updated based on actual recording rate)
         self._chunk_samples = int(chunk_duration * sample_rate)
         self._overlap_samples = int(chunk_overlap * sample_rate)
+
+    @property
+    def sample_rate(self) -> int:
+        """Return the current/target sample rate."""
+        return self.recording_sample_rate or self.target_sample_rate
 
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:
         """Callback function for sounddevice stream."""
@@ -370,9 +481,21 @@ class ChunkedRecorder:
     def _save_chunk(self, audio_data: np.ndarray) -> str | None:
         """Save a chunk to a temporary WAV file."""
         try:
-            # Apply preprocessing based on level
+            # Flatten if needed (mono)
+            if audio_data.ndim > 1:
+                audio_data = audio_data.flatten()
+            
+            # Resample to target rate if needed (16kHz for Whisper)
+            if self.recording_sample_rate and self.recording_sample_rate != self.target_sample_rate:
+                audio_data = resample_audio(
+                    audio_data, 
+                    self.recording_sample_rate, 
+                    self.target_sample_rate
+                )
+            
+            # Apply preprocessing based on level (using target sample rate)
             if self.preprocessing and self.preprocessing != "off":
-                audio_data = preprocess_audio(audio_data, self.sample_rate, level=self.preprocessing)
+                audio_data = preprocess_audio(audio_data, self.target_sample_rate, level=self.preprocessing)
             
             # Convert float32 to int16
             audio_int16 = (audio_data * 32767).astype(np.int16)
@@ -385,11 +508,11 @@ class ChunkedRecorder:
             temp_path = temp_file.name
             self._temp_files.append(temp_path)
             
-            # Write WAV
+            # Write WAV at target sample rate (16kHz for Whisper)
             with wave.open(temp_path, "wb") as wav_file:
                 wav_file.setnchannels(self.channels)
                 wav_file.setsampwidth(2)
-                wav_file.setframerate(self.sample_rate)
+                wav_file.setframerate(self.target_sample_rate)
                 wav_file.writeframes(audio_int16.tobytes())
             
             return temp_path
@@ -412,9 +535,22 @@ class ChunkedRecorder:
             except queue.Empty:
                 break
         
+        # Find a supported sample rate for this device
+        self.recording_sample_rate = get_supported_sample_rate(
+            device=self.device, 
+            target_rate=self.target_sample_rate
+        )
+        
+        if self.recording_sample_rate != self.target_sample_rate:
+            print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
+        
+        # Recalculate chunk samples based on actual recording rate
+        self._chunk_samples = int(self.chunk_duration * self.recording_sample_rate)
+        self._overlap_samples = int(self.chunk_overlap * self.recording_sample_rate)
+        
         # Start audio stream
         self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
+            samplerate=self.recording_sample_rate,
             channels=self.channels,
             device=self.device,
             dtype=np.float32,
