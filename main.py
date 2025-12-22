@@ -2141,8 +2141,10 @@ class WayfinderApp(ctk.CTk):
         self._hero_animation_job = None
         self._idle_breath_job = None
         
-        # Draw initial idle waveform
+        # Draw initial idle waveform and start gentle breathing animation
         self._draw_hero_waveform()
+        # Schedule idle animation to start after window is shown
+        self.after(100, self._start_idle_breath)
         
         # === Mic Button Container (centered) ===
         mic_container = ctk.CTkFrame(hero_inner, fg_color="transparent")
@@ -2285,8 +2287,9 @@ class WayfinderApp(ctk.CTk):
         
         # Calculate amplitude based on audio level
         audio_level = self._hero_audio_level
-        base_breath = 0.1 + 0.05 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.5))
-        voice_boost = (audio_level ** 0.7) * 0.9
+        # Gentle breathing oscillation: ranges from 0.2 to 0.35 for visible idle motion
+        base_breath = 0.2 + 0.15 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.5))
+        voice_boost = (audio_level ** 0.7) * 0.75
         amplitude_factor = min(1.0, base_breath + voice_boost)
         
         # Draw layered waves
@@ -2792,17 +2795,14 @@ class WayfinderApp(ctk.CTk):
         self.log_textbox.pack(fill="both", expand=True, padx=12, pady=12)
         self.log_textbox.configure(state="disabled")
         
-        # Legacy compatibility
+        # Legacy compatibility - these are needed for old code references
         self.log_expanded = True
         self.log_container = log_card
         self.log_frame = log_card
-        
-        # Keep legacy toggle methods working
-        self.advanced_expanded = False
-        self.advanced_container = ctk.CTkFrame(frame, fg_color="transparent")
-        self.advanced_toggle_btn = ctk.CTkButton(frame, text="")
-        self.log_toggle_btn = ctk.CTkButton(frame, text="")
         self.log_header_frame = header
+        
+        # Note: advanced_toggle_btn and advanced_container are created in _create_settings_tab
+        # Do NOT overwrite them here!
     
     def _draw_gradient_bg(self, event=None):
         """Draw radial gradient background with electric teal glow."""
@@ -2850,15 +2850,9 @@ class WayfinderApp(ctk.CTk):
     
     
     def toggle_activity_log(self):
-        """Toggle the activity log expanded/collapsed state."""
-        self.log_expanded = not self.log_expanded
-        
-        if self.log_expanded:
-            self.log_toggle_btn.configure(text="▼  ACTIVITY")
-            self.log_container.pack(fill="both", expand=True)
-        else:
-            self.log_toggle_btn.configure(text="▶  ACTIVITY")
-            self.log_container.pack_forget()
+        """Toggle the activity log expanded/collapsed state (legacy - now in History tab)."""
+        # Activity log is now always visible in the History tab
+        pass
     
     def toggle_advanced_settings(self):
         """Toggle the advanced settings expanded/collapsed state (legacy method)."""
@@ -5773,6 +5767,37 @@ class WayfinderApp(ctk.CTk):
         # Reset to idle state
         self._hero_audio_level = 0.0
         self._draw_hero_waveform()
+        # Start gentle idle breathing animation
+        self._start_idle_breath()
+    
+    def _start_idle_breath(self):
+        """Start the gentle idle breathing animation for the waveform."""
+        if hasattr(self, '_idle_breath_job') and self._idle_breath_job:
+            return  # Already running
+        self._animate_idle_breath()
+    
+    def _stop_idle_breath(self):
+        """Stop the idle breathing animation."""
+        if hasattr(self, '_idle_breath_job') and self._idle_breath_job:
+            self.after_cancel(self._idle_breath_job)
+            self._idle_breath_job = None
+    
+    def _animate_idle_breath(self):
+        """Animation frame for idle breathing waveform - runs at ~20fps for smooth gentle motion."""
+        # Slow, gentle time progression for calm wave motion
+        self._hero_wave_time += 0.04
+        
+        # No audio level in idle - pure breathing
+        self._hero_audio_level = 0.0
+        
+        # Redraw waveform
+        self._draw_hero_waveform()
+        
+        # Schedule next frame if still in idle state
+        if self.app_state == AppState.IDLE:
+            self._idle_breath_job = self.after(50, self._animate_idle_breath)  # ~20fps for smooth gentle motion
+        else:
+            self._idle_breath_job = None
     
     def _animate_hero(self):
         """Animation frame for hero waveform - runs at ~30fps."""
