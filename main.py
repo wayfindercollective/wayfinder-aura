@@ -2640,8 +2640,8 @@ class WayfinderApp(ctk.CTk):
         frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
         self.tab_frames["dictate"] = frame
         
-        # Scrollable content with smooth Mac-like scrolling
-        scroll = SmoothScrollableFrame(
+        # Scrollable content
+        scroll = ctk.CTkScrollableFrame(
             frame,
             fg_color="transparent",
             scrollbar_button_color=COLORS["bg_hover"],
@@ -2741,8 +2741,8 @@ class WayfinderApp(ctk.CTk):
         frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
         self.tab_frames["settings"] = frame
         
-        # Scrollable content with smooth Mac-like scrolling
-        scroll = SmoothScrollableFrame(
+        # Scrollable content
+        scroll = ctk.CTkScrollableFrame(
             frame,
             fg_color="transparent",
             scrollbar_button_color=COLORS["bg_hover"],
