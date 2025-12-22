@@ -55,13 +55,13 @@ class WhisperCppBackend(TranscriptionBackend):
         use_gpu: bool = False,
         gpu_layers: int = 0,
         # Accuracy enhancement parameters
-        beam_size: int = 8,
-        best_of: int = 5,
+        beam_size: int = 5,
+        best_of: int = 3,
         language: str = "en",
-        entropy_threshold: float = 2.8,
+        entropy_threshold: float = 2.6,
         no_speech_threshold: float = 0.5,
         temperature: float = 0.0,
-        temperature_fallback: float = 0.2,  # Increment if decoding fails
+        temperature_fallback: float = 0.0,  # Increment if decoding fails (0 = disabled)
         # Vocabulary and suppression
         custom_vocabulary: list = None,
         suppress_nst: bool = False,  # Suppress non-speech tokens (can drop words)
@@ -425,13 +425,13 @@ def get_backend(config: dict) -> TranscriptionBackend:
             timeout=config.get("timeout", 120),
             use_gpu=config.get("use_gpu", False),
             gpu_layers=config.get("gpu_layers", 0),
-            beam_size=config.get("beam_size", 8),
-            best_of=config.get("best_of", 5),
+            beam_size=config.get("beam_size", 5),
+            best_of=config.get("best_of", 3),
             language=config.get("language", "en"),
-            entropy_threshold=config.get("entropy_threshold", 2.8),
+            entropy_threshold=config.get("entropy_threshold", 2.6),
             no_speech_threshold=config.get("no_speech_threshold", 0.5),
             temperature=config.get("temperature", 0.0),
-            temperature_fallback=config.get("temperature_fallback", 0.2),
+            temperature_fallback=config.get("temperature_fallback", 0.0),
             # Vocabulary and suppression
             custom_vocabulary=config.get("custom_vocabulary", []),
             suppress_nst=config.get("suppress_nst", False),

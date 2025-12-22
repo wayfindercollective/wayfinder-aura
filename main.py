@@ -61,13 +61,13 @@ DEFAULT_CONFIG = {
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
     # Accuracy enhancement settings
-    "beam_size": 8,  # Beam search size (higher = more accurate, slower)
-    "best_of": 5,  # Number of best candidates to consider
+    "beam_size": 5,  # Beam search size (1-5 recommended, higher is slow)
+    "best_of": 3,  # Number of best candidates to consider
     "language": "en",  # Language code: "en", "auto" for auto-detect
-    "entropy_threshold": 2.8,  # Filter low-confidence outputs (higher = accept more)
+    "entropy_threshold": 2.6,  # Filter low-confidence outputs (higher = accept more)
     "no_speech_threshold": 0.5,  # Silence detection threshold (lower = more sensitive)
     "temperature": 0.0,  # Sampling temperature (0.0 = greedy/deterministic)
-    "temperature_fallback": 0.2,  # Fallback temperature if greedy decoding produces poor results
+    "temperature_fallback": 0.0,  # Temperature increment for retries (0 = no retries)
     "accuracy_mode": "balanced",  # fast | balanced | high
     "audio_preprocessing": True,  # Enable gain normalization and noise filtering
     # Vocabulary and hallucination suppression
@@ -2758,40 +2758,41 @@ class WayfinderApp(ctk.CTk):
         ).pack(anchor="w", pady=(0, 20))
         
         # Mode presets with their settings
+        # Note: beam_size > 5 and best_of > 5 cause exponential slowdown
         modes = {
             "fast": {
                 "label": "Fast",
                 "desc": "Quick results, may miss some words",
                 "settings": {
-                    "beam_size": 3,
-                    "best_of": 2,
+                    "beam_size": 1,
+                    "best_of": 1,
                     "entropy_threshold": 2.4,
                     "no_speech_threshold": 0.6,
                     "temperature_fallback": 0.0,
-                    "suppress_nst": True,
+                    "suppress_nst": False,
                 }
             },
             "balanced": {
                 "label": "Balanced",
                 "desc": "Good accuracy with reasonable speed (default)",
                 "settings": {
-                    "beam_size": 8,
-                    "best_of": 5,
-                    "entropy_threshold": 2.8,
+                    "beam_size": 5,
+                    "best_of": 3,
+                    "entropy_threshold": 2.6,
                     "no_speech_threshold": 0.5,
-                    "temperature_fallback": 0.2,
+                    "temperature_fallback": 0.0,
                     "suppress_nst": False,
                 }
             },
             "high": {
                 "label": "High Accuracy",
-                "desc": "Best accuracy, slower processing",
+                "desc": "Better accuracy, ~2x slower",
                 "settings": {
-                    "beam_size": 10,
-                    "best_of": 8,
-                    "entropy_threshold": 3.0,
+                    "beam_size": 5,
+                    "best_of": 5,
+                    "entropy_threshold": 2.8,
                     "no_speech_threshold": 0.4,
-                    "temperature_fallback": 0.3,
+                    "temperature_fallback": 0.0,
                     "suppress_nst": False,
                 }
             },
