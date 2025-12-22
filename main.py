@@ -1409,7 +1409,7 @@ class WayfinderApp(ctk.CTk):
         self.record_btn.pack(fill="x", pady=(0, 24))
         
         # Add tooltip explaining the record functionality
-        Tooltip(
+        ToolTip(
             self.record_btn,
             f"Toggle {self.get_hotkey_display()}\n\nWhen recording stops, text is automatically\ninjected into any focused text field in Linux."
         )
