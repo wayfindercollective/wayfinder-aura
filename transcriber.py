@@ -45,10 +45,6 @@ class WhisperCppBackend(TranscriptionBackend):
     Supports CPU and GPU (Vulkan/CUDA) acceleration.
     """
     
-    # Common hallucination tokens to suppress (whisper.cpp token IDs)
-    # These are artifacts from YouTube training data
-    SUPPRESS_TOKEN_IDS = "-1"  # -1 suppresses common non-speech tokens
-    
     def __init__(
         self,
         whisper_binary: str = "~/whisper.cpp/build/bin/whisper-cli",
@@ -67,8 +63,7 @@ class WhisperCppBackend(TranscriptionBackend):
         temperature: float = 0.0,
         # Vocabulary and suppression
         custom_vocabulary: list = None,
-        suppress_tokens: bool = True,
-        suppress_blank: bool = True,
+        suppress_nst: bool = True,  # Suppress non-speech tokens
     ):
         self.whisper_binary = os.path.expanduser(whisper_binary)
         self.model_path = os.path.expanduser(model_path)
@@ -84,8 +79,7 @@ class WhisperCppBackend(TranscriptionBackend):
         self.no_speech_threshold = no_speech_threshold
         self.temperature = temperature
         self.custom_vocabulary = custom_vocabulary or []
-        self.suppress_tokens = suppress_tokens
-        self.suppress_blank = suppress_blank
+        self.suppress_nst = suppress_nst
         
         # Cache GPU support check
         self._gpu_supported: Optional[bool] = None
@@ -179,10 +173,9 @@ class WhisperCppBackend(TranscriptionBackend):
             cmd.extend(["--language", self.language])
         
         # Hallucination suppression flags
-        if self.suppress_tokens:
-            cmd.extend(["--suppress-tokens", self.SUPPRESS_TOKEN_IDS])
-        if self.suppress_blank:
-            cmd.append("--suppress-blank")
+        # Use --suppress-nst to suppress non-speech tokens (works in current whisper.cpp)
+        if self.suppress_nst:
+            cmd.append("--suppress-nst")
         
         # Add GPU acceleration flags if enabled and supported
         if self.use_gpu and self.supports_gpu():
@@ -431,8 +424,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             temperature=config.get("temperature", 0.0),
             # Vocabulary and suppression
             custom_vocabulary=config.get("custom_vocabulary", []),
-            suppress_tokens=config.get("suppress_tokens", True),
-            suppress_blank=config.get("suppress_blank", True),
+            suppress_nst=config.get("suppress_nst", True),
         )
 
 
