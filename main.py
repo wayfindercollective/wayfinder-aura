@@ -776,6 +776,14 @@ class FloatingIndicator:
             return f"{self._target_fps} Hz (auto-detected)"
         else:
             return f"{self._target_fps} Hz (manual)"
+    
+    def _font_exists(self, font_name: str) -> bool:
+        """Check if a font exists on the system."""
+        try:
+            import tkinter.font as tkfont
+            return font_name in tkfont.families()
+        except:
+            return False
         
     def show(self, text: str = "Listening...", color: str = COLORS["accent_red"]) -> None:
         """Show the floating indicator with the given text."""
@@ -824,38 +832,50 @@ class FloatingIndicator:
         except:
             pass
         
-        # Configure the window
-        self.window.configure(fg_color=COLORS["bg_card"])
+        # Configure the window with transparent-ish background
+        self.window.configure(fg_color=COLORS["bg_base"])
         
-        # Create a frame with rounded appearance
-        frame = ctk.CTkFrame(
+        # Create outer glow frame
+        glow_frame = ctk.CTkFrame(
             self.window,
+            fg_color=COLORS["bg_base"],
+            corner_radius=20,
+        )
+        glow_frame.pack(padx=4, pady=4)
+        
+        # Create main pill-shaped frame with glow border
+        frame = ctk.CTkFrame(
+            glow_frame,
             fg_color=COLORS["bg_card"],
-            corner_radius=12,
+            corner_radius=16,
             border_width=2,
             border_color=color,
         )
-        frame.pack(padx=2, pady=2)
+        frame.pack(padx=3, pady=3)
         
-        # Status indicator dot
+        # Inner content frame
+        inner = ctk.CTkFrame(frame, fg_color="transparent")
+        inner.pack(padx=14, pady=10)
+        
+        # Glowing status indicator dot (larger canvas for glow effect)
         self.dot_canvas = ctk.CTkCanvas(
-            frame,
-            width=12,
-            height=12,
+            inner,
+            width=20,
+            height=20,
             bg=COLORS["bg_card"],
             highlightthickness=0,
         )
-        self.dot_canvas.pack(side="left", padx=(12, 6), pady=12)
+        self.dot_canvas.pack(side="left", padx=(0, 10))
         self._draw_dot(color)
         
         # Label with status text
         self.label = ctk.CTkLabel(
-            frame,
+            inner,
             text=text,
-            font=("Inter", 14, "bold"),
+            font=("SF Pro Display", 15, "bold") if self._font_exists("SF Pro Display") else ("Inter", 15, "bold"),
             text_color=COLORS["text_bright"],
         )
-        self.label.pack(side="left", padx=(0, 16), pady=12)
+        self.label.pack(side="left", padx=(0, 4))
         
         self.current_color = color
         
@@ -883,10 +903,20 @@ class FloatingIndicator:
         if color and color != self.current_color:
             self.current_color = color
             self._draw_dot(color)
-            # Update border color
-            for widget in self.window.winfo_children():
-                if isinstance(widget, ctk.CTkFrame):
-                    widget.configure(border_color=color)
+            # Update border color on the main frame (nested inside glow_frame)
+            self._update_border_color(self.window, color)
+    
+    def _update_border_color(self, widget, color: str) -> None:
+        """Recursively find and update border color on frames."""
+        for child in widget.winfo_children():
+            if isinstance(child, ctk.CTkFrame):
+                try:
+                    # Try to update border - will work on frames with borders
+                    child.configure(border_color=color)
+                except:
+                    pass
+                # Check children too
+                self._update_border_color(child, color)
                     
     def hide(self) -> None:
         """Hide and destroy the floating indicator."""
@@ -939,7 +969,7 @@ class FloatingIndicator:
         self._is_centered = True
             
     def _draw_dot(self, color: str, scale: float = 1.0) -> None:
-        """Draw the status indicator dot."""
+        """Draw a glowing status indicator dot."""
         if not self.dot_canvas:
             return
             
@@ -950,23 +980,31 @@ class FloatingIndicator:
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
         
-        # Draw glow (larger, faded circle)
-        size = int(10 * scale)
-        offset = (12 - size) // 2
-        glow_color = f"#{r//3:02x}{g//3:02x}{b//3:02x}"
-        self.dot_canvas.create_oval(
-            offset - 1, offset - 1,
-            offset + size + 1, offset + size + 1,
-            fill=glow_color,
-            outline="",
-        )
+        # Canvas is 20x20, center is at 10,10
+        cx, cy = 10, 10
         
-        # Draw main dot
-        inner_size = int(8 * scale)
-        inner_offset = (12 - inner_size) // 2
+        # Draw outer glow layers (soft fade)
+        for i, alpha in enumerate([0.1, 0.15, 0.25, 0.4]):
+            glow_size = int((18 - i * 3) * scale)
+            offset = (20 - glow_size) // 2
+            # Mix with background
+            gr = int(r * alpha + 13 * (1 - alpha))  # bg_card is ~#141419
+            gg = int(g * alpha + 20 * (1 - alpha))
+            gb = int(b * alpha + 25 * (1 - alpha))
+            glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+            self.dot_canvas.create_oval(
+                offset, offset,
+                offset + glow_size, offset + glow_size,
+                fill=glow_color,
+                outline="",
+            )
+        
+        # Draw bright core
+        core_size = int(8 * scale)
+        core_offset = (20 - core_size) // 2
         self.dot_canvas.create_oval(
-            inner_offset, inner_offset,
-            inner_offset + inner_size, inner_offset + inner_size,
+            core_offset, core_offset,
+            core_offset + core_size, core_offset + core_size,
             fill=color,
             outline="",
         )
