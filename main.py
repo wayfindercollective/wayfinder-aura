@@ -5748,24 +5748,34 @@ class WayfinderApp(ctk.CTk):
         self.app_state = new_state
         color = STATE_COLORS[new_state]
         
-        # Update mic button with new state color
-        self._draw_mic_button(color)
-        
-        # Update status label
-        self.status_label.configure(text=STATE_LABELS[new_state], text_color=color)
-        
-        # Update hero frame border for subtle glow effect
-        if new_state == AppState.IDLE:
-            self.hero_frame.configure(border_color=COLORS["border_subtle"])
-            self._stop_hero_animation()
-        else:
-            self.hero_frame.configure(border_color=color)
-            self._start_hero_animation()
-        
-        # Redraw waveform with new state color
-        self._draw_hero_waveform()
-        
+        # Update tray FIRST - this is critical for user feedback
         self.update_tray(new_state)
+        
+        # Update UI elements with error handling
+        try:
+            # Update mic button with new state color
+            if hasattr(self, 'mic_button_canvas'):
+                self._draw_mic_button(color)
+            
+            # Update status label
+            if hasattr(self, 'status_label'):
+                self.status_label.configure(text=STATE_LABELS[new_state], text_color=color)
+            
+            # Update hero frame border for subtle glow effect
+            if hasattr(self, 'hero_frame'):
+                if new_state == AppState.IDLE:
+                    self.hero_frame.configure(border_color=COLORS["border_subtle"])
+                    self._stop_hero_animation()
+                else:
+                    self.hero_frame.configure(border_color=color)
+                    self._start_hero_animation()
+            
+            # Redraw waveform with new state color
+            if hasattr(self, 'hero_canvas'):
+                self._draw_hero_waveform()
+        except Exception as e:
+            # Log but don't break recording functionality
+            self.log(f"⚠ UI update error: {e}")
     
     # === Hero Animation System ===
     
@@ -5949,19 +5959,23 @@ class WayfinderApp(ctk.CTk):
         try:
             self.log("🎤 Listening...")
             
+            # Update state FIRST for immediate feedback
+            self.update_state(AppState.RECORDING)
+            
             # Show floating indicator / overlay
-            if self._use_pyqt_overlay and self.overlay_controller:
-                self.overlay_controller.show("listening")
-            elif self.indicator:
-                self.indicator.show("Listening...", COLORS["accent_red"])
+            try:
+                if self._use_pyqt_overlay and self.overlay_controller:
+                    self.overlay_controller.show("listening")
+                elif self.indicator:
+                    self.indicator.show("Listening...", COLORS["state_recording"])
+            except Exception as e:
+                self.log(f"⚠ Indicator error: {e}")
             
             # Check if chunked mode is enabled
             if self.config.get("chunked_mode", True):
                 self._start_chunked_recording()
             else:
                 self.recorder.start()
-            
-            self.update_state(AppState.RECORDING)
             
             # Start duration update timer
             import time
