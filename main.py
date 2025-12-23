@@ -57,7 +57,7 @@ if IS_FLATPAK:
     if not ICON_PATH.exists():
         ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
 else:
-ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
+    ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
 
 # Default whisper paths - Flatpak uses bundled binary and models
 if IS_FLATPAK:
@@ -1543,7 +1543,7 @@ class FloatingIndicator:
             return
             
         import math
-            
+        
         self.dot_canvas.delete("all")
         
         # Parse color
@@ -1570,7 +1570,7 @@ class FloatingIndicator:
                 ring_b = int(b * ring_alpha + bg_b * (1 - ring_alpha))
                 ring_color = f"#{ring_r:02x}{ring_g:02x}{ring_b:02x}"
                 
-        self.dot_canvas.create_oval(
+                self.dot_canvas.create_oval(
                     cx - ring_radius, cy - ring_radius,
                     cx + ring_radius, cy + ring_radius,
                     outline=ring_color,
@@ -1600,9 +1600,9 @@ class FloatingIndicator:
             self.dot_canvas.create_oval(
                 cx - glow_radius, cy - glow_radius,
                 cx + glow_radius, cy + glow_radius,
-            fill=glow_color,
-            outline="",
-        )
+                fill=glow_color,
+                outline="",
+            )
         
         # Draw bright core (scales more dramatically)
         core_radius = 2.5 * scale
@@ -1728,7 +1728,7 @@ class FloatingIndicator:
                 width=2,
                 smooth=True,
                 splinesteps=10,
-        )
+            )
         
     def _start_pulse(self) -> None:
         """Start the pulsing animation."""
@@ -1738,7 +1738,7 @@ class FloatingIndicator:
         """Animate one pulse step with smooth sinusoidal easing and voice reactivity."""
         if not self._visible:
             return
-            
+        
         import math
         
         # Scale animation speed based on frame rate (normalized to 60fps baseline)
@@ -1756,7 +1756,7 @@ class FloatingIndicator:
                 if raw_level > self._current_audio_level:
                     # Instant attack - respond IMMEDIATELY!
                     self._current_audio_level = raw_level
-        else:
+                else:
                     # Moderate decay - scaled for frame rate
                     decay = 0.75 ** fps_scale
                     self._current_audio_level = self._current_audio_level * decay + raw_level * (1 - decay)
@@ -1808,7 +1808,7 @@ class FloatingIndicator:
         """Update position - currently centered, mouse follow code preserved for future."""
         if not self._visible or not self.window:
             return
-            
+        
         # For now, just keep centered above taskbar (more reliable on Wayland)
         # Mouse following code preserved below for future use
         if not self._is_centered:
@@ -2313,20 +2313,6 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["accent"],
         ).pack(side="left")
         
-        # PRO badge (shown when licensed)
-        self.pro_badge = ctk.CTkLabel(
-            title_frame,
-            text=" PRO",
-            font=(self.font_body[0], 10, "bold"),
-            text_color="#000000",
-            fg_color="#FFD700",  # Gold
-            corner_radius=4,
-            padx=6,
-            pady=2,
-        )
-        if self.feature_gate.is_premium:
-            self.pro_badge.pack(side="left", padx=(8, 0))
-        
         # Close button
         ctk.CTkButton(
             header,
@@ -2340,7 +2326,7 @@ class WayfinderApp(ctk.CTk):
             corner_radius=RADIUS["sm"],
             command=self.hide_to_tray,
         ).pack(side="right")
-        
+    
     def _create_hero_section(self, parent) -> None:
         """Create the hero section with visualizer and mic button."""
         # Hero card with premium styling
@@ -2598,9 +2584,9 @@ class WayfinderApp(ctk.CTk):
                 font=(self.font_body[0], self.font_sizes["heading"]),
                 fg_color="transparent",
                 hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_secondary"],
+                text_color=COLORS["text_secondary"],
                 corner_radius=RADIUS["md"],
-            anchor="w",
+                anchor="w",
                 command=lambda t=tab_id: self._switch_tab(t),
             )
             btn.pack(fill="both", expand=True, pady=4)
@@ -2825,18 +2811,6 @@ class WayfinderApp(ctk.CTk):
         
         # UI Scale - inline slider with real-time adjustment
         self._create_scale_slider_row(settings_card)
-        
-        # License / Upgrade to Pro
-        license_display = "PRO ✓" if self.feature_gate.is_premium else "Upgrade to Pro"
-        license_color = "#FFD700" if self.feature_gate.is_premium else COLORS["accent"]
-        self.license_btn = self.create_setting_row(
-            settings_card,
-            "License",
-            license_display,
-            self.open_license_settings,
-            tooltip="Unlock premium features: GPU acceleration, large models, unlimited recording & more",
-            text_color=license_color,
-        )
         
         # === Collapsible Advanced Settings ===
         self.advanced_expanded = False
@@ -3256,12 +3230,6 @@ class WayfinderApp(ctk.CTk):
     
     def toggle_chunked_mode(self):
         """Toggle chunked recording mode."""
-        # Check premium feature
-        if self.chunked_var.get() and not self.feature_gate.has_feature("chunked_recording"):
-            self.chunked_var.set(False)
-            self.show_upgrade_prompt("chunked_recording")
-            return
-        
         self.config["chunked_mode"] = self.chunked_var.get()
         save_config(self.config)
         mode = "chunked (unlimited)" if self.chunked_var.get() else "simple"
@@ -3276,96 +3244,12 @@ class WayfinderApp(ctk.CTk):
 
     def toggle_gpu(self):
         """Toggle GPU acceleration."""
-        # Check premium feature
-        if self.gpu_var.get() and not self.feature_gate.has_feature("gpu_acceleration"):
-            self.gpu_var.set(False)
-            self.show_upgrade_prompt("gpu_acceleration")
-            return
-        
         self.config["use_gpu"] = self.gpu_var.get()
         save_config(self.config)
         status = "enabled" if self.gpu_var.get() else "disabled"
         self.log(f"⚙ GPU acceleration: {status}")
 
-    def show_upgrade_prompt(self, feature_id: str):
-        """Show a dialog prompting user to upgrade for a premium feature."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Premium Feature")
-        dialog.geometry("400x280")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        # Get feature info
-        feature_name, feature_desc = PREMIUM_FEATURES.get(
-            feature_id, 
-            ("Premium Feature", "This feature requires Wayfinder Voice Pro")
-        )
-        
-        ctk.CTkLabel(
-            inner,
-            text="🔒 Premium Feature",
-            font=(self.font_header[0], 20, "bold"),
-            text_color="#FFD700",
-        ).pack(anchor="w", pady=(0, 15))
-        
-        ctk.CTkLabel(
-            inner,
-            text=feature_name,
-            font=(self.font_body[0], 16, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w")
-        
-        ctk.CTkLabel(
-            inner,
-            text=feature_desc,
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_secondary"],
-            wraplength=340,
-        ).pack(anchor="w", pady=(5, 20))
-        
-        ctk.CTkLabel(
-            inner,
-            text="Upgrade to Wayfinder Voice Pro for $20 (one-time)",
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_muted"],
-        ).pack(anchor="w", pady=(0, 15))
-        
-        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        btn_frame.pack(fill="x")
-        
-        def open_upgrade():
-            dialog.destroy()
-            self.open_license_settings()
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Upgrade Now",
-            font=(self.font_body[0], 13, "bold"),
-            height=40,
-            corner_radius=10,
-            fg_color="#FFD700",
-            hover_color="#e5c100",
-            text_color="#000000",
-            command=open_upgrade,
-        ).pack(side="left", fill="x", expand=True, padx=(0, 10))
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Not Now",
-            font=(self.font_body[0], 12),
-            height=40,
-            corner_radius=10,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=dialog.destroy,
-        ).pack(side="right")
-
-    def create_setting_row(self, parent, label, value, command, tooltip=None, text_color=None):
+    def create_setting_row(self, parent, label, value, command, tooltip=None):
         """Create a modernized setting row with frosted glass styling."""
         # Row container with subtle padding
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -3406,7 +3290,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_input"],
             hover_color=COLORS["bg_hover"],
-            text_color=text_color or COLORS["accent"],
+            text_color=COLORS["accent"],
             height=40,
             corner_radius=RADIUS["md"],
             border_width=1,
@@ -3822,12 +3706,12 @@ class WayfinderApp(ctk.CTk):
             download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             
             models = self.get_available_models()
-        
-        if not models:
+            
+            if not models:
                 empty_frame = ctk.CTkFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12)
                 empty_frame.pack(fill="both", expand=True, pady=10)
                 
-            ctk.CTkLabel(
+                ctk.CTkLabel(
                     empty_frame,
                     text="📦 No models installed yet",
                     font=(self.font_body[0], 16, "bold"),
@@ -3856,50 +3740,50 @@ class WayfinderApp(ctk.CTk):
             
             scroll = ctk.CTkScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=320)
             scroll.pack(fill="both", expand=True, pady=(0, 15))
-        
-        for model in models:
-            is_current = os.path.expanduser(model["path"]) == current_path
             
+            for model in models:
+                is_current = os.path.expanduser(model["path"]) == current_path
+                
                 frame = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=8)
-            frame.pack(fill="x", pady=3, padx=5)
-            
-            radio = ctk.CTkRadioButton(
+                frame.pack(fill="x", pady=3, padx=5)
+                
+                radio = ctk.CTkRadioButton(
                     frame, text="", variable=model_var, value=model["path"],
                     width=20, fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
-            )
-            radio.pack(side="left", padx=(10, 5), pady=10)
-            
+                )
+                radio.pack(side="left", padx=(10, 5), pady=10)
+                
                 info = ctk.CTkFrame(frame, fg_color="transparent")
                 info.pack(side="left", fill="x", expand=True, pady=8)
-            
-            ctk.CTkLabel(
+                
+                ctk.CTkLabel(
                     info, text=model["name"],
-                font=(self.font_body[0], 14, "bold" if is_current else "normal"),
-                text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
-                anchor="w",
-            ).pack(anchor="w")
-            
-            ctk.CTkLabel(
+                    font=(self.font_body[0], 14, "bold" if is_current else "normal"),
+                    text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
+                    anchor="w",
+                ).pack(anchor="w")
+                
+                ctk.CTkLabel(
                     info, text=f"{model['speed']} • {model['size']}",
                     font=(self.font_body[0], 11), text_color=COLORS["text_muted"], anchor="w",
-            ).pack(anchor="w")
-        
-        # Save button
-        def save():
+                ).pack(anchor="w")
+            
+            # Save button
+            def save():
                 selected = model_var.get()
                 if selected.startswith(str(Path.home())):
                     selected = "~" + selected[len(str(Path.home())):]
                 self.config["model_path"] = selected
-            save_config(self.config)
-            self.model_btn.configure(text=self.get_model_display())
-            self.log(f"⚙ Model: {self.get_model_display()}")
-            dialog.destroy()
-        
-        ctk.CTkButton(
+                save_config(self.config)
+                self.model_btn.configure(text=self.get_model_display())
+                self.log(f"⚙ Model: {self.get_model_display()}")
+                dialog.destroy()
+            
+            ctk.CTkButton(
                 content_frame, text="Save & Apply",
                 font=(self.font_body[0], 15, "bold"), height=50, corner_radius=12,
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
-            command=save,
+                command=save,
             ).pack(fill="x", pady=(0, 5))
         
         def show_download_tab():
@@ -3972,8 +3856,8 @@ class WayfinderApp(ctk.CTk):
                     else:
                         def make_download_handler(mid=model_id, frm=frame):
                             return lambda: start_download(mid, frm)
-        
-        ctk.CTkButton(
+                        
+                        ctk.CTkButton(
                             btn_frame, text="Download",
                             font=(self.font_body[0], 11), width=80, height=28,
                             corner_radius=6, fg_color=COLORS["bg_elevated"],
@@ -4009,7 +3893,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 pd_inner, text=f"Size: {info['size']}",
                 font=(self.font_body[0], 12),
-            text_color=COLORS["text_secondary"],
+                text_color=COLORS["text_secondary"],
             ).pack(pady=(0, 15))
             
             progress_bar = ctk.CTkProgressBar(pd_inner, width=340, height=20, corner_radius=10)
@@ -4267,298 +4151,6 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Cancel",
-            font=(self.font_body[0], 13),
-            height=40,
-            corner_radius=10,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=dialog.destroy,
-        ).pack(fill="x")
-
-    def open_license_settings(self):
-        """Open dialog to enter/manage license key for premium features."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Wayfinder Voice Pro")
-        dialog.geometry("520x650")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        # Header
-        header_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        header_frame.pack(fill="x", pady=(0, 20))
-        
-        ctk.CTkLabel(
-            header_frame,
-            text="💎 Wayfinder Voice",
-            font=(self.font_header[0], 24, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(side="left")
-        
-        ctk.CTkLabel(
-            header_frame,
-            text=" PRO",
-            font=(self.font_header[0], 24, "bold"),
-            text_color="#FFD700",
-        ).pack(side="left")
-        
-        # Status banner
-        is_premium = self.feature_gate.is_premium
-        status_color = "#1a4a1a" if is_premium else COLORS["bg_card"]
-        status_border = "#2d7a2d" if is_premium else COLORS["border_subtle"]
-        
-        status_frame = ctk.CTkFrame(
-            inner, 
-            fg_color=status_color,
-            corner_radius=12,
-            border_width=1,
-            border_color=status_border,
-        )
-        status_frame.pack(fill="x", pady=(0, 20))
-        
-        status_inner = ctk.CTkFrame(status_frame, fg_color="transparent")
-        status_inner.pack(fill="x", padx=20, pady=16)
-        
-        if is_premium:
-            ctk.CTkLabel(
-                status_inner,
-                text="✓ Premium Active",
-                font=(self.font_body[0], 16, "bold"),
-                text_color="#4ade80",
-            ).pack(anchor="w")
-            
-            license_info = self.feature_gate.license_info
-            if license_info.activated_date:
-                ctk.CTkLabel(
-                    status_inner,
-                    text=f"Activated: {license_info.activated_date[:10]}",
-                    font=(self.font_body[0], 11),
-                    text_color=COLORS["text_secondary"],
-                ).pack(anchor="w", pady=(4, 0))
-        else:
-            ctk.CTkLabel(
-                status_inner,
-                text="Free Version",
-                font=(self.font_body[0], 16, "bold"),
-                text_color=COLORS["text_primary"],
-            ).pack(anchor="w")
-            
-            ctk.CTkLabel(
-                status_inner,
-                text="Upgrade to unlock all features",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_secondary"],
-            ).pack(anchor="w", pady=(4, 0))
-        
-        # Premium features list
-        features_label = ctk.CTkLabel(
-            inner,
-            text="Premium Features:" if not is_premium else "Your Premium Features:",
-            font=(self.font_body[0], 13, "bold"),
-            text_color=COLORS["text_primary"],
-        )
-        features_label.pack(anchor="w", pady=(0, 10))
-        
-        features_frame = ctk.CTkScrollableFrame(
-            inner,
-            fg_color=COLORS["bg_card"],
-            corner_radius=10,
-            height=150,
-        )
-        features_frame.pack(fill="x", pady=(0, 20))
-        
-        premium_features = [
-            ("⚡", "GPU Acceleration", "3-10x faster transcription"),
-            ("🚀", "Faster-Whisper Backend", "Best GPU utilization"),
-            ("🎯", "Large Models", "Medium.en & Large v3 Turbo"),
-            ("♾️", "Chunked Recording", "Unlimited duration"),
-            ("🎛️", "Advanced Audio", "Medium & Heavy preprocessing"),
-            ("🎚️", "High Beam Search", "4-10 for max accuracy"),
-            ("⌨️", "Typing Speeds", "Fast, Normal, Slow options"),
-            ("📝", "Custom Vocabulary", "Add your own terms"),
-        ]
-        
-        for icon, name, desc in premium_features:
-            row = ctk.CTkFrame(features_frame, fg_color="transparent")
-            row.pack(fill="x", padx=12, pady=6)
-            
-            check = "✓" if is_premium else "○"
-            check_color = "#4ade80" if is_premium else COLORS["text_muted"]
-            
-            ctk.CTkLabel(
-                row,
-                text=f"{check} {icon}",
-                font=(self.font_body[0], 13),
-                text_color=check_color,
-                width=40,
-            ).pack(side="left")
-            
-            ctk.CTkLabel(
-                row,
-                text=name,
-                font=(self.font_body[0], 12),
-                text_color=COLORS["text_primary"] if is_premium else COLORS["text_secondary"],
-            ).pack(side="left")
-            
-            ctk.CTkLabel(
-                row,
-                text=f"  •  {desc}",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_muted"],
-            ).pack(side="left")
-        
-        # License key entry
-        ctk.CTkLabel(
-            inner,
-            text="License Key:",
-            font=(self.font_body[0], 13, "bold"),
-            text_color=COLORS["text_primary"],
-        ).pack(anchor="w", pady=(0, 8))
-        
-        key_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        key_frame.pack(fill="x", pady=(0, 10))
-        
-        key_entry = ctk.CTkEntry(
-            key_frame,
-            placeholder_text="WV-XXXX-XXXX-XXXX-XXXX",
-            font=(self.font_mono[0], 14),
-            fg_color=COLORS["bg_card"],
-            text_color=COLORS["text_primary"],
-            border_color=COLORS["border_subtle"],
-            height=45,
-            corner_radius=10,
-        )
-        key_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        
-        # Pre-fill if already licensed
-        if is_premium and self.feature_gate.license_info.license_key:
-            key_entry.insert(0, self.feature_gate.license_info.license_key)
-        
-        status_label = ctk.CTkLabel(
-            inner,
-            text="",
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_secondary"],
-        )
-        status_label.pack(anchor="w", pady=(0, 15))
-        
-        def activate_key():
-            key = key_entry.get().strip().upper()
-            if not key:
-                status_label.configure(text="Please enter a license key", text_color="#ef4444")
-                return
-            
-            result = self.feature_gate.activate(key)
-            
-            if result.is_valid:
-                status_label.configure(text="✓ License activated! Restarting UI...", text_color="#4ade80")
-                self.log("🔑 Premium license activated!")
-                
-                # Update UI elements
-                self.license_btn.configure(text="PRO ✓", text_color="#FFD700")
-                
-                # Show/update PRO badge
-                if hasattr(self, 'pro_badge'):
-                    self.pro_badge.pack(side="left", padx=(8, 0))
-                
-                dialog.after(1500, dialog.destroy)
-            else:
-                status_label.configure(text=f"✗ {result.error_message}", text_color="#ef4444")
-        
-        def deactivate_key():
-            self.feature_gate.deactivate()
-            status_label.configure(text="License removed", text_color=COLORS["text_secondary"])
-            key_entry.delete(0, "end")
-            self.license_btn.configure(text="Upgrade to Pro", text_color=COLORS["accent"])
-            
-            # Hide PRO badge
-            if hasattr(self, 'pro_badge'):
-                self.pro_badge.pack_forget()
-            
-            self.log("🔑 License deactivated")
-            dialog.after(1000, dialog.destroy)
-        
-        # Buttons
-        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(0, 15))
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Activate License",
-            font=(self.font_body[0], 14, "bold"),
-            height=45,
-            corner_radius=10,
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=activate_key,
-        ).pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
-        if is_premium:
-            ctk.CTkButton(
-                btn_frame,
-                text="Remove",
-                font=(self.font_body[0], 12),
-                height=45,
-                width=80,
-                corner_radius=10,
-                fg_color=COLORS["bg_hover"],
-                hover_color="#4a1a1a",
-                text_color=COLORS["text_secondary"],
-                command=deactivate_key,
-            ).pack(side="right")
-        
-        # Purchase section
-        if not is_premium:
-            purchase_frame = ctk.CTkFrame(
-                inner,
-                fg_color=COLORS["bg_hover"],
-                corner_radius=12,
-            )
-            purchase_frame.pack(fill="x", pady=(0, 15))
-            
-            purchase_inner = ctk.CTkFrame(purchase_frame, fg_color="transparent")
-            purchase_inner.pack(fill="x", padx=20, pady=16)
-            
-            ctk.CTkLabel(
-                purchase_inner,
-                text="🛒 Get Wayfinder Voice Pro",
-                font=(self.font_body[0], 14, "bold"),
-                text_color=COLORS["text_bright"],
-            ).pack(anchor="w")
-            
-            ctk.CTkLabel(
-                purchase_inner,
-                text="One-time purchase • $20 • No subscription",
-                font=(self.font_body[0], 12),
-                text_color=COLORS["text_secondary"],
-            ).pack(anchor="w", pady=(4, 10))
-            
-            def open_purchase():
-                import webbrowser
-                # TODO: Replace with your actual purchase URL
-                webbrowser.open("https://wayfinder.dev/pro")
-            
-            ctk.CTkButton(
-                purchase_inner,
-                text="Buy Now - $20",
-                font=(self.font_body[0], 13, "bold"),
-                height=40,
-                corner_radius=8,
-                fg_color="#FFD700",
-                hover_color="#e5c100",
-                text_color="#000000",
-                command=open_purchase,
-            ).pack(anchor="w")
-        
-        # Close button
-        ctk.CTkButton(
-            inner,
-            text="Close",
             font=(self.font_body[0], 13),
             height=40,
             corner_radius=10,
@@ -6191,7 +5783,7 @@ class WayfinderApp(ctk.CTk):
             ))
         
         return pystray.Menu(*items)
-    
+
     def create_model_setter(self, model_name: str):
         """Create a callback function for setting a specific model from tray menu."""
         def setter(icon=None, item=None):
