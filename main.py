@@ -925,7 +925,7 @@ class BenchmarkRunner:
     Results are stored in config for dynamic tooltip generation.
     """
     
-    # Models to benchmark (in order of speed)
+    # Models to benchmark (in order of speed) - model_id, filename pattern, display name
     BENCHMARK_MODELS = [
         ("tiny.en", "ggml-tiny.en.bin", "Tiny"),
         ("base.en", "ggml-base.en.bin", "Base"),
@@ -936,16 +936,64 @@ class BenchmarkRunner:
         ("large-v3", "ggml-large-v3.bin", "Large v3"),
     ]
     
-    def __init__(self, config: dict, progress_callback=None, log_callback=None):
+    def __init__(self, config: dict, progress_callback=None, log_callback=None, 
+                 countdown_callback=None):
         self.config = config
         self.progress_callback = progress_callback or (lambda p, msg: None)
         self.log_callback = log_callback or (lambda msg: None)
+        self.countdown_callback = countdown_callback or (lambda s: None)
         self._cancel_requested = False
         self.results = {}
     
     def cancel(self):
         """Request cancellation of running benchmark."""
         self._cancel_requested = True
+    
+    @staticmethod
+    def get_system_info() -> dict:
+        """Detect system hardware: CPU, GPU, RAM."""
+        info = {"cpu": "Unknown", "gpu": "Unknown", "ram": "Unknown"}
+        
+        # CPU detection
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if "model name" in line:
+                        info["cpu"] = line.split(":")[1].strip()
+                        break
+        except:
+            pass
+        
+        # GPU detection (AMD/NVIDIA/Intel)
+        try:
+            import subprocess
+            result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split("\n"):
+                if "VGA" in line or "3D controller" in line:
+                    # Extract GPU name - it's after the last colon
+                    if ":" in line:
+                        gpu_part = line.split(":")[-1].strip()
+                        # Clean up common prefixes
+                        for prefix in ["Advanced Micro Devices, Inc. ", "NVIDIA Corporation ", "Intel Corporation "]:
+                            gpu_part = gpu_part.replace(prefix, "")
+                        info["gpu"] = gpu_part[:60]  # Truncate long names
+                    break
+        except:
+            pass
+        
+        # RAM detection
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if "MemTotal" in line:
+                        mem_kb = int(line.split()[1])
+                        mem_gb = mem_kb / 1024 / 1024
+                        info["ram"] = f"{mem_gb:.0f} GB"
+                        break
+        except:
+            pass
+        
+        return info
     
     def _find_models_dir(self) -> Path:
         """Find the whisper models directory."""
@@ -1002,7 +1050,7 @@ class BenchmarkRunner:
         return temp_file.name
     
     def _run_single_benchmark(self, whisper_cli: str, model_path: str, 
-                               audio_file: str, use_gpu: bool) -> float | None:
+                               audio_file: str, use_gpu: bool, timeout: int = 30) -> float | None:
         """Run a single transcription and return time in seconds."""
         import subprocess
         
@@ -1019,34 +1067,36 @@ class BenchmarkRunner:
             cmd.append("-ng")  # GPU flag
         
         try:
-            # Warm-up run
-            subprocess.run(cmd, capture_output=True, timeout=120)
+            start = time.perf_counter()
+            result = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            elapsed = time.perf_counter() - start
             
-            if self._cancel_requested:
+            if result.returncode == 0:
+                return elapsed
+            else:
+                stderr = result.stderr.decode('utf-8', errors='replace')[:100]
+                self.log_callback(f"   ⚠️ Exit code {result.returncode}: {stderr}")
                 return None
             
-            # Timed runs (average of 2)
-            times = []
-            for _ in range(2):
-                if self._cancel_requested:
-                    return None
-                start = time.perf_counter()
-                result = subprocess.run(cmd, capture_output=True, timeout=180)
-                elapsed = time.perf_counter() - start
-                if result.returncode == 0:
-                    times.append(elapsed)
-            
-            return sum(times) / len(times) if times else None
-            
-        except (subprocess.TimeoutExpired, Exception) as e:
-            self.log_callback(f"Benchmark error: {e}")
+        except subprocess.TimeoutExpired:
+            self.log_callback(f"   ⚠️ Timed out after {timeout}s")
+            return None
+        except Exception as e:
+            self.log_callback(f"   ⚠️ Error: {e}")
             return None
     
-    def run_benchmarks(self, test_gpu: bool = True, test_cpu: bool = True) -> dict:
+    def run_benchmarks(self, test_gpu: bool = True, test_cpu: bool = True, 
+                       quick_mode: bool = False, selected_model: str = None) -> tuple:
         """
         Run benchmarks on available models.
         
-        Returns dict of results: {model_id: {cpu_10s: float, gpu_10s: float, fastest: str}}
+        Args:
+            test_gpu: Test GPU performance
+            test_cpu: Test CPU performance  
+            quick_mode: Only test selected model (faster)
+            selected_model: Model filename to test in quick mode
+        
+        Returns tuple: (results_dict, overall_fastest_processor)
         """
         self._cancel_requested = False
         self.results = {}
@@ -1054,26 +1104,32 @@ class BenchmarkRunner:
         whisper_cli = self._find_whisper_binary()
         if not whisper_cli:
             self.log_callback("❌ whisper-cli not found")
-            return {}
+            return {}, None
         
         models_dir = self._find_models_dir()
-        self.log_callback(f"📁 Models directory: {models_dir}")
-        self.log_callback(f"🔧 Using: {whisper_cli}")
+        self.log_callback(f"📁 Models: {models_dir}")
+        self.log_callback(f"🔧 Binary: {whisper_cli}")
         
         # Find available models
         available = []
         for model_id, filename, display_name in self.BENCHMARK_MODELS:
             path = models_dir / filename
             if path.exists():
-                available.append((model_id, str(path), display_name))
+                # In quick mode, only test the selected model
+                if quick_mode and selected_model:
+                    if filename in selected_model or selected_model in filename:
+                        available.append((model_id, str(path), display_name))
+                        break
+                else:
+                    available.append((model_id, str(path), display_name))
         
         if not available:
             self.log_callback("❌ No models found to benchmark")
-            return {}
+            return {}, None
         
-        self.log_callback(f"📦 Found {len(available)} models to test")
+        self.log_callback(f"📦 Testing {len(available)} model(s)")
         
-        # Create test audio
+        # Create test audio (10 seconds)
         self.log_callback("🎤 Creating 10s test audio...")
         test_audio = self._create_test_audio(10)
         
@@ -1087,47 +1143,45 @@ class BenchmarkRunner:
                 
                 self.results[model_id] = {"model_name": display_name}
                 
-                # CPU benchmark
-                if test_cpu:
-                    current_test += 1
-                    self.progress_callback(
-                        current_test / total_tests,
-                        f"Testing {display_name} (CPU)..."
-                    )
-                    self.log_callback(f"⏱️ {display_name} CPU...")
-                    
-                    cpu_time = self._run_single_benchmark(
-                        whisper_cli, model_path, test_audio, use_gpu=False
-                    )
-                    if cpu_time:
-                        self.results[model_id]["cpu_10s"] = round(cpu_time, 2)
-                        self.log_callback(f"   ✅ CPU: {cpu_time:.2f}s")
-                    else:
-                        self.log_callback(f"   ⚠️ CPU test failed")
-                
-                # GPU benchmark
+                # GPU benchmark first (usually faster)
                 if test_gpu and not self._cancel_requested:
                     current_test += 1
-                    self.progress_callback(
-                        current_test / total_tests,
-                        f"Testing {display_name} (GPU)..."
-                    )
+                    progress = current_test / total_tests
+                    self.progress_callback(progress, f"Testing {display_name} (GPU)...")
                     self.log_callback(f"⏱️ {display_name} GPU...")
                     
                     gpu_time = self._run_single_benchmark(
-                        whisper_cli, model_path, test_audio, use_gpu=True
+                        whisper_cli, model_path, test_audio, use_gpu=True, timeout=60
                     )
                     if gpu_time:
                         self.results[model_id]["gpu_10s"] = round(gpu_time, 2)
-                        self.log_callback(f"   ✅ GPU: {gpu_time:.2f}s")
+                        self.log_callback(f"   ✅ GPU: {gpu_time:.1f}s")
                     else:
                         self.log_callback(f"   ⚠️ GPU test failed")
+                
+                # CPU benchmark
+                if test_cpu and not self._cancel_requested:
+                    current_test += 1
+                    progress = current_test / total_tests
+                    self.progress_callback(progress, f"Testing {display_name} (CPU)...")
+                    self.log_callback(f"⏱️ {display_name} CPU...")
+                    
+                    cpu_time = self._run_single_benchmark(
+                        whisper_cli, model_path, test_audio, use_gpu=False, timeout=120
+                    )
+                    if cpu_time:
+                        self.results[model_id]["cpu_10s"] = round(cpu_time, 2)
+                        self.log_callback(f"   ✅ CPU: {cpu_time:.1f}s")
+                    else:
+                        self.log_callback(f"   ⚠️ CPU test failed")
                 
                 # Determine fastest processor for this model
                 cpu = self.results[model_id].get("cpu_10s")
                 gpu = self.results[model_id].get("gpu_10s")
                 if cpu and gpu:
                     self.results[model_id]["fastest"] = "gpu" if gpu < cpu else "cpu"
+                    speedup = cpu / gpu if gpu > 0 else 1.0
+                    self.log_callback(f"   🚀 GPU is {speedup:.1f}x faster")
                 elif gpu:
                     self.results[model_id]["fastest"] = "gpu"
                 elif cpu:
@@ -4619,13 +4673,13 @@ class WayfinderApp(ctk.CTk):
             self._select_llm_model(file_path, dialog)
     
     def _download_llm_model(self, model_id: str, model_info: dict, models_dir: Path, dialog):
-        """Download an LLM model."""
+        """Download an LLM model with detailed progress."""
         model_file = models_dir / model_info["filename"]
         
         # Create progress dialog
         progress_dialog = ctk.CTkToplevel(dialog)
         progress_dialog.title(f"Downloading {model_info['name']}")
-        progress_dialog.geometry("400x200")
+        progress_dialog.geometry("450x280")
         progress_dialog.configure(fg_color=COLORS["bg_base"])
         progress_dialog.transient(dialog)
         
@@ -4640,38 +4694,85 @@ class WayfinderApp(ctk.CTk):
         ).pack(pady=(0, 12))
         
         progress_bar = ctk.CTkProgressBar(inner)
-        progress_bar.pack(fill="x", pady=(0, 12))
+        progress_bar.pack(fill="x", pady=(0, 8))
         progress_bar.set(0)
         
+        # Status label (bytes and percentage)
         status_label = ctk.CTkLabel(
             inner,
-            text="Starting download...",
+            text="Connecting...",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
         )
-        status_label.pack()
+        status_label.pack(pady=(0, 4))
+        
+        # Speed and time label
+        speed_label = ctk.CTkLabel(
+            inner,
+            text="",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+        )
+        speed_label.pack(pady=(0, 12))
         
         cancel_btn = ctk.CTkButton(
             inner,
             text="Cancel",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_primary"],
             command=lambda: setattr(self, '_cancel_llm_download', True),
         )
-        cancel_btn.pack(pady=(12, 0))
+        cancel_btn.pack(pady=(8, 0))
         
         self._cancel_llm_download = False
         
         def download_thread():
             try:
+                import time
                 url = model_info["url"]
                 temp_path = models_dir / f"{model_info['filename']}.downloading"
                 
                 request = urllib.request.Request(url)
                 request.add_header("User-Agent", "Wayfinder-Voice/1.0")
                 
+                start_time = time.time()
+                last_update_time = start_time
+                last_downloaded = 0
+                
                 with urllib.request.urlopen(request, timeout=30) as response:
                     total_size = int(response.headers.get("Content-Length", 0))
                     downloaded = 0
-                    chunk_size = 1024 * 1024  # 1MB chunks
+                    chunk_size = 64 * 1024  # 64KB chunks for more frequent updates
+                    
+                    def format_size(bytes_val):
+                        """Format bytes to human-readable size."""
+                        for unit in ['B', 'KB', 'MB', 'GB']:
+                            if bytes_val < 1024.0:
+                                return f"{bytes_val:.1f} {unit}"
+                            bytes_val /= 1024.0
+                        return f"{bytes_val:.1f} TB"
+                    
+                    def format_speed(bytes_per_sec):
+                        """Format bytes per second to human-readable speed."""
+                        if bytes_per_sec < 1024:
+                            return f"{bytes_per_sec:.0f} B/s"
+                        elif bytes_per_sec < 1024 * 1024:
+                            return f"{bytes_per_sec / 1024:.1f} KB/s"
+                        else:
+                            return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
+                    
+                    def format_time(seconds):
+                        """Format seconds to human-readable time."""
+                        if seconds < 60:
+                            return f"{int(seconds)}s"
+                        elif seconds < 3600:
+                            return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+                        else:
+                            hours = int(seconds // 3600)
+                            minutes = int((seconds % 3600) // 60)
+                            return f"{hours}h {minutes}m"
                     
                     with open(temp_path, "wb") as f:
                         while True:
@@ -4687,12 +4788,47 @@ class WayfinderApp(ctk.CTk):
                             f.write(chunk)
                             downloaded += len(chunk)
                             
-                            if total_size > 0:
-                                progress = downloaded / total_size
-                                self.after(0, lambda p=progress: progress_bar.set(p))
-                                self.after(0, lambda d=downloaded, t=total_size: status_label.configure(
-                                    text=f"Downloaded: {d // (1024*1024)} MB / {t // (1024*1024)} MB"
-                                ))
+                            # Update UI every 0.2 seconds or every 512KB, whichever comes first
+                            current_time = time.time()
+                            time_since_update = current_time - last_update_time
+                            
+                            if time_since_update >= 0.2 or downloaded - last_downloaded >= 512 * 1024:
+                                elapsed = current_time - start_time
+                                speed = downloaded / elapsed if elapsed > 0 else 0
+                                
+                                if total_size > 0:
+                                    progress = downloaded / total_size
+                                    percentage = progress * 100
+                                    remaining = total_size - downloaded
+                                    eta_seconds = remaining / speed if speed > 0 else 0
+                                    
+                                    # Update progress bar
+                                    self.after(0, lambda p=progress: progress_bar.set(p))
+                                    
+                                    # Update status (bytes and percentage)
+                                    status_text = f"{format_size(downloaded)} / {format_size(total_size)} ({percentage:.1f}%)"
+                                    self.after(0, lambda t=status_text: status_label.configure(text=t))
+                                    
+                                    # Update speed and ETA
+                                    if speed > 0:
+                                        speed_text = f"{format_speed(speed)} • {format_time(elapsed)} elapsed"
+                                        if eta_seconds > 0 and eta_seconds < 86400:  # Less than 24 hours
+                                            speed_text += f" • {format_time(eta_seconds)} remaining"
+                                        self.after(0, lambda s=speed_text: speed_label.configure(text=s))
+                                    else:
+                                        self.after(0, lambda: speed_label.configure(text="Calculating speed..."))
+                                else:
+                                    # Unknown total size
+                                    self.after(0, lambda p=downloaded: progress_bar.set(0.1))  # Show some progress
+                                    status_text = f"{format_size(downloaded)} downloaded"
+                                    self.after(0, lambda t=status_text: status_label.configure(text=t))
+                                    
+                                    if elapsed > 0:
+                                        speed_text = f"{format_speed(speed)} • {format_time(elapsed)} elapsed"
+                                        self.after(0, lambda s=speed_text: speed_label.configure(text=s))
+                                
+                                last_update_time = current_time
+                                last_downloaded = downloaded
                     
                     # Move temp to final
                     if temp_path.exists():
@@ -4702,7 +4838,9 @@ class WayfinderApp(ctk.CTk):
                         
                         def on_success():
                             try:
-                                self.log(f"✓ Downloaded: {model_info['name']}")
+                                total_time = time.time() - start_time
+                                final_speed = downloaded / total_time if total_time > 0 else 0
+                                self.log(f"✓ Downloaded: {model_info['name']} ({format_size(downloaded)} in {format_time(total_time)}, avg {format_speed(final_speed)})")
                                 if progress_dialog.winfo_exists():
                                     progress_dialog.destroy()
                                 self.open_postproc_model_settings()  # Refresh
@@ -4726,6 +4864,7 @@ class WayfinderApp(ctk.CTk):
                                 text=f"Error: {error_msg}",
                                 text_color="#CF7B7B"
                             )
+                            speed_label.configure(text="")
                             cancel_btn.configure(text="Close")
                     except:
                         pass
@@ -4734,7 +4873,7 @@ class WayfinderApp(ctk.CTk):
                 
                 # Clean up temp file if it exists
                 try:
-                    if temp_path.exists():
+                    if 'temp_path' in locals() and temp_path.exists():
                         temp_path.unlink()
                 except:
                     pass
