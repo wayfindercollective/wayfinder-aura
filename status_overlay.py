@@ -12,9 +12,189 @@ A premium PyQt6-based status indicator with:
 Designed to feel like high-end hardware embedded in the screen.
 """
 
+import ctypes
 import json
 import math
+import os
+import subprocess
 import sys
+
+# Force native Wayland path for PyQt6 if running on Wayland
+# This ensures proper transparency and always-on-top behavior
+if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+    os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
+
+
+def _force_kde_window_position(window_title: str, x: int, y: int, width: int, height: int) -> bool:
+    """Force window position using KWin scripting - the ONLY way that works on Wayland."""
+    try:
+        import tempfile
+        
+        # Create a KWin script that FORCES position via frameGeometry
+        script_content = f'''
+        // KWin script to force overlay position (required for Wayland)
+        var windows = workspace.windowList();
+        for (var i = 0; i < windows.length; i++) {{
+            var w = windows[i];
+            if (w.caption && w.caption.indexOf("{window_title}") !== -1) {{
+                // Force position - this is the only way on Wayland
+                w.frameGeometry = {{
+                    x: {x},
+                    y: {y},
+                    width: {width},
+                    height: {height}
+                }};
+                w.keepAbove = true;
+                w.skipTaskbar = true;
+                w.skipPager = true;
+                w.skipSwitcher = true;
+            }}
+        }}
+        '''
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
+        
+        try:
+            result = subprocess.run([
+                "qdbus", "org.kde.KWin", "/Scripting",
+                "org.kde.kwin.Scripting.loadScript", script_path
+            ], capture_output=True, text=True, timeout=2)
+            
+            if result.returncode == 0:
+                subprocess.run([
+                    "qdbus", "org.kde.KWin", "/Scripting",
+                    "org.kde.kwin.Scripting.start"
+                ], capture_output=True, timeout=1)
+                return True
+        finally:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"KWin position force failed: {e}", file=sys.stderr)
+    
+    return False
+
+
+def _try_kde_window_setup(window_title: str, x: int, y: int, width: int, height: int) -> bool:
+    """Try to set window properties using KWin scripting (no position - app handles that)."""
+    try:
+        import tempfile
+        
+        # Create a KWin script that sets properties only (not position)
+        # Position is handled by the app to allow off-screen hiding
+        script_content = f'''
+        // KWin script to configure overlay window (properties only)
+        var windows = workspace.windowList();
+        for (var i = 0; i < windows.length; i++) {{
+            var w = windows[i];
+            if (w.caption && w.caption.indexOf("{window_title}") !== -1) {{
+                w.keepAbove = true;
+                w.skipTaskbar = true;
+                w.skipPager = true;
+                w.skipSwitcher = true;
+                w.demandsAttention = false;
+            }}
+        }}
+        '''
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
+        
+        try:
+            result = subprocess.run([
+                "qdbus", "org.kde.KWin", "/Scripting",
+                "org.kde.kwin.Scripting.loadScript", script_path
+            ], capture_output=True, text=True, timeout=2)
+            
+            if result.returncode == 0:
+                subprocess.run([
+                    "qdbus", "org.kde.KWin", "/Scripting",
+                    "org.kde.kwin.Scripting.start"
+                ], capture_output=True, timeout=1)
+                return True
+        finally:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"KDE window setup failed: {e}", file=sys.stderr)
+    
+    return False
+
+
+def _setup_kwin_window_rule(x: int, y: int, width: int, height: int) -> bool:
+    """Create a persistent KWin window rule to position the overlay from first frame."""
+    try:
+        import tempfile
+        
+        # Create a KWin script that sets window properties but NOT position
+        # Position is handled by the app itself to allow off-screen hiding
+        script_content = f'''
+        // KWin script - set overlay properties (not position - app handles that)
+        workspace.windowAdded.connect(function(client) {{
+            if (client.caption && client.caption.indexOf("Wayfinder Voice Overlay") !== -1) {{
+                // Only set properties, not position
+                client.keepAbove = true;
+                client.skipTaskbar = true;
+                client.skipPager = true;
+                client.skipSwitcher = true;
+                client.demandsAttention = false;
+            }}
+        }});
+        
+        // Also handle existing windows (properties only, not position)
+        var windows = workspace.windowList();
+        for (var i = 0; i < windows.length; i++) {{
+            var w = windows[i];
+            if (w.caption && w.caption.indexOf("Wayfinder Voice Overlay") !== -1) {{
+                w.keepAbove = true;
+                w.skipTaskbar = true;
+                w.skipPager = true;
+                w.skipSwitcher = true;
+                w.demandsAttention = false;
+            }}
+        }}
+        '''
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
+        
+        try:
+            result = subprocess.run([
+                "qdbus", "org.kde.KWin", "/Scripting",
+                "org.kde.kwin.Scripting.loadScript", script_path
+            ], capture_output=True, text=True, timeout=2)
+            
+            if result.returncode == 0:
+                subprocess.run([
+                    "qdbus", "org.kde.KWin", "/Scripting",
+                    "org.kde.kwin.Scripting.start"
+                ], capture_output=True, timeout=1)
+                return True
+        finally:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"KWin rule setup failed: {e}", file=sys.stderr)
+    
+    return False
+
+
+def _try_kde_always_on_top(window_title: str) -> bool:
+    """Legacy wrapper - now uses full window setup."""
+    return True
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional
@@ -76,25 +256,25 @@ class StateColors:
 
 STATE_PALETTES = {
     OverlayState.READY: StateColors(
-        border_top="#4B5563",      # Subtle gray highlight
-        border_bottom="#1F2937",   # Dark gray shadow
-        glow="#374151",            # Muted glow
-        wave="#6B7280",            # Gray wave
-        text="#9CA3AF",            # Muted text
+        border_top="#2D333B",      # GitHub Dark elevated
+        border_bottom="#161B22",   # GitHub Dark surface
+        glow="#21262D",            # Muted glow
+        wave="#3D444D",            # Subtle wave
+        text="#8B8B8F",            # Secondary text (2025 accessible)
     ),
     OverlayState.LISTENING: StateColors(
-        border_top="#FF6B6B",      # Bright crimson highlight
-        border_bottom="#7F1D1D",   # Dark maroon shadow
-        glow="#F43F5E",            # Electric crimson glow
-        wave="#F43F5E",            # Crimson wave
-        text="#F8FAFC",            # Bright text
+        border_top="#E8A0A8",      # Muted rose highlight
+        border_bottom="#2D1520",   # Deep rose shadow
+        glow="#E8707F",            # Muted rose glow
+        wave="#E8707F",            # Muted rose wave
+        text="#E8E8E8",            # Off-white (no pure white)
     ),
     OverlayState.PROCESSING: StateColors(
-        border_top="#FCD34D",      # Bright gold highlight
-        border_bottom="#78350F",   # Deep bronze shadow
-        glow="#F59E0B",            # Golden amber glow
-        wave="#F59E0B",            # Amber wave
-        text="#F8FAFC",            # Bright text
+        border_top="#E8C86A",      # Muted gold highlight
+        border_bottom="#2D2208",   # Deep bronze shadow
+        glow="#E5AC2A",            # Muted gold glow
+        wave="#E5AC2A",            # Muted gold wave
+        text="#E8E8E8",            # Off-white (no pure white)
     ),
 }
 
@@ -105,56 +285,83 @@ STATE_LABELS = {
 }
 
 
-# === Squircle Path Generator ===
+# === Squircle Path Generator (Kappa-based Bezier) ===
 
 def create_squircle_path(rect: QRectF, n: float = 4.5) -> QPainterPath:
     """
-    Create a superellipse (squircle) path.
+    Create a premium squircle using Cubic Bezier curves.
     
-    The squircle is defined by: |x/a|^n + |y/b|^n = 1
-    where n=4-5 gives a pleasing blend between square and circle.
+    Standard drawRoundedRect uses circular arcs which create a sharp "break"
+    where the straight line meets the curve. This implementation uses kappa
+    (≈0.552) to create smooth, continuous curvature like iOS/macOS.
     
     Args:
         rect: Bounding rectangle for the squircle
-        n: Superellipse exponent (4.5 recommended for squircle)
+        n: Controls corner aggressiveness (4.5 = balanced squircle)
         
     Returns:
-        QPainterPath representing the squircle
+        QPainterPath representing a true squircle
     """
     path = QPainterPath()
     
-    cx = rect.center().x()
-    cy = rect.center().y()
-    a = rect.width() / 2
-    b = rect.height() / 2
+    # Kappa constant for smooth Bezier approximation of circular arcs
+    # Standard kappa ≈ 0.552, but we use higher for more aggressive squircle
+    kappa = 0.552284749831
+    squircle_factor = 1.2  # Multiplier for more aggressive squircle feel
     
-    # Generate points around the squircle
-    num_points = 100
-    points = []
+    # Calculate corner radius (proportional to smaller dimension)
+    radius = min(rect.width(), rect.height()) * 0.3  # 30% of size
+    offset = radius * (1 - kappa * squircle_factor)
     
-    for i in range(num_points):
-        theta = 2 * math.pi * i / num_points
-        
-        # Parametric form of superellipse
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        
-        # Sign-preserving power function
-        def signed_pow(base, exp):
-            return math.copysign(abs(base) ** exp, base)
-        
-        x = cx + a * signed_pow(cos_t, 2 / n)
-        y = cy + b * signed_pow(sin_t, 2 / n)
-        
-        points.append(QPointF(x, y))
+    left = rect.left()
+    right = rect.right()
+    top = rect.top()
+    bottom = rect.bottom()
     
-    # Create smooth path through points
-    if points:
-        path.moveTo(points[0])
-        for point in points[1:]:
-            path.lineTo(point)
-        path.closeSubpath()
+    # Start from top-left, going clockwise
+    path.moveTo(left + radius, top)
     
+    # Top edge
+    path.lineTo(right - radius, top)
+    
+    # Top-right corner (Bezier curve)
+    path.cubicTo(
+        right - offset, top,           # Control point 1
+        right, top + offset,           # Control point 2
+        right, top + radius            # End point
+    )
+    
+    # Right edge
+    path.lineTo(right, bottom - radius)
+    
+    # Bottom-right corner
+    path.cubicTo(
+        right, bottom - offset,
+        right - offset, bottom,
+        right - radius, bottom
+    )
+    
+    # Bottom edge
+    path.lineTo(left + radius, bottom)
+    
+    # Bottom-left corner
+    path.cubicTo(
+        left + offset, bottom,
+        left, bottom - offset,
+        left, bottom - radius
+    )
+    
+    # Left edge
+    path.lineTo(left, top + radius)
+    
+    # Top-left corner
+    path.cubicTo(
+        left, top + offset,
+        left + offset, top,
+        left + radius, top
+    )
+    
+    path.closeSubpath()
     return path
 
 
@@ -382,8 +589,8 @@ class AnimatedValue(QObject):
             self._value = val
             self.valueChanged.emit(val)
     
-    def animate_to(self, target: float, duration: int = 350):
-        """Animate value to target over duration ms."""
+    def animate_to(self, target: float, duration: int = 250):
+        """Animate value to target over duration ms (250ms ease-out = engineered feel)."""
         if self._animation:
             self._animation.stop()
         
@@ -391,7 +598,7 @@ class AnimatedValue(QObject):
         self._animation.setStartValue(self._value)
         self._animation.setEndValue(target)
         self._animation.setDuration(duration)
-        self._animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)  # 250ms OutCubic = premium
         self._animation.valueChanged.connect(lambda v: setattr(self, 'value', v))
         self._animation.start()
 
@@ -415,8 +622,8 @@ class ColorAnimator(QObject):
         self._color = color
         self.colorChanged.emit(color)
     
-    def animate_to(self, target: QColor, duration: int = 350):
-        """Animate color to target over duration ms."""
+    def animate_to(self, target: QColor, duration: int = 250):
+        """Animate color to target over duration ms (250ms ease-out = engineered feel)."""
         if self._animation:
             self._animation.stop()
         
@@ -426,7 +633,7 @@ class ColorAnimator(QObject):
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
         self._animation.setDuration(duration)
-        self._animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)  # 250ms OutCubic = premium
         
         def interpolate(t):
             r = int(start_color.red() + (target.red() - start_color.red()) * t)
@@ -454,12 +661,16 @@ class GlassmorphicOverlay(QWidget):
     - Smooth state transitions
     """
     
-    # Base dimensions
-    BASE_HEIGHT = 44
-    PADDING_H = 20
-    WAVE_WIDTH = 100
+    # Base dimensions - ultra compact for minimal intrusion
+    BASE_HEIGHT = 20
+    PADDING_H = 8
+    WAVE_WIDTH = 40
     
     def __init__(self):
+        # Setup KWin positioning rule BEFORE creating window
+        # This ensures the window is positioned correctly from the first frame
+        self._setup_kwin_positioning_rule()
+        
         super().__init__()
         
         # State
@@ -481,10 +692,10 @@ class GlassmorphicOverlay(QWidget):
         self._opacity = AnimatedValue(0.0, self)
         self._opacity.valueChanged.connect(self._on_opacity_changed)
         
-        self._border_color_top = ColorAnimator(QColor("#4B5563"), self)
-        self._border_color_bottom = ColorAnimator(QColor("#1F2937"), self)
-        self._glow_color = ColorAnimator(QColor("#374151"), self)
-        self._wave_color = ColorAnimator(QColor("#6B7280"), self)
+        self._border_color_top = ColorAnimator(QColor("#2D333B"), self)
+        self._border_color_bottom = ColorAnimator(QColor("#161B22"), self)
+        self._glow_color = ColorAnimator(QColor("#21262D"), self)
+        self._wave_color = ColorAnimator(QColor("#3D444D"), self)
         
         for animator in [self._border_color_top, self._border_color_bottom, 
                          self._glow_color, self._wave_color]:
@@ -499,15 +710,31 @@ class GlassmorphicOverlay(QWidget):
         self._position_at_bottom()
     
     def _setup_window(self):
-        """Configure window flags for overlay behavior."""
-        # Simple flags that work reliably on Wayland/KDE
+        """Configure window flags for overlay behavior (Wayland-proof)."""
+        # CRITICAL: All flags must be combined in a SINGLE call
+        # 
+        # Window flags for overlay:
+        # - Tool: Helper window (better Wayland support)
+        # - FramelessWindowHint: No decorations
+        # - WindowStaysOnTopHint: Stay on top
+        # 
+        # Note: Actual positioning on Wayland is done via KWin scripting
         self.setWindowFlags(
+            Qt.WindowType.Tool |
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.BypassWindowManagerHint  # Bypass WM for true always-on-top
+            Qt.WindowType.WindowDoesNotAcceptFocus  # Never steal focus from text fields
         )
+        
+        # Critical for ARGB channel on Wayland - must be set for transparency
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        
+        # Ensure no background is painted by Qt
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        
+        # Absolutely refuse to accept focus
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         
         # X11-specific: don't accept focus
         try:
@@ -518,9 +745,18 @@ class GlassmorphicOverlay(QWidget):
         # Try to enable blur on KDE Plasma
         self._request_blur()
         
-        # Set initial size
-        self.setFixedHeight(self.BASE_HEIGHT + 20)  # Extra for glow
+        # Set initial size (minimal margin for subtle glow)
+        self.setFixedHeight(self.BASE_HEIGHT + 16)  # 8px margin each side
         self._update_size()
+        
+        # Timer to periodically raise window (Wayland focus protector)
+        # 250ms is a good balance between responsiveness and CPU usage
+        self._raise_timer = QTimer(self)
+        self._raise_timer.timeout.connect(self._ensure_on_top)
+        self._raise_timer.setInterval(250)
+        
+        # Set window title for KWin script identification
+        self.setWindowTitle("Wayfinder Voice Overlay")
         
         # Timer to periodically raise window (ensures stay-on-top on all compositors)
         self._raise_timer = QTimer(self)
@@ -528,10 +764,9 @@ class GlassmorphicOverlay(QWidget):
         self._raise_timer.setInterval(100)  # Every 100ms for more aggressive stay-on-top
     
     def _ensure_on_top(self):
-        """Ensure window stays on top of other windows."""
+        """Ensure window stays on top of other windows (Wayland focus protector)."""
         if self.isVisible():
-            # Re-apply stay on top hint and raise
-            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            # Only raise, never activate - we must not steal focus from text fields
             self.raise_()
     
     def _request_blur(self):
@@ -545,9 +780,67 @@ class GlassmorphicOverlay(QWidget):
             print(f"Could not enable blur: {e}")
     
     def showEvent(self, event):
-        """Handle show event to setup blur."""
+        """Handle show event to setup blur, mask, position, and KDE always-on-top."""
         super().showEvent(event)
         self._setup_kde_blur()
+        self._apply_squircle_mask()
+        
+        # Force position after window is shown (Wayland often ignores pre-show positioning)
+        self._position_at_bottom()
+        
+        # Schedule another position attempt after window is fully mapped
+        QTimer.singleShot(50, self._position_at_bottom)
+        QTimer.singleShot(150, self._position_at_bottom)
+        
+        # Try KDE-specific always-on-top via D-Bus
+        if os.environ.get("XDG_CURRENT_DESKTOP", "").upper() == "KDE":
+            try:
+                if self.windowHandle():
+                    QTimer.singleShot(100, self._try_kde_keep_above)
+            except Exception:
+                pass
+    
+    def _try_kde_keep_above(self):
+        """Attempt to set window position via KDE KWin scripting (only way that works on Wayland)."""
+        try:
+            screen = QApplication.primaryScreen()
+            if screen:
+                geom = screen.geometry()
+                # Position: centered horizontally, just above taskbar
+                # Taskbar is typically 44-48px on 1080p
+                TASKBAR_HEIGHT = 44
+                
+                x = (geom.width() - self.width()) // 2
+                y = geom.height() - self.height() - TASKBAR_HEIGHT
+                
+                # Use KWin script to force position (only way on Wayland)
+                _force_kde_window_position(
+                    "Wayfinder Voice Overlay",
+                    x, y,
+                    self.width(), self.height()
+                )
+        except Exception as e:
+            print(f"KWin positioning failed: {e}", file=sys.stderr)
+    
+    def _apply_squircle_mask(self):
+        """Apply window mask to clip black corners (Wayland fix)."""
+        # Calculate the squircle bounds
+        margin = 8
+        bar_rect = QRectF(
+            margin,
+            margin,
+            self._current_width,
+            self.BASE_HEIGHT
+        )
+        
+        # Create expanded path for glow area (minimal)
+        glow_margin = 6
+        glow_rect = bar_rect.adjusted(-glow_margin, -glow_margin, glow_margin, glow_margin)
+        glow_path = create_squircle_path(glow_rect, n=4.5)
+        
+        # Apply mask - physically clips black corners
+        mask_region = QRegion(glow_path.toFillPolygon().toPolygon())
+        self.setMask(mask_region)
     
     def _setup_kde_blur(self):
         """Setup KDE Plasma blur behind window."""
@@ -569,9 +862,9 @@ class GlassmorphicOverlay(QWidget):
             pass  # Blur not available, fallback to semi-transparent
     
     def _setup_fonts(self):
-        """Setup premium typography."""
-        # Try to load JetBrains Mono, fallback to system fonts
-        font_families = ["JetBrains Mono", "SF Mono", "Fira Code", "monospace"]
+        """Setup premium typography - refined mono for pro-tool aesthetic."""
+        # Prefer Geist Mono for modern look, fallback chain
+        font_families = ["Geist Mono", "JetBrains Mono", "SF Mono", "Cascadia Code", "monospace"]
         
         # Find first available font
         available_families = QFontDatabase.families()
@@ -581,9 +874,9 @@ class GlassmorphicOverlay(QWidget):
                 selected_family = family
                 break
         
-        self._font = QFont(selected_family, 11)
+        self._font = QFont(selected_family, 7)  # Ultra compact
         self._font.setWeight(QFont.Weight.Medium)
-        self._font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.5)
+        self._font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.3)
     
     def _setup_timers(self):
         """Setup animation timers."""
@@ -592,27 +885,80 @@ class GlassmorphicOverlay(QWidget):
         self._render_timer.timeout.connect(self._on_frame)
         self._render_timer.setInterval(16)  # ~60 FPS
     
+    def _setup_kwin_positioning_rule(self):
+        """Setup KWin rule to position overlay before window is created."""
+        if os.environ.get("XDG_CURRENT_DESKTOP", "").upper() != "KDE":
+            return
+        
+        try:
+            # Calculate target position based on primary screen
+            app = QApplication.instance()
+            if app:
+                screen = app.primaryScreen()
+                if screen:
+                    geom = screen.geometry()
+                    TASKBAR_HEIGHT = 0
+                    GAP = 0
+                    
+                    # Calculate exact widget size
+                    # Initial width for "Listening..." text (approximate)
+                    estimated_content_width = 200  # Will be recalculated when shown
+                    estimated_width = estimated_content_width + 16  # + glow margins
+                    estimated_height = self.BASE_HEIGHT + 16
+                    
+                    x = geom.x() + (geom.width() - estimated_width) // 2
+                    y = geom.y() + geom.height() - estimated_height - TASKBAR_HEIGHT - GAP
+                    
+                    _setup_kwin_window_rule(x, y, estimated_width, estimated_height)
+        except Exception as e:
+            print(f"KWin positioning rule setup failed: {e}", file=sys.stderr)
+    
     def _position_at_bottom(self):
         """Position overlay at bottom center of screen, just above taskbar."""
         screen = QApplication.primaryScreen()
-        if screen:
-            # availableGeometry excludes taskbars/panels
-            available = screen.availableGeometry()
-            
-            # Center horizontally in available area
-            x = available.x() + (available.width() - self.width()) // 2
-            
-            # Position at the very bottom of available area (just above taskbar)
-            # Small offset (8px) so it doesn't touch the taskbar
-            y = available.y() + available.height() - self.height() - 8
-            
-            self.move(x, y)
+        if not screen:
+            return
+        
+        # Get screen geometry
+        geom = screen.geometry()
+        screen_width = geom.width()
+        screen_height = geom.height()
+        
+        # Positioning - use 0 for both to sit at screen bottom
+        # Adjust TASKBAR_HEIGHT if overlay is hidden behind taskbar
+        TASKBAR_HEIGHT = 0
+        GAP = 0
+        
+        # Calculate target position
+        x = geom.x() + (screen_width - self.width()) // 2
+        # HARDCODED TEST - force to very bottom
+        y = screen_height - 50  # Should be very close to bottom
+        
+        print(f"DEBUG: screen={screen_width}x{screen_height}, widget_h={self.height()}, FORCING y={y}", file=sys.stderr, flush=True)
+        
+        # Try multiple methods to set position (Wayland workarounds)
+        # Method 1: setGeometry with explicit size
+        self.setGeometry(x, y, self.width(), self.height())
+        
+        # Method 2: move after geometry is set
+        self.move(x, y)
+        
+        # Method 3: Set position via window handle (more direct on Wayland)
+        try:
+            if self.windowHandle():
+                from PyQt6.QtCore import QPoint
+                self.windowHandle().setPosition(QPoint(x, y))
+        except Exception:
+            pass
     
     def _update_size(self):
         """Update widget size based on current width."""
-        width = int(self._current_width) + 40  # Extra for glow
+        width = int(self._current_width) + 16  # Extra for glow (8px each side)
         self.setFixedWidth(width)
         self._position_at_bottom()
+        # Re-apply mask when size changes
+        if self.isVisible():
+            self._apply_squircle_mask()
     
     def _on_width_changed(self, width: float):
         """Handle width animation updates."""
@@ -647,13 +993,22 @@ class GlassmorphicOverlay(QWidget):
         old_state = self._state
         self._state = state
         
-        duration = 350 if animate else 0
+        duration = 250 if animate else 0  # 250ms ease-out = engineered, not vibe-coded
         
         if state == OverlayState.HIDDEN:
-            # Fade out
-            self._opacity.animate_to(0.0, 200)
             self._render_timer.stop()
             self._raise_timer.stop()
+            
+            # Check overlay mode
+            mode = getattr(self, '_overlay_mode', 'persistent')
+            # Check overlay mode
+            mode = getattr(self, '_overlay_mode', 'persistent')
+            if mode == "persistent":
+                # Move off-screen instead of hiding (prevents focus stealing on show)
+                self.setGeometry(-9999, -9999, self.width(), self.height())
+            else:
+                # Standard mode: actually hide
+                self.hide()
             return
         
         # Get colors for new state
@@ -680,12 +1035,63 @@ class GlassmorphicOverlay(QWidget):
         
         # Show and fade in if hidden
         if old_state == OverlayState.HIDDEN:
-            self._position_at_bottom()  # Ensure correct position before showing
-            self.show()
-            self.raise_()  # Immediately raise to top
-            self._opacity.animate_to(1.0, 200)
             self._render_timer.start()
-            self._raise_timer.start()  # Keep raising to stay on top
+            self._raise_timer.start()
+            
+            # Delay showing entirely - let KWin script prepare first
+            # This completely eliminates the center flash
+            QTimer.singleShot(50, self._delayed_show)
+    
+    def _delayed_show(self):
+        """Show or move the overlay on-screen based on mode."""
+        # Ensure we're still supposed to be visible
+        if self._state == OverlayState.HIDDEN:
+            return
+        
+        # Calculate final size based on current state's text
+        label = STATE_LABELS.get(self._state, "")
+        content_width = self._calculate_target_width(label)
+        final_width = content_width + 16  # content + glow margins
+        final_height = self.BASE_HEIGHT + 16
+        
+        # Stop any running width animation and set final value immediately
+        if self._width_animator._animation:
+            self._width_animator._animation.stop()
+        self._current_width = float(content_width)
+        self._target_width = content_width
+        self._width_animator._value = float(content_width)
+        
+        # Lock size to prevent "growing" animation
+        self.setFixedSize(final_width, final_height)
+        
+        # Calculate position: centered, just above taskbar
+        screen = QApplication.primaryScreen()
+        if screen:
+            geom = screen.geometry()
+            TASKBAR_HEIGHT = 44  # Standard KDE taskbar height
+            
+            x = (geom.width() - final_width) // 2
+            y = geom.height() - final_height - TASKBAR_HEIGHT
+            
+            # Try Qt first (won't work on Wayland but doesn't hurt)
+            self.setGeometry(x, y, final_width, final_height)
+            
+            # Force position via KWin (the only way that works on Wayland)
+            _force_kde_window_position(
+                "Wayfinder Voice Overlay",
+                x, y,
+                final_width, final_height
+            )
+        
+        # Check mode for how to show
+        mode = getattr(self, '_overlay_mode', 'persistent')
+        if mode == "persistent":
+            # Window is already shown, just raise it
+            self.raise_()
+        else:
+            # Standard mode: show the window
+            self.show()
+            self.raise_()
         
         self.update()
     
@@ -713,7 +1119,8 @@ class GlassmorphicOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         
         # Calculate centered rect for the squircle
-        margin = 20  # Space for glow
+        # Margin provides room for subtle glow
+        margin = 8  # Space for glow
         bar_rect = QRectF(
             margin,
             margin,
@@ -721,10 +1128,10 @@ class GlassmorphicOverlay(QWidget):
             self.BASE_HEIGHT
         )
         
-        # Create squircle path
+        # Create squircle path for main shape
         squircle = create_squircle_path(bar_rect, n=4.5)
         
-        # Draw outer glow
+        # Draw outer glow (fades into transparency)
         self._draw_outer_glow(painter, squircle, bar_rect)
         
         # Draw glass background
@@ -737,7 +1144,7 @@ class GlassmorphicOverlay(QWidget):
         if self._state == OverlayState.PROCESSING:
             self.border_chaser.render(painter, squircle, self._glow_color.color)
         
-        # Clip to squircle for content
+        # Clip to squircle for content (text, wave)
         painter.setClipPath(squircle)
         
         # Draw wave visualization
@@ -784,11 +1191,11 @@ class GlassmorphicOverlay(QWidget):
         painter.restore()
     
     def _draw_glass_background(self, painter: QPainter, path: QPainterPath):
-        """Draw the frosted glass background."""
+        """Draw the frosted glass background - GitHub Dark base."""
         painter.save()
         
-        # Smoked glass color with transparency
-        glass_color = QColor(15, 23, 42, int(255 * 0.75))
+        # GitHub Dark glass (#0D1117 base) - reduces eye strain
+        glass_color = QColor(13, 17, 23, int(255 * 0.94))
         
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(glass_color))
@@ -824,8 +1231,8 @@ class GlassmorphicOverlay(QWidget):
         # Setup font and color
         painter.setFont(self._font)
         
-        text_color = QColor("#F8FAFC")
-        text_color.setAlphaF(0.95)
+        text_color = QColor("#FAFAFA")
+        text_color.setAlphaF(0.92)
         painter.setPen(QPen(text_color))
         
         # Position text with padding
@@ -845,10 +1252,48 @@ class GlassmorphicOverlay(QWidget):
 
 def run_overlay():
     """Run the overlay as a standalone application with stdin command handling."""
+    # Parse mode argument
+    mode = "persistent"  # default
+    for arg in sys.argv:
+        if arg.startswith("--mode="):
+            mode = arg.split("=", 1)[1]
+    
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     
     overlay = GlassmorphicOverlay()
+    overlay._overlay_mode = mode  # Store mode for later use
+    
+    if mode == "persistent":
+        # Start in READY state (visible, grey)
+        overlay._overlay_mode = mode
+        # Calculate position: centered, just above taskbar
+        screen = app.primaryScreen()
+        if screen:
+            geom = screen.geometry()
+            TASKBAR_HEIGHT = 44  # Standard KDE taskbar height
+            
+            # Calculate initial size for "Ready" text
+            label = STATE_LABELS.get(OverlayState.READY, "Ready")
+            content_width = overlay._calculate_target_width(label)
+            final_width = content_width + 16
+            final_height = overlay.BASE_HEIGHT + 16
+            
+            x = (geom.width() - final_width) // 2
+            y = geom.height() - final_height - TASKBAR_HEIGHT
+            
+            # Try Qt positioning (may not work on Wayland)
+            overlay.setGeometry(x, y, final_width, final_height)
+            overlay.show()
+            overlay.set_state(OverlayState.READY, animate=False)
+            
+            # Force position via KWin after showing
+            QTimer.singleShot(100, lambda: _force_kde_window_position(
+                "Wayfinder Voice Overlay",
+                x, y,
+                final_width, final_height
+            ))
+    # In "standard" mode, window starts hidden
     
     # Command processing timer
     import select
