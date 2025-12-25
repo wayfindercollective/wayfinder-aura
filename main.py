@@ -4674,11 +4674,16 @@ class WayfinderApp(ctk.CTk):
     
     def _download_llm_model(self, model_id: str, model_info: dict, models_dir: Path, dialog):
         """Download an LLM model with detailed progress."""
+        import time as time_module
+        
         model_file = models_dir / model_info["filename"]
+        model_name = model_info["name"]
+        model_url = model_info["url"]
+        model_filename = model_info["filename"]
         
         # Create progress dialog
         progress_dialog = ctk.CTkToplevel(dialog)
-        progress_dialog.title(f"Downloading {model_info['name']}")
+        progress_dialog.title(f"Downloading {model_name}")
         progress_dialog.geometry("450x280")
         progress_dialog.configure(fg_color=COLORS["bg_base"])
         progress_dialog.transient(dialog)
@@ -4688,7 +4693,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             inner,
-            text=f"Downloading {model_info['name']}",
+            text=f"Downloading {model_name}",
             font=(self.font_header[0], 16, "bold"),
             text_color=COLORS["text_bright"],
         ).pack(pady=(0, 12))
@@ -4715,6 +4720,8 @@ class WayfinderApp(ctk.CTk):
         )
         speed_label.pack(pady=(0, 12))
         
+        self._cancel_llm_download = False
+        
         cancel_btn = ctk.CTkButton(
             inner,
             text="Cancel",
@@ -4726,68 +4733,68 @@ class WayfinderApp(ctk.CTk):
         )
         cancel_btn.pack(pady=(8, 0))
         
-        self._cancel_llm_download = False
+        # Helper functions (defined outside thread for stability)
+        def format_size(bytes_val):
+            for unit in ['B', 'KB', 'MB', 'GB']:
+                if bytes_val < 1024.0:
+                    return f"{bytes_val:.1f} {unit}"
+                bytes_val /= 1024.0
+            return f"{bytes_val:.1f} TB"
+        
+        def format_speed(bytes_per_sec):
+            if bytes_per_sec < 1024:
+                return f"{bytes_per_sec:.0f} B/s"
+            elif bytes_per_sec < 1024 * 1024:
+                return f"{bytes_per_sec / 1024:.1f} KB/s"
+            else:
+                return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
+        
+        def format_time(seconds):
+            if seconds < 60:
+                return f"{int(seconds)}s"
+            elif seconds < 3600:
+                return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+            else:
+                hours = int(seconds // 3600)
+                minutes = int((seconds % 3600) // 60)
+                return f"{hours}h {minutes}m"
+        
+        def update_progress(prog, status_text, speed_text):
+            """Safe UI update function."""
+            try:
+                if progress_dialog.winfo_exists():
+                    progress_bar.set(prog)
+                    status_label.configure(text=status_text)
+                    if speed_text:
+                        speed_label.configure(text=speed_text)
+            except Exception:
+                pass
         
         def download_thread():
+            temp_path = None
             try:
-                import time
-                url = model_info["url"]
-                temp_path = models_dir / f"{model_info['filename']}.downloading"
+                temp_path = models_dir / f"{model_filename}.downloading"
                 
-                request = urllib.request.Request(url)
+                request = urllib.request.Request(model_url)
                 request.add_header("User-Agent", "Wayfinder-Voice/1.0")
                 
-                start_time = time.time()
+                start_time = time_module.time()
                 last_update_time = start_time
-                last_downloaded = 0
                 
-                with urllib.request.urlopen(request, timeout=30) as response:
+                with urllib.request.urlopen(request, timeout=60) as response:
                     total_size = int(response.headers.get("Content-Length", 0))
                     downloaded = 0
-                    chunk_size = 64 * 1024  # 64KB chunks for more frequent updates
-                    
-                    def format_size(bytes_val):
-                        """Format bytes to human-readable size."""
-                        for unit in ['B', 'KB', 'MB', 'GB']:
-                            if bytes_val < 1024.0:
-                                return f"{bytes_val:.1f} {unit}"
-                            bytes_val /= 1024.0
-                        return f"{bytes_val:.1f} TB"
-                    
-                    def format_speed(bytes_per_sec):
-                        """Format bytes per second to human-readable speed."""
-                        if bytes_per_sec < 1024:
-                            return f"{bytes_per_sec:.0f} B/s"
-                        elif bytes_per_sec < 1024 * 1024:
-                            return f"{bytes_per_sec / 1024:.1f} KB/s"
-                        else:
-                            return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
-                    
-                    def format_time(seconds):
-                        """Format seconds to human-readable time."""
-                        if seconds < 60:
-                            return f"{int(seconds)}s"
-                        elif seconds < 3600:
-                            return f"{int(seconds // 60)}m {int(seconds % 60)}s"
-                        else:
-                            hours = int(seconds // 3600)
-                            minutes = int((seconds % 3600) // 60)
-                            return f"{hours}h {minutes}m"
+                    chunk_size = 64 * 1024  # 64KB chunks
                     
                     with open(temp_path, "wb") as f:
                         while True:
-                            if getattr(self, '_cancel_llm_download', False):
+                            if self._cancel_llm_download:
                                 try:
+                                    f.close()
                                     temp_path.unlink(missing_ok=True)
                                 except:
                                     pass
-                                def cancel_close():
-                                    try:
-                                        if progress_dialog.winfo_exists():
-                                            progress_dialog.destroy()
-                                    except:
-                                        pass
-                                self.after(0, cancel_close)
+                                self.after(0, lambda: progress_dialog.destroy() if progress_dialog.winfo_exists() else None)
                                 return
                             
                             chunk = response.read(chunk_size)
@@ -4797,107 +4804,74 @@ class WayfinderApp(ctk.CTk):
                             f.write(chunk)
                             downloaded += len(chunk)
                             
-                            # Update UI every 0.2 seconds or every 512KB, whichever comes first
-                            current_time = time.time()
-                            time_since_update = current_time - last_update_time
-                            
-                            if time_since_update >= 0.2 or downloaded - last_downloaded >= 512 * 1024:
+                            # Update UI every 0.3 seconds
+                            current_time = time_module.time()
+                            if current_time - last_update_time >= 0.3:
                                 elapsed = current_time - start_time
                                 speed = downloaded / elapsed if elapsed > 0 else 0
-                                
-                                # Capture variables for lambda closures
-                                d = downloaded
-                                ts = total_size
-                                el = elapsed
-                                sp = speed
                                 
                                 if total_size > 0:
                                     progress = downloaded / total_size
                                     percentage = progress * 100
                                     remaining = total_size - downloaded
-                                    eta_seconds = remaining / speed if speed > 0 else 0
+                                    eta = remaining / speed if speed > 0 else 0
                                     
-                                    # Update progress bar
-                                    p = progress
-                                    self.after(0, lambda p=p: progress_bar.set(p))
-                                    
-                                    # Update status (bytes and percentage)
                                     status_text = f"{format_size(downloaded)} / {format_size(total_size)} ({percentage:.1f}%)"
-                                    self.after(0, lambda t=status_text: status_label.configure(text=t))
+                                    speed_text = f"{format_speed(speed)} • {format_time(elapsed)} elapsed"
+                                    if eta > 0 and eta < 86400:
+                                        speed_text += f" • {format_time(eta)} remaining"
                                     
-                                    # Update speed and ETA
-                                    if speed > 0:
-                                        speed_text = f"{format_speed(speed)} • {format_time(elapsed)} elapsed"
-                                        if eta_seconds > 0 and eta_seconds < 86400:  # Less than 24 hours
-                                            speed_text += f" • {format_time(eta_seconds)} remaining"
-                                        self.after(0, lambda s=speed_text: speed_label.configure(text=s))
-                                    else:
-                                        self.after(0, lambda: speed_label.configure(text="Calculating speed..."))
+                                    self.after(0, lambda p=progress, s=status_text, sp=speed_text: update_progress(p, s, sp))
                                 else:
-                                    # Unknown total size
-                                    self.after(0, lambda: progress_bar.set(0.1))  # Show some progress
                                     status_text = f"{format_size(downloaded)} downloaded"
-                                    self.after(0, lambda t=status_text: status_label.configure(text=t))
-                                    
-                                    if elapsed > 0:
-                                        speed_text = f"{format_speed(speed)} • {format_time(elapsed)} elapsed"
-                                        self.after(0, lambda s=speed_text: speed_label.configure(text=s))
+                                    speed_text = f"{format_speed(speed)}" if speed > 0 else ""
+                                    self.after(0, lambda s=status_text, sp=speed_text: update_progress(0.5, s, sp))
                                 
                                 last_update_time = current_time
-                                last_downloaded = downloaded
                     
-                    # Move temp to final
+                    # Download complete - move temp to final
                     if temp_path.exists():
                         if model_file.exists():
-                            model_file.unlink()  # Remove existing file if present
+                            model_file.unlink()
                         temp_path.rename(model_file)
+                        
+                        total_time = time_module.time() - start_time
+                        final_speed = downloaded / total_time if total_time > 0 else 0
                         
                         def on_success():
                             try:
-                                total_time = time.time() - start_time
-                                final_downloaded = downloaded
-                                final_speed = final_downloaded / total_time if total_time > 0 else 0
-                                model_name = model_info['name']
-                                self.log(f"✓ Downloaded: {model_name} ({format_size(final_downloaded)} in {format_time(total_time)}, avg {format_speed(final_speed)})")
+                                self.log(f"✓ Downloaded: {model_name} ({format_size(downloaded)} in {format_time(total_time)}, avg {format_speed(final_speed)})")
                                 if progress_dialog.winfo_exists():
                                     progress_dialog.destroy()
-                                self.open_postproc_model_settings()  # Refresh
+                                self.open_postproc_model_settings()
                             except Exception as e:
-                                import traceback
-                                self.log(f"⚠️ Error closing dialog: {e}")
-                                self.log(traceback.format_exc())
+                                self.log(f"⚠️ Error in success handler: {e}")
                         
                         self.after(0, on_success)
                     else:
-                        raise Exception("Download file not found after completion")
+                        raise Exception("Download file missing after completion")
                     
             except Exception as e:
-                import traceback
-                error_msg = str(e)
-                error_trace = traceback.format_exc()
+                error_msg = str(e)[:100]  # Truncate long errors
                 self.log(f"⚠️ Download failed: {error_msg}")
-                self.log(f"Traceback: {error_trace}")
                 
-                def on_error(err_msg=error_msg):
+                def on_error():
                     try:
                         if progress_dialog.winfo_exists():
-                            status_label.configure(
-                                text=f"Error: {err_msg}",
-                                text_color="#CF7B7B"
-                            )
+                            status_label.configure(text=f"Error: {error_msg}", text_color="#CF7B7B")
                             speed_label.configure(text="")
                             cancel_btn.configure(text="Close")
-                    except Exception as ui_err:
-                        self.log(f"⚠️ Error updating UI: {ui_err}")
+                    except:
+                        pass
                 
                 self.after(0, on_error)
                 
-                # Clean up temp file if it exists
+                # Cleanup
                 try:
-                    if 'temp_path' in locals() and temp_path.exists():
+                    if temp_path and temp_path.exists():
                         temp_path.unlink()
-                except Exception as cleanup_err:
-                    self.log(f"⚠️ Error cleaning up temp file: {cleanup_err}")
+                except:
+                    pass
         
         threading.Thread(target=download_thread, daemon=True).start()
     
@@ -7840,19 +7814,21 @@ class WayfinderApp(ctk.CTk):
         dialog = ctk.CTkToplevel(self)
         self._benchmark_settings_dialog = dialog
         dialog.title("Hardware Benchmark")
-        dialog.geometry("550x600")
+        dialog.geometry("580x700")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
         
         def on_dialog_close():
+            if benchmark_runner[0]:
+                benchmark_runner[0].cancel()
             self._benchmark_settings_dialog = None
             dialog.destroy()
         
         dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        inner.pack(fill="both", expand=True, padx=30, pady=25)
         
         ctk.CTkLabel(
             inner,
@@ -7863,22 +7839,67 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             inner,
-            text="Run a 10-second test on each model to measure actual\nGPU and CPU speeds on your system. Results are used\nto show accurate timing estimates throughout the app.",
+            text="Transcribe a 10-second test clip on GPU and CPU to measure\nyour hardware speed. Results customize speed estimates in the app.",
             font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
             justify="left",
-        ).pack(anchor="w", pady=(0, 20))
+        ).pack(anchor="w", pady=(0, 15))
         
-        # Results display area
+        # === Hardware Info Section ===
+        hw_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=12)
+        hw_frame.pack(fill="x", pady=(0, 15))
+        
+        hw_inner = ctk.CTkFrame(hw_frame, fg_color="transparent")
+        hw_inner.pack(fill="x", padx=15, pady=12)
+        
+        ctk.CTkLabel(
+            hw_inner,
+            text="🖥️ Detected Hardware",
+            font=(self.font_body[0], 13, "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(0, 8))
+        
+        # Get system info
+        sys_info = BenchmarkRunner.get_system_info()
+        
+        hw_grid = ctk.CTkFrame(hw_inner, fg_color="transparent")
+        hw_grid.pack(fill="x")
+        
+        # CPU
+        cpu_row = ctk.CTkFrame(hw_grid, fg_color="transparent")
+        cpu_row.pack(fill="x", pady=2)
+        ctk.CTkLabel(cpu_row, text="CPU:", font=(self.font_body[0], 11, "bold"),
+                     text_color=COLORS["text_muted"], width=50, anchor="w").pack(side="left")
+        ctk.CTkLabel(cpu_row, text=sys_info["cpu"][:55] + ("..." if len(sys_info["cpu"]) > 55 else ""),
+                     font=(self.font_body[0], 11), text_color=COLORS["text_primary"],
+                     anchor="w").pack(side="left", fill="x", expand=True)
+        
+        # GPU
+        gpu_row = ctk.CTkFrame(hw_grid, fg_color="transparent")
+        gpu_row.pack(fill="x", pady=2)
+        ctk.CTkLabel(gpu_row, text="GPU:", font=(self.font_body[0], 11, "bold"),
+                     text_color=COLORS["text_muted"], width=50, anchor="w").pack(side="left")
+        ctk.CTkLabel(gpu_row, text=sys_info["gpu"][:55] + ("..." if len(sys_info["gpu"]) > 55 else ""),
+                     font=(self.font_body[0], 11), text_color=COLORS["text_primary"],
+                     anchor="w").pack(side="left", fill="x", expand=True)
+        
+        # RAM
+        ram_row = ctk.CTkFrame(hw_grid, fg_color="transparent")
+        ram_row.pack(fill="x", pady=2)
+        ctk.CTkLabel(ram_row, text="RAM:", font=(self.font_body[0], 11, "bold"),
+                     text_color=COLORS["text_muted"], width=50, anchor="w").pack(side="left")
+        ctk.CTkLabel(ram_row, text=sys_info["ram"],
+                     font=(self.font_body[0], 11), text_color=COLORS["text_primary"],
+                     anchor="w").pack(side="left")
+        
+        # === Results Section ===
         results_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=12)
         results_frame.pack(fill="both", expand=True, pady=(0, 15))
         
-        results_scroll = ctk.CTkScrollableFrame(results_frame, fg_color="transparent", height=200)
+        results_scroll = ctk.CTkScrollableFrame(results_frame, fg_color="transparent", height=180)
         results_scroll.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # Show existing benchmark results if any
-        benchmark_results = self.config.get("benchmark_results", {})
-        fastest = self.config.get("benchmark_fastest_processor", None)
+        benchmark_runner = [None]
         
         def refresh_results_display():
             """Refresh the results display after benchmark completes."""
@@ -7911,11 +7932,11 @@ class WayfinderApp(ctk.CTk):
                 col_header = ctk.CTkFrame(results_scroll, fg_color="transparent")
                 col_header.pack(fill="x", pady=(0, 5))
                 ctk.CTkLabel(col_header, text="Model", font=(self.font_body[0], 11, "bold"),
-                             text_color=COLORS["text_muted"], width=100, anchor="w").pack(side="left")
-                ctk.CTkLabel(col_header, text="CPU", font=(self.font_body[0], 11, "bold"),
-                             text_color=COLORS["text_muted"], width=70).pack(side="left", padx=(10, 0))
+                             text_color=COLORS["text_muted"], width=90, anchor="w").pack(side="left")
                 ctk.CTkLabel(col_header, text="GPU", font=(self.font_body[0], 11, "bold"),
-                             text_color=COLORS["text_muted"], width=70).pack(side="left", padx=(10, 0))
+                             text_color=COLORS["text_muted"], width=65).pack(side="left", padx=(10, 0))
+                ctk.CTkLabel(col_header, text="CPU", font=(self.font_body[0], 11, "bold"),
+                             text_color=COLORS["text_muted"], width=65).pack(side="left", padx=(10, 0))
                 ctk.CTkLabel(col_header, text="Speedup", font=(self.font_body[0], 11, "bold"),
                              text_color=COLORS["text_muted"], width=70).pack(side="left", padx=(10, 0))
                 
@@ -7933,11 +7954,11 @@ class WayfinderApp(ctk.CTk):
                         row, text=model_name,
                         font=(self.font_body[0], 12),
                         text_color=COLORS["text_primary"],
-                        width=100, anchor="w",
+                        width=90, anchor="w",
                     ).pack(side="left")
                     
-                    cpu_str = f"{cpu_time:.1f}s" if isinstance(cpu_time, (int, float)) else "—"
                     gpu_str = f"{gpu_time:.1f}s" if isinstance(gpu_time, (int, float)) else "—"
+                    cpu_str = f"{cpu_time:.1f}s" if isinstance(cpu_time, (int, float)) else "—"
                     
                     # Calculate speedup
                     if cpu_time and gpu_time and gpu_time > 0:
@@ -7946,17 +7967,17 @@ class WayfinderApp(ctk.CTk):
                         speedup = "—"
                     
                     ctk.CTkLabel(
-                        row, text=cpu_str,
+                        row, text=gpu_str,
                         font=(self.font_body[0], 11),
-                        text_color=COLORS["text_muted"] if model_fastest == "gpu" else COLORS["accent_green"],
-                        width=70,
+                        text_color=COLORS["accent_green"] if model_fastest == "gpu" else COLORS["text_muted"],
+                        width=65,
                     ).pack(side="left", padx=(10, 0))
                     
                     ctk.CTkLabel(
-                        row, text=gpu_str,
+                        row, text=cpu_str,
                         font=(self.font_body[0], 11),
-                        text_color=COLORS["text_muted"] if model_fastest == "cpu" else COLORS["accent_green"],
-                        width=70,
+                        text_color=COLORS["accent_green"] if model_fastest == "cpu" else COLORS["text_muted"],
+                        width=65,
                     ).pack(side="left", padx=(10, 0))
                     
                     ctk.CTkLabel(
@@ -7980,38 +8001,36 @@ class WayfinderApp(ctk.CTk):
             else:
                 ctk.CTkLabel(
                     results_scroll,
-                    text="⏱️ No benchmark results yet\n\nRun a benchmark to measure your hardware\nand get accurate speed predictions.",
+                    text="⏱️ No benchmark results yet\n\nRun a benchmark to measure transcription\nspeed on your hardware.",
                     font=(self.font_body[0], 13),
                     text_color=COLORS["text_muted"],
                     justify="center",
-                ).pack(pady=40)
+                ).pack(pady=30)
         
         refresh_results_display()
         
-        # Progress section
+        # === Progress Section ===
         progress_frame = ctk.CTkFrame(inner, fg_color="transparent")
         progress_bar = ctk.CTkProgressBar(progress_frame, width=400, height=16, corner_radius=8)
         progress_bar.set(0)
-        progress_label = ctk.CTkLabel(
+        status_label = ctk.CTkLabel(
             progress_frame,
             text="Ready to benchmark",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
         )
         
         # Log textbox (hidden initially)
         log_text = ctk.CTkTextbox(
-            inner, height=100, fg_color=COLORS["bg_elevated"],
+            inner, height=80, fg_color=COLORS["bg_elevated"],
             corner_radius=8, font=("JetBrains Mono", 10),
             text_color=COLORS["text_secondary"],
         )
         
-        benchmark_runner = [None]
-        
         def update_progress(progress: float, msg: str):
             def do_update():
                 progress_bar.set(progress)
-                progress_label.configure(text=msg)
+                status_label.configure(text=msg)
             dialog.after(0, do_update)
         
         def log_message(msg: str):
@@ -8026,15 +8045,16 @@ class WayfinderApp(ctk.CTk):
             """Run the benchmark in a background thread."""
             # Show progress UI
             progress_frame.pack(fill="x", pady=(0, 10))
-            progress_bar.pack(fill="x", pady=(0, 5))
+            status_label.pack(pady=(0, 5))
+            progress_bar.pack(fill="x")
             progress_bar.set(0)
-            progress_label.pack()
-            log_text.pack(fill="x", pady=(0, 10))
+            log_text.pack(fill="x", pady=(10, 0))
             log_text.configure(state="normal")
             log_text.delete("1.0", "end")
             log_text.configure(state="disabled")
             
             run_btn.configure(state="disabled", text="Running...")
+            quick_btn.configure(state="disabled")
             cancel_btn.pack(side="left", padx=(10, 0))
             
             runner = BenchmarkRunner(
@@ -8055,9 +8075,10 @@ class WayfinderApp(ctk.CTk):
                         save_config(self.config)
                         
                         def on_complete():
-                            run_btn.configure(state="normal", text="⏱️ Run Benchmark")
+                            run_btn.configure(state="normal", text="⏱️ Full Benchmark")
+                            quick_btn.configure(state="normal")
                             cancel_btn.pack_forget()
-                            progress_label.configure(text="✅ Benchmark complete!")
+                            status_label.configure(text="✅ Benchmark complete!")
                             refresh_results_display()
                             # Update main settings button
                             model_count = len(results)
@@ -8066,15 +8087,93 @@ class WayfinderApp(ctk.CTk):
                         dialog.after(0, on_complete)
                     else:
                         def on_cancel():
-                            run_btn.configure(state="normal", text="⏱️ Run Benchmark")
+                            run_btn.configure(state="normal", text="⏱️ Full Benchmark")
+                            quick_btn.configure(state="normal")
                             cancel_btn.pack_forget()
-                            progress_label.configure(text="Benchmark cancelled")
+                            status_label.configure(text="Benchmark cancelled")
                         dialog.after(0, on_cancel)
                 except Exception as e:
                     def on_error():
-                        run_btn.configure(state="normal", text="⏱️ Run Benchmark")
+                        run_btn.configure(state="normal", text="⏱️ Full Benchmark")
+                        quick_btn.configure(state="normal")
                         cancel_btn.pack_forget()
-                        progress_label.configure(text=f"Error: {e}")
+                        status_label.configure(text=f"Error: {e}")
+                        log_message(f"❌ Exception: {e}")
+                    dialog.after(0, on_error)
+            
+            threading.Thread(target=benchmark_thread, daemon=True).start()
+        
+        def run_quick_benchmark():
+            """Run a quick benchmark on just the currently selected model."""
+            # Show progress UI
+            progress_frame.pack(fill="x", pady=(0, 10))
+            status_label.pack(pady=(0, 5))
+            progress_bar.pack(fill="x")
+            progress_bar.set(0)
+            log_text.pack(fill="x", pady=(10, 0))
+            log_text.configure(state="normal")
+            log_text.delete("1.0", "end")
+            log_text.configure(state="disabled")
+            
+            run_btn.configure(state="disabled")
+            quick_btn.configure(state="disabled", text="Running...")
+            cancel_btn.pack(side="left", padx=(10, 0))
+            
+            runner = BenchmarkRunner(
+                self.config,
+                progress_callback=update_progress,
+                log_callback=log_message,
+            )
+            benchmark_runner[0] = runner
+            
+            # Get currently selected model
+            selected_model = self.config.get("whisper_model", "ggml-large-v3-turbo.bin")
+            
+            def benchmark_thread():
+                try:
+                    results, fastest = runner.run_benchmarks(
+                        test_gpu=True, test_cpu=True,
+                        quick_mode=True, selected_model=selected_model
+                    )
+                    
+                    if results and not runner._cancel_requested:
+                        # Merge with existing results
+                        existing = self.config.get("benchmark_results", {})
+                        existing.update(results)
+                        self.config["benchmark_results"] = existing
+                        
+                        # Recalculate overall fastest
+                        gpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "gpu")
+                        cpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "cpu")
+                        overall_fastest = "gpu" if gpu_wins > cpu_wins else "cpu" if cpu_wins > 0 else None
+                        self.config["benchmark_fastest_processor"] = overall_fastest
+                        save_config(self.config)
+                        
+                        def on_complete():
+                            run_btn.configure(state="normal")
+                            quick_btn.configure(state="normal", text="⚡ Quick Test")
+                            cancel_btn.pack_forget()
+                            status_label.configure(text="✅ Quick test complete!")
+                            refresh_results_display()
+                            # Update main settings button
+                            model_count = len(existing)
+                            fastest_display = f"🚀 {overall_fastest.upper()}" if overall_fastest else ""
+                            self.benchmark_btn.configure(text=f"{model_count} models tested {fastest_display}  ▼")
+                        dialog.after(0, on_complete)
+                    else:
+                        def on_cancel():
+                            run_btn.configure(state="normal")
+                            quick_btn.configure(state="normal", text="⚡ Quick Test")
+                            cancel_btn.pack_forget()
+                            status_label.configure(text="Benchmark cancelled")
+                        dialog.after(0, on_cancel)
+                except Exception as e:
+                    def on_error():
+                        run_btn.configure(state="normal")
+                        quick_btn.configure(state="normal", text="⚡ Quick Test")
+                        cancel_btn.pack_forget()
+                        status_label.configure(text=f"Error: {e}")
+                        log_message(f"❌ Exception: {e}")
                     dialog.after(0, on_error)
             
             threading.Thread(target=benchmark_thread, daemon=True).start()
@@ -8082,20 +8181,35 @@ class WayfinderApp(ctk.CTk):
         def cancel_benchmark():
             if benchmark_runner[0]:
                 benchmark_runner[0].cancel()
+                status_label.configure(text="Cancelling...")
         
-        # Buttons
+        # === Buttons ===
         btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
         btn_frame.pack(fill="x", pady=(10, 0))
         
-        run_btn = ctk.CTkButton(
+        quick_btn = ctk.CTkButton(
             btn_frame,
-            text="⏱️ Run Benchmark",
-            font=(self.font_body[0], 15, "bold"),
-            height=50,
+            text="⚡ Quick Test",
+            font=(self.font_body[0], 14, "bold"),
+            height=45,
+            width=140,
             corner_radius=12,
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
+            command=run_quick_benchmark,
+        )
+        quick_btn.pack(side="left", padx=(0, 10))
+        
+        run_btn = ctk.CTkButton(
+            btn_frame,
+            text="⏱️ Full Benchmark",
+            font=(self.font_body[0], 14),
+            height=45,
+            corner_radius=12,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_primary"],
             command=run_benchmark,
         )
         run_btn.pack(side="left", fill="x", expand=True)
@@ -8105,11 +8219,11 @@ class WayfinderApp(ctk.CTk):
             text="Cancel",
             font=(self.font_body[0], 13),
             width=80,
-            height=50,
+            height=45,
             corner_radius=12,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
+            fg_color=COLORS["accent_red"],
+            hover_color="#FF6666",
+            text_color="#FFFFFF",
             command=cancel_benchmark,
         )
         # cancel_btn hidden initially
