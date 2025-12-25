@@ -4,6 +4,9 @@
 # UI Framework
 customtkinter>=5.2.0
 
+# HTTP requests for model downloads
+requests>=2.28.0
+
 # Glassmorphic Status Overlay (PyQt6)
 # Premium overlay with blur effects, animations, and squircle shape
 PyQt6>=6.5.0

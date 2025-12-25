@@ -98,6 +98,7 @@ from transcriber import transcribe_with_config, TranscriptionError
 _debug_log("transcriber imported successfully")
 # #endregion
 from postprocessor import process_with_config, get_available_backends, get_template_names
+from ollama_manager import get_ollama_manager, OllamaManager
 from license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 # #region agent log
 _debug_log("All imports complete - moving to configuration")
@@ -200,6 +201,9 @@ DEFAULT_CONFIG = {
     # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}
     "benchmark_results": {},
     "benchmark_fastest_processor": None,  # "gpu" or "cpu" - auto-detected from benchmarks
+    # API benchmark results - populated by running API latency test
+    # Format: {"openai": {"latency_10s": 2.5, "timestamp": 1234567890}, "anthropic": {...}}
+    "api_benchmark_results": {},
 }
 
 KEY_CODES = {
@@ -881,8 +885,10 @@ class BenchmarkRunner:
             "--no-prints",
         ]
         
-        if use_gpu:
-            cmd.append("-ng")  # GPU flag
+        # GPU is ON by default in Vulkan builds of whisper.cpp
+        # Use --no-gpu to disable it for CPU-only testing
+        if not use_gpu:
+            cmd.append("--no-gpu")
         
         try:
             start = time.perf_counter()
@@ -1125,9 +1131,9 @@ LLM_GGUF_MODELS = {
     "phi-3-mini": {
         "name": "Phi-3 Mini (3.8B)",
         "size": "2.3 GB",
-        "size_bytes": 2_300_000_000,
-        "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4_K_M.gguf",
-        "filename": "Phi-3-mini-4k-instruct-q4_K_M.gguf",
+        "size_bytes": 2_393_231_072,
+        "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
+        "filename": "Phi-3-mini-4k-instruct-q4.gguf",
         "description": "Microsoft's compact powerhouse. Excellent at text cleanup and formatting.",
         "speed": "Fast",
         "accuracy": "High",
@@ -1136,9 +1142,9 @@ LLM_GGUF_MODELS = {
     "qwen2.5-1.5b": {
         "name": "Qwen2.5 1.5B",
         "size": "1.0 GB",
-        "size_bytes": 1_000_000_000,
-        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_K_M.gguf",
-        "filename": "qwen2.5-1.5b-instruct-q4_K_M.gguf",
+        "size_bytes": 1_117_320_736,
+        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
         "description": "Alibaba's efficient model. Great balance of speed and quality.",
         "speed": "Very Fast",
         "accuracy": "Good",
@@ -1146,8 +1152,8 @@ LLM_GGUF_MODELS = {
     },
     "smollm2-360m": {
         "name": "SmolLM2 360M",
-        "size": "229 MB",
-        "size_bytes": 229_000_000,
+        "size": "369 MB",
+        "size_bytes": 386_404_992,
         "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q8_0.gguf",
         "filename": "smollm2-360m-instruct-q8_0.gguf",
         "description": "HuggingFace's tiny model. Blazing fast, best for simple cleanup.",
@@ -1156,8 +1162,8 @@ LLM_GGUF_MODELS = {
     },
     "llama3.2-1b": {
         "name": "Llama 3.2 1B",
-        "size": "700 MB",
-        "size_bytes": 700_000_000,
+        "size": "770 MB",
+        "size_bytes": 807_694_464,
         "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
         "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
         "description": "Meta's latest efficient model. Good all-rounder for text tasks.",
@@ -4059,9 +4065,31 @@ class WayfinderApp(ctk.CTk):
         """Run a quick benchmark on the current model (inline, no popup)."""
         import subprocess
         
-        # Get current model
+        # Get current model with proper display name
         selected_model = self.config.get("whisper_model", "ggml-large-v3-turbo.bin")
-        model_name = selected_model.replace("ggml-", "").replace(".bin", "").replace("-", " ").title()
+        
+        # Create proper display name - look up in WHISPER_CPP_MODELS for accurate names
+        model_id = selected_model.replace("ggml-", "").replace(".bin", "")
+        if model_id in WHISPER_CPP_MODELS:
+            model_name = WHISPER_CPP_MODELS[model_id]["name"]
+        else:
+            # Fallback: better formatting that preserves Q5 distinction
+            model_name = model_id.replace("-", " ").replace("_", " ")
+            # Capitalize properly: "large v3 turbo q5 0" -> "Large V3 Turbo Q5"
+            parts = model_name.split()
+            formatted = []
+            for part in parts:
+                if part.lower() in ["v2", "v3", "q5", "q8"]:
+                    formatted.append(part.upper())
+                elif part.isdigit() and formatted and formatted[-1].startswith("Q"):
+                    continue  # Skip the "0" after Q5
+                else:
+                    formatted.append(part.title())
+            model_name = " ".join(formatted)
+        
+        # Log to History tab
+        self.log(f"⏱️ BENCHMARK: Starting test of {model_name}")
+        self.log(f"   Model file: {selected_model}")
         
         # Timer state
         timer_running = [True]
@@ -4115,36 +4143,53 @@ class WayfinderApp(ctk.CTk):
                 model_path = models_dir / selected_model
                 
                 if not whisper_cli:
+                    self.after(0, lambda: self.log("   ❌ whisper-cli not found!"))
                     return None, None, "whisper-cli not found"
                 if not model_path.exists():
+                    self.after(0, lambda: self.log(f"   ❌ Model not found: {selected_model}"))
                     return None, None, f"Model not found: {selected_model}"
+                
+                self.after(0, lambda: self.log(f"   ✓ Found binary: {whisper_cli}"))
+                self.after(0, lambda: self.log(f"   ✓ Found model: {model_path}"))
                 
                 # Create test audio
                 self.after(0, lambda: self.benchmark_status_label.configure(
                     text="Creating 10s test audio..."))
+                self.after(0, lambda: self.log("   🎤 Creating 10s test audio..."))
                 test_audio = runner._create_test_audio(10)
+                self.after(0, lambda: self.log("   ✓ Test audio ready"))
                 
                 try:
                     # GPU test
                     current_phase[0] = "GPU"
                     self.after(0, lambda: self.benchmark_status_label.configure(
                         text=f"Testing {model_name} on GPU..."))
+                    self.after(0, lambda: self.log(f"   🔥 Testing GPU (max 90s timeout)..."))
+                    
                     gpu_time = runner._run_single_benchmark(
                         whisper_cli, str(model_path), test_audio, use_gpu=True, timeout=90
                     )
                     
                     if gpu_time:
+                        self.after(0, lambda t=gpu_time: self.log(f"   ✅ GPU: {t:.2f}s"))
                         self.after(0, lambda t=gpu_time: self.benchmark_status_label.configure(
                             text=f"GPU done: {t:.1f}s. Now testing CPU..."))
                     else:
+                        self.after(0, lambda: self.log("   ⚠️ GPU test failed or timed out"))
                         self.after(0, lambda: self.benchmark_status_label.configure(
                             text=f"GPU test failed. Testing CPU..."))
                     
                     # CPU test
                     current_phase[0] = "CPU"
+                    self.after(0, lambda: self.log(f"   🧠 Testing CPU (max 180s timeout)..."))
                     cpu_time = runner._run_single_benchmark(
                         whisper_cli, str(model_path), test_audio, use_gpu=False, timeout=180
                     )
+                    
+                    if cpu_time:
+                        self.after(0, lambda t=cpu_time: self.log(f"   ✅ CPU: {t:.2f}s"))
+                    else:
+                        self.after(0, lambda: self.log("   ⚠️ CPU test failed or timed out"))
                     
                     return gpu_time, cpu_time, None
                 finally:
@@ -4156,6 +4201,7 @@ class WayfinderApp(ctk.CTk):
             except Exception as e:
                 import traceback
                 traceback.print_exc()
+                self.after(0, lambda err=str(e): self.log(f"   ❌ Error: {err}"))
                 return None, None, str(e)
         
         def on_complete(gpu_time, cpu_time, error):
@@ -4171,7 +4217,19 @@ class WayfinderApp(ctk.CTk):
             
             if error:
                 self.benchmark_status_label.configure(text=f"Error: {error}")
+                self.log(f"   ❌ BENCHMARK FAILED: {error}")
                 return
+            
+            # Log results
+            self.log(f"   🏁 BENCHMARK COMPLETE in {total_time}s")
+            if gpu_time:
+                self.log(f"      GPU: {gpu_time:.2f}s")
+            if cpu_time:
+                self.log(f"      CPU: {cpu_time:.2f}s")
+            if gpu_time and cpu_time:
+                faster = "GPU" if gpu_time < cpu_time else "CPU"
+                speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
+                self.log(f"      🚀 {faster} is {speedup:.1f}x faster!")
             
             # Determine model_id from filename
             model_id = selected_model.replace("ggml-", "").replace(".bin", "")
@@ -4215,6 +4273,197 @@ class WayfinderApp(ctk.CTk):
             self.after(0, lambda: on_complete(gpu_time, cpu_time, error))
         
         threading.Thread(target=background_thread, daemon=True).start()
+    
+    def _run_api_benchmark(self):
+        """Run an API latency benchmark for remote transcription (OpenAI Whisper API)."""
+        import subprocess
+        import tempfile
+        import wave
+        import numpy as np
+        
+        # Check if API key is configured
+        api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            self.api_benchmark_status_label.configure(text="❌ OpenAI API key not configured")
+            return
+        
+        # Disable button and show progress
+        self.api_benchmark_btn.configure(state="disabled", text="Testing...", fg_color=COLORS["bg_surface"])
+        self.api_benchmark_status_label.configure(text="Creating test audio...")
+        self.log("🌐 API BENCHMARK: Testing OpenAI Whisper latency...")
+        
+        # Timer display
+        elapsed = [0]
+        timer_running = [True]
+        
+        def update_timer():
+            if timer_running[0]:
+                elapsed[0] += 1
+                self.api_benchmark_status_label.configure(text=f"Testing... {elapsed[0]}s")
+                self.after(1000, update_timer)
+        
+        def stop_timer():
+            timer_running[0] = False
+        
+        self.after(1000, update_timer)
+        
+        def create_test_audio(duration: int = 10) -> str:
+            """Create a 10-second test audio file with speech-like noise."""
+            sample_rate = 16000
+            samples = int(duration * sample_rate)
+            
+            # Create pseudo-speech: modulated noise with pauses
+            t = np.linspace(0, duration, samples)
+            
+            # Base speech-like signal
+            speech = np.sin(2 * np.pi * 200 * t) * 0.3  # Base tone
+            speech += np.sin(2 * np.pi * 400 * t) * 0.2  # Harmonic
+            speech += np.random.randn(samples) * 0.1    # Noise
+            
+            # Add envelope to simulate words
+            envelope = np.abs(np.sin(2 * np.pi * 2 * t)) ** 0.5
+            speech *= envelope
+            
+            # Normalize
+            speech = speech / np.max(np.abs(speech)) * 0.7
+            
+            # Convert to int16
+            audio_int16 = (speech * 32767).astype(np.int16)
+            
+            # Save to temp file
+            temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            with wave.open(temp_file.name, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(sample_rate)
+                wav.writeframes(audio_int16.tobytes())
+            
+            return temp_file.name
+        
+        def run_api_test():
+            """Run the actual API latency test."""
+            audio_file = None
+            try:
+                # Create test audio
+                audio_file = create_test_audio(10)
+                self.after(0, lambda: self.log("   📁 Created 10s test audio"))
+                
+                # Import OpenAI client
+                try:
+                    import openai
+                except ImportError:
+                    return None, "openai package not installed"
+                
+                # Create client
+                client = openai.OpenAI(api_key=api_key, timeout=120.0)
+                
+                # Time the API call
+                self.after(0, lambda: self.log("   ☁️ Sending to OpenAI..."))
+                start_time = time.perf_counter()
+                
+                with open(audio_file, "rb") as f:
+                    transcription = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=f,
+                        response_format="text",
+                        language="en",
+                    )
+                
+                latency = time.perf_counter() - start_time
+                self.after(0, lambda: self.log(f"   ✓ Response received: {latency:.2f}s"))
+                
+                return latency, None
+                
+            except Exception as e:
+                return None, str(e)
+            finally:
+                # Cleanup
+                if audio_file and os.path.exists(audio_file):
+                    try:
+                        os.unlink(audio_file)
+                    except:
+                        pass
+        
+        def on_complete(latency, error):
+            stop_timer()
+            
+            # Reset button
+            self.api_benchmark_btn.configure(
+                state="normal",
+                text="☁️ Test API Latency",
+                fg_color=COLORS["accent"],
+            )
+            
+            if error:
+                self.api_benchmark_status_label.configure(text=f"❌ {error[:40]}")
+                self.log(f"   ❌ API BENCHMARK FAILED: {error}")
+                return
+            
+            # Log results
+            self.log(f"   🏁 API BENCHMARK COMPLETE: {latency:.2f}s latency")
+            
+            # Save results
+            api_results = self.config.get("api_benchmark_results", {})
+            api_results["openai"] = {
+                "latency_10s": round(latency, 2),
+                "timestamp": int(time.time()),
+            }
+            self.config["api_benchmark_results"] = api_results
+            save_config(self.config)
+            
+            # Update display
+            self._update_api_benchmark_display()
+            
+            # Show completion message
+            self.api_benchmark_status_label.configure(text=f"✓ Done! Latency: {latency:.1f}s")
+        
+        def background_thread():
+            latency, error = run_api_test()
+            self.after(0, lambda: on_complete(latency, error))
+        
+        threading.Thread(target=background_thread, daemon=True).start()
+    
+    def _update_api_benchmark_display(self):
+        """Update the API benchmark results display in Remote mode settings."""
+        if not hasattr(self, 'api_benchmark_results_frame') or not self.api_benchmark_results_frame.winfo_exists():
+            return
+        
+        # Clear existing
+        for widget in self.api_benchmark_results_frame.winfo_children():
+            widget.destroy()
+        
+        api_results = self.config.get("api_benchmark_results", {})
+        
+        if api_results and "openai" in api_results:
+            result = api_results["openai"]
+            latency = result.get("latency_10s")
+            timestamp = result.get("timestamp", 0)
+            
+            if latency:
+                ctk.CTkLabel(
+                    self.api_benchmark_results_frame,
+                    text=f"OpenAI Whisper: {latency:.1f}s (10s audio)",
+                    font=(self.font_body[0], 12),
+                    text_color=COLORS["text_primary"],
+                ).pack(anchor="w", pady=2)
+            
+            # Show timestamp
+            if timestamp > 0:
+                from datetime import datetime
+                last_run = datetime.fromtimestamp(timestamp).strftime("%b %d, %H:%M")
+                ctk.CTkLabel(
+                    self.api_benchmark_results_frame,
+                    text=f"Last tested: {last_run}",
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["text_muted"],
+                ).pack(anchor="w", pady=(5, 0))
+        else:
+            ctk.CTkLabel(
+                self.api_benchmark_results_frame,
+                text="No API benchmark results yet.",
+                font=(self.font_body[0], 11),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w")
     
     def _build_mode_settings(self, mode: str) -> None:
         """Build the settings panel for the selected processing mode."""
@@ -4486,6 +4735,46 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(padx=12, pady=8)
+        
+        # === API Benchmark Section ===
+        benchmark_header = ctk.CTkFrame(parent, fg_color="transparent")
+        benchmark_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(16, 8))
+        ctk.CTkLabel(
+            benchmark_header, text="⏱️   B E N C H M A R K",
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        
+        # Results display
+        self.api_benchmark_results_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self.api_benchmark_results_frame.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, 10))
+        self._update_api_benchmark_display()
+        
+        # Test button and status
+        btn_row = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_row.pack(fill="x", padx=SPACING["tile_pad"])
+        
+        self.api_benchmark_btn = ctk.CTkButton(
+            btn_row,
+            text="☁️ Test API Latency",
+            font=(self.font_body[0], 13, "bold"),
+            height=40,
+            width=180,
+            corner_radius=10,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=self._run_api_benchmark,
+        )
+        self.api_benchmark_btn.pack(side="left")
+        
+        self.api_benchmark_status_label = ctk.CTkLabel(
+            btn_row,
+            text="",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+        )
+        self.api_benchmark_status_label.pack(side="left", padx=(15, 0))
     
     def _create_mode_section_header(self, parent, text: str) -> None:
         """Create a section header within mode settings."""
@@ -5298,28 +5587,40 @@ class WayfinderApp(ctk.CTk):
         )
         self._ollama_status_label.pack(anchor="w")
         
-        # Row 4: Ollama status
+        # Row 4: Ollama status with install/start buttons
         status_row = ctk.CTkFrame(parent, fg_color="transparent")
         status_row.pack(fill="x")
         
-        if ollama_available:
+        # Use OllamaManager for comprehensive status
+        ollama_mgr = get_ollama_manager()
+        ollama_installed = ollama_mgr.is_installed()
+        ollama_running = ollama_available  # Already checked above
+        
+        if ollama_running:
             status_text = "✓ Ollama is running"
             status_color = COLORS["accent"]
+        elif ollama_installed:
+            status_text = "⚠️ Ollama installed but not running"
+            status_color = "#FFA726"  # Orange warning
         else:
-            status_text = "⚠️ Ollama not detected — start with: ollama serve"
+            status_text = "❌ Ollama not installed"
             status_color = COLORS["text_muted"]
         
-        status_label = ctk.CTkLabel(
+        self._ollama_status_text = ctk.CTkLabel(
             status_row,
             text=status_text,
             font=(self.font_body[0], self.font_sizes["caption"]),
             text_color=status_color,
         )
-        status_label.pack(side="left")
+        self._ollama_status_text.pack(side="left")
         
-        # Refresh button
+        # Action buttons container
+        action_frame = ctk.CTkFrame(status_row, fg_color="transparent")
+        action_frame.pack(side="right")
+        
+        # Refresh button (always shown)
         refresh_btn = ctk.CTkButton(
-            status_row,
+            action_frame,
             text="↻",
             font=(self.font_body[0], self.font_sizes["small"]),
             fg_color="transparent",
@@ -5330,7 +5631,39 @@ class WayfinderApp(ctk.CTk):
             command=lambda: self._rebuild_postproc_section(),
         )
         refresh_btn.pack(side="right")
-        ToolTip(refresh_btn, "Check Ollama connection and refresh installed models.\nUse after starting Ollama or downloading new models.")
+        ToolTip(refresh_btn, "Refresh Ollama status and installed models")
+        
+        # Install or Start button based on status
+        if not ollama_installed:
+            # Show Install button
+            install_btn = ctk.CTkButton(
+                action_frame,
+                text="Install Ollama",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_hover"],
+                text_color=COLORS["text_bright"],
+                width=110,
+                height=26,
+                command=self._install_ollama,
+            )
+            install_btn.pack(side="right", padx=(0, 8))
+            ToolTip(install_btn, "Download and install Ollama (one-click setup)\nWorks on SteamOS, Bazzite, and most Linux distros")
+        elif not ollama_running:
+            # Show Start button
+            start_btn = ctk.CTkButton(
+                action_frame,
+                text="Start Ollama",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_hover"],
+                text_color=COLORS["text_bright"],
+                width=100,
+                height=26,
+                command=self._start_ollama_service,
+            )
+            start_btn.pack(side="right", padx=(0, 8))
+            ToolTip(start_btn, "Start the Ollama service in the background")
     
     def _on_llamacpp_model_selected(self, selection: str) -> None:
         """Handle llama.cpp model selection from dropdown."""
@@ -5544,6 +5877,7 @@ class WayfinderApp(ctk.CTk):
         def download_thread():
             import time as time_module
             temp_path = None
+            response = None
             try:
                 import requests
                 
@@ -5552,11 +5886,30 @@ class WayfinderApp(ctk.CTk):
                 model_file = models_dir / filename
                 temp_path = model_file.with_suffix('.tmp')
                 
+                # Check for cancel before starting
+                if self._cancel_download:
+                    raise Exception("Download cancelled by user")
+                
                 self.log(f"⬇️ Downloading {model_info['name']} from {url[:50]}...")
                 
-                # Start download with longer timeout for connection
-                response = requests.get(url, stream=True, timeout=(30, 300))
+                # Update status to show we're connecting
+                self.after(0, lambda: self._llamacpp_status_label.configure(text="Connecting to server..."))
+                
+                # Set up session with proper headers (some CDNs block requests without User-Agent)
+                session = requests.Session()
+                session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) Wayfinder-Voice/1.0',
+                    'Accept': '*/*',
+                })
+                
+                # Start download with reasonable timeouts
+                # (connect timeout, read timeout) - read timeout per chunk, not total
+                response = session.get(url, stream=True, timeout=(15, 30), allow_redirects=True)
                 response.raise_for_status()
+                
+                # Check for cancel after connection
+                if self._cancel_download:
+                    raise Exception("Download cancelled by user")
                 
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded = 0
@@ -5627,6 +5980,13 @@ class WayfinderApp(ctk.CTk):
                 error_msg = str(e)
                 is_cancelled = "cancelled" in error_msg.lower()
                 
+                # Close response if it exists (important for cleanup)
+                try:
+                    if response is not None:
+                        response.close()
+                except:
+                    pass
+                
                 def on_error():
                     self._inline_download_active = False
                     if is_cancelled:
@@ -5669,6 +6029,77 @@ class WayfinderApp(ctk.CTk):
         self._cancel_download = True
         self._llamacpp_status_label.configure(text="Cancelling...", text_color=COLORS["text_muted"])
         self._llamacpp_download_btn.configure(state="disabled", text="Cancelling...")
+    
+    def _install_ollama(self) -> None:
+        """Install Ollama with one-click setup."""
+        ollama_mgr = get_ollama_manager()
+        
+        # Check if already installed
+        if ollama_mgr.is_installed():
+            self.log("✓ Ollama is already installed")
+            self._rebuild_postproc_section()
+            return
+        
+        # Update UI to show installation progress
+        self._ollama_status_text.configure(text="Installing Ollama...", text_color=COLORS["text_secondary"])
+        self.log("⬇️ Installing Ollama...")
+        
+        def on_progress(status: str, progress: float):
+            def update():
+                try:
+                    self._ollama_status_text.configure(text=status)
+                except:
+                    pass
+            self.after(0, update)
+        
+        def on_complete(success: bool, message: str):
+            def update():
+                if success:
+                    self._ollama_status_text.configure(text="✓ " + message, text_color=COLORS["accent"])
+                    self.log(f"✓ {message}")
+                    # Auto-start the service after installation
+                    self.after(1000, self._start_ollama_service)
+                else:
+                    self._ollama_status_text.configure(text="❌ " + message, text_color="#CF7B7B")
+                    self.log(f"❌ {message}")
+                # Rebuild UI after a delay
+                self.after(2000, self._rebuild_postproc_section)
+            self.after(0, update)
+        
+        ollama_mgr.install(progress_callback=on_progress, complete_callback=on_complete)
+    
+    def _start_ollama_service(self) -> None:
+        """Start the Ollama service."""
+        ollama_mgr = get_ollama_manager()
+        
+        # Check if already running
+        if ollama_mgr.is_service_running():
+            self.log("✓ Ollama is already running")
+            self._rebuild_postproc_section()
+            return
+        
+        # Check if installed
+        if not ollama_mgr.is_installed():
+            self.log("❌ Ollama is not installed")
+            return
+        
+        # Update UI
+        self._ollama_status_text.configure(text="Starting Ollama...", text_color=COLORS["text_secondary"])
+        self.log("🚀 Starting Ollama service...")
+        
+        def on_service_status(success: bool, message: str):
+            def update():
+                if success:
+                    self._ollama_status_text.configure(text="✓ " + message, text_color=COLORS["accent"])
+                    self.log(f"✓ {message}")
+                else:
+                    self._ollama_status_text.configure(text="❌ " + message, text_color="#CF7B7B")
+                    self.log(f"❌ {message}")
+                # Rebuild UI to show model selection
+                self.after(500, self._rebuild_postproc_section)
+            self.after(0, update)
+        
+        ollama_mgr.start_service(callback=on_service_status)
     
     def _download_selected_ollama_model(self) -> None:
         """Download the currently selected Ollama model."""
@@ -10673,21 +11104,41 @@ class WayfinderApp(ctk.CTk):
 
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
+        # Signal all background threads to stop
+        self.stop_event.set()
+        
+        # Shutdown thread pool executors gracefully
+        try:
+            if hasattr(self, 'executor'):
+                self.executor.shutdown(wait=False, cancel_futures=True)
+            if hasattr(self, 'transcription_executor'):
+                self.transcription_executor.shutdown(wait=False, cancel_futures=True)
+        except:
+            pass
+        
+        # Clean up recorder if active
+        try:
+            if hasattr(self, 'recorder') and self.recorder:
+                self.recorder.cleanup()
+            if hasattr(self, 'chunked_recorder') and self.chunked_recorder:
+                self.chunked_recorder.cleanup()
+        except:
+            pass
+        
+        # Clean up overlay
         self._cleanup_overlay()
         
         # Give a moment for cleanup to complete
-        import time
         time.sleep(0.2)
         
         # Force kill any remaining overlay processes as safety net
         try:
-            import subprocess
             subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
                           capture_output=True, timeout=1)
         except:
             pass
         
-        os._exit(0)  # Clean exit instead of SIGKILL
+        os._exit(0)  # Clean exit
     
     def _cleanup_overlay(self):
         """Clean up overlay subprocess - called on exit."""
@@ -11355,34 +11806,96 @@ def main():
     _debug_log("main() called - about to create WayfinderApp", {"hypothesisId": "D"})
     # #endregion
     
-    # === STARTUP CLEANUP: Kill any ghost overlay processes from previous runs ===
+    # === STARTUP CLEANUP: Kill any ghost processes from previous runs ===
     try:
+        # Kill any leftover overlay processes
         subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
                       capture_output=True, timeout=2)
+        # Kill any leftover main.py processes (but not ourselves)
+        our_pid = os.getpid()
+        result = subprocess.run(
+            ["pgrep", "-f", "python.*main.py"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.stdout:
+            for pid_str in result.stdout.strip().split('\n'):
+                try:
+                    pid = int(pid_str)
+                    if pid != our_pid:
+                        os.kill(pid, 9)
+                except (ValueError, OSError):
+                    pass
     except:
         pass
     
+    app = None
+    
+    def cleanup_all():
+        """Comprehensive cleanup for all threads, executors, and subprocesses."""
+        nonlocal app
+        try:
+            if app:
+                # Signal all threads to stop
+                app.stop_event.set()
+                
+                # Shutdown thread pool executors gracefully
+                if hasattr(app, 'executor'):
+                    app.executor.shutdown(wait=False, cancel_futures=True)
+                if hasattr(app, 'transcription_executor'):
+                    app.transcription_executor.shutdown(wait=False, cancel_futures=True)
+                
+                # Clean up overlay
+                app._cleanup_overlay()
+                
+                # Clean up recorder if active
+                if hasattr(app, 'recorder') and app.recorder:
+                    try:
+                        app.recorder.cleanup()
+                    except:
+                        pass
+                if hasattr(app, 'chunked_recorder') and app.chunked_recorder:
+                    try:
+                        app.chunked_recorder.cleanup()
+                    except:
+                        pass
+        except:
+            pass
+        
+        # Force kill any overlay processes as safety net
+        try:
+            subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
+                          capture_output=True, timeout=1)
+        except:
+            pass
+    
+    def signal_handler(signum, frame):
+        """Handle SIGTERM/SIGINT for graceful shutdown."""
+        _debug_log(f"Signal {signum} received - cleaning up")
+        cleanup_all()
+        os._exit(0)
+    
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # Register atexit cleanup as additional safety net
+    atexit.register(cleanup_all)
+    
     try:
         app = WayfinderApp()
-        
-        # Register cleanup handler as safety net for any exit path
-        def cleanup_on_exit():
-            try:
-                # Kill any overlay processes
-                subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
-                              capture_output=True, timeout=1)
-            except:
-                pass
-        atexit.register(cleanup_on_exit)
         
         # #region agent log
         _debug_log("WayfinderApp created successfully - starting mainloop", {"hypothesisId": "D"})
         # #endregion
         app.mainloop()
+    except KeyboardInterrupt:
+        _debug_log("KeyboardInterrupt caught")
+        cleanup_all()
     except Exception as e:
         # #region agent log
         _debug_log("Exception in main()", {"error": str(e), "type": type(e).__name__})
         # #endregion
+        cleanup_all()
         raise
 
 
