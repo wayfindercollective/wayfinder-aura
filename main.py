@@ -3894,13 +3894,48 @@ class WayfinderApp(ctk.CTk):
         selected_model = self.config.get("whisper_model", "ggml-large-v3-turbo.bin")
         model_name = selected_model.replace("ggml-", "").replace(".bin", "").replace("-", " ").title()
         
+        # Timer state
+        timer_running = [True]
+        elapsed = [0]
+        current_phase = ["Starting"]
+        timer_id = [None]
+        
+        def update_timer():
+            if timer_running[0]:
+                elapsed[0] += 1
+                phase = current_phase[0]
+                try:
+                    if self.benchmark_test_btn.winfo_exists():
+                        self.benchmark_test_btn.configure(text=f"⏳ {phase} {elapsed[0]}s")
+                        timer_id[0] = self.after(1000, update_timer)
+                except Exception as e:
+                    print(f"Timer error: {e}")
+                    timer_running[0] = False
+        
+        def stop_timer():
+            timer_running[0] = False
+            if timer_id[0]:
+                try:
+                    self.after_cancel(timer_id[0])
+                except:
+                    pass
+        
         # Update button to show running state
-        self.benchmark_test_btn.configure(
-            state="disabled",
-            text="Testing...",
-            fg_color=COLORS["accent_green"],
-        )
-        self.benchmark_status_label.configure(text=f"Testing {model_name}...")
+        try:
+            self.benchmark_test_btn.configure(
+                state="disabled",
+                text="⏳ Starting 0s",
+                fg_color=COLORS["accent_green"],
+            )
+            self.benchmark_status_label.configure(text=f"Preparing {model_name}...")
+        except Exception as e:
+            print(f"Error configuring button: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+        
+        # Start timer
+        timer_id[0] = self.after(1000, update_timer)
         
         def run_test():
             try:
@@ -3916,21 +3951,30 @@ class WayfinderApp(ctk.CTk):
                     return None, None, f"Model not found: {selected_model}"
                 
                 # Create test audio
+                self.after(0, lambda: self.benchmark_status_label.configure(
+                    text="Creating 10s test audio..."))
                 test_audio = runner._create_test_audio(10)
                 
                 try:
                     # GPU test
+                    current_phase[0] = "GPU"
                     self.after(0, lambda: self.benchmark_status_label.configure(
-                        text=f"Testing {model_name} GPU..."))
+                        text=f"Testing {model_name} on GPU..."))
                     gpu_time = runner._run_single_benchmark(
-                        whisper_cli, str(model_path), test_audio, use_gpu=True, timeout=60
+                        whisper_cli, str(model_path), test_audio, use_gpu=True, timeout=90
                     )
                     
+                    if gpu_time:
+                        self.after(0, lambda t=gpu_time: self.benchmark_status_label.configure(
+                            text=f"GPU done: {t:.1f}s. Now testing CPU..."))
+                    else:
+                        self.after(0, lambda: self.benchmark_status_label.configure(
+                            text=f"GPU test failed. Testing CPU..."))
+                    
                     # CPU test
-                    self.after(0, lambda: self.benchmark_status_label.configure(
-                        text=f"Testing {model_name} CPU..."))
+                    current_phase[0] = "CPU"
                     cpu_time = runner._run_single_benchmark(
-                        whisper_cli, str(model_path), test_audio, use_gpu=False, timeout=120
+                        whisper_cli, str(model_path), test_audio, use_gpu=False, timeout=180
                     )
                     
                     return gpu_time, cpu_time, None
@@ -3941,9 +3985,14 @@ class WayfinderApp(ctk.CTk):
                         pass
                         
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 return None, None, str(e)
         
         def on_complete(gpu_time, cpu_time, error):
+            stop_timer()
+            total_time = elapsed[0]
+            
             # Reset button
             self.benchmark_test_btn.configure(
                 state="normal",
@@ -3980,16 +4029,17 @@ class WayfinderApp(ctk.CTk):
             
             # Show completion message
             if gpu_time and cpu_time:
-                speedup = cpu_time / gpu_time if gpu_time > 0 else 1.0
+                faster = "GPU" if gpu_time < cpu_time else "CPU"
+                speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
                 self.benchmark_status_label.configure(
-                    text=f"✓ GPU: {gpu_time:.1f}s, CPU: {cpu_time:.1f}s ({speedup:.1f}x faster)"
+                    text=f"✓ Done in {total_time}s! {faster} is {speedup:.1f}x faster"
                 )
             elif gpu_time:
-                self.benchmark_status_label.configure(text=f"✓ GPU: {gpu_time:.1f}s")
+                self.benchmark_status_label.configure(text=f"✓ GPU: {gpu_time:.1f}s (CPU failed)")
             elif cpu_time:
-                self.benchmark_status_label.configure(text=f"✓ CPU: {cpu_time:.1f}s")
+                self.benchmark_status_label.configure(text=f"✓ CPU: {cpu_time:.1f}s (GPU failed)")
             else:
-                self.benchmark_status_label.configure(text="Test failed")
+                self.benchmark_status_label.configure(text="Both tests failed")
         
         def background_thread():
             gpu_time, cpu_time, error = run_test()
@@ -4135,24 +4185,8 @@ class WayfinderApp(ctk.CTk):
                 tooltip="llama.cpp/ollama = local, Anthropic/OpenAI = cloud (requires API key)", width=160,
             )
             
-            # Model selection for llama.cpp
-            if postproc_backend == "llama_cpp":
-                model_path = self.config.get("llama_cpp_model_path", "")
-                model_display = Path(model_path).name if model_path else "No model selected"
-                self.postproc_model_btn = self.create_setting_row(
-                    parent, "LLM Model", model_display,
-                    self.open_postproc_model_settings,
-                    tooltip="Select GGUF model for post-processing (e.g., Phi-3-mini, Qwen2.5-1.5B)",
-                )
-            
-            # Model selection for Ollama
-            elif postproc_backend == "ollama":
-                ollama_model = self.config.get("ollama_model", "phi3:mini")
-                self.postproc_model_btn = self.create_setting_row(
-                    parent, "Ollama Model", ollama_model,
-                    self.open_ollama_model_settings,
-                    tooltip="Select Ollama model (e.g., phi3:mini, qwen2.5:1.5b)",
-                )
+            # Inline model management section (no popups)
+            self._build_inline_model_section(parent, postproc_backend)
             
             # Template selector
             postproc_template = self.config.get("post_processing_template", "clean")
@@ -4663,6 +4697,704 @@ class WayfinderApp(ctk.CTk):
             "custom": "Custom prompt",
         }
         self.log(f"⚙ Post-processing template: {template_names.get(value, value)}")
+    
+    def _build_inline_model_section(self, parent, backend: str) -> None:
+        """Build inline model selection with download capability (no popups)."""
+        # Container for the model section
+        model_section = ctk.CTkFrame(parent, fg_color="transparent")
+        model_section.pack(fill="x", padx=16, pady=(0, 10))
+        
+        # Store reference for updates
+        self._inline_model_section = model_section
+        self._inline_download_active = False
+        
+        if backend == "llama_cpp":
+            self._build_llamacpp_inline_section(model_section)
+        elif backend == "ollama":
+            self._build_ollama_inline_section(model_section)
+    
+    def _build_llamacpp_inline_section(self, parent) -> None:
+        """Build inline llama.cpp model selection with download."""
+        models_dir = Path.home() / ".local" / "share" / "wayfinder-voice" / "llm-models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        
+        current_model_path = self.config.get("llama_cpp_model_path", "")
+        
+        # Build model options with install status
+        model_options = []
+        model_data = {}  # model_display -> {id, info, path, installed}
+        
+        for model_id, model_info in LLM_GGUF_MODELS.items():
+            model_file = models_dir / model_info["filename"]
+            is_installed = model_file.exists()
+            is_selected = str(model_file) == current_model_path
+            
+            status_icon = "✓ " if is_installed else ""
+            display_name = f"{status_icon}{model_info['name']}"
+            model_options.append(display_name)
+            model_data[display_name] = {
+                "id": model_id,
+                "info": model_info,
+                "path": str(model_file),
+                "installed": is_installed,
+                "selected": is_selected,
+            }
+        
+        # Determine current selection display
+        current_display = None
+        for display_name, data in model_data.items():
+            if data["selected"]:
+                current_display = display_name
+                break
+        
+        if not current_display and model_options:
+            # Default to first option
+            current_display = model_options[0]
+        
+        # Row 1: Model dropdown + Download button
+        row1 = ctk.CTkFrame(parent, fg_color="transparent")
+        row1.pack(fill="x", pady=(0, 6))
+        row1.grid_columnconfigure(0, weight=0)
+        row1.grid_columnconfigure(1, weight=1)
+        row1.grid_columnconfigure(2, weight=0)
+        
+        # Label
+        label_widget = ctk.CTkLabel(
+            row1,
+            text="LLM Model",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            text_color=COLORS["text_primary"],
+        )
+        label_widget.grid(row=0, column=0, sticky="w")
+        
+        # Info icon
+        info_icon = ctk.CTkLabel(
+            row1,
+            text="ⓘ",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+        )
+        info_icon.grid(row=0, column=0, sticky="e", padx=(5, 0))
+        ToolTip(label_widget, "Select a GGUF model for post-processing. Download if not installed.")
+        ToolTip(info_icon, "Select a GGUF model for post-processing. Download if not installed.")
+        
+        # Right side container for dropdown and button
+        right_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        right_frame.grid(row=0, column=2, sticky="e")
+        
+        # Model dropdown
+        self._llamacpp_model_var = ctk.StringVar(value=current_display or "Select model")
+        self._llamacpp_model_data = model_data
+        
+        model_dropdown = ctk.CTkOptionMenu(
+            right_frame,
+            values=model_options if model_options else ["No models available"],
+            variable=self._llamacpp_model_var,
+            command=self._on_llamacpp_model_selected,
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["bg_hover"],
+            button_hover_color=COLORS["accent_dim"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"],
+            font=(self.font_mono[0], self.font_sizes["small"]),
+            width=180,
+            height=32,
+        )
+        model_dropdown.pack(side="left", padx=(0, 8))
+        self._llamacpp_model_dropdown = model_dropdown
+        
+        # Download button
+        self._llamacpp_download_btn = ctk.CTkButton(
+            right_frame,
+            text="Download",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            text_color=COLORS["text_bright"],
+            width=90,
+            height=32,
+            command=self._download_selected_llamacpp_model,
+        )
+        self._llamacpp_download_btn.pack(side="left")
+        
+        # Update button state based on current selection
+        self._update_llamacpp_download_button()
+        
+        # Row 2: Progress bar (hidden by default)
+        self._llamacpp_progress_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self._llamacpp_progress_frame.pack(fill="x", pady=(0, 6))
+        self._llamacpp_progress_frame.pack_forget()  # Hide initially
+        
+        self._llamacpp_progress_bar = ctk.CTkProgressBar(
+            self._llamacpp_progress_frame,
+            progress_color=COLORS["accent"],
+            fg_color=COLORS["bg_hover"],
+            height=8,
+        )
+        self._llamacpp_progress_bar.pack(fill="x", pady=(0, 4))
+        self._llamacpp_progress_bar.set(0)
+        
+        self._llamacpp_status_label = ctk.CTkLabel(
+            self._llamacpp_progress_frame,
+            text="",
+            font=(self.font_body[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
+        )
+        self._llamacpp_status_label.pack(anchor="w")
+        
+        # Row 3: Browse button for custom GGUF files
+        browse_row = ctk.CTkFrame(parent, fg_color="transparent")
+        browse_row.pack(fill="x")
+        
+        browse_btn = ctk.CTkButton(
+            browse_row,
+            text="Browse for custom GGUF file...",
+            font=(self.font_body[0], self.font_sizes["caption"]),
+            fg_color="transparent",
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_muted"],
+            anchor="w",
+            height=24,
+            command=self._browse_custom_gguf,
+        )
+        browse_btn.pack(anchor="e")
+    
+    def _build_ollama_inline_section(self, parent) -> None:
+        """Build inline Ollama model selection with download."""
+        base_url = self.config.get("ollama_base_url", "http://localhost:11434")
+        current_model = self.config.get("ollama_model", "phi3:mini")
+        
+        # Check Ollama availability and get installed models
+        ollama_available = False
+        available_models = []
+        
+        try:
+            import requests
+            response = requests.get(f"{base_url}/api/tags", timeout=2)
+            ollama_available = response.status_code == 200
+            if ollama_available:
+                models_data = response.json().get("models", [])
+                available_models = [m.get("name", "") for m in models_data if m.get("name")]
+        except:
+            ollama_available = False
+        
+        # Recommended models
+        recommended_models = [
+            {"name": "llama3.2:1b", "desc": "Meta's latest (1B params)"},
+            {"name": "phi3:mini", "desc": "Fast, small (3.8GB)"},
+            {"name": "qwen2.5:1.5b", "desc": "Good balance (1.5B params)"},
+            {"name": "smollm2:360m", "desc": "Ultra-small, fastest"},
+        ]
+        
+        # Build model options with install status
+        model_options = []
+        model_data = {}
+        
+        for model_info in recommended_models:
+            model_name = model_info["name"]
+            is_installed = model_name in available_models
+            is_selected = model_name == current_model
+            
+            status_icon = "✓ " if is_installed else ""
+            display_name = f"{status_icon}{model_name}"
+            model_options.append(display_name)
+            model_data[display_name] = {
+                "name": model_name,
+                "desc": model_info["desc"],
+                "installed": is_installed,
+                "selected": is_selected,
+            }
+        
+        # Add any other installed models not in recommended list
+        for installed_model in available_models:
+            if installed_model not in [m["name"] for m in recommended_models]:
+                display_name = f"✓ {installed_model}"
+                model_options.append(display_name)
+                model_data[display_name] = {
+                    "name": installed_model,
+                    "desc": "Installed model",
+                    "installed": True,
+                    "selected": installed_model == current_model,
+                }
+        
+        # Determine current selection display
+        current_display = None
+        for display_name, data in model_data.items():
+            if data["selected"]:
+                current_display = display_name
+                break
+        
+        if not current_display and model_options:
+            current_display = model_options[0]
+        
+        # Row 1: Model dropdown + Download button
+        row1 = ctk.CTkFrame(parent, fg_color="transparent")
+        row1.pack(fill="x", pady=(0, 6))
+        row1.grid_columnconfigure(0, weight=0)
+        row1.grid_columnconfigure(1, weight=1)
+        row1.grid_columnconfigure(2, weight=0)
+        
+        # Label
+        label_widget = ctk.CTkLabel(
+            row1,
+            text="Ollama Model",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            text_color=COLORS["text_primary"],
+        )
+        label_widget.grid(row=0, column=0, sticky="w")
+        
+        # Info icon
+        info_icon = ctk.CTkLabel(
+            row1,
+            text="ⓘ",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+        )
+        info_icon.grid(row=0, column=0, sticky="e", padx=(5, 0))
+        tooltip_text = "Select an Ollama model. Download if not installed."
+        if not ollama_available:
+            tooltip_text += "\n⚠️ Ollama not running. Start with: ollama serve"
+        ToolTip(label_widget, tooltip_text)
+        ToolTip(info_icon, tooltip_text)
+        
+        # Right side container
+        right_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        right_frame.grid(row=0, column=2, sticky="e")
+        
+        # Model dropdown
+        self._ollama_model_var = ctk.StringVar(value=current_display or "Select model")
+        self._ollama_model_data = model_data
+        self._ollama_available = ollama_available
+        
+        model_dropdown = ctk.CTkOptionMenu(
+            right_frame,
+            values=model_options if model_options else ["No models available"],
+            variable=self._ollama_model_var,
+            command=self._on_ollama_model_selected,
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["bg_hover"],
+            button_hover_color=COLORS["accent_dim"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"],
+            font=(self.font_mono[0], self.font_sizes["small"]),
+            width=180,
+            height=32,
+        )
+        model_dropdown.pack(side="left", padx=(0, 8))
+        self._ollama_model_dropdown = model_dropdown
+        
+        # Download button
+        self._ollama_download_btn = ctk.CTkButton(
+            right_frame,
+            text="Download",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            text_color=COLORS["text_bright"],
+            width=90,
+            height=32,
+            command=self._download_selected_ollama_model,
+        )
+        self._ollama_download_btn.pack(side="left")
+        
+        # Update button state
+        self._update_ollama_download_button()
+        
+        # Row 2: Progress bar (hidden by default)
+        self._ollama_progress_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self._ollama_progress_frame.pack(fill="x", pady=(0, 6))
+        self._ollama_progress_frame.pack_forget()  # Hide initially
+        
+        self._ollama_progress_bar = ctk.CTkProgressBar(
+            self._ollama_progress_frame,
+            progress_color=COLORS["accent"],
+            fg_color=COLORS["bg_hover"],
+            height=8,
+        )
+        self._ollama_progress_bar.pack(fill="x", pady=(0, 4))
+        self._ollama_progress_bar.set(0)
+        
+        self._ollama_status_label = ctk.CTkLabel(
+            self._ollama_progress_frame,
+            text="",
+            font=(self.font_body[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
+        )
+        self._ollama_status_label.pack(anchor="w")
+        
+        # Row 3: Ollama status
+        status_row = ctk.CTkFrame(parent, fg_color="transparent")
+        status_row.pack(fill="x")
+        
+        if ollama_available:
+            status_text = "✓ Ollama is running"
+            status_color = COLORS["accent"]
+        else:
+            status_text = "⚠️ Ollama not detected — start with: ollama serve"
+            status_color = COLORS["text_muted"]
+        
+        status_label = ctk.CTkLabel(
+            status_row,
+            text=status_text,
+            font=(self.font_body[0], self.font_sizes["caption"]),
+            text_color=status_color,
+        )
+        status_label.pack(side="left")
+        
+        # Refresh button
+        refresh_btn = ctk.CTkButton(
+            status_row,
+            text="↻",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            fg_color="transparent",
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_muted"],
+            width=28,
+            height=24,
+            command=lambda: self._rebuild_postproc_section(),
+        )
+        refresh_btn.pack(side="right")
+        ToolTip(refresh_btn, "Refresh Ollama status and models")
+    
+    def _on_llamacpp_model_selected(self, selection: str) -> None:
+        """Handle llama.cpp model selection from dropdown."""
+        if selection not in self._llamacpp_model_data:
+            return
+        
+        data = self._llamacpp_model_data[selection]
+        if data["installed"]:
+            # Select and save the model
+            self.config["llama_cpp_model_path"] = data["path"]
+            save_config(self.config)
+            self.log(f"⚙ LLM Model: {data['info']['name']}")
+        
+        self._update_llamacpp_download_button()
+    
+    def _on_ollama_model_selected(self, selection: str) -> None:
+        """Handle Ollama model selection from dropdown."""
+        if selection not in self._ollama_model_data:
+            return
+        
+        data = self._ollama_model_data[selection]
+        # Save the model name (stripped of status icon)
+        self.config["ollama_model"] = data["name"]
+        save_config(self.config)
+        self.log(f"⚙ Ollama Model: {data['name']}")
+        
+        self._update_ollama_download_button()
+    
+    def _update_llamacpp_download_button(self) -> None:
+        """Update download button state based on selected model."""
+        if not hasattr(self, '_llamacpp_model_var'):
+            return
+        
+        selection = self._llamacpp_model_var.get()
+        if selection in self._llamacpp_model_data:
+            data = self._llamacpp_model_data[selection]
+            if data["installed"]:
+                self._llamacpp_download_btn.configure(
+                    text="✓ Installed",
+                    fg_color=COLORS["bg_hover"],
+                    hover_color=COLORS["bg_hover"],
+                    state="disabled",
+                )
+            else:
+                self._llamacpp_download_btn.configure(
+                    text="Download",
+                    fg_color=COLORS["accent"],
+                    hover_color=COLORS["accent_hover"],
+                    state="normal",
+                )
+    
+    def _update_ollama_download_button(self) -> None:
+        """Update download button state based on selected model."""
+        if not hasattr(self, '_ollama_model_var'):
+            return
+        
+        selection = self._ollama_model_var.get()
+        if selection in self._ollama_model_data:
+            data = self._ollama_model_data[selection]
+            if data["installed"]:
+                self._ollama_download_btn.configure(
+                    text="✓ Installed",
+                    fg_color=COLORS["bg_hover"],
+                    hover_color=COLORS["bg_hover"],
+                    state="disabled",
+                )
+            else:
+                if self._ollama_available:
+                    self._ollama_download_btn.configure(
+                        text="Download",
+                        fg_color=COLORS["accent"],
+                        hover_color=COLORS["accent_hover"],
+                        state="normal",
+                    )
+                else:
+                    self._ollama_download_btn.configure(
+                        text="Ollama offline",
+                        fg_color=COLORS["bg_hover"],
+                        hover_color=COLORS["bg_hover"],
+                        state="disabled",
+                    )
+    
+    def _download_selected_llamacpp_model(self) -> None:
+        """Download the currently selected llama.cpp model."""
+        if self._inline_download_active:
+            return
+        
+        selection = self._llamacpp_model_var.get()
+        if selection not in self._llamacpp_model_data:
+            return
+        
+        data = self._llamacpp_model_data[selection]
+        if data["installed"]:
+            return
+        
+        model_id = data["id"]
+        model_info = data["info"]
+        models_dir = Path.home() / ".local" / "share" / "wayfinder-voice" / "llm-models"
+        
+        self._inline_download_active = True
+        self._llamacpp_download_btn.configure(text="Downloading...", state="disabled")
+        
+        # Show progress bar
+        self._llamacpp_progress_frame.pack(fill="x", pady=(0, 6))
+        self._llamacpp_progress_bar.set(0)
+        self._llamacpp_status_label.configure(text="Starting download...")
+        
+        def format_size(size_bytes):
+            if size_bytes >= 1024 * 1024 * 1024:
+                return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+            elif size_bytes >= 1024 * 1024:
+                return f"{size_bytes / (1024 * 1024):.1f} MB"
+            else:
+                return f"{size_bytes / 1024:.1f} KB"
+        
+        def update_progress(progress, status_text):
+            try:
+                if hasattr(self, '_llamacpp_progress_bar'):
+                    self._llamacpp_progress_bar.set(progress)
+                    self._llamacpp_status_label.configure(text=status_text)
+            except:
+                pass
+        
+        def download_thread():
+            import time as time_module
+            try:
+                import requests
+                
+                url = model_info["url"]
+                filename = model_info["filename"]
+                model_file = models_dir / filename
+                temp_path = model_file.with_suffix('.tmp')
+                
+                # Start download
+                response = requests.get(url, stream=True, timeout=30)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                start_time = time_module.time()
+                last_update_time = start_time
+                
+                with open(temp_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            current_time = time_module.time()
+                            if current_time - last_update_time >= 0.2:  # Update every 200ms
+                                elapsed = current_time - start_time
+                                speed = downloaded / elapsed if elapsed > 0 else 0
+                                
+                                if total_size > 0:
+                                    progress = downloaded / total_size
+                                    percentage = progress * 100
+                                    status = f"{format_size(downloaded)} / {format_size(total_size)} ({percentage:.0f}%)"
+                                else:
+                                    progress = 0.5
+                                    status = f"{format_size(downloaded)} downloaded"
+                                
+                                self.after(0, lambda p=progress, s=status: update_progress(p, s))
+                                last_update_time = current_time
+                
+                # Move temp to final
+                if temp_path.exists():
+                    if model_file.exists():
+                        model_file.unlink()
+                    temp_path.rename(model_file)
+                
+                # Success
+                def on_success():
+                    self._inline_download_active = False
+                    self._llamacpp_progress_bar.set(1.0)
+                    self._llamacpp_status_label.configure(
+                        text=f"✓ Downloaded {model_info['name']}",
+                        text_color=COLORS["accent"]
+                    )
+                    self.log(f"✓ Downloaded: {model_info['name']}")
+                    
+                    # Auto-select the downloaded model
+                    self.config["llama_cpp_model_path"] = str(model_file)
+                    save_config(self.config)
+                    
+                    # Hide progress after 2 seconds and rebuild
+                    self.after(2000, self._rebuild_postproc_section)
+                
+                self.after(0, on_success)
+                
+            except Exception as e:
+                def on_error():
+                    self._inline_download_active = False
+                    self._llamacpp_status_label.configure(
+                        text=f"✗ Error: {str(e)[:50]}",
+                        text_color="#CF7B7B"
+                    )
+                    self._llamacpp_download_btn.configure(text="Retry", state="normal")
+                    self.log(f"⚠️ Download failed: {e}")
+                
+                self.after(0, on_error)
+                
+                # Cleanup
+                try:
+                    if temp_path and temp_path.exists():
+                        temp_path.unlink()
+                except:
+                    pass
+        
+        threading.Thread(target=download_thread, daemon=True).start()
+    
+    def _download_selected_ollama_model(self) -> None:
+        """Download the currently selected Ollama model."""
+        if self._inline_download_active:
+            return
+        
+        if not self._ollama_available:
+            self.log("⚠️ Ollama is not running. Start with: ollama serve")
+            return
+        
+        selection = self._ollama_model_var.get()
+        if selection not in self._ollama_model_data:
+            return
+        
+        data = self._ollama_model_data[selection]
+        if data["installed"]:
+            return
+        
+        model_name = data["name"]
+        base_url = self.config.get("ollama_base_url", "http://localhost:11434")
+        
+        self._inline_download_active = True
+        self._ollama_download_btn.configure(text="Downloading...", state="disabled")
+        
+        # Show progress bar
+        self._ollama_progress_frame.pack(fill="x", pady=(0, 6))
+        self._ollama_progress_bar.set(0)
+        self._ollama_status_label.configure(text="Connecting to Ollama...")
+        
+        def update_progress(progress, status_text):
+            try:
+                if hasattr(self, '_ollama_progress_bar'):
+                    self._ollama_progress_bar.set(progress)
+                    self._ollama_status_label.configure(text=status_text)
+            except:
+                pass
+        
+        def download_thread():
+            try:
+                import requests
+                import json
+                
+                # Use Ollama's pull API
+                response = requests.post(
+                    f"{base_url}/api/pull",
+                    json={"name": model_name},
+                    stream=True,
+                    timeout=600,  # 10 minute timeout for large models
+                )
+                
+                if response.status_code != 200:
+                    raise Exception(f"Ollama returned status {response.status_code}")
+                
+                last_status = ""
+                for line in response.iter_lines():
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            status = data.get("status", "")
+                            
+                            if "total" in data and "completed" in data:
+                                total = data["total"]
+                                completed = data["completed"]
+                                if total > 0:
+                                    progress = completed / total
+                                    progress_text = f"{status} ({progress * 100:.0f}%)"
+                                    self.after(0, lambda p=progress, s=progress_text: update_progress(p, s))
+                            elif status != last_status:
+                                last_status = status
+                                self.after(0, lambda s=status: update_progress(0.5, s))
+                        except:
+                            pass
+                
+                # Success
+                def on_success():
+                    self._inline_download_active = False
+                    self._ollama_progress_bar.set(1.0)
+                    self._ollama_status_label.configure(
+                        text=f"✓ Downloaded {model_name}",
+                        text_color=COLORS["accent"]
+                    )
+                    self.log(f"✓ Downloaded: {model_name}")
+                    
+                    # Hide progress after 2 seconds and rebuild
+                    self.after(2000, self._rebuild_postproc_section)
+                
+                self.after(0, on_success)
+                
+            except Exception as e:
+                def on_error():
+                    self._inline_download_active = False
+                    self._ollama_status_label.configure(
+                        text=f"✗ Error: {str(e)[:50]}",
+                        text_color="#CF7B7B"
+                    )
+                    self._ollama_download_btn.configure(text="Retry", state="normal")
+                    self.log(f"⚠️ Download failed: {e}")
+                
+                self.after(0, on_error)
+        
+        threading.Thread(target=download_thread, daemon=True).start()
+    
+    def _browse_custom_gguf(self) -> None:
+        """Browse for a custom GGUF file."""
+        from tkinter import filedialog
+        
+        current_path = self.config.get("llama_cpp_model_path", "")
+        if current_path:
+            initial_dir = str(Path(current_path).parent)
+        else:
+            initial_dir = str(Path.home())
+        
+        file_path = filedialog.askopenfilename(
+            title="Select GGUF Model File",
+            initialdir=initial_dir,
+            filetypes=[("GGUF models", "*.gguf"), ("All files", "*.*")],
+        )
+        
+        if file_path:
+            self.config["llama_cpp_model_path"] = file_path
+            save_config(self.config)
+            model_name = Path(file_path).name
+            self.log(f"⚙ LLM Model: {model_name}")
+            self._rebuild_postproc_section()
+    
+    def _rebuild_postproc_section(self) -> None:
+        """Rebuild the post-processing section to refresh model list."""
+        current_mode = self.config.get("processing_mode", "local")
+        self._build_mode_settings(current_mode)
     
     def open_postproc_model_settings(self):
         """Open dialog to select or download llama.cpp GGUF models for post-processing."""
