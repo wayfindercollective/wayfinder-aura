@@ -1247,6 +1247,44 @@ WHISPER_CPP_MODELS = {
     },
 }
 
+# Recommended GGUF models for post-processing (llama.cpp)
+LLM_GGUF_MODELS = {
+    "phi-3-mini": {
+        "name": "Phi-3 Mini (3.8B)",
+        "size": "~2.3 GB",
+        "size_bytes": 2_300_000_000,
+        "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4_K_M.gguf",
+        "filename": "Phi-3-mini-4k-instruct-q4_K_M.gguf",
+        "description": "Fast, efficient, great for cleanup tasks",
+        "recommended": True,
+    },
+    "qwen2.5-1.5b": {
+        "name": "Qwen2.5 1.5B",
+        "size": "~1.0 GB",
+        "size_bytes": 1_000_000_000,
+        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_K_M.gguf",
+        "filename": "qwen2.5-1.5b-instruct-q4_K_M.gguf",
+        "description": "Small, fast, good quality",
+        "recommended": True,
+    },
+    "smollm2-360m": {
+        "name": "SmolLM2 360M",
+        "size": "~229 MB",
+        "size_bytes": 229_000_000,
+        "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q8_0.gguf",
+        "filename": "smollm2-360m-instruct-q8_0.gguf",
+        "description": "Ultra-small, fastest inference",
+    },
+    "llama3.2-1b": {
+        "name": "Llama 3.2 1B",
+        "size": "~700 MB",
+        "size_bytes": 700_000_000,
+        "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "description": "Meta's latest small model",
+    },
+}
+
 # Faster-Whisper models (auto-downloaded by library, but we can list them)
 FASTER_WHISPER_MODELS = {
     "tiny": {"name": "Tiny", "size": "~75 MB", "speed": "⚡ Fastest"},
@@ -4320,39 +4358,295 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⚙ Post-processing template: {template_names.get(value, value)}")
     
     def open_postproc_model_settings(self):
-        """Open file dialog to select llama.cpp GGUF model for post-processing."""
+        """Open dialog to select or download llama.cpp GGUF models for post-processing."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("LLM Models for Post-Processing")
+        dialog.geometry("600x700")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        # Title
+        ctk.CTkLabel(
+            inner,
+            text="LLM Models for Post-Processing",
+            font=(self.font_header[0], 20, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 8))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Select a GGUF model or download a recommended one.",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w", pady=(0, 16))
+        
+        # Models directory
+        models_dir = Path.home() / ".local" / "share" / "wayfinder-voice" / "llm-models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Content container
+        content_container = ctk.CTkFrame(inner, fg_color="transparent")
+        content_container.pack(fill="both", expand=True)
+        
+        # Recommended models scrollable list
+        recommended_scroll = ctk.CTkScrollableFrame(
+            content_container,
+            fg_color=COLORS["bg_surface"],
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+            height=400,
+        )
+        recommended_scroll.pack(fill="both", expand=True)
+        
+        current_model_path = self.config.get("llama_cpp_model_path", "")
+        
+        # Show recommended models
+        for model_id, model_info in LLM_GGUF_MODELS.items():
+            model_file = models_dir / model_info["filename"]
+            is_installed = model_file.exists()
+            is_selected = str(model_file) == current_model_path if is_installed else False
+            
+            frame = ctk.CTkFrame(
+                recommended_scroll,
+                fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_surface"],
+                corner_radius=RADIUS["sm"],
+            )
+            frame.pack(fill="x", padx=4, pady=4)
+            
+            # Model info
+            info_frame = ctk.CTkFrame(frame, fg_color="transparent")
+            info_frame.pack(fill="x", padx=12, pady=8)
+            
+            name_label = ctk.CTkLabel(
+                info_frame,
+                text=model_info["name"] + (" ⭐" if model_info.get("recommended") else ""),
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["text_bright"],
+            )
+            name_label.pack(anchor="w")
+            
+            desc_label = ctk.CTkLabel(
+                info_frame,
+                text=model_info["description"],
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+            )
+            desc_label.pack(anchor="w", pady=(2, 0))
+            
+            size_label = ctk.CTkLabel(
+                info_frame,
+                text=f"Size: {model_info['size']}",
+                font=(self.font_mono[0], self.font_sizes["caption"]),
+                text_color=COLORS["text_muted"],
+            )
+            size_label.pack(anchor="w", pady=(2, 0))
+            
+            # Actions
+            actions_frame = ctk.CTkFrame(frame, fg_color="transparent")
+            actions_frame.pack(fill="x", padx=12, pady=(0, 8))
+            
+            if is_installed:
+                if is_selected:
+                    status_btn = ctk.CTkButton(
+                        actions_frame,
+                        text="✓ Selected",
+                        font=(self.font_body[0], self.font_sizes["small"]),
+                        fg_color=COLORS["accent"],
+                        hover_color=COLORS["accent_hover"],
+                        text_color=COLORS["text_bright"],
+                        command=lambda m=model_file: self._select_llm_model(str(m), dialog),
+                    )
+                    status_btn.pack(side="left", padx=(0, 8))
+                else:
+                    select_btn = ctk.CTkButton(
+                        actions_frame,
+                        text="Select",
+                        font=(self.font_body[0], self.font_sizes["small"]),
+                        fg_color=COLORS["bg_hover"],
+                        hover_color=COLORS["bg_elevated"],
+                        text_color=COLORS["text_primary"],
+                        command=lambda m=model_file: self._select_llm_model(str(m), dialog),
+                    )
+                    select_btn.pack(side="left", padx=(0, 8))
+                
+                delete_btn = ctk.CTkButton(
+                    actions_frame,
+                    text="Delete",
+                    font=(self.font_body[0], self.font_sizes["small"]),
+                    fg_color="transparent",
+                    hover_color=COLORS["bg_hover"],
+                    text_color=COLORS["text_secondary"],
+                    command=lambda m=model_file: self._delete_llm_model(m, dialog),
+                )
+                delete_btn.pack(side="left")
+            else:
+                download_btn = ctk.CTkButton(
+                    actions_frame,
+                    text="⬇️ Download",
+                    font=(self.font_body[0], self.font_sizes["small"]),
+                    fg_color=COLORS["accent"],
+                    hover_color=COLORS["accent_hover"],
+                    text_color=COLORS["text_bright"],
+                    command=lambda mid=model_id, info=model_info: self._download_llm_model(mid, info, models_dir, dialog),
+                )
+                download_btn.pack(side="left")
+        
+        # Browse files button
+        browse_files_btn = ctk.CTkButton(
+            inner,
+            text="Browse for GGUF File...",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_primary"],
+            command=lambda: self._browse_llm_file(dialog),
+        )
+        browse_files_btn.pack(fill="x", pady=(12, 8))
+        
+        # Close button
+        close_btn = ctk.CTkButton(
+            inner,
+            text="Close",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"],
+            command=dialog.destroy,
+        )
+        close_btn.pack(fill="x")
+    
+    def _select_llm_model(self, model_path: str, dialog):
+        """Select an LLM model."""
+        self.config["llama_cpp_model_path"] = model_path
+        save_config(self.config)
+        model_name = Path(model_path).name
+        self.log(f"⚙ Post-processing model: {model_name}")
+        dialog.destroy()
+        # Rebuild settings to refresh UI
+        current_mode = self.config.get("processing_mode", "local")
+        self._build_mode_settings(current_mode)
+    
+    def _delete_llm_model(self, model_path: Path, dialog):
+        """Delete an LLM model file."""
+        try:
+            model_path.unlink()
+            self.log(f"🗑️ Deleted model: {model_path.name}")
+            dialog.destroy()
+            self.open_postproc_model_settings()  # Refresh dialog
+        except Exception as e:
+            self.log(f"⚠️ Failed to delete model: {e}")
+    
+    def _browse_llm_file(self, dialog):
+        """Browse for a GGUF file."""
         from tkinter import filedialog
         
-        # Get current model path or default to models directory
         current_path = self.config.get("llama_cpp_model_path", "")
         if current_path:
             initial_dir = str(Path(current_path).parent)
         else:
-            # Default to models directory
-            models_dir = Path.home() / ".local" / "share" / "wayfinder-voice" / "models"
-            initial_dir = str(models_dir) if models_dir.exists() else str(Path.home())
+            initial_dir = str(Path.home())
         
-        # Open file dialog
         file_path = filedialog.askopenfilename(
-            title="Select GGUF Model for Post-Processing",
+            title="Select GGUF Model",
             initialdir=initial_dir,
-            filetypes=[
-                ("GGUF files", "*.gguf"),
-                ("All files", "*.*"),
-            ],
+            filetypes=[("GGUF files", "*.gguf"), ("All files", "*.*")],
         )
         
         if file_path:
-            self.config["llama_cpp_model_path"] = file_path
-            save_config(self.config)
-            model_name = Path(file_path).name
-            self.log(f"⚙ Post-processing model: {model_name}")
-            # Update the button text
-            if hasattr(self, 'postproc_model_btn'):
-                self.postproc_model_btn.configure(text=model_name[:30] + "..." if len(model_name) > 30 else model_name)
-            # Rebuild settings to refresh UI
-            current_mode = self.config.get("processing_mode", "local")
-            self._build_mode_settings(current_mode)
+            self._select_llm_model(file_path, dialog)
+    
+    def _download_llm_model(self, model_id: str, model_info: dict, models_dir: Path, dialog):
+        """Download an LLM model."""
+        model_file = models_dir / model_info["filename"]
+        
+        # Create progress dialog
+        progress_dialog = ctk.CTkToplevel(dialog)
+        progress_dialog.title(f"Downloading {model_info['name']}")
+        progress_dialog.geometry("400x200")
+        progress_dialog.configure(fg_color=COLORS["bg_base"])
+        progress_dialog.transient(dialog)
+        
+        inner = ctk.CTkFrame(progress_dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        ctk.CTkLabel(
+            inner,
+            text=f"Downloading {model_info['name']}",
+            font=(self.font_header[0], 16, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(pady=(0, 12))
+        
+        progress_bar = ctk.CTkProgressBar(inner)
+        progress_bar.pack(fill="x", pady=(0, 12))
+        progress_bar.set(0)
+        
+        status_label = ctk.CTkLabel(
+            inner,
+            text="Starting download...",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+        )
+        status_label.pack()
+        
+        cancel_btn = ctk.CTkButton(
+            inner,
+            text="Cancel",
+            command=lambda: setattr(self, '_cancel_llm_download', True),
+        )
+        cancel_btn.pack(pady=(12, 0))
+        
+        self._cancel_llm_download = False
+        
+        def download_thread():
+            try:
+                url = model_info["url"]
+                temp_path = models_dir / f"{model_info['filename']}.downloading"
+                
+                request = urllib.request.Request(url)
+                request.add_header("User-Agent", "Wayfinder-Voice/1.0")
+                
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    total_size = int(response.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    chunk_size = 1024 * 1024  # 1MB chunks
+                    
+                    with open(temp_path, "wb") as f:
+                        while True:
+                            if getattr(self, '_cancel_llm_download', False):
+                                temp_path.unlink(missing_ok=True)
+                                self.after(0, lambda: progress_dialog.destroy())
+                                return
+                            
+                            chunk = response.read(chunk_size)
+                            if not chunk:
+                                break
+                            
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            if total_size > 0:
+                                progress = downloaded / total_size
+                                self.after(0, lambda p=progress: progress_bar.set(p))
+                                self.after(0, lambda d=downloaded, t=total_size: status_label.configure(
+                                    text=f"Downloaded: {d // (1024*1024)} MB / {t // (1024*1024)} MB"
+                                ))
+                    
+                    # Move temp to final
+                    temp_path.rename(model_file)
+                    
+                    self.after(0, lambda: self.log(f"✓ Downloaded: {model_info['name']}"))
+                    self.after(0, progress_dialog.destroy)
+                    self.after(0, lambda: self.open_postproc_model_settings())  # Refresh
+                    
+            except Exception as e:
+                self.after(0, lambda: self.log(f"⚠️ Download failed: {e}"))
+                self.after(0, progress_dialog.destroy)
+        
+        threading.Thread(target=download_thread, daemon=True).start()
     
     def open_ollama_model_settings(self):
         """Open dialog to select or download Ollama models."""
