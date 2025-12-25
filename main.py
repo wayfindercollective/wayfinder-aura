@@ -4777,8 +4777,17 @@ class WayfinderApp(ctk.CTk):
                     with open(temp_path, "wb") as f:
                         while True:
                             if getattr(self, '_cancel_llm_download', False):
-                                temp_path.unlink(missing_ok=True)
-                                self.after(0, lambda: progress_dialog.destroy())
+                                try:
+                                    temp_path.unlink(missing_ok=True)
+                                except:
+                                    pass
+                                def cancel_close():
+                                    try:
+                                        if progress_dialog.winfo_exists():
+                                            progress_dialog.destroy()
+                                    except:
+                                        pass
+                                self.after(0, cancel_close)
                                 return
                             
                             chunk = response.read(chunk_size)
@@ -4796,6 +4805,12 @@ class WayfinderApp(ctk.CTk):
                                 elapsed = current_time - start_time
                                 speed = downloaded / elapsed if elapsed > 0 else 0
                                 
+                                # Capture variables for lambda closures
+                                d = downloaded
+                                ts = total_size
+                                el = elapsed
+                                sp = speed
+                                
                                 if total_size > 0:
                                     progress = downloaded / total_size
                                     percentage = progress * 100
@@ -4803,7 +4818,8 @@ class WayfinderApp(ctk.CTk):
                                     eta_seconds = remaining / speed if speed > 0 else 0
                                     
                                     # Update progress bar
-                                    self.after(0, lambda p=progress: progress_bar.set(p))
+                                    p = progress
+                                    self.after(0, lambda p=p: progress_bar.set(p))
                                     
                                     # Update status (bytes and percentage)
                                     status_text = f"{format_size(downloaded)} / {format_size(total_size)} ({percentage:.1f}%)"
@@ -4819,7 +4835,7 @@ class WayfinderApp(ctk.CTk):
                                         self.after(0, lambda: speed_label.configure(text="Calculating speed..."))
                                 else:
                                     # Unknown total size
-                                    self.after(0, lambda p=downloaded: progress_bar.set(0.1))  # Show some progress
+                                    self.after(0, lambda: progress_bar.set(0.1))  # Show some progress
                                     status_text = f"{format_size(downloaded)} downloaded"
                                     self.after(0, lambda t=status_text: status_label.configure(text=t))
                                     
@@ -4839,13 +4855,17 @@ class WayfinderApp(ctk.CTk):
                         def on_success():
                             try:
                                 total_time = time.time() - start_time
-                                final_speed = downloaded / total_time if total_time > 0 else 0
-                                self.log(f"✓ Downloaded: {model_info['name']} ({format_size(downloaded)} in {format_time(total_time)}, avg {format_speed(final_speed)})")
+                                final_downloaded = downloaded
+                                final_speed = final_downloaded / total_time if total_time > 0 else 0
+                                model_name = model_info['name']
+                                self.log(f"✓ Downloaded: {model_name} ({format_size(final_downloaded)} in {format_time(total_time)}, avg {format_speed(final_speed)})")
                                 if progress_dialog.winfo_exists():
                                     progress_dialog.destroy()
                                 self.open_postproc_model_settings()  # Refresh
                             except Exception as e:
+                                import traceback
                                 self.log(f"⚠️ Error closing dialog: {e}")
+                                self.log(traceback.format_exc())
                         
                         self.after(0, on_success)
                     else:
@@ -4856,18 +4876,19 @@ class WayfinderApp(ctk.CTk):
                 error_msg = str(e)
                 error_trace = traceback.format_exc()
                 self.log(f"⚠️ Download failed: {error_msg}")
+                self.log(f"Traceback: {error_trace}")
                 
-                def on_error():
+                def on_error(err_msg=error_msg):
                     try:
                         if progress_dialog.winfo_exists():
                             status_label.configure(
-                                text=f"Error: {error_msg}",
+                                text=f"Error: {err_msg}",
                                 text_color="#CF7B7B"
                             )
                             speed_label.configure(text="")
                             cancel_btn.configure(text="Close")
-                    except:
-                        pass
+                    except Exception as ui_err:
+                        self.log(f"⚠️ Error updating UI: {ui_err}")
                 
                 self.after(0, on_error)
                 
@@ -4875,8 +4896,8 @@ class WayfinderApp(ctk.CTk):
                 try:
                     if 'temp_path' in locals() and temp_path.exists():
                         temp_path.unlink()
-                except:
-                    pass
+                except Exception as cleanup_err:
+                    self.log(f"⚠️ Error cleaning up temp file: {cleanup_err}")
         
         threading.Thread(target=download_thread, daemon=True).start()
     
