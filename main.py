@@ -3764,7 +3764,7 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["hotkey_devices"],
         )
         
-        # === BENTO TILE 4: Benchmark ===
+        # === BENTO TILE 4: Benchmark (inline, no popup) ===
         benchmark_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"], border_width=1,
@@ -3781,27 +3781,221 @@ class WayfinderApp(ctk.CTk):
         ).pack(side="left")
         
         benchmark_content = ctk.CTkFrame(benchmark_tile, fg_color="transparent")
-        benchmark_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
+        benchmark_content.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
         
-        # Show benchmark status/results
+        # Hardware info (inline)
+        sys_info = BenchmarkRunner.get_system_info()
+        hw_frame = ctk.CTkFrame(benchmark_content, fg_color=COLORS["bg_hover"], corner_radius=8)
+        hw_frame.pack(fill="x", pady=(0, 10))
+        
+        hw_text = f"CPU: {sys_info['cpu'][:45]}{'...' if len(sys_info['cpu']) > 45 else ''}\n"
+        hw_text += f"GPU: {sys_info['gpu'][:45]}{'...' if len(sys_info['gpu']) > 45 else ''}\n"
+        hw_text += f"RAM: {sys_info['ram']}"
+        
+        ctk.CTkLabel(
+            hw_frame, text=hw_text,
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=10)
+        
+        # Results display (inline)
+        self.benchmark_results_frame = ctk.CTkFrame(benchmark_content, fg_color="transparent")
+        self.benchmark_results_frame.pack(fill="x", pady=(0, 10))
+        self._update_benchmark_results_display()
+        
+        # Test button and status (inline)
+        btn_row = ctk.CTkFrame(benchmark_content, fg_color="transparent")
+        btn_row.pack(fill="x")
+        
+        self.benchmark_test_btn = ctk.CTkButton(
+            btn_row,
+            text="⏱️ Test Current Model",
+            font=(self.font_body[0], 13, "bold"),
+            height=40,
+            width=180,
+            corner_radius=10,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=self._run_inline_benchmark,
+        )
+        self.benchmark_test_btn.pack(side="left")
+        
+        self.benchmark_status_label = ctk.CTkLabel(
+            btn_row,
+            text="",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+        )
+        self.benchmark_status_label.pack(side="left", padx=(15, 0))
+        
+        self._settings_scroll = scroll
+    
+    def _update_benchmark_results_display(self):
+        """Update the inline benchmark results display."""
+        # Clear existing
+        for widget in self.benchmark_results_frame.winfo_children():
+            widget.destroy()
+        
         benchmark_results = self.config.get("benchmark_results", {})
         fastest = self.config.get("benchmark_fastest_processor", None)
         
         if benchmark_results:
-            # Show summary of last benchmark
-            model_count = len(benchmark_results)
-            fastest_display = f"🚀 {fastest.upper()}" if fastest else ""
-            benchmark_status = f"{model_count} models tested {fastest_display}"
+            # Show results in a simple format
+            for model_id, result in benchmark_results.items():
+                model_name = result.get("model_name", model_id)
+                gpu_time = result.get("gpu_10s")
+                cpu_time = result.get("cpu_10s")
+                model_fastest = result.get("fastest", "")
+                
+                gpu_str = f"GPU: {gpu_time:.1f}s" if gpu_time else "GPU: —"
+                cpu_str = f"CPU: {cpu_time:.1f}s" if cpu_time else "CPU: —"
+                
+                # Highlight the faster one
+                if model_fastest == "gpu":
+                    result_text = f"{model_name}: {gpu_str} ✓  |  {cpu_str}"
+                elif model_fastest == "cpu":
+                    result_text = f"{model_name}: {gpu_str}  |  {cpu_str} ✓"
+                else:
+                    result_text = f"{model_name}: {gpu_str}  |  {cpu_str}"
+                
+                ctk.CTkLabel(
+                    self.benchmark_results_frame,
+                    text=result_text,
+                    font=(self.font_body[0], 12),
+                    text_color=COLORS["text_primary"],
+                ).pack(anchor="w", pady=2)
+            
+            # Show timestamp
+            timestamps = [r.get("timestamp", 0) for r in benchmark_results.values()]
+            if timestamps and max(timestamps) > 0:
+                from datetime import datetime
+                last_run = datetime.fromtimestamp(max(timestamps)).strftime("%b %d, %H:%M")
+                ctk.CTkLabel(
+                    self.benchmark_results_frame,
+                    text=f"Last tested: {last_run}",
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["text_muted"],
+                ).pack(anchor="w", pady=(5, 0))
         else:
-            benchmark_status = "Not run yet"
+            ctk.CTkLabel(
+                self.benchmark_results_frame,
+                text="No benchmark results yet. Click 'Test Current Model' to measure speed.",
+                font=(self.font_body[0], 11),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w")
+    
+    def _run_inline_benchmark(self):
+        """Run a quick benchmark on the current model (inline, no popup)."""
+        import subprocess
         
-        self.benchmark_btn = self.create_setting_row(
-            benchmark_content, "Hardware Speed Test", benchmark_status,
-            self.open_benchmark_settings,
-            tooltip=SETTING_TOOLTIPS["benchmark"],
+        # Get current model
+        selected_model = self.config.get("whisper_model", "ggml-large-v3-turbo.bin")
+        model_name = selected_model.replace("ggml-", "").replace(".bin", "").replace("-", " ").title()
+        
+        # Update button to show running state
+        self.benchmark_test_btn.configure(
+            state="disabled",
+            text="Testing...",
+            fg_color=COLORS["accent_green"],
         )
+        self.benchmark_status_label.configure(text=f"Testing {model_name}...")
         
-        self._settings_scroll = scroll
+        def run_test():
+            try:
+                # Find whisper binary and model
+                runner = BenchmarkRunner(self.config)
+                whisper_cli = runner._find_whisper_binary()
+                models_dir = runner._find_models_dir()
+                model_path = models_dir / selected_model
+                
+                if not whisper_cli:
+                    return None, None, "whisper-cli not found"
+                if not model_path.exists():
+                    return None, None, f"Model not found: {selected_model}"
+                
+                # Create test audio
+                test_audio = runner._create_test_audio(10)
+                
+                try:
+                    # GPU test
+                    self.after(0, lambda: self.benchmark_status_label.configure(
+                        text=f"Testing {model_name} GPU..."))
+                    gpu_time = runner._run_single_benchmark(
+                        whisper_cli, str(model_path), test_audio, use_gpu=True, timeout=60
+                    )
+                    
+                    # CPU test
+                    self.after(0, lambda: self.benchmark_status_label.configure(
+                        text=f"Testing {model_name} CPU..."))
+                    cpu_time = runner._run_single_benchmark(
+                        whisper_cli, str(model_path), test_audio, use_gpu=False, timeout=120
+                    )
+                    
+                    return gpu_time, cpu_time, None
+                finally:
+                    try:
+                        os.unlink(test_audio)
+                    except:
+                        pass
+                        
+            except Exception as e:
+                return None, None, str(e)
+        
+        def on_complete(gpu_time, cpu_time, error):
+            # Reset button
+            self.benchmark_test_btn.configure(
+                state="normal",
+                text="⏱️ Test Current Model",
+                fg_color=COLORS["accent"],
+            )
+            
+            if error:
+                self.benchmark_status_label.configure(text=f"Error: {error}")
+                return
+            
+            # Determine model_id from filename
+            model_id = selected_model.replace("ggml-", "").replace(".bin", "")
+            
+            # Save results
+            existing = self.config.get("benchmark_results", {})
+            existing[model_id] = {
+                "model_name": model_name,
+                "gpu_10s": round(gpu_time, 2) if gpu_time else None,
+                "cpu_10s": round(cpu_time, 2) if cpu_time else None,
+                "fastest": "gpu" if (gpu_time and cpu_time and gpu_time < cpu_time) else "cpu" if cpu_time else None,
+                "timestamp": int(time.time()),
+            }
+            self.config["benchmark_results"] = existing
+            
+            # Determine overall fastest
+            gpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "gpu")
+            cpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "cpu")
+            self.config["benchmark_fastest_processor"] = "gpu" if gpu_wins > cpu_wins else "cpu"
+            save_config(self.config)
+            
+            # Update display
+            self._update_benchmark_results_display()
+            
+            # Show completion message
+            if gpu_time and cpu_time:
+                speedup = cpu_time / gpu_time if gpu_time > 0 else 1.0
+                self.benchmark_status_label.configure(
+                    text=f"✓ GPU: {gpu_time:.1f}s, CPU: {cpu_time:.1f}s ({speedup:.1f}x faster)"
+                )
+            elif gpu_time:
+                self.benchmark_status_label.configure(text=f"✓ GPU: {gpu_time:.1f}s")
+            elif cpu_time:
+                self.benchmark_status_label.configure(text=f"✓ CPU: {cpu_time:.1f}s")
+            else:
+                self.benchmark_status_label.configure(text="Test failed")
+        
+        def background_thread():
+            gpu_time, cpu_time, error = run_test()
+            self.after(0, lambda: on_complete(gpu_time, cpu_time, error))
+        
+        threading.Thread(target=background_thread, daemon=True).start()
     
     def _build_mode_settings(self, mode: str) -> None:
         """Build the settings panel for the selected processing mode."""
@@ -7797,449 +7991,6 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
             command=on_dialog_close,
         ).pack(fill="x")
-
-    def open_benchmark_settings(self):
-        """Open dialog to run hardware benchmarks and measure transcription speeds."""
-        # Check if dialog already exists and is still open
-        if hasattr(self, '_benchmark_settings_dialog') and self._benchmark_settings_dialog is not None:
-            try:
-                if self._benchmark_settings_dialog.winfo_exists():
-                    self._benchmark_settings_dialog.lift()
-                    self._benchmark_settings_dialog.focus_force()
-                    return
-            except:
-                pass
-            self._benchmark_settings_dialog = None
-        
-        dialog = ctk.CTkToplevel(self)
-        self._benchmark_settings_dialog = dialog
-        dialog.title("Hardware Benchmark")
-        dialog.geometry("580x700")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        
-        def on_dialog_close():
-            if benchmark_runner[0]:
-                benchmark_runner[0].cancel()
-            self._benchmark_settings_dialog = None
-            dialog.destroy()
-        
-        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=25)
-        
-        ctk.CTkLabel(
-            inner,
-            text="⏱️ Hardware Speed Test",
-            font=(self.font_header[0], 22, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 5))
-        
-        ctk.CTkLabel(
-            inner,
-            text="Transcribe a 10-second test clip on GPU and CPU to measure\nyour hardware speed. Results customize speed estimates in the app.",
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_secondary"],
-            justify="left",
-        ).pack(anchor="w", pady=(0, 15))
-        
-        # === Hardware Info Section ===
-        hw_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=12)
-        hw_frame.pack(fill="x", pady=(0, 15))
-        
-        hw_inner = ctk.CTkFrame(hw_frame, fg_color="transparent")
-        hw_inner.pack(fill="x", padx=15, pady=12)
-        
-        ctk.CTkLabel(
-            hw_inner,
-            text="🖥️ Detected Hardware",
-            font=(self.font_body[0], 13, "bold"),
-            text_color=COLORS["text_primary"],
-        ).pack(anchor="w", pady=(0, 8))
-        
-        # Get system info
-        sys_info = BenchmarkRunner.get_system_info()
-        
-        hw_grid = ctk.CTkFrame(hw_inner, fg_color="transparent")
-        hw_grid.pack(fill="x")
-        
-        # CPU
-        cpu_row = ctk.CTkFrame(hw_grid, fg_color="transparent")
-        cpu_row.pack(fill="x", pady=2)
-        ctk.CTkLabel(cpu_row, text="CPU:", font=(self.font_body[0], 11, "bold"),
-                     text_color=COLORS["text_muted"], width=50, anchor="w").pack(side="left")
-        ctk.CTkLabel(cpu_row, text=sys_info["cpu"][:55] + ("..." if len(sys_info["cpu"]) > 55 else ""),
-                     font=(self.font_body[0], 11), text_color=COLORS["text_primary"],
-                     anchor="w").pack(side="left", fill="x", expand=True)
-        
-        # GPU
-        gpu_row = ctk.CTkFrame(hw_grid, fg_color="transparent")
-        gpu_row.pack(fill="x", pady=2)
-        ctk.CTkLabel(gpu_row, text="GPU:", font=(self.font_body[0], 11, "bold"),
-                     text_color=COLORS["text_muted"], width=50, anchor="w").pack(side="left")
-        ctk.CTkLabel(gpu_row, text=sys_info["gpu"][:55] + ("..." if len(sys_info["gpu"]) > 55 else ""),
-                     font=(self.font_body[0], 11), text_color=COLORS["text_primary"],
-                     anchor="w").pack(side="left", fill="x", expand=True)
-        
-        # RAM
-        ram_row = ctk.CTkFrame(hw_grid, fg_color="transparent")
-        ram_row.pack(fill="x", pady=2)
-        ctk.CTkLabel(ram_row, text="RAM:", font=(self.font_body[0], 11, "bold"),
-                     text_color=COLORS["text_muted"], width=50, anchor="w").pack(side="left")
-        ctk.CTkLabel(ram_row, text=sys_info["ram"],
-                     font=(self.font_body[0], 11), text_color=COLORS["text_primary"],
-                     anchor="w").pack(side="left")
-        
-        # === Results Section ===
-        results_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=12)
-        results_frame.pack(fill="both", expand=True, pady=(0, 15))
-        
-        results_scroll = ctk.CTkScrollableFrame(results_frame, fg_color="transparent", height=180)
-        results_scroll.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        benchmark_runner = [None]
-        
-        def refresh_results_display():
-            """Refresh the results display after benchmark completes."""
-            for widget in results_scroll.winfo_children():
-                widget.destroy()
-            
-            benchmark_results = self.config.get("benchmark_results", {})
-            fastest = self.config.get("benchmark_fastest_processor", None)
-            
-            if benchmark_results:
-                header = ctk.CTkFrame(results_scroll, fg_color="transparent")
-                header.pack(fill="x", pady=(0, 10))
-                
-                ctk.CTkLabel(
-                    header,
-                    text="📊 Benchmark Results",
-                    font=(self.font_body[0], 14, "bold"),
-                    text_color=COLORS["text_primary"],
-                ).pack(side="left")
-                
-                if fastest:
-                    ctk.CTkLabel(
-                        header,
-                        text=f"🚀 Fastest: {fastest.upper()}",
-                        font=(self.font_body[0], 12, "bold"),
-                        text_color=COLORS["accent_green"],
-                    ).pack(side="right")
-                
-                # Column headers
-                col_header = ctk.CTkFrame(results_scroll, fg_color="transparent")
-                col_header.pack(fill="x", pady=(0, 5))
-                ctk.CTkLabel(col_header, text="Model", font=(self.font_body[0], 11, "bold"),
-                             text_color=COLORS["text_muted"], width=90, anchor="w").pack(side="left")
-                ctk.CTkLabel(col_header, text="GPU", font=(self.font_body[0], 11, "bold"),
-                             text_color=COLORS["text_muted"], width=65).pack(side="left", padx=(10, 0))
-                ctk.CTkLabel(col_header, text="CPU", font=(self.font_body[0], 11, "bold"),
-                             text_color=COLORS["text_muted"], width=65).pack(side="left", padx=(10, 0))
-                ctk.CTkLabel(col_header, text="Speedup", font=(self.font_body[0], 11, "bold"),
-                             text_color=COLORS["text_muted"], width=70).pack(side="left", padx=(10, 0))
-                
-                # Model results
-                for model_id, result in benchmark_results.items():
-                    model_name = result.get("model_name", model_id)
-                    cpu_time = result.get("cpu_10s")
-                    gpu_time = result.get("gpu_10s")
-                    model_fastest = result.get("fastest", "")
-                    
-                    row = ctk.CTkFrame(results_scroll, fg_color="transparent")
-                    row.pack(fill="x", pady=3)
-                    
-                    ctk.CTkLabel(
-                        row, text=model_name,
-                        font=(self.font_body[0], 12),
-                        text_color=COLORS["text_primary"],
-                        width=90, anchor="w",
-                    ).pack(side="left")
-                    
-                    gpu_str = f"{gpu_time:.1f}s" if isinstance(gpu_time, (int, float)) else "—"
-                    cpu_str = f"{cpu_time:.1f}s" if isinstance(cpu_time, (int, float)) else "—"
-                    
-                    # Calculate speedup
-                    if cpu_time and gpu_time and gpu_time > 0:
-                        speedup = f"{cpu_time / gpu_time:.1f}x"
-                    else:
-                        speedup = "—"
-                    
-                    ctk.CTkLabel(
-                        row, text=gpu_str,
-                        font=(self.font_body[0], 11),
-                        text_color=COLORS["accent_green"] if model_fastest == "gpu" else COLORS["text_muted"],
-                        width=65,
-                    ).pack(side="left", padx=(10, 0))
-                    
-                    ctk.CTkLabel(
-                        row, text=cpu_str,
-                        font=(self.font_body[0], 11),
-                        text_color=COLORS["accent_green"] if model_fastest == "cpu" else COLORS["text_muted"],
-                        width=65,
-                    ).pack(side="left", padx=(10, 0))
-                    
-                    ctk.CTkLabel(
-                        row, text=speedup,
-                        font=(self.font_body[0], 11),
-                        text_color=COLORS["accent"] if speedup != "—" else COLORS["text_muted"],
-                        width=70,
-                    ).pack(side="left", padx=(10, 0))
-                
-                # Timestamp
-                timestamps = [r.get("timestamp", 0) for r in benchmark_results.values()]
-                if timestamps and max(timestamps) > 0:
-                    from datetime import datetime
-                    last_run = datetime.fromtimestamp(max(timestamps)).strftime("%Y-%m-%d %H:%M")
-                    ctk.CTkLabel(
-                        results_scroll,
-                        text=f"Last run: {last_run}",
-                        font=(self.font_body[0], 10),
-                        text_color=COLORS["text_muted"],
-                    ).pack(anchor="w", pady=(10, 0))
-            else:
-                ctk.CTkLabel(
-                    results_scroll,
-                    text="⏱️ No benchmark results yet\n\nRun a benchmark to measure transcription\nspeed on your hardware.",
-                    font=(self.font_body[0], 13),
-                    text_color=COLORS["text_muted"],
-                    justify="center",
-                ).pack(pady=30)
-        
-        refresh_results_display()
-        
-        # === Progress Section ===
-        progress_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        progress_bar = ctk.CTkProgressBar(progress_frame, width=400, height=16, corner_radius=8)
-        progress_bar.set(0)
-        status_label = ctk.CTkLabel(
-            progress_frame,
-            text="Ready to benchmark",
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_secondary"],
-        )
-        
-        # Log textbox (hidden initially)
-        log_text = ctk.CTkTextbox(
-            inner, height=80, fg_color=COLORS["bg_elevated"],
-            corner_radius=8, font=("JetBrains Mono", 10),
-            text_color=COLORS["text_secondary"],
-        )
-        
-        def update_progress(progress: float, msg: str):
-            def do_update():
-                progress_bar.set(progress)
-                status_label.configure(text=msg)
-            dialog.after(0, do_update)
-        
-        def log_message(msg: str):
-            def do_log():
-                log_text.configure(state="normal")
-                log_text.insert("end", msg + "\n")
-                log_text.see("end")
-                log_text.configure(state="disabled")
-            dialog.after(0, do_log)
-        
-        def run_benchmark():
-            """Run the benchmark in a background thread."""
-            # Show progress UI
-            progress_frame.pack(fill="x", pady=(0, 10))
-            status_label.pack(pady=(0, 5))
-            progress_bar.pack(fill="x")
-            progress_bar.set(0)
-            log_text.pack(fill="x", pady=(10, 0))
-            log_text.configure(state="normal")
-            log_text.delete("1.0", "end")
-            log_text.configure(state="disabled")
-            
-            run_btn.configure(state="disabled", text="Running...")
-            quick_btn.configure(state="disabled")
-            cancel_btn.pack(side="left", padx=(10, 0))
-            
-            runner = BenchmarkRunner(
-                self.config,
-                progress_callback=update_progress,
-                log_callback=log_message,
-            )
-            benchmark_runner[0] = runner
-            
-            def benchmark_thread():
-                try:
-                    results, fastest = runner.run_benchmarks(test_gpu=True, test_cpu=True)
-                    
-                    if results and not runner._cancel_requested:
-                        # Save results to config
-                        self.config["benchmark_results"] = results
-                        self.config["benchmark_fastest_processor"] = fastest
-                        save_config(self.config)
-                        
-                        def on_complete():
-                            run_btn.configure(state="normal", text="⏱️ Full Benchmark")
-                            quick_btn.configure(state="normal")
-                            cancel_btn.pack_forget()
-                            status_label.configure(text="✅ Benchmark complete!")
-                            refresh_results_display()
-                            # Update main settings button
-                            model_count = len(results)
-                            fastest_display = f"🚀 {fastest.upper()}" if fastest else ""
-                            self.benchmark_btn.configure(text=f"{model_count} models tested {fastest_display}  ▼")
-                        dialog.after(0, on_complete)
-                    else:
-                        def on_cancel():
-                            run_btn.configure(state="normal", text="⏱️ Full Benchmark")
-                            quick_btn.configure(state="normal")
-                            cancel_btn.pack_forget()
-                            status_label.configure(text="Benchmark cancelled")
-                        dialog.after(0, on_cancel)
-                except Exception as e:
-                    def on_error():
-                        run_btn.configure(state="normal", text="⏱️ Full Benchmark")
-                        quick_btn.configure(state="normal")
-                        cancel_btn.pack_forget()
-                        status_label.configure(text=f"Error: {e}")
-                        log_message(f"❌ Exception: {e}")
-                    dialog.after(0, on_error)
-            
-            threading.Thread(target=benchmark_thread, daemon=True).start()
-        
-        def run_quick_benchmark():
-            """Run a quick benchmark on just the currently selected model."""
-            # Show progress UI
-            progress_frame.pack(fill="x", pady=(0, 10))
-            status_label.pack(pady=(0, 5))
-            progress_bar.pack(fill="x")
-            progress_bar.set(0)
-            log_text.pack(fill="x", pady=(10, 0))
-            log_text.configure(state="normal")
-            log_text.delete("1.0", "end")
-            log_text.configure(state="disabled")
-            
-            run_btn.configure(state="disabled")
-            quick_btn.configure(state="disabled", text="Running...")
-            cancel_btn.pack(side="left", padx=(10, 0))
-            
-            runner = BenchmarkRunner(
-                self.config,
-                progress_callback=update_progress,
-                log_callback=log_message,
-            )
-            benchmark_runner[0] = runner
-            
-            # Get currently selected model
-            selected_model = self.config.get("whisper_model", "ggml-large-v3-turbo.bin")
-            
-            def benchmark_thread():
-                try:
-                    results, fastest = runner.run_benchmarks(
-                        test_gpu=True, test_cpu=True,
-                        quick_mode=True, selected_model=selected_model
-                    )
-                    
-                    if results and not runner._cancel_requested:
-                        # Merge with existing results
-                        existing = self.config.get("benchmark_results", {})
-                        existing.update(results)
-                        self.config["benchmark_results"] = existing
-                        
-                        # Recalculate overall fastest
-                        gpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "gpu")
-                        cpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "cpu")
-                        overall_fastest = "gpu" if gpu_wins > cpu_wins else "cpu" if cpu_wins > 0 else None
-                        self.config["benchmark_fastest_processor"] = overall_fastest
-                        save_config(self.config)
-                        
-                        def on_complete():
-                            run_btn.configure(state="normal")
-                            quick_btn.configure(state="normal", text="⚡ Quick Test")
-                            cancel_btn.pack_forget()
-                            status_label.configure(text="✅ Quick test complete!")
-                            refresh_results_display()
-                            # Update main settings button
-                            model_count = len(existing)
-                            fastest_display = f"🚀 {overall_fastest.upper()}" if overall_fastest else ""
-                            self.benchmark_btn.configure(text=f"{model_count} models tested {fastest_display}  ▼")
-                        dialog.after(0, on_complete)
-                    else:
-                        def on_cancel():
-                            run_btn.configure(state="normal")
-                            quick_btn.configure(state="normal", text="⚡ Quick Test")
-                            cancel_btn.pack_forget()
-                            status_label.configure(text="Benchmark cancelled")
-                        dialog.after(0, on_cancel)
-                except Exception as e:
-                    def on_error():
-                        run_btn.configure(state="normal")
-                        quick_btn.configure(state="normal", text="⚡ Quick Test")
-                        cancel_btn.pack_forget()
-                        status_label.configure(text=f"Error: {e}")
-                        log_message(f"❌ Exception: {e}")
-                    dialog.after(0, on_error)
-            
-            threading.Thread(target=benchmark_thread, daemon=True).start()
-        
-        def cancel_benchmark():
-            if benchmark_runner[0]:
-                benchmark_runner[0].cancel()
-                status_label.configure(text="Cancelling...")
-        
-        # === Buttons ===
-        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(10, 0))
-        
-        quick_btn = ctk.CTkButton(
-            btn_frame,
-            text="⚡ Quick Test",
-            font=(self.font_body[0], 14, "bold"),
-            height=45,
-            width=140,
-            corner_radius=12,
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=run_quick_benchmark,
-        )
-        quick_btn.pack(side="left", padx=(0, 10))
-        
-        run_btn = ctk.CTkButton(
-            btn_frame,
-            text="⏱️ Full Benchmark",
-            font=(self.font_body[0], 14),
-            height=45,
-            corner_radius=12,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_primary"],
-            command=run_benchmark,
-        )
-        run_btn.pack(side="left", fill="x", expand=True)
-        
-        cancel_btn = ctk.CTkButton(
-            btn_frame,
-            text="Cancel",
-            font=(self.font_body[0], 13),
-            width=80,
-            height=45,
-            corner_radius=12,
-            fg_color=COLORS["accent_red"],
-            hover_color="#FF6666",
-            text_color="#FFFFFF",
-            command=cancel_benchmark,
-        )
-        # cancel_btn hidden initially
-        
-        # Close button
-        ctk.CTkButton(
-            inner,
-            text="Close",
-            font=(self.font_body[0], 13),
-            height=40,
-            corner_radius=10,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=on_dialog_close,
-        ).pack(fill="x", pady=(10, 0))
 
     def open_speed_settings(self):
         """Open dialog to configure typing speed."""
