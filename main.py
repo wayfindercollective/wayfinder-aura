@@ -6186,6 +6186,7 @@ class WayfinderApp(ctk.CTk):
                 if hasattr(self, '_ollama_progress_bar') and self._ollama_progress_bar.winfo_exists():
                     self._ollama_progress_bar.set(progress)
                     self._ollama_status_label.configure(text=status_text)
+                    self.update_idletasks()  # Force UI update
             except:
                 pass
         
@@ -6276,13 +6277,18 @@ class WayfinderApp(ctk.CTk):
                 # Success
                 def on_success():
                     self._inline_download_active = False
-                    self._ollama_progress_bar.set(1.0)
-                    time_str = f"{int(total_time//60)}m {int(total_time%60)}s" if total_time >= 60 else f"{int(total_time)}s"
-                    self._ollama_status_label.configure(
-                        text=f"✓ Downloaded {model_name} in {time_str}",
-                        text_color=COLORS["accent"]
-                    )
-                    self.log(f"✓ Downloaded: {model_name} in {time_str}")
+                    try:
+                        if hasattr(self, '_ollama_progress_bar') and self._ollama_progress_bar.winfo_exists():
+                            self._ollama_progress_bar.set(1.0)
+                            time_str = f"{int(total_time//60)}m {int(total_time%60)}s" if total_time >= 60 else f"{int(total_time)}s"
+                            self._ollama_status_label.configure(
+                                text=f"✓ Downloaded {model_name} in {time_str}",
+                                text_color=COLORS["accent"]
+                            )
+                            self.update_idletasks()
+                    except:
+                        pass
+                    self.log(f"✓ Downloaded: {model_name}")
                     
                     # Hide progress after 2 seconds and rebuild
                     self.after(2000, self._rebuild_postproc_section)
@@ -6295,28 +6301,34 @@ class WayfinderApp(ctk.CTk):
                 
                 def on_error():
                     self._inline_download_active = False
-                    if is_cancelled:
-                        self._ollama_status_label.configure(
-                            text="Download cancelled",
-                            text_color=COLORS["text_muted"]
-                        )
-                        self.log("⚠️ Download cancelled")
-                        self.after(1000, self._rebuild_postproc_section)
-                    else:
-                        self._ollama_status_label.configure(
-                            text=f"✗ Error: {error_msg[:60]}",
-                            text_color="#CF7B7B"
-                        )
-                        # Reset button for retry
-                        self._ollama_download_btn.configure(
-                            text="Retry",
-                            fg_color=COLORS["accent"],
-                            hover_color=COLORS["accent_hover"],
-                            text_color=COLORS["text_bright"],
-                            state="normal",
-                            command=self._download_selected_ollama_model,
-                        )
-                        self.log(f"⚠️ Download failed: {error_msg}")
+                    try:
+                        if is_cancelled:
+                            if hasattr(self, '_ollama_status_label') and self._ollama_status_label.winfo_exists():
+                                self._ollama_status_label.configure(
+                                    text="Download cancelled",
+                                    text_color=COLORS["text_muted"]
+                                )
+                            self.log("⚠️ Download cancelled")
+                            self.after(1000, self._rebuild_postproc_section)
+                        else:
+                            if hasattr(self, '_ollama_status_label') and self._ollama_status_label.winfo_exists():
+                                self._ollama_status_label.configure(
+                                    text=f"✗ Error: {error_msg[:60]}",
+                                    text_color="#CF7B7B"
+                                )
+                            # Reset button for retry
+                            if hasattr(self, '_ollama_download_btn') and self._ollama_download_btn.winfo_exists():
+                                self._ollama_download_btn.configure(
+                                    text="Retry",
+                                    fg_color=COLORS["accent"],
+                                    hover_color=COLORS["accent_hover"],
+                                    text_color=COLORS["text_bright"],
+                                    state="normal",
+                                    command=self._download_selected_ollama_model,
+                                )
+                            self.log(f"⚠️ Download failed: {error_msg}")
+                    except:
+                        pass
                 
                 self.after(0, on_error)
         
