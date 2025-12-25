@@ -880,10 +880,10 @@ class GlassmorphicOverlay(QWidget):
     
     def _setup_timers(self):
         """Setup animation timers."""
-        # Main render timer (60 FPS)
+        # Main render timer (30 FPS - designer spec for CPU optimization)
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self._on_frame)
-        self._render_timer.setInterval(16)  # ~60 FPS
+        self._render_timer.setInterval(33)  # ~30 FPS (capped per designer spec)
     
     def _setup_kwin_positioning_rule(self):
         """Setup KWin rule to position overlay before window is created."""
@@ -1101,7 +1101,7 @@ class GlassmorphicOverlay(QWidget):
     
     def _on_frame(self):
         """Called each frame to update animations."""
-        dt = 0.016  # Assuming 60 FPS
+        dt = 0.033  # 30 FPS (capped per designer spec for CPU optimization)
         
         # Update wave animation
         self.wave_renderer.advance_time(dt)

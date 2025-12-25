@@ -7764,52 +7764,89 @@ class WayfinderApp(ctk.CTk):
         # #endregion
 
     def get_tray_icon(self, state: AppState, pulse_scale: float = 1.0) -> Image.Image:
-        """Create a bold, obvious tray icon with full color fill."""
-        color = STATE_COLORS[state]
+        """Create a Wayfinder Arrow + Waves tray icon.
+        
+        Designer spec: Solid white glyph (navigation arrow + radio waves) on 
+        transparent background. Recording state animates the waves in red.
+        """
         size = 64
         
-        # Create a solid colored icon for maximum visibility
+        # Create transparent background
         icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(icon)
         
-        # Parse the hex color
-        r = int(color[1:3], 16)
-        g = int(color[3:5], 16)
-        b = int(color[5:7], 16)
-        
-        # Fill the entire icon with the state color (rounded square)
-        draw.rounded_rectangle(
-            [4, 4, size - 4, size - 4],
-            radius=12,
-            fill=(r, g, b, 255),
-        )
-        
-        # Add a subtle inner icon or symbol
-        if state == AppState.IDLE:
-            # Microphone symbol for ready (simple circle)
-            draw.ellipse([22, 18, 42, 46], fill=(255, 255, 255, 200))
-            draw.rectangle([28, 42, 36, 52], fill=(255, 255, 255, 200))
-        elif state == AppState.RECORDING:
-            # Animated pulsing dot for listening!
-            # pulse_scale goes from 0.0 to 1.0
-            # At 0.0 (min): 15% of square = ~8px diameter, offset = 28
-            # At 1.0 (max): 80% of square = ~45px diameter, offset = 10
-            min_offset = 28  # Small dot
-            max_offset = 10  # Large dot
-            offset = int(min_offset - (min_offset - max_offset) * pulse_scale)
-            draw.ellipse(
-                [offset, offset, size - offset, size - offset], 
-                fill=(255, 255, 255, 230)
-            )
+        # Color based on state
+        if state == AppState.RECORDING:
+            # Active Red for recording (#FF4D4D from designer spec)
+            glyph_color = (255, 77, 77, 255)
+            wave_color = (255, 77, 77, int(180 + 75 * pulse_scale))  # Pulsing alpha
         elif state == AppState.PROCESSING:
-            # Gear/spinner symbol
-            draw.ellipse([20, 20, 44, 44], outline=(255, 255, 255, 230), width=4)
-            draw.ellipse([26, 26, 38, 38], fill=(r, g, b, 255))
-        else:  # PASTING
-            # Text/typing symbol
-            draw.rectangle([16, 22, 48, 28], fill=(255, 255, 255, 200))
-            draw.rectangle([16, 32, 40, 38], fill=(255, 255, 255, 200))
-            draw.rectangle([16, 42, 44, 48], fill=(255, 255, 255, 200))
+            # Muted gold for processing
+            glyph_color = (229, 172, 42, 255)
+            wave_color = (229, 172, 42, 200)
+        elif state == AppState.PASTING:
+            # Muted mint for typing
+            glyph_color = (93, 212, 168, 255)
+            wave_color = (93, 212, 168, 200)
+        else:  # IDLE
+            # Solid white for ready state
+            glyph_color = (255, 255, 255, 255)
+            wave_color = (255, 255, 255, 180)
+        
+        # === Draw Navigation Arrow (pointing upper-right, like compass/location) ===
+        # Arrow is a filled triangle pointing to upper-right
+        # Centered-left to leave room for waves on right
+        arrow_points = [
+            (10, 48),   # Bottom-left
+            (38, 10),   # Top-right (tip)
+            (24, 38),   # Inner notch
+            (10, 48),   # Back to start
+        ]
+        draw.polygon(arrow_points, fill=glyph_color)
+        
+        # Add a small notch/cutout to make it look like a cursor/arrow
+        notch_points = [
+            (18, 40),
+            (26, 32),
+            (22, 44),
+        ]
+        draw.polygon(notch_points, fill=(0, 0, 0, 0))
+        
+        # === Draw Radio Waves (3 curved arcs emanating from arrow tip) ===
+        # Waves expand from upper-right of arrow
+        wave_center = (36, 12)
+        
+        # Calculate wave sizes based on pulse_scale for recording animation
+        if state == AppState.RECORDING:
+            # Animate waves expanding outward
+            base_offset = pulse_scale * 4  # Waves expand during pulse
+            wave_radii = [
+                (8 + base_offset, 12 + base_offset),
+                (14 + base_offset, 20 + base_offset),
+                (22 + base_offset, 30 + base_offset),
+            ]
+            # Fade waves based on distance
+            wave_alphas = [
+                int(255 * (0.5 + 0.5 * pulse_scale)),
+                int(200 * (0.3 + 0.7 * pulse_scale)),
+                int(150 * (0.1 + 0.9 * pulse_scale)),
+            ]
+        else:
+            wave_radii = [(8, 12), (14, 20), (22, 30)]
+            wave_alphas = [180, 140, 100]
+        
+        import math
+        for i, ((r_inner, r_outer), alpha) in enumerate(zip(wave_radii, wave_alphas)):
+            wave_col = (wave_color[0], wave_color[1], wave_color[2], min(255, alpha))
+            # Draw arc (approximate with thick line arc)
+            # Arc from 315° to 45° (upper-right quadrant)
+            for angle in range(-45, 46, 5):
+                rad = math.radians(angle)
+                x1 = wave_center[0] + r_inner * math.cos(rad)
+                y1 = wave_center[1] - r_inner * math.sin(rad)
+                x2 = wave_center[0] + r_outer * math.cos(rad)
+                y2 = wave_center[1] - r_outer * math.sin(rad)
+                draw.line([(x1, y1), (x2, y2)], fill=wave_col, width=2)
         
         return icon
 
@@ -7841,29 +7878,35 @@ class WayfinderApp(ctk.CTk):
         """Start the tray icon pulsing animation."""
         if not hasattr(self, '_tray_pulse_job'):
             self._tray_pulse_job = None
-        if not hasattr(self, '_tray_pulse_phase'):
-            self._tray_pulse_phase = 0.0
+        if not hasattr(self, '_tray_pulse_frame'):
+            self._tray_pulse_frame = 0
         self._tray_pulse_step()
     
     def _tray_pulse_step(self):
-        """Animate one step of the tray icon pulse."""
+        """Animate the tray icon wave pulse.
+        
+        Designer spec: Cycle through 3 frames at 350ms intervals.
+        Frames represent radio waves expanding outward.
+        """
         if self.app_state != AppState.RECORDING:
             return
         
-        import math
+        # 3-frame animation as per designer spec
+        # Frame 0: waves compact (pulse_scale = 0.0)
+        # Frame 1: waves mid (pulse_scale = 0.5)
+        # Frame 2: waves expanded (pulse_scale = 1.0)
+        self._tray_pulse_frame = getattr(self, '_tray_pulse_frame', 0)
+        self._tray_pulse_frame = (self._tray_pulse_frame + 1) % 3
         
-        # Update phase for smooth sine wave pulse
-        self._tray_pulse_phase += 0.15  # Speed of pulse
+        # Map frame to pulse scale
+        pulse_scale = self._tray_pulse_frame / 2.0  # 0.0, 0.5, 1.0
         
-        # Sine wave from 0 to 1 (smooth in-out)
-        pulse_scale = 0.5 + 0.5 * math.sin(self._tray_pulse_phase)
-        
-        # Update tray icon with new pulse scale
+        # Update tray icon with current frame
         if self.tray_icon:
             self.tray_icon.icon = self.get_tray_icon(AppState.RECORDING, pulse_scale)
         
-        # Schedule next step (~20fps for tray icon)
-        self._tray_pulse_job = self.after(50, self._tray_pulse_step)
+        # Schedule next frame at 350ms (designer spec)
+        self._tray_pulse_job = self.after(350, self._tray_pulse_step)
     
     def _stop_tray_pulse(self):
         """Stop the tray icon pulsing animation."""
