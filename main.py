@@ -618,186 +618,14 @@ class ModeSelector(ctk.CTkFrame):
 
 class SmoothScrollableFrame(ctk.CTkScrollableFrame):
     """
-    Premium scrollable frame with Mac-like smooth scrolling.
-    Features:
-    - Momentum-based scrolling (continues after release)
-    - Elastic bounce at boundaries
-    - Smooth easing animations
+    Scrollable frame wrapper that uses CTk's built-in scrolling.
+    The custom smooth scrolling implementation was incompatible with 
+    the current CustomTkinter version.
     """
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        
-        # Physics parameters for smooth scrolling
-        self._velocity = 0.0
-        self._friction = 0.4  # Deceleration factor (very low = stops almost immediately)
-        self._bounce_strength = 0.35  # How much to bounce back
-        self._bounce_damping = 0.65  # How quickly bounce settles
-        self._scroll_multiplier = 1.0  # Scroll sensitivity
-        self._min_velocity = 1.0  # Stop threshold (high = stops very quickly)
-        
-        # State tracking
-        self._is_animating = False
-        self._overscroll = 0.0  # How far past boundary
-        self._last_scroll_time = 0
-        self._scroll_history = []  # Track recent scroll events for momentum
-        
-        # Get the internal canvas for custom scroll handling
-        self._parent_canvas = self._parent_frame.master
-        
-        # Bind custom scroll events (override default behavior)
-        self._bind_scroll_to_widget(self._parent_canvas)
-        self._bind_scroll_to_widget(self)
-        self._bind_scroll_to_widget(self._parent_frame)
-        
-        # Bind to all children when they're added
-        self.bind("<Map>", self._bind_all_children)
-        self.after(100, self._bind_all_children)
-    
-    def _bind_scroll_to_widget(self, widget):
-        """Bind smooth scroll events to a widget."""
-        widget.bind("<MouseWheel>", self._on_smooth_scroll, add="+")
-        widget.bind("<Button-4>", self._on_smooth_scroll, add="+")
-        widget.bind("<Button-5>", self._on_smooth_scroll, add="+")
-    
-    def _bind_all_children(self, event=None):
-        """Recursively bind scroll events to all children."""
-        def bind_recursive(widget):
-            try:
-                self._bind_scroll_to_widget(widget)
-                for child in widget.winfo_children():
-                    bind_recursive(child)
-            except:
-                pass
-        bind_recursive(self)
-    
-    def _on_smooth_scroll(self, event):
-        """Handle scroll with momentum and bounce."""
-        import time
-        current_time = time.time()
-        
-        # Determine scroll delta - very small values for precise scrolling
-        if hasattr(event, 'delta'):
-            # Windows/Mac - delta is typically 120 per notch
-            delta = event.delta / 120.0 * 6 * self._scroll_multiplier
-        elif event.num == 4:
-            # Linux scroll up
-            delta = 6 * self._scroll_multiplier
-        elif event.num == 5:
-            # Linux scroll down
-            delta = -6 * self._scroll_multiplier
-        else:
-            return
-        
-        # Minimal momentum - almost direct scroll with tiny glide
-        # Just use the delta directly with a small velocity boost
-        self._velocity = delta * 0.8
-        
-        # Very low velocity cap for precise scrolling
-        max_velocity = 8
-        self._velocity = max(-max_velocity, min(max_velocity, self._velocity))
-        
-        # Start animation loop if not already running
-        if not self._is_animating:
-            self._is_animating = True
-            self._animate_scroll()
-        
-        return "break"  # Prevent default scroll
-    
-    def _get_scroll_bounds(self):
-        """Get current scroll position and limits."""
-        try:
-            # Get scroll region
-            scroll_region = self._parent_canvas.cget("scrollregion")
-            if not scroll_region:
-                return 0, 0, 0
-            
-            # Parse scroll region
-            parts = scroll_region.split()
-            if len(parts) >= 4:
-                content_height = float(parts[3]) - float(parts[1])
-            else:
-                content_height = 0
-            
-            canvas_height = self._parent_canvas.winfo_height()
-            max_scroll = max(0, content_height - canvas_height)
-            
-            # Get current position
-            current_pos = self._parent_canvas.canvasy(0)
-            
-            return current_pos, max_scroll, content_height
-        except:
-            return 0, 0, 0
-    
-    def _animate_scroll(self):
-        """Animation loop for smooth scrolling with bounce."""
-        if not self._is_animating:
-            return
-        
-        current_pos, max_scroll, content_height = self._get_scroll_bounds()
-        
-        # Check if we're past boundaries
-        at_top = current_pos <= 0
-        at_bottom = current_pos >= max_scroll and max_scroll > 0
-        
-        # Apply velocity
-        if abs(self._velocity) > self._min_velocity or abs(self._overscroll) > 1:
-            # Calculate new position
-            new_pos = current_pos - self._velocity
-            
-            # Handle overscroll (elastic bounce)
-            if new_pos < 0:
-                # Past top
-                self._overscroll = new_pos
-                # Rubber band - resistance increases with distance
-                resistance = 1.0 / (1.0 + abs(self._overscroll) * 0.01)
-                self._velocity *= resistance * 0.5
-                new_pos = self._overscroll * 0.3  # Show some overscroll visually
-            elif new_pos > max_scroll and max_scroll > 0:
-                # Past bottom
-                self._overscroll = new_pos - max_scroll
-                resistance = 1.0 / (1.0 + abs(self._overscroll) * 0.01)
-                self._velocity *= resistance * 0.5
-                new_pos = max_scroll + self._overscroll * 0.3
-            else:
-                self._overscroll = 0
-            
-            # Apply friction
-            self._velocity *= self._friction
-            
-            # Bounce back if overscrolled
-            if self._overscroll != 0 and abs(self._velocity) < 5:
-                # Snap back with easing
-                bounce_force = -self._overscroll * self._bounce_strength
-                self._velocity += bounce_force
-                self._velocity *= self._bounce_damping
-            
-            # Apply scroll
-            try:
-                if content_height > 0:
-                    fraction = max(0, min(1, new_pos / content_height))
-                    self._parent_canvas.yview_moveto(fraction)
-            except:
-                pass
-            
-            # Continue animation
-            self.after(16, self._animate_scroll)  # ~60fps
-        else:
-            # Animation complete - ensure we're not stuck overscrolled
-            self._is_animating = False
-            self._velocity = 0
-            
-            if self._overscroll != 0:
-                # Final snap to boundary
-                try:
-                    if self._overscroll < 0:
-                        self._parent_canvas.yview_moveto(0)
-                    else:
-                        if content_height > 0:
-                            self._parent_canvas.yview_moveto(max_scroll / content_height)
-                except:
-                    pass
-                self._overscroll = 0
+        # Just use standard CTk scrolling - works reliably
 
 
 # Setting tooltip descriptions with latency indicators
@@ -2555,6 +2383,13 @@ class OverlayController:
             if self._process is not None and self._process.poll() is None:
                 return True  # Already running
             
+            # Clean up any stale overlay processes before starting a new one
+            try:
+                subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
+                              capture_output=True, timeout=1)
+            except:
+                pass
+            
             try:
                 # Find the overlay script
                 script_path = Path(__file__).parent / "status_overlay.py"
@@ -2631,6 +2466,8 @@ class OverlayController:
             if self._current_state == "listening" and self._audio_level_callback:
                 try:
                     level = self._audio_level_callback()
+                    # Convert numpy float32 to Python float for JSON serialization
+                    level = float(level) if level is not None else 0.0
                     self._send_command({"cmd": "level", "value": level})
                 except:
                     pass
@@ -2910,28 +2747,38 @@ class WayfinderApp(ctk.CTk):
             self.config["ui_scale"] = self.ui_scale
             save_config(self.config)
         
-        # Apply UI scale
-        scaled_w = int(self.BASE_WINDOW_WIDTH * self.ui_scale)
-        scaled_h = int(self.BASE_WINDOW_HEIGHT * self.ui_scale)
+        # Use a comfortable fixed window size (NOT tied to content scale)
+        # This allows: big readable content in a small window that scrolls
+        window_w = 520
+        window_h = 780
         
         # Get screen dimensions for initial placement
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
         
+        # Account for taskbar and panels
+        taskbar_height = 56
+        top_panel = 32
+        usable_h = screen_h - taskbar_height - top_panel
+        
+        # Clamp to usable area
+        window_h = min(window_h, usable_h)
+        window_w = min(window_w, screen_w - 40)
+        
         # Center on screen
-        center_x = (screen_w - scaled_w) // 2
-        center_y = (screen_h - scaled_h) // 2
+        center_x = (screen_w - window_w) // 2
+        center_y = top_panel + (usable_h - window_h) // 2
         
         # Apply geometry
-        self.geometry(f"{scaled_w}x{scaled_h}+{center_x}+{center_y}")
+        self.geometry(f"{window_w}x{window_h}+{center_x}+{center_y}")
         
         # Set reasonable minimum size
         self.minsize(360, 500)
         self.configure(fg_color=COLORS["bg_dark"])
         
-        # Apply CustomTkinter scaling
+        # Apply widget scaling only - this controls content size
+        # NOT window scaling - that would fight with manual window resizing
         ctk.set_widget_scaling(self.ui_scale)
-        ctk.set_window_scaling(self.ui_scale)
         
         if ICON_PATH.exists():
             try:
@@ -3004,38 +2851,45 @@ class WayfinderApp(ctk.CTk):
         return recommended
     
     def rescue_window(self):
-        """Emergency rescue: reset window to center of screen at optimal size.
+        """Emergency rescue: reset window to center of screen at a usable size.
         
         Use this if the window gets lost off-screen or under the taskbar.
         Bound to Ctrl+R as a keyboard shortcut.
-        
-        Automatically calculates the best scale for your screen resolution.
         """
-        # Calculate optimal scale for this screen
+        # Reset to a good readable scale
         optimal_scale = self._get_recommended_scale()
         self.ui_scale = optimal_scale
         self.config["ui_scale"] = optimal_scale
         save_config(self.config)
         
-        # Calculate size at optimal scale
-        new_w = int(self.BASE_WINDOW_WIDTH * optimal_scale)
-        new_h = int(self.BASE_WINDOW_HEIGHT * optimal_scale)
+        # Use a comfortable fixed window size (not tied to scale)
+        # This gives a good balance of screen real estate and usability
+        new_w = 520
+        new_h = 780
         
-        # Center on screen
+        # Center on screen, accounting for taskbar
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
+        taskbar_height = 56
+        top_panel = 32
+        usable_h = screen_h - taskbar_height - top_panel
+        
+        # Clamp size if needed
+        new_h = min(new_h, usable_h)
+        new_w = min(new_w, screen_w - 40)
+        
         center_x = (screen_w - new_w) // 2
-        center_y = (screen_h - new_h) // 2
+        center_y = top_panel + (usable_h - new_h) // 2
+        
+        # Update widget scaling only (not window scaling)
+        ctk.set_widget_scaling(optimal_scale)
         
         # Apply geometry
         self.geometry(f"{new_w}x{new_h}+{center_x}+{center_y}")
         self.minsize(360, 500)
+        self.update_idletasks()
         
-        # Apply CustomTkinter scaling
-        ctk.set_widget_scaling(optimal_scale)
-        ctk.set_window_scaling(optimal_scale)
-        
-        # Update all scale UI elements
+        # Update UI indicators
         if hasattr(self, 'scale_slider_var'):
             self.scale_slider_var.set(optimal_scale)
         if hasattr(self, 'scale_value_label'):
@@ -3043,7 +2897,7 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, 'header_scale_label'):
             self.header_scale_label.configure(text=f"{int(optimal_scale * 100)}%")
         
-        self.log(f"🛟 Window rescued! Scale set to {int(optimal_scale * 100)}% (optimal for your {screen_w}x{screen_h} display)")
+        self.log(f"🛟 Window rescued! Centered at {new_w}x{new_h}, scale {int(optimal_scale*100)}%")
     
     def scale_ui(self, factor: float):
         """Scale the UI by the given factor."""
@@ -3071,21 +2925,17 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚙ UI Scale: {int(optimal * 100)}% (optimal for display)")
     
     def _apply_scale(self):
-        """Apply the current scale to all UI elements."""
-        # Calculate new window size
-        new_w = int(self.BASE_WINDOW_WIDTH * self.ui_scale)
-        new_h = int(self.BASE_WINDOW_HEIGHT * self.ui_scale)
+        """Apply the current scale - scales content WITHOUT changing window size.
         
-        # Get current position to preserve it
-        current_x = self.winfo_x()
-        current_y = self.winfo_y()
-        
-        # Apply geometry - keep current position, just resize
-        self.geometry(f"{new_w}x{new_h}+{current_x}+{current_y}")
-        
-        # Update CustomTkinter widget scaling
+        This allows big readable text in a small window that scrolls.
+        """
+        # Only update widget scaling - this makes content bigger
+        # DON'T change window size - let user control that manually
+        # DON'T use set_window_scaling - that fights with manual window sizing
         ctk.set_widget_scaling(self.ui_scale)
-        ctk.set_window_scaling(self.ui_scale)
+        
+        # Force layout recalculation so scrollable frames update
+        self.update_idletasks()
         
         # Update all scale indicators
         if hasattr(self, 'header_scale_label'):
@@ -11462,6 +11312,14 @@ def main():
     # #region agent log
     _debug_log("main() called - about to create WayfinderApp", {"hypothesisId": "D"})
     # #endregion
+    
+    # === STARTUP CLEANUP: Kill any ghost overlay processes from previous runs ===
+    try:
+        subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
+                      capture_output=True, timeout=2)
+    except:
+        pass
+    
     try:
         app = WayfinderApp()
         

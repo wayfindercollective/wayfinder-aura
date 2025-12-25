@@ -680,31 +680,6 @@ class GlassmorphicOverlay(QWidget):
         self._state = OverlayState.HIDDEN
         self._target_width = 200
         self._current_width = 200.0
-    
-    @property
-    def PADDING_H(self):
-        """Scaled horizontal padding."""
-        return int(self.BASE_PADDING_H * self._scale)
-    
-    @property
-    def WAVE_WIDTH(self):
-        """Scaled wave width."""
-        return int(self.BASE_WAVE_WIDTH * self._scale)
-    
-    @property
-    def height(self):
-        """Scaled height."""
-        return int(self.BASE_HEIGHT * self._scale)
-    
-    def set_scale(self, scale: float):
-        """Update the overlay scale and resize."""
-        if abs(scale - self._scale) < 0.01:
-            return
-        self._scale = max(0.5, min(2.0, scale))
-        self._update_font()
-        self._update_size()
-        self._position_at_bottom()
-        self.update()  # Trigger repaint
         
         # Animation components
         self.wave_renderer = LiquidWaveRenderer()
@@ -736,6 +711,31 @@ class GlassmorphicOverlay(QWidget):
         
         # Position at bottom center
         self._position_at_bottom()
+    
+    @property
+    def PADDING_H(self):
+        """Scaled horizontal padding."""
+        return int(self.BASE_PADDING_H * self._scale)
+    
+    @property
+    def WAVE_WIDTH(self):
+        """Scaled wave width."""
+        return int(self.BASE_WAVE_WIDTH * self._scale)
+    
+    @property
+    def scaled_height(self):
+        """Scaled height for content area."""
+        return int(self.BASE_HEIGHT * self._scale)
+    
+    def set_scale(self, scale: float):
+        """Update the overlay scale and resize."""
+        if abs(scale - self._scale) < 0.01:
+            return
+        self._scale = max(0.5, min(2.0, scale))
+        self._update_font()
+        self._update_size()
+        self._position_at_bottom()
+        self.update()  # Trigger repaint
     
     def _setup_window(self):
         """Configure window flags for overlay behavior (Wayland-proof)."""
@@ -774,7 +774,7 @@ class GlassmorphicOverlay(QWidget):
         self._request_blur()
         
         # Set initial size (minimal margin for subtle glow)
-        self.setFixedHeight(self.height + 16)  # 8px margin each side
+        self.setFixedHeight(self.scaled_height + 16)  # 8px margin each side
         self._update_size()
         
         # Timer to periodically raise window (Wayland focus protector)
@@ -858,7 +858,7 @@ class GlassmorphicOverlay(QWidget):
             margin,
             margin,
             self._current_width,
-            self.height
+            self.scaled_height
         )
         
         # Create expanded path for glow area (minimal)
@@ -938,7 +938,7 @@ class GlassmorphicOverlay(QWidget):
                     # Initial width for "Listening..." text (approximate)
                     estimated_content_width = 200  # Will be recalculated when shown
                     estimated_width = estimated_content_width + 16  # + glow margins
-                    estimated_height = self.height + 16
+                    estimated_height = self.scaled_height + 16
                     
                     x = geom.x() + (geom.width() - estimated_width) // 2
                     y = geom.y() + geom.height() - estimated_height - TASKBAR_HEIGHT - GAP
@@ -958,17 +958,13 @@ class GlassmorphicOverlay(QWidget):
         screen_width = geom.width()
         screen_height = geom.height()
         
-        # Positioning - use 0 for both to sit at screen bottom
-        # Adjust TASKBAR_HEIGHT if overlay is hidden behind taskbar
-        TASKBAR_HEIGHT = 0
-        GAP = 0
+        # Position above taskbar (44px is standard KDE Plasma taskbar height)
+        TASKBAR_HEIGHT = 44
+        GAP = 8  # Small gap above taskbar
         
-        # Calculate target position
+        # Calculate target position - centered horizontally, above taskbar
         x = geom.x() + (screen_width - self.width()) // 2
-        # HARDCODED TEST - force to very bottom
-        y = screen_height - 50  # Should be very close to bottom
-        
-        print(f"DEBUG: screen={screen_width}x{screen_height}, widget_h={self.height()}, FORCING y={y}", file=sys.stderr, flush=True)
+        y = geom.y() + screen_height - self.height() - TASKBAR_HEIGHT - GAP
         
         # Try multiple methods to set position (Wayland workarounds)
         # Method 1: setGeometry with explicit size
@@ -1009,8 +1005,15 @@ class GlassmorphicOverlay(QWidget):
     def _calculate_target_width(self, text: str) -> int:
         """Calculate required width for text and wave."""
         from PyQt6.QtGui import QFontMetrics
+        
+        if not text:
+            # READY state: compact pill with just centered wave
+            # Minimal padding around the wave
+            return self.WAVE_WIDTH + self.PADDING_H
+        
+        # LISTENING/PROCESSING: full width with text + wave
         fm = QFontMetrics(self._font)
-        text_width = fm.horizontalAdvance(text) if text else 0
+        text_width = fm.horizontalAdvance(text)
         return self.PADDING_H * 2 + text_width + 20 + self.WAVE_WIDTH
     
     def set_state(self, state: OverlayState, animate: bool = True):
@@ -1086,7 +1089,7 @@ class GlassmorphicOverlay(QWidget):
         label = STATE_LABELS.get(self._state, "")
         content_width = self._calculate_target_width(label)
         final_width = content_width + 16  # content + glow margins
-        final_height = self.height + 16
+        final_height = self.scaled_height + 16
         
         # Stop any running width animation and set final value immediately
         if self._width_animator._animation:
@@ -1159,7 +1162,7 @@ class GlassmorphicOverlay(QWidget):
             margin,
             margin,
             self._current_width,
-            self.height
+            self.scaled_height
         )
         
         # Create squircle path for main shape
@@ -1182,16 +1185,30 @@ class GlassmorphicOverlay(QWidget):
         painter.setClipPath(squircle)
         
         # Draw wave visualization
-        wave_rect = QRectF(
-            bar_rect.right() - self.WAVE_WIDTH - self.PADDING_H + 10,
-            bar_rect.top() + 4,
-            self.WAVE_WIDTH - 10,
-            bar_rect.height() - 8
-        )
+        label = STATE_LABELS.get(self._state, "")
+        if label:
+            # LISTENING/PROCESSING: wave on right side, text on left
+            wave_rect = QRectF(
+                bar_rect.right() - self.WAVE_WIDTH - self.PADDING_H + 10,
+                bar_rect.top() + 4,
+                self.WAVE_WIDTH - 10,
+                bar_rect.height() - 8
+            )
+        else:
+            # READY state: center the wave in the compact pill
+            wave_width = self.WAVE_WIDTH - 10
+            wave_x = bar_rect.left() + (bar_rect.width() - wave_width) / 2
+            wave_rect = QRectF(
+                wave_x,
+                bar_rect.top() + 4,
+                wave_width,
+                bar_rect.height() - 8
+            )
         self.wave_renderer.render(painter, wave_rect, self._wave_color.color)
         
-        # Draw text
-        self._draw_text(painter, bar_rect)
+        # Draw text (only if there's text to draw)
+        if label:
+            self._draw_text(painter, bar_rect)
         
         painter.end()
     
@@ -1322,7 +1339,7 @@ def run_overlay():
             label = STATE_LABELS.get(OverlayState.READY, "Ready")
             content_width = overlay._calculate_target_width(label)
             final_width = content_width + 16
-            final_height = overlay.BASE_HEIGHT + 16
+            final_height = overlay.scaled_height + 16
             
             x = (geom.width() - final_width) // 2
             y = geom.height() - final_height - TASKBAR_HEIGHT
