@@ -4649,10 +4649,10 @@ class WayfinderApp(ctk.CTk):
         threading.Thread(target=download_thread, daemon=True).start()
     
     def open_ollama_model_settings(self):
-        """Open dialog to select or download Ollama models."""
+        """Open dialog to select or download Ollama models with direct download support."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Ollama Models")
-        dialog.geometry("500x600")
+        dialog.geometry("550x650")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
@@ -4666,100 +4666,210 @@ class WayfinderApp(ctk.CTk):
             text="Ollama Models",
             font=(self.font_header[0], 20, "bold"),
             text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 16))
+        ).pack(anchor="w", pady=(0, 8))
         
         ctk.CTkLabel(
             inner,
-            text="Select a model for post-processing. Models are managed by Ollama.",
+            text="Select a model or download a recommended one. Downloads happen automatically.",
             font=(self.font_body[0], 11),
             text_color=COLORS["text_secondary"],
         ).pack(anchor="w", pady=(0, 16))
         
         # Check if Ollama is available
+        base_url = self.config.get("ollama_base_url", "http://localhost:11434")
+        ollama_available = False
+        available_models = []
+        
         try:
             import requests
-            base_url = self.config.get("ollama_base_url", "http://localhost:11434")
             response = requests.get(f"{base_url}/api/tags", timeout=2)
             ollama_available = response.status_code == 200
             
             if ollama_available:
                 models_data = response.json().get("models", [])
                 available_models = [m.get("name", "") for m in models_data if m.get("name")]
-            else:
-                available_models = []
-        except:
+        except Exception as e:
             ollama_available = False
-            available_models = []
         
         if not ollama_available:
-            # Error message
+            # Error message with install instructions
             error_frame = ctk.CTkFrame(inner, fg_color="#2A1A1A", corner_radius=RADIUS["sm"])
             error_frame.pack(fill="x", pady=(0, 16))
             ctk.CTkLabel(
                 error_frame,
                 text="⚠️ Ollama is not running",
-                font=(self.font_body[0], self.font_sizes["small"]),
+                font=(self.font_body[0], self.font_sizes["small"], "bold"),
                 text_color="#CF7B7B",
-            ).pack(padx=12, pady=8)
+            ).pack(padx=12, pady=(8, 4))
             ctk.CTkLabel(
                 error_frame,
-                text="Start Ollama: ollama serve",
-                font=(self.font_body[0], self.font_sizes["small"]),
+                text="Install Ollama: curl -fsSL https://ollama.com/install.sh | sh",
+                font=(self.font_mono[0], self.font_sizes["caption"]),
+                text_color=COLORS["text_secondary"],
+            ).pack(padx=12, pady=(0, 4))
+            ctk.CTkLabel(
+                error_frame,
+                text="Then start it: ollama serve",
+                font=(self.font_mono[0], self.font_sizes["caption"]),
                 text_color=COLORS["text_secondary"],
             ).pack(padx=12, pady=(0, 8))
         
-        # Scrollable list of models
+        # Recommended models section
+        recommended_label = ctk.CTkLabel(
+            inner,
+            text="RECOMMENDED MODELS",
+            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+            text_color=COLORS["text_muted"],
+        )
+        recommended_label.pack(anchor="w", pady=(0, 8))
+        
+        # Scrollable list
         scroll = ctk.CTkScrollableFrame(
             inner,
             fg_color=COLORS["bg_surface"],
             scrollbar_button_color=COLORS["bg_hover"],
             scrollbar_button_hover_color=COLORS["accent_dim"],
-            height=300,
+            height=350,
         )
         scroll.pack(fill="both", expand=True, pady=(0, 16))
         
         current_model = self.config.get("ollama_model", "phi3:mini")
-        self.ollama_model_var = ctk.StringVar(value=current_model)
         
-        if available_models:
-            for model_name in sorted(available_models):
+        # Recommended models with download buttons
+        recommended_models = [
+            {"name": "phi3:mini", "desc": "Fast, small (3.8GB)", "recommended": True},
+            {"name": "qwen2.5:1.5b", "desc": "Good balance (1.5B params)", "recommended": True},
+            {"name": "llama3.2:1b", "desc": "Meta's latest (1B params)", "recommended": False},
+            {"name": "smollm2:360m", "desc": "Ultra-small, fastest", "recommended": False},
+        ]
+        
+        for model_info in recommended_models:
+            model_name = model_info["name"]
+            is_installed = model_name in available_models
+            is_selected = model_name == current_model and is_installed
+            
+            frame = ctk.CTkFrame(
+                scroll,
+                fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_surface"],
+                corner_radius=RADIUS["sm"],
+                border_width=1 if is_selected else 0,
+                border_color=COLORS["accent"] if is_selected else "transparent",
+            )
+            frame.pack(fill="x", padx=4, pady=4)
+            
+            # Model info
+            info_frame = ctk.CTkFrame(frame, fg_color="transparent")
+            info_frame.pack(fill="x", padx=12, pady=10)
+            
+            name_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
+            name_frame.pack(fill="x")
+            
+            name_label = ctk.CTkLabel(
+                name_frame,
+                text=model_name + (" ⭐" if model_info.get("recommended") else ""),
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["text_bright"],
+            )
+            name_label.pack(side="left")
+            
+            if is_selected:
+                selected_label = ctk.CTkLabel(
+                    name_frame,
+                    text="✓ Selected",
+                    font=(self.font_body[0], self.font_sizes["caption"]),
+                    text_color=COLORS["accent"],
+                )
+                selected_label.pack(side="right")
+            
+            desc_label = ctk.CTkLabel(
+                info_frame,
+                text=model_info["desc"],
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+            )
+            desc_label.pack(anchor="w", pady=(4, 0))
+            
+            # Action button
+            actions_frame = ctk.CTkFrame(frame, fg_color="transparent")
+            actions_frame.pack(fill="x", padx=12, pady=(0, 10))
+            
+            if is_installed:
+                if not is_selected:
+                    select_btn = ctk.CTkButton(
+                        actions_frame,
+                        text="Select",
+                        font=(self.font_body[0], self.font_sizes["small"]),
+                        fg_color=COLORS["accent"],
+                        hover_color=COLORS["accent_hover"],
+                        text_color=COLORS["text_bright"],
+                        command=lambda m=model_name: self._select_ollama_model(m, dialog),
+                    )
+                    select_btn.pack(side="left")
+            else:
+                # Download button - works even if Ollama isn't running (will show error)
+                download_btn = ctk.CTkButton(
+                    actions_frame,
+                    text="⬇️ Download",
+                    font=(self.font_body[0], self.font_sizes["small"]),
+                    fg_color=COLORS["accent"],
+                    hover_color=COLORS["accent_hover"],
+                    text_color=COLORS["text_bright"],
+                    command=lambda m=model_name: self._download_ollama_model(m, dialog),
+                )
+                download_btn.pack(side="left")
+        
+        # Installed models section (if any)
+        if available_models and len(available_models) > len([m["name"] for m in recommended_models if m["name"] in available_models]):
+            installed_label = ctk.CTkLabel(
+                inner,
+                text="OTHER INSTALLED MODELS",
+                font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+                text_color=COLORS["text_muted"],
+            )
+            installed_label.pack(anchor="w", pady=(8, 8))
+            
+            other_scroll = ctk.CTkScrollableFrame(
+                inner,
+                fg_color=COLORS["bg_surface"],
+                scrollbar_button_color=COLORS["bg_hover"],
+                scrollbar_button_hover_color=COLORS["accent_dim"],
+                height=150,
+            )
+            other_scroll.pack(fill="both", expand=True, pady=(0, 16))
+            
+            other_models = [m for m in available_models if m not in [rm["name"] for rm in recommended_models]]
+            for model_name in sorted(other_models):
+                is_selected = model_name == current_model
                 frame = ctk.CTkFrame(
-                    scroll,
-                    fg_color=COLORS["bg_card"] if model_name == current_model else "transparent",
+                    other_scroll,
+                    fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_surface"],
                     corner_radius=RADIUS["sm"],
                 )
                 frame.pack(fill="x", padx=4, pady=2)
                 
                 btn = ctk.CTkButton(
                     frame,
-                    text=model_name,
+                    text=model_name + (" ✓ Selected" if is_selected else ""),
                     font=(self.font_body[0], self.font_sizes["body"]),
-                    fg_color="transparent" if model_name != current_model else COLORS["bg_hover"],
+                    fg_color="transparent" if not is_selected else COLORS["bg_hover"],
                     hover_color=COLORS["bg_hover"],
-                    text_color=COLORS["text_bright"] if model_name == current_model else COLORS["text_primary"],
+                    text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
                     anchor="w",
                     command=lambda m=model_name: self._select_ollama_model(m, dialog),
                 )
                 btn.pack(fill="x", padx=8, pady=6)
-        else:
-            ctk.CTkLabel(
-                scroll,
-                text="No models found. Pull a model:\nollama pull phi3:mini",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_secondary"],
-            ).pack(pady=20)
         
-        # Download button
-        download_btn = ctk.CTkButton(
+        # Refresh button
+        refresh_btn = ctk.CTkButton(
             inner,
-            text="Pull Model (ollama pull <name>)",
+            text="🔄 Refresh List",
             font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_primary"],
-            command=lambda: self._show_ollama_pull_help(dialog),
+            command=lambda: (dialog.destroy(), self.open_ollama_model_settings()),
         )
-        download_btn.pack(fill="x", pady=(0, 8))
+        refresh_btn.pack(fill="x", pady=(0, 8))
         
         # Close button
         close_btn = ctk.CTkButton(
@@ -4783,51 +4893,150 @@ class WayfinderApp(ctk.CTk):
         current_mode = self.config.get("processing_mode", "local")
         self._build_mode_settings(current_mode)
     
-    def _show_ollama_pull_help(self, parent):
-        """Show help for pulling Ollama models."""
-        help_dialog = ctk.CTkToplevel(parent)
-        help_dialog.title("Pull Ollama Model")
-        help_dialog.geometry("450x300")
-        help_dialog.configure(fg_color=COLORS["bg_base"])
-        help_dialog.transient(parent)
+    def _download_ollama_model(self, model_name: str, parent_dialog):
+        """Download an Ollama model using the API."""
+        base_url = self.config.get("ollama_base_url", "http://localhost:11434")
         
-        inner = ctk.CTkFrame(help_dialog, fg_color="transparent")
+        # Create progress dialog
+        progress_dialog = ctk.CTkToplevel(parent_dialog)
+        progress_dialog.title(f"Downloading {model_name}")
+        progress_dialog.geometry("450x250")
+        progress_dialog.configure(fg_color=COLORS["bg_base"])
+        progress_dialog.transient(parent_dialog)
+        progress_dialog.after(100, progress_dialog.lift)
+        
+        inner = ctk.CTkFrame(progress_dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
         
         ctk.CTkLabel(
             inner,
-            text="Pull Ollama Models",
+            text=f"Downloading {model_name}",
             font=(self.font_header[0], 18, "bold"),
             text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 16))
-        
-        help_text = """To download an Ollama model, run in terminal:
-
-ollama pull phi3:mini
-ollama pull qwen2.5:1.5b
-ollama pull llama3.2:1b
-
-Recommended models:
-• phi3:mini - Fast, small (3.8GB)
-• qwen2.5:1.5b - Good balance (1.5B params)
-• llama3.2:1b - Meta's latest (1B params)
-
-After pulling, refresh this dialog to see the model."""
+        ).pack(pady=(0, 12))
         
         ctk.CTkLabel(
             inner,
-            text=help_text,
-            font=(self.font_mono[0], self.font_sizes["small"]),
+            text="This may take a few minutes depending on model size...",
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
-            justify="left",
-            anchor="w",
-        ).pack(anchor="w", fill="x", pady=(0, 16))
+        ).pack(pady=(0, 16))
         
-        ctk.CTkButton(
+        progress_bar = ctk.CTkProgressBar(inner)
+        progress_bar.pack(fill="x", pady=(0, 12))
+        progress_bar.set(0)
+        
+        status_label = ctk.CTkLabel(
             inner,
-            text="Close",
-            command=help_dialog.destroy,
-        ).pack(fill="x")
+            text="Connecting to Ollama...",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+        )
+        status_label.pack()
+        
+        cancel_btn = ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_primary"],
+            command=lambda: setattr(self, '_cancel_ollama_download', True),
+        )
+        cancel_btn.pack(pady=(16, 0))
+        
+        self._cancel_ollama_download = False
+        
+        def download_thread():
+            try:
+                import requests
+                
+                # Check if Ollama is running
+                try:
+                    test_response = requests.get(f"{base_url}/api/tags", timeout=2)
+                    if test_response.status_code != 200:
+                        raise Exception("Ollama not running")
+                except:
+                    self.after(0, lambda: status_label.configure(
+                        text="Error: Ollama is not running. Start it with: ollama serve",
+                        text_color="#CF7B7B"
+                    ))
+                    self.after(0, lambda: cancel_btn.configure(text="Close"))
+                    return
+                
+                # Start pull request
+                self.after(0, lambda: status_label.configure(text="Starting download..."))
+                
+                pull_response = requests.post(
+                    f"{base_url}/api/pull",
+                    json={"name": model_name},
+                    stream=True,
+                    timeout=300,
+                )
+                
+                if pull_response.status_code != 200:
+                    raise Exception(f"API error: {pull_response.status_code}")
+                
+                # Parse streaming response
+                total_size = None
+                downloaded = 0
+                
+                for line in pull_response.iter_lines():
+                    if getattr(self, '_cancel_ollama_download', False):
+                        self.after(0, progress_dialog.destroy)
+                        return
+                    
+                    if not line:
+                        continue
+                    
+                    try:
+                        import json
+                        data = json.loads(line)
+                        
+                        # Update status
+                        if "status" in data:
+                            status_text = data["status"]
+                            self.after(0, lambda s=status_text: status_label.configure(text=s))
+                        
+                        # Update progress if available
+                        if "completed" in data and "total" in data:
+                            completed = data.get("completed", 0)
+                            total = data.get("total", 1)
+                            if total > 0:
+                                progress = completed / total
+                                self.after(0, lambda p=progress: progress_bar.set(p))
+                        
+                        # Check if done
+                        if data.get("status") == "success" or (data.get("completed") and data.get("total") and data.get("completed") >= data.get("total")):
+                            self.after(0, lambda: progress_bar.set(1.0))
+                            self.after(0, lambda: status_label.configure(text="✓ Download complete!"))
+                            self.after(0, lambda: self.log(f"✓ Downloaded Ollama model: {model_name}"))
+                            self.after(0, lambda: cancel_btn.configure(text="Close"))
+                            # Auto-close after 2 seconds
+                            self.after(2000, progress_dialog.destroy)
+                            # Refresh parent dialog
+                            self.after(2100, lambda: (parent_dialog.destroy(), self.open_ollama_model_settings()))
+                            return
+                            
+                    except json.JSONDecodeError:
+                        continue
+                
+                # If we get here, assume success
+                self.after(0, lambda: progress_bar.set(1.0))
+                self.after(0, lambda: status_label.configure(text="✓ Download complete!"))
+                self.after(0, lambda: cancel_btn.configure(text="Close"))
+                self.after(2000, progress_dialog.destroy)
+                self.after(2100, lambda: (parent_dialog.destroy(), self.open_ollama_model_settings()))
+                
+            except Exception as e:
+                self.after(0, lambda: status_label.configure(
+                    text=f"Error: {str(e)}",
+                    text_color="#CF7B7B"
+                ))
+                self.after(0, lambda: cancel_btn.configure(text="Close"))
+                self.after(0, lambda: self.log(f"⚠️ Failed to download {model_name}: {e}"))
+        
+        threading.Thread(target=download_thread, daemon=True).start()
     
     def _get_postproc_config_display(self) -> str:
         """Get display text for post-processing configuration button."""
