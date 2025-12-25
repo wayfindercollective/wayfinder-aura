@@ -178,7 +178,7 @@ DEFAULT_CONFIG = {
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": False,  # Enable LLM post-processing
-    "post_processing_backend": "llama_cpp",  # llama_cpp | anthropic
+    "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai
     "post_processing_template": "clean",  # clean | email | notes | code_comment | custom
     "post_processing_custom_prompt": "",  # Custom prompt for 'custom' template
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
@@ -188,6 +188,9 @@ DEFAULT_CONFIG = {
     "llama_cpp_n_ctx": 2048,  # Context window size
     "llama_cpp_n_threads": 4,  # CPU threads
     "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
+    # Ollama post-processing settings
+    "ollama_base_url": "http://localhost:11434",  # Ollama API URL
+    "ollama_model": "phi3:mini",  # Ollama model name (e.g., phi3:mini, qwen2.5:1.5b)
     # Cloud post-processing settings (API keys read from environment variables only)
     # Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment
     "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
@@ -3764,17 +3767,27 @@ class WayfinderApp(ctk.CTk):
         if postproc_enabled:
             postproc_backend = self.config.get("post_processing_backend", "llama_cpp")
             self.postproc_backend_var = ctk.StringVar(value=postproc_backend)
-            backend_options = ["llama_cpp"]
-            # Add cloud options if available
+            
+            # Get all available backends
             backends = get_available_backends()
+            backend_options = []
+            backend_display_map = {}
+            
+            # Build backend options list with display names
             for b in backends:
-                if b["id"] in ["anthropic", "openai"] and b["available"]:
-                    backend_options.append(b["id"])
+                backend_id = b["id"]
+                backend_options.append(backend_id)
+                backend_display_map[backend_id] = b["name"]
+            
+            # If no backends available, at least show llama_cpp
+            if not backend_options:
+                backend_options = ["llama_cpp"]
+                backend_display_map["llama_cpp"] = "llama.cpp (Local)"
             
             self.postproc_backend_dropdown = self.create_dropdown_row(
                 parent, "Post-Processing Backend", backend_options,
                 self.postproc_backend_var, self.on_postproc_backend_changed,
-                tooltip="llama.cpp = local, Anthropic/OpenAI = cloud (requires API key)", width=160,
+                tooltip="llama.cpp/ollama = local, Anthropic/OpenAI = cloud (requires API key)", width=160,
             )
             
             # Model selection for llama.cpp
@@ -3785,6 +3798,15 @@ class WayfinderApp(ctk.CTk):
                     parent, "LLM Model", model_display,
                     self.open_postproc_model_settings,
                     tooltip="Select GGUF model for post-processing (e.g., Phi-3-mini, Qwen2.5-1.5B)",
+                )
+            
+            # Model selection for Ollama
+            elif postproc_backend == "ollama":
+                ollama_model = self.config.get("ollama_model", "phi3:mini")
+                self.postproc_model_btn = self.create_setting_row(
+                    parent, "Ollama Model", ollama_model,
+                    self.open_ollama_model_settings,
+                    tooltip="Select Ollama model (e.g., phi3:mini, qwen2.5:1.5b)",
                 )
             
             # Template selector
@@ -4271,6 +4293,7 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
         display_map = {
             "llama_cpp": "Local (llama.cpp)",
+            "ollama": "Local (Ollama)",
             "anthropic": "Cloud (Anthropic Claude)",
             "openai": "Cloud (OpenAI GPT)",
         }
@@ -4331,6 +4354,187 @@ class WayfinderApp(ctk.CTk):
             current_mode = self.config.get("processing_mode", "local")
             self._build_mode_settings(current_mode)
     
+    def open_ollama_model_settings(self):
+        """Open dialog to select or download Ollama models."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Ollama Models")
+        dialog.geometry("500x600")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        # Title
+        ctk.CTkLabel(
+            inner,
+            text="Ollama Models",
+            font=(self.font_header[0], 20, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 16))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Select a model for post-processing. Models are managed by Ollama.",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w", pady=(0, 16))
+        
+        # Check if Ollama is available
+        try:
+            import requests
+            base_url = self.config.get("ollama_base_url", "http://localhost:11434")
+            response = requests.get(f"{base_url}/api/tags", timeout=2)
+            ollama_available = response.status_code == 200
+            
+            if ollama_available:
+                models_data = response.json().get("models", [])
+                available_models = [m.get("name", "") for m in models_data if m.get("name")]
+            else:
+                available_models = []
+        except:
+            ollama_available = False
+            available_models = []
+        
+        if not ollama_available:
+            # Error message
+            error_frame = ctk.CTkFrame(inner, fg_color="#2A1A1A", corner_radius=RADIUS["sm"])
+            error_frame.pack(fill="x", pady=(0, 16))
+            ctk.CTkLabel(
+                error_frame,
+                text="⚠️ Ollama is not running",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color="#CF7B7B",
+            ).pack(padx=12, pady=8)
+            ctk.CTkLabel(
+                error_frame,
+                text="Start Ollama: ollama serve",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+            ).pack(padx=12, pady=(0, 8))
+        
+        # Scrollable list of models
+        scroll = ctk.CTkScrollableFrame(
+            inner,
+            fg_color=COLORS["bg_surface"],
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+            height=300,
+        )
+        scroll.pack(fill="both", expand=True, pady=(0, 16))
+        
+        current_model = self.config.get("ollama_model", "phi3:mini")
+        self.ollama_model_var = ctk.StringVar(value=current_model)
+        
+        if available_models:
+            for model_name in sorted(available_models):
+                frame = ctk.CTkFrame(
+                    scroll,
+                    fg_color=COLORS["bg_card"] if model_name == current_model else "transparent",
+                    corner_radius=RADIUS["sm"],
+                )
+                frame.pack(fill="x", padx=4, pady=2)
+                
+                btn = ctk.CTkButton(
+                    frame,
+                    text=model_name,
+                    font=(self.font_body[0], self.font_sizes["body"]),
+                    fg_color="transparent" if model_name != current_model else COLORS["bg_hover"],
+                    hover_color=COLORS["bg_hover"],
+                    text_color=COLORS["text_bright"] if model_name == current_model else COLORS["text_primary"],
+                    anchor="w",
+                    command=lambda m=model_name: self._select_ollama_model(m, dialog),
+                )
+                btn.pack(fill="x", padx=8, pady=6)
+        else:
+            ctk.CTkLabel(
+                scroll,
+                text="No models found. Pull a model:\nollama pull phi3:mini",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+            ).pack(pady=20)
+        
+        # Download button
+        download_btn = ctk.CTkButton(
+            inner,
+            text="Pull Model (ollama pull <name>)",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_primary"],
+            command=lambda: self._show_ollama_pull_help(dialog),
+        )
+        download_btn.pack(fill="x", pady=(0, 8))
+        
+        # Close button
+        close_btn = ctk.CTkButton(
+            inner,
+            text="Close",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"],
+            command=dialog.destroy,
+        )
+        close_btn.pack(fill="x")
+    
+    def _select_ollama_model(self, model_name: str, dialog):
+        """Select an Ollama model."""
+        self.config["ollama_model"] = model_name
+        save_config(self.config)
+        self.log(f"⚙ Ollama model: {model_name}")
+        dialog.destroy()
+        # Rebuild settings to refresh UI
+        current_mode = self.config.get("processing_mode", "local")
+        self._build_mode_settings(current_mode)
+    
+    def _show_ollama_pull_help(self, parent):
+        """Show help for pulling Ollama models."""
+        help_dialog = ctk.CTkToplevel(parent)
+        help_dialog.title("Pull Ollama Model")
+        help_dialog.geometry("450x300")
+        help_dialog.configure(fg_color=COLORS["bg_base"])
+        help_dialog.transient(parent)
+        
+        inner = ctk.CTkFrame(help_dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Pull Ollama Models",
+            font=(self.font_header[0], 18, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 16))
+        
+        help_text = """To download an Ollama model, run in terminal:
+
+ollama pull phi3:mini
+ollama pull qwen2.5:1.5b
+ollama pull llama3.2:1b
+
+Recommended models:
+• phi3:mini - Fast, small (3.8GB)
+• qwen2.5:1.5b - Good balance (1.5B params)
+• llama3.2:1b - Meta's latest (1B params)
+
+After pulling, refresh this dialog to see the model."""
+        
+        ctk.CTkLabel(
+            inner,
+            text=help_text,
+            font=(self.font_mono[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+            anchor="w",
+        ).pack(anchor="w", fill="x", pady=(0, 16))
+        
+        ctk.CTkButton(
+            inner,
+            text="Close",
+            command=help_dialog.destroy,
+        ).pack(fill="x")
+    
     def _get_postproc_config_display(self) -> str:
         """Get display text for post-processing configuration button."""
         import os
@@ -4343,6 +4547,9 @@ class WayfinderApp(ctk.CTk):
                 name = Path(model_path).name
                 return name[:25] + "..." if len(name) > 25 else name
             return "No model selected"
+        elif backend == "ollama":
+            model_name = self.config.get("ollama_model", "phi3:mini")
+            return model_name[:25] + "..." if len(model_name) > 25 else model_name
         elif backend == "anthropic":
             # Check config first, then environment variable
             api_key = self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")

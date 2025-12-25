@@ -452,6 +452,132 @@ class OpenAIBackend(PostProcessorBackend):
 
 
 # =============================================================================
+# Ollama Backend (Local)
+# =============================================================================
+
+class OllamaBackend(PostProcessorBackend):
+    """
+    Local LLM backend using Ollama API.
+    Requires Ollama to be installed and running locally.
+    Recommended models: phi3:mini, qwen2.5:1.5b, llama3.2:1b
+    """
+    
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11434",
+        model: str = "phi3:mini",
+        max_tokens: int = 1024,
+        temperature: float = 0.1,
+    ):
+        self.base_url = base_url.rstrip('/')
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self._client = None
+    
+    def get_name(self) -> str:
+        return "Ollama (Local)"
+    
+    def is_available(self) -> bool:
+        """Check if Ollama is installed and running."""
+        try:
+            import requests
+            response = requests.get(f"{self.base_url}/api/tags", timeout=2)
+            return response.status_code == 200
+        except:
+            return False
+    
+    def _get_client(self):
+        """Get or create the requests session."""
+        if self._client is not None:
+            return self._client
+        
+        try:
+            import requests
+            self._client = requests.Session()
+            return self._client
+        except ImportError:
+            raise PostProcessingError(
+                "requests package is not installed. "
+                "Install with: pip install requests"
+            )
+    
+    def process(self, text: str, prompt_template: str) -> str:
+        """
+        Process text using Ollama API.
+        
+        Args:
+            text: The raw transcription text
+            prompt_template: The prompt template to use
+            
+        Returns:
+            Cleaned/formatted text
+        """
+        if not self.is_available():
+            raise PostProcessingError(
+                "Ollama is not running. "
+                "Please start Ollama service: ollama serve"
+            )
+        
+        if not text or not text.strip():
+            return text
+        
+        try:
+            import requests
+            
+            # Format the prompt
+            full_prompt = format_prompt(prompt_template, text)
+            
+            # Call Ollama API
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": full_prompt,
+                    "stream": False,
+                    "options": {
+                        "num_predict": self.max_tokens,
+                        "temperature": self.temperature,
+                    },
+                },
+                timeout=30,
+            )
+            
+            if response.status_code != 200:
+                raise PostProcessingError(f"Ollama API error: {response.status_code}")
+            
+            result = response.json().get("response", "").strip()
+            
+            # Clean up any artifacts
+            result = self._clean_response(result)
+            
+            return result if result else text
+            
+        except requests.exceptions.RequestException as e:
+            raise PostProcessingError(f"Ollama API call failed: {e}")
+        except Exception as e:
+            raise PostProcessingError(f"Ollama processing failed: {e}")
+    
+    def _clean_response(self, text: str) -> str:
+        """Clean up LLM response artifacts."""
+        # Remove common artifacts
+        lines = text.split("\n")
+        cleaned_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            # Skip empty lines at start
+            if not cleaned_lines and not line:
+                continue
+            # Skip lines that look like prompts/instructions
+            if line.lower().startswith(("transcription:", "cleaned text:", "result:", "formatted")):
+                continue
+            cleaned_lines.append(line)
+        
+        return "\n".join(cleaned_lines).strip()
+
+
+# =============================================================================
 # Factory Functions
 # =============================================================================
 
@@ -467,7 +593,14 @@ def get_backend(config: dict) -> PostProcessorBackend:
     """
     backend_type = config.get("post_processing_backend", "llama_cpp")
     
-    if backend_type == "anthropic":
+    if backend_type == "ollama":
+        return OllamaBackend(
+            base_url=config.get("ollama_base_url", "http://localhost:11434"),
+            model=config.get("ollama_model", "phi3:mini"),
+            max_tokens=config.get("post_processing_max_tokens", 1024),
+            temperature=config.get("post_processing_temperature", 0.1),
+        )
+    elif backend_type == "anthropic":
         # API key is read from environment variable only (secure)
         return AnthropicBackend(
             api_key="",  # Will be read from ANTHROPIC_API_KEY env var
@@ -600,6 +733,18 @@ def get_available_backends() -> list:
         "available": openai_available,
         "requires_api_key": True,
         "description": "Cloud processing using GPT-4o-mini. Fast and reliable.",
+    })
+    
+    # Check Ollama
+    ollama_backend = OllamaBackend()
+    ollama_available = ollama_backend.is_available()
+    
+    backends.append({
+        "id": "ollama",
+        "name": "Ollama (Local)",
+        "available": ollama_available,
+        "requires_model": True,
+        "description": "Local inference using Ollama. Recommended: phi3:mini, qwen2.5:1.5b",
     })
     
     return backends
