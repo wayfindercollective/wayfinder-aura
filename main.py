@@ -143,6 +143,8 @@ DEFAULT_CONFIG = {
     "start_minimized": False,
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
+    # Processing mode: local (100% private), hybrid (local transcription + cloud post-processing), remote (cloud transcription)
+    "processing_mode": "local",  # local | hybrid | remote
     # Accuracy enhancement settings
     "beam_size": 5,  # Beam search size (1-5 recommended, higher is slow)
     "best_of": 3,  # Number of best candidates to consider
@@ -502,6 +504,111 @@ class ToolTip:
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
+
+
+class ModeSelector(ctk.CTkFrame):
+    """
+    Segmented control widget for selecting processing mode.
+    Three mutually exclusive options: Local | Hybrid | Remote
+    """
+    
+    def __init__(
+        self,
+        parent,
+        values: list[str] = None,
+        current_value: str = "local",
+        command=None,
+        **kwargs
+    ):
+        super().__init__(parent, fg_color="transparent", **kwargs)
+        
+        self.values = values or ["local", "hybrid", "remote"]
+        self.current_value = current_value
+        self.command = command
+        self.buttons: dict[str, ctk.CTkButton] = {}
+        
+        # Display labels and icons for each mode
+        self.display_info = {
+            "local": {"label": "Local", "icon": "🔒", "desc": "100% Private"},
+            "hybrid": {"label": "Hybrid", "icon": "🔗", "desc": "Local + Cloud AI"},
+            "remote": {"label": "Remote", "icon": "☁️", "desc": "Cloud Processing"},
+        }
+        
+        # Create container with pill background
+        self.container = ctk.CTkFrame(
+            self,
+            fg_color=COLORS["bg_input"],
+            corner_radius=RADIUS["md"],
+            height=44,
+        )
+        self.container.pack(fill="x", padx=0, pady=0)
+        self.container.pack_propagate(False)
+        
+        # Inner frame for buttons
+        inner = ctk.CTkFrame(self.container, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=3, pady=3)
+        
+        # Configure columns
+        for i in range(len(self.values)):
+            inner.grid_columnconfigure(i, weight=1)
+        inner.grid_rowconfigure(0, weight=1)
+        
+        # Create buttons
+        for i, value in enumerate(self.values):
+            info = self.display_info.get(value, {"label": value.title(), "icon": "", "desc": ""})
+            text = f"{info['icon']}  {info['label']}"
+            
+            is_selected = value == self.current_value
+            btn = ctk.CTkButton(
+                inner,
+                text=text,
+                font=("Inter", 13, "bold" if is_selected else "normal"),
+                fg_color=COLORS["bg_card"] if is_selected else "transparent",
+                hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
+                corner_radius=RADIUS["sm"],
+                height=36,
+                command=lambda v=value: self._on_select(v),
+            )
+            btn.grid(row=0, column=i, sticky="nsew", padx=1)
+            self.buttons[value] = btn
+    
+    def _on_select(self, value: str) -> None:
+        """Handle button selection."""
+        if value == self.current_value:
+            return
+        
+        old_value = self.current_value
+        self.current_value = value
+        
+        # Update all button styles
+        for v, btn in self.buttons.items():
+            is_selected = v == value
+            btn.configure(
+                fg_color=COLORS["bg_card"] if is_selected else "transparent",
+                text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
+                font=("Inter", 13, "bold" if is_selected else "normal"),
+            )
+        
+        # Call callback
+        if self.command:
+            self.command(value)
+    
+    def get(self) -> str:
+        """Get current selected value."""
+        return self.current_value
+    
+    def set(self, value: str) -> None:
+        """Set current value without triggering callback."""
+        if value in self.values and value != self.current_value:
+            self.current_value = value
+            for v, btn in self.buttons.items():
+                is_selected = v == value
+                btn.configure(
+                    fg_color=COLORS["bg_card"] if is_selected else "transparent",
+                    text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
+                    font=("Inter", 13, "bold" if is_selected else "normal"),
+                )
 
 
 class SmoothScrollableFrame(ctk.CTkScrollableFrame):
@@ -3428,7 +3535,7 @@ class WayfinderApp(ctk.CTk):
         return content
     
     def _create_settings_tab(self) -> None:
-        """Create the Settings tab with Bento-style grouped tiles."""
+        """Create the Settings tab with Local/Hybrid/Remote processing modes."""
         frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
         self.tab_frames["settings"] = frame
         
@@ -3453,7 +3560,7 @@ class WayfinderApp(ctk.CTk):
         audio_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
             audio_header, text="🎤   A U D I O",
-            font=(self.font_header[0], self.font_sizes["caption"]),  # Medium weight
+            font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
         
@@ -3467,94 +3574,43 @@ class WayfinderApp(ctk.CTk):
             self._on_microphone_selected, tooltip=SETTING_TOOLTIPS["microphone"], width=180,
         )
         
-        # === BENTO TILE 2: Intel ===
-        intel_tile = ctk.CTkFrame(
+        # === BENTO TILE 2: Processing Mode ===
+        mode_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"], border_width=1,
             border_color=COLORS["border_rim"],
         )
-        intel_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        mode_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         
-        intel_header = ctk.CTkFrame(intel_tile, fg_color="transparent")
-        intel_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
+        mode_header = ctk.CTkFrame(mode_tile, fg_color="transparent")
+        mode_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            intel_header, text="🧠   I N T E L",
+            mode_header, text="🧠   P R O C E S S I N G   M O D E",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
         
-        intel_content = ctk.CTkFrame(intel_tile, fg_color="transparent")
-        intel_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
+        # Mode selector (Local | Hybrid | Remote)
+        mode_selector_frame = ctk.CTkFrame(mode_tile, fg_color="transparent")
+        mode_selector_frame.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, 12))
         
-        model_display = self.get_model_display()
-        self.model_btn = self.create_setting_row(
-            intel_content, "Whisper Model", model_display,
-            self.open_model_settings, tooltip=get_dynamic_tooltip("whisper_model", self.config),
+        current_mode = self.config.get("processing_mode", "local")
+        self.mode_selector = ModeSelector(
+            mode_selector_frame,
+            values=["local", "hybrid", "remote"],
+            current_value=current_mode,
+            command=self._on_processing_mode_changed,
         )
+        self.mode_selector.pack(fill="x")
         
-        prompt_display = self.get_prompt_display()
-        self.prompt_btn = self.create_setting_row(
-            intel_content, "Prompt", prompt_display,
-            self.open_prompt_settings, tooltip=SETTING_TOOLTIPS["prompt"],
-        )
+        # Dynamic content container for mode-specific settings
+        self.mode_settings_container = ctk.CTkFrame(mode_tile, fg_color="transparent")
+        self.mode_settings_container.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
         
-        # === SIDE-BY-SIDE TILES: Controls (Hotkey + Typing Speed) ===
-        controls_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        controls_row.pack(fill="x", pady=(0, SPACING["gutter"]))
-        controls_row.grid_columnconfigure(0, weight=1)
-        controls_row.grid_columnconfigure(1, weight=1)
+        # Build initial mode settings
+        self._build_mode_settings(current_mode)
         
-        # Left tile: Hotkey
-        hotkey_tile = ctk.CTkFrame(
-            controls_row, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
-        )
-        hotkey_tile.grid(row=0, column=0, sticky="nsew", padx=(0, SPACING["gutter"]//2))
-        
-        hotkey_header = ctk.CTkFrame(hotkey_tile, fg_color="transparent")
-        hotkey_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
-        ctk.CTkLabel(
-            hotkey_header, text="⌨   H O T K E Y",
-            font=(self.font_header[0], self.font_sizes["caption"]),
-            text_color=COLORS["text_secondary"],
-        ).pack(side="left")
-        
-        hotkey_content = ctk.CTkFrame(hotkey_tile, fg_color="transparent")
-        hotkey_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
-        
-        self.hotkey_btn = self.create_setting_row(
-            hotkey_content, "Key", self.get_hotkey_display(),
-            self.open_hotkey_settings, tooltip=SETTING_TOOLTIPS["hotkey"],
-        )
-        
-        # Right tile: Typing Speed
-        speed_tile = ctk.CTkFrame(
-            controls_row, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
-        )
-        speed_tile.grid(row=0, column=1, sticky="nsew", padx=(SPACING["gutter"]//2, 0))
-        
-        speed_header = ctk.CTkFrame(speed_tile, fg_color="transparent")
-        speed_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
-        ctk.CTkLabel(
-            speed_header, text="⚡   S P E E D",
-            font=(self.font_header[0], self.font_sizes["caption"]),
-            text_color=COLORS["text_secondary"],
-        ).pack(side="left")
-        
-        speed_content = ctk.CTkFrame(speed_tile, fg_color="transparent")
-        speed_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
-        
-        speed = self.config.get("typing_speed", "instant")
-        speed_display = speed.replace("_", " ").title()
-        self.speed_btn = self.create_setting_row(
-            speed_content, "Typing", speed_display,
-            self.open_speed_settings, tooltip=SETTING_TOOLTIPS["typing_speed"],
-        )
-        
-        # === BENTO TILE 3: System ===
+        # === BENTO TILE 3: System (expanded with Hotkey and Typing Speed) ===
         system_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"], border_width=1,
@@ -3573,221 +3629,252 @@ class WayfinderApp(ctk.CTk):
         system_content = ctk.CTkFrame(system_tile, fg_color="transparent")
         system_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
         
+        # Hotkey setting (moved here from separate tile)
+        self.hotkey_btn = self.create_setting_row(
+            system_content, "Hotkey", self.get_hotkey_display(),
+            self.open_hotkey_settings, tooltip=SETTING_TOOLTIPS["hotkey"],
+        )
+        
+        # Typing Speed setting (moved here from separate tile)
+        speed = self.config.get("typing_speed", "instant")
+        speed_display = speed.replace("_", " ").title()
+        self.speed_btn = self.create_setting_row(
+            system_content, "Typing Speed", speed_display,
+            self.open_speed_settings, tooltip=SETTING_TOOLTIPS["typing_speed"],
+        )
+        
+        # UI Scale slider
         self._create_scale_slider_row(system_content)
         
+        # Start minimized toggle
         self.start_min_var = ctk.BooleanVar(value=self.config.get("start_minimized", True))
         self.create_toggle_row(
             system_content, "Start minimized to tray", self.start_min_var,
             self.toggle_start_minimized, tooltip=SETTING_TOOLTIPS["start_minimized"],
         )
         
-        # === Collapsible Advanced Settings ===
-        self.advanced_expanded = False
-        
-        advanced_header = ctk.CTkFrame(scroll, fg_color="transparent")
-        advanced_header.pack(fill="x", pady=(8, 8))
-        
-        self.advanced_toggle_btn = ctk.CTkButton(
-            advanced_header,
-            text="▶  ADVANCED",
-            font=(self.font_mono[0], self.font_sizes["caption"], "bold"),
-            text_color=COLORS["text_muted"],
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            anchor="w",
-            height=28,
-            command=self._toggle_advanced_inline,
+        # Hotkey devices setting
+        device_count = len(get_all_input_devices())
+        enabled = self.config.get("enabled_input_devices", [])
+        device_text = f"All ({device_count})" if not enabled else f"{len(enabled)} selected"
+        self.devices_btn = self.create_setting_row(
+            system_content, "Hotkey Devices", device_text,
+            self.open_device_settings,
+            tooltip=SETTING_TOOLTIPS["hotkey_devices"],
         )
-        self.advanced_toggle_btn.pack(side="left")
-        
-        self.advanced_container = ctk.CTkFrame(scroll, fg_color="transparent")
-        self._build_advanced_settings_content(self.advanced_container)
         
         self._settings_scroll = scroll
     
-    def _toggle_advanced_inline(self):
-        """Toggle the advanced settings expanded/collapsed state."""
-        self.advanced_expanded = not self.advanced_expanded
+    def _build_mode_settings(self, mode: str) -> None:
+        """Build the settings panel for the selected processing mode."""
+        # Clear existing content
+        for widget in self.mode_settings_container.winfo_children():
+            widget.destroy()
         
-        if self.advanced_expanded:
-            self.advanced_toggle_btn.configure(text="▼  ADVANCED")
-            self.advanced_container.pack(fill="x", pady=(0, 8))
-        else:
-            self.advanced_toggle_btn.configure(text="▶  ADVANCED")
-            self.advanced_container.pack_forget()
+        if mode == "local":
+            self._build_local_mode_settings(self.mode_settings_container)
+        elif mode == "hybrid":
+            self._build_hybrid_mode_settings(self.mode_settings_container)
+        elif mode == "remote":
+            self._build_remote_mode_settings(self.mode_settings_container)
     
-    def _build_advanced_settings_content(self, parent):
-        """Build the advanced settings content inside the given container."""
-        # === Accuracy Section ===
-        self._create_advanced_section_header(parent, "Accuracy")
+    def _build_local_mode_settings(self, parent) -> None:
+        """Build settings panel for Local mode (100% private, on-device processing)."""
+        # Privacy indicator
+        privacy_frame = ctk.CTkFrame(parent, fg_color="#1A2A1A", corner_radius=RADIUS["sm"])
+        privacy_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(0, 12))
         
-        accuracy_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
-        accuracy_card.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(
+            privacy_frame,
+            text="🔒  100% Private — All processing happens on your device",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color="#7BCF7B",
+        ).pack(padx=12, pady=8)
         
+        # Whisper Model
+        model_display = self.get_model_display()
+        self.model_btn = self.create_setting_row(
+            parent, "Whisper Model", model_display,
+            self.open_model_settings, tooltip=get_dynamic_tooltip("whisper_model", self.config),
+        )
+        
+        # Prompt
+        prompt_display = self.get_prompt_display()
+        self.prompt_btn = self.create_setting_row(
+            parent, "Prompt", prompt_display,
+            self.open_prompt_settings, tooltip=SETTING_TOOLTIPS["prompt"],
+        )
+        
+        # GPU Acceleration toggle
+        self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", True))
+        self.create_toggle_row(
+            parent, "GPU Acceleration",
+            self.gpu_var, self.toggle_gpu,
+            tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
+        )
+        
+        # Accuracy Mode
         accuracy_mode = self.config.get("accuracy_mode", "balanced")
         self.accuracy_mode_var = ctk.StringVar(value=accuracy_mode)
         self.accuracy_mode_dropdown = self.create_dropdown_row(
-            accuracy_card, "Accuracy Mode", ["fast", "balanced", "high"],
+            parent, "Accuracy Mode", ["fast", "balanced", "high"],
             self.accuracy_mode_var, self.on_accuracy_mode_changed,
             tooltip=get_dynamic_tooltip("accuracy_mode", self.config), width=140,
         )
         
-        beam_size = self.config.get("beam_size", 5)
-        self.beam_size_var = ctk.StringVar(value=str(beam_size))
-        self.beam_size_dropdown = self.create_dropdown_row(
-            accuracy_card, "Beam Size", ["1", "2", "3", "4", "5", "6", "7", "8", "10", "12"],
-            self.beam_size_var, self.on_beam_size_changed,
-            tooltip=SETTING_TOOLTIPS["beam_size"], width=100,
-        )
-        
+        # Language
         language = self.config.get("language", "en")
         self.language_var = ctk.StringVar(value=language)
         self.language_dropdown = self.create_dropdown_row(
-            accuracy_card, "Language",
+            parent, "Language",
             ["en", "auto", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko"],
             self.language_var, self.on_language_changed,
             tooltip=SETTING_TOOLTIPS["language"], width=100,
         )
         
-        # Audio preprocessing
-        preprocess_level = self.config.get("audio_preprocessing", "light")
-        if preprocess_level is True:
-            preprocess_level = "light"
-        elif preprocess_level is False:
-            preprocess_level = "off"
-        self.preprocess_var = ctk.StringVar(value=preprocess_level)
-        self.preprocess_dropdown = self.create_dropdown_row(
-            accuracy_card, "Audio Processing", ["off", "light", "medium", "heavy"],
-            self.preprocess_var, self.on_preprocessing_changed,
-            tooltip=SETTING_TOOLTIPS["audio_preprocessing"], width=120,
-        )
-        
-        self.punctuation_var = ctk.BooleanVar(value=self.config.get("ensure_punctuation", False))
-        self.create_toggle_row(
-            accuracy_card, "Additional Punctuation",
-            self.punctuation_var, self.toggle_punctuation,
-            tooltip=SETTING_TOOLTIPS["ensure_punctuation"],
-        )
-        
-        # === Chunk Processing Section ===
-        self._create_advanced_section_header(parent, "Chunk Processing")
-        
-        chunk_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
-        chunk_card.pack(fill="x", pady=(0, 12))
-        
-        self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
-        self.create_toggle_row(
-            chunk_card, "Enable Chunked Processing",
-            self.chunked_var, self.toggle_chunked_mode,
-            tooltip=SETTING_TOOLTIPS["chunked_mode"],
-        )
-        
-        chunk_duration = self.config.get("chunk_duration", 30)
-        self.chunk_duration_var = ctk.StringVar(value=str(chunk_duration))
-        self.chunk_duration_dropdown = self.create_dropdown_row(
-            chunk_card, "Segment Length (s)", ["15", "20", "30", "45", "60", "90", "120"],
-            self.chunk_duration_var, self.on_chunk_duration_changed,
-            tooltip=SETTING_TOOLTIPS["chunk_duration"], width=100,
-        )
-        
-        # === GPU Acceleration Section ===
-        self._create_advanced_section_header(parent, "GPU Acceleration")
-        
-        gpu_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
-        gpu_card.pack(fill="x", pady=(0, 12))
-        
+        # Backend (whisper_cpp or faster_whisper only for local)
         backend = self.config.get("transcription_backend", "whisper_cpp")
+        if backend == "openai_whisper":
+            backend = "whisper_cpp"  # Default to local backend
         self.backend_var = ctk.StringVar(value=backend)
         self.backend_dropdown = self.create_dropdown_row(
-            gpu_card, "Backend", ["whisper_cpp", "faster_whisper", "openai_whisper"],
+            parent, "Backend", ["whisper_cpp", "faster_whisper"],
             self.backend_var, self.on_backend_changed,
             tooltip=SETTING_TOOLTIPS["backend"], width=160,
         )
+    
+    def _build_hybrid_mode_settings(self, parent) -> None:
+        """Build settings panel for Hybrid mode (local transcription + cloud post-processing)."""
+        # Cloud warning
+        warning_frame = ctk.CTkFrame(parent, fg_color="#2A2A1A", corner_radius=RADIUS["sm"])
+        warning_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(0, 12))
         
-        self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", False))
+        ctk.CTkLabel(
+            warning_frame,
+            text="⚠️  Transcribed text will be sent to cloud for cleanup",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color="#CFB77B",
+        ).pack(padx=12, pady=8)
+        
+        # === Local Transcription Section ===
+        self._create_mode_section_header(parent, "Local Transcription")
+        
+        # Whisper Model
+        model_display = self.get_model_display()
+        self.model_btn = self.create_setting_row(
+            parent, "Whisper Model", model_display,
+            self.open_model_settings, tooltip=get_dynamic_tooltip("whisper_model", self.config),
+        )
+        
+        # Prompt
+        prompt_display = self.get_prompt_display()
+        self.prompt_btn = self.create_setting_row(
+            parent, "Prompt", prompt_display,
+            self.open_prompt_settings, tooltip=SETTING_TOOLTIPS["prompt"],
+        )
+        
+        # GPU Acceleration toggle
+        self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", True))
         self.create_toggle_row(
-            gpu_card, "GPU Acceleration",
+            parent, "GPU Acceleration",
             self.gpu_var, self.toggle_gpu,
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
         )
         
-        gpu_layers = self.config.get("gpu_layers", 0)
-        self.gpu_layers_var = ctk.StringVar(value="auto" if gpu_layers == 0 else str(gpu_layers))
-        self.gpu_layers_dropdown = self.create_dropdown_row(
-            gpu_card, "GPU Layers", ["auto", "1", "4", "8", "16", "24", "32", "48", "64", "99"],
-            self.gpu_layers_var, self.on_gpu_layers_changed,
-            tooltip=SETTING_TOOLTIPS["gpu_layers"], width=100,
-        )
+        # === Cloud Post-Processing Section ===
+        self._create_mode_section_header(parent, "Cloud Post-Processing")
         
-        # === Post-Processing Section (LLM cleanup) ===
-        self._create_advanced_section_header(parent, "Post-Processing (AI Cleanup)")
-        
-        postproc_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
-        postproc_card.pack(fill="x", pady=(0, 12))
-        
-        # Enable toggle
-        self.postproc_var = ctk.BooleanVar(value=self.config.get("post_processing_enabled", False))
-        self.create_toggle_row(
-            postproc_card, "Enable LLM Post-Processing",
-            self.postproc_var, self.toggle_post_processing,
-            tooltip="Use a small LLM to clean up filler words and apply smart formatting",
-        )
-        
-        # Backend selector
-        postproc_backend = self.config.get("post_processing_backend", "llama_cpp")
+        # Provider selector (anthropic or openai for cloud)
+        postproc_backend = self.config.get("post_processing_backend", "openai")
+        if postproc_backend == "llama_cpp":
+            postproc_backend = "openai"  # Default to cloud provider for hybrid
         self.postproc_backend_var = ctk.StringVar(value=postproc_backend)
         self.postproc_backend_dropdown = self.create_dropdown_row(
-            postproc_card, "Backend", ["llama_cpp", "anthropic", "openai"],
+            parent, "Provider", ["openai", "anthropic"],
             self.postproc_backend_var, self.on_postproc_backend_changed,
-            tooltip="llama_cpp = Local, anthropic = Claude, openai = GPT", width=140,
+            tooltip="OpenAI = GPT-4o-mini, Anthropic = Claude Haiku", width=140,
         )
         
         # Template selector
         postproc_template = self.config.get("post_processing_template", "clean")
         self.postproc_template_var = ctk.StringVar(value=postproc_template)
         self.postproc_template_dropdown = self.create_dropdown_row(
-            postproc_card, "Format Template", ["clean", "email", "notes", "code_comment", "custom"],
+            parent, "Format Template", ["clean", "email", "notes", "code_comment", "custom"],
             self.postproc_template_var, self.on_postproc_template_changed,
-            tooltip="clean=Remove fillers, email=Format as email, notes=Bullet points, custom=Your prompt", width=140,
+            tooltip="clean=Remove fillers, email=Format as email, notes=Bullet points", width=140,
         )
         
-        # Settings button (opens model path / API key dialog)
+        # API Configuration
         postproc_config_text = self._get_postproc_config_display()
         self.postproc_config_btn = self.create_setting_row(
-            postproc_card, "Configuration", postproc_config_text,
+            parent, "API Configuration", postproc_config_text,
             self.open_postproc_settings,
-            tooltip="Configure model path (local) or API key (cloud)",
+            tooltip="Configure API key for cloud post-processing",
+        )
+    
+    def _build_remote_mode_settings(self, parent) -> None:
+        """Build settings panel for Remote mode (full cloud transcription)."""
+        # Cloud warning
+        warning_frame = ctk.CTkFrame(parent, fg_color="#2A1A1A", corner_radius=RADIUS["sm"])
+        warning_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(0, 12))
+        
+        ctk.CTkLabel(
+            warning_frame,
+            text="☁️  Audio recordings will be sent to cloud for transcription",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color="#CF7B7B",
+        ).pack(padx=12, pady=8)
+        
+        # Provider (currently only OpenAI Whisper for remote transcription)
+        ctk.CTkLabel(
+            parent,
+            text="Provider: OpenAI Whisper",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 8))
+        
+        # Language
+        language = self.config.get("language", "en")
+        self.language_var = ctk.StringVar(value=language)
+        self.language_dropdown = self.create_dropdown_row(
+            parent, "Language",
+            ["en", "auto", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko"],
+            self.language_var, self.on_language_changed,
+            tooltip=SETTING_TOOLTIPS["language"], width=100,
         )
         
-        # === Display Section ===
-        self._create_advanced_section_header(parent, "Display")
-        
-        display_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
-        display_card.pack(fill="x", pady=(0, 12))
-        
-        overlay_type = self.config.get("overlay_type", "always_on")
-        self.overlay_type_var = ctk.StringVar(value=overlay_type)
-        self.overlay_type_dropdown = self.create_dropdown_row(
-            display_card, "Status Indicator", ["always_on", "disappearing"],
-            self.overlay_type_var, self.on_overlay_type_changed,
-            tooltip="Always On: persistent indicator, no focus steal\nDisappearing: shows/hides with recording",
-            width=140,
+        # API Configuration
+        api_status = "Configured ✓" if os.environ.get("OPENAI_API_KEY") else "Not configured"
+        self.remote_api_btn = self.create_setting_row(
+            parent, "API Configuration", api_status,
+            self.open_remote_api_settings,
+            tooltip="Configure OpenAI API key for cloud transcription",
         )
         
-        # === Devices Section ===
-        self._create_advanced_section_header(parent, "Input Devices")
+        # Info about no local model needed
+        info_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
+        info_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(12, 0))
         
-        devices_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
-        devices_card.pack(fill="x")
-        
-        device_count = len(get_all_input_devices())
-        enabled = self.config.get("enabled_input_devices", [])
-        device_text = f"All ({device_count})" if not enabled else f"{len(enabled)} selected"
-        self.devices_btn = self.create_setting_row(
-            devices_card, "Hotkey Devices", device_text,
-            self.open_device_settings,
-            tooltip=SETTING_TOOLTIPS["hotkey_devices"],
-        )
+        ctk.CTkLabel(
+            info_frame,
+            text="ℹ️  No local model download required — transcription runs on OpenAI servers",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        ).pack(padx=12, pady=8)
+    
+    def _create_mode_section_header(self, parent, text: str) -> None:
+        """Create a section header within mode settings."""
+        ctk.CTkLabel(
+            parent,
+            text=text.upper(),
+            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(8, 8))
+    
+    def open_remote_api_settings(self) -> None:
+        """Open dialog to configure remote (OpenAI) API settings."""
+        # Reuse the existing post-processing settings dialog but focused on OpenAI
+        self.open_postproc_settings()
     
     def _create_advanced_section_header(self, parent, text: str) -> None:
         """Create a section header for advanced settings."""
@@ -3992,6 +4079,44 @@ class WayfinderApp(ctk.CTk):
         display = "Auto (all)" if value == "auto" else value
         self.log(f"⚙ GPU layers: {display}")
     
+    def _on_processing_mode_changed(self, mode: str) -> None:
+        """Handle processing mode change from the mode selector."""
+        old_mode = self.config.get("processing_mode", "local")
+        if mode == old_mode:
+            return
+        
+        # Save mode to config
+        self.config["processing_mode"] = mode
+        
+        # Update related settings based on mode
+        if mode == "local":
+            # Local mode: use local transcription backend, disable cloud post-processing
+            if self.config.get("transcription_backend") == "openai_whisper":
+                self.config["transcription_backend"] = "whisper_cpp"
+            self.config["post_processing_enabled"] = False
+            self.log("🔒 Mode: Local (100% private)")
+            
+        elif mode == "hybrid":
+            # Hybrid mode: local transcription + cloud post-processing
+            if self.config.get("transcription_backend") == "openai_whisper":
+                self.config["transcription_backend"] = "whisper_cpp"
+            self.config["post_processing_enabled"] = True
+            # Default to OpenAI for post-processing if currently using local
+            if self.config.get("post_processing_backend") == "llama_cpp":
+                self.config["post_processing_backend"] = "openai"
+            self.log("🔗 Mode: Hybrid (local transcription + cloud cleanup)")
+            
+        elif mode == "remote":
+            # Remote mode: full cloud transcription via OpenAI Whisper
+            self.config["transcription_backend"] = "openai_whisper"
+            self.config["post_processing_enabled"] = False  # Transcription is already cloud
+            self.log("☁️ Mode: Remote (cloud transcription)")
+        
+        save_config(self.config)
+        
+        # Rebuild the mode-specific settings panel
+        self._build_mode_settings(mode)
+    
     def show_preprocessing_help(self):
         """Show help dialog explaining audio processing levels."""
         dialog = ctk.CTkToplevel(self)
@@ -4068,10 +4193,11 @@ class WayfinderApp(ctk.CTk):
 
     def toggle_gpu(self):
         """Toggle GPU acceleration."""
-        self.config["use_gpu"] = self.gpu_var.get()
-        save_config(self.config)
-        status = "enabled" if self.gpu_var.get() else "disabled"
-        self.log(f"⚙ GPU acceleration: {status}")
+        if hasattr(self, 'gpu_var'):
+            self.config["use_gpu"] = self.gpu_var.get()
+            save_config(self.config)
+            status = "enabled" if self.gpu_var.get() else "disabled"
+            self.log(f"⚙ GPU acceleration: {status}")
 
     # === Post-Processing Handlers ===
     
@@ -4139,15 +4265,12 @@ class WayfinderApp(ctk.CTk):
         return "Not configured"
     
     def open_postproc_settings(self):
-        """Open post-processing configuration dialog."""
+        """Open post-processing configuration dialog with provider switching."""
         import os
         
         dialog = ctk.CTkToplevel(self)
-        dialog.title("Post-Processing Configuration")
-        # Make dialog taller when custom prompt is shown
-        is_custom = self.config.get("post_processing_template") == "custom"
-        dialog_height = 750 if is_custom else 600
-        dialog.geometry(f"560x{dialog_height}")
+        dialog.title("Cloud API Configuration")
+        dialog.geometry("560x520")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
@@ -4158,527 +4281,305 @@ class WayfinderApp(ctk.CTk):
         # Title
         ctk.CTkLabel(
             inner,
-            text="Post-Processing Configuration",
+            text="Cloud API Configuration",
             font=(self.font_header[0], 20, "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 16))
         
-        backend = self.config.get("post_processing_backend", "llama_cpp")
-        container = inner  # Use inner as container for consistency
+        # Get current provider from config
+        current_backend = self.config.get("post_processing_backend", "openai")
+        if current_backend == "llama_cpp":
+            current_backend = "openai"  # Default to OpenAI for cloud config
         
-        if backend == "llama_cpp":
-            # === Local (llama.cpp) Settings ===
-            ctk.CTkLabel(
-                container,
-                text="Select a model to use for local AI post-processing.\nDownload one if you haven't already.",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_secondary"],
-                justify="left",
-            ).pack(anchor="w", pady=(0, 12))
+        # Provider selector (OpenAI vs Anthropic)
+        provider_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        provider_frame.pack(fill="x", pady=(0, 16))
+        
+        ctk.CTkLabel(
+            provider_frame,
+            text="PROVIDER",
+            font=(self.font_body[0], 11, "bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", pady=(0, 8))
+        
+        # Provider segmented control
+        provider_var = ctk.StringVar(value=current_backend)
+        provider_buttons_frame = ctk.CTkFrame(provider_frame, fg_color=COLORS["bg_input"], corner_radius=RADIUS["md"], height=44)
+        provider_buttons_frame.pack(fill="x")
+        provider_buttons_frame.pack_propagate(False)
+        
+        provider_inner = ctk.CTkFrame(provider_buttons_frame, fg_color="transparent")
+        provider_inner.pack(fill="both", expand=True, padx=3, pady=3)
+        provider_inner.grid_columnconfigure(0, weight=1)
+        provider_inner.grid_columnconfigure(1, weight=1)
+        provider_inner.grid_rowconfigure(0, weight=1)
+        
+        provider_btns = {}
+        
+        def update_provider_buttons():
+            selected = provider_var.get()
+            for name, btn in provider_btns.items():
+                is_selected = name == selected
+                btn.configure(
+                    fg_color=COLORS["bg_card"] if is_selected else "transparent",
+                    text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
+                    font=(self.font_body[0], 13, "bold" if is_selected else "normal"),
+                )
+        
+        def select_provider(name):
+            provider_var.set(name)
+            update_provider_buttons()
+            rebuild_provider_settings()
+        
+        openai_btn = ctk.CTkButton(
+            provider_inner,
+            text="OpenAI",
+            font=(self.font_body[0], 13, "bold" if current_backend == "openai" else "normal"),
+            fg_color=COLORS["bg_card"] if current_backend == "openai" else "transparent",
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_bright"] if current_backend == "openai" else COLORS["text_secondary"],
+            corner_radius=RADIUS["sm"],
+            height=36,
+            command=lambda: select_provider("openai"),
+        )
+        openai_btn.grid(row=0, column=0, sticky="nsew", padx=1)
+        provider_btns["openai"] = openai_btn
+        
+        anthropic_btn = ctk.CTkButton(
+            provider_inner,
+            text="Anthropic",
+            font=(self.font_body[0], 13, "bold" if current_backend == "anthropic" else "normal"),
+            fg_color=COLORS["bg_card"] if current_backend == "anthropic" else "transparent",
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_bright"] if current_backend == "anthropic" else COLORS["text_secondary"],
+            corner_radius=RADIUS["sm"],
+            height=36,
+            command=lambda: select_provider("anthropic"),
+        )
+        anthropic_btn.grid(row=0, column=1, sticky="nsew", padx=1)
+        provider_btns["anthropic"] = anthropic_btn
+        
+        # Dynamic settings container
+        settings_container = ctk.CTkFrame(inner, fg_color="transparent")
+        settings_container.pack(fill="both", expand=True)
+        
+        # Variables to store form data (persist across provider switches)
+        form_data = {
+            "openai_key": ctk.StringVar(value=self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")),
+            "openai_model": ctk.StringVar(value=self.config.get("openai_model", "gpt-4o-mini")),
+            "anthropic_key": ctk.StringVar(value=self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")),
+            "anthropic_model": ctk.StringVar(value=self.config.get("anthropic_model", "claude-3-haiku-20240307")),
+        }
+        
+        def rebuild_provider_settings():
+            # Clear existing settings
+            for widget in settings_container.winfo_children():
+                widget.destroy()
             
-            # Available models
-            available_models = [
-                {
-                    "name": "SmolLM2-1.7B",
-                    "filename": "smollm2-1.7b-instruct-q4_k_m.gguf",
-                    "url": "https://huggingface.co/bartowski/SmolLM2-1.7B-Instruct-GGUF/resolve/main/SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
-                    "size": "1.0 GB",
-                    "desc": "Recommended • Fast & efficient",
-                },
-                {
-                    "name": "Qwen2.5-1.5B",
-                    "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-                    "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-                    "size": "1.1 GB",
-                    "desc": "Great instruction following",
-                },
-                {
-                    "name": "Phi-3-mini",
-                    "filename": "phi-3-mini-4k-instruct-q4.gguf",
-                    "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
-                    "size": "2.2 GB",
-                    "desc": "Higher quality, larger",
-                },
-            ]
+            provider = provider_var.get()
             
-            # Models directory
-            models_dir = CONFIG_DIR / "models"
-            models_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Current selection
-            current_model = self.config.get("llama_cpp_model_path", "")
-            model_var = ctk.StringVar(value=current_model)
-            
-            # Models card
-            models_frame = ctk.CTkFrame(container, fg_color=COLORS["bg_card"], corner_radius=12)
-            models_frame.pack(fill="x", pady=(0, 12))
-            
-            # Status/progress area
-            status_var = ctk.StringVar(value="")
-            status_label = ctk.CTkLabel(
-                models_frame,
-                textvariable=status_var,
-                font=(self.font_body[0], 10),
-                text_color=COLORS["accent"],
-            )
-            
-            progress_bar = ctk.CTkProgressBar(
-                models_frame,
-                fg_color=COLORS["bg_input"],
-                progress_color=COLORS["accent"],
-                height=6,
-            )
-            progress_bar.set(0)
-            
-            def download_model(model_info, row_widgets):
-                """Download a model in a background thread."""
-                import urllib.request
-                import threading
-                
-                dest_path = models_dir / model_info["filename"]
-                
-                if dest_path.exists():
-                    model_var.set(str(dest_path))
-                    status_var.set(f"✓ Selected {model_info['name']}")
-                    update_model_rows()
-                    return
-                
-                def do_download():
-                    try:
-                        # UI updates must be scheduled on main thread
-                        def show_progress_ui():
-                            status_label.pack(anchor="w", padx=16, pady=(8, 0))
-                            progress_bar.pack(fill="x", padx=16, pady=(4, 8))
-                            progress_bar.set(0)
-                        dialog.after(0, show_progress_ui)
-                        
-                        def report_progress(block_num, block_size, total_size):
-                            if total_size > 0:
-                                progress = min(block_num * block_size / total_size, 1.0)
-                                downloaded_mb = (block_num * block_size) / (1024 * 1024)
-                                total_mb = total_size / (1024 * 1024)
-                                dialog.after(0, lambda: progress_bar.set(progress))
-                                dialog.after(0, lambda: status_var.set(
-                                    f"Downloading {model_info['name']}... {downloaded_mb:.0f}/{total_mb:.0f} MB"))
-                        
-                        urllib.request.urlretrieve(model_info["url"], dest_path, reporthook=report_progress)
-                        
-                        dialog.after(0, lambda: status_var.set(f"✓ Downloaded {model_info['name']}!"))
-                        dialog.after(0, lambda: progress_bar.pack_forget())
-                        dialog.after(0, lambda: model_var.set(str(dest_path)))
-                        dialog.after(0, lambda: self.log(f"✓ Downloaded: {model_info['name']}"))
-                        dialog.after(0, update_model_rows)
-                        
-                    except Exception as e:
-                        dialog.after(0, lambda: status_var.set(f"✗ Failed: {str(e)[:40]}"))
-                        dialog.after(0, lambda: progress_bar.pack_forget())
-                        if dest_path.exists():
-                            dest_path.unlink()
-                
-                threading.Thread(target=do_download, daemon=True).start()
-            
-            # Store row widgets for updating
-            model_rows = []
-            
-            def update_model_rows():
-                """Refresh all model row buttons based on current state."""
-                current = model_var.get()
-                for info, widgets in model_rows:
-                    dest_path = models_dir / info["filename"]
-                    is_downloaded = dest_path.exists()
-                    is_selected = str(dest_path) == current
-                    
-                    btn = widgets["btn"]
-                    status_lbl = widgets["status"]
-                    
-                    if is_selected:
-                        btn.configure(text="Selected", fg_color=COLORS["accent"], 
-                                     text_color=COLORS["bg_base"], state="disabled")
-                        status_lbl.configure(text="✓ Active", text_color=COLORS["accent"])
-                    elif is_downloaded:
-                        btn.configure(text="Use", fg_color=COLORS["bg_surface"],
-                                     text_color=COLORS["text_primary"], state="normal")
-                        status_lbl.configure(text="✓ Ready", text_color=COLORS["accent"])
-                    else:
-                        btn.configure(text="Download", fg_color=COLORS["bg_surface"],
-                                     text_color=COLORS["text_secondary"], state="normal")
-                        status_lbl.configure(text=info["size"], text_color=COLORS["text_muted"])
-            
-            def select_model(model_info):
-                dest_path = models_dir / model_info["filename"]
-                if dest_path.exists():
-                    model_var.set(str(dest_path))
-                    status_var.set(f"✓ Selected {model_info['name']}")
-                    update_model_rows()
-                else:
-                    download_model(model_info, None)
-            
-            # Create model rows
-            for model_info in available_models:
-                row = ctk.CTkFrame(models_frame, fg_color="transparent")
-                row.pack(fill="x", padx=16, pady=8)
-                
-                dest_path = models_dir / model_info["filename"]
-                is_downloaded = dest_path.exists()
-                is_selected = str(dest_path) == current_model
-                
-                # Left side: name and description
-                left = ctk.CTkFrame(row, fg_color="transparent")
-                left.pack(side="left", fill="x", expand=True)
+            if provider == "openai":
+                # OpenAI settings
+                api_frame = ctk.CTkFrame(settings_container, fg_color=COLORS["bg_card"], corner_radius=12)
+                api_frame.pack(fill="x", pady=(0, 12))
                 
                 ctk.CTkLabel(
-                    left,
-                    text=model_info["name"],
-                    font=(self.font_body[0], 13, "bold"),
+                    api_frame,
+                    text="API Key",
+                    font=(self.font_body[0], 12),
+                    text_color=COLORS["text_secondary"],
+                ).pack(anchor="w", padx=16, pady=(12, 4))
+                
+                key_entry = ctk.CTkEntry(
+                    api_frame,
+                    textvariable=form_data["openai_key"],
+                    font=(self.font_mono[0], 11),
+                    fg_color=COLORS["bg_input"],
+                    border_color=COLORS["border_subtle"],
                     text_color=COLORS["text_primary"],
-                    anchor="w",
-                ).pack(anchor="w")
+                    placeholder_text="sk-...",
+                    width=350,
+                    show="•",
+                )
+                key_entry.pack(anchor="w", padx=16, pady=(0, 4))
                 
-                ctk.CTkLabel(
-                    left,
-                    text=model_info["desc"],
+                show_key_var = ctk.BooleanVar(value=False)
+                def toggle_visibility():
+                    key_entry.configure(show="" if show_key_var.get() else "•")
+                
+                ctk.CTkCheckBox(
+                    api_frame,
+                    text="Show key",
+                    variable=show_key_var,
+                    command=toggle_visibility,
                     font=(self.font_body[0], 10),
                     text_color=COLORS["text_muted"],
-                    anchor="w",
-                ).pack(anchor="w")
-                
-                # Right side: status + button
-                right = ctk.CTkFrame(row, fg_color="transparent")
-                right.pack(side="right")
-                
-                if is_selected:
-                    btn_text, btn_fg, btn_state = "Selected", COLORS["accent"], "disabled"
-                    status_text, status_color = "✓ Active", COLORS["accent"]
-                elif is_downloaded:
-                    btn_text, btn_fg, btn_state = "Use", COLORS["bg_surface"], "normal"
-                    status_text, status_color = "✓ Ready", COLORS["accent"]
-                else:
-                    btn_text, btn_fg, btn_state = "Download", COLORS["bg_surface"], "normal"
-                    status_text, status_color = model_info["size"], COLORS["text_muted"]
-                
-                status_lbl = ctk.CTkLabel(
-                    right, text=status_text,
-                    font=(self.font_body[0], 10),
-                    text_color=status_color,
-                )
-                status_lbl.pack(side="left", padx=(0, 8))
-                
-                btn = ctk.CTkButton(
-                    right, text=btn_text,
-                    font=(self.font_body[0], 11),
-                    fg_color=btn_fg,
+                    fg_color=COLORS["accent"],
                     hover_color=COLORS["accent_dim"],
-                    text_color=COLORS["bg_base"] if is_selected else COLORS["text_primary"],
-                    height=28, width=85,
-                    corner_radius=6,
-                    state=btn_state,
-                    command=lambda m=model_info: select_model(m),
-                )
-                btn.pack(side="right")
+                ).pack(anchor="w", padx=16, pady=(0, 12))
                 
-                model_rows.append((model_info, {"btn": btn, "status": status_lbl}))
-            
-            # Padding at bottom
-            ctk.CTkFrame(models_frame, fg_color="transparent", height=8).pack()
-            
-            def save_local():
-                self.config["llama_cpp_model_path"] = model_var.get()
-                save_config(self.config)
-                self.postproc_config_btn.configure(text=self._get_postproc_config_display())
-                self.log("⚙ Post-processing model updated")
-                dialog.destroy()
-            
-            save_cmd = save_local
-            
-        elif backend == "anthropic":
-            # === Cloud (Anthropic Claude) Settings ===
-            import os
-            
-            ctk.CTkLabel(
-                container,
-                text="CLOUD INFERENCE (Anthropic Claude)",
-                font=(self.font_body[0], 11, "bold"),
-                text_color=COLORS["text_muted"],
-            ).pack(anchor="w", pady=(0, 8))
-            
-            # API key status (read from environment - secure)
-            api_frame = ctk.CTkFrame(container, fg_color=COLORS["bg_card"], corner_radius=12)
-            api_frame.pack(fill="x", pady=(0, 12))
-            
-            # Get API key from config or environment
-            api_key = self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
-            
-            ctk.CTkLabel(
-                api_frame,
-                text="API Key",
-                font=(self.font_body[0], 12),
-                text_color=COLORS["text_secondary"],
-            ).pack(anchor="w", padx=16, pady=(12, 4))
-            
-            # API key entry field
-            anthropic_key_var = ctk.StringVar(value=api_key)
-            key_entry = ctk.CTkEntry(
-                api_frame,
-                textvariable=anthropic_key_var,
-                font=(self.font_mono[0], 11),
-                fg_color=COLORS["bg_input"],
-                border_color=COLORS["border_subtle"],
-                text_color=COLORS["text_primary"],
-                placeholder_text="sk-ant-api03-...",
-                width=350,
-                show="•",  # Hide the key
-            )
-            key_entry.pack(anchor="w", padx=16, pady=(0, 4))
-            
-            # Show/hide button
-            show_key_var = ctk.BooleanVar(value=False)
-            def toggle_key_visibility():
-                if show_key_var.get():
-                    key_entry.configure(show="")
-                else:
-                    key_entry.configure(show="•")
-            
-            ctk.CTkCheckBox(
-                api_frame,
-                text="Show key",
-                variable=show_key_var,
-                command=toggle_key_visibility,
-                font=(self.font_body[0], 10),
-                text_color=COLORS["text_muted"],
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_dim"],
-            ).pack(anchor="w", padx=16, pady=(0, 12))
-            
-            # Model selector
-            ctk.CTkLabel(
-                api_frame,
-                text="Claude Model",
-                font=(self.font_body[0], 12),
-                text_color=COLORS["text_secondary"],
-            ).pack(anchor="w", padx=16, pady=(0, 4))
-            
-            model = self.config.get("anthropic_model", "claude-3-haiku-20240307")
-            model_var = ctk.StringVar(value=model)
-            
-            ctk.CTkOptionMenu(
-                api_frame,
-                variable=model_var,
-                values=[
-                    "claude-3-haiku-20240307",
-                    "claude-3-5-haiku-20241022",
-                    "claude-3-sonnet-20240229",
-                    "claude-3-5-sonnet-20241022",
-                ],
-                font=(self.font_body[0], 12),
-                fg_color=COLORS["bg_input"],
-                button_color=COLORS["bg_surface"],
-                button_hover_color=COLORS["bg_hover"],
-                dropdown_fg_color=COLORS["bg_card"],
-                dropdown_hover_color=COLORS["bg_hover"],
-                text_color=COLORS["text_primary"],
-                width=280,
-            ).pack(anchor="w", padx=16, pady=(0, 12))
-            
-            ctk.CTkLabel(
-                container,
-                text="Claude Haiku is fast and cheap (~$0.25/1M tokens). Sonnet is higher quality but slower.",
-                font=(self.font_body[0], 10),
-                text_color=COLORS["text_muted"],
-                wraplength=460,
-            ).pack(anchor="w", pady=(0, 8))
-            
-            # Get API key link - clickable
-            anthropic_link = ctk.CTkLabel(
-                container,
-                text="Get your API key at: console.anthropic.com",
-                font=(self.font_body[0], 10),
-                text_color=COLORS["accent"],
-                cursor="hand2",
-            )
-            anthropic_link.pack(anchor="w", pady=(0, 8))
-            anthropic_link.bind("<Button-1>", lambda e: webbrowser.open("https://console.anthropic.com"))
-            
-            def save_anthropic():
-                # Save API key if provided
-                new_key = anthropic_key_var.get().strip()
-                if new_key:
-                    self.config["anthropic_api_key"] = new_key
-                    # Also set in environment for current session
-                    os.environ["ANTHROPIC_API_KEY"] = new_key
-                self.config["anthropic_model"] = model_var.get()
-                save_config(self.config)
-                self.postproc_config_btn.configure(text=self._get_postproc_config_display())
-                self.log("⚙ Anthropic settings saved")
-                dialog.destroy()
-            
-            save_cmd = save_anthropic
-            
-        elif backend == "openai":
-            # === Cloud (OpenAI) Settings ===
-            import os
-            
-            ctk.CTkLabel(
-                container,
-                text="CLOUD INFERENCE (OpenAI)",
-                font=(self.font_body[0], 11, "bold"),
-                text_color=COLORS["text_muted"],
-            ).pack(anchor="w", pady=(0, 8))
-            
-            # API key status (read from environment - secure)
-            api_frame = ctk.CTkFrame(container, fg_color=COLORS["bg_card"], corner_radius=12)
-            api_frame.pack(fill="x", pady=(0, 12))
-            
-            # Get API key from config or environment
-            api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
-            
-            ctk.CTkLabel(
-                api_frame,
-                text="API Key",
-                font=(self.font_body[0], 12),
-                text_color=COLORS["text_secondary"],
-            ).pack(anchor="w", padx=16, pady=(12, 4))
-            
-            # API key entry field
-            openai_key_var = ctk.StringVar(value=api_key)
-            openai_key_entry = ctk.CTkEntry(
-                api_frame,
-                textvariable=openai_key_var,
-                font=(self.font_mono[0], 11),
-                fg_color=COLORS["bg_input"],
-                border_color=COLORS["border_subtle"],
-                text_color=COLORS["text_primary"],
-                placeholder_text="sk-...",
-                width=350,
-                show="•",  # Hide the key
-            )
-            openai_key_entry.pack(anchor="w", padx=16, pady=(0, 4))
-            
-            # Show/hide button
-            show_openai_key_var = ctk.BooleanVar(value=False)
-            def toggle_openai_key_visibility():
-                if show_openai_key_var.get():
-                    openai_key_entry.configure(show="")
-                else:
-                    openai_key_entry.configure(show="•")
-            
-            ctk.CTkCheckBox(
-                api_frame,
-                text="Show key",
-                variable=show_openai_key_var,
-                command=toggle_openai_key_visibility,
-                font=(self.font_body[0], 10),
-                text_color=COLORS["text_muted"],
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_dim"],
-            ).pack(anchor="w", padx=16, pady=(0, 12))
-            
-            # Model selector
-            ctk.CTkLabel(
-                api_frame,
-                text="OpenAI Model",
-                font=(self.font_body[0], 12),
-                text_color=COLORS["text_secondary"],
-            ).pack(anchor="w", padx=16, pady=(0, 4))
-            
-            model = self.config.get("openai_model", "gpt-4o-mini")
-            model_var = ctk.StringVar(value=model)
-            
-            ctk.CTkOptionMenu(
-                api_frame,
-                variable=model_var,
-                values=[
-                    "gpt-4o-mini",
-                    "gpt-4o",
-                    "gpt-4-turbo",
-                    "gpt-3.5-turbo",
-                ],
-                font=(self.font_body[0], 12),
-                fg_color=COLORS["bg_input"],
-                button_color=COLORS["bg_surface"],
-                button_hover_color=COLORS["bg_hover"],
-                dropdown_fg_color=COLORS["bg_card"],
-                dropdown_hover_color=COLORS["bg_hover"],
-                text_color=COLORS["text_primary"],
-                width=280,
-            ).pack(anchor="w", padx=16, pady=(0, 12))
-            
-            ctk.CTkLabel(
-                container,
-                text="GPT-4o-mini is fast and affordable. GPT-4o is higher quality but more expensive.",
-                font=(self.font_body[0], 10),
-                text_color=COLORS["text_muted"],
-                wraplength=460,
-            ).pack(anchor="w", pady=(0, 8))
-            
-            # Get API key link - clickable
-            openai_link = ctk.CTkLabel(
-                container,
-                text="Get your API key at: platform.openai.com/api-keys",
-                font=(self.font_body[0], 10),
-                text_color=COLORS["accent"],
-                cursor="hand2",
-            )
-            openai_link.pack(anchor="w", pady=(0, 8))
-            openai_link.bind("<Button-1>", lambda e: webbrowser.open("https://platform.openai.com/api-keys"))
-            
-            def save_openai():
-                # Save API key if provided
-                new_key = openai_key_var.get().strip()
-                if new_key:
-                    self.config["openai_api_key"] = new_key
-                    # Also set in environment for current session
-                    os.environ["OPENAI_API_KEY"] = new_key
-                self.config["openai_model"] = model_var.get()
-                save_config(self.config)
-                self.postproc_config_btn.configure(text=self._get_postproc_config_display())
-                self.log("⚙ OpenAI settings saved")
-                dialog.destroy()
-            
-            save_cmd = save_openai
+                ctk.CTkLabel(
+                    api_frame,
+                    text="OpenAI Model",
+                    font=(self.font_body[0], 12),
+                    text_color=COLORS["text_secondary"],
+                ).pack(anchor="w", padx=16, pady=(0, 4))
+                
+                ctk.CTkOptionMenu(
+                    api_frame,
+                    variable=form_data["openai_model"],
+                    values=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+                    font=(self.font_body[0], 12),
+                    fg_color=COLORS["bg_input"],
+                    button_color=COLORS["bg_surface"],
+                    button_hover_color=COLORS["bg_hover"],
+                    dropdown_fg_color=COLORS["bg_card"],
+                    dropdown_hover_color=COLORS["bg_hover"],
+                    text_color=COLORS["text_primary"],
+                    width=280,
+                ).pack(anchor="w", padx=16, pady=(0, 12))
+                
+                ctk.CTkLabel(
+                    settings_container,
+                    text="GPT-4o-mini is fast and affordable. GPT-4o is higher quality but more expensive.",
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["text_muted"],
+                    wraplength=460,
+                ).pack(anchor="w", pady=(0, 8))
+                
+                link = ctk.CTkLabel(
+                    settings_container,
+                    text="Get your API key at: platform.openai.com/api-keys",
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["accent"],
+                    cursor="hand2",
+                )
+                link.pack(anchor="w", pady=(0, 8))
+                link.bind("<Button-1>", lambda e: webbrowser.open("https://platform.openai.com/api-keys"))
+                
+            else:  # anthropic
+                api_frame = ctk.CTkFrame(settings_container, fg_color=COLORS["bg_card"], corner_radius=12)
+                api_frame.pack(fill="x", pady=(0, 12))
+                
+                ctk.CTkLabel(
+                    api_frame,
+                    text="API Key",
+                    font=(self.font_body[0], 12),
+                    text_color=COLORS["text_secondary"],
+                ).pack(anchor="w", padx=16, pady=(12, 4))
+                
+                key_entry = ctk.CTkEntry(
+                    api_frame,
+                    textvariable=form_data["anthropic_key"],
+                    font=(self.font_mono[0], 11),
+                    fg_color=COLORS["bg_input"],
+                    border_color=COLORS["border_subtle"],
+                    text_color=COLORS["text_primary"],
+                    placeholder_text="sk-ant-api03-...",
+                    width=350,
+                    show="•",
+                )
+                key_entry.pack(anchor="w", padx=16, pady=(0, 4))
+                
+                show_key_var = ctk.BooleanVar(value=False)
+                def toggle_visibility():
+                    key_entry.configure(show="" if show_key_var.get() else "•")
+                
+                ctk.CTkCheckBox(
+                    api_frame,
+                    text="Show key",
+                    variable=show_key_var,
+                    command=toggle_visibility,
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["text_muted"],
+                    fg_color=COLORS["accent"],
+                    hover_color=COLORS["accent_dim"],
+                ).pack(anchor="w", padx=16, pady=(0, 12))
+                
+                ctk.CTkLabel(
+                    api_frame,
+                    text="Claude Model",
+                    font=(self.font_body[0], 12),
+                    text_color=COLORS["text_secondary"],
+                ).pack(anchor="w", padx=16, pady=(0, 4))
+                
+                ctk.CTkOptionMenu(
+                    api_frame,
+                    variable=form_data["anthropic_model"],
+                    values=[
+                        "claude-3-haiku-20240307",
+                        "claude-3-5-haiku-20241022",
+                        "claude-3-sonnet-20240229",
+                        "claude-3-5-sonnet-20241022",
+                    ],
+                    font=(self.font_body[0], 12),
+                    fg_color=COLORS["bg_input"],
+                    button_color=COLORS["bg_surface"],
+                    button_hover_color=COLORS["bg_hover"],
+                    dropdown_fg_color=COLORS["bg_card"],
+                    dropdown_hover_color=COLORS["bg_hover"],
+                    text_color=COLORS["text_primary"],
+                    width=280,
+                ).pack(anchor="w", padx=16, pady=(0, 12))
+                
+                ctk.CTkLabel(
+                    settings_container,
+                    text="Claude Haiku is fast and cheap (~$0.25/1M tokens). Sonnet is higher quality but slower.",
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["text_muted"],
+                    wraplength=460,
+                ).pack(anchor="w", pady=(0, 8))
+                
+                link = ctk.CTkLabel(
+                    settings_container,
+                    text="Get your API key at: console.anthropic.com",
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["accent"],
+                    cursor="hand2",
+                )
+                link.pack(anchor="w", pady=(0, 8))
+                link.bind("<Button-1>", lambda e: webbrowser.open("https://console.anthropic.com"))
         
-        # === Custom Prompt Section (for both backends) ===
-        if self.config.get("post_processing_template") == "custom":
-            ctk.CTkLabel(
-                container,
-                text="CUSTOM PROMPT",
-                font=(self.font_body[0], 11, "bold"),
-                text_color=COLORS["text_muted"],
-            ).pack(anchor="w", pady=(16, 4))
+        # Build initial settings
+        rebuild_provider_settings()
+        
+        def save_settings():
+            provider = provider_var.get()
             
-            ctk.CTkLabel(
-                container,
-                text="Write instructions for how the AI should process your transcription.\nUse {text} as a placeholder for your transcribed text.",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_secondary"],
-                justify="left",
-            ).pack(anchor="w", pady=(0, 8))
+            # Save the selected provider as the post-processing backend
+            self.config["post_processing_backend"] = provider
             
-            prompt_frame = ctk.CTkFrame(container, fg_color=COLORS["bg_card"], corner_radius=12)
-            prompt_frame.pack(fill="x", pady=(0, 12))
+            # Save OpenAI settings
+            openai_key = form_data["openai_key"].get().strip()
+            if openai_key:
+                self.config["openai_api_key"] = openai_key
+                os.environ["OPENAI_API_KEY"] = openai_key
+            self.config["openai_model"] = form_data["openai_model"].get()
             
-            custom_prompt = self.config.get("post_processing_custom_prompt", "")
-            if not custom_prompt:
-                custom_prompt = "Clean up this transcription, fix grammar and punctuation:\n\n{text}"
-            prompt_text = ctk.CTkTextbox(
-                prompt_frame,
-                font=(self.font_body[0], 11),
-                fg_color=COLORS["bg_input"],
-                text_color=COLORS["text_primary"],
-                height=120,
-            )
-            prompt_text.pack(fill="x", padx=12, pady=12)
-            prompt_text.insert("1.0", custom_prompt)
+            # Save Anthropic settings
+            anthropic_key = form_data["anthropic_key"].get().strip()
+            if anthropic_key:
+                self.config["anthropic_api_key"] = anthropic_key
+                os.environ["ANTHROPIC_API_KEY"] = anthropic_key
+            self.config["anthropic_model"] = form_data["anthropic_model"].get()
             
-            # Modify save command to include custom prompt
-            original_save = save_cmd
-            def save_with_prompt():
-                self.config["post_processing_custom_prompt"] = prompt_text.get("1.0", "end-1c")
-                original_save()
-            save_cmd = save_with_prompt
+            save_config(self.config)
+            
+            # Update UI
+            if hasattr(self, 'postproc_config_btn'):
+                self.postproc_config_btn.configure(text=self._get_postproc_config_display())
+            if hasattr(self, 'postproc_backend_var'):
+                self.postproc_backend_var.set(provider)
+            if hasattr(self, 'remote_api_btn'):
+                status = "Configured ✓" if (openai_key or anthropic_key) else "Not configured"
+                self.remote_api_btn.configure(text=status)
+            
+            self.log(f"⚙ Cloud API settings saved ({provider.title()})")
+            dialog.destroy()
         
         # Buttons
-        btn_frame = ctk.CTkFrame(container, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(20, 0))
+        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=(20, 0), side="bottom")
         
         ctk.CTkButton(
             btn_frame,
@@ -4703,7 +4604,7 @@ class WayfinderApp(ctk.CTk):
             height=40,
             width=100,
             corner_radius=8,
-            command=save_cmd,
+            command=save_settings,
         ).pack(side="right")
 
     def create_setting_row(self, parent, label, value, command, tooltip=None):
@@ -5501,7 +5402,8 @@ class WayfinderApp(ctk.CTk):
                     selected = "~" + selected[len(str(Path.home())):]
                 self.config["model_path"] = selected
                 save_config(self.config)
-                self.model_btn.configure(text=self.get_model_display())
+                if hasattr(self, 'model_btn'):
+                    self.model_btn.configure(text=self.get_model_display())
                 self.log(f"⚙ Model: {self.get_model_display()}")
                 dialog.destroy()
             
@@ -6101,7 +6003,8 @@ class WayfinderApp(ctk.CTk):
             
             save_config(self.config)
             
-            self.prompt_btn.configure(text=self.get_prompt_display())
+            if hasattr(self, 'prompt_btn'):
+                self.prompt_btn.configure(text=self.get_prompt_display())
             vocab_count = len(self.config.get("custom_vocabulary", []))
             self.log(f"⚙ Prompt updated: {self.get_prompt_display()} (+{vocab_count} vocab terms)")
             dialog.destroy()
@@ -7816,10 +7719,11 @@ class WayfinderApp(ctk.CTk):
             save_config(self.config)
             self.log(f"⚙ Model: {model_name}")
             # Update the button in main UI if visible
-            try:
-                self.model_btn.configure(text=self.get_model_display())
-            except:
-                pass
+            if hasattr(self, 'model_btn'):
+                try:
+                    self.model_btn.configure(text=self.get_model_display())
+                except:
+                    pass
         else:
             self.log(f"⚠ Model not found: {model_name}")
     
@@ -8358,7 +8262,7 @@ class WayfinderApp(ctk.CTk):
                 with self.chunk_transcription_lock:
                     if len(self.chunk_transcriptions) >= chunk_index:
                         prev_text = self.chunk_transcriptions[chunk_index - 1]
-                        if prev_text:
+                        if prev_text and prev_text != "[error]":
                             context = prev_text
             
             text = transcribe_with_config(chunk_path, self.config, context=context)
@@ -8366,7 +8270,7 @@ class WayfinderApp(ctk.CTk):
                 # Ensure list is large enough
                 while len(self.chunk_transcriptions) <= chunk_index:
                     self.chunk_transcriptions.append("")
-                self.chunk_transcriptions[chunk_index] = text.strip()
+                self.chunk_transcriptions[chunk_index] = text.strip() if text.strip() else "[empty]"
             
             # Log with context indicator for chunks after the first
             if chunk_index > 0 and context:
@@ -8375,6 +8279,11 @@ class WayfinderApp(ctk.CTk):
                 self.event_queue.put((EventType.CHUNK_TRANSCRIBED, (chunk_index, text, False)))
         except Exception as e:
             self.log(f"⚠ Chunk {chunk_index + 1} error: {e}")
+            # Mark chunk as failed so finalization doesn't wait forever
+            with self.chunk_transcription_lock:
+                while len(self.chunk_transcriptions) <= chunk_index:
+                    self.chunk_transcriptions.append("")
+                self.chunk_transcriptions[chunk_index] = "[error]"
     
     def _update_recording_duration(self):
         """Update the status label with recording duration."""
@@ -8511,8 +8420,11 @@ class WayfinderApp(ctk.CTk):
         if not transcriptions:
             return ""
         
-        # Filter out empty transcriptions
-        valid_transcriptions = [t.strip() for t in transcriptions if t and t.strip()]
+        # Filter out empty transcriptions and error/empty markers
+        valid_transcriptions = [
+            t.strip() for t in transcriptions 
+            if t and t.strip() and t.strip() not in ("[error]", "[empty]")
+        ]
         
         if not valid_transcriptions:
             return ""

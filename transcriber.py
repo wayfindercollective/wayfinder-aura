@@ -506,7 +506,11 @@ class OpenAIWhisperBackend(TranscriptionBackend):
         
         try:
             import openai
-            self._client = openai.OpenAI(api_key=self.api_key)
+            # Set a reasonable timeout (60 seconds for audio transcription)
+            self._client = openai.OpenAI(
+                api_key=self.api_key,
+                timeout=60.0,  # 60 second timeout
+            )
             return self._client
         except Exception as e:
             raise TranscriptionError(f"Failed to initialize OpenAI client: {e}")
@@ -542,6 +546,10 @@ class OpenAIWhisperBackend(TranscriptionBackend):
             # Build prompt with context and vocabulary
             prompt = self._build_prompt(context)
             
+            # Log for debugging
+            file_size = Path(audio_path).stat().st_size
+            print(f"[OpenAI Whisper] Sending {file_size / 1024:.1f}KB audio file...")
+            
             # OpenAI Whisper API call
             with open(audio_path, "rb") as audio_file:
                 # Prepare API parameters
@@ -562,10 +570,13 @@ class OpenAIWhisperBackend(TranscriptionBackend):
                 
                 transcription = client.audio.transcriptions.create(**params)
             
+            print(f"[OpenAI Whisper] ✓ Transcription received")
+            
             # Response is just text when response_format="text"
             return transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
             
         except Exception as e:
+            print(f"[OpenAI Whisper] ✗ Error: {e}")
             raise TranscriptionError(f"OpenAI Whisper API call failed: {e}")
 
 
