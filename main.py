@@ -97,6 +97,7 @@ from transcriber import transcribe_with_config, TranscriptionError
 # #region agent log
 _debug_log("transcriber imported successfully")
 # #endregion
+from postprocessor import process_with_config, get_available_backends, get_template_names
 from license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 # #region agent log
 _debug_log("All imports complete - moving to configuration")
@@ -3742,6 +3743,54 @@ class WayfinderApp(ctk.CTk):
             self.backend_var, self.on_backend_changed,
             tooltip=SETTING_TOOLTIPS["backend"], width=160,
         )
+        
+        # === Post-Processing Section ===
+        self._create_mode_section_header(parent, "Post-Processing (LLM Cleanup)")
+        
+        # Post-processing toggle
+        postproc_enabled = self.config.get("post_processing_enabled", False)
+        self.postproc_enabled_var = ctk.BooleanVar(value=postproc_enabled)
+        self.create_toggle_row(
+            parent, "Enable Post-Processing",
+            self.postproc_enabled_var, self.toggle_post_processing,
+            tooltip="Remove filler words (um, uh, ah) and fix punctuation using local LLM",
+        )
+        
+        # Post-processing backend and options (only show if enabled)
+        if postproc_enabled:
+            postproc_backend = self.config.get("post_processing_backend", "llama_cpp")
+            self.postproc_backend_var = ctk.StringVar(value=postproc_backend)
+            backend_options = ["llama_cpp"]
+            # Add cloud options if available
+            backends = get_available_backends()
+            for b in backends:
+                if b["id"] in ["anthropic", "openai"] and b["available"]:
+                    backend_options.append(b["id"])
+            
+            self.postproc_backend_dropdown = self.create_dropdown_row(
+                parent, "Post-Processing Backend", backend_options,
+                self.postproc_backend_var, self.on_postproc_backend_changed,
+                tooltip="llama.cpp = local, Anthropic/OpenAI = cloud (requires API key)", width=160,
+            )
+            
+            # Model selection for llama.cpp
+            if postproc_backend == "llama_cpp":
+                model_path = self.config.get("llama_cpp_model_path", "")
+                model_display = Path(model_path).name if model_path else "No model selected"
+                self.postproc_model_btn = self.create_setting_row(
+                    parent, "LLM Model", model_display,
+                    self.open_postproc_model_settings,
+                    tooltip="Select GGUF model for post-processing (e.g., Phi-3-mini, Qwen2.5-1.5B)",
+                )
+            
+            # Template selector
+            postproc_template = self.config.get("post_processing_template", "clean")
+            self.postproc_template_var = ctk.StringVar(value=postproc_template)
+            self.postproc_template_dropdown = self.create_dropdown_row(
+                parent, "Format Template", ["clean", "email", "notes", "code_comment", "custom"],
+                self.postproc_template_var, self.on_postproc_template_changed,
+                tooltip="clean=Remove fillers, email=Format as email, notes=Bullet points", width=140,
+            )
     
     def _build_hybrid_mode_settings(self, parent) -> None:
         """Build settings panel for Hybrid mode (local transcription + cloud post-processing)."""
@@ -4203,10 +4252,14 @@ class WayfinderApp(ctk.CTk):
     
     def toggle_post_processing(self):
         """Toggle LLM post-processing."""
-        self.config["post_processing_enabled"] = self.postproc_var.get()
+        enabled = self.postproc_enabled_var.get() if hasattr(self, 'postproc_enabled_var') else self.postproc_var.get() if hasattr(self, 'postproc_var') else False
+        self.config["post_processing_enabled"] = enabled
         save_config(self.config)
-        status = "enabled" if self.postproc_var.get() else "disabled"
+        status = "enabled" if enabled else "disabled"
         self.log(f"⚙ LLM Post-processing: {status}")
+        # Rebuild mode settings to show/hide post-processing options
+        current_mode = self.config.get("processing_mode", "local")
+        self._build_mode_settings(current_mode)
     
     def on_postproc_backend_changed(self, value: str):
         """Handle post-processing backend change."""
@@ -4222,6 +4275,9 @@ class WayfinderApp(ctk.CTk):
         # Update config button text
         if hasattr(self, 'postproc_config_btn'):
             self.postproc_config_btn.configure(text=self._get_postproc_config_display())
+        # Rebuild mode settings to show/hide model selection
+        current_mode = self.config.get("processing_mode", "local")
+        self._build_mode_settings(current_mode)
     
     def on_postproc_template_changed(self, value: str):
         """Handle post-processing template change."""
@@ -4235,6 +4291,41 @@ class WayfinderApp(ctk.CTk):
             "custom": "Custom prompt",
         }
         self.log(f"⚙ Post-processing template: {template_names.get(value, value)}")
+    
+    def open_postproc_model_settings(self):
+        """Open file dialog to select llama.cpp GGUF model for post-processing."""
+        from tkinter import filedialog
+        
+        # Get current model path or default to models directory
+        current_path = self.config.get("llama_cpp_model_path", "")
+        if current_path:
+            initial_dir = str(Path(current_path).parent)
+        else:
+            # Default to models directory
+            models_dir = Path.home() / ".local" / "share" / "wayfinder-voice" / "models"
+            initial_dir = str(models_dir) if models_dir.exists() else str(Path.home())
+        
+        # Open file dialog
+        file_path = filedialog.askopenfilename(
+            title="Select GGUF Model for Post-Processing",
+            initialdir=initial_dir,
+            filetypes=[
+                ("GGUF files", "*.gguf"),
+                ("All files", "*.*"),
+            ],
+        )
+        
+        if file_path:
+            self.config["llama_cpp_model_path"] = file_path
+            save_config(self.config)
+            model_name = Path(file_path).name
+            self.log(f"⚙ Post-processing model: {model_name}")
+            # Update the button text
+            if hasattr(self, 'postproc_model_btn'):
+                self.postproc_model_btn.configure(text=model_name[:30] + "..." if len(model_name) > 30 else model_name)
+            # Rebuild settings to refresh UI
+            current_mode = self.config.get("processing_mode", "local")
+            self._build_mode_settings(current_mode)
     
     def _get_postproc_config_display(self) -> str:
         """Get display text for post-processing configuration button."""
@@ -8561,8 +8652,20 @@ class WayfinderApp(ctk.CTk):
             self.on_error("No speech detected")
             return
         
+        # Apply post-processing if enabled
+        processed_text = text.strip()
+        if self.config.get("post_processing_enabled", False):
+            try:
+                processed_text = process_with_config(processed_text, self.config)
+                if processed_text != text.strip():
+                    self.log("✨ Post-processed transcription")
+            except Exception as e:
+                self.log(f"⚠️ Post-processing failed: {e}")
+                # Fall back to original text
+                processed_text = text.strip()
+        
         # Store and display in Dictate tab
-        self.last_transcription = text.strip()
+        self.last_transcription = processed_text
         if hasattr(self, 'transcription_label'):
             self.transcription_label.configure(
                 text=self.last_transcription,
@@ -8570,7 +8673,7 @@ class WayfinderApp(ctk.CTk):
             )
         
         self.update_state(AppState.PASTING)
-        self.executor.submit(self.do_inject, text)
+        self.executor.submit(self.do_inject, processed_text)
 
     def do_inject(self, text):
         try:
