@@ -821,6 +821,7 @@ SETTING_TOOLTIPS = {
     "hotkey": "The keyboard shortcut to start/stop voice recording.\n⚡ Latency: None",
     "microphone": "Select which microphone/audio input device to use.\n⚡ Latency: None",
     "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\n⚡ Latency: None",
+    "benchmark": "Measure transcription speed on your hardware.\nResults customize speed estimates throughout the app.\n⏱️ Run once to get accurate timing predictions.",
     "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
     "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
     "prompt": "Initial text that guides transcription style.\n⚡ Latency: None (processed at model load)",
@@ -3709,6 +3710,43 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["hotkey_devices"],
         )
         
+        # === BENTO TILE 4: Benchmark ===
+        benchmark_tile = ctk.CTkFrame(
+            scroll, fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["lg"], border_width=1,
+            border_color=COLORS["border_rim"],
+        )
+        benchmark_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        
+        benchmark_header = ctk.CTkFrame(benchmark_tile, fg_color="transparent")
+        benchmark_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
+        ctk.CTkLabel(
+            benchmark_header, text="⏱️   B E N C H M A R K",
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        
+        benchmark_content = ctk.CTkFrame(benchmark_tile, fg_color="transparent")
+        benchmark_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
+        
+        # Show benchmark status/results
+        benchmark_results = self.config.get("benchmark_results", {})
+        fastest = self.config.get("benchmark_fastest_processor", None)
+        
+        if benchmark_results:
+            # Show summary of last benchmark
+            model_count = len(benchmark_results)
+            fastest_display = f"🚀 {fastest.upper()}" if fastest else ""
+            benchmark_status = f"{model_count} models tested {fastest_display}"
+        else:
+            benchmark_status = "Not run yet"
+        
+        self.benchmark_btn = self.create_setting_row(
+            benchmark_content, "Hardware Speed Test", benchmark_status,
+            self.open_benchmark_settings,
+            tooltip=SETTING_TOOLTIPS["benchmark"],
+        )
+        
         self._settings_scroll = scroll
     
     def _build_mode_settings(self, mode: str) -> None:
@@ -4657,15 +4695,49 @@ class WayfinderApp(ctk.CTk):
                                 ))
                     
                     # Move temp to final
-                    temp_path.rename(model_file)
-                    
-                    self.after(0, lambda: self.log(f"✓ Downloaded: {model_info['name']}"))
-                    self.after(0, progress_dialog.destroy)
-                    self.after(0, lambda: self.open_postproc_model_settings())  # Refresh
+                    if temp_path.exists():
+                        if model_file.exists():
+                            model_file.unlink()  # Remove existing file if present
+                        temp_path.rename(model_file)
+                        
+                        def on_success():
+                            try:
+                                self.log(f"✓ Downloaded: {model_info['name']}")
+                                if progress_dialog.winfo_exists():
+                                    progress_dialog.destroy()
+                                self.open_postproc_model_settings()  # Refresh
+                            except Exception as e:
+                                self.log(f"⚠️ Error closing dialog: {e}")
+                        
+                        self.after(0, on_success)
+                    else:
+                        raise Exception("Download file not found after completion")
                     
             except Exception as e:
-                self.after(0, lambda: self.log(f"⚠️ Download failed: {e}"))
-                self.after(0, progress_dialog.destroy)
+                import traceback
+                error_msg = str(e)
+                error_trace = traceback.format_exc()
+                self.log(f"⚠️ Download failed: {error_msg}")
+                
+                def on_error():
+                    try:
+                        if progress_dialog.winfo_exists():
+                            status_label.configure(
+                                text=f"Error: {error_msg}",
+                                text_color="#CF7B7B"
+                            )
+                            cancel_btn.configure(text="Close")
+                    except:
+                        pass
+                
+                self.after(0, on_error)
+                
+                # Clean up temp file if it exists
+                try:
+                    if temp_path.exists():
+                        temp_path.unlink()
+                except:
+                    pass
         
         threading.Thread(target=download_thread, daemon=True).start()
     
@@ -4700,6 +4772,7 @@ class WayfinderApp(ctk.CTk):
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
         ollama_available = False
         available_models = []
+        current_model = self.config.get("ollama_model", "phi3:mini")
         
         try:
             import requests
@@ -4711,6 +4784,18 @@ class WayfinderApp(ctk.CTk):
                 available_models = [m.get("name", "") for m in models_data if m.get("name")]
         except Exception as e:
             ollama_available = False
+        
+        # Show currently selected model (always visible)
+        if current_model:
+            selected_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_surface"], corner_radius=RADIUS["sm"])
+            selected_frame.pack(fill="x", pady=(0, 12))
+            
+            ctk.CTkLabel(
+                selected_frame,
+                text=f"Selected: {current_model}",
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["accent"],
+            ).pack(padx=12, pady=8)
         
         # Status indicator (subtle, not intrusive)
         status_frame = ctk.CTkFrame(inner, fg_color="transparent")
@@ -4727,7 +4812,7 @@ class WayfinderApp(ctk.CTk):
         else:
             status_indicator = ctk.CTkLabel(
                 status_frame,
-                text="⚠️ Ollama is not running",
+                text="⚠️ Ollama service not detected (you can still select models)",
                 font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_secondary"],
             )
@@ -4837,8 +4922,6 @@ class WayfinderApp(ctk.CTk):
         )
         scroll.pack(fill="both", expand=True, pady=(0, 16))
         
-        current_model = self.config.get("ollama_model", "phi3:mini")
-        
         # Recommended models with download buttons
         recommended_models = [
             {"name": "phi3:mini", "desc": "Fast, small (3.8GB)", "recommended": True},
@@ -4910,17 +4993,31 @@ class WayfinderApp(ctk.CTk):
                     )
                     select_btn.pack(side="left")
             else:
-                # Download button - works even if Ollama isn't running (will show error)
-                download_btn = ctk.CTkButton(
-                    actions_frame,
-                    text="⬇️ Download",
-                    font=(self.font_body[0], self.font_sizes["small"]),
-                    fg_color=COLORS["accent"],
-                    hover_color=COLORS["accent_hover"],
-                    text_color=COLORS["text_bright"],
-                    command=lambda m=model_name: self._download_ollama_model(m, dialog),
-                )
-                download_btn.pack(side="left")
+                # Allow selecting even if not installed - user can download later
+                # Or download if Ollama is running
+                if ollama_available:
+                    download_btn = ctk.CTkButton(
+                        actions_frame,
+                        text="⬇️ Download",
+                        font=(self.font_body[0], self.font_sizes["small"]),
+                        fg_color=COLORS["accent"],
+                        hover_color=COLORS["accent_hover"],
+                        text_color=COLORS["text_bright"],
+                        command=lambda m=model_name: self._download_ollama_model(m, dialog),
+                    )
+                    download_btn.pack(side="left")
+                else:
+                    # Allow pre-selection even if Ollama isn't running
+                    select_btn = ctk.CTkButton(
+                        actions_frame,
+                        text="Select (will use when Ollama starts)",
+                        font=(self.font_body[0], self.font_sizes["small"]),
+                        fg_color=COLORS["bg_hover"],
+                        hover_color=COLORS["bg_elevated"],
+                        text_color=COLORS["text_primary"],
+                        command=lambda m=model_name: self._select_ollama_model(m, dialog),
+                    )
+                    select_btn.pack(side="left")
         
         # Installed models section (if any)
         if available_models and len(available_models) > len([m["name"] for m in recommended_models if m["name"] in available_models]):
