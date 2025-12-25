@@ -3713,6 +3713,20 @@ class WayfinderApp(ctk.CTk):
     
     def _build_mode_settings(self, mode: str) -> None:
         """Build the settings panel for the selected processing mode."""
+        # Validate and reset post-processing backend based on mode
+        current_backend = self.config.get("post_processing_backend", "llama_cpp")
+        if mode == "local":
+            # Local mode: only allow local backends
+            if current_backend not in ["llama_cpp", "ollama"]:
+                self.config["post_processing_backend"] = "llama_cpp"
+                save_config(self.config)
+        elif mode == "hybrid":
+            # Hybrid mode: only allow cloud backends for post-processing
+            if current_backend not in ["openai", "anthropic"]:
+                self.config["post_processing_backend"] = "openai"
+                save_config(self.config)
+        # Remote mode doesn't use post-processing (transcription is already cloud)
+        
         # Clear existing content
         for widget in self.mode_settings_container.winfo_children():
             widget.destroy()
@@ -3804,18 +3818,25 @@ class WayfinderApp(ctk.CTk):
         # Post-processing backend and options (only show if enabled)
         if postproc_enabled:
             postproc_backend = self.config.get("post_processing_backend", "llama_cpp")
+            # Ensure we're using a local backend for local mode
+            if postproc_backend not in ["llama_cpp", "ollama"]:
+                postproc_backend = "llama_cpp"
+                self.config["post_processing_backend"] = postproc_backend
+                save_config(self.config)
             self.postproc_backend_var = ctk.StringVar(value=postproc_backend)
             
-            # Get all available backends
-            backends = get_available_backends()
+            # Get all available backends, but filter to only local ones for local mode
+            all_backends = get_available_backends()
             backend_options = []
             backend_display_map = {}
             
-            # Build backend options list with display names
-            for b in backends:
+            # Filter to only local backends (llama_cpp and ollama)
+            local_backend_ids = ["llama_cpp", "ollama"]
+            for b in all_backends:
                 backend_id = b["id"]
-                backend_options.append(backend_id)
-                backend_display_map[backend_id] = b["name"]
+                if backend_id in local_backend_ids:
+                    backend_options.append(backend_id)
+                    backend_display_map[backend_id] = b["name"]
             
             # If no backends available, at least show llama_cpp
             if not backend_options:
