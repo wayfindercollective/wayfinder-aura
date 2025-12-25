@@ -176,6 +176,7 @@ DEFAULT_CONFIG = {
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
+    "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": False,  # Enable LLM post-processing
     "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai
@@ -629,11 +630,11 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
         
         # Physics parameters for smooth scrolling
         self._velocity = 0.0
-        self._friction = 0.93  # Deceleration factor (higher = more glide)
+        self._friction = 0.4  # Deceleration factor (very low = stops almost immediately)
         self._bounce_strength = 0.35  # How much to bounce back
         self._bounce_damping = 0.65  # How quickly bounce settles
         self._scroll_multiplier = 1.0  # Scroll sensitivity
-        self._min_velocity = 0.3  # Stop threshold
+        self._min_velocity = 1.0  # Stop threshold (high = stops very quickly)
         
         # State tracking
         self._is_animating = False
@@ -675,38 +676,25 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
         import time
         current_time = time.time()
         
-        # Determine scroll delta
+        # Determine scroll delta - very small values for precise scrolling
         if hasattr(event, 'delta'):
             # Windows/Mac - delta is typically 120 per notch
-            delta = event.delta / 120.0 * 40 * self._scroll_multiplier
+            delta = event.delta / 120.0 * 6 * self._scroll_multiplier
         elif event.num == 4:
             # Linux scroll up
-            delta = 40 * self._scroll_multiplier
+            delta = 6 * self._scroll_multiplier
         elif event.num == 5:
             # Linux scroll down
-            delta = -40 * self._scroll_multiplier
+            delta = -6 * self._scroll_multiplier
         else:
             return
         
-        # Track scroll history for momentum calculation
-        self._scroll_history.append((current_time, delta))
-        # Keep only recent history (last 100ms)
-        self._scroll_history = [(t, d) for t, d in self._scroll_history 
-                                if current_time - t < 0.1]
+        # Minimal momentum - almost direct scroll with tiny glide
+        # Just use the delta directly with a small velocity boost
+        self._velocity = delta * 0.8
         
-        # Calculate velocity from recent scrolls
-        if len(self._scroll_history) > 1:
-            total_delta = sum(d for _, d in self._scroll_history)
-            time_span = self._scroll_history[-1][0] - self._scroll_history[0][0]
-            if time_span > 0:
-                self._velocity = total_delta / (time_span * 60)  # Normalize to ~60fps
-            else:
-                self._velocity = delta * 0.5
-        else:
-            self._velocity = delta * 0.5
-        
-        # Cap velocity
-        max_velocity = 80
+        # Very low velocity cap for precise scrolling
+        max_velocity = 8
         self._velocity = max(-max_velocity, min(max_velocity, self._velocity))
         
         # Start animation loop if not already running
@@ -824,6 +812,8 @@ SETTING_TOOLTIPS = {
     "benchmark": "Measure transcription speed on your hardware.\nResults customize speed estimates throughout the app.\n⏱️ Run once to get accurate timing predictions.",
     "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
     "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
+    "overlay_type": "Choose the status indicator style:\n• Always On: Stays visible, never steals focus (PyQt6)\n• Disappearing: Shows only during recording (CTk)\n⚠️ Requires restart to take effect.",
+    "overlay_scale": "Adjust the size of the status overlay.\nSeparate from the main UI scale.\n⚡ Latency: None",
     "prompt": "Initial text that guides transcription style.\n⚡ Latency: None (processed at model load)",
     "language": "The language for transcription. English is most optimized.\n⚡ Latency: None",
     
@@ -2683,6 +2673,10 @@ class OverlayController:
         self._current_state = "hidden"
         self._send_command({"cmd": "hide"})
     
+    def set_scale(self, scale: float):
+        """Set the overlay scale factor."""
+        self._send_command({"cmd": "scale", "value": scale})
+    
     def quit(self):
         """Shut down the overlay subprocess."""
         self._stop_audio_polling()
@@ -2844,6 +2838,10 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"✨ Using Always On indicator (PyQt6)")
                 # Pre-start the subprocess to avoid focus steal
                 self.overlay_controller._start_process()
+                # Apply saved overlay scale
+                overlay_scale = self.config.get("overlay_scale", 1.0)
+                if overlay_scale != 1.0:
+                    self.overlay_controller.set_scale(overlay_scale)
             except ImportError:
                 self._use_pyqt_overlay = False
                 self.log("⚠ PyQt6 not available, using Disappearing indicator")
@@ -2905,7 +2903,14 @@ class WayfinderApp(ctk.CTk):
         # Ensure window is resizable
         self.resizable(True, True)
         
-        # Apply saved UI scale - simple and direct
+        # Check if this is first run (no saved scale) - use recommended scale
+        if "ui_scale" not in self.config:
+            # First run: calculate optimal scale for this display
+            self.ui_scale = self._get_recommended_scale()
+            self.config["ui_scale"] = self.ui_scale
+            save_config(self.config)
+        
+        # Apply UI scale
         scaled_w = int(self.BASE_WINDOW_WIDTH * self.ui_scale)
         scaled_h = int(self.BASE_WINDOW_HEIGHT * self.ui_scale)
         
@@ -2913,11 +2918,11 @@ class WayfinderApp(ctk.CTk):
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
         
-        # Center on screen (don't override user's saved position if they move it later)
+        # Center on screen
         center_x = (screen_w - scaled_w) // 2
         center_y = (screen_h - scaled_h) // 2
         
-        # Just apply the geometry directly - trust the saved scale
+        # Apply geometry
         self.geometry(f"{scaled_w}x{scaled_h}+{center_x}+{center_y}")
         
         # Set reasonable minimum size
@@ -2947,21 +2952,74 @@ class WayfinderApp(ctk.CTk):
         self.bind("<Control-0>", lambda e: self.reset_scale())
         self.bind("<Control-r>", lambda e: self.rescue_window())  # Emergency rescue
     
+    def _get_recommended_scale(self) -> float:
+        """Calculate recommended UI scale based on screen resolution and system DPI.
+        
+        This ensures the window takes up a sensible portion of the screen regardless
+        of whether you're on 1080p, 1440p, 4K, etc.
+        
+        Reference: At 1920x1080, scale 1.0 gives a 480x720 window (25% x 67% of screen)
+        On higher resolutions, we scale up proportionally.
+        """
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        
+        # Reference resolution (1080p) - this is where scale 1.0 feels "right"
+        REF_WIDTH = 1920
+        REF_HEIGHT = 1080
+        
+        # Calculate scale factor based on resolution
+        # Use the smaller ratio to ensure window fits on screen
+        scale_by_width = screen_w / REF_WIDTH
+        scale_by_height = screen_h / REF_HEIGHT
+        resolution_scale = min(scale_by_width, scale_by_height)
+        
+        # Also check for system-level DPI scaling (Linux desktop environments)
+        system_scale = 1.0
+        try:
+            # Check common environment variables for scaling
+            # GDK_SCALE is used by GTK apps
+            if os.environ.get("GDK_SCALE"):
+                system_scale = float(os.environ.get("GDK_SCALE", "1"))
+            # QT_SCALE_FACTOR is used by Qt apps
+            elif os.environ.get("QT_SCALE_FACTOR"):
+                system_scale = float(os.environ.get("QT_SCALE_FACTOR", "1"))
+            # QT_SCREEN_SCALE_FACTORS for per-screen scaling
+            elif os.environ.get("QT_SCREEN_SCALE_FACTORS"):
+                # Take the first value (primary screen)
+                factors = os.environ.get("QT_SCREEN_SCALE_FACTORS", "1").split(";")
+                system_scale = float(factors[0]) if factors else 1.0
+        except (ValueError, TypeError):
+            system_scale = 1.0
+        
+        # Combine resolution-based scale with system scale
+        # If system scaling is already applied (e.g., 200% on KDE), resolution_scale
+        # will already reflect logical pixels, so we don't double-count
+        recommended = resolution_scale
+        
+        # Clamp to reasonable range and snap to 5% increments
+        recommended = max(0.7, min(2.5, recommended))
+        recommended = round(recommended * 20) / 20
+        
+        return recommended
+    
     def rescue_window(self):
-        """Emergency rescue: reset window to center of screen at safe size.
+        """Emergency rescue: reset window to center of screen at optimal size.
         
         Use this if the window gets lost off-screen or under the taskbar.
         Bound to Ctrl+R as a keyboard shortcut.
+        
+        Automatically calculates the best scale for your screen resolution.
         """
-        # Reset to safe scale
-        safe_scale = 1.0
-        self.ui_scale = safe_scale
-        self.config["ui_scale"] = safe_scale
+        # Calculate optimal scale for this screen
+        optimal_scale = self._get_recommended_scale()
+        self.ui_scale = optimal_scale
+        self.config["ui_scale"] = optimal_scale
         save_config(self.config)
         
-        # Calculate safe size at 100% scale
-        new_w = self.BASE_WINDOW_WIDTH
-        new_h = self.BASE_WINDOW_HEIGHT
+        # Calculate size at optimal scale
+        new_w = int(self.BASE_WINDOW_WIDTH * optimal_scale)
+        new_h = int(self.BASE_WINDOW_HEIGHT * optimal_scale)
         
         # Center on screen
         screen_w = self.winfo_screenwidth()
@@ -2973,25 +3031,25 @@ class WayfinderApp(ctk.CTk):
         self.geometry(f"{new_w}x{new_h}+{center_x}+{center_y}")
         self.minsize(360, 500)
         
-        # Reset CustomTkinter scaling
-        ctk.set_widget_scaling(safe_scale)
-        ctk.set_window_scaling(safe_scale)
+        # Apply CustomTkinter scaling
+        ctk.set_widget_scaling(optimal_scale)
+        ctk.set_window_scaling(optimal_scale)
         
         # Update all scale UI elements
         if hasattr(self, 'scale_slider_var'):
-            self.scale_slider_var.set(safe_scale)
+            self.scale_slider_var.set(optimal_scale)
         if hasattr(self, 'scale_value_label'):
-            self.scale_value_label.configure(text=f"{int(safe_scale * 100)}%")
+            self.scale_value_label.configure(text=f"{int(optimal_scale * 100)}%")
         if hasattr(self, 'header_scale_label'):
-            self.header_scale_label.configure(text=f"{int(safe_scale * 100)}%")
+            self.header_scale_label.configure(text=f"{int(optimal_scale * 100)}%")
         
-        self.log("🛟 Window rescued! Position and scale reset to 100%.")
+        self.log(f"🛟 Window rescued! Scale set to {int(optimal_scale * 100)}% (optimal for your {screen_w}x{screen_h} display)")
     
     def scale_ui(self, factor: float):
         """Scale the UI by the given factor."""
         new_scale = self.ui_scale * factor
-        # Clamp between 0.7 and 2.0 (reasonable range)
-        new_scale = max(0.7, min(2.0, new_scale))
+        # Clamp between 0.7 and 2.5 (supports up to 4K displays)
+        new_scale = max(0.7, min(2.5, new_scale))
         # Snap to 5% increments for cleaner values
         new_scale = round(new_scale * 20) / 20
         
@@ -3003,13 +3061,14 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚙ UI Scale: {int(new_scale * 100)}%")
     
     def reset_scale(self):
-        """Reset UI scale to 100%."""
-        if self.ui_scale != 1.0:
-            self.ui_scale = 1.0
-            self.config["ui_scale"] = 1.0
+        """Reset UI scale to optimal for current display."""
+        optimal = self._get_recommended_scale()
+        if abs(self.ui_scale - optimal) > 0.01:
+            self.ui_scale = optimal
+            self.config["ui_scale"] = optimal
             save_config(self.config)
             self._apply_scale()
-            self.log("⚙ UI Scale: 100% (reset)")
+            self.log(f"⚙ UI Scale: {int(optimal * 100)}% (optimal for display)")
     
     def _apply_scale(self):
         """Apply the current scale to all UI elements."""
@@ -3682,7 +3741,7 @@ class WayfinderApp(ctk.CTk):
         self.tab_frames["dictate"] = frame
         
         # Scrollable content
-        scroll = ctk.CTkScrollableFrame(
+        scroll = SmoothScrollableFrame(
             frame,
             fg_color="transparent",
             scrollbar_button_color=COLORS["bg_hover"],
@@ -3811,7 +3870,7 @@ class WayfinderApp(ctk.CTk):
         self.tab_frames["settings"] = frame
         
         # Scrollable content
-        scroll = ctk.CTkScrollableFrame(
+        scroll = SmoothScrollableFrame(
             frame,
             fg_color="transparent",
             scrollbar_button_color=COLORS["bg_hover"],
@@ -3843,6 +3902,15 @@ class WayfinderApp(ctk.CTk):
         self.mic_dropdown = self.create_dropdown_row(
             audio_content, "Microphone", mic_options, self.mic_var,
             self._on_microphone_selected, tooltip=SETTING_TOOLTIPS["microphone"], width=180,
+        )
+        
+        # Audio Processing dropdown
+        preprocess_options = ["Off", "Light", "Medium", "Heavy"]
+        current_preprocess = self.config.get("audio_preprocessing", "light").capitalize()
+        self.preprocess_var = ctk.StringVar(value=current_preprocess)
+        self.preprocess_dropdown = self.create_dropdown_row(
+            audio_content, "Audio Processing", preprocess_options, self.preprocess_var,
+            self._on_audio_processing_selected, tooltip=SETTING_TOOLTIPS["audio_preprocessing"], width=180,
         )
         
         # === BENTO TILE 2: Processing Mode ===
@@ -3933,6 +4001,45 @@ class WayfinderApp(ctk.CTk):
             self.open_device_settings,
             tooltip=SETTING_TOOLTIPS["hotkey_devices"],
         )
+        
+        # === BENTO TILE: Status Overlay ===
+        overlay_tile = ctk.CTkFrame(
+            scroll, fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["lg"], border_width=1,
+            border_color=COLORS["border_rim"],
+        )
+        overlay_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        
+        overlay_header = ctk.CTkFrame(overlay_tile, fg_color="transparent")
+        overlay_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
+        ctk.CTkLabel(
+            overlay_header, text="🔔   S T A T U S   O V E R L A Y",
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        
+        overlay_content = ctk.CTkFrame(overlay_tile, fg_color="transparent")
+        overlay_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
+        
+        # Overlay Type dropdown
+        overlay_type = self.config.get("overlay_type", "always_on")
+        self.overlay_type_var = ctk.StringVar(value=overlay_type)
+        overlay_type_labels = {
+            "always_on": "Always On (PyQt6)",
+            "disappearing": "Disappearing (CTk)",
+        }
+        self.overlay_type_dropdown = self.create_dropdown_row(
+            overlay_content, "Indicator Style",
+            list(overlay_type_labels.keys()),
+            self.overlay_type_var, self.on_overlay_type_changed,
+            tooltip=SETTING_TOOLTIPS.get("overlay_type", ""),
+            width=180,
+        )
+        # Set display value
+        self.overlay_type_dropdown.set(overlay_type)
+        
+        # Overlay Scale slider
+        self._create_overlay_scale_slider_row(overlay_content)
         
         # === BENTO TILE 4: Benchmark (inline, no popup) ===
         benchmark_tile = ctk.CTkFrame(
@@ -4879,6 +4986,8 @@ class WayfinderApp(ctk.CTk):
         # Store reference for updates
         self._inline_model_section = model_section
         self._inline_download_active = False
+        self._cancel_download = False
+        self._cancel_ollama_download = False
         
         if backend == "llama_cpp":
             self._build_llamacpp_inline_section(model_section)
@@ -5484,26 +5593,57 @@ class WayfinderApp(ctk.CTk):
         model_id = data["id"]
         model_info = data["info"]
         models_dir = Path.home() / ".local" / "share" / "wayfinder-voice" / "llm-models"
+        models_dir.mkdir(parents=True, exist_ok=True)
         
         self._inline_download_active = True
-        self._llamacpp_download_btn.configure(text="Downloading...", state="disabled")
+        self._cancel_download = False
+        
+        # Update button to show Cancel option (white text on accent color for readability)
+        self._llamacpp_download_btn.configure(
+            text="✕ Cancel",
+            fg_color="#CF6679",  # Reddish cancel color
+            hover_color="#B55566",
+            text_color="#FFFFFF",  # White text for readability
+            state="normal",
+            command=self._cancel_llamacpp_download,
+        )
         
         # Show progress bar
         self._llamacpp_progress_frame.pack(fill="x", pady=(0, 6))
         self._llamacpp_progress_bar.set(0)
-        self._llamacpp_status_label.configure(text="Starting download...")
+        self._llamacpp_status_label.configure(text="Starting download...", text_color=COLORS["text_secondary"])
         
         def format_size(size_bytes):
             if size_bytes >= 1024 * 1024 * 1024:
-                return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+                return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
             elif size_bytes >= 1024 * 1024:
                 return f"{size_bytes / (1024 * 1024):.1f} MB"
             else:
-                return f"{size_bytes / 1024:.1f} KB"
+                return f"{size_bytes / 1024:.0f} KB"
+        
+        def format_speed(bytes_per_sec):
+            if bytes_per_sec >= 1024 * 1024:
+                return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
+            elif bytes_per_sec >= 1024:
+                return f"{bytes_per_sec / 1024:.0f} KB/s"
+            else:
+                return f"{bytes_per_sec:.0f} B/s"
+        
+        def format_eta(seconds):
+            if seconds < 60:
+                return f"{int(seconds)}s"
+            elif seconds < 3600:
+                mins = int(seconds // 60)
+                secs = int(seconds % 60)
+                return f"{mins}m {secs}s"
+            else:
+                hours = int(seconds // 3600)
+                mins = int((seconds % 3600) // 60)
+                return f"{hours}h {mins}m"
         
         def update_progress(progress, status_text):
             try:
-                if hasattr(self, '_llamacpp_progress_bar'):
+                if hasattr(self, '_llamacpp_progress_bar') and self._llamacpp_progress_bar.winfo_exists():
                     self._llamacpp_progress_bar.set(progress)
                     self._llamacpp_status_label.configure(text=status_text)
             except:
@@ -5511,6 +5651,7 @@ class WayfinderApp(ctk.CTk):
         
         def download_thread():
             import time as time_module
+            temp_path = None
             try:
                 import requests
                 
@@ -5519,8 +5660,10 @@ class WayfinderApp(ctk.CTk):
                 model_file = models_dir / filename
                 temp_path = model_file.with_suffix('.tmp')
                 
-                # Start download
-                response = requests.get(url, stream=True, timeout=30)
+                self.log(f"⬇️ Downloading {model_info['name']} from {url[:50]}...")
+                
+                # Start download with longer timeout for connection
+                response = requests.get(url, stream=True, timeout=(30, 300))
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
@@ -5529,23 +5672,32 @@ class WayfinderApp(ctk.CTk):
                 last_update_time = start_time
                 
                 with open(temp_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+                    for chunk in response.iter_content(chunk_size=1024 * 256):  # 256KB chunks for smoother progress
+                        # Check for cancel
+                        if self._cancel_download:
+                            raise Exception("Download cancelled by user")
+                        
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
                             
                             current_time = time_module.time()
-                            if current_time - last_update_time >= 0.2:  # Update every 200ms
+                            if current_time - last_update_time >= 0.3:  # Update every 300ms
                                 elapsed = current_time - start_time
                                 speed = downloaded / elapsed if elapsed > 0 else 0
                                 
                                 if total_size > 0:
                                     progress = downloaded / total_size
                                     percentage = progress * 100
-                                    status = f"{format_size(downloaded)} / {format_size(total_size)} ({percentage:.0f}%)"
+                                    remaining = total_size - downloaded
+                                    eta = remaining / speed if speed > 0 else 0
+                                    
+                                    status = f"{format_size(downloaded)} / {format_size(total_size)} ({percentage:.0f}%) • {format_speed(speed)}"
+                                    if eta > 0 and eta < 86400:  # Less than a day
+                                        status += f" • ETA {format_eta(eta)}"
                                 else:
-                                    progress = 0.5
-                                    status = f"{format_size(downloaded)} downloaded"
+                                    progress = min(0.9, downloaded / (500 * 1024 * 1024))  # Assume ~500MB if unknown
+                                    status = f"{format_size(downloaded)} • {format_speed(speed)}"
                                 
                                 self.after(0, lambda p=progress, s=status: update_progress(p, s))
                                 last_update_time = current_time
@@ -5556,15 +5708,19 @@ class WayfinderApp(ctk.CTk):
                         model_file.unlink()
                     temp_path.rename(model_file)
                 
+                # Calculate final stats
+                total_time = time_module.time() - start_time
+                avg_speed = downloaded / total_time if total_time > 0 else 0
+                
                 # Success
                 def on_success():
                     self._inline_download_active = False
                     self._llamacpp_progress_bar.set(1.0)
                     self._llamacpp_status_label.configure(
-                        text=f"✓ Downloaded {model_info['name']}",
+                        text=f"✓ Downloaded {model_info['name']} ({format_size(downloaded)} in {format_eta(total_time)})",
                         text_color=COLORS["accent"]
                     )
-                    self.log(f"✓ Downloaded: {model_info['name']}")
+                    self.log(f"✓ Downloaded: {model_info['name']} ({format_size(downloaded)}, avg {format_speed(avg_speed)})")
                     
                     # Auto-select the downloaded model
                     self.config["llama_cpp_model_path"] = str(model_file)
@@ -5576,18 +5732,38 @@ class WayfinderApp(ctk.CTk):
                 self.after(0, on_success)
                 
             except Exception as e:
+                error_msg = str(e)
+                is_cancelled = "cancelled" in error_msg.lower()
+                
                 def on_error():
                     self._inline_download_active = False
-                    self._llamacpp_status_label.configure(
-                        text=f"✗ Error: {str(e)[:50]}",
-                        text_color="#CF7B7B"
-                    )
-                    self._llamacpp_download_btn.configure(text="Retry", state="normal")
-                    self.log(f"⚠️ Download failed: {e}")
+                    if is_cancelled:
+                        self._llamacpp_status_label.configure(
+                            text="Download cancelled",
+                            text_color=COLORS["text_muted"]
+                        )
+                        self.log("⚠️ Download cancelled")
+                        # Rebuild UI after short delay
+                        self.after(1000, self._rebuild_postproc_section)
+                    else:
+                        self._llamacpp_status_label.configure(
+                            text=f"✗ Error: {error_msg[:60]}",
+                            text_color="#CF7B7B"
+                        )
+                        # Reset download button for retry
+                        self._llamacpp_download_btn.configure(
+                            text="Retry",
+                            fg_color=COLORS["accent"],
+                            hover_color=COLORS["accent_hover"],
+                            text_color=COLORS["text_bright"],
+                            state="normal",
+                            command=self._download_selected_llamacpp_model,
+                        )
+                        self.log(f"⚠️ Download failed: {error_msg}")
                 
                 self.after(0, on_error)
                 
-                # Cleanup
+                # Cleanup temp file
                 try:
                     if temp_path and temp_path.exists():
                         temp_path.unlink()
@@ -5595,6 +5771,12 @@ class WayfinderApp(ctk.CTk):
                     pass
         
         threading.Thread(target=download_thread, daemon=True).start()
+    
+    def _cancel_llamacpp_download(self) -> None:
+        """Cancel the current llama.cpp model download."""
+        self._cancel_download = True
+        self._llamacpp_status_label.configure(text="Cancelling...", text_color=COLORS["text_muted"])
+        self._llamacpp_download_btn.configure(state="disabled", text="Cancelling...")
     
     def _download_selected_ollama_model(self) -> None:
         """Download the currently selected Ollama model."""
@@ -5617,32 +5799,57 @@ class WayfinderApp(ctk.CTk):
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
         
         self._inline_download_active = True
-        self._ollama_download_btn.configure(text="Downloading...", state="disabled")
+        self._cancel_ollama_download = False
+        
+        # Update button to show Cancel option
+        self._ollama_download_btn.configure(
+            text="✕ Cancel",
+            fg_color="#CF6679",  # Reddish cancel color
+            hover_color="#B55566",
+            text_color="#FFFFFF",  # White text for readability
+            state="normal",
+            command=self._cancel_ollama_download_action,
+        )
         
         # Show progress bar
         self._ollama_progress_frame.pack(fill="x", pady=(0, 6))
         self._ollama_progress_bar.set(0)
-        self._ollama_status_label.configure(text="Connecting to Ollama...")
+        self._ollama_status_label.configure(text="Connecting to Ollama...", text_color=COLORS["text_secondary"])
+        
+        def format_size(size_bytes):
+            if size_bytes >= 1024 * 1024 * 1024:
+                return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+            elif size_bytes >= 1024 * 1024:
+                return f"{size_bytes / (1024 * 1024):.1f} MB"
+            else:
+                return f"{size_bytes / 1024:.0f} KB"
         
         def update_progress(progress, status_text):
             try:
-                if hasattr(self, '_ollama_progress_bar'):
+                if hasattr(self, '_ollama_progress_bar') and self._ollama_progress_bar.winfo_exists():
                     self._ollama_progress_bar.set(progress)
                     self._ollama_status_label.configure(text=status_text)
             except:
                 pass
         
         def download_thread():
+            import time as time_module
+            start_time = time_module.time()
+            last_completed = 0
+            last_time = start_time
+            
             try:
                 import requests
                 import json
+                
+                self.log(f"⬇️ Downloading {model_name} via Ollama...")
                 
                 # Use Ollama's pull API
                 response = requests.post(
                     f"{base_url}/api/pull",
                     json={"name": model_name},
                     stream=True,
-                    timeout=600,  # 10 minute timeout for large models
+                    timeout=(30, 1800),  # 30s connect, 30min read for large models
                 )
                 
                 if response.status_code != 200:
@@ -5650,6 +5857,10 @@ class WayfinderApp(ctk.CTk):
                 
                 last_status = ""
                 for line in response.iter_lines():
+                    # Check for cancel
+                    if self._cancel_ollama_download:
+                        raise Exception("Download cancelled by user")
+                    
                     if line:
                         try:
                             data = json.loads(line)
@@ -5658,25 +5869,63 @@ class WayfinderApp(ctk.CTk):
                             if "total" in data and "completed" in data:
                                 total = data["total"]
                                 completed = data["completed"]
+                                current_time = time_module.time()
+                                
                                 if total > 0:
                                     progress = completed / total
-                                    progress_text = f"{status} ({progress * 100:.0f}%)"
-                                    self.after(0, lambda p=progress, s=progress_text: update_progress(p, s))
+                                    
+                                    # Calculate speed
+                                    time_delta = current_time - last_time
+                                    if time_delta > 0.5:  # Update speed every 500ms
+                                        bytes_delta = completed - last_completed
+                                        speed = bytes_delta / time_delta if time_delta > 0 else 0
+                                        last_completed = completed
+                                        last_time = current_time
+                                        
+                                        # Calculate ETA
+                                        remaining = total - completed
+                                        eta = remaining / speed if speed > 0 else 0
+                                        
+                                        speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed > 0 else ""
+                                        eta_str = ""
+                                        if eta > 0 and eta < 86400:
+                                            if eta < 60:
+                                                eta_str = f"ETA {int(eta)}s"
+                                            elif eta < 3600:
+                                                eta_str = f"ETA {int(eta//60)}m {int(eta%60)}s"
+                                            else:
+                                                eta_str = f"ETA {int(eta//3600)}h {int((eta%3600)//60)}m"
+                                        
+                                        progress_text = f"{status} • {format_size(completed)} / {format_size(total)} ({progress*100:.0f}%)"
+                                        if speed_str:
+                                            progress_text += f" • {speed_str}"
+                                        if eta_str:
+                                            progress_text += f" • {eta_str}"
+                                        
+                                        self.after(0, lambda p=progress, s=progress_text: update_progress(p, s))
+                                    else:
+                                        # Just update progress bar without speed
+                                        progress_text = f"{status} • {format_size(completed)} / {format_size(total)} ({progress*100:.0f}%)"
+                                        self.after(0, lambda p=progress, s=progress_text: update_progress(p, s))
                             elif status != last_status:
                                 last_status = status
-                                self.after(0, lambda s=status: update_progress(0.5, s))
-                        except:
+                                self.after(0, lambda s=status: update_progress(0.3, s))
+                        except json.JSONDecodeError:
                             pass
+                
+                # Calculate final time
+                total_time = time_module.time() - start_time
                 
                 # Success
                 def on_success():
                     self._inline_download_active = False
                     self._ollama_progress_bar.set(1.0)
+                    time_str = f"{int(total_time//60)}m {int(total_time%60)}s" if total_time >= 60 else f"{int(total_time)}s"
                     self._ollama_status_label.configure(
-                        text=f"✓ Downloaded {model_name}",
+                        text=f"✓ Downloaded {model_name} in {time_str}",
                         text_color=COLORS["accent"]
                     )
-                    self.log(f"✓ Downloaded: {model_name}")
+                    self.log(f"✓ Downloaded: {model_name} in {time_str}")
                     
                     # Hide progress after 2 seconds and rebuild
                     self.after(2000, self._rebuild_postproc_section)
@@ -5684,18 +5933,43 @@ class WayfinderApp(ctk.CTk):
                 self.after(0, on_success)
                 
             except Exception as e:
+                error_msg = str(e)
+                is_cancelled = "cancelled" in error_msg.lower()
+                
                 def on_error():
                     self._inline_download_active = False
-                    self._ollama_status_label.configure(
-                        text=f"✗ Error: {str(e)[:50]}",
-                        text_color="#CF7B7B"
-                    )
-                    self._ollama_download_btn.configure(text="Retry", state="normal")
-                    self.log(f"⚠️ Download failed: {e}")
+                    if is_cancelled:
+                        self._ollama_status_label.configure(
+                            text="Download cancelled",
+                            text_color=COLORS["text_muted"]
+                        )
+                        self.log("⚠️ Download cancelled")
+                        self.after(1000, self._rebuild_postproc_section)
+                    else:
+                        self._ollama_status_label.configure(
+                            text=f"✗ Error: {error_msg[:60]}",
+                            text_color="#CF7B7B"
+                        )
+                        # Reset button for retry
+                        self._ollama_download_btn.configure(
+                            text="Retry",
+                            fg_color=COLORS["accent"],
+                            hover_color=COLORS["accent_hover"],
+                            text_color=COLORS["text_bright"],
+                            state="normal",
+                            command=self._download_selected_ollama_model,
+                        )
+                        self.log(f"⚠️ Download failed: {error_msg}")
                 
                 self.after(0, on_error)
         
         threading.Thread(target=download_thread, daemon=True).start()
+    
+    def _cancel_ollama_download_action(self) -> None:
+        """Cancel the current Ollama model download."""
+        self._cancel_ollama_download = True
+        self._ollama_status_label.configure(text="Cancelling...", text_color=COLORS["text_muted"])
+        self._ollama_download_btn.configure(state="disabled", text="Cancelling...")
     
     def _browse_custom_gguf(self) -> None:
         """Browse for a custom GGUF file."""
@@ -5761,7 +6035,7 @@ class WayfinderApp(ctk.CTk):
         content_container.pack(fill="both", expand=True)
         
         # Recommended models scrollable list
-        recommended_scroll = ctk.CTkScrollableFrame(
+        recommended_scroll = SmoothScrollableFrame(
             content_container,
             fg_color=COLORS["bg_surface"],
             scrollbar_button_color=COLORS["bg_hover"],
@@ -6302,7 +6576,7 @@ class WayfinderApp(ctk.CTk):
             ).pack(anchor="w")
         
         # Scrollable list
-        scroll = ctk.CTkScrollableFrame(
+        scroll = SmoothScrollableFrame(
             inner,
             fg_color=COLORS["bg_surface"],
             scrollbar_button_color=COLORS["bg_hover"],
@@ -6434,7 +6708,7 @@ class WayfinderApp(ctk.CTk):
             )
             installed_label.pack(anchor="w", pady=(8, 8))
             
-            other_scroll = ctk.CTkScrollableFrame(
+            other_scroll = SmoothScrollableFrame(
                 inner,
                 fg_color=COLORS["bg_surface"],
                 scrollbar_button_color=COLORS["bg_hover"],
@@ -7128,7 +7402,7 @@ class WayfinderApp(ctk.CTk):
         self.scale_slider = ctk.CTkSlider(
             row,
             from_=0.7,
-            to=2.0,
+            to=2.5,
             variable=self.scale_slider_var,
             command=on_slider_change,
             height=18,
@@ -7152,6 +7426,96 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
         self._apply_scale()
         self.log(f"⚙ UI Scale: {int(new_scale * 100)}%")
+
+    def _create_overlay_scale_slider_row(self, parent):
+        """Create inline overlay scale slider (separate from UI scale)."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=8)
+        
+        row.grid_columnconfigure(0, weight=0)  # Label column
+        row.grid_columnconfigure(1, weight=1)  # Slider column - grows
+        row.grid_columnconfigure(2, weight=0)  # Value display column
+        
+        # Label
+        label_widget = ctk.CTkLabel(
+            row,
+            text="Overlay Scale",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_secondary"],
+        )
+        label_widget.grid(row=0, column=0, sticky="w")
+        
+        tooltip_text = SETTING_TOOLTIPS.get("overlay_scale", "")
+        if tooltip_text:
+            ToolTip(label_widget, tooltip_text)
+        
+        # Get current overlay scale
+        overlay_scale = self.config.get("overlay_scale", 1.0)
+        
+        # Value display (right side, shows percentage)
+        self.overlay_scale_value_label = ctk.CTkLabel(
+            row,
+            text=f"{int(overlay_scale * 100)}%",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["accent"],
+            width=60,
+        )
+        self.overlay_scale_value_label.grid(row=0, column=2, sticky="e", padx=(10, 0))
+        
+        # Slider in the middle
+        self.overlay_scale_slider_var = ctk.DoubleVar(value=overlay_scale)
+        
+        # Debounce timer for applying scale
+        self._overlay_scale_apply_timer = None
+        
+        def on_overlay_slider_change(value):
+            """Update display and schedule overlay scale application."""
+            value = float(value)
+            # Snap to nearest 10%
+            snapped = round(value * 10) / 10
+            self.overlay_scale_value_label.configure(text=f"{int(snapped * 100)}%")
+            
+            # Cancel any pending apply
+            if self._overlay_scale_apply_timer is not None:
+                try:
+                    self.after_cancel(self._overlay_scale_apply_timer)
+                except:
+                    pass
+            
+            # Schedule apply after a short delay (debounce)
+            self._overlay_scale_apply_timer = self.after(150, lambda: self._apply_overlay_scale(snapped))
+        
+        self.overlay_scale_slider = ctk.CTkSlider(
+            row,
+            from_=0.5,
+            to=2.0,
+            variable=self.overlay_scale_slider_var,
+            command=on_overlay_slider_change,
+            height=18,
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+            button_hover_color=COLORS["text_primary"],
+            fg_color=COLORS["bg_input"],
+        )
+        self.overlay_scale_slider.grid(row=0, column=1, sticky="ew", padx=(20, 10))
+        
+        if tooltip_text:
+            ToolTip(self.overlay_scale_slider, tooltip_text)
+    
+    def _apply_overlay_scale(self, new_scale):
+        """Apply overlay scale change - sends command to overlay process."""
+        current = self.config.get("overlay_scale", 1.0)
+        if abs(new_scale - current) < 0.01:
+            return  # No significant change
+        
+        self.config["overlay_scale"] = new_scale
+        save_config(self.config)
+        
+        # Send scale command to overlay if running
+        if self.overlay_controller and self._use_pyqt_overlay:
+            self.overlay_controller.set_scale(new_scale)
+        
+        self.log(f"⚙ Overlay Scale: {int(new_scale * 100)}%")
 
     def create_toggle_row(self, parent, label, variable, command, tooltip=None):
         """Create a premium toggle row with improved typography."""
@@ -7561,6 +7925,18 @@ class WayfinderApp(ctk.CTk):
         # Log the change
         self.log(f"🎤 Microphone: {device_display}")
 
+    def _on_audio_processing_selected(self, selection: str):
+        """Handle audio processing dropdown selection."""
+        level = selection.lower()
+        self.config["audio_preprocessing"] = level
+        save_config(self.config)
+        
+        # Update recorder if it exists
+        if hasattr(self, 'recorder') and self.recorder:
+            self.recorder.preprocessing = level
+        
+        self.log(f"⚙ Audio processing: {level}")
+
     def get_model_display(self) -> str:
         """Get display name for current model."""
         model_path = self.config.get("model_path", "")
@@ -7776,7 +8152,7 @@ class WayfinderApp(ctk.CTk):
                 ).pack(pady=(10, 40))
                 return
             
-            scroll = ctk.CTkScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=320)
+            scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=320)
             scroll.pack(fill="both", expand=True, pady=(0, 15))
             
             for model in models:
@@ -7833,7 +8209,7 @@ class WayfinderApp(ctk.CTk):
             installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             download_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
             
-            scroll = ctk.CTkScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=380)
+            scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=380)
             scroll.pack(fill="both", expand=True, pady=(0, 10))
             
             # Group models by category
@@ -8009,7 +8385,7 @@ class WayfinderApp(ctk.CTk):
             benchmark_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
             
             # Benchmark UI
-            bench_scroll = ctk.CTkScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=320)
+            bench_scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=320)
             bench_scroll.pack(fill="both", expand=True, pady=(0, 10))
             
             # Description
@@ -8293,7 +8669,7 @@ class WayfinderApp(ctk.CTk):
         prompt_var = ctk.StringVar(value=current_preset or "Custom")
         
         # Preset buttons frame (scrollable for many presets)
-        presets_frame = ctk.CTkScrollableFrame(
+        presets_frame = SmoothScrollableFrame(
             inner, 
             fg_color=COLORS["bg_card"], 
             corner_radius=10,
@@ -8687,7 +9063,7 @@ class WayfinderApp(ctk.CTk):
         selected_device = ctk.IntVar(value=-1 if current_device is None else current_device)
         
         # Scrollable frame for devices
-        scroll_frame = ctk.CTkScrollableFrame(
+        scroll_frame = SmoothScrollableFrame(
             inner,
             fg_color=COLORS["bg_card"],
             corner_radius=12,
@@ -8916,7 +9292,7 @@ class WayfinderApp(ctk.CTk):
             enabled = [d["name"] for d in all_devices]
         
         # Scrollable frame for devices
-        scroll_frame = ctk.CTkScrollableFrame(
+        scroll_frame = SmoothScrollableFrame(
             inner,
             fg_color=COLORS["bg_card"],
             corner_radius=12,
@@ -9730,7 +10106,7 @@ class WayfinderApp(ctk.CTk):
             },
         ]
         
-        scroll_frame = ctk.CTkScrollableFrame(
+        scroll_frame = SmoothScrollableFrame(
             inner,
             fg_color=COLORS["bg_card"],
             corner_radius=12,
@@ -10069,6 +10445,62 @@ class WayfinderApp(ctk.CTk):
 
     # === Tray Functions ===
     
+    def _create_audio_processing_tray_menu(self):
+        """Dynamically create audio processing submenu."""
+        current = self.config.get("audio_preprocessing", "light")
+        
+        levels = [
+            ("off", "Off"),
+            ("light", "Light"),
+            ("medium", "Medium"),
+            ("heavy", "Heavy"),
+        ]
+        
+        items = []
+        for level_key, level_name in levels:
+            def make_checker(lk):
+                return lambda item: self.config.get("audio_preprocessing", "light") == lk
+            
+            items.append(pystray.MenuItem(
+                level_name,
+                self.create_audio_processing_setter(level_key),
+                checked=make_checker(level_key),
+            ))
+        
+        return pystray.Menu(*items)
+    
+    def create_audio_processing_setter(self, level: str):
+        """Create a callback function for setting audio processing level from tray menu."""
+        def setter(icon=None, item=None):
+            self.after(0, lambda: self._apply_audio_processing_from_tray(level))
+        return setter
+    
+    def _apply_audio_processing_from_tray(self, level: str):
+        """Apply audio processing selection from tray menu - runs on main Tk thread."""
+        self.config["audio_preprocessing"] = level
+        save_config(self.config)
+        self.log(f"⚙ Audio processing: {level}")
+        
+        # Update recorder if it exists
+        if hasattr(self, 'recorder') and self.recorder:
+            self.recorder.preprocessing = level
+        
+        # Update UI dropdown if visible (dropdown uses capitalized values)
+        if hasattr(self, 'preprocess_var'):
+            try:
+                self.preprocess_var.set(level.capitalize())
+            except:
+                pass
+    
+    def _create_microphone_tray_menu(self):
+        """Dynamically create microphone submenu with audio processing options."""
+        return pystray.Menu(
+            pystray.MenuItem(
+                "Audio Processing",
+                self._create_audio_processing_tray_menu,
+            ),
+        )
+    
     def _create_model_tray_menu(self):
         """Dynamically create model submenu showing only installed models."""
         models = self.get_available_models()
@@ -10154,6 +10586,10 @@ class WayfinderApp(ctk.CTk):
             pystray.MenuItem(
                 "Model",
                 self._create_model_tray_menu,
+            ),
+            pystray.MenuItem(
+                "Microphone",
+                self._create_microphone_tray_menu,
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self.quit_app),

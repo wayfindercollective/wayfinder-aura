@@ -663,10 +663,13 @@ class GlassmorphicOverlay(QWidget):
     
     # Base dimensions - ultra compact for minimal intrusion
     BASE_HEIGHT = 20
-    PADDING_H = 8
-    WAVE_WIDTH = 40
+    BASE_PADDING_H = 8
+    BASE_WAVE_WIDTH = 40
     
-    def __init__(self):
+    def __init__(self, scale: float = 1.0):
+        # Scale factor must be set first (before any property access)
+        self._scale = max(0.5, min(2.0, scale))
+        
         # Setup KWin positioning rule BEFORE creating window
         # This ensures the window is positioned correctly from the first frame
         self._setup_kwin_positioning_rule()
@@ -677,6 +680,31 @@ class GlassmorphicOverlay(QWidget):
         self._state = OverlayState.HIDDEN
         self._target_width = 200
         self._current_width = 200.0
+    
+    @property
+    def PADDING_H(self):
+        """Scaled horizontal padding."""
+        return int(self.BASE_PADDING_H * self._scale)
+    
+    @property
+    def WAVE_WIDTH(self):
+        """Scaled wave width."""
+        return int(self.BASE_WAVE_WIDTH * self._scale)
+    
+    @property
+    def height(self):
+        """Scaled height."""
+        return int(self.BASE_HEIGHT * self._scale)
+    
+    def set_scale(self, scale: float):
+        """Update the overlay scale and resize."""
+        if abs(scale - self._scale) < 0.01:
+            return
+        self._scale = max(0.5, min(2.0, scale))
+        self._update_font()
+        self._update_size()
+        self._position_at_bottom()
+        self.update()  # Trigger repaint
         
         # Animation components
         self.wave_renderer = LiquidWaveRenderer()
@@ -746,7 +774,7 @@ class GlassmorphicOverlay(QWidget):
         self._request_blur()
         
         # Set initial size (minimal margin for subtle glow)
-        self.setFixedHeight(self.BASE_HEIGHT + 16)  # 8px margin each side
+        self.setFixedHeight(self.height + 16)  # 8px margin each side
         self._update_size()
         
         # Timer to periodically raise window (Wayland focus protector)
@@ -830,7 +858,7 @@ class GlassmorphicOverlay(QWidget):
             margin,
             margin,
             self._current_width,
-            self.BASE_HEIGHT
+            self.height
         )
         
         # Create expanded path for glow area (minimal)
@@ -868,15 +896,21 @@ class GlassmorphicOverlay(QWidget):
         
         # Find first available font
         available_families = QFontDatabase.families()
-        selected_family = "monospace"
+        self._font_family = "monospace"
         for family in font_families:
             if family in available_families:
-                selected_family = family
+                self._font_family = family
                 break
         
-        self._font = QFont(selected_family, 7)  # Ultra compact
+        self._update_font()
+    
+    def _update_font(self):
+        """Update font with current scale."""
+        base_size = 7  # Ultra compact base size
+        scaled_size = max(6, int(base_size * self._scale))
+        self._font = QFont(self._font_family, scaled_size)
         self._font.setWeight(QFont.Weight.Medium)
-        self._font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.3)
+        self._font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.3 * self._scale)
     
     def _setup_timers(self):
         """Setup animation timers."""
@@ -904,7 +938,7 @@ class GlassmorphicOverlay(QWidget):
                     # Initial width for "Listening..." text (approximate)
                     estimated_content_width = 200  # Will be recalculated when shown
                     estimated_width = estimated_content_width + 16  # + glow margins
-                    estimated_height = self.BASE_HEIGHT + 16
+                    estimated_height = self.height + 16
                     
                     x = geom.x() + (geom.width() - estimated_width) // 2
                     y = geom.y() + geom.height() - estimated_height - TASKBAR_HEIGHT - GAP
@@ -1052,7 +1086,7 @@ class GlassmorphicOverlay(QWidget):
         label = STATE_LABELS.get(self._state, "")
         content_width = self._calculate_target_width(label)
         final_width = content_width + 16  # content + glow margins
-        final_height = self.BASE_HEIGHT + 16
+        final_height = self.height + 16
         
         # Stop any running width animation and set final value immediately
         if self._width_animator._animation:
@@ -1125,7 +1159,7 @@ class GlassmorphicOverlay(QWidget):
             margin,
             margin,
             self._current_width,
-            self.BASE_HEIGHT
+            self.height
         )
         
         # Create squircle path for main shape
@@ -1344,6 +1378,10 @@ def run_overlay():
         elif command == "level":
             level = cmd.get("value", 0.0)
             overlay.set_audio_level(level)
+        
+        elif command == "scale":
+            scale = cmd.get("value", 1.0)
+            overlay.set_scale(scale)
         
         elif command == "quit":
             app.quit()
