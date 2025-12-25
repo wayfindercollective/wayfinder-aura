@@ -411,6 +411,18 @@ class LiquidWaveRenderer:
         center_y = rect.center().y()
         max_amp = height * 0.4  # Maximum amplitude
         
+        # Edge fade zone (pixels from edge where fade applies)
+        fade_zone = min(12, width * 0.25)  # 25% of width or 12px max
+        
+        def get_edge_fade(x_pos: float) -> float:
+            """Calculate fade factor (0-1) based on distance from edges."""
+            dist_from_left = x_pos - rect.left()
+            dist_from_right = rect.right() - x_pos
+            min_dist = min(dist_from_left, dist_from_right)
+            if min_dist >= fade_zone:
+                return 1.0
+            return min_dist / fade_zone if fade_zone > 0 else 1.0
+        
         # Calculate amplitude based on audio level and breathing
         base_breath = 0.15 + 0.12 * (0.5 + 0.5 * math.sin(self.breath))
         voice_boost = (self.audio_level ** 0.6) * 12.0
@@ -424,13 +436,11 @@ class LiquidWaveRenderer:
             (0.22, 0.7, 0.55, 3),      # Quick wave
         ]
         
-        for freq, phase, alpha, thickness in wave_configs:
+        for freq, phase, base_alpha, thickness in wave_configs:
             amp = max_amp * amplitude_factor
             
-            # Build wave path
-            path = QPainterPath()
-            first_point = True
-            
+            # Draw wave in segments with fading alpha at edges
+            prev_point = None
             for x_pixel in range(int(rect.left()), int(rect.right()) + 1, 2):
                 x = x_pixel - rect.left()
                 
@@ -442,36 +452,32 @@ class LiquidWaveRenderer:
                 # Clamp to bounds
                 y = max(rect.top(), min(rect.bottom(), y))
                 
-                if first_point:
-                    path.moveTo(x_pixel, y)
-                    first_point = False
-                else:
-                    path.lineTo(x_pixel, y)
-            
-            # Create gradient for this wave layer
-            wave_color = QColor(color)
-            wave_color.setAlphaF(alpha)
-            
-            # Draw glow layer first (thicker, more transparent)
-            glow_color = QColor(color)
-            glow_color.setAlphaF(alpha * 0.3)
-            glow_pen = QPen(glow_color, thickness + 4)
-            glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(glow_pen)
-            painter.drawPath(path)
-            
-            # Draw main wave
-            pen = QPen(wave_color, thickness)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
-            painter.drawPath(path)
+                if prev_point is not None:
+                    # Calculate edge fade for this segment
+                    fade = get_edge_fade(x_pixel)
+                    segment_alpha = base_alpha * fade
+                    
+                    # Draw glow segment
+                    glow_color = QColor(color)
+                    glow_color.setAlphaF(segment_alpha * 0.3)
+                    glow_pen = QPen(glow_color, thickness + 4)
+                    glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                    painter.setPen(glow_pen)
+                    painter.drawLine(QPointF(prev_point[0], prev_point[1]), QPointF(x_pixel, y))
+                    
+                    # Draw main wave segment
+                    wave_color = QColor(color)
+                    wave_color.setAlphaF(segment_alpha)
+                    pen = QPen(wave_color, thickness)
+                    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                    painter.setPen(pen)
+                    painter.drawLine(QPointF(prev_point[0], prev_point[1]), QPointF(x_pixel, y))
+                
+                prev_point = (x_pixel, y)
         
-        # Draw bright center highlight wave
+        # Draw bright center highlight wave with edge fade
         highlight_amp = max_amp * amplitude_factor
-        highlight_path = QPainterPath()
-        first_point = True
+        prev_point = None
         
         for x_pixel in range(int(rect.left()), int(rect.right()) + 1, 2):
             x = x_pixel - rect.left()
@@ -479,21 +485,22 @@ class LiquidWaveRenderer:
             y += (highlight_amp * 0.5) * math.sin(0.26 * x + self.time * 2.0 + 0.8)
             y = max(rect.top(), min(rect.bottom(), y))
             
-            if first_point:
-                highlight_path.moveTo(x_pixel, y)
-                first_point = False
-            else:
-                highlight_path.lineTo(x_pixel, y)
-        
-        # Highlight glow
-        highlight_glow = QColor(color)
-        highlight_glow.setAlphaF(0.4)
-        painter.setPen(QPen(highlight_glow, 6))
-        painter.drawPath(highlight_path)
-        
-        # Bright highlight core
-        painter.setPen(QPen(color, 2))
-        painter.drawPath(highlight_path)
+            if prev_point is not None:
+                fade = get_edge_fade(x_pixel)
+                
+                # Highlight glow with fade
+                highlight_glow = QColor(color)
+                highlight_glow.setAlphaF(0.4 * fade)
+                painter.setPen(QPen(highlight_glow, 6))
+                painter.drawLine(QPointF(prev_point[0], prev_point[1]), QPointF(x_pixel, y))
+                
+                # Bright highlight core with fade
+                highlight_core = QColor(color)
+                highlight_core.setAlphaF(fade)
+                painter.setPen(QPen(highlight_core, 2))
+                painter.drawLine(QPointF(prev_point[0], prev_point[1]), QPointF(x_pixel, y))
+            
+            prev_point = (x_pixel, y)
         
         painter.restore()
 
@@ -1008,8 +1015,8 @@ class GlassmorphicOverlay(QWidget):
         
         if not text:
             # READY state: compact pill with just centered wave
-            # Minimal padding around the wave
-            return self.WAVE_WIDTH + self.PADDING_H
+            # Moderate breathing room (half the previous amount)
+            return self.WAVE_WIDTH + int(self.PADDING_H * 1.5)
         
         # LISTENING/PROCESSING: full width with text + wave
         fm = QFontMetrics(self._font)

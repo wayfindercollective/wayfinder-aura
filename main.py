@@ -2747,12 +2747,7 @@ class WayfinderApp(ctk.CTk):
             self.config["ui_scale"] = self.ui_scale
             save_config(self.config)
         
-        # Use a comfortable fixed window size (NOT tied to content scale)
-        # This allows: big readable content in a small window that scrolls
-        window_w = 520
-        window_h = 780
-        
-        # Get screen dimensions for initial placement
+        # Get screen dimensions
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
         
@@ -2761,16 +2756,49 @@ class WayfinderApp(ctk.CTk):
         top_panel = 32
         usable_h = screen_h - taskbar_height - top_panel
         
+        # Try to restore saved window geometry
+        saved_geom = self.config.get("window_geometry")
+        if saved_geom:
+            # Restore saved position and size
+            window_w = saved_geom.get("width", 520)
+            window_h = saved_geom.get("height", 780)
+            window_x = saved_geom.get("x", None)
+            window_y = saved_geom.get("y", None)
+            
+            # Validate the saved geometry is still on-screen
+            if window_x is not None and window_y is not None:
+                # Check if window is mostly visible
+                if (window_x + window_w > 50 and window_x < screen_w - 50 and
+                    window_y + window_h > 50 and window_y < screen_h - 50):
+                    # Saved position is valid, use it
+                    pass
+                else:
+                    # Window would be off-screen, center it instead
+                    window_x = (screen_w - window_w) // 2
+                    window_y = top_panel + (usable_h - window_h) // 2
+            else:
+                window_x = (screen_w - window_w) // 2
+                window_y = top_panel + (usable_h - window_h) // 2
+        else:
+            # First run: use percentage-based sizing for consistency
+            # Target: ~28% of screen width, ~65% of usable height
+            window_w = int(screen_w * 0.28)
+            window_h = int(usable_h * 0.65)
+            
+            # Set reasonable minimums
+            window_w = max(window_w, 520)
+            window_h = max(window_h, 700)
+            
+            # Center on screen
+            window_x = (screen_w - window_w) // 2
+            window_y = top_panel + (usable_h - window_h) // 2
+        
         # Clamp to usable area
         window_h = min(window_h, usable_h)
         window_w = min(window_w, screen_w - 40)
         
-        # Center on screen
-        center_x = (screen_w - window_w) // 2
-        center_y = top_panel + (usable_h - window_h) // 2
-        
         # Apply geometry
-        self.geometry(f"{window_w}x{window_h}+{center_x}+{center_y}")
+        self.geometry(f"{window_w}x{window_h}+{window_x}+{window_y}")
         
         # Set reasonable minimum size
         self.minsize(360, 500)
@@ -2779,6 +2807,10 @@ class WayfinderApp(ctk.CTk):
         # Apply widget scaling only - this controls content size
         # NOT window scaling - that would fight with manual window resizing
         ctk.set_widget_scaling(self.ui_scale)
+        
+        # Save geometry when window is moved or resized (debounced)
+        self._geometry_save_pending = False
+        self.bind("<Configure>", self._on_window_configure)
         
         if ICON_PATH.exists():
             try:
@@ -2791,6 +2823,38 @@ class WayfinderApp(ctk.CTk):
         
         ctk.set_appearance_mode("dark")
     
+    def _on_window_configure(self, event):
+        """Handle window move/resize events - save geometry with debouncing."""
+        # Only handle events for the main window, not child widgets
+        if event.widget != self:
+            return
+        
+        # Debounce: schedule a save after 500ms of no changes
+        if self._geometry_save_pending:
+            self.after_cancel(self._geometry_save_id)
+        
+        self._geometry_save_pending = True
+        self._geometry_save_id = self.after(500, self._save_window_geometry)
+    
+    def _save_window_geometry(self):
+        """Save current window geometry to config."""
+        self._geometry_save_pending = False
+        
+        try:
+            geometry = {
+                "width": self.winfo_width(),
+                "height": self.winfo_height(),
+                "x": self.winfo_x(),
+                "y": self.winfo_y(),
+            }
+            
+            # Only save if values are reasonable (window is visible)
+            if geometry["width"] > 100 and geometry["height"] > 100:
+                self.config["window_geometry"] = geometry
+                save_config(self.config)
+        except Exception:
+            pass  # Ignore errors during geometry save
+    
     def setup_scaling_shortcuts(self):
         """Bind Ctrl+Plus/Minus for UI scaling."""
         self.bind("<Control-plus>", lambda e: self.scale_ui(1.1))
@@ -2800,52 +2864,30 @@ class WayfinderApp(ctk.CTk):
         self.bind("<Control-r>", lambda e: self.rescue_window())  # Emergency rescue
     
     def _get_recommended_scale(self) -> float:
-        """Calculate recommended UI scale based on screen resolution and system DPI.
+        """Calculate recommended UI scale based on screen resolution for READABILITY.
         
-        This ensures the window takes up a sensible portion of the screen regardless
-        of whether you're on 1080p, 1440p, 4K, etc.
+        Focus: Make text readable on high-DPI screens out of the box.
         
-        Reference: At 1920x1080, scale 1.0 gives a 480x720 window (25% x 67% of screen)
-        On higher resolutions, we scale up proportionally.
+        Scale targets (content scale, not window size):
+        - 4K (3840x2160): 200% - big readable text
+        - 1440p (2560x1440): 150% 
+        - 1080p (1920x1080): 100% - baseline
+        - Lower: 100% minimum
         """
-        screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
         
-        # Reference resolution (1080p) - this is where scale 1.0 feels "right"
-        REF_WIDTH = 1920
-        REF_HEIGHT = 1080
+        # Scale based on vertical resolution (most reliable metric)
+        # These are optimized for readability, not for "fitting" 
+        if screen_h >= 2160:  # 4K
+            recommended = 2.0
+        elif screen_h >= 1440:  # 1440p
+            recommended = 1.5
+        elif screen_h >= 1080:  # 1080p
+            recommended = 1.0
+        else:  # Lower resolutions
+            recommended = 1.0
         
-        # Calculate scale factor based on resolution
-        # Use the smaller ratio to ensure window fits on screen
-        scale_by_width = screen_w / REF_WIDTH
-        scale_by_height = screen_h / REF_HEIGHT
-        resolution_scale = min(scale_by_width, scale_by_height)
-        
-        # Also check for system-level DPI scaling (Linux desktop environments)
-        system_scale = 1.0
-        try:
-            # Check common environment variables for scaling
-            # GDK_SCALE is used by GTK apps
-            if os.environ.get("GDK_SCALE"):
-                system_scale = float(os.environ.get("GDK_SCALE", "1"))
-            # QT_SCALE_FACTOR is used by Qt apps
-            elif os.environ.get("QT_SCALE_FACTOR"):
-                system_scale = float(os.environ.get("QT_SCALE_FACTOR", "1"))
-            # QT_SCREEN_SCALE_FACTORS for per-screen scaling
-            elif os.environ.get("QT_SCREEN_SCALE_FACTORS"):
-                # Take the first value (primary screen)
-                factors = os.environ.get("QT_SCREEN_SCALE_FACTORS", "1").split(";")
-                system_scale = float(factors[0]) if factors else 1.0
-        except (ValueError, TypeError):
-            system_scale = 1.0
-        
-        # Combine resolution-based scale with system scale
-        # If system scaling is already applied (e.g., 200% on KDE), resolution_scale
-        # will already reflect logical pixels, so we don't double-count
-        recommended = resolution_scale
-        
-        # Clamp to reasonable range and snap to 5% increments
-        recommended = max(0.7, min(2.5, recommended))
+        # Snap to 5% increments
         recommended = round(recommended * 20) / 20
         
         return recommended
