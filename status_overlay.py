@@ -1252,6 +1252,17 @@ class GlassmorphicOverlay(QWidget):
 
 def run_overlay():
     """Run the overlay as a standalone application with stdin command handling."""
+    import signal
+    
+    # Handle termination signals for clean shutdown
+    def signal_handler(signum, frame):
+        print(f"Overlay received signal {signum}, exiting...", file=sys.stderr)
+        QApplication.quit()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
     # Parse mode argument
     mode = "persistent"  # default
     for arg in sys.argv:

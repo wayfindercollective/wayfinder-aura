@@ -152,3 +152,4 @@
 > "Otter.ai: $100/year. Google Cloud Speech: $0.006/15 seconds. Wayfinder Voice Premium: $20 once, forever, private."
 
 
+

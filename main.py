@@ -15,6 +15,7 @@ def _debug_log(msg, data=None):
 _debug_log("Script starting - before any imports")
 # #endregion
 
+import atexit
 import json
 import os
 import queue
@@ -2450,9 +2451,38 @@ class OverlayController:
         with self._lock:
             if self._process is not None:
                 try:
-                    self._process.wait(timeout=1.0)
+                    self._process.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
                     self._process.kill()
+                    try:
+                        self._process.wait(timeout=0.5)
+                    except:
+                        pass
+                self._process = None
+    
+    def stop(self):
+        """Stop and clean up the overlay subprocess forcefully."""
+        self._stop_audio_polling()
+        
+        with self._lock:
+            if self._process is not None:
+                pid = self._process.pid
+                # First try graceful quit
+                self._send_command({"cmd": "quit"})
+                try:
+                    self._process.wait(timeout=0.3)
+                except subprocess.TimeoutExpired:
+                    # Force kill if it doesn't respond
+                    try:
+                        self._process.kill()
+                        self._process.wait(timeout=0.3)
+                    except:
+                        # Last resort: use pkill
+                        import os
+                        try:
+                            os.kill(pid, 9)
+                        except:
+                            pass
                 self._process = None
     
     def set_audio_level_callback(self, callback):
@@ -2561,7 +2591,6 @@ class WayfinderApp(ctk.CTk):
         
         # Check which overlay type to use
         overlay_type = self.config.get("overlay_type", "always_on")
-        overlay_mode = self.config.get("overlay_mode", "persistent")
         
         if overlay_type == "always_on":
             # Use PyQt6 overlay (always on, no focus steal)
@@ -2569,13 +2598,12 @@ class WayfinderApp(ctk.CTk):
                 import PyQt6
                 self.overlay_controller = OverlayController(
                     audio_level_callback=get_audio_level,
-                    mode=overlay_mode
+                    mode="persistent"  # Always use persistent mode for always_on
                 )
                 self._use_pyqt_overlay = True
                 self.log(f"✨ Using Always On indicator (PyQt6)")
-                # Pre-start the subprocess in persistent mode to avoid focus steal
-                if overlay_mode == "persistent":
-                    self.overlay_controller._start_process()
+                # Pre-start the subprocess to avoid focus steal
+                self.overlay_controller._start_process()
             except ImportError:
                 self._use_pyqt_overlay = False
                 self.log("⚠ PyQt6 not available, using Disappearing indicator")
@@ -2587,12 +2615,15 @@ class WayfinderApp(ctk.CTk):
         # #region agent log
         _debug_log("About to create FloatingIndicator", {"hypothesisId": "D"})
         # #endregion
-        # Always create fallback indicator (used when PyQt overlay unavailable)
-        self.indicator = FloatingIndicator(
-            self, 
-            target_fps=self.config.get("indicator_fps", 0),
-            audio_level_callback=get_audio_level
-        )
+        # Only create CTk indicator if NOT using PyQt overlay
+        if not self._use_pyqt_overlay:
+            self.indicator = FloatingIndicator(
+                self, 
+                target_fps=self.config.get("indicator_fps", 0),
+                audio_level_callback=get_audio_level
+            )
+        else:
+            self.indicator = None
         # #region agent log
         _debug_log("FloatingIndicator created - about to setup_tray()", {"hypothesisId": "D"})
         # #endregion
@@ -3544,16 +3575,6 @@ class WayfinderApp(ctk.CTk):
         
         self._create_scale_slider_row(system_content)
         
-        # Overlay mode selector
-        overlay_mode = self.config.get("overlay_mode", "persistent")
-        self.overlay_mode_var = ctk.StringVar(value=overlay_mode)
-        self.create_dropdown_row(
-            system_content, "Overlay Mode", ["persistent", "standard"],
-            self.overlay_mode_var, self.on_overlay_mode_changed,
-            tooltip="Persistent: stays ready, no focus steal\nStandard: shows/hides, may steal focus from text fields",
-            width=120,
-        )
-        
         self.start_min_var = ctk.BooleanVar(value=self.config.get("start_minimized", True))
         self.create_toggle_row(
             system_content, "Start minimized to tray", self.start_min_var,
@@ -3678,7 +3699,7 @@ class WayfinderApp(ctk.CTk):
         backend = self.config.get("transcription_backend", "whisper_cpp")
         self.backend_var = ctk.StringVar(value=backend)
         self.backend_dropdown = self.create_dropdown_row(
-            gpu_card, "Backend", ["whisper_cpp", "faster_whisper"],
+            gpu_card, "Backend", ["whisper_cpp", "faster_whisper", "openai_whisper"],
             self.backend_var, self.on_backend_changed,
             tooltip=SETTING_TOOLTIPS["backend"], width=160,
         )
@@ -3953,7 +3974,12 @@ class WayfinderApp(ctk.CTk):
         """Handle transcription backend change from dropdown."""
         self.config["transcription_backend"] = value
         save_config(self.config)
-        display = "whisper.cpp" if value == "whisper_cpp" else "Faster-Whisper"
+        display_names = {
+            "whisper_cpp": "whisper.cpp",
+            "faster_whisper": "Faster-Whisper",
+            "openai_whisper": "OpenAI Whisper (Cloud)",
+        }
+        display = display_names.get(value, value)
         self.log(f"⚙ Backend: {display}")
     
     def on_gpu_layers_changed(self, value: str):
@@ -4118,7 +4144,10 @@ class WayfinderApp(ctk.CTk):
         
         dialog = ctk.CTkToplevel(self)
         dialog.title("Post-Processing Configuration")
-        dialog.geometry("560x600")
+        # Make dialog taller when custom prompt is shown
+        is_custom = self.config.get("post_processing_template") == "custom"
+        dialog_height = 750 if is_custom else 600
+        dialog.geometry(f"560x{dialog_height}")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
@@ -4614,18 +4643,28 @@ class WayfinderApp(ctk.CTk):
                 text="CUSTOM PROMPT",
                 font=(self.font_body[0], 11, "bold"),
                 text_color=COLORS["text_muted"],
-            ).pack(anchor="w", pady=(12, 8))
+            ).pack(anchor="w", pady=(16, 4))
+            
+            ctk.CTkLabel(
+                container,
+                text="Write instructions for how the AI should process your transcription.\nUse {text} as a placeholder for your transcribed text.",
+                font=(self.font_body[0], 11),
+                text_color=COLORS["text_secondary"],
+                justify="left",
+            ).pack(anchor="w", pady=(0, 8))
             
             prompt_frame = ctk.CTkFrame(container, fg_color=COLORS["bg_card"], corner_radius=12)
             prompt_frame.pack(fill="x", pady=(0, 12))
             
             custom_prompt = self.config.get("post_processing_custom_prompt", "")
+            if not custom_prompt:
+                custom_prompt = "Clean up this transcription, fix grammar and punctuation:\n\n{text}"
             prompt_text = ctk.CTkTextbox(
                 prompt_frame,
                 font=(self.font_body[0], 11),
                 fg_color=COLORS["bg_input"],
                 text_color=COLORS["text_primary"],
-                height=100,
+                height=120,
             )
             prompt_text.pack(fill="x", padx=12, pady=12)
             prompt_text.insert("1.0", custom_prompt)
@@ -4908,27 +4947,116 @@ class WayfinderApp(ctk.CTk):
         self.config["start_minimized"] = self.start_min_var.get()
         save_config(self.config)
     
-    def on_overlay_mode_changed(self, value: str):
-        """Handle overlay mode change."""
-        self.config["overlay_mode"] = value
-        save_config(self.config)
-        mode_names = {
-            "persistent": "Persistent (no focus steal)",
-            "standard": "Standard (shows/hides)",
-        }
-        self.log(f"⚙ Overlay mode: {mode_names.get(value, value)}")
-        self.log("  ℹ️ Restart app for change to take effect")
-    
     def on_overlay_type_changed(self, value: str):
-        """Handle overlay type change."""
+        """Handle overlay type change - requires restart for clean switch."""
+        old_value = self.config.get("overlay_type", "always_on")
         self.config["overlay_type"] = value
         save_config(self.config)
+        
         type_names = {
             "always_on": "Always On (PyQt6)",
             "disappearing": "Disappearing (CTk)",
         }
         self.log(f"⚙ Status indicator: {type_names.get(value, value)}")
-        self.log("  ℹ️ Restart app for change to take effect")
+        
+        if value == old_value:
+            return  # No change
+        
+        # Kill any running overlay processes
+        import subprocess as sp
+        try:
+            sp.run(["pkill", "-9", "-f", "status_overlay.py"], 
+                   capture_output=True, timeout=2)
+        except:
+            pass
+        
+        self.log("  ℹ️ Restart the app to apply the change")
+        
+        # Show restart dialog
+        try:
+            self._show_restart_dialog()
+        except Exception as e:
+            self.log(f"  ⚠ Dialog error: {e}")
+    
+    def _show_restart_dialog(self):
+        """Show a dialog prompting user to restart the app."""
+        self.log("  📋 Opening restart dialog...")
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Restart Required")
+        dialog.geometry("400x180")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.focus_force()
+        dialog.lift()
+        dialog.attributes("-topmost", True)
+        dialog.after(200, lambda: dialog.attributes("-topmost", False))
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 400) // 2
+        y = self.winfo_y() + (self.winfo_height() - 180) // 2
+        dialog.geometry(f"400x180+{x}+{y}")
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Restart Required",
+            font=(self.font_header[0], 18, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(pady=(0, 12))
+        
+        ctk.CTkLabel(
+            inner,
+            text="The status indicator change requires a restart to take effect.",
+            font=(self.font_body[0], 13),
+            text_color=COLORS["text_secondary"],
+            wraplength=340,
+        ).pack(pady=(0, 20))
+        
+        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_frame.pack(fill="x")
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="Later",
+            font=(self.font_body[0], 13),
+            fg_color=COLORS["bg_surface"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_secondary"],
+            height=36,
+            width=100,
+            corner_radius=8,
+            command=dialog.destroy,
+        ).pack(side="left", expand=True)
+        
+        def restart_now():
+            dialog.destroy()
+            # Kill overlay and restart
+            import subprocess as sp
+            import sys
+            try:
+                sp.run(["pkill", "-9", "-f", "status_overlay.py"], capture_output=True, timeout=1)
+            except:
+                pass
+            # Restart the app
+            import os
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="Restart Now",
+            font=(self.font_body[0], 13, "bold"),
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_dim"],
+            text_color=COLORS["bg_base"],
+            height=36,
+            width=120,
+            corner_radius=8,
+            command=restart_now,
+        ).pack(side="right", expand=True)
 
     def clear_log(self):
         self.log_textbox.configure(state="normal")
@@ -7171,7 +7299,7 @@ class WayfinderApp(ctk.CTk):
 
     def open_backend_settings(self):
         """Open dialog to select transcription backend."""
-        from transcriber import WhisperCppBackend, FasterWhisperBackend
+        from transcriber import WhisperCppBackend, FasterWhisperBackend, OpenAIWhisperBackend
         
         dialog = ctk.CTkToplevel(self)
         dialog.title("Transcription Backend")
@@ -7245,6 +7373,7 @@ class WayfinderApp(ctk.CTk):
             whisper_binary=self.config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli"),
         )
         faster_whisper = FasterWhisperBackend()
+        openai_whisper = OpenAIWhisperBackend()
         
         # Customize descriptions based on GPU with latency info
         if gpu_info.is_nvidia:
@@ -7256,6 +7385,8 @@ class WayfinderApp(ctk.CTk):
         else:
             whisper_cpp_desc = "Fast C++ implementation. Lightweight.\n⚡ Good for CPU-only systems"
             faster_whisper_desc = "Python library with CTranslate2.\n🟡 Moderate CPU performance"
+        
+        openai_whisper_desc = "OpenAI's cloud Whisper API.\n☁️ Requires API key • Always fast • Per-minute billing"
         
         backends = [
             {
@@ -7273,6 +7404,15 @@ class WayfinderApp(ctk.CTk):
                 "available": faster_whisper.is_available(),
                 "gpu": faster_whisper.supports_gpu(),
                 "recommended": gpu_info.is_nvidia,
+            },
+            {
+                "id": "openai_whisper",
+                "name": "OpenAI Whisper (Cloud)",
+                "desc": openai_whisper_desc,
+                "available": openai_whisper.is_available(),
+                "gpu": True,  # Cloud = always "GPU"
+                "recommended": False,
+                "cloud": True,
             },
         ]
         
@@ -7452,7 +7592,12 @@ class WayfinderApp(ctk.CTk):
             self.config["faster_whisper_compute_type"] = fw_compute_var.get()
             save_config(self.config)
             
-            display = "whisper.cpp" if backend_var.get() == "whisper_cpp" else "Faster-Whisper"
+            display_names = {
+                "whisper_cpp": "whisper.cpp",
+                "faster_whisper": "Faster-Whisper",
+                "openai_whisper": "OpenAI (Cloud)",
+            }
+            display = display_names.get(backend_var.get(), backend_var.get())
             self.backend_btn.configure(text=display)
             self.log(f"⚙ Backend: {display}")
             dialog.destroy()
@@ -7841,13 +7986,38 @@ class WayfinderApp(ctk.CTk):
         self.after(0, self.on_record_button)
 
     def quit_app(self, icon=None, item=None):
-        # Clean up overlay controller if running
-        if self.overlay_controller:
+        """Clean shutdown of the app and all subprocesses."""
+        self._cleanup_overlay()
+        
+        # Give a moment for cleanup to complete
+        import time
+        time.sleep(0.2)
+        
+        # Force kill any remaining overlay processes as safety net
+        try:
+            import subprocess
+            subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
+                          capture_output=True, timeout=1)
+        except:
+            pass
+        
+        os._exit(0)  # Clean exit instead of SIGKILL
+    
+    def _cleanup_overlay(self):
+        """Clean up overlay subprocess - called on exit."""
+        if hasattr(self, 'overlay_controller') and self.overlay_controller:
             try:
                 self.overlay_controller.quit()
             except:
                 pass
-        os.kill(os.getpid(), signal.SIGKILL)
+            self.overlay_controller = None
+        
+        # Also clean up CTk indicator
+        if hasattr(self, 'indicator') and self.indicator:
+            try:
+                self.indicator.hide()
+            except:
+                pass
 
     # === State Management ===
     
@@ -8457,26 +8627,18 @@ class WayfinderApp(ctk.CTk):
 
     def on_injection_done(self):
         self.log("✓ Text inserted")
-        # Return overlay to ready state (or hide in standard mode)
+        # Return overlay to ready state
         if self._use_pyqt_overlay and self.overlay_controller:
-            overlay_mode = self.config.get("overlay_mode", "persistent")
-            if overlay_mode == "persistent":
-                self.overlay_controller.show("ready")  # Return to grey ready state
-            else:
-                self.overlay_controller.hide()
+            self.overlay_controller.show("ready")  # Return to grey ready state
         elif self.indicator:
             self.indicator.hide()
         self.update_state(AppState.IDLE)
 
     def on_error(self, message):
         self.log(f"⚠ {message}")
-        # Return overlay to ready state (or hide in standard mode)
+        # Return overlay to ready state
         if self._use_pyqt_overlay and self.overlay_controller:
-            overlay_mode = self.config.get("overlay_mode", "persistent")
-            if overlay_mode == "persistent":
-                self.overlay_controller.show("ready")  # Return to grey ready state
-            else:
-                self.overlay_controller.hide()
+            self.overlay_controller.show("ready")  # Return to grey ready state
         elif self.indicator:
             self.indicator.hide()
         self.update_state(AppState.IDLE)
@@ -8488,6 +8650,17 @@ def main():
     # #endregion
     try:
         app = WayfinderApp()
+        
+        # Register cleanup handler as safety net for any exit path
+        def cleanup_on_exit():
+            try:
+                # Kill any overlay processes
+                subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
+                              capture_output=True, timeout=1)
+            except:
+                pass
+        atexit.register(cleanup_on_exit)
+        
         # #region agent log
         _debug_log("WayfinderApp created successfully - starting mainloop", {"hypothesisId": "D"})
         # #endregion

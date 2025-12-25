@@ -44,6 +44,6 @@ Pillow>=10.0.0
 # Get API key from: https://console.anthropic.com/
 # anthropic>=0.40.0
 
-# Cloud inference with OpenAI (GPT models, requires API key)
+# Cloud inference with OpenAI (GPT models + Whisper transcription, requires API key)
 # Get API key from: https://platform.openai.com/api-keys
-# openai>=1.0.0
+openai>=1.0.0

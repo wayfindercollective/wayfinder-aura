@@ -439,6 +439,136 @@ class FasterWhisperBackend(TranscriptionBackend):
             raise TranscriptionError(f"Faster-Whisper transcription failed: {e}")
 
 
+class OpenAIWhisperBackend(TranscriptionBackend):
+    """
+    OpenAI Whisper API backend for cloud transcription.
+    Uses OpenAI's hosted Whisper model for high-quality transcription.
+    """
+    
+    def __init__(
+        self,
+        api_key: str = "",
+        model: str = "whisper-1",
+        language: str = "en",
+        prompt: str = "",
+        temperature: float = 0.0,
+        custom_vocabulary: list = None,
+    ):
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.model = model
+        self.language = language
+        self.prompt = prompt
+        self.temperature = temperature
+        self.custom_vocabulary = custom_vocabulary or []
+        self._client = None
+    
+    def _build_prompt(self, context: str = "") -> str:
+        """Build the prompt with context and custom vocabulary."""
+        parts = []
+        
+        if context:
+            context_snippet = context.strip()[-200:] if len(context) > 200 else context.strip()
+            parts.append(context_snippet)
+        elif self.prompt:
+            parts.append(self.prompt)
+        
+        if self.custom_vocabulary:
+            vocab_str = ", ".join(self.custom_vocabulary)
+            parts.append(vocab_str)
+        
+        return " ".join(parts) if parts else ""
+    
+    def get_name(self) -> str:
+        return "OpenAI Whisper (Cloud)"
+    
+    def is_available(self) -> bool:
+        """Check if openai is installed and API key is set."""
+        try:
+            import openai
+            return bool(self.api_key)
+        except ImportError:
+            return False
+    
+    def supports_gpu(self) -> bool:
+        """Cloud API - GPU is handled server-side."""
+        return True  # Always "GPU" since it runs on OpenAI's servers
+    
+    def _get_client(self):
+        """Get or create the OpenAI client."""
+        if self._client is not None:
+            return self._client
+        
+        if not self.api_key:
+            raise TranscriptionError(
+                "OpenAI API key not set. "
+                "Set OPENAI_API_KEY environment variable or configure in settings."
+            )
+        
+        try:
+            import openai
+            self._client = openai.OpenAI(api_key=self.api_key)
+            return self._client
+        except Exception as e:
+            raise TranscriptionError(f"Failed to initialize OpenAI client: {e}")
+    
+    def transcribe(self, audio_path: str, context: str = "") -> str:
+        """
+        Transcribe an audio file using OpenAI's Whisper API.
+        
+        Args:
+            audio_path: Path to the audio file to transcribe
+            context: Optional context from previous transcription for continuity
+            
+        Returns:
+            Transcribed text string
+            
+        Raises:
+            TranscriptionError: If transcription fails
+        """
+        if not self.is_available():
+            if not self.api_key:
+                raise TranscriptionError("OpenAI API key not configured.")
+            raise TranscriptionError(
+                "openai package is not installed. "
+                "Install with: pip install openai"
+            )
+        
+        if not Path(audio_path).exists():
+            raise TranscriptionError(f"Audio file not found: {audio_path}")
+        
+        try:
+            client = self._get_client()
+            
+            # Build prompt with context and vocabulary
+            prompt = self._build_prompt(context)
+            
+            # OpenAI Whisper API call
+            with open(audio_path, "rb") as audio_file:
+                # Prepare API parameters
+                params = {
+                    "model": self.model,
+                    "file": audio_file,
+                    "response_format": "text",
+                    "temperature": self.temperature,
+                }
+                
+                # Add optional parameters
+                if prompt:
+                    params["prompt"] = prompt
+                
+                # Language (None = auto-detect)
+                if self.language and self.language.lower() != "auto":
+                    params["language"] = self.language
+                
+                transcription = client.audio.transcriptions.create(**params)
+            
+            # Response is just text when response_format="text"
+            return transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
+            
+        except Exception as e:
+            raise TranscriptionError(f"OpenAI Whisper API call failed: {e}")
+
+
 def get_backend(config: dict) -> TranscriptionBackend:
     """
     Factory function to create the appropriate transcription backend.
@@ -460,6 +590,15 @@ def get_backend(config: dict) -> TranscriptionBackend:
             language=config.get("language", "en"),
             beam_size=config.get("beam_size", 5),
             best_of=config.get("best_of", 3),
+            temperature=config.get("temperature", 0.0),
+            custom_vocabulary=config.get("custom_vocabulary", []),
+        )
+    elif backend_type == "openai_whisper":
+        return OpenAIWhisperBackend(
+            api_key="",  # Will be read from OPENAI_API_KEY env var
+            model=config.get("openai_whisper_model", "whisper-1"),
+            language=config.get("language", "en"),
+            prompt=config.get("prompt", ""),
             temperature=config.get("temperature", 0.0),
             custom_vocabulary=config.get("custom_vocabulary", []),
         )
