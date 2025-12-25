@@ -355,8 +355,8 @@ class FeatureGate:
         """Get upgrade prompt for a locked feature."""
         if feature_id in PREMIUM_FEATURES:
             name, desc = PREMIUM_FEATURES[feature_id]
-            return f"🔒 {name} requires Wayfinder Voice Premium.\n\n{desc}\n\nUpgrade for $20 at wayfinder.dev/premium"
-        return "This feature requires Wayfinder Voice Premium."
+            return f"🔒 {name} requires Wayfinder Aura Premium.\n\n{desc}\n\nUpgrade for $20 at wayfinder.dev/premium"
+        return "This feature requires Wayfinder Aura Premium."
     
     def activate(self, key: str) -> LicenseInfo:
         """
@@ -454,6 +454,6 @@ if __name__ == "__main__":
             print(f"Unknown command: {cmd}")
             print("Commands: generate, generate-bound, validate, activate, status, machine-id")
     else:
-        print("Wayfinder Voice License Manager")
+        print("Wayfinder Aura License Manager")
         print("Commands: generate, generate-bound, validate <KEY>, activate <KEY>, status, machine-id")
 

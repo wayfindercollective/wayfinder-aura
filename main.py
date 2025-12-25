@@ -4,12 +4,24 @@ Wayfinder Voice - Local voice dictation for Bazzite (Wayland)
 Toggle-to-record with whisper.cpp transcription.
 """
 
+# #region agent log
+import json as _json_debug
+def _debug_log(msg, data=None):
+    try:
+        with open("/home/bazzite/Dev/wayfinder-voice/.cursor/debug.log", "a") as f:
+            payload = {"location": "main.py:startup", "message": msg, "data": data or {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "hypothesisId": "A-E"}
+            f.write(_json_debug.dumps(payload) + "\n")
+    except: pass
+_debug_log("Script starting - before any imports")
+# #endregion
+
 import json
 import os
 import queue
 import signal
 import socket
 import subprocess
+import webbrowser
 import threading
 import time
 import urllib.request
@@ -19,27 +31,75 @@ from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 
+# #region agent log
+_debug_log("Standard library imports complete", {"hypothesisId": "A"})
+# #endregion
+
 SOCKET_PATH = "/tmp/wayfinder-voice.sock"
 
+# #region agent log
+_debug_log("About to import customtkinter", {"hypothesisId": "D"})
+# #endregion
 import customtkinter as ctk
+# #region agent log
+_debug_log("customtkinter imported successfully", {"hypothesisId": "D"})
+# #endregion
+
+# #region agent log
+_debug_log("About to import evdev", {"hypothesisId": "C"})
+# #endregion
 import evdev
 from evdev import InputDevice, categorize, ecodes
+# #region agent log
+_debug_log("evdev imported successfully", {"hypothesisId": "C"})
+# #endregion
+
+# #region agent log
+_debug_log("About to import PIL and pystray", {"hypothesisId": "D"})
+# #endregion
 from PIL import Image, ImageDraw, ImageFilter
 import pystray
+# #region agent log
+_debug_log("PIL and pystray imported successfully", {"hypothesisId": "D"})
+# #endregion
 
 # D-Bus for Wayland GlobalShortcuts
+# #region agent log
+_debug_log("About to import D-Bus/GLib", {"hypothesisId": "E"})
+# #endregion
 try:
     import dbus
     from dbus.mainloop.glib import DBusGMainLoop
     from gi.repository import GLib
     DBUS_AVAILABLE = True
+    # #region agent log
+    _debug_log("D-Bus/GLib imported successfully", {"hypothesisId": "E"})
+    # #endregion
 except ImportError:
     DBUS_AVAILABLE = False
+    # #region agent log
+    _debug_log("D-Bus/GLib not available (ImportError)", {"hypothesisId": "E"})
+    # #endregion
 
+# #region agent log
+_debug_log("About to import local modules (injector, recorder, transcriber)", {"hypothesisId": "B"})
+# #endregion
 from injector import inject_text, InjectionError
-from recorder import AudioRecorder, ChunkedRecorder
+# #region agent log
+_debug_log("injector imported successfully")
+# #endregion
+from recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name
+# #region agent log
+_debug_log("recorder imported successfully - sounddevice/numpy loaded", {"hypothesisId": "A,B"})
+# #endregion
 from transcriber import transcribe_with_config, TranscriptionError
+# #region agent log
+_debug_log("transcriber imported successfully")
+# #endregion
 from license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
+# #region agent log
+_debug_log("All imports complete - moving to configuration")
+# #endregion
 
 
 # === Configuration ===
@@ -110,6 +170,26 @@ DEFAULT_CONFIG = {
     "faster_whisper_compute_type": "float16",  # float16, int8, int8_float16
     # Floating indicator settings
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
+    # Post-processing settings (LLM cleanup)
+    "post_processing_enabled": False,  # Enable LLM post-processing
+    "post_processing_backend": "llama_cpp",  # llama_cpp | anthropic
+    "post_processing_template": "clean",  # clean | email | notes | code_comment | custom
+    "post_processing_custom_prompt": "",  # Custom prompt for 'custom' template
+    "post_processing_max_tokens": 1024,  # Max tokens for LLM response
+    "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
+    # llama.cpp post-processing settings
+    "llama_cpp_model_path": "",  # Path to GGUF model file
+    "llama_cpp_n_ctx": 2048,  # Context window size
+    "llama_cpp_n_threads": 4,  # CPU threads
+    "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
+    # Cloud post-processing settings (API keys read from environment variables only)
+    # Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment
+    "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
+    "openai_model": "gpt-4o-mini",  # OpenAI model to use
+    # Benchmark results - populated by running benchmark
+    # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}
+    "benchmark_results": {},
+    "benchmark_fastest_processor": None,  # "gpu" or "cpu" - auto-detected from benchmarks
 }
 
 KEY_CODES = {
@@ -629,7 +709,7 @@ SETTING_TOOLTIPS = {
     "chunk_duration": "Length of each audio segment (seconds).\nShorter = faster feedback but more splice points.\n🟡 15-30s recommended for best balance",
     
     # 🔴 MAJOR latency impact - These are the biggest factors
-    "whisper_model": "AI model size - the #1 factor in transcription speed.\n🔴 GPU: Tiny ~0.5s | Base ~1s | Small ~1.5s | Medium ~3s | Large ~6s | Turbo ~2s\n🔴 CPU: Tiny ~2s | Base ~4s | Small ~6s | Medium ~12s | Large ~25s | Turbo ~8s",
+    "whisper_model": "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed.\n🔴 GPU: Tiny ~0.5s | Base ~1s | Small ~1.5s | Medium ~3s | Large ~6s | Turbo ~2s\n🔴 CPU: Tiny ~2s | Base ~4s | Small ~6s | Medium ~12s | Large ~25s | Turbo ~8s",
     "accuracy_mode": "Speed vs accuracy preset - affects beam search depth.\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)",
     "beam_size": "Search width for finding best transcription.\n🔴 1 = fastest (-50%) | 5 = balanced | 10 = slowest (+100%)",
     
@@ -638,6 +718,311 @@ SETTING_TOOLTIPS = {
     "gpu_acceleration": "Use GPU for transcription.\n🚀 Enabled: 3-10x faster than CPU (requires CUDA/ROCm/Vulkan)",
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
 }
+
+
+def get_dynamic_tooltip(key: str, config: dict) -> str:
+    """
+    Generate dynamic tooltip text based on benchmark results.
+    Falls back to static text with TBD for unbenchmarked values.
+    """
+    benchmark_results = config.get("benchmark_results", {})
+    fastest = config.get("benchmark_fastest_processor", None)
+    
+    # Model-specific tooltip with actual benchmarked speeds
+    if key == "whisper_model":
+        base_text = "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed."
+        
+        if not benchmark_results:
+            return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
+        
+        # Build speed table from benchmarks
+        speed_lines = []
+        processor_label = "GPU" if fastest == "gpu" else "CPU" if fastest == "cpu" else "Best"
+        
+        model_order = ["tiny.en", "base.en", "small.en", "medium.en", "large-v3-turbo-q5", "large-v3-turbo", "large-v3"]
+        model_names = {
+            "tiny.en": "Tiny", "base.en": "Base", "small.en": "Small", 
+            "medium.en": "Medium", "large-v3-turbo-q5": "Turbo Q5",
+            "large-v3-turbo": "Turbo", "large-v3": "Large v3"
+        }
+        
+        for model_id in model_order:
+            if model_id in benchmark_results:
+                result = benchmark_results[model_id]
+                if fastest == "gpu" and "gpu_10s" in result:
+                    time_str = f"{result['gpu_10s']:.1f}s"
+                elif "cpu_10s" in result:
+                    time_str = f"{result['cpu_10s']:.1f}s"
+                else:
+                    time_str = "TBD"
+                name = model_names.get(model_id, model_id)
+                speed_lines.append(f"{name}: ~{time_str}")
+        
+        if speed_lines:
+            speeds = " | ".join(speed_lines)
+            return f"{base_text}\n\n🚀 {processor_label} speeds (10s audio):\n{speeds}"
+        
+        return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
+    
+    # Accuracy mode tooltip with benchmarked impact
+    if key == "accuracy_mode":
+        base_text = "Speed vs accuracy preset - affects beam search depth."
+        if benchmark_results and fastest:
+            return f"{base_text}\n🔴 Fast: ~40% faster | Balanced: baseline | High: ~60% slower\n(Based on your {fastest.upper()} benchmarks)"
+        return f"{base_text}\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)\n⏱️ Run benchmark for exact timings"
+    
+    # GPU acceleration tooltip with measured speedup
+    if key == "gpu_acceleration":
+        base_text = "Use GPU for transcription."
+        if benchmark_results:
+            # Calculate actual speedup from benchmark data
+            speedups = []
+            for model_id, result in benchmark_results.items():
+                cpu_time = result.get("cpu_10s")
+                gpu_time = result.get("gpu_10s")
+                if cpu_time and gpu_time and gpu_time > 0:
+                    speedups.append(cpu_time / gpu_time)
+            if speedups:
+                avg_speedup = sum(speedups) / len(speedups)
+                return f"{base_text}\n🚀 Your GPU is {avg_speedup:.1f}x faster than CPU on average!"
+        return f"{base_text}\n🚀 TBD — run benchmark to measure your GPU speedup"
+    
+    # Default to static tooltip
+    return SETTING_TOOLTIPS.get(key, "")
+
+
+class BenchmarkRunner:
+    """
+    Runs in-app benchmarks to measure transcription speed on user's hardware.
+    Results are stored in config for dynamic tooltip generation.
+    """
+    
+    # Models to benchmark (in order of speed)
+    BENCHMARK_MODELS = [
+        ("tiny.en", "ggml-tiny.en.bin", "Tiny"),
+        ("base.en", "ggml-base.en.bin", "Base"),
+        ("small.en", "ggml-small.en.bin", "Small"),
+        ("medium.en", "ggml-medium.en.bin", "Medium"),
+        ("large-v3-turbo-q5", "ggml-large-v3-turbo-q5_0.bin", "Turbo Q5"),
+        ("large-v3-turbo", "ggml-large-v3-turbo.bin", "Turbo"),
+        ("large-v3", "ggml-large-v3.bin", "Large v3"),
+    ]
+    
+    def __init__(self, config: dict, progress_callback=None, log_callback=None):
+        self.config = config
+        self.progress_callback = progress_callback or (lambda p, msg: None)
+        self.log_callback = log_callback or (lambda msg: None)
+        self._cancel_requested = False
+        self.results = {}
+    
+    def cancel(self):
+        """Request cancellation of running benchmark."""
+        self._cancel_requested = True
+    
+    def _find_models_dir(self) -> Path:
+        """Find the whisper models directory."""
+        possible_dirs = [
+            Path.home() / "whisper.cpp" / "models",
+            Path.home() / ".local" / "share" / "whisper.cpp",
+            Path("/app/share/whisper-models"),  # Flatpak
+        ]
+        for d in possible_dirs:
+            if d.exists():
+                return d
+        return possible_dirs[0]  # Default
+    
+    def _find_whisper_binary(self) -> str | None:
+        """Find whisper-cli binary."""
+        possible = [
+            Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli",
+            Path("/usr/bin/whisper-cli"),
+            Path("/app/bin/whisper-cli"),
+        ]
+        for p in possible:
+            if p.exists():
+                return str(p)
+        # Try system PATH
+        import shutil
+        return shutil.which("whisper-cli")
+    
+    def _create_test_audio(self, duration: int = 10) -> str:
+        """Create a test audio file for benchmarking."""
+        import tempfile
+        import wave
+        import numpy as np
+        
+        sample_rate = 16000
+        samples = int(duration * sample_rate)
+        
+        # Generate pseudo-speech audio
+        t = np.linspace(0, duration, samples)
+        speech = np.sin(2 * np.pi * 200 * t) * 0.3
+        speech += np.sin(2 * np.pi * 400 * t) * 0.2
+        speech += np.random.randn(samples) * 0.1
+        envelope = np.abs(np.sin(2 * np.pi * 2 * t)) ** 0.5
+        speech *= envelope
+        speech = speech / np.max(np.abs(speech)) * 0.7
+        audio_int16 = (speech * 32767).astype(np.int16)
+        
+        temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        with wave.open(temp_file.name, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(sample_rate)
+            wav.writeframes(audio_int16.tobytes())
+        
+        return temp_file.name
+    
+    def _run_single_benchmark(self, whisper_cli: str, model_path: str, 
+                               audio_file: str, use_gpu: bool) -> float | None:
+        """Run a single transcription and return time in seconds."""
+        import subprocess
+        
+        cmd = [
+            whisper_cli,
+            "-m", model_path,
+            "-f", audio_file,
+            "-t", "6",  # threads
+            "--no-timestamps",
+            "--no-prints",
+        ]
+        
+        if use_gpu:
+            cmd.append("-ng")  # GPU flag
+        
+        try:
+            # Warm-up run
+            subprocess.run(cmd, capture_output=True, timeout=120)
+            
+            if self._cancel_requested:
+                return None
+            
+            # Timed runs (average of 2)
+            times = []
+            for _ in range(2):
+                if self._cancel_requested:
+                    return None
+                start = time.perf_counter()
+                result = subprocess.run(cmd, capture_output=True, timeout=180)
+                elapsed = time.perf_counter() - start
+                if result.returncode == 0:
+                    times.append(elapsed)
+            
+            return sum(times) / len(times) if times else None
+            
+        except (subprocess.TimeoutExpired, Exception) as e:
+            self.log_callback(f"Benchmark error: {e}")
+            return None
+    
+    def run_benchmarks(self, test_gpu: bool = True, test_cpu: bool = True) -> dict:
+        """
+        Run benchmarks on available models.
+        
+        Returns dict of results: {model_id: {cpu_10s: float, gpu_10s: float, fastest: str}}
+        """
+        self._cancel_requested = False
+        self.results = {}
+        
+        whisper_cli = self._find_whisper_binary()
+        if not whisper_cli:
+            self.log_callback("❌ whisper-cli not found")
+            return {}
+        
+        models_dir = self._find_models_dir()
+        self.log_callback(f"📁 Models directory: {models_dir}")
+        self.log_callback(f"🔧 Using: {whisper_cli}")
+        
+        # Find available models
+        available = []
+        for model_id, filename, display_name in self.BENCHMARK_MODELS:
+            path = models_dir / filename
+            if path.exists():
+                available.append((model_id, str(path), display_name))
+        
+        if not available:
+            self.log_callback("❌ No models found to benchmark")
+            return {}
+        
+        self.log_callback(f"📦 Found {len(available)} models to test")
+        
+        # Create test audio
+        self.log_callback("🎤 Creating 10s test audio...")
+        test_audio = self._create_test_audio(10)
+        
+        try:
+            total_tests = len(available) * (int(test_cpu) + int(test_gpu))
+            current_test = 0
+            
+            for model_id, model_path, display_name in available:
+                if self._cancel_requested:
+                    break
+                
+                self.results[model_id] = {"model_name": display_name}
+                
+                # CPU benchmark
+                if test_cpu:
+                    current_test += 1
+                    self.progress_callback(
+                        current_test / total_tests,
+                        f"Testing {display_name} (CPU)..."
+                    )
+                    self.log_callback(f"⏱️ {display_name} CPU...")
+                    
+                    cpu_time = self._run_single_benchmark(
+                        whisper_cli, model_path, test_audio, use_gpu=False
+                    )
+                    if cpu_time:
+                        self.results[model_id]["cpu_10s"] = round(cpu_time, 2)
+                        self.log_callback(f"   ✅ CPU: {cpu_time:.2f}s")
+                    else:
+                        self.log_callback(f"   ⚠️ CPU test failed")
+                
+                # GPU benchmark
+                if test_gpu and not self._cancel_requested:
+                    current_test += 1
+                    self.progress_callback(
+                        current_test / total_tests,
+                        f"Testing {display_name} (GPU)..."
+                    )
+                    self.log_callback(f"⏱️ {display_name} GPU...")
+                    
+                    gpu_time = self._run_single_benchmark(
+                        whisper_cli, model_path, test_audio, use_gpu=True
+                    )
+                    if gpu_time:
+                        self.results[model_id]["gpu_10s"] = round(gpu_time, 2)
+                        self.log_callback(f"   ✅ GPU: {gpu_time:.2f}s")
+                    else:
+                        self.log_callback(f"   ⚠️ GPU test failed")
+                
+                # Determine fastest processor for this model
+                cpu = self.results[model_id].get("cpu_10s")
+                gpu = self.results[model_id].get("gpu_10s")
+                if cpu and gpu:
+                    self.results[model_id]["fastest"] = "gpu" if gpu < cpu else "cpu"
+                elif gpu:
+                    self.results[model_id]["fastest"] = "gpu"
+                elif cpu:
+                    self.results[model_id]["fastest"] = "cpu"
+                
+                self.results[model_id]["timestamp"] = int(time.time())
+        
+        finally:
+            # Cleanup test audio
+            try:
+                os.unlink(test_audio)
+            except:
+                pass
+        
+        # Determine overall fastest processor
+        gpu_wins = sum(1 for r in self.results.values() if r.get("fastest") == "gpu")
+        cpu_wins = sum(1 for r in self.results.values() if r.get("fastest") == "cpu")
+        overall_fastest = "gpu" if gpu_wins > cpu_wins else "cpu" if cpu_wins > 0 else None
+        
+        self.log_callback(f"\n🏁 Benchmark complete!")
+        self.log_callback(f"🚀 Fastest processor: {overall_fastest.upper() if overall_fastest else 'Unknown'}")
+        
+        return self.results, overall_fastest
 
 
 # === Model Download Definitions ===
@@ -859,24 +1244,75 @@ class ModelDownloader:
 
 
 def get_audio_input_devices() -> list[dict]:
-    """Get all available audio input devices."""
+    """Get all available audio input devices with smart recommendations."""
     import sounddevice as sd
+    
+    # Use the enhanced device listing from recorder module
+    devices_info = list_input_devices()
+    
     devices = []
     try:
-        all_devices = sd.query_devices()
-        for idx, device in enumerate(all_devices):
-            # Only include input devices (max_input_channels > 0)
-            if device.get("max_input_channels", 0) > 0:
-                devices.append({
-                    "index": idx,
-                    "name": device["name"],
-                    "channels": device["max_input_channels"],
-                    "sample_rate": int(device.get("default_samplerate", 16000)),
-                    "is_default": idx == sd.default.device[0],  # default input device
-                })
+        default_input = sd.default.device[0] if sd.default.device else None
+        
+        for dev in devices_info:
+            # Skip excluded devices (monitors, HDMI, etc.) from the UI list
+            if dev.get('excluded', False):
+                continue
+            
+            devices.append({
+                "index": dev["index"],
+                "name": dev["name"],
+                "channels": dev["channels"],
+                "sample_rate": 16000,  # We resample anyway
+                "is_default": dev["index"] == default_input,
+                "recommended": dev.get("recommended", False),
+            })
+        
+        # Sort: recommended first, then by name
+        devices.sort(key=lambda d: (not d.get("recommended", False), d["name"]))
+        
     except Exception as e:
         print(f"Error querying audio devices: {e}")
+    
     return devices
+
+
+def resolve_audio_device(config: dict) -> int | None:
+    """
+    Resolve the audio device to use based on config.
+    
+    If audio_device is None, intelligently selects the best device.
+    If audio_device_name is set, finds the device by name.
+    
+    Args:
+        config: The application config dict
+        
+    Returns:
+        Device index to use, or None for system default
+    """
+    device_id = config.get("audio_device")
+    device_name = config.get("audio_device_name")
+    
+    # If we have a saved device name, try to find it by name first
+    # (device IDs can change when USB devices are reconnected)
+    if device_name:
+        found_id = get_input_device_by_name(device_name)
+        if found_id is not None:
+            return found_id
+        print(f"Saved device '{device_name}' not found, using auto-selection")
+    
+    # If explicit device ID is set and valid, use it
+    if device_id is not None:
+        try:
+            import sounddevice as sd
+            dev_info = sd.query_devices(device_id)
+            if dev_info.get('max_input_channels', 0) > 0:
+                return device_id
+        except Exception:
+            print(f"Configured device {device_id} not available, using auto-selection")
+    
+    # Auto-select the best device
+    return find_best_input_device(preferred_name=device_name)
 
 
 class EventType(Enum):
@@ -1194,6 +1630,9 @@ def get_monitor_refresh_rate() -> int:
     Detect the monitor's refresh rate.
     Returns the refresh rate in Hz, or 60 as fallback.
     """
+    # #region agent log
+    _debug_log("get_monitor_refresh_rate() called", {"hypothesisId": "F-xrandr"})
+    # #endregion
     # Try xrandr first (works on X11 and XWayland)
     try:
         result = subprocess.run(
@@ -1241,7 +1680,13 @@ class FloatingIndicator:
     """
     A floating status indicator that appears near the cursor.
     Shows "Listening..." during recording and "Processing..." during transcription.
+    
+    STABILITY FIX: Uses pre-created canvas items updated via coords()/itemconfig()
+    instead of delete/recreate cycle which caused memory corruption segfaults.
     """
+    
+    # STABILITY: Fixed 15fps for animations - prevents canvas memory issues
+    STABLE_FPS = 15
     
     def __init__(self, parent: ctk.CTk, target_fps: int = 0, audio_level_callback=None):
         self.parent = parent
@@ -1277,14 +1722,18 @@ class FloatingIndicator:
         # Ring animation state for enhanced pulsing dot
         self._ring_phase = 0.0
         
-        # Determine target FPS
-        if target_fps <= 0:
-            # Auto-detect from monitor
-            self._target_fps = get_monitor_refresh_rate()
-            self._fps_auto_detected = True
-        else:
-            self._target_fps = target_fps
-            self._fps_auto_detected = False
+        # STABILITY FIX: Pre-created canvas item IDs (avoids delete/recreate cycle)
+        self._dot_items_created = False
+        self._dot_glow_ids = []  # List of oval IDs for glow layers
+        self._dot_core_id = None  # Core dot oval ID
+        self._dot_ring_id = None  # Expanding ring oval ID
+        
+        self._wave_items_created = False
+        self._wave_bar_ids = []  # List of rectangle IDs for waveform bars
+        
+        # STABILITY: Fixed 15fps regardless of monitor - prevents memory issues
+        self._target_fps = self.STABLE_FPS
+        self._fps_auto_detected = False
         
         # Calculate frame interval in milliseconds
         self._frame_interval_ms = max(1, int(1000 / self._target_fps))
@@ -1399,15 +1848,15 @@ class FloatingIndicator:
         row = ctk.CTkFrame(content, fg_color="transparent")
         row.pack()
         
-        # Glowing status indicator dot (smaller)
+        # Glowing status indicator dot - bigger for visibility
         self.dot_canvas = ctk.CTkCanvas(
             row,
-            width=18,
-            height=18,
+            width=28,
+            height=28,
             bg=pill_bg,
             highlightthickness=0,
         )
-        self.dot_canvas.pack(side="left", padx=(0, 6))
+        self.dot_canvas.pack(side="left", padx=(0, 8))
         self._draw_dot(color)
         
         # Label with status text
@@ -1422,8 +1871,8 @@ class FloatingIndicator:
         # Voice-reactive waveform - right next to text, fills remaining space
         self.wave_canvas = ctk.CTkCanvas(
             row,
-            width=90,
-            height=18,
+            width=200,  # Much wider for dramatic effect
+            height=32,  # Taller for bigger waves
             bg=pill_bg,
             highlightthickness=0,
         )
@@ -1490,6 +1939,14 @@ class FloatingIndicator:
         self._wave_breath = 0.0
         self._ring_phase = 0.0
         
+        # STABILITY FIX: Reset canvas item flags so they get recreated next show()
+        self._dot_items_created = False
+        self._dot_glow_ids = []
+        self._dot_core_id = None
+        self._dot_ring_id = None
+        self._wave_items_created = False
+        self._wave_bar_ids = []
+        
         if self.window:
             try:
                 self.window.destroy()
@@ -1537,259 +1994,224 @@ class FloatingIndicator:
         self.window.geometry(f"+{pos_x}+{pos_y}")
         self._is_centered = True
             
+    def _init_dot_items(self, color: str) -> None:
+        """Create dot canvas items ONCE - called during show()."""
+        if not self.dot_canvas or self._dot_items_created:
+            return
+        
+        canvas_size = 28  # Bigger for visibility
+        cx, cy = canvas_size // 2, canvas_size // 2
+        
+        # Create ring (initially hidden) - larger for dramatic effect
+        self._dot_ring_id = self.dot_canvas.create_oval(
+            cx - 6, cy - 6, cx + 6, cy + 6,
+            outline=color, width=2, fill="", state="hidden"
+        )
+        
+        # Create 3 glow layers - larger radii for bigger dot
+        glow_radii = [10, 7, 4]
+        self._dot_glow_ids = []
+        for radius in glow_radii:
+            item_id = self.dot_canvas.create_oval(
+                cx - radius, cy - radius, cx + radius, cy + radius,
+                fill=color, outline=""
+            )
+            self._dot_glow_ids.append(item_id)
+        
+        # Create core dot - bigger
+        self._dot_core_id = self.dot_canvas.create_oval(
+            cx - 4, cy - 4, cx + 4, cy + 4,
+            fill=color, outline=""
+        )
+        
+        self._dot_items_created = True
+    
     def _draw_dot(self, color: str, scale: float = 1.0) -> None:
-        """Draw an enhanced glowing status indicator with pulsing ring."""
+        """Update dot canvas items - STABLE version using coords/itemconfig."""
         if not self.dot_canvas:
             return
-            
-        import math
         
-        self.dot_canvas.delete("all")
+        # Initialize items on first call
+        if not self._dot_items_created:
+            self._init_dot_items(color)
+            return
         
         # Parse color
         r = int(color[1:3], 16)
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
         
-        # Canvas is 18x18 (ultra compact)
-        canvas_size = 18
+        canvas_size = 28  # Bigger for visibility
         cx, cy = canvas_size // 2, canvas_size // 2
+        bg_r, bg_g, bg_b = 24, 24, 31  # pill_bg
         
-        # Background color for blending (pill_bg = #18181f)
-        bg_r, bg_g, bg_b = 24, 24, 31
-        
-        # Expanding ring animation - ring grows outward and fades
-        ring_progress = self._ring_phase % 1.0  # 0 to 1
-        if ring_progress > 0:
-            ring_radius = 4 + ring_progress * 6  # Expands from 4 to 10 (fits 18px canvas)
-            ring_alpha = 0.6 * (1 - ring_progress)  # Fades out as it expands
+        # Update ring animation - larger for bigger dot
+        ring_progress = self._ring_phase % 1.0
+        if ring_progress > 0.05 and ring_progress < 0.95:
+            ring_radius = 6 + ring_progress * 8  # Bigger ring expansion
+            ring_alpha = 0.6 * (1 - ring_progress)
+            ring_r = int(r * ring_alpha + bg_r * (1 - ring_alpha))
+            ring_g = int(g * ring_alpha + bg_g * (1 - ring_alpha))
+            ring_b = int(b * ring_alpha + bg_b * (1 - ring_alpha))
+            ring_color = f"#{ring_r:02x}{ring_g:02x}{ring_b:02x}"
             
-            if ring_alpha > 0.05:
-                ring_r = int(r * ring_alpha + bg_r * (1 - ring_alpha))
-                ring_g = int(g * ring_alpha + bg_g * (1 - ring_alpha))
-                ring_b = int(b * ring_alpha + bg_b * (1 - ring_alpha))
-                ring_color = f"#{ring_r:02x}{ring_g:02x}{ring_b:02x}"
+            self.dot_canvas.coords(self._dot_ring_id,
+                cx - ring_radius, cy - ring_radius, cx + ring_radius, cy + ring_radius)
+            self.dot_canvas.itemconfig(self._dot_ring_id, outline=ring_color, state="normal")
+        else:
+            self.dot_canvas.itemconfig(self._dot_ring_id, state="hidden")
+        
+        # Update glow layers - larger radii for bigger dot
+        glow_configs = [(10, 0.25), (7, 0.5), (4, 0.75)]
+        for i, (base_radius, alpha) in enumerate(glow_configs):
+            if i < len(self._dot_glow_ids):
+                glow_radius = base_radius * scale
+                gr = int(r * alpha + bg_r * (1 - alpha))
+                gg = int(g * alpha + bg_g * (1 - alpha))
+                gb = int(b * alpha + bg_b * (1 - alpha))
+                glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
                 
-                self.dot_canvas.create_oval(
-                    cx - ring_radius, cy - ring_radius,
-                    cx + ring_radius, cy + ring_radius,
-                    outline=ring_color,
-                    width=1.5,
-                    fill="",
-                )
+                self.dot_canvas.coords(self._dot_glow_ids[i],
+                    cx - glow_radius, cy - glow_radius, cx + glow_radius, cy + glow_radius)
+                self.dot_canvas.itemconfig(self._dot_glow_ids[i], fill=glow_color)
         
-        # Draw intensified outer glow layers (sized for 18px canvas)
-        glow_configs = [
-            (8, 0.15),    # Outermost - subtle halo
-            (6.5, 0.25),  # Outer glow
-            (5, 0.4),     # Middle glow  
-            (3.5, 0.55),  # Inner glow
-            (2.5, 0.7),   # Core glow
-        ]
+        # Update core - bigger for visibility
+        core_radius = 4 * scale
+        self.dot_canvas.coords(self._dot_core_id,
+            cx - core_radius, cy - core_radius, cx + core_radius, cy + core_radius)
+        self.dot_canvas.itemconfig(self._dot_core_id, fill=color)
+    
+    def _init_wave_items(self, color: str) -> None:
+        """Create waveform bar items ONCE - called during show()."""
+        if not self.wave_canvas or self._wave_items_created:
+            return
         
-        for base_radius, alpha in glow_configs:
-            # Scale the glow with the pulse
-            glow_radius = base_radius * scale
-            
-            # Mix color with background for alpha effect
-            gr = int(r * alpha + bg_r * (1 - alpha))
-            gg = int(g * alpha + bg_g * (1 - alpha))
-            gb = int(b * alpha + bg_b * (1 - alpha))
-            glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
-            
-            self.dot_canvas.create_oval(
-                cx - glow_radius, cy - glow_radius,
-                cx + glow_radius, cy + glow_radius,
-                fill=glow_color,
-                outline="",
+        # Use vertical bars - BIG and dramatic
+        width = 200  # Match canvas width
+        height = 32  # Match canvas height
+        center_y = height // 2
+        bar_width = 3
+        bar_gap = 4
+        num_bars = width // (bar_width + bar_gap)
+        
+        self._wave_bar_ids = []
+        for i in range(num_bars):
+            x = i * (bar_width + bar_gap) + bar_gap // 2
+            # Create bar centered vertically (will be updated in _draw_waveform)
+            bar_id = self.wave_canvas.create_rectangle(
+                x, center_y - 1, x + bar_width, center_y + 1,
+                fill=color, outline=""
             )
+            self._wave_bar_ids.append(bar_id)
         
-        # Draw bright core (scales more dramatically)
-        core_radius = 2.5 * scale
-        self.dot_canvas.create_oval(
-            cx - core_radius, cy - core_radius,
-            cx + core_radius, cy + core_radius,
-            fill=color,
-            outline="",
-        )
-        
-        # Add bright highlight spot for premium look
-        highlight_radius = 1 * scale
-        highlight_offset = -0.6 * scale
-        # Lighter version of color for highlight
-        hr = min(255, r + 60)
-        hg = min(255, g + 60)
-        hb = min(255, b + 60)
-        highlight_color = f"#{hr:02x}{hg:02x}{hb:02x}"
-        
-        self.dot_canvas.create_oval(
-            cx + highlight_offset - highlight_radius,
-            cy + highlight_offset - highlight_radius,
-            cx + highlight_offset + highlight_radius,
-            cy + highlight_offset + highlight_radius,
-            fill=highlight_color,
-            outline="",
-        )
+        self._wave_items_created = True
     
     def _draw_waveform(self, color: str) -> None:
-        """Draw a HYPER voice-reactive waveform - exaggerated and grandiose!"""
+        """Update waveform bars - HYPER voice-reactive version!"""
         if not self.wave_canvas:
             return
-            
-        self.wave_canvas.delete("all")
+        
+        # Initialize items on first call
+        if not self._wave_items_created:
+            self._init_wave_items(color)
+            return
         
         import math
         
-        # Canvas dimensions (compact, inline with text)
-        width = 90
-        height = 18
+        width = 200  # Match canvas width
+        height = 32  # Match canvas height
         center_y = height // 2
-        max_amp = height // 2  # Full amplitude - waves can touch the very edges!
+        max_amp = height // 2  # Full height available
+        bar_width = 3
+        bar_gap = 4
         
-        # Parse color for wave layers
+        # Parse color
         r = int(color[1:3], 16)
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
-        
-        # Background color for alpha blending (pill_bg = #18181f)
         bg_r, bg_g, bg_b = 24, 24, 31
         
-        # HYPER voice-reactive - exaggerated response!
+        # HYPER voice-reactive amplitude - FREAK OUT when speaking!
         audio_level = self._current_audio_level
+        # Small base motion when quiet
+        base_breath = 0.15 + 0.1 * (0.5 + 0.5 * math.sin(self._wave_breath))
+        # MASSIVE exponential voice boost - fills space FAST when speaking
+        voice_boost = (audio_level ** 0.3) * 3.0  # Very sensitive, huge multiplier
+        amplitude_factor = min(1.0, base_breath + voice_boost)
         
-        # Slightly larger base motion
-        base_breath = 0.15 + 0.12 * (0.5 + 0.5 * math.sin(self._wave_breath))
-        
-        # MASSIVE voice response - exponential curve for dramatic effect
-        # Even more sensitive - fills space faster
-        voice_boost = (audio_level ** 0.6) * 15.0  # More exponential + bigger multiplier!
-        amplitude_factor = base_breath + voice_boost
-        
-        # Cap at 1.0 which = max_amp (fills the entire space edge to edge)
-        amplitude_factor = min(1.0, amplitude_factor)
-        
-        # Draw layered sine waves - dramatic and flowing
-        wave_configs = [
-            # (frequency, phase_offset, alpha)
-            (0.07, 0.0, 0.2),       # Slow background wave
-            (0.11, 1.0, 0.35),      # Medium wave
-            (0.16, 2.2, 0.5),       # Faster wave
-            (0.22, 0.7, 0.65),      # Quick wave
-        ]
-        
-        for freq, phase_offset, alpha in wave_configs:
-            # All waves use the same amplitude factor - fills the space!
-            amp = max_amp * amplitude_factor
+        # Update each bar
+        for i, bar_id in enumerate(self._wave_bar_ids):
+            x = i * (bar_width + bar_gap) + bar_gap // 2
             
-            # Build wave points
-            points = []
-            for x in range(0, width + 1, 2):
-                # Combine sine waves for organic motion
-                y = center_y + amp * math.sin(freq * x + self._wave_time + phase_offset)
-                # Add harmonics for richness
-                y += (amp * 0.4) * math.sin(freq * 2.3 * x + self._wave_time * 1.6 + phase_offset)
-                y += (amp * 0.2) * math.sin(freq * 3.7 * x + self._wave_time * 2.1 + phase_offset * 0.5)
-                # Clamp to canvas bounds (allow touching edges)
-                y = max(0, min(height, y))
-                points.append((x, y))
+            # Calculate bar height - chaotic multi-frequency waves
+            phase = self._wave_time + i * 0.4
+            # Multiple overlapping frequencies for organic chaos
+            wave_val = (math.sin(phase * 1.2) * 0.35 + 
+                       math.sin(phase * 2.1 + 0.7) * 0.35 + 
+                       math.sin(phase * 0.7 + 1.2) * 0.3)
+            # Bars fill the space when voice is detected
+            bar_height = max(1, (0.2 + abs(wave_val) * 0.8) * max_amp * amplitude_factor)
             
-            # Blend color with background for alpha effect
-            wr = int(r * alpha + bg_r * (1 - alpha))
-            wg = int(g * alpha + bg_g * (1 - alpha))
-            wb = int(b * alpha + bg_b * (1 - alpha))
-            wave_color = f"#{wr:02x}{wg:02x}{wb:02x}"
+            # Intense color variation
+            alpha = 0.4 + 0.6 * abs(wave_val) * amplitude_factor
+            br = int(r * alpha + bg_r * (1 - alpha))
+            bg = int(g * alpha + bg_g * (1 - alpha))
+            bb = int(b * alpha + bg_b * (1 - alpha))
+            bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
             
-            # Draw as smooth line
-            if len(points) >= 2:
-                flat_points = [coord for point in points for coord in point]
-                self.wave_canvas.create_line(
-                    *flat_points,
-                    fill=wave_color,
-                    width=2,
-                    smooth=True,
-                    splinesteps=10,
-                )
-        
-        # Draw center line highlight (brightest, fills space when loud)
-        highlight_amp = max_amp * amplitude_factor
-        highlight_points = []
-        for x in range(0, width + 1, 2):
-            y = center_y + highlight_amp * math.sin(0.13 * x + self._wave_time * 1.4)
-            y += (highlight_amp * 0.5) * math.sin(0.26 * x + self._wave_time * 2.0 + 0.8)
-            # Clamp to canvas bounds (allow touching edges)
-            y = max(0, min(height, y))
-            highlight_points.append((x, y))
-        
-        if len(highlight_points) >= 2:
-            flat_highlight = [coord for point in highlight_points for coord in point]
-            self.wave_canvas.create_line(
-                *flat_highlight,
-                fill=color,
-                width=2,
-                smooth=True,
-                splinesteps=10,
-            )
+            # Update bar position and color
+            self.wave_canvas.coords(bar_id,
+                x, center_y - bar_height, x + bar_width, center_y + bar_height)
+            self.wave_canvas.itemconfig(bar_id, fill=bar_color)
         
     def _start_pulse(self) -> None:
         """Start the pulsing animation."""
         self._pulse_step()
         
     def _pulse_step(self) -> None:
-        """Animate one pulse step with smooth sinusoidal easing and voice reactivity."""
-        if not self._visible:
+        """Animate one pulse step - STABLE version at fixed 15fps."""
+        if not self._visible or not self.window:
             return
         
         import math
         
-        # Scale animation speed based on frame rate (normalized to 60fps baseline)
-        fps_scale = 60.0 / self._target_fps
+        fps_scale = 4.0  # 60/15 = 4
         
-        # Cycle through pulse states (2 second cycle regardless of frame rate)
-        cycle_steps = self._target_fps * 2  # 2 second cycle
-        self.pulse_state = (self.pulse_state + 1) % cycle_steps
+        # Cycle through pulse states (2 second cycle at 15fps = 30 steps)
+        self.pulse_state = (self.pulse_state + 1) % 30
         
-        # Get audio level from callback (voice reactivity)
+        # Get audio level from callback - INSTANT attack, moderate decay
         if self._audio_level_callback:
             try:
                 raw_level = self._audio_level_callback()
-                # INSTANT response - no smoothing on attack for maximum impact!
+                # Instant attack - respond IMMEDIATELY to voice!
                 if raw_level > self._current_audio_level:
-                    # Instant attack - respond IMMEDIATELY!
                     self._current_audio_level = raw_level
                 else:
-                    # Moderate decay - scaled for frame rate
-                    decay = 0.75 ** fps_scale
-                    self._current_audio_level = self._current_audio_level * decay + raw_level * (1 - decay)
+                    # Slower decay to maintain energy
+                    self._current_audio_level = self._current_audio_level * 0.7 + raw_level * 0.3
             except:
-                self._current_audio_level *= 0.85 ** fps_scale  # Decay if error
+                self._current_audio_level *= 0.8
         else:
-            self._current_audio_level *= 0.85 ** fps_scale  # Decay if no callback
+            self._current_audio_level *= 0.8
         
-        # Sinusoidal easing for smooth breathing effect
-        t = self.pulse_state / cycle_steps * 2 * math.pi
-        ease = 0.5 + 0.5 * math.sin(t)  # 0 to 1 smooth
-        
-        # Dramatic scale range: 0.7 to 1.3
-        # Add strong voice reactivity to dot scale
+        # Calculate scale with sinusoidal easing
+        t = self.pulse_state / 30.0 * 2 * math.pi
+        ease = 0.5 + 0.5 * math.sin(t)
         voice_scale_boost = self._current_audio_level * 0.5
         scale = 0.7 + ease * 0.6 + voice_scale_boost
         
-        # Update ring animation phase (scaled for frame rate)
+        # Update animation phases
         self._ring_phase = (self._ring_phase + 0.022 * fps_scale) % 1.0
-        
-        # Update waveform animation time (scaled for frame rate - smooth at any fps)
         self._wave_time += 0.08 * fps_scale
-        
-        # Update breathing amplitude for waveform (scaled for frame rate)
         self._wave_breath += 0.04 * fps_scale
         
-        # Redraw both the dot and waveform
+        # Update canvas items (STABLE - no delete/recreate)
         self._draw_dot(self.current_color, scale)
         self._draw_waveform(self.current_color)
         
-        # Schedule next step at monitor refresh rate for buttery smooth animation
-        if self.window:
-            self.pulse_job = self.window.after(self._frame_interval_ms, self._pulse_step)
+        # Schedule next step at fixed 66ms (15fps)
+        self.pulse_job = self.window.after(66, self._pulse_step)
             
     def _stop_pulse(self) -> None:
         """Stop the pulsing animation."""
@@ -2026,13 +2448,29 @@ class OverlayController:
 
 class WayfinderApp(ctk.CTk):
     def __init__(self):
+        # #region agent log
+        _debug_log("WayfinderApp.__init__ starting - calling super().__init__()", {"hypothesisId": "D"})
+        # #endregion
         super().__init__()
+        # #region agent log
+        _debug_log("super().__init__() complete - Tk window created", {"hypothesisId": "D"})
+        # #endregion
         
         # Set WM_CLASS so Linux desktop environments show the correct icon
         # This must match the .desktop file's StartupWMClass
         self.tk.call('tk', 'appname', 'wayfinder-voice')
         
+        # #region agent log
+        _debug_log("Loading config")
+        # #endregion
         self.config = load_config()
+        
+        # Load API keys from config into environment (if stored)
+        if self.config.get("anthropic_api_key"):
+            os.environ["ANTHROPIC_API_KEY"] = self.config["anthropic_api_key"]
+        if self.config.get("openai_api_key"):
+            os.environ["OPENAI_API_KEY"] = self.config["openai_api_key"]
+        
         self.app_state = AppState.IDLE
         self.event_queue = queue.Queue()
         self.stop_event = threading.Event()
@@ -2040,12 +2478,27 @@ class WayfinderApp(ctk.CTk):
         # License/feature gate for premium features
         self.feature_gate = get_feature_gate()
         
+        # #region agent log
+        _debug_log("About to resolve audio device", {"hypothesisId": "B"})
+        # #endregion
+        # Resolve audio device (intelligent selection if not explicitly set)
+        self._resolved_audio_device = resolve_audio_device(self.config)
+        # #region agent log
+        _debug_log("Audio device resolved", {"device": str(self._resolved_audio_device), "hypothesisId": "B"})
+        # #endregion
+        
+        # #region agent log
+        _debug_log("About to create AudioRecorder", {"hypothesisId": "B"})
+        # #endregion
         # Standard recorder for short recordings
         self.recorder = AudioRecorder(
             sample_rate=self.config["sample_rate"],
-            device=self.config["audio_device"],
+            device=self._resolved_audio_device,
             preprocessing=self.config.get("audio_preprocessing", "light"),
         )
+        # #region agent log
+        _debug_log("AudioRecorder created successfully", {"hypothesisId": "B"})
+        # #endregion
         
         # Chunked recorder for indefinite recording
         self.chunked_recorder: ChunkedRecorder | None = None
@@ -2073,6 +2526,9 @@ class WayfinderApp(ctk.CTk):
         # Dialog tracking to prevent multiple instances
         self._device_settings_dialog: ctk.CTkToplevel | None = None
         
+        # #region agent log
+        _debug_log("About to call setup_window()", {"hypothesisId": "D"})
+        # #endregion
         self.setup_window()
         
         # Create indicator with voice-reactive callback
@@ -2099,16 +2555,31 @@ class WayfinderApp(ctk.CTk):
         #     self._use_pyqt_overlay = False
         #     self.log("⚠ PyQt6 not available, using fallback indicator")
         
+        # #region agent log
+        _debug_log("About to create FloatingIndicator", {"hypothesisId": "D"})
+        # #endregion
         # Always create fallback indicator (used when PyQt overlay unavailable)
         self.indicator = FloatingIndicator(
             self, 
             target_fps=self.config.get("indicator_fps", 0),
             audio_level_callback=get_audio_level
         )
+        # #region agent log
+        _debug_log("FloatingIndicator created - about to setup_tray()", {"hypothesisId": "D"})
+        # #endregion
         self.setup_tray()
+        # #region agent log
+        _debug_log("Tray setup complete - about to setup_ui()")
+        # #endregion
         self.setup_ui()
+        # #region agent log
+        _debug_log("UI setup complete - about to start_hotkey_listener()", {"hypothesisId": "C"})
+        # #endregion
         self.setup_scaling_shortcuts()
         self.start_hotkey_listener()
+        # #region agent log
+        _debug_log("Hotkey listener started - about to poll_events()")
+        # #endregion
         self.poll_events()
         
         # Log animation refresh rate info
@@ -2125,7 +2596,7 @@ class WayfinderApp(ctk.CTk):
         #     self.after(100, self.hide_to_tray)
 
     def setup_window(self) -> None:
-        self.title("Wayfinder Voice")
+        self.title("Wayfinder Aura")
         
         # Apply saved UI scale
         base_w, base_h = 480, 720
@@ -2268,7 +2739,7 @@ class WayfinderApp(ctk.CTk):
         self._switch_tab("settings")
         
         # Initial log entries
-        self.log("✓ Wayfinder Voice started")
+        self.log("✓ Wayfinder Aura started")
         self.log(f"⌨ Hotkey: {self.get_hotkey_display()}")
         
         # Log detected hardware
@@ -2305,10 +2776,10 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
         
-        # "VOICE" in accent
+        # "AURA" in accent
         ctk.CTkLabel(
             title_frame,
-            text=" VOICE",
+            text=" AURA",
             font=(self.font_display[0], self.font_sizes["title"], "bold"),
             text_color=COLORS["accent"],
         ).pack(side="left")
@@ -2345,11 +2816,11 @@ class WayfinderApp(ctk.CTk):
         # === Waveform Visualizer Canvas - MASSIVE dramatic waves ===
         self.hero_canvas = ctk.CTkCanvas(
             hero_inner,
-            height=180,  # Very tall for huge dramatic waves
+            height=80,  # Refined, elegant height
             bg=COLORS["bg_card"],
             highlightthickness=0,
         )
-        self.hero_canvas.pack(fill="x", pady=(0, 8))
+        self.hero_canvas.pack(fill="x", pady=(0, 12))
         
         # Initialize animation state
         self._hero_wave_time = 0.0
@@ -2357,15 +2828,21 @@ class WayfinderApp(ctk.CTk):
         self._hero_animation_job = None
         self._idle_breath_job = None
         
-        # Detect monitor refresh rate for smooth animations
-        self._target_fps = get_monitor_refresh_rate()
-        self._frame_interval_ms = max(1, int(1000 / self._target_fps))
-        self._fps_scale = 60.0 / self._target_fps  # Scale factors normalized to 60fps
+        # STABILITY FIX: Pre-created canvas item tracking (avoids delete/recreate cycle)
+        self._hero_wave_items_created = False
+        self._hero_wave_bar_ids = []
+        self._hero_canvas_width = 0  # Track width to detect resize
         
-        # Draw initial idle waveform and start gentle breathing animation
-        self._draw_hero_waveform()
-        # Schedule idle animation to start after window is shown
-        self.after(100, self._start_idle_breath)
+        # Bind resize to reinitialize bars when canvas gets proper size
+        self.hero_canvas.bind("<Configure>", self._on_hero_canvas_resize)
+        
+        # STABILITY FIX: Fixed 15fps for animations to prevent memory issues
+        self._target_fps = 15
+        self._frame_interval_ms = 66  # ~15fps
+        self._fps_scale = 60.0 / self._target_fps
+        
+        # Schedule idle animation to start after window is shown (gives time for layout)
+        self.after(200, self._start_idle_breath)
         
         # === Mic Button Container (centered) ===
         mic_container = ctk.CTkFrame(hero_inner, fg_color="transparent")
@@ -2382,6 +2859,12 @@ class WayfinderApp(ctk.CTk):
         )
         self.mic_button_canvas.pack()
         self.mic_button_canvas.bind("<Button-1>", lambda e: self.on_record_button())
+        
+        # STABILITY FIX: Pre-created mic button item tracking
+        self._mic_items_created = False
+        self._mic_glow_ids = []  # List of oval IDs for glow layers
+        self._mic_button_id = None  # Main button circle
+        self._mic_icon_ids = []  # Mic icon elements
         
         # Draw the mic button
         self._draw_mic_button(STATE_COLORS[AppState.IDLE])
@@ -2405,9 +2888,14 @@ class WayfinderApp(ctk.CTk):
         self.hotkey_label.pack(pady=(4, 0))
     
     def _draw_mic_button(self, color: str) -> None:
-        """Draw the glowing circular mic button."""
+        """Draw the glowing circular mic button (non-pulsing version)."""
         canvas = self.mic_button_canvas
         canvas.delete("all")
+        
+        # Reset pulse item tracking since we're recreating
+        self._mic_items_created = False
+        self._mic_glow_ids = []
+        self._mic_button_id = None
         
         size = 80
         cx, cy = size // 2, size // 2
@@ -2477,24 +2965,82 @@ class WayfinderApp(ctk.CTk):
             width=2,
         )
     
-    def _draw_hero_waveform(self) -> None:
-        """Draw MASSIVE, full-height waveform visualization."""
+    def _on_hero_canvas_resize(self, event=None):
+        """Handle canvas resize - reinitialize bars to fill new width."""
+        if not self.hero_canvas:
+            return
+        new_width = self.hero_canvas.winfo_width()
+        if new_width > 100 and abs(new_width - self._hero_canvas_width) > 20:
+            self._hero_canvas_width = new_width
+            for bar_id in self._hero_wave_bar_ids:
+                try:
+                    self.hero_canvas.delete(bar_id)
+                except:
+                    pass
+            self._hero_wave_bar_ids = []
+            self._hero_wave_items_created = False
+            self._init_hero_wave_items()
+    
+    def _init_hero_wave_items(self) -> None:
+        """Create hero waveform bar items ONCE."""
+        if not self.hero_canvas or self._hero_wave_items_created:
+            return
+        
         canvas = self.hero_canvas
-        canvas.delete("all")
-        
-        import math
-        
         w = canvas.winfo_width()
         h = canvas.winfo_height()
         
         if w <= 1:
             w = 400
         if h <= 1:
-            h = 180
+            h = 80
         
         center_y = h // 2
-        # FULL HEIGHT - waves touch the edges
-        max_amp = (h // 2)
+        # Thin, elegant bars for refined look
+        bar_width = 3
+        bar_gap = 2
+        num_bars = w // (bar_width + bar_gap)
+        
+        self._hero_wave_bar_ids = []
+        color = STATE_COLORS.get(self.app_state, COLORS["accent"])
+        
+        for i in range(num_bars):
+            x = i * (bar_width + bar_gap) + bar_gap // 2
+            # Create bar centered vertically with initial height
+            bar_id = canvas.create_rectangle(
+                x, center_y - 10, x + bar_width, center_y + 10,
+                fill=color, outline=""
+            )
+            self._hero_wave_bar_ids.append(bar_id)
+        
+        self._hero_wave_items_created = True
+    
+    def _draw_hero_waveform(self) -> None:
+        """Update hero waveform bars - STABLE version using coords/itemconfig."""
+        if not self.hero_canvas:
+            return
+        
+        # Initialize items on first call
+        if not self._hero_wave_items_created:
+            self._init_hero_wave_items()
+            return
+        
+        import math
+        
+        canvas = self.hero_canvas
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        
+        if w <= 1:
+            w = 400
+        if h <= 1:
+            h = 80
+        
+        center_y = h // 2
+        max_amp = (h // 2) - 2  # Use nearly full height
+        # Must match _init_hero_wave_items dimensions
+        bar_width = 3
+        bar_gap = 2
         
         # Get current color based on state
         color = STATE_COLORS.get(self.app_state, COLORS["accent"])
@@ -2502,52 +3048,41 @@ class WayfinderApp(ctk.CTk):
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
         
-        # Background color for blending
         bg_r = int(COLORS["bg_card"][1:3], 16)
         bg_g = int(COLORS["bg_card"][3:5], 16)
         bg_b = int(COLORS["bg_card"][5:7], 16)
         
-        # Calculate amplitude - HUGE waves always
+        # Calculate amplitude - DRAMATIC and space-filling!
         audio_level = self._hero_audio_level
-        # Always big - ranges from 0.85 to 1.0 for constant dramatic motion
-        base_breath = 0.85 + 0.15 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.3))
-        voice_boost = (audio_level ** 0.5) * 0.15
+        # High base amplitude so bars are always visible and moving
+        base_breath = 0.6 + 0.3 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.3))
+        # MASSIVE voice boost - fills the space when speaking
+        voice_boost = (audio_level ** 0.4) * 2.0  # More sensitive, bigger boost
         amplitude_factor = min(1.0, base_breath + voice_boost)
         
-        # Dramatic wave layers - BIG flowing waves
-        wave_configs = [
-            # (frequency, phase_offset, alpha, line_width, amplitude_mult)
-            (0.006, 0.0, 0.20, 2, 1.0),      # Huge slow wave
-            (0.010, 1.0, 0.35, 2, 0.95),     # Large wave  
-            (0.015, 2.0, 0.50, 3, 0.85),     # Medium-large
-            (0.022, 3.0, 0.70, 3, 0.70),     # Medium wave
-            (0.032, 4.0, 0.90, 3, 0.55),     # Smaller detail wave
-        ]
-        
-        for freq, phase_offset, alpha, line_width, amp_mult in wave_configs:
-            # Blend color with background based on alpha
-            blend_r = int(bg_r + (r - bg_r) * alpha)
-            blend_g = int(bg_g + (g - bg_g) * alpha)
-            blend_b = int(bg_b + (b - bg_b) * alpha)
-            wave_color = f"#{blend_r:02x}{blend_g:02x}{blend_b:02x}"
+        # Update each bar
+        for i, bar_id in enumerate(self._hero_wave_bar_ids):
+            x = i * (bar_width + bar_gap) + bar_gap // 2
             
-            points = []
-            for x in range(0, w + 1, 2):
-                t = self._hero_wave_time
-                
-                # Smooth flowing sine waves
-                wave1 = math.sin(x * freq + t + phase_offset)
-                wave2 = math.sin(x * freq * 1.8 + t * 0.7 + phase_offset) * 0.3
-                wave3 = math.sin(x * freq * 0.6 + t * 1.1 + phase_offset) * 0.25
-                
-                combined = (wave1 + wave2 + wave3) / 1.55
-                
-                # Apply full amplitude
-                y = center_y + combined * max_amp * amplitude_factor * amp_mult
-                points.extend([x, y])
+            # Calculate bar height - more dramatic wave pattern
+            phase = self._hero_wave_time + i * 0.2
+            # Multi-frequency waves for organic, dramatic motion
+            wave_val = (math.sin(phase) * 0.4 + 
+                       math.sin(phase * 1.7 + 0.5) * 0.35 + 
+                       math.sin(phase * 0.6 + 1.0) * 0.25)
+            # Bars always have significant height, scale up dramatically
+            bar_height = max(8, (0.3 + abs(wave_val) * 0.7) * max_amp * amplitude_factor)
             
-            if len(points) >= 4:
-                canvas.create_line(points, fill=wave_color, width=line_width, smooth=True)
+            # Vary color intensity per bar for wave effect
+            alpha = 0.5 + 0.5 * abs(wave_val)
+            br = int(r * alpha + bg_r * (1 - alpha))
+            bg = int(g * alpha + bg_g * (1 - alpha))
+            bb = int(b * alpha + bg_b * (1 - alpha))
+            bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
+            
+            # Update bar position and color (STABLE - no delete/recreate)
+            canvas.coords(bar_id, x, center_y - bar_height, x + bar_width, center_y + bar_height)
+            canvas.itemconfig(bar_id, fill=bar_color)
     
     def _create_sidebar(self, parent) -> None:
         """Create the vertical sidebar navigation."""
@@ -2758,14 +3293,17 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["hotkey"],
         )
         
-        # Microphone setting
-        mic_display = self.get_microphone_display()
-        self.mic_btn = self.create_setting_row(
+        # Microphone setting (dropdown)
+        mic_options, mic_current = self._get_microphone_dropdown_options()
+        self.mic_var = ctk.StringVar(value=mic_current)
+        self.mic_dropdown = self.create_dropdown_row(
             settings_card,
             "Microphone",
-            mic_display,
-            self.open_microphone_settings,
+            mic_options,
+            self.mic_var,
+            self._on_microphone_selected,
             tooltip=SETTING_TOOLTIPS["microphone"],
+            width=220,
         )
         
         # Typing speed
@@ -2779,14 +3317,14 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["typing_speed"],
         )
         
-        # Whisper model
+        # Whisper model (local on-device processing)
         model_display = self.get_model_display()
         self.model_btn = self.create_setting_row(
             settings_card,
-            "Whisper Model",
+            "Local Whisper Model",
             model_display,
             self.open_model_settings,
-            tooltip=SETTING_TOOLTIPS["whisper_model"],
+            tooltip=get_dynamic_tooltip("whisper_model", self.config),
         )
         
         # Prompt
@@ -2866,7 +3404,7 @@ class WayfinderApp(ctk.CTk):
         self.accuracy_mode_dropdown = self.create_dropdown_row(
             accuracy_card, "Accuracy Mode", ["fast", "balanced", "high"],
             self.accuracy_mode_var, self.on_accuracy_mode_changed,
-            tooltip=SETTING_TOOLTIPS["accuracy_mode"], width=140,
+            tooltip=get_dynamic_tooltip("accuracy_mode", self.config), width=140,
         )
         
         beam_size = self.config.get("beam_size", 5)
@@ -2945,7 +3483,7 @@ class WayfinderApp(ctk.CTk):
         self.create_toggle_row(
             gpu_card, "GPU Acceleration",
             self.gpu_var, self.toggle_gpu,
-            tooltip=SETTING_TOOLTIPS["gpu_acceleration"],
+            tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
         )
         
         gpu_layers = self.config.get("gpu_layers", 0)
@@ -2954,6 +3492,46 @@ class WayfinderApp(ctk.CTk):
             gpu_card, "GPU Layers", ["auto", "1", "4", "8", "16", "24", "32", "48", "64", "99"],
             self.gpu_layers_var, self.on_gpu_layers_changed,
             tooltip=SETTING_TOOLTIPS["gpu_layers"], width=100,
+        )
+        
+        # === Post-Processing Section (LLM cleanup) ===
+        self._create_advanced_section_header(parent, "Post-Processing (AI Cleanup)")
+        
+        postproc_card = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"])
+        postproc_card.pack(fill="x", pady=(0, 12))
+        
+        # Enable toggle
+        self.postproc_var = ctk.BooleanVar(value=self.config.get("post_processing_enabled", False))
+        self.create_toggle_row(
+            postproc_card, "Enable LLM Post-Processing",
+            self.postproc_var, self.toggle_post_processing,
+            tooltip="Use a small LLM to clean up filler words and apply smart formatting",
+        )
+        
+        # Backend selector
+        postproc_backend = self.config.get("post_processing_backend", "llama_cpp")
+        self.postproc_backend_var = ctk.StringVar(value=postproc_backend)
+        self.postproc_backend_dropdown = self.create_dropdown_row(
+            postproc_card, "Backend", ["llama_cpp", "anthropic", "openai"],
+            self.postproc_backend_var, self.on_postproc_backend_changed,
+            tooltip="llama_cpp = Local, anthropic = Claude, openai = GPT", width=140,
+        )
+        
+        # Template selector
+        postproc_template = self.config.get("post_processing_template", "clean")
+        self.postproc_template_var = ctk.StringVar(value=postproc_template)
+        self.postproc_template_dropdown = self.create_dropdown_row(
+            postproc_card, "Format Template", ["clean", "email", "notes", "code_comment", "custom"],
+            self.postproc_template_var, self.on_postproc_template_changed,
+            tooltip="clean=Remove fillers, email=Format as email, notes=Bullet points, custom=Your prompt", width=140,
+        )
+        
+        # Settings button (opens model path / API key dialog)
+        postproc_config_text = self._get_postproc_config_display()
+        self.postproc_config_btn = self.create_setting_row(
+            postproc_card, "Configuration", postproc_config_text,
+            self.open_postproc_settings,
+            tooltip="Configure model path (local) or API key (cloud)",
         )
         
         # === Devices Section ===
@@ -3249,6 +3827,623 @@ class WayfinderApp(ctk.CTk):
         status = "enabled" if self.gpu_var.get() else "disabled"
         self.log(f"⚙ GPU acceleration: {status}")
 
+    # === Post-Processing Handlers ===
+    
+    def toggle_post_processing(self):
+        """Toggle LLM post-processing."""
+        self.config["post_processing_enabled"] = self.postproc_var.get()
+        save_config(self.config)
+        status = "enabled" if self.postproc_var.get() else "disabled"
+        self.log(f"⚙ LLM Post-processing: {status}")
+    
+    def on_postproc_backend_changed(self, value: str):
+        """Handle post-processing backend change."""
+        self.config["post_processing_backend"] = value
+        save_config(self.config)
+        display_map = {
+            "llama_cpp": "Local (llama.cpp)",
+            "anthropic": "Cloud (Anthropic Claude)",
+            "openai": "Cloud (OpenAI GPT)",
+        }
+        display = display_map.get(value, value)
+        self.log(f"⚙ Post-processing backend: {display}")
+        # Update config button text
+        if hasattr(self, 'postproc_config_btn'):
+            self.postproc_config_btn.configure(text=self._get_postproc_config_display())
+    
+    def on_postproc_template_changed(self, value: str):
+        """Handle post-processing template change."""
+        self.config["post_processing_template"] = value
+        save_config(self.config)
+        template_names = {
+            "clean": "Clean (remove fillers)",
+            "email": "Email format",
+            "notes": "Notes (bullet points)",
+            "code_comment": "Code comment",
+            "custom": "Custom prompt",
+        }
+        self.log(f"⚙ Post-processing template: {template_names.get(value, value)}")
+    
+    def _get_postproc_config_display(self) -> str:
+        """Get display text for post-processing configuration button."""
+        import os
+        backend = self.config.get("post_processing_backend", "llama_cpp")
+        if backend == "llama_cpp":
+            model_path = self.config.get("llama_cpp_model_path", "")
+            if model_path:
+                # Show just the filename
+                from pathlib import Path
+                name = Path(model_path).name
+                return name[:25] + "..." if len(name) > 25 else name
+            return "No model selected"
+        elif backend == "anthropic":
+            # Check config first, then environment variable
+            api_key = self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+            model = self.config.get("anthropic_model", "claude-3-haiku-20240307")
+            if api_key:
+                return f"{model.split('-')[1].title()}: ✓ Key set"
+            return "⚠ API key not set"
+        elif backend == "openai":
+            # Check config first, then environment variable
+            api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+            model = self.config.get("openai_model", "gpt-4o-mini")
+            if api_key:
+                return f"{model}: ✓ Key set"
+            return "⚠ API key not set"
+        return "Not configured"
+    
+    def open_postproc_settings(self):
+        """Open post-processing configuration dialog."""
+        import os
+        
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Post-Processing Configuration")
+        dialog.geometry("560x600")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        # Title
+        ctk.CTkLabel(
+            inner,
+            text="Post-Processing Configuration",
+            font=(self.font_header[0], 20, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 16))
+        
+        backend = self.config.get("post_processing_backend", "llama_cpp")
+        container = inner  # Use inner as container for consistency
+        
+        if backend == "llama_cpp":
+            # === Local (llama.cpp) Settings ===
+            ctk.CTkLabel(
+                container,
+                text="Select a model to use for local AI post-processing.\nDownload one if you haven't already.",
+                font=(self.font_body[0], 11),
+                text_color=COLORS["text_secondary"],
+                justify="left",
+            ).pack(anchor="w", pady=(0, 12))
+            
+            # Available models
+            available_models = [
+                {
+                    "name": "SmolLM2-1.7B",
+                    "filename": "smollm2-1.7b-instruct-q4_k_m.gguf",
+                    "url": "https://huggingface.co/bartowski/SmolLM2-1.7B-Instruct-GGUF/resolve/main/SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
+                    "size": "1.0 GB",
+                    "desc": "Recommended • Fast & efficient",
+                },
+                {
+                    "name": "Qwen2.5-1.5B",
+                    "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+                    "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+                    "size": "1.1 GB",
+                    "desc": "Great instruction following",
+                },
+                {
+                    "name": "Phi-3-mini",
+                    "filename": "phi-3-mini-4k-instruct-q4.gguf",
+                    "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
+                    "size": "2.2 GB",
+                    "desc": "Higher quality, larger",
+                },
+            ]
+            
+            # Models directory
+            models_dir = CONFIG_DIR / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Current selection
+            current_model = self.config.get("llama_cpp_model_path", "")
+            model_var = ctk.StringVar(value=current_model)
+            
+            # Models card
+            models_frame = ctk.CTkFrame(container, fg_color=COLORS["bg_card"], corner_radius=12)
+            models_frame.pack(fill="x", pady=(0, 12))
+            
+            # Status/progress area
+            status_var = ctk.StringVar(value="")
+            status_label = ctk.CTkLabel(
+                models_frame,
+                textvariable=status_var,
+                font=(self.font_body[0], 10),
+                text_color=COLORS["accent"],
+            )
+            
+            progress_bar = ctk.CTkProgressBar(
+                models_frame,
+                fg_color=COLORS["bg_input"],
+                progress_color=COLORS["accent"],
+                height=6,
+            )
+            progress_bar.set(0)
+            
+            def download_model(model_info, row_widgets):
+                """Download a model in a background thread."""
+                import urllib.request
+                import threading
+                
+                dest_path = models_dir / model_info["filename"]
+                
+                if dest_path.exists():
+                    model_var.set(str(dest_path))
+                    status_var.set(f"✓ Selected {model_info['name']}")
+                    update_model_rows()
+                    return
+                
+                def do_download():
+                    try:
+                        status_label.pack(anchor="w", padx=16, pady=(8, 0))
+                        progress_bar.pack(fill="x", padx=16, pady=(4, 8))
+                        progress_bar.set(0)
+                        
+                        def report_progress(block_num, block_size, total_size):
+                            if total_size > 0:
+                                progress = min(block_num * block_size / total_size, 1.0)
+                                downloaded_mb = (block_num * block_size) / (1024 * 1024)
+                                total_mb = total_size / (1024 * 1024)
+                                dialog.after(0, lambda: progress_bar.set(progress))
+                                dialog.after(0, lambda: status_var.set(
+                                    f"Downloading {model_info['name']}... {downloaded_mb:.0f}/{total_mb:.0f} MB"))
+                        
+                        urllib.request.urlretrieve(model_info["url"], dest_path, reporthook=report_progress)
+                        
+                        dialog.after(0, lambda: status_var.set(f"✓ Downloaded {model_info['name']}!"))
+                        dialog.after(0, lambda: progress_bar.pack_forget())
+                        dialog.after(0, lambda: model_var.set(str(dest_path)))
+                        dialog.after(0, lambda: self.log(f"✓ Downloaded: {model_info['name']}"))
+                        dialog.after(0, update_model_rows)
+                        
+                    except Exception as e:
+                        dialog.after(0, lambda: status_var.set(f"✗ Failed: {str(e)[:40]}"))
+                        dialog.after(0, lambda: progress_bar.pack_forget())
+                        if dest_path.exists():
+                            dest_path.unlink()
+                
+                threading.Thread(target=do_download, daemon=True).start()
+            
+            # Store row widgets for updating
+            model_rows = []
+            
+            def update_model_rows():
+                """Refresh all model row buttons based on current state."""
+                current = model_var.get()
+                for info, widgets in model_rows:
+                    dest_path = models_dir / info["filename"]
+                    is_downloaded = dest_path.exists()
+                    is_selected = str(dest_path) == current
+                    
+                    btn = widgets["btn"]
+                    status_lbl = widgets["status"]
+                    
+                    if is_selected:
+                        btn.configure(text="Selected", fg_color=COLORS["accent"], 
+                                     text_color=COLORS["bg_base"], state="disabled")
+                        status_lbl.configure(text="✓ Active", text_color=COLORS["accent"])
+                    elif is_downloaded:
+                        btn.configure(text="Use", fg_color=COLORS["bg_surface"],
+                                     text_color=COLORS["text_primary"], state="normal")
+                        status_lbl.configure(text="✓ Ready", text_color=COLORS["accent"])
+                    else:
+                        btn.configure(text="Download", fg_color=COLORS["bg_surface"],
+                                     text_color=COLORS["text_secondary"], state="normal")
+                        status_lbl.configure(text=info["size"], text_color=COLORS["text_muted"])
+            
+            def select_model(model_info):
+                dest_path = models_dir / model_info["filename"]
+                if dest_path.exists():
+                    model_var.set(str(dest_path))
+                    status_var.set(f"✓ Selected {model_info['name']}")
+                    update_model_rows()
+                else:
+                    download_model(model_info, None)
+            
+            # Create model rows
+            for model_info in available_models:
+                row = ctk.CTkFrame(models_frame, fg_color="transparent")
+                row.pack(fill="x", padx=16, pady=8)
+                
+                dest_path = models_dir / model_info["filename"]
+                is_downloaded = dest_path.exists()
+                is_selected = str(dest_path) == current_model
+                
+                # Left side: name and description
+                left = ctk.CTkFrame(row, fg_color="transparent")
+                left.pack(side="left", fill="x", expand=True)
+                
+                ctk.CTkLabel(
+                    left,
+                    text=model_info["name"],
+                    font=(self.font_body[0], 13, "bold"),
+                    text_color=COLORS["text_primary"],
+                    anchor="w",
+                ).pack(anchor="w")
+                
+                ctk.CTkLabel(
+                    left,
+                    text=model_info["desc"],
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["text_muted"],
+                    anchor="w",
+                ).pack(anchor="w")
+                
+                # Right side: status + button
+                right = ctk.CTkFrame(row, fg_color="transparent")
+                right.pack(side="right")
+                
+                if is_selected:
+                    btn_text, btn_fg, btn_state = "Selected", COLORS["accent"], "disabled"
+                    status_text, status_color = "✓ Active", COLORS["accent"]
+                elif is_downloaded:
+                    btn_text, btn_fg, btn_state = "Use", COLORS["bg_surface"], "normal"
+                    status_text, status_color = "✓ Ready", COLORS["accent"]
+                else:
+                    btn_text, btn_fg, btn_state = "Download", COLORS["bg_surface"], "normal"
+                    status_text, status_color = model_info["size"], COLORS["text_muted"]
+                
+                status_lbl = ctk.CTkLabel(
+                    right, text=status_text,
+                    font=(self.font_body[0], 10),
+                    text_color=status_color,
+                )
+                status_lbl.pack(side="left", padx=(0, 8))
+                
+                btn = ctk.CTkButton(
+                    right, text=btn_text,
+                    font=(self.font_body[0], 11),
+                    fg_color=btn_fg,
+                    hover_color=COLORS["accent_dim"],
+                    text_color=COLORS["bg_base"] if is_selected else COLORS["text_primary"],
+                    height=28, width=85,
+                    corner_radius=6,
+                    state=btn_state,
+                    command=lambda m=model_info: select_model(m),
+                )
+                btn.pack(side="right")
+                
+                model_rows.append((model_info, {"btn": btn, "status": status_lbl}))
+            
+            # Padding at bottom
+            ctk.CTkFrame(models_frame, fg_color="transparent", height=8).pack()
+            
+            def save_local():
+                self.config["llama_cpp_model_path"] = model_var.get()
+                save_config(self.config)
+                self.postproc_config_btn.configure(text=self._get_postproc_config_display())
+                self.log("⚙ Post-processing model updated")
+                dialog.destroy()
+            
+            save_cmd = save_local
+            
+        elif backend == "anthropic":
+            # === Cloud (Anthropic Claude) Settings ===
+            import os
+            
+            ctk.CTkLabel(
+                container,
+                text="CLOUD INFERENCE (Anthropic Claude)",
+                font=(self.font_body[0], 11, "bold"),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w", pady=(0, 8))
+            
+            # API key status (read from environment - secure)
+            api_frame = ctk.CTkFrame(container, fg_color=COLORS["bg_card"], corner_radius=12)
+            api_frame.pack(fill="x", pady=(0, 12))
+            
+            # Get API key from config or environment
+            api_key = self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+            
+            ctk.CTkLabel(
+                api_frame,
+                text="API Key",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", padx=16, pady=(12, 4))
+            
+            # API key entry field
+            anthropic_key_var = ctk.StringVar(value=api_key)
+            key_entry = ctk.CTkEntry(
+                api_frame,
+                textvariable=anthropic_key_var,
+                font=(self.font_mono[0], 11),
+                fg_color=COLORS["bg_input"],
+                border_color=COLORS["border_subtle"],
+                text_color=COLORS["text_primary"],
+                placeholder_text="sk-ant-api03-...",
+                width=350,
+                show="•",  # Hide the key
+            )
+            key_entry.pack(anchor="w", padx=16, pady=(0, 4))
+            
+            # Show/hide button
+            show_key_var = ctk.BooleanVar(value=False)
+            def toggle_key_visibility():
+                if show_key_var.get():
+                    key_entry.configure(show="")
+                else:
+                    key_entry.configure(show="•")
+            
+            ctk.CTkCheckBox(
+                api_frame,
+                text="Show key",
+                variable=show_key_var,
+                command=toggle_key_visibility,
+                font=(self.font_body[0], 10),
+                text_color=COLORS["text_muted"],
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_dim"],
+            ).pack(anchor="w", padx=16, pady=(0, 12))
+            
+            # Model selector
+            ctk.CTkLabel(
+                api_frame,
+                text="Claude Model",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", padx=16, pady=(0, 4))
+            
+            model = self.config.get("anthropic_model", "claude-3-haiku-20240307")
+            model_var = ctk.StringVar(value=model)
+            
+            ctk.CTkOptionMenu(
+                api_frame,
+                variable=model_var,
+                values=[
+                    "claude-3-haiku-20240307",
+                    "claude-3-5-haiku-20241022",
+                    "claude-3-sonnet-20240229",
+                    "claude-3-5-sonnet-20241022",
+                ],
+                font=(self.font_body[0], 12),
+                fg_color=COLORS["bg_input"],
+                button_color=COLORS["bg_surface"],
+                button_hover_color=COLORS["bg_hover"],
+                dropdown_fg_color=COLORS["bg_card"],
+                dropdown_hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_primary"],
+                width=280,
+            ).pack(anchor="w", padx=16, pady=(0, 12))
+            
+            ctk.CTkLabel(
+                container,
+                text="Claude Haiku is fast and cheap (~$0.25/1M tokens). Sonnet is higher quality but slower.",
+                font=(self.font_body[0], 10),
+                text_color=COLORS["text_muted"],
+                wraplength=460,
+            ).pack(anchor="w", pady=(0, 8))
+            
+            # Get API key link - clickable
+            anthropic_link = ctk.CTkLabel(
+                container,
+                text="Get your API key at: console.anthropic.com",
+                font=(self.font_body[0], 10),
+                text_color=COLORS["accent"],
+                cursor="hand2",
+            )
+            anthropic_link.pack(anchor="w", pady=(0, 8))
+            anthropic_link.bind("<Button-1>", lambda e: webbrowser.open("https://console.anthropic.com"))
+            
+            def save_anthropic():
+                # Save API key if provided
+                new_key = anthropic_key_var.get().strip()
+                if new_key:
+                    self.config["anthropic_api_key"] = new_key
+                    # Also set in environment for current session
+                    os.environ["ANTHROPIC_API_KEY"] = new_key
+                self.config["anthropic_model"] = model_var.get()
+                save_config(self.config)
+                self.postproc_config_btn.configure(text=self._get_postproc_config_display())
+                self.log("⚙ Anthropic settings saved")
+                dialog.destroy()
+            
+            save_cmd = save_anthropic
+            
+        elif backend == "openai":
+            # === Cloud (OpenAI) Settings ===
+            import os
+            
+            ctk.CTkLabel(
+                container,
+                text="CLOUD INFERENCE (OpenAI)",
+                font=(self.font_body[0], 11, "bold"),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w", pady=(0, 8))
+            
+            # API key status (read from environment - secure)
+            api_frame = ctk.CTkFrame(container, fg_color=COLORS["bg_card"], corner_radius=12)
+            api_frame.pack(fill="x", pady=(0, 12))
+            
+            # Get API key from config or environment
+            api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+            
+            ctk.CTkLabel(
+                api_frame,
+                text="API Key",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", padx=16, pady=(12, 4))
+            
+            # API key entry field
+            openai_key_var = ctk.StringVar(value=api_key)
+            openai_key_entry = ctk.CTkEntry(
+                api_frame,
+                textvariable=openai_key_var,
+                font=(self.font_mono[0], 11),
+                fg_color=COLORS["bg_input"],
+                border_color=COLORS["border_subtle"],
+                text_color=COLORS["text_primary"],
+                placeholder_text="sk-...",
+                width=350,
+                show="•",  # Hide the key
+            )
+            openai_key_entry.pack(anchor="w", padx=16, pady=(0, 4))
+            
+            # Show/hide button
+            show_openai_key_var = ctk.BooleanVar(value=False)
+            def toggle_openai_key_visibility():
+                if show_openai_key_var.get():
+                    openai_key_entry.configure(show="")
+                else:
+                    openai_key_entry.configure(show="•")
+            
+            ctk.CTkCheckBox(
+                api_frame,
+                text="Show key",
+                variable=show_openai_key_var,
+                command=toggle_openai_key_visibility,
+                font=(self.font_body[0], 10),
+                text_color=COLORS["text_muted"],
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_dim"],
+            ).pack(anchor="w", padx=16, pady=(0, 12))
+            
+            # Model selector
+            ctk.CTkLabel(
+                api_frame,
+                text="OpenAI Model",
+                font=(self.font_body[0], 12),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", padx=16, pady=(0, 4))
+            
+            model = self.config.get("openai_model", "gpt-4o-mini")
+            model_var = ctk.StringVar(value=model)
+            
+            ctk.CTkOptionMenu(
+                api_frame,
+                variable=model_var,
+                values=[
+                    "gpt-4o-mini",
+                    "gpt-4o",
+                    "gpt-4-turbo",
+                    "gpt-3.5-turbo",
+                ],
+                font=(self.font_body[0], 12),
+                fg_color=COLORS["bg_input"],
+                button_color=COLORS["bg_surface"],
+                button_hover_color=COLORS["bg_hover"],
+                dropdown_fg_color=COLORS["bg_card"],
+                dropdown_hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_primary"],
+                width=280,
+            ).pack(anchor="w", padx=16, pady=(0, 12))
+            
+            ctk.CTkLabel(
+                container,
+                text="GPT-4o-mini is fast and affordable. GPT-4o is higher quality but more expensive.",
+                font=(self.font_body[0], 10),
+                text_color=COLORS["text_muted"],
+                wraplength=460,
+            ).pack(anchor="w", pady=(0, 8))
+            
+            # Get API key link - clickable
+            openai_link = ctk.CTkLabel(
+                container,
+                text="Get your API key at: platform.openai.com/api-keys",
+                font=(self.font_body[0], 10),
+                text_color=COLORS["accent"],
+                cursor="hand2",
+            )
+            openai_link.pack(anchor="w", pady=(0, 8))
+            openai_link.bind("<Button-1>", lambda e: webbrowser.open("https://platform.openai.com/api-keys"))
+            
+            def save_openai():
+                # Save API key if provided
+                new_key = openai_key_var.get().strip()
+                if new_key:
+                    self.config["openai_api_key"] = new_key
+                    # Also set in environment for current session
+                    os.environ["OPENAI_API_KEY"] = new_key
+                self.config["openai_model"] = model_var.get()
+                save_config(self.config)
+                self.postproc_config_btn.configure(text=self._get_postproc_config_display())
+                self.log("⚙ OpenAI settings saved")
+                dialog.destroy()
+            
+            save_cmd = save_openai
+        
+        # === Custom Prompt Section (for both backends) ===
+        if self.config.get("post_processing_template") == "custom":
+            ctk.CTkLabel(
+                container,
+                text="CUSTOM PROMPT",
+                font=(self.font_body[0], 11, "bold"),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w", pady=(12, 8))
+            
+            prompt_frame = ctk.CTkFrame(container, fg_color=COLORS["bg_card"], corner_radius=12)
+            prompt_frame.pack(fill="x", pady=(0, 12))
+            
+            custom_prompt = self.config.get("post_processing_custom_prompt", "")
+            prompt_text = ctk.CTkTextbox(
+                prompt_frame,
+                font=(self.font_body[0], 11),
+                fg_color=COLORS["bg_input"],
+                text_color=COLORS["text_primary"],
+                height=100,
+            )
+            prompt_text.pack(fill="x", padx=12, pady=12)
+            prompt_text.insert("1.0", custom_prompt)
+            
+            # Modify save command to include custom prompt
+            original_save = save_cmd
+            def save_with_prompt():
+                self.config["post_processing_custom_prompt"] = prompt_text.get("1.0", "end-1c")
+                original_save()
+            save_cmd = save_with_prompt
+        
+        # Buttons
+        btn_frame = ctk.CTkFrame(container, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=(20, 0))
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            fg_color=COLORS["bg_surface"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_secondary"],
+            height=40,
+            width=100,
+            corner_radius=8,
+            command=dialog.destroy,
+        ).pack(side="left")
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="Save",
+            font=(self.font_body[0], 13, "bold"),
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_dim"],
+            text_color=COLORS["bg_base"],
+            height=40,
+            width=100,
+            corner_radius=8,
+            command=save_cmd,
+        ).pack(side="right")
+
     def create_setting_row(self, parent, label, value, command, tooltip=None):
         """Create a modernized setting row with frosted glass styling."""
         # Row container with subtle padding
@@ -3532,38 +4727,183 @@ class WayfinderApp(ctk.CTk):
     def get_microphone_display(self) -> str:
         """Get display name for current audio input device."""
         device_id = self.config.get("audio_device")
-        if device_id is None:
-            return "System Default"
         
-        # Find the device name
+        # Auto-detect mode
+        if device_id is None:
+            # Show what was actually selected
+            if hasattr(self, '_resolved_audio_device') and self._resolved_audio_device is not None:
+                try:
+                    import sounddevice as sd
+                    dev_info = sd.query_devices(self._resolved_audio_device)
+                    name = dev_info.get('name', '')
+                    # Extract short name (e.g., "Shure MV7" from "Shure MV7 Mono")
+                    short_name = name.split(':')[0].strip() if ':' in name else name.split('(')[0].strip()
+                    if len(short_name) > 18:
+                        short_name = short_name[:15] + "..."
+                    return f"{short_name} (Auto)"
+                except Exception:
+                    pass
+            return "Auto-detect  ▼"
+        
+        # Manual selection - find the device name
         try:
             devices = get_audio_input_devices()
             for device in devices:
                 if device["index"] == device_id:
                     # Truncate long names
                     name = device["name"]
-                    if len(name) > 25:
-                        return name[:22] + "..."
-                    return name
+                    short_name = name.split(':')[0].strip() if ':' in name else name.split('(')[0].strip()
+                    if len(short_name) > 20:
+                        return short_name[:17] + "...  ▼"
+                    return f"{short_name}  ▼"
         except Exception:
             pass
         
-        return f"Device {device_id}"
+        return f"Device {device_id}  ▼"
+
+    def _get_microphone_dropdown_options(self) -> tuple[list[str], str]:
+        """
+        Get list of microphone options for dropdown and current selection.
+        Only shows actual microphone inputs, filtering out outputs and virtual devices.
+        
+        Returns:
+            Tuple of (list of display names, current selection name)
+        """
+        # Build options list with auto-detect first
+        options = ["🎤 Auto-detect (Recommended)"]
+        device_map = {}  # Map display name -> device index
+        
+        # Keywords indicating this is NOT a microphone input
+        excluded_keywords = [
+            # Output devices
+            "speaker", "headphone", "s/pdif output", "hdmi", "output",
+            "front headphone", "rear headphone",
+            # Virtual/system devices (standalone, not as part of device name)
+            # We'll handle these separately
+        ]
+        
+        # Virtual device names to skip entirely
+        virtual_devices = ["pipewire", "pulse", "default"]
+        
+        try:
+            # Use the existing safe device listing
+            from recorder import list_input_devices
+            all_devices = list_input_devices()
+            
+            for dev in all_devices:
+                name = dev.get('name', f"Device {dev['index']}")
+                name_lower = name.lower()
+                
+                # Skip virtual/system device entries
+                if name_lower.strip() in virtual_devices:
+                    continue
+                
+                # Skip obvious output devices
+                if any(kw in name_lower for kw in excluded_keywords):
+                    continue
+                
+                # Skip devices marked as excluded by recorder module
+                if dev.get('excluded', False):
+                    continue
+                
+                # Create display name - truncate long names
+                short_name = name.split(':')[0].strip() if ':' in name else name.split('(')[0].strip()
+                if len(short_name) > 35:
+                    short_name = short_name[:32] + "..."
+                
+                # Add star badge for recommended mics
+                if dev.get('recommended'):
+                    display_name = f"{short_name} (★)"
+                else:
+                    display_name = short_name
+                
+                # Ensure unique display names
+                if display_name in device_map:
+                    display_name = f"{display_name} [{dev['index']}]"
+                
+                options.append(display_name)
+                device_map[display_name] = dev['index']
+        except Exception as e:
+            print(f"Error getting audio devices for dropdown: {e}")
+        
+        # Store the device map for selection handling
+        self._mic_device_map = device_map
+        
+        # Find current selection
+        current_device = self.config.get("audio_device")
+        if current_device is None:
+            current = options[0]  # Auto-detect
+        else:
+            # Find the display name for current device
+            current = options[0]  # Default to auto-detect
+            for display_name, idx in device_map.items():
+                if idx == current_device:
+                    current = display_name
+                    break
+        
+        return options, current
+
+    def _on_microphone_selected(self, selection: str):
+        """Handle microphone dropdown selection."""
+        if "Auto-detect" in selection:
+            # Auto-detect mode
+            self.config["audio_device"] = None
+            self.config["audio_device_name"] = None
+            device_display = "Auto-detect"
+        else:
+            # Find the device index from the map
+            device_idx = self._mic_device_map.get(selection)
+            if device_idx is not None:
+                self.config["audio_device"] = device_idx
+                # Also save the device name for reconnection
+                try:
+                    from recorder import list_input_devices
+                    for dev in list_input_devices():
+                        if dev['index'] == device_idx:
+                            self.config["audio_device_name"] = dev['name']
+                            break
+                except Exception:
+                    pass
+                device_display = selection
+            else:
+                self.log(f"⚠ Could not find device: {selection}")
+                return
+        
+        # Save config
+        save_config(self.config)
+        
+        # Update recorder with new device
+        self.update_audio_device()
+        
+        # Log the change
+        self.log(f"🎤 Microphone: {device_display}")
 
     def get_model_display(self) -> str:
         """Get display name for current model."""
         model_path = self.config.get("model_path", "")
-        # Extract model name from path
-        if "tiny.en" in model_path:
-            return "Tiny (Fast)"
+        # Extract model name from path - check specific models first (most specific to least)
+        # Turbo Q5 quantized
+        if "large-v3-turbo-q5" in model_path:
+            return "Turbo Q5 (Fast)"
+        # Turbo full precision
+        elif "large-v3-turbo" in model_path:
+            return "Turbo (Fast)"
+        # Large v3 (non-turbo)
+        elif "large-v3" in model_path:
+            return "Large v3 (Slow)"
+        # Legacy large
+        elif "large" in model_path:
+            return "Large (Slow)"
+        # English-only models
+        elif "tiny.en" in model_path:
+            return "Tiny (Fastest)"
         elif "base.en" in model_path:
             return "Base"
         elif "small.en" in model_path:
             return "Small"
         elif "medium.en" in model_path:
-            return "Medium (Slow)"
-        elif "large" in model_path:
-            return "Large (Slowest)"
+            return "Medium"
+        # Multi-language models
         elif "tiny" in model_path:
             return "Tiny (Multi)"
         elif "base" in model_path:
@@ -3621,31 +4961,46 @@ class WayfinderApp(ctk.CTk):
         models_dir = Path.home() / "whisper.cpp" / "models"
         models = []
         
-        # Define model info with latency estimates (GPU / CPU for 10s audio)
+        # Default model info with estimated latencies
+        # These are overridden by benchmark results if available
         model_info = {
-            "ggml-tiny.en.bin": ("Tiny (English)", "75MB", "⚡ GPU: ~0.5s | CPU: ~2s"),
-            "ggml-base.en.bin": ("Base (English)", "142MB", "⚡ GPU: ~1s | CPU: ~4s"),
-            "ggml-small.en.bin": ("Small (English)", "466MB", "🟡 GPU: ~1.5s | CPU: ~6s"),
-            "ggml-medium.en.bin": ("Medium (English)", "1.5GB", "🔴 GPU: ~3s | CPU: ~12s"),
-            "ggml-large-v3-turbo.bin": ("Large v3 Turbo ⭐", "1.6GB", "🚀 GPU: ~2s | CPU: ~8s"),
-            "ggml-large-v3-turbo-q5_0.bin": ("Large v3 Turbo Q5", "547MB", "🚀 GPU: ~2s | CPU: ~6s"),
-            "ggml-tiny.bin": ("Tiny (Multi-lang)", "75MB", "⚡ GPU: ~0.5s | CPU: ~2s"),
-            "ggml-base.bin": ("Base (Multi-lang)", "142MB", "⚡ GPU: ~1s | CPU: ~4s"),
-            "ggml-small.bin": ("Small (Multi-lang)", "466MB", "🟡 GPU: ~1.5s | CPU: ~6s"),
-            "ggml-medium.bin": ("Medium (Multi-lang)", "1.5GB", "🔴 GPU: ~3s | CPU: ~12s"),
-            "ggml-large-v3.bin": ("Large v3", "3GB", "🔴 GPU: ~6s | CPU: ~25s"),
-            "ggml-large.bin": ("Large (Multi-lang)", "3GB", "🐌 GPU: ~6s | CPU: ~25s"),
+            "ggml-tiny.en.bin": ("Tiny (English)", "75MB", "⚡ TBD", "tiny.en"),
+            "ggml-base.en.bin": ("Base (English)", "142MB", "⚡ TBD", "base.en"),
+            "ggml-small.en.bin": ("Small (English)", "466MB", "🟡 TBD", "small.en"),
+            "ggml-medium.en.bin": ("Medium (English)", "1.5GB", "🔴 TBD", "medium.en"),
+            "ggml-large-v3-turbo.bin": ("Large v3 Turbo ⭐", "1.6GB", "🚀 TBD", "large-v3-turbo"),
+            "ggml-large-v3-turbo-q5_0.bin": ("Large v3 Turbo Q5", "547MB", "🚀 TBD", "large-v3-turbo-q5"),
+            "ggml-tiny.bin": ("Tiny (Multi-lang)", "75MB", "⚡ TBD", "tiny"),
+            "ggml-base.bin": ("Base (Multi-lang)", "142MB", "⚡ TBD", "base"),
+            "ggml-small.bin": ("Small (Multi-lang)", "466MB", "🟡 TBD", "small"),
+            "ggml-medium.bin": ("Medium (Multi-lang)", "1.5GB", "🔴 TBD", "medium"),
+            "ggml-large-v3.bin": ("Large v3", "3GB", "🔴 TBD", "large-v3"),
+            "ggml-large.bin": ("Large (Multi-lang)", "3GB", "🐌 TBD", "large"),
         }
         
-        for filename, (name, size, speed) in model_info.items():
+        # Get benchmark results for dynamic speed display
+        benchmark_results = self.config.get("benchmark_results", {})
+        fastest = self.config.get("benchmark_fastest_processor", None)
+        
+        for filename, (name, size, default_speed, model_id) in model_info.items():
             path = models_dir / filename
             if path.exists():
+                # Try to get benchmarked speed
+                speed = default_speed
+                if model_id in benchmark_results:
+                    result = benchmark_results[model_id]
+                    if fastest == "gpu" and "gpu_10s" in result:
+                        speed = f"🚀 GPU: {result['gpu_10s']}s"
+                    elif "cpu_10s" in result:
+                        speed = f"⚙️ CPU: {result['cpu_10s']}s"
+                
                 models.append({
                     "name": name,
                     "path": str(path),
                     "size": size,
                     "speed": speed,
                     "filename": filename,
+                    "model_id": model_id,
                 })
         
         return models
@@ -3958,6 +5313,250 @@ class WayfinderApp(ctk.CTk):
             command=show_download_tab,
         )
         download_btn.pack(side="left")
+        
+        def show_benchmark_tab():
+            """Show benchmark tab for measuring model speeds."""
+            current_tab.set("benchmark")
+            for widget in content_frame.winfo_children():
+                widget.destroy()
+            
+            installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
+            download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
+            benchmark_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
+            
+            # Benchmark UI
+            bench_scroll = ctk.CTkScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=320)
+            bench_scroll.pack(fill="both", expand=True, pady=(0, 10))
+            
+            # Description
+            ctk.CTkLabel(
+                bench_scroll,
+                text="🚀 Benchmark Your Hardware",
+                font=(self.font_body[0], 16, "bold"),
+                text_color=COLORS["text_bright"],
+            ).pack(anchor="w", padx=15, pady=(15, 5))
+            
+            ctk.CTkLabel(
+                bench_scroll,
+                text="Run a 10-second test on each model to measure actual\nGPU and CPU speeds on your system. Results are used\nto show accurate timing estimates throughout the app.",
+                font=(self.font_body[0], 11),
+                text_color=COLORS["text_secondary"],
+                justify="left",
+            ).pack(anchor="w", padx=15, pady=(0, 15))
+            
+            # Results display area
+            results_frame = ctk.CTkFrame(bench_scroll, fg_color=COLORS["bg_hover"], corner_radius=8)
+            results_frame.pack(fill="x", padx=10, pady=(0, 10))
+            
+            # Show existing benchmark results if any
+            benchmark_results = self.config.get("benchmark_results", {})
+            fastest = self.config.get("benchmark_fastest_processor", None)
+            
+            if benchmark_results:
+                header = ctk.CTkFrame(results_frame, fg_color="transparent")
+                header.pack(fill="x", padx=15, pady=(10, 5))
+                
+                ctk.CTkLabel(
+                    header,
+                    text="📊 Last Benchmark Results",
+                    font=(self.font_body[0], 13, "bold"),
+                    text_color=COLORS["text_primary"],
+                ).pack(side="left")
+                
+                if fastest:
+                    ctk.CTkLabel(
+                        header,
+                        text=f"🚀 Fastest: {fastest.upper()}",
+                        font=(self.font_body[0], 11, "bold"),
+                        text_color=COLORS["accent_green"],
+                    ).pack(side="right")
+                
+                # Model results table
+                for model_id, result in benchmark_results.items():
+                    model_name = result.get("model_name", model_id)
+                    cpu_time = result.get("cpu_10s", "—")
+                    gpu_time = result.get("gpu_10s", "—")
+                    model_fastest = result.get("fastest", "")
+                    
+                    row = ctk.CTkFrame(results_frame, fg_color="transparent")
+                    row.pack(fill="x", padx=15, pady=3)
+                    
+                    ctk.CTkLabel(
+                        row,
+                        text=model_name,
+                        font=(self.font_body[0], 12),
+                        text_color=COLORS["text_primary"],
+                        width=100,
+                        anchor="w",
+                    ).pack(side="left")
+                    
+                    cpu_str = f"CPU: {cpu_time}s" if isinstance(cpu_time, (int, float)) else "CPU: —"
+                    gpu_str = f"GPU: {gpu_time}s" if isinstance(gpu_time, (int, float)) else "GPU: —"
+                    
+                    ctk.CTkLabel(
+                        row,
+                        text=cpu_str,
+                        font=(self.font_body[0], 11),
+                        text_color=COLORS["text_muted"] if model_fastest == "gpu" else COLORS["accent_green"],
+                        width=80,
+                    ).pack(side="left", padx=(10, 0))
+                    
+                    ctk.CTkLabel(
+                        row,
+                        text=gpu_str,
+                        font=(self.font_body[0], 11),
+                        text_color=COLORS["text_muted"] if model_fastest == "cpu" else COLORS["accent_green"],
+                        width=80,
+                    ).pack(side="left", padx=(10, 0))
+                
+                # Timestamp
+                timestamps = [r.get("timestamp", 0) for r in benchmark_results.values()]
+                if timestamps:
+                    from datetime import datetime
+                    last_run = datetime.fromtimestamp(max(timestamps)).strftime("%Y-%m-%d %H:%M")
+                    ctk.CTkLabel(
+                        results_frame,
+                        text=f"Last run: {last_run}",
+                        font=(self.font_body[0], 10),
+                        text_color=COLORS["text_muted"],
+                    ).pack(anchor="w", padx=15, pady=(5, 10))
+            else:
+                ctk.CTkLabel(
+                    results_frame,
+                    text="⏱️ No benchmark results yet\nRun a benchmark to measure your hardware speeds!",
+                    font=(self.font_body[0], 12),
+                    text_color=COLORS["text_muted"],
+                    justify="center",
+                ).pack(pady=20)
+            
+            # Progress bar and log (hidden initially)
+            progress_frame = ctk.CTkFrame(bench_scroll, fg_color="transparent")
+            progress_bar = ctk.CTkProgressBar(progress_frame, width=400, height=16, corner_radius=8)
+            progress_label = ctk.CTkLabel(
+                progress_frame,
+                text="Ready to benchmark",
+                font=(self.font_body[0], 11),
+                text_color=COLORS["text_secondary"],
+            )
+            
+            log_text = ctk.CTkTextbox(
+                bench_scroll, height=120, fg_color=COLORS["bg_elevated"],
+                corner_radius=8, font=("JetBrains Mono", 10),
+                text_color=COLORS["text_secondary"],
+            )
+            
+            benchmark_runner = [None]  # Mutable container for runner reference
+            
+            def update_progress(progress: float, msg: str):
+                def do_update():
+                    progress_bar.set(progress)
+                    progress_label.configure(text=msg)
+                dialog.after(0, do_update)
+            
+            def log_message(msg: str):
+                def do_log():
+                    log_text.configure(state="normal")
+                    log_text.insert("end", msg + "\n")
+                    log_text.see("end")
+                    log_text.configure(state="disabled")
+                dialog.after(0, do_log)
+            
+            def run_benchmark():
+                """Run the benchmark in a background thread."""
+                # Show progress UI
+                progress_frame.pack(fill="x", padx=10, pady=(10, 5))
+                progress_bar.pack(fill="x", pady=(0, 5))
+                progress_bar.set(0)
+                progress_label.pack()
+                log_text.pack(fill="x", padx=10, pady=(5, 10))
+                log_text.configure(state="normal")
+                log_text.delete("1.0", "end")
+                log_text.configure(state="disabled")
+                
+                run_btn.configure(state="disabled", text="Running...")
+                cancel_bench_btn.pack(side="left", padx=(10, 0))
+                
+                runner = BenchmarkRunner(
+                    self.config,
+                    progress_callback=update_progress,
+                    log_callback=log_message,
+                )
+                benchmark_runner[0] = runner
+                
+                def benchmark_thread():
+                    try:
+                        results, fastest = runner.run_benchmarks(test_gpu=True, test_cpu=True)
+                        
+                        if results and not runner._cancel_requested:
+                            # Save results to config
+                            self.config["benchmark_results"] = results
+                            self.config["benchmark_fastest_processor"] = fastest
+                            save_config(self.config)
+                            
+                            def on_complete():
+                                run_btn.configure(state="normal", text="⏱️ Run Benchmark")
+                                cancel_bench_btn.pack_forget()
+                                # Refresh tab to show results
+                                show_benchmark_tab()
+                            dialog.after(0, on_complete)
+                        else:
+                            def on_cancel():
+                                run_btn.configure(state="normal", text="⏱️ Run Benchmark")
+                                cancel_bench_btn.pack_forget()
+                                progress_label.configure(text="Benchmark cancelled")
+                            dialog.after(0, on_cancel)
+                    except Exception as e:
+                        def on_error():
+                            run_btn.configure(state="normal", text="⏱️ Run Benchmark")
+                            cancel_bench_btn.pack_forget()
+                            progress_label.configure(text=f"Error: {e}")
+                        dialog.after(0, on_error)
+                
+                threading.Thread(target=benchmark_thread, daemon=True).start()
+            
+            def cancel_benchmark():
+                if benchmark_runner[0]:
+                    benchmark_runner[0].cancel()
+            
+            # Buttons
+            btn_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
+            btn_frame.pack(fill="x", pady=(5, 0))
+            
+            run_btn = ctk.CTkButton(
+                btn_frame,
+                text="⏱️ Run Benchmark",
+                font=(self.font_body[0], 15, "bold"),
+                height=50,
+                corner_radius=12,
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_glow"],
+                text_color="#000000",
+                command=run_benchmark,
+            )
+            run_btn.pack(side="left", fill="x", expand=True)
+            
+            cancel_bench_btn = ctk.CTkButton(
+                btn_frame,
+                text="Cancel",
+                font=(self.font_body[0], 13),
+                width=80,
+                height=50,
+                corner_radius=12,
+                fg_color=COLORS["bg_hover"],
+                hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_secondary"],
+                command=cancel_benchmark,
+            )
+            # cancel_bench_btn hidden initially
+        
+        benchmark_btn = ctk.CTkButton(
+            tab_frame, text="⏱️ Benchmark",
+            font=(self.font_body[0], 13), width=120, height=36,
+            corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
+            hover_color=COLORS["bg_elevated"],
+            command=show_benchmark_tab,
+        )
+        benchmark_btn.pack(side="left", padx=(8, 0))
         
         # Show installed tab initially
         show_installed_tab()
@@ -4411,26 +6010,26 @@ class WayfinderApp(ctk.CTk):
         )
         scroll_frame.pack(fill="both", expand=True, pady=(0, 20))
         
-        # System default option
-        default_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
-        default_frame.pack(fill="x", pady=5, padx=5)
+        # Auto-detect option (intelligent selection)
+        auto_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        auto_frame.pack(fill="x", pady=5, padx=5)
         
         ctk.CTkRadioButton(
-            default_frame,
-            text="System Default",
+            auto_frame,
+            text="🎤 Auto-detect Microphone",
             variable=selected_device,
             value=-1,
             font=(self.font_body[0], 13, "bold"),
-            text_color=COLORS["text_bright"],
+            text_color=COLORS["accent"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
         ).pack(side="left")
         
         ctk.CTkLabel(
-            default_frame,
-            text="(Use system audio settings)",
+            auto_frame,
+            text="(Recommended)",
             font=(self.font_body[0], 11),
-            text_color=COLORS["text_secondary"],
+            text_color=COLORS["success"],
         ).pack(side="left", padx=(10, 0))
         
         # Separator
@@ -4459,23 +6058,29 @@ class WayfinderApp(ctk.CTk):
             
             # Device name (truncated if needed)
             name = device["name"]
-            display_name = name[:45] + "..." if len(name) > 45 else name
+            display_name = name[:40] + "..." if len(name) > 40 else name
             
-            # Mark default device
+            # Mark default and recommended devices
+            badges = []
             if device.get("is_default"):
-                display_name += " ★"
+                badges.append("★ Default")
+            if device.get("recommended"):
+                badges.append("✓ Mic")
             
             name_label = ctk.CTkLabel(
                 info_frame,
                 text=display_name,
                 font=(self.font_body[0], 12),
-                text_color=COLORS["text_primary"],
+                text_color=COLORS["accent"] if device.get("recommended") else COLORS["text_primary"],
                 anchor="w",
             )
             name_label.pack(anchor="w")
             
-            # Device details (channels, sample rate)
-            details = f"{device['channels']}ch • {device['sample_rate']}Hz"
+            # Device details (channels, badges)
+            details_parts = [f"{device['channels']}ch"]
+            if badges:
+                details_parts.extend(badges)
+            details = " • ".join(details_parts)
             ctk.CTkLabel(
                 info_frame,
                 text=details,
@@ -4510,8 +6115,11 @@ class WayfinderApp(ctk.CTk):
             
             save_config(self.config)
             
-            # Update button text
-            self.mic_btn.configure(text=self.get_microphone_display())
+            # Update dropdown selection
+            if hasattr(self, 'mic_dropdown'):
+                mic_options, mic_current = self._get_microphone_dropdown_options()
+                self.mic_dropdown.configure(values=mic_options)
+                self.mic_dropdown.set(mic_current)
             
             # Update recorder with new device
             self.update_audio_device()
@@ -4545,12 +6153,22 @@ class WayfinderApp(ctk.CTk):
 
     def update_audio_device(self):
         """Update the recorder with the new audio device setting."""
-        device_id = self.config.get("audio_device")
+        # Re-resolve the audio device (handles intelligent selection)
+        self._resolved_audio_device = resolve_audio_device(self.config)
+        
+        # Store the device name for persistence (device IDs can change)
+        if self._resolved_audio_device is not None:
+            try:
+                import sounddevice as sd
+                dev_info = sd.query_devices(self._resolved_audio_device)
+                self.config["audio_device_name"] = dev_info.get("name", "")
+            except Exception:
+                pass
         
         # Update standard recorder
         self.recorder = AudioRecorder(
             sample_rate=self.config["sample_rate"],
-            device=device_id,
+            device=self._resolved_audio_device,
             preprocessing=self.config.get("audio_preprocessing", "light"),
         )
         
@@ -5787,23 +7405,35 @@ class WayfinderApp(ctk.CTk):
     def create_model_setter(self, model_name: str):
         """Create a callback function for setting a specific model from tray menu."""
         def setter(icon=None, item=None):
-            models_dir = Path.home() / "whisper.cpp" / "models"
-            model_path = models_dir / f"ggml-{model_name}.bin"
-            
-            if model_path.exists():
-                # Store with ~ for portability
-                relative_path = f"~/whisper.cpp/models/ggml-{model_name}.bin"
-                self.config["model_path"] = relative_path
-                save_config(self.config)
-                self.log(f"⚙ Model: {model_name}")
-                # Update the button in main UI if visible
-                try:
-                    self.model_btn.configure(text=self.get_model_display())
-                except:
-                    pass
-            else:
-                self.log(f"⚠ Model not found: {model_name}")
+            # #region agent log
+            _debug_log("create_model_setter callback called from pystray thread", {"model": model_name, "hypothesisId": "G-threading"})
+            # #endregion
+            # Schedule on main thread - pystray callbacks run on a different thread
+            # and Tk is NOT thread-safe
+            self.after(0, lambda: self._apply_model_from_tray(model_name))
         return setter
+    
+    def _apply_model_from_tray(self, model_name: str):
+        """Apply model selection from tray menu - runs on main Tk thread."""
+        # #region agent log
+        _debug_log("_apply_model_from_tray on main thread", {"model": model_name, "hypothesisId": "G-threading"})
+        # #endregion
+        models_dir = Path.home() / "whisper.cpp" / "models"
+        model_path = models_dir / f"ggml-{model_name}.bin"
+        
+        if model_path.exists():
+            # Store with ~ for portability
+            relative_path = f"~/whisper.cpp/models/ggml-{model_name}.bin"
+            self.config["model_path"] = relative_path
+            save_config(self.config)
+            self.log(f"⚙ Model: {model_name}")
+            # Update the button in main UI if visible
+            try:
+                self.model_btn.configure(text=self.get_model_display())
+            except:
+                pass
+        else:
+            self.log(f"⚠ Model not found: {model_name}")
     
     def setup_tray(self):
         self.custom_icon = None
@@ -5827,9 +7457,19 @@ class WayfinderApp(ctk.CTk):
         )
         
         icon_image = self.get_tray_icon(AppState.IDLE)
-        self.tray_icon = pystray.Icon("wayfinder-voice", icon_image, "Wayfinder Voice", menu)
+        self.tray_icon = pystray.Icon("wayfinder-aura", icon_image, "Wayfinder Aura", menu)
         
-        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        # #region agent log
+        def _tray_thread_wrapper():
+            _debug_log("Tray thread starting", {"hypothesisId": "F-tray"})
+            try:
+                self.tray_icon.run()
+            except Exception as e:
+                _debug_log("Tray thread exception", {"error": str(e), "hypothesisId": "F-tray"})
+                raise
+            _debug_log("Tray thread exited normally", {"hypothesisId": "F-tray"})
+        threading.Thread(target=_tray_thread_wrapper, daemon=True).start()
+        # #endregion
 
     def get_tray_icon(self, state: AppState, pulse_scale: float = 1.0) -> Image.Image:
         """Create a bold, obvious tray icon with full color fill."""
@@ -5882,9 +7522,22 @@ class WayfinderApp(ctk.CTk):
         return icon
 
     def update_tray(self, state: AppState):
+        # #region agent log
+        _debug_log("update_tray called", {"state": state.name, "hypothesisId": "G-threading"})
+        # #endregion
         if self.tray_icon:
-            self.tray_icon.icon = self.get_tray_icon(state)
-            self.tray_icon.title = f"Wayfinder Voice - {STATE_LABELS[state]}"
+            # Create icon image first (this is thread-safe)
+            new_icon = self.get_tray_icon(state)
+            new_title = f"Wayfinder Aura - {STATE_LABELS[state]}"
+            # Update tray - pystray handles thread safety for these operations
+            try:
+                self.tray_icon.icon = new_icon
+                self.tray_icon.title = new_title
+            except Exception as e:
+                # #region agent log
+                _debug_log("update_tray exception", {"error": str(e), "hypothesisId": "G-threading"})
+                # #endregion
+                pass
         
         # Start/stop tray pulse animation based on state
         if state == AppState.RECORDING:
@@ -6023,26 +7676,37 @@ class WayfinderApp(ctk.CTk):
             self._idle_breath_job = None
     
     def _animate_idle_breath(self):
-        """Animation frame for idle breathing waveform - runs at monitor refresh rate for buttery smooth motion."""
-        # Slow, gentle time progression for calm wave motion (scaled for frame rate)
-        self._hero_wave_time += 0.04 * self._fps_scale
+        """Animation frame for idle breathing waveform - STABLE at 15fps."""
+        # Guard: Stop if not in IDLE state
+        if self.app_state != AppState.IDLE:
+            self._idle_breath_job = None
+            return
         
-        # No audio level in idle - pure breathing
+        # STABILITY FIX: 15fps animation
+        idle_fps_scale = 4.0  # 60/15
+        
+        # Slow, gentle time progression for calm wave motion
+        self._hero_wave_time += 0.04 * idle_fps_scale
         self._hero_audio_level = 0.0
         
-        # Redraw waveform
+        # Redraw waveform (uses stable pre-created items)
         self._draw_hero_waveform()
         
-        # Schedule next frame at monitor refresh rate for smooth gentle motion
-        if self.app_state == AppState.IDLE:
-            self._idle_breath_job = self.after(self._frame_interval_ms, self._animate_idle_breath)
-        else:
-            self._idle_breath_job = None
+        # Schedule next frame at fixed 66ms (15fps)
+        self._idle_breath_job = self.after(66, self._animate_idle_breath)
     
     def _animate_hero(self):
-        """Animation frame for hero waveform - runs at monitor refresh rate for buttery smooth animation."""
-        # Update animation time (scaled for frame rate)
-        self._hero_wave_time += 0.15 * self._fps_scale
+        """Animation frame for hero waveform - STABLE at 15fps."""
+        # Guard: Stop if in IDLE state (idle breath handles that)
+        if self.app_state == AppState.IDLE:
+            self._hero_animation_job = None
+            return
+        
+        import math
+        hero_fps_scale = 4.0  # 60/15
+        
+        # Update animation time
+        self._hero_wave_time += 0.15 * hero_fps_scale
         
         # Get current audio level from active recorder
         target_level = 0.0
@@ -6054,29 +7718,61 @@ class WayfinderApp(ctk.CTk):
         except:
             pass
         
-        # Smooth the audio level (exponential moving average, scaled for frame rate)
-        smooth_factor = 0.7 ** self._fps_scale
+        # Smooth the audio level
+        smooth_factor = 0.7 ** hero_fps_scale
         self._hero_audio_level = self._hero_audio_level * smooth_factor + target_level * (1 - smooth_factor)
         
-        # Redraw waveform
+        # Redraw waveform (uses stable pre-created items)
         self._draw_hero_waveform()
         
         # Pulse the mic button during recording
         if self.app_state == AppState.RECORDING:
-            import math
             pulse = 0.9 + 0.1 * math.sin(self._hero_wave_time * 2)
             self._draw_mic_button_with_pulse(STATE_COLORS[self.app_state], pulse)
         
-        # Schedule next frame at monitor refresh rate for buttery smooth animation
-        if self.app_state != AppState.IDLE:
-            self._hero_animation_job = self.after(self._frame_interval_ms, self._animate_hero)
-        else:
-            self._hero_animation_job = None
+        # Schedule next frame at fixed 66ms (15fps)
+        self._hero_animation_job = self.after(66, self._animate_hero)
+    
+    def _init_mic_pulse_items(self, color: str):
+        """Create mic button pulse items ONCE."""
+        if self._mic_items_created:
+            return
+        
+        canvas = self.mic_button_canvas
+        size = 80
+        cx, cy = size // 2, size // 2
+        
+        # Create 3 glow layers
+        self._mic_glow_ids = []
+        for radius in [38, 34, 30]:
+            item_id = canvas.create_oval(
+                cx - radius, cy - radius, cx + radius, cy + radius,
+                fill=color, outline=""
+            )
+            self._mic_glow_ids.append(item_id)
+        
+        # Main button circle
+        self._mic_button_id = canvas.create_oval(
+            cx - 24, cy - 24, cx + 24, cy + 24,
+            fill=color, outline=""
+        )
+        
+        # Stop icon (square)
+        self._mic_stop_id = canvas.create_rectangle(
+            cx - 8, cy - 8, cx + 8, cy + 8,
+            fill=COLORS["bg_base"], outline=""
+        )
+        
+        self._mic_items_created = True
     
     def _draw_mic_button_with_pulse(self, color: str, pulse: float = 1.0):
-        """Draw mic button with pulse effect for recording state."""
+        """Update mic button with pulse - STABLE version using coords/itemconfig."""
         canvas = self.mic_button_canvas
-        canvas.delete("all")
+        
+        # Initialize items on first call
+        if not self._mic_items_created:
+            self._init_mic_pulse_items(color)
+            return
         
         size = 80
         cx, cy = size // 2, size // 2
@@ -6090,42 +7786,29 @@ class WayfinderApp(ctk.CTk):
         bg_g = int(COLORS["bg_card"][3:5], 16)
         bg_b = int(COLORS["bg_card"][5:7], 16)
         
-        # Pulsing glow layers
-        glow_layers = [
+        # Update glow layers
+        glow_configs = [
             (int(38 * pulse), 0.06 * pulse),
             (int(34 * pulse), 0.12 * pulse),
             (int(30 * pulse), 0.22 * pulse),
         ]
         
-        for radius, intensity in glow_layers:
-            gr = int(bg_r + (r - bg_r) * intensity)
-            gg = int(bg_g + (g - bg_g) * intensity)
-            gb = int(bg_b + (b - bg_b) * intensity)
-            glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
-            canvas.create_oval(
-                cx - radius, cy - radius,
-                cx + radius, cy + radius,
-                fill=glow_color,
-                outline="",
-            )
+        for i, (radius, intensity) in enumerate(glow_configs):
+            if i < len(self._mic_glow_ids):
+                gr = int(bg_r + (r - bg_r) * intensity)
+                gg = int(bg_g + (g - bg_g) * intensity)
+                gb = int(bg_b + (b - bg_b) * intensity)
+                glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+                
+                canvas.coords(self._mic_glow_ids[i],
+                    cx - radius, cy - radius, cx + radius, cy + radius)
+                canvas.itemconfig(self._mic_glow_ids[i], fill=glow_color)
         
-        # Main button circle
+        # Update main button
         button_radius = int(24 * (0.95 + 0.05 * pulse))
-        canvas.create_oval(
-            cx - button_radius, cy - button_radius,
-            cx + button_radius, cy + button_radius,
-            fill=color,
-            outline="",
-        )
-        
-        # Stop icon during recording (square instead of mic)
-        sq_size = 8
-        canvas.create_rectangle(
-            cx - sq_size, cy - sq_size,
-            cx + sq_size, cy + sq_size,
-            fill=COLORS["bg_base"],
-            outline="",
-        )
+        canvas.coords(self._mic_button_id,
+            cx - button_radius, cy - button_radius, cx + button_radius, cy + button_radius)
+        canvas.itemconfig(self._mic_button_id, fill=color)
     
     # Legacy method for compatibility
     def _draw_status_indicator(self, color: str):
@@ -6155,7 +7838,7 @@ class WayfinderApp(ctk.CTk):
         
         if is_wayland:
             self.log("🖥️ Wayland detected")
-            self.log("💡 Configure shortcut in System Settings → Shortcuts → Applications → Wayfinder Voice")
+            self.log("💡 Configure shortcut in System Settings → Shortcuts → Applications → Wayfinder Aura")
         else:
             self.log("🖥️ X11 detected - using evdev")
             threading.Thread(
@@ -6165,6 +7848,9 @@ class WayfinderApp(ctk.CTk):
             ).start()
 
     def poll_events(self):
+        # #region agent log
+        _debug_log("poll_events() called", {"hypothesisId": "F-runtime"})
+        # #endregion
         try:
             while True:
                 event_type, data = self.event_queue.get_nowait()
@@ -6242,7 +7928,7 @@ class WayfinderApp(ctk.CTk):
         
         self.chunked_recorder = ChunkedRecorder(
             sample_rate=self.config["sample_rate"],
-            device=self.config["audio_device"],
+            device=self._resolved_audio_device,
             preprocessing=self.config.get("audio_preprocessing", "light"),
             chunk_duration=self.config.get("chunk_duration", 30),
             chunk_overlap=self.config.get("chunk_overlap", 2),
@@ -6546,9 +8232,24 @@ class WayfinderApp(ctk.CTk):
 
 
 def main():
-    app = WayfinderApp()
-    app.mainloop()
+    # #region agent log
+    _debug_log("main() called - about to create WayfinderApp", {"hypothesisId": "D"})
+    # #endregion
+    try:
+        app = WayfinderApp()
+        # #region agent log
+        _debug_log("WayfinderApp created successfully - starting mainloop", {"hypothesisId": "D"})
+        # #endregion
+        app.mainloop()
+    except Exception as e:
+        # #region agent log
+        _debug_log("Exception in main()", {"error": str(e), "type": type(e).__name__})
+        # #endregion
+        raise
 
 
 if __name__ == "__main__":
+    # #region agent log
+    _debug_log("__main__ block executing")
+    # #endregion
     main()

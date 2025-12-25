@@ -559,9 +559,50 @@ def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> 
     backend = get_backend(config)
     text = backend.transcribe(audio_path, context=context)
     
-    # Apply post-processing if punctuation is enabled
+    # Apply basic post-processing if punctuation is enabled
     if ensure_punct and text:
         text = ensure_punctuation_postprocess(text)
+    
+    # Apply LLM post-processing if enabled
+    if config.get("post_processing_enabled", False) and text:
+        try:
+            from postprocessor import process_with_config
+            import os
+            backend = config.get("post_processing_backend", "llama_cpp")
+            
+            # Debug: Check if API key is available for cloud backends
+            if backend == "openai":
+                key = os.environ.get("OPENAI_API_KEY", "")
+                if not key:
+                    print("[Post-processing] ⚠ OPENAI_API_KEY not set in environment")
+                else:
+                    print(f"[Post-processing] Using OpenAI ({config.get('openai_model', 'gpt-4o-mini')})")
+            elif backend == "anthropic":
+                key = os.environ.get("ANTHROPIC_API_KEY", "")
+                if not key:
+                    print("[Post-processing] ⚠ ANTHROPIC_API_KEY not set in environment")
+                else:
+                    print(f"[Post-processing] Using Anthropic ({config.get('anthropic_model', 'claude-3-haiku')})")
+            elif backend == "llama_cpp":
+                model_path = config.get("llama_cpp_model_path", "")
+                if not model_path:
+                    print("[Post-processing] ⚠ No llama.cpp model selected")
+                else:
+                    print(f"[Post-processing] Using local model: {os.path.basename(model_path)}")
+            
+            original_text = text
+            text = process_with_config(text, config)
+            
+            if text != original_text:
+                print(f"[Post-processing] ✓ Text cleaned ({len(original_text)} → {len(text)} chars)")
+            else:
+                print("[Post-processing] Text unchanged (or processing skipped)")
+                
+        except ImportError as e:
+            print(f"[Post-processing] ✗ Module not available: {e}")
+        except Exception as e:
+            print(f"[Post-processing] ✗ Error: {e}")
+            # Continue with original text
     
     return text
 

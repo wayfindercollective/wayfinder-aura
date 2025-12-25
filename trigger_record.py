@@ -15,7 +15,7 @@ try:
     sock.close()
     print("Toggle sent!")
 except FileNotFoundError:
-    print("Wayfinder Voice not running")
+    print("Wayfinder Aura not running")
     sys.exit(1)
 except Exception as e:
     print(f"Error: {e}")

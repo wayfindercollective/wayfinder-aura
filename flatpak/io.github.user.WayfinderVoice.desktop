@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Wayfinder Voice
+Name=Wayfinder Aura
 GenericName=Voice Dictation
 Comment=Local voice dictation using whisper.cpp - speak and your words are typed
 Exec=wayfinder-voice

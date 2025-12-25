@@ -28,6 +28,189 @@ except ImportError:
 # Target sample rate for Whisper
 WHISPER_SAMPLE_RATE = 16000
 
+# Known microphone brands/keywords to prioritize
+PREFERRED_MIC_KEYWORDS = [
+    "shure", "mv7", "sm7", "blue", "yeti", "snowball", "rode", "nt-usb", "ntusb",
+    "audio-technica", "at2020", "at2035", "hyperx", "quadcast", "elgato", "wave",
+    "focusrite", "scarlett", "behringer", "samson", "fifine", "maono", "tonor",
+    "microphone", "mic input", "headset",
+]
+
+# Keywords indicating the device is NOT a microphone input
+EXCLUDED_DEVICE_KEYWORDS = [
+    # Output devices
+    "monitor", "hdmi", "loopback", "output", "speaker", "playback", 
+    "digital stereo (hdmi", "s/pdif", "headphone", "front headphone",
+    # Virtual/system devices (when they appear as standalone device names)
+    "pipewire", "pulse", "default",
+    # ALSA output nodes
+    "alsa_output",
+]
+
+
+def find_best_input_device(preferred_name: str | None = None) -> int | None:
+    """
+    Intelligently find the best audio input device for voice recording.
+    
+    Strategy:
+    1. If preferred_name is given, try to find a device matching that name
+    2. Prefer PipeWire/PulseAudio/JACK virtual devices over raw ALSA
+    3. Prioritize devices with microphone-related keywords
+    4. Filter out monitor, HDMI, and loopback devices
+    5. Ensure the device has input channels
+    
+    Args:
+        preferred_name: Optional device name to look for (partial match)
+        
+    Returns:
+        Device index, or None to use system default
+    """
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return None
+    
+    candidates = []
+    
+    for i, dev in enumerate(devices):
+        name = dev.get('name', '').lower()
+        max_inputs = dev.get('max_input_channels', 0)
+        
+        # Skip devices with no input channels
+        if max_inputs < 1:
+            continue
+        
+        # Skip excluded device types
+        if any(excl in name for excl in EXCLUDED_DEVICE_KEYWORDS):
+            continue
+        
+        # Calculate a priority score
+        score = 0
+        
+        # Preferred name match (highest priority)
+        if preferred_name and preferred_name.lower() in name:
+            score += 1000
+        
+        # Prefer JACK/PipeWire virtual devices (they handle routing properly)
+        hostapi = dev.get('hostapi', -1)
+        try:
+            hostapi_info = sd.query_hostapis(hostapi)
+            hostapi_name = hostapi_info.get('name', '').lower()
+            if 'jack' in hostapi_name:
+                score += 100  # JACK devices are well-routed
+            elif 'pulse' in hostapi_name or 'pipewire' in hostapi_name:
+                score += 80
+        except Exception:
+            pass
+        
+        # Prefer known microphone brands/keywords
+        for keyword in PREFERRED_MIC_KEYWORDS:
+            if keyword in name:
+                score += 50
+                break
+        
+        # Prefer "mono" for voice (cleaner for speech recognition)
+        if 'mono' in name:
+            score += 20
+        
+        # Slight preference for devices with fewer channels (more likely dedicated mics)
+        if max_inputs == 1:
+            score += 10
+        elif max_inputs == 2:
+            score += 5
+        
+        # Penalize raw ALSA hw: devices (IDs can shift)
+        if 'hw:' in name:
+            score -= 30
+        
+        candidates.append((score, i, dev['name']))
+    
+    if not candidates:
+        return None
+    
+    # Sort by score (highest first)
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    
+    # Return the best candidate
+    best_score, best_idx, best_name = candidates[0]
+    
+    # Only use auto-detected device if it has a reasonable score
+    if best_score > 0:
+        print(f"Auto-selected audio device: {best_name} (score: {best_score})")
+        return best_idx
+    
+    # Fall back to system default if no good candidates
+    return None
+
+
+def get_input_device_by_name(name: str) -> int | None:
+    """
+    Find a device by name (partial match, case-insensitive).
+    
+    Args:
+        name: Device name to search for
+        
+    Returns:
+        Device index or None if not found
+    """
+    if not name:
+        return None
+    
+    try:
+        devices = sd.query_devices()
+        name_lower = name.lower()
+        
+        for i, dev in enumerate(devices):
+            if name_lower in dev.get('name', '').lower():
+                if dev.get('max_input_channels', 0) > 0:
+                    return i
+    except Exception:
+        pass
+    
+    return None
+
+
+def list_input_devices() -> list[dict]:
+    """
+    List all available input devices with relevant info.
+    
+    Returns:
+        List of dicts with device info (index, name, channels, recommended)
+    """
+    result = []
+    
+    try:
+        devices = sd.query_devices()
+        
+        for i, dev in enumerate(devices):
+            max_inputs = dev.get('max_input_channels', 0)
+            if max_inputs < 1:
+                continue
+            
+            name = dev.get('name', f'Device {i}')
+            name_lower = name.lower()
+            
+            # Skip excluded types
+            is_excluded = any(excl in name_lower for excl in EXCLUDED_DEVICE_KEYWORDS)
+            
+            # Check if it's a recommended device
+            is_recommended = (
+                not is_excluded and
+                any(kw in name_lower for kw in PREFERRED_MIC_KEYWORDS)
+            )
+            
+            result.append({
+                'index': i,
+                'name': name,
+                'channels': max_inputs,
+                'recommended': is_recommended,
+                'excluded': is_excluded,
+            })
+    except Exception:
+        pass
+    
+    return result
+
 
 def get_supported_sample_rate(device: int | None = None, target_rate: int = 16000) -> int:
     """
