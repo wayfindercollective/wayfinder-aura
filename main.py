@@ -4691,30 +4691,54 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             ollama_available = False
         
-        if not ollama_available:
-            # Error message with install instructions
-            error_frame = ctk.CTkFrame(inner, fg_color="#2A1A1A", corner_radius=RADIUS["sm"])
-            error_frame.pack(fill="x", pady=(0, 16))
-            ctk.CTkLabel(
-                error_frame,
-                text="⚠️ Ollama is not running",
-                font=(self.font_body[0], self.font_sizes["small"], "bold"),
-                text_color="#CF7B7B",
-            ).pack(padx=12, pady=(8, 4))
-            ctk.CTkLabel(
-                error_frame,
-                text="Install Ollama: curl -fsSL https://ollama.com/install.sh | sh",
-                font=(self.font_mono[0], self.font_sizes["caption"]),
-                text_color=COLORS["text_secondary"],
-            ).pack(padx=12, pady=(0, 4))
-            ctk.CTkLabel(
-                error_frame,
-                text="Then start it: ollama serve",
-                font=(self.font_mono[0], self.font_sizes["caption"]),
-                text_color=COLORS["text_secondary"],
-            ).pack(padx=12, pady=(0, 8))
+        # Status indicator (subtle, not intrusive)
+        status_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        status_frame.pack(fill="x", pady=(0, 12))
         
-        # Recommended models section
+        if ollama_available:
+            status_indicator = ctk.CTkLabel(
+                status_frame,
+                text="✓ Ollama is running",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["accent"],
+            )
+            status_indicator.pack(side="left")
+        else:
+            status_indicator = ctk.CTkLabel(
+                status_frame,
+                text="⚠️ Ollama is not running",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+            )
+            status_indicator.pack(side="left")
+            
+            def check_ollama_status():
+                """Check if Ollama is now running and refresh."""
+                try:
+                    import requests
+                    test_response = requests.get(f"{base_url}/api/tags", timeout=2)
+                    if test_response.status_code == 200:
+                        status_indicator.configure(text="✓ Ollama is running", text_color=COLORS["accent"])
+                        dialog.after(100, lambda: (dialog.destroy(), self.open_ollama_model_settings()))
+                    else:
+                        status_indicator.configure(text="⚠️ Still not running", text_color="#CF7B7B")
+                except:
+                    status_indicator.configure(text="⚠️ Still not running", text_color="#CF7B7B")
+            
+            check_btn = ctk.CTkButton(
+                status_frame,
+                text="Check Status",
+                font=(self.font_body[0], self.font_sizes["caption"]),
+                fg_color=COLORS["bg_hover"],
+                hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_primary"],
+                width=80,
+                height=24,
+                command=check_ollama_status,
+            )
+            check_btn.pack(side="right")
+        
+        # Recommended models section (always visible)
         recommended_label = ctk.CTkLabel(
             inner,
             text="RECOMMENDED MODELS",
@@ -4722,6 +4746,65 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         recommended_label.pack(anchor="w", pady=(0, 8))
+        
+        # Help section (only if Ollama not available, collapsed by default)
+        if not ollama_available:
+            help_expanded = {"value": False}
+            help_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_surface"], corner_radius=RADIUS["sm"])
+            
+            def toggle_help():
+                if help_expanded["value"]:
+                    help_frame.pack_forget()
+                    help_expanded["value"] = False
+                    help_toggle.configure(text="Need help?")
+                else:
+                    help_frame.pack(fill="x", pady=(0, 12), after=recommended_label)
+                    help_expanded["value"] = True
+                    help_toggle.configure(text="Hide help")
+            
+            help_toggle = ctk.CTkButton(
+                inner,
+                text="Need help?",
+                font=(self.font_body[0], self.font_sizes["caption"]),
+                fg_color="transparent",
+                hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_muted"],
+                anchor="w",
+                command=toggle_help,
+            )
+            help_toggle.pack(fill="x", pady=(0, 8), after=status_frame)
+            
+            # Help content (hidden by default)
+            help_inner = ctk.CTkFrame(help_frame, fg_color="transparent")
+            help_inner.pack(fill="x", padx=12, pady=12)
+            
+            ctk.CTkLabel(
+                help_inner,
+                text="To use Ollama models, you need Ollama installed and running:",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", pady=(0, 8))
+            
+            ctk.CTkLabel(
+                help_inner,
+                text="1. Install: Visit https://ollama.com and download for your system",
+                font=(self.font_body[0], self.font_sizes["caption"]),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w", pady=(0, 4))
+            
+            ctk.CTkLabel(
+                help_inner,
+                text="2. Start Ollama: It usually runs automatically, or run 'ollama serve' in terminal",
+                font=(self.font_body[0], self.font_sizes["caption"]),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w", pady=(0, 4))
+            
+            ctk.CTkLabel(
+                help_inner,
+                text="3. Click 'Check Status' above once Ollama is running",
+                font=(self.font_body[0], self.font_sizes["caption"]),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w")
         
         # Scrollable list
         scroll = ctk.CTkScrollableFrame(
