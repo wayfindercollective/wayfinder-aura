@@ -50,3 +50,8 @@ Pillow>=10.0.0
 # Cloud inference with OpenAI (GPT models + Whisper transcription, requires API key)
 # Get API key from: https://platform.openai.com/api-keys
 openai>=1.0.0
+
+# Ultra-fast cloud transcription with Groq (Whisper Large-v3 on LPU hardware)
+# ~10x faster than standard Whisper API, same accuracy
+# Get API key from: https://console.groq.com/
+groq>=0.4.0

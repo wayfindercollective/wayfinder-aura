@@ -439,6 +439,151 @@ class FasterWhisperBackend(TranscriptionBackend):
             raise TranscriptionError(f"Faster-Whisper transcription failed: {e}")
 
 
+class GroqWhisperBackend(TranscriptionBackend):
+    """
+    Groq Whisper API backend for ultra-fast cloud transcription.
+    Uses Groq's LPU hardware for ~10x faster inference than standard Whisper.
+    Same Whisper Large-v3 model, dramatically lower latency.
+    """
+    
+    def __init__(
+        self,
+        api_key: str = "",
+        model: str = "whisper-large-v3",
+        language: str = "en",
+        prompt: str = "",
+        temperature: float = 0.0,
+        custom_vocabulary: list = None,
+    ):
+        self.api_key = api_key or os.environ.get("GROQ_API_KEY", "")
+        self.model = model
+        self.language = language
+        self.prompt = prompt
+        self.temperature = temperature
+        self.custom_vocabulary = custom_vocabulary or []
+        self._client = None
+    
+    def _build_prompt(self, context: str = "") -> str:
+        """Build the prompt with context and custom vocabulary."""
+        parts = []
+        
+        if context:
+            context_snippet = context.strip()[-200:] if len(context) > 200 else context.strip()
+            parts.append(context_snippet)
+        elif self.prompt:
+            parts.append(self.prompt)
+        
+        if self.custom_vocabulary:
+            vocab_str = ", ".join(self.custom_vocabulary)
+            parts.append(vocab_str)
+        
+        return " ".join(parts) if parts else ""
+    
+    def get_name(self) -> str:
+        return "Groq Whisper (Ultra-Fast)"
+    
+    def is_available(self) -> bool:
+        """Check if groq is installed and API key is set."""
+        try:
+            import groq
+            return bool(self.api_key)
+        except ImportError:
+            return False
+    
+    def supports_gpu(self) -> bool:
+        """Cloud API - runs on Groq's LPU hardware."""
+        return True
+    
+    def _get_client(self):
+        """Get or create the Groq client."""
+        if self._client is not None:
+            return self._client
+        
+        if not self.api_key:
+            raise TranscriptionError(
+                "Groq API key not set. "
+                "Set GROQ_API_KEY environment variable or configure in settings."
+            )
+        
+        try:
+            import groq
+            self._client = groq.Groq(
+                api_key=self.api_key,
+                timeout=60.0,
+            )
+            return self._client
+        except Exception as e:
+            raise TranscriptionError(f"Failed to initialize Groq client: {e}")
+    
+    def transcribe(self, audio_path: str, context: str = "") -> str:
+        """
+        Transcribe an audio file using Groq's Whisper API.
+        
+        Args:
+            audio_path: Path to the audio file to transcribe
+            context: Optional context from previous transcription for continuity
+            
+        Returns:
+            Transcribed text string
+            
+        Raises:
+            TranscriptionError: If transcription fails
+        """
+        if not self.is_available():
+            if not self.api_key:
+                raise TranscriptionError("Groq API key not configured.")
+            raise TranscriptionError(
+                "groq package is not installed. "
+                "Install with: pip install groq"
+            )
+        
+        if not Path(audio_path).exists():
+            raise TranscriptionError(f"Audio file not found: {audio_path}")
+        
+        try:
+            client = self._get_client()
+            
+            # Build prompt with context and vocabulary
+            prompt = self._build_prompt(context)
+            
+            # Log for debugging
+            file_size = Path(audio_path).stat().st_size
+            print(f"[Groq Whisper] Sending {file_size / 1024:.1f}KB audio file...")
+            
+            import time
+            start_time = time.time()
+            
+            # Groq Whisper API call
+            with open(audio_path, "rb") as audio_file:
+                # Prepare API parameters
+                params = {
+                    "model": self.model,
+                    "file": audio_file,
+                    "response_format": "text",
+                    "temperature": self.temperature,
+                }
+                
+                # Add optional parameters
+                if prompt:
+                    params["prompt"] = prompt
+                
+                # Language (None = auto-detect)
+                if self.language and self.language.lower() != "auto":
+                    params["language"] = self.language
+                
+                transcription = client.audio.transcriptions.create(**params)
+            
+            elapsed = time.time() - start_time
+            print(f"[Groq Whisper] ✓ Transcription received in {elapsed:.2f}s")
+            
+            # Response is just text when response_format="text"
+            return transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
+            
+        except Exception as e:
+            print(f"[Groq Whisper] ✗ Error: {e}")
+            raise TranscriptionError(f"Groq Whisper API call failed: {e}")
+
+
 class OpenAIWhisperBackend(TranscriptionBackend):
     """
     OpenAI Whisper API backend for cloud transcription.
@@ -608,6 +753,15 @@ def get_backend(config: dict) -> TranscriptionBackend:
         return OpenAIWhisperBackend(
             api_key="",  # Will be read from OPENAI_API_KEY env var
             model=config.get("openai_whisper_model", "whisper-1"),
+            language=config.get("language", "en"),
+            prompt=config.get("prompt", ""),
+            temperature=config.get("temperature", 0.0),
+            custom_vocabulary=config.get("custom_vocabulary", []),
+        )
+    elif backend_type == "groq_whisper":
+        return GroqWhisperBackend(
+            api_key="",  # Will be read from GROQ_API_KEY env var
+            model=config.get("groq_whisper_model", "whisper-large-v3"),
             language=config.get("language", "en"),
             prompt=config.get("prompt", ""),
             temperature=config.get("temperature", 0.0),

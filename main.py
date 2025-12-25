@@ -3940,12 +3940,14 @@ class WayfinderApp(ctk.CTk):
         self._create_overlay_scale_slider_row(overlay_content)
         
         # === BENTO TILE 4: Benchmark (inline, no popup) ===
-        benchmark_tile = ctk.CTkFrame(
+        # This tile is for local/hybrid modes only - hidden in remote mode
+        self.local_benchmark_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"], border_width=1,
             border_color=COLORS["border_rim"],
         )
-        benchmark_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        self.local_benchmark_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        benchmark_tile = self.local_benchmark_tile  # Keep local reference for below
         
         benchmark_header = ctk.CTkFrame(benchmark_tile, fg_color="transparent")
         benchmark_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
@@ -4004,6 +4006,11 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         self.benchmark_status_label.pack(side="left", padx=(15, 0))
+        
+        # Hide local benchmark tile if starting in Remote mode
+        current_mode = self.config.get("processing_mode", "local")
+        if current_mode == "remote":
+            self.local_benchmark_tile.pack_forget()
         
         self._settings_scroll = scroll
     
@@ -4481,6 +4488,15 @@ class WayfinderApp(ctk.CTk):
                 save_config(self.config)
         # Remote mode doesn't use post-processing (transcription is already cloud)
         
+        # Show/hide local benchmark tile based on mode
+        # Local and Hybrid use local whisper, Remote doesn't
+        if hasattr(self, 'local_benchmark_tile') and self.local_benchmark_tile.winfo_exists():
+            if mode == "remote":
+                self.local_benchmark_tile.pack_forget()
+            else:
+                # Re-pack if it was hidden (after the settings scroll content)
+                self.local_benchmark_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        
         # Clear existing content
         for widget in self.mode_settings_container.winfo_children():
             widget.destroy()
@@ -4548,7 +4564,7 @@ class WayfinderApp(ctk.CTk):
         
         # Backend (whisper_cpp or faster_whisper only for local)
         backend = self.config.get("transcription_backend", "whisper_cpp")
-        if backend == "openai_whisper":
+        if backend in ("openai_whisper", "groq_whisper"):
             backend = "whisper_cpp"  # Default to local backend
         self.backend_var = ctk.StringVar(value=backend)
         self.backend_dropdown = self.create_dropdown_row(
@@ -5005,14 +5021,14 @@ class WayfinderApp(ctk.CTk):
         # Update related settings based on mode
         if mode == "local":
             # Local mode: use local transcription backend, disable cloud post-processing
-            if self.config.get("transcription_backend") == "openai_whisper":
+            if self.config.get("transcription_backend") in ("openai_whisper", "groq_whisper"):
                 self.config["transcription_backend"] = "whisper_cpp"
             self.config["post_processing_enabled"] = False
             self.log("🔒 Mode: Local (100% private)")
             
         elif mode == "hybrid":
             # Hybrid mode: local transcription + cloud post-processing
-            if self.config.get("transcription_backend") == "openai_whisper":
+            if self.config.get("transcription_backend") in ("openai_whisper", "groq_whisper"):
                 self.config["transcription_backend"] = "whisper_cpp"
             self.config["post_processing_enabled"] = True
             # Default to OpenAI for post-processing if currently using local
@@ -5021,10 +5037,14 @@ class WayfinderApp(ctk.CTk):
             self.log("🔗 Mode: Hybrid (local transcription + cloud cleanup)")
             
         elif mode == "remote":
-            # Remote mode: full cloud transcription via OpenAI Whisper
-            self.config["transcription_backend"] = "openai_whisper"
+            # Remote mode: full cloud transcription via Groq (fastest) or OpenAI
+            current_backend = self.config.get("transcription_backend", "")
+            # Keep existing cloud backend if already set, otherwise default to Groq (faster)
+            if current_backend not in ("groq_whisper", "openai_whisper"):
+                self.config["transcription_backend"] = "groq_whisper"  # Default to Groq for speed
             self.config["post_processing_enabled"] = False  # Transcription is already cloud
-            self.log("☁️ Mode: Remote (cloud transcription)")
+            backend_name = "Groq" if self.config["transcription_backend"] == "groq_whisper" else "OpenAI"
+            self.log(f"☁️ Mode: Remote ({backend_name} cloud transcription)")
         
         save_config(self.config)
         
@@ -5871,6 +5891,7 @@ class WayfinderApp(ctk.CTk):
                 if hasattr(self, '_llamacpp_progress_bar') and self._llamacpp_progress_bar.winfo_exists():
                     self._llamacpp_progress_bar.set(progress)
                     self._llamacpp_status_label.configure(text=status_text)
+                    self.update_idletasks()  # Force UI update
             except:
                 pass
         
@@ -5879,6 +5900,9 @@ class WayfinderApp(ctk.CTk):
             temp_path = None
             response = None
             try:
+                # Log that thread started (this should appear in log panel)
+                self.after(0, lambda: self.log("📦 Download thread started..."))
+                
                 import requests
                 
                 url = model_info["url"]
@@ -5893,7 +5917,10 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"⬇️ Downloading {model_info['name']} from {url[:50]}...")
                 
                 # Update status to show we're connecting
-                self.after(0, lambda: self._llamacpp_status_label.configure(text="Connecting to server..."))
+                def show_connecting():
+                    self._llamacpp_status_label.configure(text="Connecting to server...")
+                    self.update_idletasks()
+                self.after(0, show_connecting)
                 
                 # Set up session with proper headers (some CDNs block requests without User-Agent)
                 session = requests.Session()
@@ -5944,7 +5971,8 @@ class WayfinderApp(ctk.CTk):
                                     progress = min(0.9, downloaded / (500 * 1024 * 1024))  # Assume ~500MB if unknown
                                     status = f"{format_size(downloaded)} • {format_speed(speed)}"
                                 
-                                self.after(0, lambda p=progress, s=status: update_progress(p, s))
+                                # Schedule UI update
+                                self.after(10, lambda p=progress, s=status: update_progress(p, s))
                                 last_update_time = current_time
                 
                 # Move temp to final
@@ -5960,11 +5988,15 @@ class WayfinderApp(ctk.CTk):
                 # Success
                 def on_success():
                     self._inline_download_active = False
-                    self._llamacpp_progress_bar.set(1.0)
-                    self._llamacpp_status_label.configure(
-                        text=f"✓ Downloaded {model_info['name']} ({format_size(downloaded)} in {format_eta(total_time)})",
-                        text_color=COLORS["accent"]
-                    )
+                    try:
+                        self._llamacpp_progress_bar.set(1.0)
+                        self._llamacpp_status_label.configure(
+                            text=f"✓ Downloaded {model_info['name']} ({format_size(downloaded)} in {format_eta(total_time)})",
+                            text_color=COLORS["accent"]
+                        )
+                        self.update_idletasks()  # Force UI refresh
+                    except:
+                        pass
                     self.log(f"✓ Downloaded: {model_info['name']} ({format_size(downloaded)}, avg {format_speed(avg_speed)})")
                     
                     # Auto-select the downloaded model
@@ -6002,6 +6034,7 @@ class WayfinderApp(ctk.CTk):
                             text=f"✗ Error: {error_msg[:60]}",
                             text_color="#CF7B7B"
                         )
+                        self.log(f"❌ Download error: {error_msg}")
                         # Reset download button for retry
                         self._llamacpp_download_btn.configure(
                             text="Retry",
@@ -6022,6 +6055,7 @@ class WayfinderApp(ctk.CTk):
                 except:
                     pass
         
+        self.log(f"🚀 Starting download of {model_info['name']}...")
         threading.Thread(target=download_thread, daemon=True).start()
     
     def _cancel_llamacpp_download(self) -> None:
@@ -10312,7 +10346,7 @@ class WayfinderApp(ctk.CTk):
 
     def open_backend_settings(self):
         """Open dialog to select transcription backend."""
-        from transcriber import WhisperCppBackend, FasterWhisperBackend, OpenAIWhisperBackend
+        from transcriber import WhisperCppBackend, FasterWhisperBackend, OpenAIWhisperBackend, GroqWhisperBackend
         
         dialog = ctk.CTkToplevel(self)
         dialog.title("Transcription Backend")
@@ -10387,6 +10421,7 @@ class WayfinderApp(ctk.CTk):
         )
         faster_whisper = FasterWhisperBackend()
         openai_whisper = OpenAIWhisperBackend()
+        groq_whisper = GroqWhisperBackend()
         
         # Customize descriptions based on GPU with latency info
         if gpu_info.is_nvidia:
@@ -10400,6 +10435,7 @@ class WayfinderApp(ctk.CTk):
             faster_whisper_desc = "Python library with CTranslate2.\n🟡 Moderate CPU performance"
         
         openai_whisper_desc = "OpenAI's cloud Whisper API.\n☁️ Requires API key • Always fast • Per-minute billing"
+        groq_whisper_desc = "Groq's ultra-fast Whisper Large-v3.\n⚡ ★ ~10x faster than OpenAI • Free tier available"
         
         backends = [
             {
@@ -10417,6 +10453,15 @@ class WayfinderApp(ctk.CTk):
                 "available": faster_whisper.is_available(),
                 "gpu": faster_whisper.supports_gpu(),
                 "recommended": gpu_info.is_nvidia,
+            },
+            {
+                "id": "groq_whisper",
+                "name": "Groq Whisper (Ultra-Fast)",
+                "desc": groq_whisper_desc,
+                "available": groq_whisper.is_available(),
+                "gpu": True,  # Cloud = always "GPU"
+                "recommended": True,  # Recommend Groq for speed
+                "cloud": True,
             },
             {
                 "id": "openai_whisper",
@@ -10609,6 +10654,7 @@ class WayfinderApp(ctk.CTk):
                 "whisper_cpp": "whisper.cpp",
                 "faster_whisper": "Faster-Whisper",
                 "openai_whisper": "OpenAI (Cloud)",
+                "groq_whisper": "Groq (Ultra-Fast)",
             }
             display = display_names.get(backend_var.get(), backend_var.get())
             self.backend_btn.configure(text=display)

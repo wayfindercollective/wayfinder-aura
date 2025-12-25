@@ -138,9 +138,10 @@ def run_benchmark(whisper_cli: str, model_path: str, audio_file: str,
         "--no-timestamps",
     ]
     
-    if use_gpu:
-        # Try Vulkan GPU acceleration
-        cmd.extend(["-ng"])  # Use GPU
+    # GPU is ON by default in Vulkan builds of whisper.cpp
+    # Use --no-gpu to disable it for CPU-only testing
+    if not use_gpu:
+        cmd.extend(["--no-gpu"])
     
     # Warm-up run (discard) - with proper exception handling
     try:
