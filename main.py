@@ -4827,9 +4827,9 @@ class WayfinderApp(ctk.CTk):
                         status_indicator.configure(text="✓ Ollama is running", text_color=COLORS["accent"])
                         dialog.after(100, lambda: (dialog.destroy(), self.open_ollama_model_settings()))
                     else:
-                        status_indicator.configure(text="⚠️ Still not running", text_color="#CF7B7B")
+                        status_indicator.configure(text="⚠️ Service not detected", text_color=COLORS["text_secondary"])
                 except:
-                    status_indicator.configure(text="⚠️ Still not running", text_color="#CF7B7B")
+                    status_indicator.configure(text="⚠️ Service not detected", text_color=COLORS["text_secondary"])
             
             check_btn = ctk.CTkButton(
                 status_frame,
@@ -4933,7 +4933,7 @@ class WayfinderApp(ctk.CTk):
         for model_info in recommended_models:
             model_name = model_info["name"]
             is_installed = model_name in available_models
-            is_selected = model_name == current_model and is_installed
+            is_selected = model_name == current_model  # Show as selected even if not installed
             
             frame = ctk.CTkFrame(
                 scroll,
@@ -4960,9 +4960,12 @@ class WayfinderApp(ctk.CTk):
             name_label.pack(side="left")
             
             if is_selected:
+                status_text = "✓ Selected"
+                if not is_installed:
+                    status_text += " (not installed)"
                 selected_label = ctk.CTkLabel(
                     name_frame,
-                    text="✓ Selected",
+                    text=status_text,
                     font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["accent"],
                 )
@@ -4980,8 +4983,10 @@ class WayfinderApp(ctk.CTk):
             actions_frame = ctk.CTkFrame(frame, fg_color="transparent")
             actions_frame.pack(fill="x", padx=12, pady=(0, 10))
             
-            if is_installed:
-                if not is_selected:
+            # Show action buttons based on state
+            if not is_selected:
+                if is_installed:
+                    # Installed but not selected - show Select button
                     select_btn = ctk.CTkButton(
                         actions_frame,
                         text="Select",
@@ -4992,32 +4997,43 @@ class WayfinderApp(ctk.CTk):
                         command=lambda m=model_name: self._select_ollama_model(m, dialog),
                     )
                     select_btn.pack(side="left")
-            else:
-                # Allow selecting even if not installed - user can download later
-                # Or download if Ollama is running
-                if ollama_available:
-                    download_btn = ctk.CTkButton(
-                        actions_frame,
-                        text="⬇️ Download",
-                        font=(self.font_body[0], self.font_sizes["small"]),
-                        fg_color=COLORS["accent"],
-                        hover_color=COLORS["accent_hover"],
-                        text_color=COLORS["text_bright"],
-                        command=lambda m=model_name: self._download_ollama_model(m, dialog),
-                    )
-                    download_btn.pack(side="left")
                 else:
-                    # Allow pre-selection even if Ollama isn't running
-                    select_btn = ctk.CTkButton(
-                        actions_frame,
-                        text="Select (will use when Ollama starts)",
-                        font=(self.font_body[0], self.font_sizes["small"]),
-                        fg_color=COLORS["bg_hover"],
-                        hover_color=COLORS["bg_elevated"],
-                        text_color=COLORS["text_primary"],
-                        command=lambda m=model_name: self._select_ollama_model(m, dialog),
-                    )
-                    select_btn.pack(side="left")
+                    # Not installed - show Download or Select based on Ollama availability
+                    if ollama_available:
+                        download_btn = ctk.CTkButton(
+                            actions_frame,
+                            text="⬇️ Download",
+                            font=(self.font_body[0], self.font_sizes["small"]),
+                            fg_color=COLORS["accent"],
+                            hover_color=COLORS["accent_hover"],
+                            text_color=COLORS["text_bright"],
+                            command=lambda m=model_name: self._download_ollama_model(m, dialog),
+                        )
+                        download_btn.pack(side="left")
+                    else:
+                        # Ollama not running - allow pre-selection
+                        select_btn = ctk.CTkButton(
+                            actions_frame,
+                            text="Select",
+                            font=(self.font_body[0], self.font_sizes["small"]),
+                            fg_color=COLORS["bg_hover"],
+                            hover_color=COLORS["bg_elevated"],
+                            text_color=COLORS["text_primary"],
+                            command=lambda m=model_name: self._select_ollama_model(m, dialog),
+                        )
+                        select_btn.pack(side="left")
+            elif is_selected and not is_installed and ollama_available:
+                # Selected but not installed and Ollama is running - show download option
+                download_btn = ctk.CTkButton(
+                    actions_frame,
+                    text="⬇️ Download Now",
+                    font=(self.font_body[0], self.font_sizes["small"]),
+                    fg_color=COLORS["accent"],
+                    hover_color=COLORS["accent_hover"],
+                    text_color=COLORS["text_bright"],
+                    command=lambda m=model_name: self._download_ollama_model(m, dialog),
+                )
+                download_btn.pack(side="left")
         
         # Installed models section (if any)
         if available_models and len(available_models) > len([m["name"] for m in recommended_models if m["name"] in available_models]):
@@ -7647,6 +7663,309 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
             command=on_dialog_close,
         ).pack(fill="x")
+
+    def open_benchmark_settings(self):
+        """Open dialog to run hardware benchmarks and measure transcription speeds."""
+        # Check if dialog already exists and is still open
+        if hasattr(self, '_benchmark_settings_dialog') and self._benchmark_settings_dialog is not None:
+            try:
+                if self._benchmark_settings_dialog.winfo_exists():
+                    self._benchmark_settings_dialog.lift()
+                    self._benchmark_settings_dialog.focus_force()
+                    return
+            except:
+                pass
+            self._benchmark_settings_dialog = None
+        
+        dialog = ctk.CTkToplevel(self)
+        self._benchmark_settings_dialog = dialog
+        dialog.title("Hardware Benchmark")
+        dialog.geometry("550x600")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        def on_dialog_close():
+            self._benchmark_settings_dialog = None
+            dialog.destroy()
+        
+        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="⏱️ Hardware Speed Test",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Run a 10-second test on each model to measure actual\nGPU and CPU speeds on your system. Results are used\nto show accurate timing estimates throughout the app.",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", pady=(0, 20))
+        
+        # Results display area
+        results_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=12)
+        results_frame.pack(fill="both", expand=True, pady=(0, 15))
+        
+        results_scroll = ctk.CTkScrollableFrame(results_frame, fg_color="transparent", height=200)
+        results_scroll.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Show existing benchmark results if any
+        benchmark_results = self.config.get("benchmark_results", {})
+        fastest = self.config.get("benchmark_fastest_processor", None)
+        
+        def refresh_results_display():
+            """Refresh the results display after benchmark completes."""
+            for widget in results_scroll.winfo_children():
+                widget.destroy()
+            
+            benchmark_results = self.config.get("benchmark_results", {})
+            fastest = self.config.get("benchmark_fastest_processor", None)
+            
+            if benchmark_results:
+                header = ctk.CTkFrame(results_scroll, fg_color="transparent")
+                header.pack(fill="x", pady=(0, 10))
+                
+                ctk.CTkLabel(
+                    header,
+                    text="📊 Benchmark Results",
+                    font=(self.font_body[0], 14, "bold"),
+                    text_color=COLORS["text_primary"],
+                ).pack(side="left")
+                
+                if fastest:
+                    ctk.CTkLabel(
+                        header,
+                        text=f"🚀 Fastest: {fastest.upper()}",
+                        font=(self.font_body[0], 12, "bold"),
+                        text_color=COLORS["accent_green"],
+                    ).pack(side="right")
+                
+                # Column headers
+                col_header = ctk.CTkFrame(results_scroll, fg_color="transparent")
+                col_header.pack(fill="x", pady=(0, 5))
+                ctk.CTkLabel(col_header, text="Model", font=(self.font_body[0], 11, "bold"),
+                             text_color=COLORS["text_muted"], width=100, anchor="w").pack(side="left")
+                ctk.CTkLabel(col_header, text="CPU", font=(self.font_body[0], 11, "bold"),
+                             text_color=COLORS["text_muted"], width=70).pack(side="left", padx=(10, 0))
+                ctk.CTkLabel(col_header, text="GPU", font=(self.font_body[0], 11, "bold"),
+                             text_color=COLORS["text_muted"], width=70).pack(side="left", padx=(10, 0))
+                ctk.CTkLabel(col_header, text="Speedup", font=(self.font_body[0], 11, "bold"),
+                             text_color=COLORS["text_muted"], width=70).pack(side="left", padx=(10, 0))
+                
+                # Model results
+                for model_id, result in benchmark_results.items():
+                    model_name = result.get("model_name", model_id)
+                    cpu_time = result.get("cpu_10s")
+                    gpu_time = result.get("gpu_10s")
+                    model_fastest = result.get("fastest", "")
+                    
+                    row = ctk.CTkFrame(results_scroll, fg_color="transparent")
+                    row.pack(fill="x", pady=3)
+                    
+                    ctk.CTkLabel(
+                        row, text=model_name,
+                        font=(self.font_body[0], 12),
+                        text_color=COLORS["text_primary"],
+                        width=100, anchor="w",
+                    ).pack(side="left")
+                    
+                    cpu_str = f"{cpu_time:.1f}s" if isinstance(cpu_time, (int, float)) else "—"
+                    gpu_str = f"{gpu_time:.1f}s" if isinstance(gpu_time, (int, float)) else "—"
+                    
+                    # Calculate speedup
+                    if cpu_time and gpu_time and gpu_time > 0:
+                        speedup = f"{cpu_time / gpu_time:.1f}x"
+                    else:
+                        speedup = "—"
+                    
+                    ctk.CTkLabel(
+                        row, text=cpu_str,
+                        font=(self.font_body[0], 11),
+                        text_color=COLORS["text_muted"] if model_fastest == "gpu" else COLORS["accent_green"],
+                        width=70,
+                    ).pack(side="left", padx=(10, 0))
+                    
+                    ctk.CTkLabel(
+                        row, text=gpu_str,
+                        font=(self.font_body[0], 11),
+                        text_color=COLORS["text_muted"] if model_fastest == "cpu" else COLORS["accent_green"],
+                        width=70,
+                    ).pack(side="left", padx=(10, 0))
+                    
+                    ctk.CTkLabel(
+                        row, text=speedup,
+                        font=(self.font_body[0], 11),
+                        text_color=COLORS["accent"] if speedup != "—" else COLORS["text_muted"],
+                        width=70,
+                    ).pack(side="left", padx=(10, 0))
+                
+                # Timestamp
+                timestamps = [r.get("timestamp", 0) for r in benchmark_results.values()]
+                if timestamps and max(timestamps) > 0:
+                    from datetime import datetime
+                    last_run = datetime.fromtimestamp(max(timestamps)).strftime("%Y-%m-%d %H:%M")
+                    ctk.CTkLabel(
+                        results_scroll,
+                        text=f"Last run: {last_run}",
+                        font=(self.font_body[0], 10),
+                        text_color=COLORS["text_muted"],
+                    ).pack(anchor="w", pady=(10, 0))
+            else:
+                ctk.CTkLabel(
+                    results_scroll,
+                    text="⏱️ No benchmark results yet\n\nRun a benchmark to measure your hardware\nand get accurate speed predictions.",
+                    font=(self.font_body[0], 13),
+                    text_color=COLORS["text_muted"],
+                    justify="center",
+                ).pack(pady=40)
+        
+        refresh_results_display()
+        
+        # Progress section
+        progress_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        progress_bar = ctk.CTkProgressBar(progress_frame, width=400, height=16, corner_radius=8)
+        progress_bar.set(0)
+        progress_label = ctk.CTkLabel(
+            progress_frame,
+            text="Ready to benchmark",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_secondary"],
+        )
+        
+        # Log textbox (hidden initially)
+        log_text = ctk.CTkTextbox(
+            inner, height=100, fg_color=COLORS["bg_elevated"],
+            corner_radius=8, font=("JetBrains Mono", 10),
+            text_color=COLORS["text_secondary"],
+        )
+        
+        benchmark_runner = [None]
+        
+        def update_progress(progress: float, msg: str):
+            def do_update():
+                progress_bar.set(progress)
+                progress_label.configure(text=msg)
+            dialog.after(0, do_update)
+        
+        def log_message(msg: str):
+            def do_log():
+                log_text.configure(state="normal")
+                log_text.insert("end", msg + "\n")
+                log_text.see("end")
+                log_text.configure(state="disabled")
+            dialog.after(0, do_log)
+        
+        def run_benchmark():
+            """Run the benchmark in a background thread."""
+            # Show progress UI
+            progress_frame.pack(fill="x", pady=(0, 10))
+            progress_bar.pack(fill="x", pady=(0, 5))
+            progress_bar.set(0)
+            progress_label.pack()
+            log_text.pack(fill="x", pady=(0, 10))
+            log_text.configure(state="normal")
+            log_text.delete("1.0", "end")
+            log_text.configure(state="disabled")
+            
+            run_btn.configure(state="disabled", text="Running...")
+            cancel_btn.pack(side="left", padx=(10, 0))
+            
+            runner = BenchmarkRunner(
+                self.config,
+                progress_callback=update_progress,
+                log_callback=log_message,
+            )
+            benchmark_runner[0] = runner
+            
+            def benchmark_thread():
+                try:
+                    results, fastest = runner.run_benchmarks(test_gpu=True, test_cpu=True)
+                    
+                    if results and not runner._cancel_requested:
+                        # Save results to config
+                        self.config["benchmark_results"] = results
+                        self.config["benchmark_fastest_processor"] = fastest
+                        save_config(self.config)
+                        
+                        def on_complete():
+                            run_btn.configure(state="normal", text="⏱️ Run Benchmark")
+                            cancel_btn.pack_forget()
+                            progress_label.configure(text="✅ Benchmark complete!")
+                            refresh_results_display()
+                            # Update main settings button
+                            model_count = len(results)
+                            fastest_display = f"🚀 {fastest.upper()}" if fastest else ""
+                            self.benchmark_btn.configure(text=f"{model_count} models tested {fastest_display}  ▼")
+                        dialog.after(0, on_complete)
+                    else:
+                        def on_cancel():
+                            run_btn.configure(state="normal", text="⏱️ Run Benchmark")
+                            cancel_btn.pack_forget()
+                            progress_label.configure(text="Benchmark cancelled")
+                        dialog.after(0, on_cancel)
+                except Exception as e:
+                    def on_error():
+                        run_btn.configure(state="normal", text="⏱️ Run Benchmark")
+                        cancel_btn.pack_forget()
+                        progress_label.configure(text=f"Error: {e}")
+                    dialog.after(0, on_error)
+            
+            threading.Thread(target=benchmark_thread, daemon=True).start()
+        
+        def cancel_benchmark():
+            if benchmark_runner[0]:
+                benchmark_runner[0].cancel()
+        
+        # Buttons
+        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=(10, 0))
+        
+        run_btn = ctk.CTkButton(
+            btn_frame,
+            text="⏱️ Run Benchmark",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=run_benchmark,
+        )
+        run_btn.pack(side="left", fill="x", expand=True)
+        
+        cancel_btn = ctk.CTkButton(
+            btn_frame,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            width=80,
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=cancel_benchmark,
+        )
+        # cancel_btn hidden initially
+        
+        # Close button
+        ctk.CTkButton(
+            inner,
+            text="Close",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=on_dialog_close,
+        ).pack(fill="x", pady=(10, 0))
 
     def open_speed_settings(self):
         """Open dialog to configure typing speed."""
