@@ -2947,53 +2947,6 @@ class WayfinderApp(ctk.CTk):
         self.bind("<Control-0>", lambda e: self.reset_scale())
         self.bind("<Control-r>", lambda e: self.rescue_window())  # Emergency rescue
     
-    def _get_screen_bounds(self) -> tuple[int, int, int, int]:
-        """Get usable screen area (excluding estimated taskbar).
-        
-        Returns: (x, y, width, height) of usable area
-        """
-        # Get screen dimensions
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
-        
-        # Estimate taskbar height (typically 44-56px on KDE, 48px common)
-        # We leave a generous margin to avoid overlap
-        TASKBAR_HEIGHT = 56
-        TOP_MARGIN = 32  # For top panels/notifications
-        
-        return (0, TOP_MARGIN, screen_w, screen_h - TASKBAR_HEIGHT - TOP_MARGIN)
-    
-    def _clamp_window_size(self, target_w: int, target_h: int) -> tuple[int, int]:
-        """Clamp window size to fit within screen bounds."""
-        _, _, usable_w, usable_h = self._get_screen_bounds()
-        
-        # Leave some margin for window decorations and breathing room
-        max_w = int(usable_w * 0.95)
-        max_h = int(usable_h * 0.95)
-        
-        return (min(target_w, max_w), min(target_h, max_h))
-    
-    def _ensure_on_screen(self):
-        """Ensure the window is fully visible on screen and not under taskbar."""
-        self.update_idletasks()  # Ensure geometry is updated
-        
-        x, y, usable_w, usable_h = self._get_screen_bounds()
-        win_w = self.winfo_width()
-        win_h = self.winfo_height()
-        win_x = self.winfo_x()
-        win_y = self.winfo_y()
-        
-        # Clamp position to keep window on screen
-        new_x = max(x, min(win_x, x + usable_w - win_w))
-        new_y = max(y, min(win_y, y + usable_h - win_h))
-        
-        # If window is too large to fit, resize it
-        if win_w > usable_w or win_h > usable_h:
-            new_w, new_h = self._clamp_window_size(win_w, win_h)
-            self.geometry(f"{new_w}x{new_h}+{new_x}+{new_y}")
-        elif new_x != win_x or new_y != win_y:
-            self.geometry(f"+{new_x}+{new_y}")
-    
     def rescue_window(self):
         """Emergency rescue: reset window to center of screen at safe size.
         
@@ -4365,7 +4318,7 @@ class WayfinderApp(ctk.CTk):
         self.create_toggle_row(
             parent, "Enable Post-Processing",
             self.postproc_enabled_var, self.toggle_post_processing,
-            tooltip="Remove filler words (um, uh, ah) and fix punctuation using local LLM",
+            tooltip="Clean up transcriptions using a local LLM.\nRemoves filler words (um, uh, like) and fixes punctuation.\nRuns 100% on your device — no data sent anywhere.",
         )
         
         # Post-processing backend and options (only show if enabled)
@@ -4399,7 +4352,8 @@ class WayfinderApp(ctk.CTk):
             self.postproc_backend_dropdown = self.create_dropdown_row(
                 parent, "Post-Processing Backend", backend_options,
                 self.postproc_backend_var, self.on_postproc_backend_changed,
-                tooltip="llama.cpp/ollama = local, Anthropic/OpenAI = cloud (requires API key)", width=160,
+                tooltip="llama_cpp: Uses llama.cpp with GGUF models. Fast GPU inference on Linux.\nollama: Uses Ollama service. Easy model management, run 'ollama serve' first.",
+                width=160,
             )
             
             # Inline model management section (no popups)
@@ -4411,7 +4365,8 @@ class WayfinderApp(ctk.CTk):
             self.postproc_template_dropdown = self.create_dropdown_row(
                 parent, "Format Template", ["clean", "email", "notes", "code_comment", "custom"],
                 self.postproc_template_var, self.on_postproc_template_changed,
-                tooltip="clean=Remove fillers, email=Format as email, notes=Bullet points", width=140,
+                tooltip="How to format the cleaned text:\n• clean: Just remove filler words, fix punctuation\n• email: Format as professional email\n• notes: Bullet points and headers\n• code_comment: Technical documentation style\n• custom: Use your own prompt",
+                width=140,
             )
     
     def _build_hybrid_mode_settings(self, parent) -> None:
@@ -4995,8 +4950,9 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         info_icon.pack(side="left", padx=(6, 0))
-        ToolTip(label_widget, "Select a GGUF model for post-processing. Hover over model info for details.")
-        ToolTip(info_icon, "Select a GGUF model for post-processing. Hover over model info for details.")
+        llamacpp_tooltip = "GGUF models run locally via llama.cpp.\nModels are downloaded to ~/.local/share/wayfinder-voice/llm-models/\nGPU acceleration is automatic on Linux with CUDA/ROCm."
+        ToolTip(label_widget, llamacpp_tooltip)
+        ToolTip(info_icon, llamacpp_tooltip)
         
         # Browse button on left (subtle)
         browse_btn = ctk.CTkButton(
@@ -5011,7 +4967,7 @@ class WayfinderApp(ctk.CTk):
             command=self._browse_custom_gguf,
         )
         browse_btn.pack(side="left", padx=(12, 0))
-        ToolTip(browse_btn, "Browse for a custom GGUF model file")
+        ToolTip(browse_btn, "Load a custom GGUF model from anywhere on your system.\nSupports any llama.cpp compatible GGUF file.")
         
         # Right side container for dropdown and button
         right_frame = ctk.CTkFrame(row1, fg_color="transparent")
@@ -5222,11 +5178,11 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         info_icon.pack(side="left", padx=(6, 0))
-        tooltip_text = "Select an Ollama model. See info below for details."
+        ollama_tooltip = "Ollama manages models and provides fast local inference.\nModels stored in ~/.ollama/models/ (configurable).\nGPU acceleration automatic with NVIDIA/AMD drivers."
         if not ollama_available:
-            tooltip_text += "\n⚠️ Ollama not running. Start with: ollama serve"
-        ToolTip(label_widget, tooltip_text)
-        ToolTip(info_icon, tooltip_text)
+            ollama_tooltip += "\n\n⚠️ Ollama not running. Start with: ollama serve"
+        ToolTip(label_widget, ollama_tooltip)
+        ToolTip(info_icon, ollama_tooltip)
         
         # Right side container
         right_frame = ctk.CTkFrame(row1, fg_color="transparent")
@@ -5373,7 +5329,7 @@ class WayfinderApp(ctk.CTk):
             command=lambda: self._rebuild_postproc_section(),
         )
         refresh_btn.pack(side="right")
-        ToolTip(refresh_btn, "Refresh Ollama status and models")
+        ToolTip(refresh_btn, "Check Ollama connection and refresh installed models.\nUse after starting Ollama or downloading new models.")
     
     def _on_llamacpp_model_selected(self, selection: str) -> None:
         """Handle llama.cpp model selection from dropdown."""
@@ -7172,7 +7128,7 @@ class WayfinderApp(ctk.CTk):
         self.scale_slider = ctk.CTkSlider(
             row,
             from_=0.7,
-            to=2.5,
+            to=2.0,
             variable=self.scale_slider_var,
             command=on_slider_change,
             height=18,
