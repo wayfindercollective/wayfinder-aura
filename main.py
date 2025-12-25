@@ -2766,11 +2766,15 @@ class WayfinderApp(ctk.CTk):
     def setup_window(self) -> None:
         self.title("Wayfinder Aura")
         
+        # Ensure window is resizable
+        self.resizable(True, True)
+        
         # Apply saved UI scale
         base_w, base_h = 480, 720
         scaled_w = int(base_w * self.ui_scale)
         scaled_h = int(base_h * self.ui_scale)
         self.geometry(f"{scaled_w}x{scaled_h}")
+        # Set minimum size to prevent bottom menu from being hidden
         self.minsize(int(400 * self.ui_scale), int(600 * self.ui_scale))
         self.configure(fg_color=COLORS["bg_dark"])
         
