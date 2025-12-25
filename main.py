@@ -1306,37 +1306,73 @@ WHISPER_CPP_MODELS = {
 LLM_GGUF_MODELS = {
     "phi-3-mini": {
         "name": "Phi-3 Mini (3.8B)",
-        "size": "~2.3 GB",
+        "size": "2.3 GB",
         "size_bytes": 2_300_000_000,
         "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4_K_M.gguf",
         "filename": "Phi-3-mini-4k-instruct-q4_K_M.gguf",
-        "description": "Fast, efficient, great for cleanup tasks",
+        "description": "Microsoft's compact powerhouse. Excellent at text cleanup and formatting.",
+        "speed": "Fast",
+        "accuracy": "High",
         "recommended": True,
     },
     "qwen2.5-1.5b": {
         "name": "Qwen2.5 1.5B",
-        "size": "~1.0 GB",
+        "size": "1.0 GB",
         "size_bytes": 1_000_000_000,
         "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_K_M.gguf",
         "filename": "qwen2.5-1.5b-instruct-q4_K_M.gguf",
-        "description": "Small, fast, good quality",
+        "description": "Alibaba's efficient model. Great balance of speed and quality.",
+        "speed": "Very Fast",
+        "accuracy": "Good",
         "recommended": True,
     },
     "smollm2-360m": {
         "name": "SmolLM2 360M",
-        "size": "~229 MB",
+        "size": "229 MB",
         "size_bytes": 229_000_000,
         "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q8_0.gguf",
         "filename": "smollm2-360m-instruct-q8_0.gguf",
-        "description": "Ultra-small, fastest inference",
+        "description": "HuggingFace's tiny model. Blazing fast, best for simple cleanup.",
+        "speed": "Instant",
+        "accuracy": "Basic",
     },
     "llama3.2-1b": {
         "name": "Llama 3.2 1B",
-        "size": "~700 MB",
+        "size": "700 MB",
         "size_bytes": 700_000_000,
         "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
         "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-        "description": "Meta's latest small model",
+        "description": "Meta's latest efficient model. Good all-rounder for text tasks.",
+        "speed": "Very Fast",
+        "accuracy": "Good",
+    },
+}
+
+# Ollama model info for display
+OLLAMA_MODEL_INFO = {
+    "llama3.2:1b": {
+        "size": "1.3 GB",
+        "description": "Meta's latest efficient model. Good all-rounder.",
+        "speed": "Very Fast",
+        "accuracy": "Good",
+    },
+    "phi3:mini": {
+        "size": "2.2 GB",
+        "description": "Microsoft's compact powerhouse. Excellent text cleanup.",
+        "speed": "Fast",
+        "accuracy": "High",
+    },
+    "qwen2.5:1.5b": {
+        "size": "986 MB",
+        "description": "Alibaba's efficient model. Great speed/quality balance.",
+        "speed": "Very Fast",
+        "accuracy": "Good",
+    },
+    "smollm2:360m": {
+        "size": "229 MB",
+        "description": "HuggingFace's tiny model. Instant inference.",
+        "speed": "Instant",
+        "accuracy": "Basic",
     },
 }
 
@@ -2859,19 +2895,33 @@ class WayfinderApp(ctk.CTk):
         # if self.config.get("start_minimized", True):
         #     self.after(100, self.hide_to_tray)
 
+    # Consistent base dimensions for the window
+    BASE_WINDOW_WIDTH = 480
+    BASE_WINDOW_HEIGHT = 720
+    
     def setup_window(self) -> None:
         self.title("Wayfinder Aura")
         
         # Ensure window is resizable
         self.resizable(True, True)
         
-        # Apply saved UI scale
-        base_w, base_h = 480, 720
-        scaled_w = int(base_w * self.ui_scale)
-        scaled_h = int(base_h * self.ui_scale)
-        self.geometry(f"{scaled_w}x{scaled_h}")
-        # Set minimum size to prevent bottom menu from being hidden
-        self.minsize(int(400 * self.ui_scale), int(600 * self.ui_scale))
+        # Apply saved UI scale - simple and direct
+        scaled_w = int(self.BASE_WINDOW_WIDTH * self.ui_scale)
+        scaled_h = int(self.BASE_WINDOW_HEIGHT * self.ui_scale)
+        
+        # Get screen dimensions for initial placement
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        
+        # Center on screen (don't override user's saved position if they move it later)
+        center_x = (screen_w - scaled_w) // 2
+        center_y = (screen_h - scaled_h) // 2
+        
+        # Just apply the geometry directly - trust the saved scale
+        self.geometry(f"{scaled_w}x{scaled_h}+{center_x}+{center_y}")
+        
+        # Set reasonable minimum size
+        self.minsize(360, 500)
         self.configure(fg_color=COLORS["bg_dark"])
         
         # Apply CustomTkinter scaling
@@ -2895,14 +2945,104 @@ class WayfinderApp(ctk.CTk):
         self.bind("<Control-equal>", lambda e: self.scale_ui(1.1))  # Ctrl+= (plus without shift)
         self.bind("<Control-minus>", lambda e: self.scale_ui(0.9))
         self.bind("<Control-0>", lambda e: self.reset_scale())
+        self.bind("<Control-r>", lambda e: self.rescue_window())  # Emergency rescue
+    
+    def _get_screen_bounds(self) -> tuple[int, int, int, int]:
+        """Get usable screen area (excluding estimated taskbar).
+        
+        Returns: (x, y, width, height) of usable area
+        """
+        # Get screen dimensions
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        
+        # Estimate taskbar height (typically 44-56px on KDE, 48px common)
+        # We leave a generous margin to avoid overlap
+        TASKBAR_HEIGHT = 56
+        TOP_MARGIN = 32  # For top panels/notifications
+        
+        return (0, TOP_MARGIN, screen_w, screen_h - TASKBAR_HEIGHT - TOP_MARGIN)
+    
+    def _clamp_window_size(self, target_w: int, target_h: int) -> tuple[int, int]:
+        """Clamp window size to fit within screen bounds."""
+        _, _, usable_w, usable_h = self._get_screen_bounds()
+        
+        # Leave some margin for window decorations and breathing room
+        max_w = int(usable_w * 0.95)
+        max_h = int(usable_h * 0.95)
+        
+        return (min(target_w, max_w), min(target_h, max_h))
+    
+    def _ensure_on_screen(self):
+        """Ensure the window is fully visible on screen and not under taskbar."""
+        self.update_idletasks()  # Ensure geometry is updated
+        
+        x, y, usable_w, usable_h = self._get_screen_bounds()
+        win_w = self.winfo_width()
+        win_h = self.winfo_height()
+        win_x = self.winfo_x()
+        win_y = self.winfo_y()
+        
+        # Clamp position to keep window on screen
+        new_x = max(x, min(win_x, x + usable_w - win_w))
+        new_y = max(y, min(win_y, y + usable_h - win_h))
+        
+        # If window is too large to fit, resize it
+        if win_w > usable_w or win_h > usable_h:
+            new_w, new_h = self._clamp_window_size(win_w, win_h)
+            self.geometry(f"{new_w}x{new_h}+{new_x}+{new_y}")
+        elif new_x != win_x or new_y != win_y:
+            self.geometry(f"+{new_x}+{new_y}")
+    
+    def rescue_window(self):
+        """Emergency rescue: reset window to center of screen at safe size.
+        
+        Use this if the window gets lost off-screen or under the taskbar.
+        Bound to Ctrl+R as a keyboard shortcut.
+        """
+        # Reset to safe scale
+        safe_scale = 1.0
+        self.ui_scale = safe_scale
+        self.config["ui_scale"] = safe_scale
+        save_config(self.config)
+        
+        # Calculate safe size at 100% scale
+        new_w = self.BASE_WINDOW_WIDTH
+        new_h = self.BASE_WINDOW_HEIGHT
+        
+        # Center on screen
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        center_x = (screen_w - new_w) // 2
+        center_y = (screen_h - new_h) // 2
+        
+        # Apply geometry
+        self.geometry(f"{new_w}x{new_h}+{center_x}+{center_y}")
+        self.minsize(360, 500)
+        
+        # Reset CustomTkinter scaling
+        ctk.set_widget_scaling(safe_scale)
+        ctk.set_window_scaling(safe_scale)
+        
+        # Update all scale UI elements
+        if hasattr(self, 'scale_slider_var'):
+            self.scale_slider_var.set(safe_scale)
+        if hasattr(self, 'scale_value_label'):
+            self.scale_value_label.configure(text=f"{int(safe_scale * 100)}%")
+        if hasattr(self, 'header_scale_label'):
+            self.header_scale_label.configure(text=f"{int(safe_scale * 100)}%")
+        
+        self.log("🛟 Window rescued! Position and scale reset to 100%.")
     
     def scale_ui(self, factor: float):
         """Scale the UI by the given factor."""
         new_scale = self.ui_scale * factor
-        # Clamp between 0.7 and 2.5
-        new_scale = max(0.7, min(2.5, new_scale))
+        # Clamp between 0.7 and 2.0 (reasonable range)
+        new_scale = max(0.7, min(2.0, new_scale))
+        # Snap to 5% increments for cleaner values
+        new_scale = round(new_scale * 20) / 20
         
-        if new_scale != self.ui_scale:
+        if abs(new_scale - self.ui_scale) > 0.01:
             self.ui_scale = new_scale
             self.config["ui_scale"] = new_scale
             save_config(self.config)
@@ -2920,16 +3060,26 @@ class WayfinderApp(ctk.CTk):
     
     def _apply_scale(self):
         """Apply the current scale to all UI elements."""
-        # Update window size - more flexible
-        base_w, base_h = 440, 680
-        new_w = int(base_w * self.ui_scale)
-        new_h = int(base_h * self.ui_scale)
-        self.geometry(f"{new_w}x{new_h}")
-        self.minsize(int(320 * self.ui_scale), int(400 * self.ui_scale))
+        # Calculate new window size
+        new_w = int(self.BASE_WINDOW_WIDTH * self.ui_scale)
+        new_h = int(self.BASE_WINDOW_HEIGHT * self.ui_scale)
+        
+        # Get current position to preserve it
+        current_x = self.winfo_x()
+        current_y = self.winfo_y()
+        
+        # Apply geometry - keep current position, just resize
+        self.geometry(f"{new_w}x{new_h}+{current_x}+{current_y}")
         
         # Update CustomTkinter widget scaling
         ctk.set_widget_scaling(self.ui_scale)
         ctk.set_window_scaling(self.ui_scale)
+        
+        # Update all scale indicators
+        if hasattr(self, 'header_scale_label'):
+            self.header_scale_label.configure(text=f"{int(self.ui_scale * 100)}%")
+        if hasattr(self, 'scale_value_label'):
+            self.scale_value_label.configure(text=f"{int(self.ui_scale * 100)}%")
     
     def _scaled_font(self, base_size: int) -> int:
         """Return a scaled font size."""
@@ -3039,7 +3189,7 @@ class WayfinderApp(ctk.CTk):
             self.log(f"💡 Tip: {cpu_count} CPU cores detected, consider setting threads to {optimal}")
     
     def _create_header(self, parent) -> None:
-        """Create the app header with refined, minimal branding."""
+        """Create the app header with refined, minimal branding and scale controls."""
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.pack(fill="x", pady=(0, 8))
         
@@ -3071,9 +3221,13 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["accent"],
         ).pack(side="left")
         
+        # Right side controls container
+        right_controls = ctk.CTkFrame(header, fg_color="transparent")
+        right_controls.pack(side="right")
+        
         # Close button - minimal
         ctk.CTkButton(
-            header,
+            right_controls,
             text="×",
             width=28,
             height=28,
@@ -3084,6 +3238,69 @@ class WayfinderApp(ctk.CTk):
             corner_radius=RADIUS["sm"],
             command=self.hide_to_tray,
         ).pack(side="right")
+        
+        # === Quick Scale Controls (always visible for accessibility) ===
+        scale_frame = ctk.CTkFrame(right_controls, fg_color="transparent")
+        scale_frame.pack(side="right", padx=(0, 12))
+        
+        # Rescue button (emergency reset) - icon only
+        rescue_btn = ctk.CTkButton(
+            scale_frame,
+            text="⟲",  # Reset/rescue icon
+            width=24,
+            height=24,
+            fg_color="transparent",
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_muted"],
+            font=(self.font_body[0], 14),
+            corner_radius=4,
+            command=self.rescue_window,
+        )
+        rescue_btn.pack(side="left", padx=(0, 4))
+        ToolTip(rescue_btn, "Rescue Window (Ctrl+R)\nReset size and position if window is lost")
+        
+        # Minus button
+        minus_btn = ctk.CTkButton(
+            scale_frame,
+            text="−",
+            width=24,
+            height=24,
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"],
+            font=(self.font_mono[0], 14),
+            corner_radius=4,
+            command=lambda: self.scale_ui(0.9),
+        )
+        minus_btn.pack(side="left", padx=1)
+        ToolTip(minus_btn, "Decrease UI Scale (Ctrl+-)")
+        
+        # Scale percentage label
+        self.header_scale_label = ctk.CTkLabel(
+            scale_frame,
+            text=f"{int(self.ui_scale * 100)}%",
+            font=(self.font_mono[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+            width=40,
+        )
+        self.header_scale_label.pack(side="left", padx=2)
+        ToolTip(self.header_scale_label, "Current UI Scale\nCtrl+0 to reset to 100%")
+        
+        # Plus button
+        plus_btn = ctk.CTkButton(
+            scale_frame,
+            text="+",
+            width=24,
+            height=24,
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"],
+            font=(self.font_mono[0], 14),
+            corner_radius=4,
+            command=lambda: self.scale_ui(1.1),
+        )
+        plus_btn.pack(side="left", padx=1)
+        ToolTip(plus_btn, "Increase UI Scale (Ctrl++)")
     
     def _create_hero_section(self, parent) -> None:
         """Create the hero section with visualizer and mic button."""
@@ -4751,32 +4968,50 @@ class WayfinderApp(ctk.CTk):
             # Default to first option
             current_display = model_options[0]
         
-        # Row 1: Model dropdown + Download button
+        # Row 1: Label + Browse on left, Dropdown + Download on right
         row1 = ctk.CTkFrame(parent, fg_color="transparent")
-        row1.pack(fill="x", pady=(0, 6))
+        row1.pack(fill="x", pady=(0, 4))
         row1.grid_columnconfigure(0, weight=0)
         row1.grid_columnconfigure(1, weight=1)
         row1.grid_columnconfigure(2, weight=0)
         
-        # Label
+        # Left side: Label + Browse
+        left_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        left_frame.grid(row=0, column=0, sticky="w")
+        
         label_widget = ctk.CTkLabel(
-            row1,
+            left_frame,
             text="LLM Model",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         )
-        label_widget.grid(row=0, column=0, sticky="w")
+        label_widget.pack(side="left")
         
         # Info icon
         info_icon = ctk.CTkLabel(
-            row1,
+            left_frame,
             text="ⓘ",
             font=(self.font_body[0], 11),
             text_color=COLORS["text_muted"],
         )
-        info_icon.grid(row=0, column=0, sticky="e", padx=(5, 0))
-        ToolTip(label_widget, "Select a GGUF model for post-processing. Download if not installed.")
-        ToolTip(info_icon, "Select a GGUF model for post-processing. Download if not installed.")
+        info_icon.pack(side="left", padx=(6, 0))
+        ToolTip(label_widget, "Select a GGUF model for post-processing. Hover over model info for details.")
+        ToolTip(info_icon, "Select a GGUF model for post-processing. Hover over model info for details.")
+        
+        # Browse button on left (subtle)
+        browse_btn = ctk.CTkButton(
+            left_frame,
+            text="Browse...",
+            font=(self.font_body[0], self.font_sizes["caption"]),
+            fg_color="transparent",
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_muted"],
+            width=60,
+            height=22,
+            command=self._browse_custom_gguf,
+        )
+        browse_btn.pack(side="left", padx=(12, 0))
+        ToolTip(browse_btn, "Browse for a custom GGUF model file")
         
         # Right side container for dropdown and button
         right_frame = ctk.CTkFrame(row1, fg_color="transparent")
@@ -4804,7 +5039,7 @@ class WayfinderApp(ctk.CTk):
         model_dropdown.pack(side="left", padx=(0, 8))
         self._llamacpp_model_dropdown = model_dropdown
         
-        # Download button
+        # Download button (will show size)
         self._llamacpp_download_btn = ctk.CTkButton(
             right_frame,
             text="Download",
@@ -4812,16 +5047,63 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_hover"],
             text_color=COLORS["text_bright"],
-            width=90,
+            width=120,
             height=32,
             command=self._download_selected_llamacpp_model,
         )
         self._llamacpp_download_btn.pack(side="left")
         
-        # Update button state based on current selection
+        # Row 2: Model info panel (shows details about selected model)
+        self._llamacpp_info_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_hover"], corner_radius=6)
+        self._llamacpp_info_frame.pack(fill="x", pady=(4, 6))
+        
+        info_inner = ctk.CTkFrame(self._llamacpp_info_frame, fg_color="transparent")
+        info_inner.pack(fill="x", padx=10, pady=8)
+        
+        # Description label
+        self._llamacpp_desc_label = ctk.CTkLabel(
+            info_inner,
+            text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+            anchor="w",
+            justify="left",
+        )
+        self._llamacpp_desc_label.pack(anchor="w")
+        
+        # Stats row (size, speed, accuracy)
+        stats_frame = ctk.CTkFrame(info_inner, fg_color="transparent")
+        stats_frame.pack(fill="x", pady=(4, 0))
+        
+        self._llamacpp_size_label = ctk.CTkLabel(
+            stats_frame,
+            text="",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._llamacpp_size_label.pack(side="left")
+        
+        self._llamacpp_speed_label = ctk.CTkLabel(
+            stats_frame,
+            text="",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._llamacpp_speed_label.pack(side="left", padx=(16, 0))
+        
+        self._llamacpp_accuracy_label = ctk.CTkLabel(
+            stats_frame,
+            text="",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._llamacpp_accuracy_label.pack(side="left", padx=(16, 0))
+        
+        # Update info panel and button state
+        self._update_llamacpp_info_panel()
         self._update_llamacpp_download_button()
         
-        # Row 2: Progress bar (hidden by default)
+        # Row 3: Progress bar (hidden by default)
         self._llamacpp_progress_frame = ctk.CTkFrame(parent, fg_color="transparent")
         self._llamacpp_progress_frame.pack(fill="x", pady=(0, 6))
         self._llamacpp_progress_frame.pack_forget()  # Hide initially
@@ -4842,23 +5124,6 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
         )
         self._llamacpp_status_label.pack(anchor="w")
-        
-        # Row 3: Browse button for custom GGUF files
-        browse_row = ctk.CTkFrame(parent, fg_color="transparent")
-        browse_row.pack(fill="x")
-        
-        browse_btn = ctk.CTkButton(
-            browse_row,
-            text="Browse for custom GGUF file...",
-            font=(self.font_body[0], self.font_sizes["caption"]),
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_muted"],
-            anchor="w",
-            height=24,
-            command=self._browse_custom_gguf,
-        )
-        browse_btn.pack(anchor="e")
     
     def _build_ollama_inline_section(self, parent) -> None:
         """Build inline Ollama model selection with download."""
@@ -4879,29 +5144,32 @@ class WayfinderApp(ctk.CTk):
         except:
             ollama_available = False
         
-        # Recommended models
+        # Recommended models with full info
         recommended_models = [
-            {"name": "llama3.2:1b", "desc": "Meta's latest (1B params)"},
-            {"name": "phi3:mini", "desc": "Fast, small (3.8GB)"},
-            {"name": "qwen2.5:1.5b", "desc": "Good balance (1.5B params)"},
-            {"name": "smollm2:360m", "desc": "Ultra-small, fastest"},
+            {"name": "llama3.2:1b"},
+            {"name": "phi3:mini"},
+            {"name": "qwen2.5:1.5b"},
+            {"name": "smollm2:360m"},
         ]
         
         # Build model options with install status
         model_options = []
         model_data = {}
         
-        for model_info in recommended_models:
-            model_name = model_info["name"]
+        for model_item in recommended_models:
+            model_name = model_item["name"]
             is_installed = model_name in available_models
             is_selected = model_name == current_model
+            
+            # Get info from OLLAMA_MODEL_INFO
+            info = OLLAMA_MODEL_INFO.get(model_name, {})
             
             status_icon = "✓ " if is_installed else ""
             display_name = f"{status_icon}{model_name}"
             model_options.append(display_name)
             model_data[display_name] = {
                 "name": model_name,
-                "desc": model_info["desc"],
+                "info": info,
                 "installed": is_installed,
                 "selected": is_selected,
             }
@@ -4913,7 +5181,7 @@ class WayfinderApp(ctk.CTk):
                 model_options.append(display_name)
                 model_data[display_name] = {
                     "name": installed_model,
-                    "desc": "Installed model",
+                    "info": {"description": "Installed model", "size": "Unknown", "speed": "", "accuracy": ""},
                     "installed": True,
                     "selected": installed_model == current_model,
                 }
@@ -4928,31 +5196,33 @@ class WayfinderApp(ctk.CTk):
         if not current_display and model_options:
             current_display = model_options[0]
         
-        # Row 1: Model dropdown + Download button
+        # Row 1: Label on left, Dropdown + Download on right
         row1 = ctk.CTkFrame(parent, fg_color="transparent")
-        row1.pack(fill="x", pady=(0, 6))
+        row1.pack(fill="x", pady=(0, 4))
         row1.grid_columnconfigure(0, weight=0)
         row1.grid_columnconfigure(1, weight=1)
         row1.grid_columnconfigure(2, weight=0)
         
-        # Label
+        # Left side: Label + Info icon
+        left_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        left_frame.grid(row=0, column=0, sticky="w")
+        
         label_widget = ctk.CTkLabel(
-            row1,
+            left_frame,
             text="Ollama Model",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         )
-        label_widget.grid(row=0, column=0, sticky="w")
+        label_widget.pack(side="left")
         
-        # Info icon
         info_icon = ctk.CTkLabel(
-            row1,
+            left_frame,
             text="ⓘ",
             font=(self.font_body[0], 11),
             text_color=COLORS["text_muted"],
         )
-        info_icon.grid(row=0, column=0, sticky="e", padx=(5, 0))
-        tooltip_text = "Select an Ollama model. Download if not installed."
+        info_icon.pack(side="left", padx=(6, 0))
+        tooltip_text = "Select an Ollama model. See info below for details."
         if not ollama_available:
             tooltip_text += "\n⚠️ Ollama not running. Start with: ollama serve"
         ToolTip(label_widget, tooltip_text)
@@ -4985,7 +5255,7 @@ class WayfinderApp(ctk.CTk):
         model_dropdown.pack(side="left", padx=(0, 8))
         self._ollama_model_dropdown = model_dropdown
         
-        # Download button
+        # Download button (will show size)
         self._ollama_download_btn = ctk.CTkButton(
             right_frame,
             text="Download",
@@ -4993,16 +5263,63 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_hover"],
             text_color=COLORS["text_bright"],
-            width=90,
+            width=120,
             height=32,
             command=self._download_selected_ollama_model,
         )
         self._ollama_download_btn.pack(side="left")
         
-        # Update button state
+        # Row 2: Model info panel
+        self._ollama_info_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_hover"], corner_radius=6)
+        self._ollama_info_frame.pack(fill="x", pady=(4, 6))
+        
+        info_inner = ctk.CTkFrame(self._ollama_info_frame, fg_color="transparent")
+        info_inner.pack(fill="x", padx=10, pady=8)
+        
+        # Description label
+        self._ollama_desc_label = ctk.CTkLabel(
+            info_inner,
+            text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+            anchor="w",
+            justify="left",
+        )
+        self._ollama_desc_label.pack(anchor="w")
+        
+        # Stats row (size, speed, accuracy)
+        stats_frame = ctk.CTkFrame(info_inner, fg_color="transparent")
+        stats_frame.pack(fill="x", pady=(4, 0))
+        
+        self._ollama_size_label = ctk.CTkLabel(
+            stats_frame,
+            text="",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._ollama_size_label.pack(side="left")
+        
+        self._ollama_speed_label = ctk.CTkLabel(
+            stats_frame,
+            text="",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._ollama_speed_label.pack(side="left", padx=(16, 0))
+        
+        self._ollama_accuracy_label = ctk.CTkLabel(
+            stats_frame,
+            text="",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._ollama_accuracy_label.pack(side="left", padx=(16, 0))
+        
+        # Update info panel and button state
+        self._update_ollama_info_panel()
         self._update_ollama_download_button()
         
-        # Row 2: Progress bar (hidden by default)
+        # Row 3: Progress bar (hidden by default)
         self._ollama_progress_frame = ctk.CTkFrame(parent, fg_color="transparent")
         self._ollama_progress_frame.pack(fill="x", pady=(0, 6))
         self._ollama_progress_frame.pack_forget()  # Hide initially
@@ -5024,7 +5341,7 @@ class WayfinderApp(ctk.CTk):
         )
         self._ollama_status_label.pack(anchor="w")
         
-        # Row 3: Ollama status
+        # Row 4: Ollama status
         status_row = ctk.CTkFrame(parent, fg_color="transparent")
         status_row.pack(fill="x")
         
@@ -5071,6 +5388,7 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚙ LLM Model: {data['info']['name']}")
         
         self._update_llamacpp_download_button()
+        self._update_llamacpp_info_panel()
     
     def _on_ollama_model_selected(self, selection: str) -> None:
         """Handle Ollama model selection from dropdown."""
@@ -5084,6 +5402,7 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⚙ Ollama Model: {data['name']}")
         
         self._update_ollama_download_button()
+        self._update_ollama_info_panel()
     
     def _update_llamacpp_download_button(self) -> None:
         """Update download button state based on selected model."""
@@ -5093,6 +5412,7 @@ class WayfinderApp(ctk.CTk):
         selection = self._llamacpp_model_var.get()
         if selection in self._llamacpp_model_data:
             data = self._llamacpp_model_data[selection]
+            size = data["info"].get("size", "")
             if data["installed"]:
                 self._llamacpp_download_btn.configure(
                     text="✓ Installed",
@@ -5101,12 +5421,38 @@ class WayfinderApp(ctk.CTk):
                     state="disabled",
                 )
             else:
+                btn_text = f"Download ({size})" if size else "Download"
                 self._llamacpp_download_btn.configure(
-                    text="Download",
+                    text=btn_text,
                     fg_color=COLORS["accent"],
                     hover_color=COLORS["accent_hover"],
                     state="normal",
                 )
+    
+    def _update_llamacpp_info_panel(self) -> None:
+        """Update the model info panel based on selected model."""
+        if not hasattr(self, '_llamacpp_model_var') or not hasattr(self, '_llamacpp_desc_label'):
+            return
+        
+        selection = self._llamacpp_model_var.get()
+        if selection in self._llamacpp_model_data:
+            data = self._llamacpp_model_data[selection]
+            info = data["info"]
+            
+            # Update description
+            desc = info.get("description", "")
+            if info.get("recommended"):
+                desc = "⭐ " + desc
+            self._llamacpp_desc_label.configure(text=desc)
+            
+            # Update stats
+            size = info.get("size", "")
+            speed = info.get("speed", "")
+            accuracy = info.get("accuracy", "")
+            
+            self._llamacpp_size_label.configure(text=f"📦 {size}" if size else "")
+            self._llamacpp_speed_label.configure(text=f"⚡ {speed}" if speed else "")
+            self._llamacpp_accuracy_label.configure(text=f"🎯 {accuracy}" if accuracy else "")
     
     def _update_ollama_download_button(self) -> None:
         """Update download button state based on selected model."""
@@ -5116,6 +5462,9 @@ class WayfinderApp(ctk.CTk):
         selection = self._ollama_model_var.get()
         if selection in self._ollama_model_data:
             data = self._ollama_model_data[selection]
+            info = data.get("info", {})
+            size = info.get("size", "")
+            
             if data["installed"]:
                 self._ollama_download_btn.configure(
                     text="✓ Installed",
@@ -5125,8 +5474,9 @@ class WayfinderApp(ctk.CTk):
                 )
             else:
                 if self._ollama_available:
+                    btn_text = f"Download ({size})" if size else "Download"
                     self._ollama_download_btn.configure(
-                        text="Download",
+                        text=btn_text,
                         fg_color=COLORS["accent"],
                         hover_color=COLORS["accent_hover"],
                         state="normal",
@@ -5138,6 +5488,29 @@ class WayfinderApp(ctk.CTk):
                         hover_color=COLORS["bg_hover"],
                         state="disabled",
                     )
+    
+    def _update_ollama_info_panel(self) -> None:
+        """Update the model info panel based on selected model."""
+        if not hasattr(self, '_ollama_model_var') or not hasattr(self, '_ollama_desc_label'):
+            return
+        
+        selection = self._ollama_model_var.get()
+        if selection in self._ollama_model_data:
+            data = self._ollama_model_data[selection]
+            info = data.get("info", {})
+            
+            # Update description
+            desc = info.get("description", "")
+            self._ollama_desc_label.configure(text=desc)
+            
+            # Update stats
+            size = info.get("size", "")
+            speed = info.get("speed", "")
+            accuracy = info.get("accuracy", "")
+            
+            self._ollama_size_label.configure(text=f"📦 {size}" if size else "")
+            self._ollama_speed_label.configure(text=f"⚡ {speed}" if speed else "")
+            self._ollama_accuracy_label.configure(text=f"🎯 {accuracy}" if accuracy else "")
     
     def _download_selected_llamacpp_model(self) -> None:
         """Download the currently selected llama.cpp model."""
