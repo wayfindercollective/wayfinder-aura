@@ -155,3 +155,4 @@ flatpak run io.github.user.WayfinderVoice 2>&1 | tee app.log
 
 
 
+

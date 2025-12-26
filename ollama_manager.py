@@ -266,15 +266,36 @@ class OllamaManager:
         
         def start_thread():
             try:
-                # Start ollama serve in background
+                # Start ollama serve in background with proper pipe handling
+                # Use PIPE for stderr to detect errors, but don't block on it
                 self._service_process = subprocess.Popen(
                     [binary, "serve"],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,  # Detach from parent process group
                 )
                 
-                # Wait for service to become available
+                # Wait for service to become available with early exit on process death
                 for i in range(30):  # Wait up to 30 seconds
+                    # Check if process died
+                    poll_result = self._service_process.poll()
+                    if poll_result is not None:
+                        # Process exited - try to read stderr for error message
+                        try:
+                            stderr_output = self._service_process.stderr.read().decode('utf-8', errors='ignore')
+                            if "address already in use" in stderr_output.lower():
+                                # Another Ollama is already running - that's fine!
+                                if self.is_service_running():
+                                    if callback:
+                                        callback(True, "Ollama service is running")
+                                    return
+                            error_msg = stderr_output.strip()[:200] if stderr_output.strip() else f"exit code {poll_result}"
+                        except Exception:
+                            error_msg = f"exit code {poll_result}"
+                        if callback:
+                            callback(False, f"Ollama failed to start: {error_msg}")
+                        return
+                    
                     time.sleep(1)
                     if self.is_service_running():
                         if callback:
@@ -444,5 +465,6 @@ def get_ollama_manager() -> OllamaManager:
     if _manager is None:
         _manager = OllamaManager()
     return _manager
+
 
 

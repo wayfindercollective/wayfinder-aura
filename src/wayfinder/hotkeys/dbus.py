@@ -154,3 +154,4 @@ def wayland_hotkey_listener(
         log(f"⚠️ Wayland hotkey setup failed: {e}")
         return False
 
+

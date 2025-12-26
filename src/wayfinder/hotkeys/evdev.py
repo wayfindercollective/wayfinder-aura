@@ -174,3 +174,4 @@ def hotkey_listener(
     except Exception as e:
         log(f"⚠️ Hotkey error: {e}")
 
+

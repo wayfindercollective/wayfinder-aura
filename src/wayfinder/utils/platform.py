@@ -106,3 +106,4 @@ def get_text_injector() -> str:
             return "ydotool"
     return "none"
 
+

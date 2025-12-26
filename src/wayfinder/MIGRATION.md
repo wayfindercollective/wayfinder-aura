@@ -75,3 +75,4 @@ PYTHONPATH=src python -c "from wayfinder.core import AudioRecorder; print('OK')"
 python -c "from recorder import AudioRecorder; print('OK')"
 ```
 
+

@@ -875,6 +875,7 @@ class BenchmarkRunner:
                                audio_file: str, use_gpu: bool, timeout: int = 30) -> float | None:
         """Run a single transcription and return time in seconds."""
         import subprocess
+        import signal
         
         cmd = [
             whisper_cli,
@@ -890,22 +891,49 @@ class BenchmarkRunner:
         if not use_gpu:
             cmd.append("--no-gpu")
         
+        proc = None
         try:
             start = time.perf_counter()
-            result = subprocess.run(cmd, capture_output=True, timeout=timeout)
-            elapsed = time.perf_counter() - start
+            # Use Popen with start_new_session for reliable process group termination
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,  # Create new process group for clean kill
+            )
             
-            if result.returncode == 0:
-                return elapsed
-            else:
-                stderr = result.stderr.decode('utf-8', errors='replace')[:100]
-                self.log_callback(f"   ⚠️ Exit code {result.returncode}: {stderr}")
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+                elapsed = time.perf_counter() - start
+                
+                if proc.returncode == 0:
+                    return elapsed
+                else:
+                    stderr_text = stderr.decode('utf-8', errors='replace')[:100]
+                    self.log_callback(f"   ⚠️ Exit code {proc.returncode}: {stderr_text}")
+                    return None
+                    
+            except subprocess.TimeoutExpired:
+                # Kill the entire process group to ensure whisper-cli is terminated
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass  # Process already dead
+                proc.wait()  # Reap the zombie process
+                self.log_callback(f"   ⚠️ Timed out after {timeout}s")
                 return None
-            
-        except subprocess.TimeoutExpired:
-            self.log_callback(f"   ⚠️ Timed out after {timeout}s")
-            return None
+                
         except Exception as e:
+            # Clean up if process was started
+            if proc is not None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    proc.wait()
+                except:
+                    pass
             self.log_callback(f"   ⚠️ Error: {e}")
             return None
     
@@ -2743,6 +2771,9 @@ class WayfinderApp(ctk.CTk):
         # Don't start minimized for now so user can see UI
         # if self.config.get("start_minimized", True):
         #     self.after(100, self.hide_to_tray)
+        
+        # Auto-start Ollama if backend is ollama and it's installed but not running
+        self.after(500, self._auto_start_ollama_if_needed)
 
     # Consistent base dimensions for the window
     BASE_WINDOW_WIDTH = 480
@@ -5410,13 +5441,15 @@ class WayfinderApp(ctk.CTk):
         
         try:
             import requests
-            response = requests.get(f"{base_url}/api/tags", timeout=2)
+            response = requests.get(f"{base_url}/api/tags", timeout=5)  # Increased timeout
             ollama_available = response.status_code == 200
             if ollama_available:
                 models_data = response.json().get("models", [])
                 available_models = [m.get("name", "") for m in models_data if m.get("name")]
-        except:
+                self.log(f"📋 Ollama models found: {len(available_models)}")
+        except Exception as e:
             ollama_available = False
+            self.log(f"⚠️ Could not reach Ollama: {str(e)[:50]}")
         
         # Recommended models with full info
         recommended_models = [
@@ -5426,13 +5459,25 @@ class WayfinderApp(ctk.CTk):
             {"name": "smollm2:360m"},
         ]
         
+        # Helper to check if a model is installed (handles version tag variations)
+        def is_model_installed(model_name: str, available: list) -> bool:
+            # Exact match first
+            if model_name in available:
+                return True
+            # Check base name match (e.g., "smollm2:360m" matches "smollm2:360m-fp16")
+            base_name = model_name.split(":")[0]
+            for avail in available:
+                if avail.startswith(model_name) or avail.split(":")[0] == base_name:
+                    return True
+            return False
+        
         # Build model options with install status
         model_options = []
         model_data = {}
         
         for model_item in recommended_models:
             model_name = model_item["name"]
-            is_installed = model_name in available_models
+            is_installed = is_model_installed(model_name, available_models)
             is_selected = model_name == current_model
             
             # Get info from OLLAMA_MODEL_INFO
@@ -5692,6 +5737,21 @@ class WayfinderApp(ctk.CTk):
             )
             start_btn.pack(side="right", padx=(0, 8))
             ToolTip(start_btn, "Start the Ollama service in the background")
+        else:
+            # Ollama is running - show Test button
+            test_btn = ctk.CTkButton(
+                action_frame,
+                text="Test Model",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                fg_color=COLORS["bg_hover"],
+                hover_color=COLORS["accent_dim"],
+                text_color=COLORS["text_secondary"],
+                width=80,
+                height=24,
+                command=self._test_ollama_model,
+            )
+            test_btn.pack(side="right", padx=(0, 8))
+            ToolTip(test_btn, "Test the selected model with a sample transcription")
     
     def _on_llamacpp_model_selected(self, selection: str) -> None:
         """Handle llama.cpp model selection from dropdown."""
@@ -6110,6 +6170,115 @@ class WayfinderApp(ctk.CTk):
         
         ollama_mgr.install(progress_callback=on_progress, complete_callback=on_complete)
     
+    def _auto_start_ollama_if_needed(self) -> None:
+        """Auto-start Ollama on app boot if needed for post-processing."""
+        # Only auto-start if using ollama backend for post-processing
+        backend = self.config.get("post_processing_backend", "llama_cpp")
+        if backend != "ollama":
+            return
+        
+        ollama_mgr = get_ollama_manager()
+        
+        # Skip if already running
+        if ollama_mgr.is_service_running():
+            return
+        
+        # Skip if not installed
+        if not ollama_mgr.is_installed():
+            return
+        
+        # Auto-start in background
+        self.log("🚀 Auto-starting Ollama service...")
+        
+        def on_service_status(success: bool, message: str):
+            def update():
+                if success:
+                    self.log(f"✓ {message}")
+                    # Refresh the post-processing UI to show updated status
+                    self._rebuild_postproc_section()
+                else:
+                    self.log(f"⚠️ {message}")
+            self.after(0, update)
+        
+        ollama_mgr.start_service(callback=on_service_status)
+    
+    def _test_ollama_model(self) -> None:
+        """Test the selected Ollama model with a sample transcription."""
+        import threading
+        
+        model_name = self.config.get("ollama_model", "phi3:mini")
+        base_url = self.config.get("ollama_base_url", "http://localhost:11434")
+        
+        # Update status to show testing
+        if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+            self._ollama_status_text.configure(
+                text=f"Testing {model_name}...",
+                text_color=COLORS["text_secondary"]
+            )
+        self.log(f"🧪 Testing model: {model_name}")
+        
+        def test_thread():
+            import time
+            start_time = time.time()
+            test_input = "hello how r u doing today i hope ur having a good day"
+            expected_fixes = ["Hello", "you", "your", "I"]  # Words that should appear
+            
+            try:
+                import requests
+                response = requests.post(
+                    f"{base_url}/api/generate",
+                    json={
+                        "model": model_name,
+                        "prompt": f"Fix spelling and grammar in this transcription, output only the corrected text: \"{test_input}\"",
+                        "stream": False,
+                        "options": {"temperature": 0.1, "num_predict": 100}
+                    },
+                    timeout=30,
+                )
+                
+                elapsed = time.time() - start_time
+                
+                if response.status_code != 200:
+                    raise Exception(f"HTTP {response.status_code}")
+                
+                data = response.json()
+                result = data.get("response", "").strip()
+                
+                # Check if model produced reasonable output
+                if not result:
+                    raise Exception("Empty response from model")
+                
+                # Check for expected corrections
+                fixes_found = sum(1 for word in expected_fixes if word.lower() in result.lower())
+                quality = "excellent" if fixes_found >= 3 else "good" if fixes_found >= 2 else "basic"
+                
+                def on_success():
+                    if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+                        self._ollama_status_text.configure(
+                            text=f"✓ Model working ({elapsed:.2f}s, {quality})",
+                            text_color=COLORS["accent"]
+                        )
+                    self.log(f"✓ Test passed in {elapsed:.2f}s")
+                    self.log(f"   Input:  \"{test_input}\"")
+                    self.log(f"   Output: \"{result[:80]}{'...' if len(result) > 80 else ''}\"")
+                
+                self.after(0, on_success)
+                
+            except Exception as e:
+                error_msg = str(e)[:50]
+                
+                def on_error():
+                    if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+                        self._ollama_status_text.configure(
+                            text=f"✗ Test failed: {error_msg}",
+                            text_color="#CF7B7B"
+                        )
+                    self.log(f"❌ Model test failed: {error_msg}")
+                
+                self.after(0, on_error)
+        
+        threading.Thread(target=test_thread, daemon=True).start()
+    
     def _start_ollama_service(self) -> None:
         """Start the Ollama service."""
         ollama_mgr = get_ollama_manager()
@@ -6125,17 +6294,26 @@ class WayfinderApp(ctk.CTk):
             self.log("❌ Ollama is not installed")
             return
         
-        # Update UI
-        self._ollama_status_text.configure(text="Starting Ollama...", text_color=COLORS["text_secondary"])
+        # Update UI safely (element may not exist)
+        if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+            self._ollama_status_text.configure(text="Starting Ollama...", text_color=COLORS["text_secondary"])
         self.log("🚀 Starting Ollama service...")
         
         def on_service_status(success: bool, message: str):
             def update():
+                # Safely update UI - widget may have been destroyed by rebuild
+                try:
+                    if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+                        if success:
+                            self._ollama_status_text.configure(text="✓ " + message, text_color=COLORS["accent"])
+                        else:
+                            self._ollama_status_text.configure(text="❌ " + message, text_color="#CF7B7B")
+                except Exception:
+                    pass  # Widget was destroyed, ignore
+                
                 if success:
-                    self._ollama_status_text.configure(text="✓ " + message, text_color=COLORS["accent"])
                     self.log(f"✓ {message}")
                 else:
-                    self._ollama_status_text.configure(text="❌ " + message, text_color="#CF7B7B")
                     self.log(f"❌ {message}")
                 # Rebuild UI to show model selection
                 self.after(500, self._rebuild_postproc_section)
@@ -6229,12 +6407,16 @@ class WayfinderApp(ctk.CTk):
             start_time = time_module.time()
             last_completed = 0
             last_time = start_time
+            first_update = True  # Track first update to ensure immediate feedback
             
             try:
                 import requests
                 import json
                 debug_log(f"Making request to {base_url}/api/pull")
                 self.log(f"⬇️ Downloading {model_name} via Ollama...")
+                
+                # Immediately show we're connecting
+                self.after(0, lambda: update_progress(0.05, "Connecting to Ollama..."))
                 
                 # Use Ollama's pull API
                 response = requests.post(
@@ -6250,6 +6432,7 @@ class WayfinderApp(ctk.CTk):
                 
                 last_status = ""
                 line_count = 0
+                
                 for line in response.iter_lines():
                     line_count += 1
                     if line_count <= 3 or line_count % 50 == 0:
@@ -6263,6 +6446,19 @@ class WayfinderApp(ctk.CTk):
                             data = json.loads(line)
                             status = data.get("status", "")
                             
+                            # Handle different status types
+                            if status == "success":
+                                # Download complete!
+                                self.after(0, lambda: update_progress(1.0, "✓ Download complete"))
+                                continue
+                            elif status in ("verifying sha256 digest", "writing manifest"):
+                                # Final stages
+                                self.after(0, lambda s=status: update_progress(0.95, f"Finalizing: {s}"))
+                                continue
+                            elif status == "pulling manifest":
+                                self.after(0, lambda: update_progress(0.1, "Fetching model info..."))
+                                continue
+                            
                             if "total" in data and "completed" in data:
                                 total = data["total"]
                                 completed = data["completed"]
@@ -6271,41 +6467,47 @@ class WayfinderApp(ctk.CTk):
                                 if total > 0:
                                     progress = completed / total
                                     
-                                    # Calculate speed
+                                    # Check if this layer is already complete (model cached)
+                                    is_cached = completed == total
+                                    
+                                    # Calculate speed (or show "cached" for instant completion)
                                     time_delta = current_time - last_time
-                                    if time_delta > 0.5:  # Update speed every 500ms
-                                        bytes_delta = completed - last_completed
-                                        speed = bytes_delta / time_delta if time_delta > 0 else 0
-                                        last_completed = completed
-                                        last_time = current_time
+                                    if first_update or time_delta > 0.3:  # Always update on first, then every 300ms
+                                        first_update = False
                                         
-                                        # Calculate ETA
-                                        remaining = total - completed
-                                        eta = remaining / speed if speed > 0 else 0
-                                        
-                                        speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed > 0 else ""
-                                        eta_str = ""
-                                        if eta > 0 and eta < 86400:
-                                            if eta < 60:
-                                                eta_str = f"ETA {int(eta)}s"
-                                            elif eta < 3600:
-                                                eta_str = f"ETA {int(eta//60)}m {int(eta%60)}s"
-                                            else:
-                                                eta_str = f"ETA {int(eta//3600)}h {int((eta%3600)//60)}m"
-                                        
-                                        progress_text = f"{status} • {format_size(completed)} / {format_size(total)} ({progress*100:.0f}%)"
-                                        if speed_str:
-                                            progress_text += f" • {speed_str}"
-                                        if eta_str:
-                                            progress_text += f" • {eta_str}"
+                                        if is_cached:
+                                            # Model layer already cached
+                                            progress_text = f"Verifying: {format_size(total)} (cached)"
+                                        else:
+                                            bytes_delta = completed - last_completed
+                                            speed = bytes_delta / time_delta if time_delta > 0 else 0
+                                            last_completed = completed
+                                            last_time = current_time
+                                            
+                                            # Calculate ETA
+                                            remaining = total - completed
+                                            eta = remaining / speed if speed > 0 else 0
+                                            
+                                            speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed > 0 else ""
+                                            eta_str = ""
+                                            if eta > 0 and eta < 86400:
+                                                if eta < 60:
+                                                    eta_str = f"~{int(eta)}s left"
+                                                elif eta < 3600:
+                                                    eta_str = f"~{int(eta//60)}m left"
+                                                else:
+                                                    eta_str = f"~{int(eta//3600)}h left"
+                                            
+                                            progress_text = f"{format_size(completed)} / {format_size(total)} ({progress*100:.0f}%)"
+                                            if speed_str:
+                                                progress_text += f" • {speed_str}"
+                                            if eta_str:
+                                                progress_text += f" • {eta_str}"
                                         
                                         self.after(0, lambda p=progress, s=progress_text: update_progress(p, s))
-                                    else:
-                                        # Just update progress bar without speed
-                                        progress_text = f"{status} • {format_size(completed)} / {format_size(total)} ({progress*100:.0f}%)"
-                                        self.after(0, lambda p=progress, s=progress_text: update_progress(p, s))
-                            elif status != last_status:
+                            elif status and status != last_status:
                                 last_status = status
+                                # Show status updates
                                 self.after(0, lambda s=status: update_progress(0.3, s))
                         except json.JSONDecodeError:
                             pass
@@ -11062,89 +11264,48 @@ class WayfinderApp(ctk.CTk):
         # #endregion
 
     def get_tray_icon(self, state: AppState, pulse_scale: float = 1.0) -> Image.Image:
-        """Create a Wayfinder Arrow + Waves tray icon.
+        """Get the tray icon using the actual app icon.
         
-        Designer spec: Solid white glyph (navigation arrow + radio waves) on 
-        transparent background. Recording state animates the waves in red.
+        Uses the icon.png file and applies color tinting based on state.
         """
         size = 64
         
-        # Create transparent background
-        icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(icon)
-        
-        # Color based on state
-        if state == AppState.RECORDING:
-            # Active Red for recording (#FF4D4D from designer spec)
-            glyph_color = (255, 77, 77, 255)
-            wave_color = (255, 77, 77, int(180 + 75 * pulse_scale))  # Pulsing alpha
-        elif state == AppState.PROCESSING:
-            # Muted gold for processing
-            glyph_color = (229, 172, 42, 255)
-            wave_color = (229, 172, 42, 200)
-        elif state == AppState.PASTING:
-            # Muted mint for typing
-            glyph_color = (93, 212, 168, 255)
-            wave_color = (93, 212, 168, 200)
-        else:  # IDLE
-            # Solid white for ready state
-            glyph_color = (255, 255, 255, 255)
-            wave_color = (255, 255, 255, 180)
-        
-        # === Draw Navigation Arrow (pointing upper-right, like compass/location) ===
-        # Arrow is a filled triangle pointing to upper-right
-        # Centered-left to leave room for waves on right
-        arrow_points = [
-            (10, 48),   # Bottom-left
-            (38, 10),   # Top-right (tip)
-            (24, 38),   # Inner notch
-            (10, 48),   # Back to start
-        ]
-        draw.polygon(arrow_points, fill=glyph_color)
-        
-        # Add a small notch/cutout to make it look like a cursor/arrow
-        notch_points = [
-            (18, 40),
-            (26, 32),
-            (22, 44),
-        ]
-        draw.polygon(notch_points, fill=(0, 0, 0, 0))
-        
-        # === Draw Radio Waves (3 curved arcs emanating from arrow tip) ===
-        # Waves expand from upper-right of arrow
-        wave_center = (36, 12)
-        
-        # Calculate wave sizes based on pulse_scale for recording animation
-        if state == AppState.RECORDING:
-            # Animate waves expanding outward
-            base_offset = pulse_scale * 4  # Waves expand during pulse
-            wave_radii = [
-                (8 + base_offset, 12 + base_offset),
-                (14 + base_offset, 20 + base_offset),
-                (22 + base_offset, 30 + base_offset),
-            ]
-            # Fade waves based on distance
-            wave_alphas = [
-                int(255 * (0.5 + 0.5 * pulse_scale)),
-                int(200 * (0.3 + 0.7 * pulse_scale)),
-                int(150 * (0.1 + 0.9 * pulse_scale)),
-            ]
+        # Use the actual icon file if available
+        if self.custom_icon:
+            icon = self.custom_icon.copy().convert("RGBA")
         else:
-            wave_radii = [(8, 12), (14, 20), (22, 30)]
-            wave_alphas = [180, 140, 100]
+            # Fallback: try loading from ICON_PATH
+            if ICON_PATH.exists():
+                try:
+                    icon = Image.open(ICON_PATH).resize((size, size)).convert("RGBA")
+                except:
+                    # Ultimate fallback: create a simple placeholder
+                    icon = Image.new("RGBA", (size, size), (100, 100, 200, 255))
+            else:
+                icon = Image.new("RGBA", (size, size), (100, 100, 200, 255))
         
-        import math
-        for i, ((r_inner, r_outer), alpha) in enumerate(zip(wave_radii, wave_alphas)):
-            wave_col = (wave_color[0], wave_color[1], wave_color[2], min(255, alpha))
-            # Draw arc (approximate with thick line arc)
-            # Arc from 315° to 45° (upper-right quadrant)
-            for angle in range(-45, 46, 5):
-                rad = math.radians(angle)
-                x1 = wave_center[0] + r_inner * math.cos(rad)
-                y1 = wave_center[1] - r_inner * math.sin(rad)
-                x2 = wave_center[0] + r_outer * math.cos(rad)
-                y2 = wave_center[1] - r_outer * math.sin(rad)
-                draw.line([(x1, y1), (x2, y2)], fill=wave_col, width=2)
+        # For IDLE state, use the icon as-is (normal blue appearance)
+        if state == AppState.IDLE:
+            return icon
+        
+        # Apply color overlay for different states
+        if state == AppState.RECORDING:
+            # Red tint for recording - pulsing intensity
+            overlay_color = (255, 60, 60, int(80 + 40 * pulse_scale))
+        elif state == AppState.PROCESSING:
+            # Gold tint for processing
+            overlay_color = (255, 200, 50, 100)
+        elif state == AppState.PASTING:
+            # Green tint for pasting/typing
+            overlay_color = (50, 220, 150, 100)
+        else:
+            return icon
+        
+        # Create color overlay and blend with original icon
+        overlay = Image.new("RGBA", icon.size, overlay_color)
+        
+        # Composite: blend overlay onto icon
+        icon = Image.alpha_composite(icon, overlay)
         
         return icon
 

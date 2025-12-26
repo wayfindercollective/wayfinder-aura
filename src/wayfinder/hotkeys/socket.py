@@ -95,3 +95,4 @@ def send_toggle():
     except Exception:
         return False
 
+
