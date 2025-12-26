@@ -6205,6 +6205,7 @@ class WayfinderApp(ctk.CTk):
     def _test_ollama_model(self) -> None:
         """Test the selected Ollama model with a sample transcription."""
         import threading
+        import time
         
         model_name = self.config.get("ollama_model", "phi3:mini")
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
@@ -6215,97 +6216,136 @@ class WayfinderApp(ctk.CTk):
             return
         self._ollama_test_running = True
         
-        # Helper to safely update status text
+        # Helper to safely update status text on main thread
         def update_status(text: str, color: str):
-            try:
-                if hasattr(self, '_ollama_status_text'):
-                    widget = self._ollama_status_text
-                    if widget and widget.winfo_exists():
-                        widget.configure(text=text, text_color=color)
-            except Exception:
-                pass  # Widget destroyed, ignore
+            def do_update():
+                try:
+                    if hasattr(self, '_ollama_status_text'):
+                        widget = self._ollama_status_text
+                        if widget and widget.winfo_exists():
+                            widget.configure(text=text, text_color=color)
+                            self.update_idletasks()  # Force immediate redraw
+                except Exception:
+                    pass  # Widget destroyed, ignore
+            self.after(0, do_update)
         
-        # Update status to show testing
-        update_status(f"🧪 Testing {model_name}...", COLORS["text_secondary"])
+        # Update status immediately
+        update_status(f"🧪 Connecting to Ollama...", COLORS["text_secondary"])
         self.log(f"🧪 Testing model: {model_name}")
         
         def test_thread():
-            import time
             start_time = time.time()
-            test_input = "hello how r u doing today i hope ur having a good day"
-            expected_fixes = ["Hello", "you", "your", "I"]  # Words that should appear
+            test_input = "hello how r u doing today"
             result = ""
             
             try:
                 import requests
+                import json
                 
-                # First check if model exists
+                # Step 1: Check Ollama is running
+                update_status("🧪 Checking Ollama...", COLORS["text_secondary"])
+                self.after(0, lambda: self.log("   Step 1: Checking Ollama connection..."))
+                
                 try:
                     tags_response = requests.get(f"{base_url}/api/tags", timeout=5)
-                    if tags_response.status_code == 200:
-                        models = [m.get("name", "") for m in tags_response.json().get("models", [])]
-                        model_exists = any(model_name in m or m.startswith(model_name.split(":")[0]) for m in models)
-                        if not model_exists:
-                            raise Exception(f"Model '{model_name}' not installed")
-                except requests.exceptions.RequestException:
-                    raise Exception("Cannot connect to Ollama")
+                    if tags_response.status_code != 200:
+                        raise Exception(f"Ollama returned HTTP {tags_response.status_code}")
+                except requests.exceptions.ConnectionError:
+                    raise Exception("Cannot connect to Ollama - is it running?")
+                except requests.exceptions.Timeout:
+                    raise Exception("Ollama connection timed out")
                 
-                # Run the test
+                # Step 2: Check model exists
+                update_status(f"🧪 Checking model...", COLORS["text_secondary"])
+                self.after(0, lambda: self.log("   Step 2: Verifying model exists..."))
+                
+                models = [m.get("name", "") for m in tags_response.json().get("models", [])]
+                model_base = model_name.split(":")[0]
+                model_exists = any(model_name == m or m.startswith(model_base) for m in models)
+                
+                if not model_exists:
+                    available = ", ".join(models[:3]) if models else "none"
+                    raise Exception(f"Model '{model_name}' not found. Available: {available}")
+                
+                # Step 3: Run inference with streaming for feedback
+                update_status(f"🧪 Running inference...", COLORS["text_secondary"])
+                self.after(0, lambda: self.log("   Step 3: Running inference test..."))
+                
+                # Use streaming to show progress
                 response = requests.post(
                     f"{base_url}/api/generate",
                     json={
                         "model": model_name,
-                        "prompt": f"Fix spelling and grammar in this transcription, output only the corrected text: \"{test_input}\"",
-                        "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 100}
+                        "prompt": f"Correct this text: \"{test_input}\"",
+                        "stream": True,  # Stream for better feedback
+                        "options": {"temperature": 0.1, "num_predict": 50}
                     },
-                    timeout=60,  # Increased timeout for slower models
+                    stream=True,
+                    timeout=(10, 30),  # 10s connect, 30s read
                 )
                 
+                if response.status_code != 200:
+                    raise Exception(f"Inference failed: HTTP {response.status_code}")
+                
+                # Collect streamed response
+                result_parts = []
+                token_count = 0
+                for line in response.iter_lines():
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if "response" in data:
+                                result_parts.append(data["response"])
+                                token_count += 1
+                                if token_count % 5 == 0:  # Update every 5 tokens
+                                    update_status(f"🧪 Generating... ({token_count} tokens)", COLORS["text_secondary"])
+                            if data.get("done", False):
+                                break
+                        except json.JSONDecodeError:
+                            pass
+                
+                result = "".join(result_parts).strip()
                 elapsed = time.time() - start_time
                 
-                if response.status_code != 200:
-                    error_detail = ""
-                    try:
-                        error_detail = response.json().get("error", "")
-                    except Exception:
-                        pass
-                    raise Exception(f"HTTP {response.status_code}: {error_detail}" if error_detail else f"HTTP {response.status_code}")
-                
-                data = response.json()
-                result = data.get("response", "").strip()
-                
-                # Check if model produced reasonable output
                 if not result:
                     raise Exception("Model returned empty response")
                 
-                # Check for expected corrections
-                fixes_found = sum(1 for word in expected_fixes if word.lower() in result.lower())
-                quality = "excellent" if fixes_found >= 3 else "good" if fixes_found >= 2 else "basic"
-                quality_emoji = "🌟" if quality == "excellent" else "👍" if quality == "good" else "📝"
-                
+                # Success!
                 def on_success():
                     self._ollama_test_running = False
-                    update_status(f"✓ Working • {elapsed:.1f}s • {quality_emoji} {quality}", COLORS["accent"])
-                    self.log(f"✓ Test passed in {elapsed:.2f}s ({quality} quality)")
+                    try:
+                        if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+                            self._ollama_status_text.configure(
+                                text=f"✓ Working • {elapsed:.1f}s • {token_count} tokens",
+                                text_color=COLORS["accent"]
+                            )
+                            self.update_idletasks()
+                    except Exception:
+                        pass
+                    self.log(f"✓ Test passed in {elapsed:.2f}s")
                     self.log(f"   Input:  \"{test_input}\"")
-                    self.log(f"   Output: \"{result[:100]}{'...' if len(result) > 100 else ''}\"")
+                    self.log(f"   Output: \"{result[:80]}{'...' if len(result) > 80 else ''}\"")
                 
                 self.after(0, on_success)
                 
             except Exception as e:
                 elapsed = time.time() - start_time
                 error_msg = str(e)
-                # Truncate long error messages
-                if len(error_msg) > 60:
-                    error_msg = error_msg[:57] + "..."
+                if len(error_msg) > 50:
+                    error_msg = error_msg[:47] + "..."
                 
                 def on_error():
                     self._ollama_test_running = False
-                    update_status(f"✗ {error_msg}", "#CF7B7B")
-                    self.log(f"❌ Model test failed: {str(e)}")
-                    if result:
-                        self.log(f"   Partial output: \"{result[:50]}...\"")
+                    try:
+                        if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+                            self._ollama_status_text.configure(
+                                text=f"✗ {error_msg}",
+                                text_color="#CF7B7B"
+                            )
+                            self.update_idletasks()
+                    except Exception:
+                        pass
+                    self.log(f"❌ Test failed after {elapsed:.1f}s: {str(e)}")
                 
                 self.after(0, on_error)
         
