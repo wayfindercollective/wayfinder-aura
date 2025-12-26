@@ -15,45 +15,72 @@ pip install -r requirements.txt
 
 # Run in development mode
 python main.py
+
+# Or use the package directly
+PYTHONPATH=src python -m wayfinder
 ```
 
-## Code Structure
+## Project Structure
 
-### main.py (Core Application)
+The project is organized as a Python package for better maintainability:
 
-The main file contains:
+```
+wayfinder-voice/
+├── src/wayfinder/          # Main package (modular, agent-friendly)
+│   ├── __init__.py         # Package init
+│   ├── __main__.py         # Entry point for python -m wayfinder
+│   ├── app.py              # Main exports bridge
+│   ├── config.py           # Configuration (defaults, load/save)
+│   ├── state.py            # State machine (IDLE → RECORDING → PROCESSING)
+│   ├── core/               # Core functionality
+│   │   ├── recorder.py     # Audio recording (sounddevice)
+│   │   ├── transcriber.py  # Speech-to-text (whisper.cpp, etc.)
+│   │   ├── injector.py     # Text injection (ydotool)
+│   │   ├── postprocessor.py # LLM post-processing
+│   │   └── ollama_manager.py # Ollama service management
+│   ├── ui/                 # User interface
+│   │   ├── theme.py        # Colors, fonts, styling
+│   │   ├── components.py   # Reusable widgets (ToolTip, etc.)
+│   │   ├── overlay.py      # Glassmorphic status overlay (PyQt6)
+│   │   └── dialogs/        # Dialog windows
+│   ├── hotkeys/            # Hotkey detection
+│   │   ├── evdev.py        # Direct input monitoring (X11)
+│   │   ├── socket.py       # Unix socket for KDE shortcuts
+│   │   └── dbus.py         # XDG GlobalShortcuts portal
+│   └── utils/              # Utilities
+│       ├── gpu.py          # GPU detection
+│       └── platform.py     # Platform-specific helpers
+├── main.py                 # Entry point (backwards compatible)
+├── wayfinder_main.py       # Legacy monolithic module (being migrated)
+├── scripts/                # Utility scripts
+│   ├── trigger_record.py   # External trigger for KDE shortcuts
+│   └── benchmark.py        # Performance benchmarking
+├── assets/                 # Icons and images
+├── flatpak/                # Flatpak packaging
+├── pyproject.toml          # Modern Python packaging
+├── requirements.txt        # Dependencies
+└── wayfinder-voice.spec    # PyInstaller spec
+```
 
-1. **Configuration** (lines 41-69): Default settings, key codes, paths
-2. **Color Scheme** (lines 107-145): Wayfinder OS-inspired palette
-3. **State Machine** (lines 100-105): IDLE → RECORDING → PROCESSING → PASTING
-4. **WayfinderApp Class** (line 463+): Main application
+## Key Modules
 
-Key methods:
-- `setup_ui()`: Builds the CustomTkinter interface
-- `setup_scaling_shortcuts()`: Ctrl+/- for UI scaling
-- `_draw_gradient_bg()`: Radial gradient background effect
-- `_draw_status_indicator()`: Ring-style status with glow
-- `update_state()`: State machine transitions
-- `poll_events()`: Event loop for hotkey/transcription events
+### src/wayfinder/config.py
+Configuration management with defaults, load/save functions.
 
-### recorder.py
+### src/wayfinder/state.py
+Application state machine: IDLE → RECORDING → PROCESSING → PASTING
 
-Audio recording using sounddevice:
-- `start()`: Begin recording to buffer
-- `stop()`: Stop and save to temp WAV file
-- `get_duration()`: Get recording length
+### src/wayfinder/core/recorder.py
+Audio recording using sounddevice with chunked recording support.
 
-### transcriber.py
+### src/wayfinder/core/transcriber.py
+Multi-backend transcription (whisper.cpp, Faster-Whisper, Groq, OpenAI).
 
-Whisper.cpp integration:
-- `transcribe_with_config()`: Run whisper-cli subprocess
-- Handles model paths, prompts, threading
+### src/wayfinder/ui/theme.py
+Design system: COLORS, FONTS, SPACING, RADIUS tokens.
 
-### injector.py
-
-Text injection for Wayland/X11:
-- Uses `ydotool` (Wayland) or `xdotool` (X11)
-- Supports typing speeds: instant, fast, normal, slow, very_slow
+### src/wayfinder/hotkeys/
+Hotkey detection for X11 (evdev), Wayland socket, and D-Bus portal.
 
 ## UI Customization
 

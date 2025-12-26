@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wayfinder-voice"
+version = "1.0.0"
+description = "Local voice dictation for Linux using whisper.cpp"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Wayfinder Voice Contributors"}
+]
+keywords = ["voice", "dictation", "whisper", "speech-to-text", "linux", "wayland"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+dependencies = [
+    "customtkinter>=5.2.0",
+    "requests>=2.28.0",
+    "PyQt6>=6.5.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "evdev>=1.6.0",
+    "pystray>=0.19.0",
+    "Pillow>=10.0.0",
+    "openai>=1.0.0",
+    "groq>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.0.0",
+]
+gpu = [
+    "faster-whisper>=1.0.0",
+]
+llm = [
+    "anthropic>=0.40.0",
+    "llama-cpp-python>=0.2.0",
+]
+
+[project.scripts]
+wayfinder-voice = "wayfinder:main"
+
+[project.gui-scripts]
+wayfinder-voice-gui = "wayfinder:main"
+
+[project.urls]
+Homepage = "https://github.com/user/wayfinder-voice"
+Repository = "https://github.com/user/wayfinder-voice"
+Issues = "https://github.com/user/wayfinder-voice/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["wayfinder*"]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+wayfinder = ["../assets/*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__", "*.pyc"]
+

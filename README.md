@@ -99,25 +99,40 @@ Config is stored at `~/.config/wayfinder-voice/config.json`
 
 ```
 wayfinder-voice/
-├── main.py              # Main application & UI
-├── recorder.py          # Audio recording (sounddevice)
-├── transcriber.py       # Whisper.cpp integration
-├── injector.py          # Text injection (ydotool/xdotool)
-├── trigger_record.py    # External trigger script
-├── launch-wayfinder-voice.sh  # Launcher script
-├── wayfinder-voice.desktop    # Desktop entry file
-├── wayfinder-voice.spec       # PyInstaller spec
-├── build.sh             # Build script
+├── src/wayfinder/           # Main package (modular structure)
+│   ├── config.py            # Configuration management
+│   ├── state.py             # State machine
+│   ├── core/                # Core functionality
+│   │   ├── recorder.py      # Audio recording
+│   │   ├── transcriber.py   # Speech-to-text
+│   │   ├── injector.py      # Text injection
+│   │   └── postprocessor.py # LLM post-processing
+│   ├── ui/                  # User interface
+│   │   ├── theme.py         # Design system
+│   │   ├── components.py    # Reusable widgets
+│   │   └── overlay.py       # Status overlay
+│   ├── hotkeys/             # Hotkey detection
+│   │   ├── evdev.py         # X11 input
+│   │   ├── socket.py        # Unix socket
+│   │   └── dbus.py          # Wayland portal
+│   └── utils/               # Utilities
+│       ├── gpu.py           # GPU detection
+│       └── platform.py      # Platform helpers
+├── main.py                  # Entry point
+├── wayfinder_main.py        # Legacy main (being migrated)
+├── scripts/                 # Utility scripts
+│   └── trigger_record.py    # External trigger
 ├── assets/
-│   └── icon.png         # App icon
-└── requirements.txt     # Python dependencies
+│   └── icon.png             # App icon
+├── pyproject.toml           # Modern Python packaging
+└── requirements.txt         # Dependencies
 ```
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    WayfinderApp (main.py)               │
+│                    WayfinderApp                          │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │
 │  │   UI/CTk    │  │  Hotkey     │  │  System Tray    │  │
 │  │  Interface  │  │  Listener   │  │   (pystray)     │  │
@@ -126,15 +141,15 @@ wayfinder-voice/
              │
              ▼
 ┌─────────────────────────────────────────────────────────┐
-│                    State Machine                         │
+│              State Machine (wayfinder.state)            │
 │   IDLE → RECORDING → PROCESSING → PASTING → IDLE       │
 └────────────┬────────────────────────────────────────────┘
              │
      ┌───────┴───────┬───────────────┐
      ▼               ▼               ▼
 ┌─────────┐   ┌─────────────┐   ┌──────────┐
-│Recorder │   │ Transcriber │   │ Injector │
-│(sounddevice)│(whisper.cpp)│   │(ydotool) │
+│core/    │   │core/        │   │core/     │
+│recorder │   │transcriber  │   │injector  │
 └─────────┘   └─────────────┘   └──────────┘
 ```
 
@@ -184,6 +199,7 @@ MIT License - See LICENSE file
 - [whisper.cpp](https://github.com/ggerganov/whisper.cpp) - Speech recognition
 - [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) - Modern UI
 - UI Design inspired by Wayfinder OS
+
 
 
 

@@ -12,16 +12,41 @@ block_cipher = None
 
 # Get the project root
 PROJECT_ROOT = Path(SPECPATH)
+SRC_DIR = PROJECT_ROOT / 'src'
 
 a = Analysis(
     ['main.py'],
-    pathex=[str(PROJECT_ROOT)],
+    pathex=[str(PROJECT_ROOT), str(SRC_DIR)],
     binaries=[],
     datas=[
         # Include assets
         ('assets/icon.png', 'assets'),
+        # Include the wayfinder package
+        ('src/wayfinder', 'wayfinder'),
     ],
     hiddenimports=[
+        # Wayfinder package modules
+        'wayfinder',
+        'wayfinder.config',
+        'wayfinder.state',
+        'wayfinder.app',
+        'wayfinder.core',
+        'wayfinder.core.recorder',
+        'wayfinder.core.transcriber',
+        'wayfinder.core.injector',
+        'wayfinder.core.postprocessor',
+        'wayfinder.core.ollama_manager',
+        'wayfinder.ui',
+        'wayfinder.ui.theme',
+        'wayfinder.ui.components',
+        'wayfinder.ui.overlay',
+        'wayfinder.hotkeys',
+        'wayfinder.hotkeys.evdev',
+        'wayfinder.hotkeys.socket',
+        'wayfinder.hotkeys.dbus',
+        'wayfinder.utils',
+        'wayfinder.utils.gpu',
+        'wayfinder.utils.platform',
         # CustomTkinter and dependencies
         'customtkinter',
         'PIL',
