@@ -6209,12 +6209,24 @@ class WayfinderApp(ctk.CTk):
         model_name = self.config.get("ollama_model", "phi3:mini")
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
         
+        # Prevent multiple simultaneous tests
+        if getattr(self, '_ollama_test_running', False):
+            self.log("⚠️ Test already in progress")
+            return
+        self._ollama_test_running = True
+        
+        # Helper to safely update status text
+        def update_status(text: str, color: str):
+            try:
+                if hasattr(self, '_ollama_status_text'):
+                    widget = self._ollama_status_text
+                    if widget and widget.winfo_exists():
+                        widget.configure(text=text, text_color=color)
+            except Exception:
+                pass  # Widget destroyed, ignore
+        
         # Update status to show testing
-        if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-            self._ollama_status_text.configure(
-                text=f"Testing {model_name}...",
-                text_color=COLORS["text_secondary"]
-            )
+        update_status(f"🧪 Testing {model_name}...", COLORS["text_secondary"])
         self.log(f"🧪 Testing model: {model_name}")
         
         def test_thread():
@@ -6222,9 +6234,23 @@ class WayfinderApp(ctk.CTk):
             start_time = time.time()
             test_input = "hello how r u doing today i hope ur having a good day"
             expected_fixes = ["Hello", "you", "your", "I"]  # Words that should appear
+            result = ""
             
             try:
                 import requests
+                
+                # First check if model exists
+                try:
+                    tags_response = requests.get(f"{base_url}/api/tags", timeout=5)
+                    if tags_response.status_code == 200:
+                        models = [m.get("name", "") for m in tags_response.json().get("models", [])]
+                        model_exists = any(model_name in m or m.startswith(model_name.split(":")[0]) for m in models)
+                        if not model_exists:
+                            raise Exception(f"Model '{model_name}' not installed")
+                except requests.exceptions.RequestException:
+                    raise Exception("Cannot connect to Ollama")
+                
+                # Run the test
                 response = requests.post(
                     f"{base_url}/api/generate",
                     json={
@@ -6233,47 +6259,53 @@ class WayfinderApp(ctk.CTk):
                         "stream": False,
                         "options": {"temperature": 0.1, "num_predict": 100}
                     },
-                    timeout=30,
+                    timeout=60,  # Increased timeout for slower models
                 )
                 
                 elapsed = time.time() - start_time
                 
                 if response.status_code != 200:
-                    raise Exception(f"HTTP {response.status_code}")
+                    error_detail = ""
+                    try:
+                        error_detail = response.json().get("error", "")
+                    except Exception:
+                        pass
+                    raise Exception(f"HTTP {response.status_code}: {error_detail}" if error_detail else f"HTTP {response.status_code}")
                 
                 data = response.json()
                 result = data.get("response", "").strip()
                 
                 # Check if model produced reasonable output
                 if not result:
-                    raise Exception("Empty response from model")
+                    raise Exception("Model returned empty response")
                 
                 # Check for expected corrections
                 fixes_found = sum(1 for word in expected_fixes if word.lower() in result.lower())
                 quality = "excellent" if fixes_found >= 3 else "good" if fixes_found >= 2 else "basic"
+                quality_emoji = "🌟" if quality == "excellent" else "👍" if quality == "good" else "📝"
                 
                 def on_success():
-                    if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-                        self._ollama_status_text.configure(
-                            text=f"✓ Model working ({elapsed:.2f}s, {quality})",
-                            text_color=COLORS["accent"]
-                        )
-                    self.log(f"✓ Test passed in {elapsed:.2f}s")
+                    self._ollama_test_running = False
+                    update_status(f"✓ Working • {elapsed:.1f}s • {quality_emoji} {quality}", COLORS["accent"])
+                    self.log(f"✓ Test passed in {elapsed:.2f}s ({quality} quality)")
                     self.log(f"   Input:  \"{test_input}\"")
-                    self.log(f"   Output: \"{result[:80]}{'...' if len(result) > 80 else ''}\"")
+                    self.log(f"   Output: \"{result[:100]}{'...' if len(result) > 100 else ''}\"")
                 
                 self.after(0, on_success)
                 
             except Exception as e:
-                error_msg = str(e)[:50]
+                elapsed = time.time() - start_time
+                error_msg = str(e)
+                # Truncate long error messages
+                if len(error_msg) > 60:
+                    error_msg = error_msg[:57] + "..."
                 
                 def on_error():
-                    if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-                        self._ollama_status_text.configure(
-                            text=f"✗ Test failed: {error_msg}",
-                            text_color="#CF7B7B"
-                        )
-                    self.log(f"❌ Model test failed: {error_msg}")
+                    self._ollama_test_running = False
+                    update_status(f"✗ {error_msg}", "#CF7B7B")
+                    self.log(f"❌ Model test failed: {str(e)}")
+                    if result:
+                        self.log(f"   Partial output: \"{result[:50]}...\"")
                 
                 self.after(0, on_error)
         
