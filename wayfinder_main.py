@@ -4268,32 +4268,47 @@ class WayfinderApp(ctk.CTk):
                 self.after(0, lambda: self.log(f"   ❌ Error: {error}"))
             
             debug_log(f"Benchmark complete: GPU={gpu_time}, CPU={cpu_time}, error={error}")
-            # Schedule completion on main thread
-            self.after(0, lambda: on_complete(gpu_time, cpu_time, error))
+            # Schedule completion on main thread - use explicit values to avoid lambda capture issues
+            final_gpu = gpu_time
+            final_cpu = cpu_time
+            final_error = error
+            debug_log("Scheduling on_complete callback...")
+            try:
+                self.after(0, lambda g=final_gpu, c=final_cpu, e=final_error: on_complete(g, c, e))
+                debug_log("Callback scheduled successfully")
+            except Exception as ex:
+                debug_log(f"Failed to schedule callback: {ex}")
         
         def on_complete(gpu_time, cpu_time, error):
             """Handle benchmark completion on main thread."""
-            debug_log(f"on_complete called: GPU={gpu_time}, CPU={cpu_time}, error={error}")
-            stop_timer()
-            
-            # Reset button
-            self.benchmark_test_btn.configure(
-                state="normal",
-                text="⏱️ Test Current Model",
-                fg_color=COLORS["accent"],
-            )
-            
-            if error:
-                self.benchmark_status_label.configure(text=f"Error: {error}")
-                self.log(f"   ❌ BENCHMARK FAILED: {error}")
-                return
-            
-            # Log summary
-            self.log(f"   🏁 BENCHMARK COMPLETE")
-            if gpu_time and cpu_time:
-                faster = "GPU" if gpu_time < cpu_time else "CPU"
-                speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
-                self.log(f"      🚀 {faster} is {speedup:.1f}x faster!")
+            try:
+                debug_log(f"on_complete EXECUTING: GPU={gpu_time}, CPU={cpu_time}, error={error}")
+                stop_timer()
+                
+                # Reset button
+                self.benchmark_test_btn.configure(
+                    state="normal",
+                    text="⏱️ Test Current Model",
+                    fg_color=COLORS["accent"],
+                )
+                debug_log("Button reset done")
+                
+                if error:
+                    self.benchmark_status_label.configure(text=f"Error: {error}")
+                    self.log(f"   ❌ BENCHMARK FAILED: {error}")
+                    debug_log(f"Error case handled: {error}")
+                    return
+                
+                # Log summary
+                self.log(f"   🏁 BENCHMARK COMPLETE")
+                if gpu_time and cpu_time:
+                    faster = "GPU" if gpu_time < cpu_time else "CPU"
+                    speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
+                    self.log(f"      🚀 {faster} is {speedup:.1f}x faster!")
+                debug_log("Summary logged")
+            except Exception as ex:
+                import traceback
+                debug_log(f"EXCEPTION in on_complete: {ex}\n{traceback.format_exc()}")
             
             # Determine model_id from filename
             model_id = selected_model.replace("ggml-", "").replace(".bin", "")
@@ -11358,10 +11373,9 @@ class WayfinderApp(ctk.CTk):
         # #endregion
 
     def get_tray_icon(self, state: AppState, pulse_scale: float = 1.0) -> Image.Image:
-        """Create a Wayfinder Arrow + Waves tray icon.
+        """Create a navigation arrow tray icon.
         
-        Designer spec: Solid white glyph (navigation arrow + radio waves) on 
-        transparent background. Recording state animates the waves in red.
+        Clean cursor/pointer arrow shape. Color indicates state.
         """
         size = 64
         
@@ -11371,76 +11385,30 @@ class WayfinderApp(ctk.CTk):
         
         # Color based on state
         if state == AppState.RECORDING:
-            # Active Red for recording (#FF4D4D from designer spec)
+            # Active Red for recording
             glyph_color = (255, 77, 77, 255)
-            wave_color = (255, 77, 77, int(180 + 75 * pulse_scale))  # Pulsing alpha
         elif state == AppState.PROCESSING:
             # Muted gold for processing
             glyph_color = (229, 172, 42, 255)
-            wave_color = (229, 172, 42, 200)
         elif state == AppState.PASTING:
             # Muted mint for typing
             glyph_color = (93, 212, 168, 255)
-            wave_color = (93, 212, 168, 200)
         else:  # IDLE
             # Solid white for ready state
             glyph_color = (255, 255, 255, 255)
-            wave_color = (255, 255, 255, 180)
         
-        # === Draw Navigation Arrow (pointing upper-right, like compass/location) ===
-        # Arrow is a filled triangle pointing to upper-right
-        # Centered-left to leave room for waves on right
+        # === Draw Navigation Arrow (cursor/pointer style, pointing up) ===
+        # Single polygon with notch built in - no "cutout" needed
+        # Arrow centered in 64x64, pointing upward
         arrow_points = [
-            (10, 48),   # Bottom-left
-            (38, 10),   # Top-right (tip)
-            (24, 38),   # Inner notch
-            (10, 48),   # Back to start
+            (32, 6),    # Tip (top center)
+            (54, 52),   # Bottom-right corner
+            (38, 44),   # Inner right (notch start)
+            (32, 58),   # Bottom of notch (center)
+            (26, 44),   # Inner left (notch end)
+            (10, 52),   # Bottom-left corner
         ]
         draw.polygon(arrow_points, fill=glyph_color)
-        
-        # Add a small notch/cutout to make it look like a cursor/arrow
-        notch_points = [
-            (18, 40),
-            (26, 32),
-            (22, 44),
-        ]
-        draw.polygon(notch_points, fill=(0, 0, 0, 0))
-        
-        # === Draw Radio Waves (3 curved arcs emanating from arrow tip) ===
-        # Waves expand from upper-right of arrow
-        wave_center = (36, 12)
-        
-        # Calculate wave sizes based on pulse_scale for recording animation
-        if state == AppState.RECORDING:
-            # Animate waves expanding outward
-            base_offset = pulse_scale * 4  # Waves expand during pulse
-            wave_radii = [
-                (8 + base_offset, 12 + base_offset),
-                (14 + base_offset, 20 + base_offset),
-                (22 + base_offset, 30 + base_offset),
-            ]
-            # Fade waves based on distance
-            wave_alphas = [
-                int(255 * (0.5 + 0.5 * pulse_scale)),
-                int(200 * (0.3 + 0.7 * pulse_scale)),
-                int(150 * (0.1 + 0.9 * pulse_scale)),
-            ]
-        else:
-            wave_radii = [(8, 12), (14, 20), (22, 30)]
-            wave_alphas = [180, 140, 100]
-        
-        import math
-        for i, ((r_inner, r_outer), alpha) in enumerate(zip(wave_radii, wave_alphas)):
-            wave_col = (wave_color[0], wave_color[1], wave_color[2], min(255, alpha))
-            # Draw arc (approximate with thick line arc)
-            # Arc from 315° to 45° (upper-right quadrant)
-            for angle in range(-45, 46, 5):
-                rad = math.radians(angle)
-                x1 = wave_center[0] + r_inner * math.cos(rad)
-                y1 = wave_center[1] - r_inner * math.sin(rad)
-                x2 = wave_center[0] + r_outer * math.cos(rad)
-                y2 = wave_center[1] - r_outer * math.sin(rad)
-                draw.line([(x1, y1), (x2, y2)], fill=wave_col, width=2)
         
         return icon
 
