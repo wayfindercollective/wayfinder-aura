@@ -20,12 +20,19 @@ class PostProcessingError(Exception):
 # =============================================================================
 
 PROMPT_TEMPLATES: Dict[str, str] = {
-    "clean": """Clean up this transcribed speech. Remove filler words (um, uh, ah, like, you know, basically, actually, I mean), fix any obvious transcription errors, and ensure proper punctuation and capitalization. Keep the meaning exactly the same - only clean up the delivery.
+    "clean": """You are a transcription editor. Output ONLY the corrected text with no explanation.
 
-Transcription:
-{text}
+Rules:
+- Remove filler words (um, uh, ah, like, you know, basically, actually, I mean)
+- Fix spelling and grammar errors
+- Add proper punctuation and capitalization
+- Do NOT add quotes around the output
+- Do NOT explain what you changed
+- Do NOT add any commentary
 
-Cleaned text:""",
+Input: {text}
+
+Output:""",
 
     "email": """Format this transcribed speech as a professional email. Remove filler words, add appropriate greeting and sign-off if not present, organize into clear paragraphs, and ensure proper punctuation.
 
@@ -230,8 +237,21 @@ class LlamaCppBackend(PostProcessorBackend):
     
     def _clean_response(self, text: str) -> str:
         """Clean up LLM response artifacts."""
-        # Remove common artifacts
-        lines = text.split("\n")
+        if not text:
+            return text
+        
+        result = text.strip()
+        
+        # Strip surrounding quotes (single, double, or smart quotes)
+        quote_pairs = [
+            ('"', '"'), ("'", "'"), ('"', '"'), (''', '''), ('「', '」'), ('«', '»')
+        ]
+        for open_q, close_q in quote_pairs:
+            if result.startswith(open_q) and result.endswith(close_q):
+                result = result[len(open_q):-len(close_q)].strip()
+        
+        # Remove common artifacts line by line
+        lines = result.split("\n")
         cleaned_lines = []
         
         for line in lines:
@@ -239,12 +259,28 @@ class LlamaCppBackend(PostProcessorBackend):
             # Skip empty lines at start
             if not cleaned_lines and not line:
                 continue
-            # Skip lines that look like prompts/instructions
-            if line.lower().startswith(("transcription:", "cleaned text:", "result:", "formatted")):
+            # Skip lines that look like prompts/instructions/metadata
+            lower_line = line.lower()
+            if lower_line.startswith((
+                "transcription:", "cleaned text:", "result:", "formatted",
+                "output:", "corrected:", "here is", "here's the",
+                "- removed", "- corrected", "- changed", "- fixed",
+                "i removed", "i corrected", "i changed", "i fixed",
+            )):
+                continue
+            # Skip lines that are just metadata descriptions
+            if "filler words" in lower_line and ("removed" in lower_line or ":" in lower_line):
                 continue
             cleaned_lines.append(line)
         
-        return "\n".join(cleaned_lines).strip()
+        result = "\n".join(cleaned_lines).strip()
+        
+        # Final quote strip in case quotes were inside other content
+        for open_q, close_q in quote_pairs:
+            if result.startswith(open_q) and result.endswith(close_q):
+                result = result[len(open_q):-len(close_q)].strip()
+        
+        return result
 
 
 # =============================================================================
@@ -560,6 +596,20 @@ class OllamaBackend(PostProcessorBackend):
     
     def _clean_response(self, text: str) -> str:
         """Clean up LLM response artifacts."""
+        if not text:
+            return text
+        
+        # Strip surrounding quotes (models often wrap output in quotes)
+        text = text.strip()
+        if (text.startswith('"') and text.endswith('"')) or \
+           (text.startswith("'") and text.endswith("'")):
+            text = text[1:-1].strip()
+        
+        # Also handle smart quotes
+        if (text.startswith('"') and text.endswith('"')) or \
+           (text.startswith(''') and text.endswith(''')):
+            text = text[1:-1].strip()
+        
         # Remove common artifacts
         lines = text.split("\n")
         cleaned_lines = []
@@ -571,6 +621,14 @@ class OllamaBackend(PostProcessorBackend):
                 continue
             # Skip lines that look like prompts/instructions
             if line.lower().startswith(("transcription:", "cleaned text:", "result:", "formatted")):
+                continue
+            # Skip meta-commentary about changes made (bullet points explaining edits)
+            if line.startswith("- ") and any(word in line.lower() for word in 
+                ["removed", "corrected", "changed", "fixed", "filler", "error"]):
+                continue
+            # Skip lines that explain what was done
+            if any(phrase in line.lower() for phrase in 
+                ["here is", "here's the", "i have", "i've", "the corrected", "the cleaned"]):
                 continue
             cleaned_lines.append(line)
         

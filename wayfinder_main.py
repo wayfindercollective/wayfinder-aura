@@ -872,10 +872,12 @@ class BenchmarkRunner:
         return temp_file.name
     
     def _run_single_benchmark(self, whisper_cli: str, model_path: str, 
-                               audio_file: str, use_gpu: bool, timeout: int = 30) -> float | None:
-        """Run a single transcription and return time in seconds."""
+                               audio_file: str, use_gpu: bool, timeout: int = 60) -> float | None:
+        """Run a single transcription and return time in seconds.
+        
+        Uses simple subprocess.run which handles timeouts correctly.
+        """
         import subprocess
-        import signal
         
         cmd = [
             whisper_cli,
@@ -891,49 +893,22 @@ class BenchmarkRunner:
         if not use_gpu:
             cmd.append("--no-gpu")
         
-        proc = None
         try:
             start = time.perf_counter()
-            # Use Popen with start_new_session for reliable process group termination
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,  # Create new process group for clean kill
-            )
+            result = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            elapsed = time.perf_counter() - start
             
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-                elapsed = time.perf_counter() - start
-                
-                if proc.returncode == 0:
-                    return elapsed
-                else:
-                    stderr_text = stderr.decode('utf-8', errors='replace')[:100]
-                    self.log_callback(f"   ⚠️ Exit code {proc.returncode}: {stderr_text}")
-                    return None
-                    
-            except subprocess.TimeoutExpired:
-                # Kill the entire process group to ensure whisper-cli is terminated
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    pass  # Process already dead
-                proc.wait()  # Reap the zombie process
-                self.log_callback(f"   ⚠️ Timed out after {timeout}s")
+            if result.returncode == 0:
+                return elapsed
+            else:
+                stderr_text = result.stderr.decode('utf-8', errors='replace')[:200]
+                self.log_callback(f"   ⚠️ Exit code {result.returncode}: {stderr_text}")
                 return None
                 
+        except subprocess.TimeoutExpired:
+            self.log_callback(f"   ⚠️ Timed out after {timeout}s")
+            return None
         except Exception as e:
-            # Clean up if process was started
-            if proc is not None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    pass
-                try:
-                    proc.wait()
-                except:
-                    pass
             self.log_callback(f"   ⚠️ Error: {e}")
             return None
     
@@ -4108,152 +4083,140 @@ class WayfinderApp(ctk.CTk):
             ).pack(anchor="w")
     
     def _run_inline_benchmark(self):
-        """Run a quick benchmark on the current model (inline, no popup)."""
+        """Run a quick benchmark on the current model (inline, no popup).
+        
+        Simplified version that runs GPU and CPU tests sequentially with clear logging.
+        """
         import subprocess
         
         # Get current model with proper display name
         selected_model = self.config.get("whisper_model", "ggml-large-v3-turbo.bin")
         
-        # Create proper display name - look up in WHISPER_CPP_MODELS for accurate names
+        # Create proper display name
         model_id = selected_model.replace("ggml-", "").replace(".bin", "")
         if model_id in WHISPER_CPP_MODELS:
             model_name = WHISPER_CPP_MODELS[model_id]["name"]
         else:
-            # Fallback: better formatting that preserves Q5 distinction
-            model_name = model_id.replace("-", " ").replace("_", " ")
-            # Capitalize properly: "large v3 turbo q5 0" -> "Large V3 Turbo Q5"
-            parts = model_name.split()
-            formatted = []
-            for part in parts:
-                if part.lower() in ["v2", "v3", "q5", "q8"]:
-                    formatted.append(part.upper())
-                elif part.isdigit() and formatted and formatted[-1].startswith("Q"):
-                    continue  # Skip the "0" after Q5
-                else:
-                    formatted.append(part.title())
-            model_name = " ".join(formatted)
+            model_name = model_id.replace("-", " ").replace("_", " ").title()
         
-        # Log to History tab
         self.log(f"⏱️ BENCHMARK: Starting test of {model_name}")
-        self.log(f"   Model file: {selected_model}")
         
-        # Timer state
-        timer_running = [True]
-        elapsed = [0]
-        current_phase = ["Starting"]
-        timer_id = [None]
+        # Disable button during test
+        self.benchmark_test_btn.configure(
+            state="disabled",
+            text="⏳ Running...",
+            fg_color=COLORS["accent_green"],
+        )
+        self.benchmark_status_label.configure(text=f"Testing {model_name}...")
         
-        def update_timer():
-            if timer_running[0]:
-                elapsed[0] += 1
-                phase = current_phase[0]
-                try:
-                    if self.benchmark_test_btn.winfo_exists():
-                        self.benchmark_test_btn.configure(text=f"⏳ {phase} {elapsed[0]}s")
-                        timer_id[0] = self.after(1000, update_timer)
-                except Exception as e:
-                    print(f"Timer error: {e}")
-                    timer_running[0] = False
-        
-        def stop_timer():
-            timer_running[0] = False
-            if timer_id[0]:
-                try:
-                    self.after_cancel(timer_id[0])
-                except:
-                    pass
-        
-        # Update button to show running state
-        try:
-            self.benchmark_test_btn.configure(
-                state="disabled",
-                text="⏳ Starting 0s",
-                fg_color=COLORS["accent_green"],
-            )
-            self.benchmark_status_label.configure(text=f"Preparing {model_name}...")
-        except Exception as e:
-            print(f"Error configuring button: {e}")
-            import traceback
-            traceback.print_exc()
-            return
-        
-        # Start timer
-        timer_id[0] = self.after(1000, update_timer)
-        
-        def run_test():
+        def run_benchmark_thread():
+            """Background thread to run benchmarks."""
+            import tempfile
+            import wave
+            import numpy as np
+            
+            gpu_time = None
+            cpu_time = None
+            error = None
+            
             try:
-                # Find whisper binary and model
-                runner = BenchmarkRunner(self.config)
-                whisper_cli = runner._find_whisper_binary()
-                models_dir = runner._find_models_dir()
-                model_path = models_dir / selected_model
+                # Find whisper-cli
+                whisper_cli = None
+                for path in [
+                    Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli",
+                    Path("/usr/bin/whisper-cli"),
+                    Path("/app/bin/whisper-cli"),
+                ]:
+                    if path.exists():
+                        whisper_cli = str(path)
+                        break
                 
                 if not whisper_cli:
-                    self.after(0, lambda: self.log("   ❌ whisper-cli not found!"))
-                    return None, None, "whisper-cli not found"
+                    error = "whisper-cli not found"
+                    return
+                
+                # Find model
+                models_dir = Path.home() / "whisper.cpp" / "models"
+                if not models_dir.exists():
+                    models_dir = Path("/app/share/whisper-models")
+                model_path = models_dir / selected_model
+                
                 if not model_path.exists():
-                    self.after(0, lambda: self.log(f"   ❌ Model not found: {selected_model}"))
-                    return None, None, f"Model not found: {selected_model}"
+                    error = f"Model not found: {selected_model}"
+                    return
                 
-                self.after(0, lambda: self.log(f"   ✓ Found binary: {whisper_cli}"))
-                self.after(0, lambda: self.log(f"   ✓ Found model: {model_path}"))
+                self.after(0, lambda: self.log(f"   Binary: {whisper_cli}"))
+                self.after(0, lambda: self.log(f"   Model: {model_path}"))
                 
-                # Create test audio
-                self.after(0, lambda: self.benchmark_status_label.configure(
-                    text="Creating 10s test audio..."))
-                self.after(0, lambda: self.log("   🎤 Creating 10s test audio..."))
-                test_audio = runner._create_test_audio(10)
-                self.after(0, lambda: self.log("   ✓ Test audio ready"))
+                # Create 10s test audio
+                self.after(0, lambda: self.benchmark_status_label.configure(text="Creating test audio..."))
+                sample_rate = 16000
+                duration = 10
+                samples = duration * sample_rate
+                t = np.linspace(0, duration, samples)
+                speech = np.sin(2 * np.pi * 200 * t) * 0.3 + np.sin(2 * np.pi * 400 * t) * 0.2
+                speech += np.random.randn(samples) * 0.1
+                speech = (speech / np.max(np.abs(speech)) * 0.7 * 32767).astype(np.int16)
+                
+                test_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                with wave.open(test_audio.name, "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(sample_rate)
+                    wav.writeframes(speech.tobytes())
                 
                 try:
-                    # GPU test
-                    current_phase[0] = "GPU"
-                    self.after(0, lambda: self.benchmark_status_label.configure(
-                        text=f"Testing {model_name} on GPU..."))
-                    self.after(0, lambda: self.log(f"   🔥 Testing GPU (max 90s timeout)..."))
+                    # GPU TEST
+                    self.after(0, lambda: self.benchmark_test_btn.configure(text="⏳ GPU..."))
+                    self.after(0, lambda: self.benchmark_status_label.configure(text="Testing GPU..."))
+                    self.after(0, lambda: self.log("   🔥 GPU test starting..."))
                     
-                    gpu_time = runner._run_single_benchmark(
-                        whisper_cli, str(model_path), test_audio, use_gpu=True, timeout=90
-                    )
+                    cmd_gpu = [whisper_cli, "-m", str(model_path), "-f", test_audio.name, 
+                               "-t", "6", "--no-timestamps", "--no-prints"]
                     
-                    if gpu_time:
+                    start = time.perf_counter()
+                    result = subprocess.run(cmd_gpu, capture_output=True, timeout=60)
+                    if result.returncode == 0:
+                        gpu_time = time.perf_counter() - start
                         self.after(0, lambda t=gpu_time: self.log(f"   ✅ GPU: {t:.2f}s"))
-                        self.after(0, lambda t=gpu_time: self.benchmark_status_label.configure(
-                            text=f"GPU done: {t:.1f}s. Now testing CPU..."))
                     else:
-                        self.after(0, lambda: self.log("   ⚠️ GPU test failed or timed out"))
-                        self.after(0, lambda: self.benchmark_status_label.configure(
-                            text=f"GPU test failed. Testing CPU..."))
+                        self.after(0, lambda: self.log(f"   ⚠️ GPU failed: exit {result.returncode}"))
                     
-                    # CPU test
-                    current_phase[0] = "CPU"
-                    self.after(0, lambda: self.log(f"   🧠 Testing CPU (max 180s timeout)..."))
-                    cpu_time = runner._run_single_benchmark(
-                        whisper_cli, str(model_path), test_audio, use_gpu=False, timeout=180
-                    )
+                    # CPU TEST
+                    self.after(0, lambda: self.benchmark_test_btn.configure(text="⏳ CPU..."))
+                    self.after(0, lambda: self.benchmark_status_label.configure(text="Testing CPU..."))
+                    self.after(0, lambda: self.log("   🧠 CPU test starting..."))
                     
-                    if cpu_time:
+                    cmd_cpu = cmd_gpu + ["--no-gpu"]
+                    
+                    start = time.perf_counter()
+                    result = subprocess.run(cmd_cpu, capture_output=True, timeout=120)
+                    if result.returncode == 0:
+                        cpu_time = time.perf_counter() - start
                         self.after(0, lambda t=cpu_time: self.log(f"   ✅ CPU: {t:.2f}s"))
                     else:
-                        self.after(0, lambda: self.log("   ⚠️ CPU test failed or timed out"))
-                    
-                    return gpu_time, cpu_time, None
+                        self.after(0, lambda: self.log(f"   ⚠️ CPU failed: exit {result.returncode}"))
+                        
+                except subprocess.TimeoutExpired as e:
+                    error = f"Test timed out: {e}"
+                    self.after(0, lambda: self.log(f"   ⚠️ {error}"))
                 finally:
                     try:
-                        os.unlink(test_audio)
+                        os.unlink(test_audio.name)
                     except:
                         pass
                         
             except Exception as e:
+                error = str(e)
                 import traceback
                 traceback.print_exc()
-                self.after(0, lambda err=str(e): self.log(f"   ❌ Error: {err}"))
-                return None, None, str(e)
+                self.after(0, lambda: self.log(f"   ❌ Error: {error}"))
+            
+            # Schedule completion on main thread
+            self.after(0, lambda: on_complete(gpu_time, cpu_time, error))
         
         def on_complete(gpu_time, cpu_time, error):
-            stop_timer()
-            total_time = elapsed[0]
-            
+            """Handle benchmark completion on main thread."""
             # Reset button
             self.benchmark_test_btn.configure(
                 state="normal",
@@ -4266,12 +4229,8 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"   ❌ BENCHMARK FAILED: {error}")
                 return
             
-            # Log results
-            self.log(f"   🏁 BENCHMARK COMPLETE in {total_time}s")
-            if gpu_time:
-                self.log(f"      GPU: {gpu_time:.2f}s")
-            if cpu_time:
-                self.log(f"      CPU: {cpu_time:.2f}s")
+            # Log summary
+            self.log(f"   🏁 BENCHMARK COMPLETE")
             if gpu_time and cpu_time:
                 faster = "GPU" if gpu_time < cpu_time else "CPU"
                 speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
@@ -4305,7 +4264,7 @@ class WayfinderApp(ctk.CTk):
                 faster = "GPU" if gpu_time < cpu_time else "CPU"
                 speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
                 self.benchmark_status_label.configure(
-                    text=f"✓ Done in {total_time}s! {faster} is {speedup:.1f}x faster"
+                    text=f"✓ {faster} is {speedup:.1f}x faster (GPU:{gpu_time:.1f}s CPU:{cpu_time:.1f}s)"
                 )
             elif gpu_time:
                 self.benchmark_status_label.configure(text=f"✓ GPU: {gpu_time:.1f}s (CPU failed)")
@@ -4314,11 +4273,8 @@ class WayfinderApp(ctk.CTk):
             else:
                 self.benchmark_status_label.configure(text="Both tests failed")
         
-        def background_thread():
-            gpu_time, cpu_time, error = run_test()
-            self.after(0, lambda: on_complete(gpu_time, cpu_time, error))
-        
-        threading.Thread(target=background_thread, daemon=True).start()
+        # Start benchmark in background thread
+        threading.Thread(target=run_benchmark_thread, daemon=True).start()
     
     def _run_api_benchmark(self):
         """Run an API latency benchmark for remote transcription (OpenAI Whisper API)."""
@@ -6467,13 +6423,18 @@ class WayfinderApp(ctk.CTk):
                 return f"{size_bytes / 1024:.0f} KB"
         
         def update_progress(progress, status_text):
-            try:
-                if hasattr(self, '_ollama_progress_bar') and self._ollama_progress_bar.winfo_exists():
-                    self._ollama_progress_bar.set(progress)
-                    self._ollama_status_label.configure(text=status_text)
-                    self.update_idletasks()  # Force UI update
-            except Exception as e:
-                debug_log(f"UI update error: {e}")
+            """Update progress UI - must be called via self.after() from threads."""
+            def do_update():
+                try:
+                    if hasattr(self, '_ollama_progress_bar') and self._ollama_progress_bar.winfo_exists():
+                        self._ollama_progress_bar.set(progress)
+                    if hasattr(self, '_ollama_status_label') and self._ollama_status_label.winfo_exists():
+                        self._ollama_status_label.configure(text=status_text)
+                        self.update_idletasks()  # Force UI redraw
+                except Exception as e:
+                    debug_log(f"UI update error: {e}")
+            # Schedule on main thread
+            self.after(0, do_update)
         
         def download_thread():
             debug_log("Thread started!")
@@ -6490,7 +6451,7 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"⬇️ Downloading {model_name} via Ollama...")
                 
                 # Immediately show we're connecting
-                self.after(0, lambda: update_progress(0.05, "Connecting to Ollama..."))
+                update_progress(0.05, "Connecting to Ollama...")
                 
                 # Use Ollama's pull API
                 response = requests.post(
@@ -6523,14 +6484,14 @@ class WayfinderApp(ctk.CTk):
                             # Handle different status types
                             if status == "success":
                                 # Download complete!
-                                self.after(0, lambda: update_progress(1.0, "✓ Download complete"))
+                                update_progress(1.0, "✓ Download complete")
                                 continue
                             elif status in ("verifying sha256 digest", "writing manifest"):
                                 # Final stages
-                                self.after(0, lambda s=status: update_progress(0.95, f"Finalizing: {s}"))
+                                update_progress(0.95, f"Finalizing: {status}")
                                 continue
                             elif status == "pulling manifest":
-                                self.after(0, lambda: update_progress(0.1, "Fetching model info..."))
+                                update_progress(0.1, "Fetching model info...")
                                 continue
                             
                             if "total" in data and "completed" in data:
@@ -6578,11 +6539,11 @@ class WayfinderApp(ctk.CTk):
                                             if eta_str:
                                                 progress_text += f" • {eta_str}"
                                         
-                                        self.after(0, lambda p=progress, s=progress_text: update_progress(p, s))
+                                        update_progress(progress, progress_text)
                             elif status and status != last_status:
                                 last_status = status
                                 # Show status updates
-                                self.after(0, lambda s=status: update_progress(0.3, s))
+                                update_progress(0.3, status)
                         except json.JSONDecodeError:
                             pass
                 
