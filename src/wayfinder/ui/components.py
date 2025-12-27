@@ -361,3 +361,4 @@ def create_body_label(parent, text: str, font_family: str = "Inter") -> ctk.CTkL
     )
 
 
+

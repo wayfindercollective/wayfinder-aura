@@ -6171,31 +6171,33 @@ class WayfinderApp(ctk.CTk):
         ollama_mgr.install(progress_callback=on_progress, complete_callback=on_complete)
     
     def _auto_start_ollama_if_needed(self) -> None:
-        """Auto-start Ollama on app boot if needed for post-processing."""
-        # Only auto-start if using ollama backend for post-processing
-        backend = self.config.get("post_processing_backend", "llama_cpp")
-        if backend != "ollama":
-            return
+        """Auto-start Ollama on app boot if installed.
         
+        Always starts Ollama in the background so it's ready for use,
+        regardless of which post-processing backend is currently selected.
+        """
         ollama_mgr = get_ollama_manager()
-        
-        # Skip if already running
-        if ollama_mgr.is_service_running():
-            return
         
         # Skip if not installed
         if not ollama_mgr.is_installed():
             return
         
+        # Skip if already running
+        if ollama_mgr.is_service_running():
+            self.log("✓ Ollama is running")
+            return
+        
         # Auto-start in background
-        self.log("🚀 Auto-starting Ollama service...")
+        self.log("🚀 Starting Ollama service...")
         
         def on_service_status(success: bool, message: str):
             def update():
                 if success:
                     self.log(f"✓ {message}")
                     # Refresh the post-processing UI to show updated status
-                    self._rebuild_postproc_section()
+                    backend = self.config.get("post_processing_backend", "llama_cpp")
+                    if backend == "ollama":
+                        self._rebuild_postproc_section()
                 else:
                     self.log(f"⚠️ {message}")
             self.after(0, update)
