@@ -4083,10 +4083,7 @@ class WayfinderApp(ctk.CTk):
             ).pack(anchor="w")
     
     def _run_inline_benchmark(self):
-        """Run a quick benchmark on the current model (inline, no popup).
-        
-        Simplified version that runs GPU and CPU tests sequentially with clear logging.
-        """
+        """Run a quick benchmark on the current model with live timer feedback."""
         import subprocess
         
         # Get current model with proper display name
@@ -4100,17 +4097,37 @@ class WayfinderApp(ctk.CTk):
             model_name = model_id.replace("-", " ").replace("_", " ").title()
         
         self.log(f"⏱️ BENCHMARK: Starting test of {model_name}")
+        print(f"[BENCHMARK DEBUG] Starting benchmark for {model_name}")  # Debug
         
-        # Disable button during test
-        self.benchmark_test_btn.configure(
-            state="disabled",
-            text="⏳ Running...",
-            fg_color=COLORS["accent_green"],
-        )
-        self.benchmark_status_label.configure(text=f"Testing {model_name}...")
+        # Timer state for live feedback
+        timer_state = {"running": True, "seconds": 0, "phase": "Starting", "timer_id": None}
+        
+        def update_timer():
+            if timer_state["running"]:
+                timer_state["seconds"] += 1
+                phase = timer_state["phase"]
+                try:
+                    self.benchmark_test_btn.configure(text=f"⏳ {phase} {timer_state['seconds']}s")
+                    timer_state["timer_id"] = self.after(1000, update_timer)
+                except:
+                    pass
+        
+        def stop_timer():
+            timer_state["running"] = False
+            if timer_state["timer_id"]:
+                try:
+                    self.after_cancel(timer_state["timer_id"])
+                except:
+                    pass
+        
+        # Disable button and start timer
+        self.benchmark_test_btn.configure(state="disabled", text="⏳ Starting 0s", fg_color=COLORS["accent_green"])
+        self.benchmark_status_label.configure(text=f"Preparing {model_name}...")
+        timer_state["timer_id"] = self.after(1000, update_timer)
         
         def run_benchmark_thread():
             """Background thread to run benchmarks."""
+            print("[BENCHMARK DEBUG] Thread started")  # Debug
             import tempfile
             import wave
             import numpy as np
@@ -4121,6 +4138,7 @@ class WayfinderApp(ctk.CTk):
             
             try:
                 # Find whisper-cli
+                print("[BENCHMARK DEBUG] Finding whisper-cli...")  # Debug
                 whisper_cli = None
                 for path in [
                     Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli",
@@ -4133,6 +4151,7 @@ class WayfinderApp(ctk.CTk):
                 
                 if not whisper_cli:
                     error = "whisper-cli not found"
+                    print(f"[BENCHMARK DEBUG] Error: {error}")  # Debug
                     return
                 
                 # Find model
@@ -4143,13 +4162,19 @@ class WayfinderApp(ctk.CTk):
                 
                 if not model_path.exists():
                     error = f"Model not found: {selected_model}"
+                    print(f"[BENCHMARK DEBUG] Error: {error}")  # Debug
                     return
                 
+                print(f"[BENCHMARK DEBUG] Binary: {whisper_cli}")  # Debug
+                print(f"[BENCHMARK DEBUG] Model: {model_path}")  # Debug
                 self.after(0, lambda: self.log(f"   Binary: {whisper_cli}"))
                 self.after(0, lambda: self.log(f"   Model: {model_path}"))
                 
                 # Create 10s test audio
+                print("[BENCHMARK DEBUG] Creating test audio...")  # Debug
+                timer_state["phase"] = "Audio"
                 self.after(0, lambda: self.benchmark_status_label.configure(text="Creating test audio..."))
+                
                 sample_rate = 16000
                 duration = 10
                 samples = duration * sample_rate
@@ -4165,9 +4190,12 @@ class WayfinderApp(ctk.CTk):
                     wav.setframerate(sample_rate)
                     wav.writeframes(speech.tobytes())
                 
+                print(f"[BENCHMARK DEBUG] Audio created: {test_audio.name}")  # Debug
+                
                 try:
                     # GPU TEST
-                    self.after(0, lambda: self.benchmark_test_btn.configure(text="⏳ GPU..."))
+                    print("[BENCHMARK DEBUG] Starting GPU test...")  # Debug
+                    timer_state["phase"] = "GPU"
                     self.after(0, lambda: self.benchmark_status_label.configure(text="Testing GPU..."))
                     self.after(0, lambda: self.log("   🔥 GPU test starting..."))
                     
@@ -4176,14 +4204,20 @@ class WayfinderApp(ctk.CTk):
                     
                     start = time.perf_counter()
                     result = subprocess.run(cmd_gpu, capture_output=True, timeout=60)
+                    gpu_elapsed = time.perf_counter() - start
+                    print(f"[BENCHMARK DEBUG] GPU done: {gpu_elapsed:.2f}s, exit={result.returncode}")  # Debug
+                    
                     if result.returncode == 0:
-                        gpu_time = time.perf_counter() - start
+                        gpu_time = gpu_elapsed
                         self.after(0, lambda t=gpu_time: self.log(f"   ✅ GPU: {t:.2f}s"))
                     else:
+                        stderr = result.stderr.decode('utf-8', errors='replace')[:200]
+                        print(f"[BENCHMARK DEBUG] GPU stderr: {stderr}")  # Debug
                         self.after(0, lambda: self.log(f"   ⚠️ GPU failed: exit {result.returncode}"))
                     
-                    # CPU TEST
-                    self.after(0, lambda: self.benchmark_test_btn.configure(text="⏳ CPU..."))
+                    # CPU TEST  
+                    print("[BENCHMARK DEBUG] Starting CPU test...")  # Debug
+                    timer_state["phase"] = "CPU"
                     self.after(0, lambda: self.benchmark_status_label.configure(text="Testing CPU..."))
                     self.after(0, lambda: self.log("   🧠 CPU test starting..."))
                     
@@ -4191,14 +4225,20 @@ class WayfinderApp(ctk.CTk):
                     
                     start = time.perf_counter()
                     result = subprocess.run(cmd_cpu, capture_output=True, timeout=120)
+                    cpu_elapsed = time.perf_counter() - start
+                    print(f"[BENCHMARK DEBUG] CPU done: {cpu_elapsed:.2f}s, exit={result.returncode}")  # Debug
+                    
                     if result.returncode == 0:
-                        cpu_time = time.perf_counter() - start
+                        cpu_time = cpu_elapsed
                         self.after(0, lambda t=cpu_time: self.log(f"   ✅ CPU: {t:.2f}s"))
                     else:
+                        stderr = result.stderr.decode('utf-8', errors='replace')[:200]
+                        print(f"[BENCHMARK DEBUG] CPU stderr: {stderr}")  # Debug
                         self.after(0, lambda: self.log(f"   ⚠️ CPU failed: exit {result.returncode}"))
                         
                 except subprocess.TimeoutExpired as e:
                     error = f"Test timed out: {e}"
+                    print(f"[BENCHMARK DEBUG] Timeout: {e}")  # Debug
                     self.after(0, lambda: self.log(f"   ⚠️ {error}"))
                 finally:
                     try:
@@ -4209,14 +4249,19 @@ class WayfinderApp(ctk.CTk):
             except Exception as e:
                 error = str(e)
                 import traceback
+                print(f"[BENCHMARK DEBUG] Exception: {e}")  # Debug
                 traceback.print_exc()
                 self.after(0, lambda: self.log(f"   ❌ Error: {error}"))
             
+            print(f"[BENCHMARK DEBUG] Benchmark complete: GPU={gpu_time}, CPU={cpu_time}, error={error}")  # Debug
             # Schedule completion on main thread
             self.after(0, lambda: on_complete(gpu_time, cpu_time, error))
         
         def on_complete(gpu_time, cpu_time, error):
             """Handle benchmark completion on main thread."""
+            print(f"[BENCHMARK DEBUG] on_complete called: GPU={gpu_time}, CPU={cpu_time}, error={error}")  # Debug
+            stop_timer()
+            
             # Reset button
             self.benchmark_test_btn.configure(
                 state="normal",
