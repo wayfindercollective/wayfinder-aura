@@ -9132,6 +9132,7 @@ class WayfinderApp(ctk.CTk):
         # Tab buttons - use grid for even sizing
         tab_frame.grid_columnconfigure(0, weight=1)
         tab_frame.grid_columnconfigure(1, weight=1)
+        tab_frame.grid_columnconfigure(2, weight=0)  # Benchmark button fixed width
         
         installed_btn = ctk.CTkButton(
             tab_frame, text="Installed",
@@ -9393,7 +9394,7 @@ class WayfinderApp(ctk.CTk):
             hover_color=COLORS["bg_elevated"],
             command=show_benchmark_tab,
         )
-        benchmark_btn.pack(side="left", padx=(8, 0))
+        benchmark_btn.grid(row=0, column=2, sticky="e", padx=(8, 0))
         
         # Show installed tab initially
         show_installed_tab()
