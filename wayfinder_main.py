@@ -11336,48 +11336,89 @@ class WayfinderApp(ctk.CTk):
         # #endregion
 
     def get_tray_icon(self, state: AppState, pulse_scale: float = 1.0) -> Image.Image:
-        """Get the tray icon using the actual app icon.
+        """Create a Wayfinder Arrow + Waves tray icon.
         
-        Uses the icon.png file and applies color tinting based on state.
+        Designer spec: Solid white glyph (navigation arrow + radio waves) on 
+        transparent background. Recording state animates the waves in red.
         """
         size = 64
         
-        # Use the actual icon file if available
-        if self.custom_icon:
-            icon = self.custom_icon.copy().convert("RGBA")
-        else:
-            # Fallback: try loading from ICON_PATH
-            if ICON_PATH.exists():
-                try:
-                    icon = Image.open(ICON_PATH).resize((size, size)).convert("RGBA")
-                except:
-                    # Ultimate fallback: create a simple placeholder
-                    icon = Image.new("RGBA", (size, size), (100, 100, 200, 255))
-            else:
-                icon = Image.new("RGBA", (size, size), (100, 100, 200, 255))
+        # Create transparent background
+        icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(icon)
         
-        # For IDLE state, use the icon as-is (normal blue appearance)
-        if state == AppState.IDLE:
-            return icon
-        
-        # Apply color overlay for different states
+        # Color based on state
         if state == AppState.RECORDING:
-            # Red tint for recording - pulsing intensity
-            overlay_color = (255, 60, 60, int(80 + 40 * pulse_scale))
+            # Active Red for recording (#FF4D4D from designer spec)
+            glyph_color = (255, 77, 77, 255)
+            wave_color = (255, 77, 77, int(180 + 75 * pulse_scale))  # Pulsing alpha
         elif state == AppState.PROCESSING:
-            # Gold tint for processing
-            overlay_color = (255, 200, 50, 100)
+            # Muted gold for processing
+            glyph_color = (229, 172, 42, 255)
+            wave_color = (229, 172, 42, 200)
         elif state == AppState.PASTING:
-            # Green tint for pasting/typing
-            overlay_color = (50, 220, 150, 100)
+            # Muted mint for typing
+            glyph_color = (93, 212, 168, 255)
+            wave_color = (93, 212, 168, 200)
+        else:  # IDLE
+            # Solid white for ready state
+            glyph_color = (255, 255, 255, 255)
+            wave_color = (255, 255, 255, 180)
+        
+        # === Draw Navigation Arrow (pointing upper-right, like compass/location) ===
+        # Arrow is a filled triangle pointing to upper-right
+        # Centered-left to leave room for waves on right
+        arrow_points = [
+            (10, 48),   # Bottom-left
+            (38, 10),   # Top-right (tip)
+            (24, 38),   # Inner notch
+            (10, 48),   # Back to start
+        ]
+        draw.polygon(arrow_points, fill=glyph_color)
+        
+        # Add a small notch/cutout to make it look like a cursor/arrow
+        notch_points = [
+            (18, 40),
+            (26, 32),
+            (22, 44),
+        ]
+        draw.polygon(notch_points, fill=(0, 0, 0, 0))
+        
+        # === Draw Radio Waves (3 curved arcs emanating from arrow tip) ===
+        # Waves expand from upper-right of arrow
+        wave_center = (36, 12)
+        
+        # Calculate wave sizes based on pulse_scale for recording animation
+        if state == AppState.RECORDING:
+            # Animate waves expanding outward
+            base_offset = pulse_scale * 4  # Waves expand during pulse
+            wave_radii = [
+                (8 + base_offset, 12 + base_offset),
+                (14 + base_offset, 20 + base_offset),
+                (22 + base_offset, 30 + base_offset),
+            ]
+            # Fade waves based on distance
+            wave_alphas = [
+                int(255 * (0.5 + 0.5 * pulse_scale)),
+                int(200 * (0.3 + 0.7 * pulse_scale)),
+                int(150 * (0.1 + 0.9 * pulse_scale)),
+            ]
         else:
-            return icon
+            wave_radii = [(8, 12), (14, 20), (22, 30)]
+            wave_alphas = [180, 140, 100]
         
-        # Create color overlay and blend with original icon
-        overlay = Image.new("RGBA", icon.size, overlay_color)
-        
-        # Composite: blend overlay onto icon
-        icon = Image.alpha_composite(icon, overlay)
+        import math
+        for i, ((r_inner, r_outer), alpha) in enumerate(zip(wave_radii, wave_alphas)):
+            wave_col = (wave_color[0], wave_color[1], wave_color[2], min(255, alpha))
+            # Draw arc (approximate with thick line arc)
+            # Arc from 315° to 45° (upper-right quadrant)
+            for angle in range(-45, 46, 5):
+                rad = math.radians(angle)
+                x1 = wave_center[0] + r_inner * math.cos(rad)
+                y1 = wave_center[1] - r_inner * math.sin(rad)
+                x2 = wave_center[0] + r_outer * math.cos(rad)
+                y2 = wave_center[1] - r_outer * math.sin(rad)
+                draw.line([(x1, y1), (x2, y2)], fill=wave_col, width=2)
         
         return icon
 
