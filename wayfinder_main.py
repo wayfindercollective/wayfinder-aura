@@ -4085,8 +4085,12 @@ class WayfinderApp(ctk.CTk):
     def _run_inline_benchmark(self):
         """Run a quick benchmark on the current model with live timer feedback."""
         import subprocess
+        import queue
         
-        # Debug logging to file (visible even when run from shortcut)
+        # Result queue for thread-safe communication
+        result_queue = queue.Queue()
+        
+        # Debug logging to file
         log_file = Path.home() / ".cache" / "wayfinder-benchmark.log"
         def debug_log(msg):
             try:
@@ -4118,14 +4122,26 @@ class WayfinderApp(ctk.CTk):
         timer_state = {"running": True, "seconds": 0, "phase": "Starting", "timer_id": None}
         
         def update_timer():
-            if timer_state["running"]:
-                timer_state["seconds"] += 1
-                phase = timer_state["phase"]
-                try:
-                    self.benchmark_test_btn.configure(text=f"⏳ {phase} {timer_state['seconds']}s")
-                    timer_state["timer_id"] = self.after(1000, update_timer)
-                except:
-                    pass
+            if not timer_state["running"]:
+                return
+            
+            # Check if benchmark completed (poll the queue)
+            try:
+                gpu_time, cpu_time, error = result_queue.get_nowait()
+                debug_log("Result retrieved from queue in timer")
+                timer_state["running"] = False
+                on_complete(gpu_time, cpu_time, error)
+                return
+            except queue.Empty:
+                pass  # No result yet, continue timer
+            
+            timer_state["seconds"] += 1
+            phase = timer_state["phase"]
+            try:
+                self.benchmark_test_btn.configure(text=f"⏳ {phase} {timer_state['seconds']}s")
+                timer_state["timer_id"] = self.after(1000, update_timer)
+            except:
+                pass
         
         def stop_timer():
             timer_state["running"] = False
@@ -4268,16 +4284,9 @@ class WayfinderApp(ctk.CTk):
                 self.after(0, lambda: self.log(f"   ❌ Error: {error}"))
             
             debug_log(f"Benchmark complete: GPU={gpu_time}, CPU={cpu_time}, error={error}")
-            # Schedule completion on main thread - use explicit values to avoid lambda capture issues
-            final_gpu = gpu_time
-            final_cpu = cpu_time
-            final_error = error
-            debug_log("Scheduling on_complete callback...")
-            try:
-                self.after(0, lambda g=final_gpu, c=final_cpu, e=final_error: on_complete(g, c, e))
-                debug_log("Callback scheduled successfully")
-            except Exception as ex:
-                debug_log(f"Failed to schedule callback: {ex}")
+            # Put result in queue for main thread to pick up
+            result_queue.put((gpu_time, cpu_time, error))
+            debug_log("Result placed in queue")
         
         def on_complete(gpu_time, cpu_time, error):
             """Handle benchmark completion on main thread."""
@@ -11376,6 +11385,7 @@ class WayfinderApp(ctk.CTk):
         """Create a navigation arrow tray icon.
         
         Clean cursor/pointer arrow shape. Color indicates state.
+        Recording state has a "drawing" animation that traces the arrow outline.
         """
         size = 64
         
@@ -11383,32 +11393,64 @@ class WayfinderApp(ctk.CTk):
         icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(icon)
         
-        # Color based on state
-        if state == AppState.RECORDING:
-            # Active Red for recording
-            glyph_color = (255, 77, 77, 255)
-        elif state == AppState.PROCESSING:
-            # Muted gold for processing
-            glyph_color = (229, 172, 42, 255)
-        elif state == AppState.PASTING:
-            # Muted mint for typing
-            glyph_color = (93, 212, 168, 255)
-        else:  # IDLE
-            # Solid white for ready state
-            glyph_color = (255, 255, 255, 255)
-        
-        # === Draw Navigation Arrow (cursor/pointer style, pointing up) ===
-        # Single polygon with notch built in - no "cutout" needed
-        # Arrow centered in 64x64, pointing upward
+        # Arrow points (30° rotated symmetric arrow)
         arrow_points = [
-            (32, 6),    # Tip (top center)
-            (54, 52),   # Bottom-right corner
-            (38, 44),   # Inner right (notch start)
-            (32, 58),   # Bottom of notch (center)
-            (26, 44),   # Inner left (notch end)
-            (10, 52),   # Bottom-left corner
+            (42, 15),   # 0: Tip (upper-right)
+            (34, 56),   # 1: Right corner
+            (30, 44),   # 2: Inner right (notch start)
+            (24, 46),   # 3: Notch bottom
+            (23, 40),   # 4: Inner left (notch end)
+            (10, 42),   # 5: Left corner
         ]
-        draw.polygon(arrow_points, fill=glyph_color)
+        
+        if state == AppState.RECORDING:
+            # Red color for recording
+            glyph_color = (255, 77, 77, 255)
+            
+            # Drawing animation: trace the arrow outline from bottom-left to tip to right
+            # pulse_scale goes from 0.0 to 1.0
+            
+            # Define drawing path segments
+            segments = [
+                (arrow_points[5], arrow_points[0]),  # Left corner → Tip
+                (arrow_points[0], arrow_points[1]),  # Tip → Right corner
+                (arrow_points[1], arrow_points[2]),  # Right corner → Inner right
+                (arrow_points[2], arrow_points[3]),  # Inner right → Notch
+                (arrow_points[3], arrow_points[4]),  # Notch → Inner left
+                (arrow_points[4], arrow_points[5]),  # Inner left → Left corner
+            ]
+            
+            if pulse_scale < 0.85:
+                # Drawing phase: trace outline with thick stroke
+                num_segments = len(segments)
+                progress = pulse_scale / 0.85  # Normalize for drawing phase
+                segments_to_draw = progress * num_segments
+                
+                for i, (start, end) in enumerate(segments):
+                    if i < int(segments_to_draw):
+                        # Draw complete segment
+                        draw.line([start, end], fill=glyph_color, width=4)
+                    elif i < segments_to_draw:
+                        # Partial segment - interpolate endpoint
+                        frac = segments_to_draw - int(segments_to_draw)
+                        partial_end = (
+                            int(start[0] + (end[0] - start[0]) * frac),
+                            int(start[1] + (end[1] - start[1]) * frac)
+                        )
+                        draw.line([start, partial_end], fill=glyph_color, width=4)
+            else:
+                # Fill phase: show complete filled arrow
+                draw.polygon(arrow_points, fill=glyph_color)
+        
+        elif state == AppState.PROCESSING:
+            glyph_color = (229, 172, 42, 255)
+            draw.polygon(arrow_points, fill=glyph_color)
+        elif state == AppState.PASTING:
+            glyph_color = (93, 212, 168, 255)
+            draw.polygon(arrow_points, fill=glyph_color)
+        else:  # IDLE
+            glyph_color = (255, 255, 255, 255)
+            draw.polygon(arrow_points, fill=glyph_color)
         
         return icon
 
@@ -11445,30 +11487,28 @@ class WayfinderApp(ctk.CTk):
         self._tray_pulse_step()
     
     def _tray_pulse_step(self):
-        """Animate the tray icon wave pulse.
+        """Animate the tray icon with a drawing effect.
         
-        Designer spec: Cycle through 3 frames at 350ms intervals.
-        Frames represent radio waves expanding outward.
+        Smoothly traces the arrow outline, then fills it, then loops.
         """
         if self.app_state != AppState.RECORDING:
             return
         
-        # 3-frame animation as per designer spec
-        # Frame 0: waves compact (pulse_scale = 0.0)
-        # Frame 1: waves mid (pulse_scale = 0.5)
-        # Frame 2: waves expanded (pulse_scale = 1.0)
-        self._tray_pulse_frame = getattr(self, '_tray_pulse_frame', 0)
-        self._tray_pulse_frame = (self._tray_pulse_frame + 1) % 3
+        # Smooth animation: increment progress each step
+        self._tray_pulse_progress = getattr(self, '_tray_pulse_progress', 0.0)
+        self._tray_pulse_progress += 0.04  # 4% per step = 25 steps for full cycle
         
-        # Map frame to pulse scale
-        pulse_scale = self._tray_pulse_frame / 2.0  # 0.0, 0.5, 1.0
+        if self._tray_pulse_progress > 1.0:
+            self._tray_pulse_progress = 0.0  # Loop
         
-        # Update tray icon with current frame
+        pulse_scale = self._tray_pulse_progress
+        
+        # Update tray icon with current progress
         if self.tray_icon:
             self.tray_icon.icon = self.get_tray_icon(AppState.RECORDING, pulse_scale)
         
-        # Schedule next frame at 350ms (designer spec)
-        self._tray_pulse_job = self.after(350, self._tray_pulse_step)
+        # Schedule next frame at 50ms (~20 fps for smooth animation)
+        self._tray_pulse_job = self.after(50, self._tray_pulse_step)
     
     def _stop_tray_pulse(self):
         """Stop the tray icon pulsing animation."""
