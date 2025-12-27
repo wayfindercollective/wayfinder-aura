@@ -3121,6 +3121,19 @@ class WayfinderApp(ctk.CTk):
         title_frame = ctk.CTkFrame(header, fg_color="transparent")
         title_frame.pack(side="left")
         
+        # Logo icon - navigation arrow matching brand
+        logo_size = 24
+        try:
+            logo_img = Image.open(ICON_PATH).resize((logo_size, logo_size), Image.LANCZOS)
+            self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=(logo_size, logo_size))
+            ctk.CTkLabel(
+                title_frame,
+                image=self._header_logo_img,
+                text="",
+            ).pack(side="left", padx=(0, 8))
+        except Exception:
+            pass  # Skip logo if icon not found
+        
         # Smaller, refined logo wordmark
         ctk.CTkLabel(
             title_frame,
@@ -8827,25 +8840,27 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to select or download whisper models."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Whisper Models")
-        dialog.geometry("580x680")
+        dialog.geometry("520x600")
+        dialog.minsize(480, 500)
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
+        dialog.grab_set()  # Make modal
         dialog.after(100, dialog.lift)
         
         # Initialize model downloader
         downloader = ModelDownloader()
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        inner.pack(fill="both", expand=True, padx=24, pady=24)
         
-        # Header with tabs
+        # Header
         header = ctk.CTkFrame(inner, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 15))
+        header.pack(fill="x", pady=(0, 12))
         
         ctk.CTkLabel(
             header,
             text="Whisper Models",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], 20, "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w")
         
@@ -8855,11 +8870,11 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], 11),
             text_color=COLORS["text_secondary"],
             justify="left",
-        ).pack(anchor="w", pady=(5, 0))
+        ).pack(anchor="w", pady=(4, 0))
         
         # Tab buttons
         tab_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        tab_frame.pack(fill="x", pady=(0, 10))
+        tab_frame.pack(fill="x", pady=(0, 12))
         
         current_tab = ctk.StringVar(value="installed")
         
@@ -8911,8 +8926,8 @@ class WayfinderApp(ctk.CTk):
                 ).pack(pady=(10, 40))
                 return
             
-            scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=320)
-            scroll.pack(fill="both", expand=True, pady=(0, 15))
+            scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12)
+            scroll.pack(fill="both", expand=True, pady=(0, 12))
             
             for model in models:
                 is_current = os.path.expanduser(model["path"]) == current_path
@@ -8968,8 +8983,8 @@ class WayfinderApp(ctk.CTk):
             installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             download_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
             
-            scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=380)
-            scroll.pack(fill="both", expand=True, pady=(0, 10))
+            scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12)
+            scroll.pack(fill="both", expand=True, pady=(0, 12))
             
             # Group models by category
             english_models = ["tiny.en", "base.en", "small.en", "medium.en"]
@@ -9114,24 +9129,27 @@ class WayfinderApp(ctk.CTk):
             
             downloader.download_model(model_id, on_progress, on_complete, on_error)
         
-        # Tab buttons
+        # Tab buttons - use grid for even sizing
+        tab_frame.grid_columnconfigure(0, weight=1)
+        tab_frame.grid_columnconfigure(1, weight=1)
+        
         installed_btn = ctk.CTkButton(
-            tab_frame, text="📁 Installed",
-            font=(self.font_body[0], 13), width=120, height=36,
+            tab_frame, text="Installed",
+            font=(self.font_body[0], 13), height=36,
             corner_radius=8, fg_color=COLORS["accent"], text_color="#000000",
             hover_color=COLORS["accent_glow"],
             command=show_installed_tab,
         )
-        installed_btn.pack(side="left", padx=(0, 8))
+        installed_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         
         download_btn = ctk.CTkButton(
-            tab_frame, text="⬇️ Download Models",
-            font=(self.font_body[0], 13), width=140, height=36,
+            tab_frame, text="Download Models",
+            font=(self.font_body[0], 13), height=36,
             corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
             hover_color=COLORS["bg_elevated"],
             command=show_download_tab,
         )
-        download_btn.pack(side="left")
+        download_btn.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         
         def show_benchmark_tab():
             """Show benchmark tab for measuring model speeds."""
