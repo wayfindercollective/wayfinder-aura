@@ -8893,15 +8893,7 @@ class WayfinderApp(ctk.CTk):
             corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
             hover_color=COLORS["bg_elevated"],
         )
-        download_btn.pack(side="left", fill="x", expand=True, padx=(4, 4))
-        
-        benchmark_btn = ctk.CTkButton(
-            tab_container, text="⏱️ Benchmark",
-            font=(self.font_body[0], 13), width=110, height=36,
-            corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
-            hover_color=COLORS["bg_elevated"],
-        )
-        benchmark_btn.pack(side="left", padx=(4, 0))
+        download_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
         
         # Content area - this gets refreshed when tabs change
         content_area = ctk.CTkFrame(main_frame, fg_color=COLORS["bg_card"], corner_radius=12)
@@ -8921,7 +8913,6 @@ class WayfinderApp(ctk.CTk):
             clear_content()
             installed_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
             download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
-            benchmark_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             
             models = self.get_available_models()
             
@@ -9007,7 +8998,6 @@ class WayfinderApp(ctk.CTk):
             clear_content()
             installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             download_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
-            benchmark_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             
             scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
             scroll.pack(fill="both", expand=True, padx=5, pady=5)
@@ -9130,74 +9120,9 @@ class WayfinderApp(ctk.CTk):
             
             downloader.download_model(model_id, on_progress, on_complete, on_error)
         
-        def show_benchmark():
-            clear_content()
-            installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
-            download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
-            benchmark_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
-            
-            scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
-            scroll.pack(fill="both", expand=True, padx=5, pady=5)
-            
-            ctk.CTkLabel(
-                scroll, text="🚀 Benchmark Your Hardware",
-                font=(self.font_body[0], 16, "bold"),
-                text_color=COLORS["text_bright"],
-            ).pack(anchor="w", padx=10, pady=(10, 5))
-            
-            ctk.CTkLabel(
-                scroll,
-                text="Test transcription speed on your system.\nResults are used for timing estimates.",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_secondary"],
-                justify="left",
-            ).pack(anchor="w", padx=10, pady=(0, 15))
-            
-            # Results display
-            results_box = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"], corner_radius=8)
-            results_box.pack(fill="x", padx=5, pady=(0, 10))
-            
-            benchmark_results = self.config.get("benchmark_results", {})
-            fastest = self.config.get("benchmark_fastest_processor", None)
-            
-            if benchmark_results:
-                ctk.CTkLabel(
-                    results_box, text="📊 Previous Results",
-                    font=(self.font_body[0], 13, "bold"),
-                    text_color=COLORS["text_primary"],
-                ).pack(anchor="w", padx=15, pady=(10, 5))
-                
-                if fastest:
-                    ctk.CTkLabel(
-                        results_box, text=f"Fastest: {fastest.upper()}",
-                        font=(self.font_body[0], 11),
-                        text_color=COLORS["accent_green"],
-                    ).pack(anchor="w", padx=15, pady=(0, 10))
-            else:
-                ctk.CTkLabel(
-                    results_box,
-                    text="No benchmark results yet.\nRun a benchmark to measure speeds!",
-                    font=(self.font_body[0], 12),
-                    text_color=COLORS["text_muted"],
-                    justify="center",
-                ).pack(pady=20)
-            
-            # Run button
-            def run_bench():
-                self.log("🚀 Starting benchmark...")
-                # TODO: Implement full benchmark UI
-            
-            ctk.CTkButton(
-                content_area, text="⏱️ Run Benchmark",
-                font=(self.font_body[0], 14, "bold"), height=45, corner_radius=10,
-                fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
-                command=run_bench,
-            ).pack(fill="x", padx=10, pady=10)
-        
         # ===== WIRE UP BUTTON COMMANDS =====
         installed_btn.configure(command=show_installed)
         download_btn.configure(command=show_download)
-        benchmark_btn.configure(command=show_benchmark)
         
         # Force update before showing content
         dialog.update_idletasks()
