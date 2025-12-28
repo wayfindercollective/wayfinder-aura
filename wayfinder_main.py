@@ -8840,8 +8840,8 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to select or download whisper models."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Whisper Models")
-        dialog.geometry("520x600")
-        dialog.minsize(480, 500)
+        dialog.geometry("580x650")
+        dialog.minsize(520, 550)
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         
@@ -8853,47 +8853,47 @@ class WayfinderApp(ctk.CTk):
         
         # ===== BUILD STATIC UI ELEMENTS FIRST =====
         
-        # Main container with visible background to debug
+        # Main container
         main_frame = ctk.CTkFrame(dialog, fg_color=COLORS["bg_base"])
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        main_frame.pack(fill="both", expand=True, padx=16, pady=16)
         
-        # Header section
+        # Header section - compact
         header_label = ctk.CTkLabel(
             main_frame,
             text="Whisper Models",
-            font=(self.font_header[0], 20, "bold"),
+            font=(self.font_header[0], 18, "bold"),
             text_color=COLORS["text_bright"],
         )
-        header_label.pack(anchor="w", pady=(0, 4))
+        header_label.pack(anchor="w", pady=(0, 2))
         
         subtitle_label = ctk.CTkLabel(
             main_frame,
             text="Select an installed model or download new ones.",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], 10),
             text_color=COLORS["text_secondary"],
         )
-        subtitle_label.pack(anchor="w", pady=(0, 16))
+        subtitle_label.pack(anchor="w", pady=(0, 10))
         
-        # Tab button container - use pack for all buttons (simpler, more reliable)
+        # Tab button container
         tab_container = ctk.CTkFrame(main_frame, fg_color="transparent")
-        tab_container.pack(fill="x", pady=(0, 12))
+        tab_container.pack(fill="x", pady=(0, 8))
         
-        # Create tab buttons with pack (all same layout manager)
+        # Compact tab buttons
         installed_btn = ctk.CTkButton(
             tab_container, text="Installed",
-            font=(self.font_body[0], 13), height=36,
-            corner_radius=8, fg_color=COLORS["accent"], text_color="#000000",
+            font=(self.font_body[0], 12), height=30,
+            corner_radius=6, fg_color=COLORS["accent"], text_color="#000000",
             hover_color=COLORS["accent_glow"],
         )
-        installed_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        installed_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
         
         download_btn = ctk.CTkButton(
             tab_container, text="Download",
-            font=(self.font_body[0], 13), height=36,
-            corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
+            font=(self.font_body[0], 12), height=30,
+            corner_radius=6, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
             hover_color=COLORS["bg_elevated"],
         )
-        download_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        download_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
         
         # Content area - this gets refreshed when tabs change
         content_area = ctk.CTkFrame(main_frame, fg_color=COLORS["bg_card"], corner_radius=12)
@@ -8951,27 +8951,27 @@ class WayfinderApp(ctk.CTk):
             for model in models:
                 is_current = os.path.expanduser(model["path"]) == current_path
                 
-                row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=8)
-                row.pack(fill="x", pady=2, padx=2)
+                row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=6)
+                row.pack(fill="x", pady=1, padx=2)
                 
                 radio = ctk.CTkRadioButton(
                     row, text="", variable=model_var, value=model["path"],
-                    width=20, fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                    width=18, fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
                 )
-                radio.pack(side="left", padx=(10, 5), pady=10)
+                radio.pack(side="left", padx=(8, 4), pady=6)
                 
                 info_frame = ctk.CTkFrame(row, fg_color="transparent")
-                info_frame.pack(side="left", fill="x", expand=True, pady=8)
+                info_frame.pack(side="left", fill="x", expand=True, pady=5)
                 
                 ctk.CTkLabel(
                     info_frame, text=model["name"],
-                    font=(self.font_body[0], 13, "bold" if is_current else "normal"),
+                    font=(self.font_body[0], 12, "bold" if is_current else "normal"),
                     text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
                 ).pack(anchor="w")
                 
                 ctk.CTkLabel(
                     info_frame, text=f"{model['speed']} • {model['size']}",
-                    font=(self.font_body[0], 10), text_color=COLORS["text_muted"],
+                    font=(self.font_body[0], 9), text_color=COLORS["text_muted"],
                 ).pack(anchor="w")
             
             # Save button at bottom
@@ -8988,11 +8988,11 @@ class WayfinderApp(ctk.CTk):
             
             save_btn = ctk.CTkButton(
                 content_area, text="Save & Apply",
-                font=(self.font_body[0], 14, "bold"), height=45, corner_radius=10,
+                font=(self.font_body[0], 13, "bold"), height=38, corner_radius=8,
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
                 command=save_selection,
             )
-            save_btn.pack(fill="x", padx=10, pady=10)
+            save_btn.pack(fill="x", padx=8, pady=8)
         
         def show_download():
             clear_content()
@@ -9012,9 +9012,9 @@ class WayfinderApp(ctk.CTk):
             for section_title, model_ids in categories:
                 ctk.CTkLabel(
                     scroll, text=section_title,
-                    font=(self.font_body[0], 11, "bold"),
+                    font=(self.font_body[0], 10, "bold"),
                     text_color=COLORS["text_muted"],
-                ).pack(anchor="w", padx=10, pady=(12, 5))
+                ).pack(anchor="w", padx=8, pady=(8, 3))
                 
                 for model_id in model_ids:
                     if model_id not in WHISPER_CPP_MODELS:
@@ -9023,12 +9023,12 @@ class WayfinderApp(ctk.CTk):
                     info = WHISPER_CPP_MODELS[model_id]
                     is_installed = downloader.is_installed(model_id)
                     
-                    row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=8)
-                    row.pack(fill="x", pady=2, padx=2)
+                    row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=6)
+                    row.pack(fill="x", pady=1, padx=2)
                     
                     # Model info
                     info_frame = ctk.CTkFrame(row, fg_color="transparent")
-                    info_frame.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+                    info_frame.pack(side="left", fill="x", expand=True, padx=8, pady=5)
                     
                     name_text = info["name"]
                     if info.get("recommended"):
@@ -9036,33 +9036,33 @@ class WayfinderApp(ctk.CTk):
                     
                     ctk.CTkLabel(
                         info_frame, text=name_text,
-                        font=(self.font_body[0], 12, "bold"),
+                        font=(self.font_body[0], 11, "bold"),
                         text_color=COLORS["accent"] if is_installed else COLORS["text_primary"],
                     ).pack(anchor="w")
                     
                     ctk.CTkLabel(
                         info_frame, text=f"{info['size']} • {info['speed']}",
-                        font=(self.font_body[0], 10), text_color=COLORS["text_muted"],
+                        font=(self.font_body[0], 9), text_color=COLORS["text_muted"],
                     ).pack(anchor="w")
                     
                     # Status/button
                     if is_installed:
                         ctk.CTkLabel(
-                            row, text="✓ Installed",
+                            row, text="✓",
                             font=(self.font_body[0], 11),
                             text_color=COLORS["accent_green"],
-                        ).pack(side="right", padx=15, pady=10)
+                        ).pack(side="right", padx=12, pady=6)
                     else:
                         def make_handler(mid=model_id):
                             return lambda: do_download(mid)
                         
                         ctk.CTkButton(
-                            row, text="Download",
-                            font=(self.font_body[0], 11), width=80, height=28,
-                            corner_radius=6, fg_color=COLORS["bg_elevated"],
+                            row, text="Get",
+                            font=(self.font_body[0], 10), width=50, height=24,
+                            corner_radius=5, fg_color=COLORS["bg_elevated"],
                             hover_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
                             command=make_handler(),
-                        ).pack(side="right", padx=10, pady=8)
+                        ).pack(side="right", padx=8, pady=5)
         
         def do_download(model_id: str):
             """Download a model with progress dialog."""
