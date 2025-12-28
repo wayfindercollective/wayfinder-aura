@@ -8840,8 +8840,8 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to select or download whisper models."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Whisper Models")
-        dialog.geometry("580x650")
-        dialog.minsize(520, 550)
+        dialog.geometry("650x750")
+        dialog.minsize(580, 600)
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         
