@@ -105,11 +105,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     
+    # Style settings (unified tone for transcription and post-processing)
+    "output_tone": "professional",  # professional | casual | technical
+    "smart_formatting": True,  # Auto-detect and format content (email, lists, code, etc.)
+    
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": False,  # Enable LLM post-processing
     "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai
-    "post_processing_template": "clean",  # clean | email | notes | code_comment | custom
-    "post_processing_custom_prompt": "",  # Custom prompt for 'custom' template
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
     "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
     

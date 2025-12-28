@@ -16,64 +16,85 @@ class PostProcessingError(Exception):
 
 
 # =============================================================================
-# Prompt Templates
+# Tone-Based Prompts (New Simplified System)
 # =============================================================================
 
+# Tone guidance for different output styles
+TONE_GUIDANCE: Dict[str, str] = {
+    "professional": "Use formal, polished, business-appropriate language. Be clear and concise.",
+    "casual": "Use relaxed, conversational, friendly language. Keep it natural and approachable.",
+    "technical": "Use precise, detailed, developer-focused language. Be accurate and specific.",
+}
+
+# Smart formatting prompt - auto-detects content type and formats appropriately
+SMART_FORMAT_PROMPT = """You are a transcription cleanup assistant. Process this speech transcription with these rules:
+
+1. Remove ALL filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well, right
+2. Fix punctuation and capitalization
+3. AUTO-DETECT the content type and format appropriately:
+   - If it reads like an email (mentions sending, recipients, subjects): format as email with greeting/sign-off
+   - If it contains lists or multiple items: use bullet points
+   - If it describes code or technical concepts: use documentation style
+   - Otherwise: clean prose paragraphs
+
+4. Tone: {tone_guidance}
+
+IMPORTANT: Output ONLY the cleaned text. No explanations, no labels, no "Here is...".
+
+Transcription:
+{text}
+
+Cleaned:"""
+
+# Clean-only prompt - minimal processing, just removes fillers
+CLEAN_ONLY_PROMPT = """Clean up this transcribed speech. Remove filler words (um, uh, ah, like, you know, basically, actually, I mean), fix punctuation and capitalization. Keep the exact structure and meaning - only clean up the delivery.
+
+Tone: {tone_guidance}
+
+IMPORTANT: Output ONLY the cleaned text. No explanations, no labels.
+
+Transcription:
+{text}
+
+Cleaned:"""
+
+
+def build_prompt(text: str, config: dict) -> str:
+    """
+    Build the appropriate prompt based on config settings.
+    
+    Args:
+        text: The transcription text to process
+        config: Configuration dictionary with style settings
+        
+    Returns:
+        Formatted prompt ready for LLM
+    """
+    # Get tone guidance
+    tone = config.get("output_tone", "professional")
+    tone_guidance = TONE_GUIDANCE.get(tone, TONE_GUIDANCE["professional"])
+    
+    # Choose prompt based on smart formatting setting
+    smart_formatting = config.get("smart_formatting", True)
+    
+    if smart_formatting:
+        template = SMART_FORMAT_PROMPT
+    else:
+        template = CLEAN_ONLY_PROMPT
+    
+    # Fill in the template
+    return template.format(tone_guidance=tone_guidance, text=text)
+
+
+# Legacy compatibility - keeping for any external code that might use these
 PROMPT_TEMPLATES: Dict[str, str] = {
-    "clean": """You are a transcription editor. Output ONLY the corrected text with no explanation.
-
-Rules:
-- Remove filler words (um, uh, ah, like, you know, basically, actually, I mean)
-- Fix spelling and grammar errors
-- Add proper punctuation and capitalization
-- Do NOT add quotes around the output
-- Do NOT explain what you changed
-- Do NOT add any commentary
-
-Input: {text}
-
-Output:""",
-
-    "email": """Format this transcribed speech as a professional email. Remove filler words, add appropriate greeting and sign-off if not present, organize into clear paragraphs, and ensure proper punctuation.
-
-Transcription:
-{text}
-
-Formatted email:""",
-
-    "notes": """Format this transcribed speech as organized notes. Remove filler words, use bullet points for lists, add headers if multiple topics are discussed, and keep it concise.
-
-Transcription:
-{text}
-
-Formatted notes:""",
-
-    "code_comment": """Format this transcribed speech as a code comment or documentation. Remove filler words, be concise and technical, use proper documentation style.
-
-Transcription:
-{text}
-
-Code comment:""",
-
-    "custom": """{custom_prompt}
-
-Transcription:
-{text}
-
-Result:""",
+    "clean": CLEAN_ONLY_PROMPT,
 }
 
 
 def get_prompt_template(template_name: str, custom_prompt: str = "") -> str:
-    """Get a prompt template by name."""
-    if template_name not in PROMPT_TEMPLATES:
-        template_name = "clean"
-    
-    template = PROMPT_TEMPLATES[template_name]
-    if template_name == "custom" and custom_prompt:
-        template = template.replace("{custom_prompt}", custom_prompt)
-    
-    return template
+    """Legacy function - now uses build_prompt internally."""
+    return CLEAN_ONLY_PROMPT
 
 
 def format_prompt(template: str, text: str) -> str:
@@ -692,6 +713,10 @@ def process_with_config(text: str, config: dict) -> str:
     Post-process transcription using settings from config dictionary.
     This is the main entry point for post-processing.
     
+    Uses the new tone-based system with optional smart formatting:
+    - output_tone: professional | casual | technical
+    - smart_formatting: True (auto-detect content type) | False (clean only)
+    
     Args:
         text: The raw transcription text
         config: Configuration dictionary with post-processing settings
@@ -707,10 +732,8 @@ def process_with_config(text: str, config: dict) -> str:
         return text
     
     try:
-        # Get the prompt template
-        template_name = config.get("post_processing_template", "clean")
-        custom_prompt = config.get("post_processing_custom_prompt", "")
-        template = get_prompt_template(template_name, custom_prompt)
+        # Build the prompt using new tone-based system
+        prompt = build_prompt(text, config)
         
         # Get backend and process
         backend = get_backend(config)
@@ -725,7 +748,8 @@ def process_with_config(text: str, config: dict) -> str:
                 print(f"[Post-processing] ⚠ llama.cpp not available - no model selected")
             return text
         
-        result = backend.process(text, template)
+        # Process with the built prompt (prompt already includes the text)
+        result = backend.process(text, prompt)
         return result
         
     except PostProcessingError as e:
@@ -809,17 +833,20 @@ def get_available_backends() -> list:
 
 
 def get_template_names() -> list:
-    """Get list of available template names."""
-    return list(PROMPT_TEMPLATES.keys())
+    """Legacy function - returns empty list as templates are replaced by tone system."""
+    return []
 
 
 def get_template_descriptions() -> Dict[str, str]:
-    """Get descriptions for each template."""
-    return {
-        "clean": "Remove filler words, fix punctuation only",
-        "email": "Format as professional email with greeting/sign-off",
-        "notes": "Bullet points, headers, organized notes",
-        "code_comment": "Format as code documentation",
-        "custom": "Use your own custom prompt",
-    }
+    """Legacy function - returns empty dict as templates are replaced by tone system."""
+    return {}
+
+
+def get_tone_options() -> list:
+    """Get list of available output tones."""
+    return [
+        {"id": "professional", "name": "Professional", "description": "Formal, polished, business-appropriate"},
+        {"id": "casual", "name": "Casual", "description": "Relaxed, conversational, friendly"},
+        {"id": "technical", "name": "Technical", "description": "Precise, detailed, developer-focused"},
+    ]
 

@@ -178,11 +178,12 @@ DEFAULT_CONFIG = {
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
+    # Style settings (unified tone for transcription and post-processing)
+    "output_tone": "professional",  # professional | casual | technical
+    "smart_formatting": True,  # Auto-detect and format content (email, lists, code, etc.)
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": False,  # Enable LLM post-processing
     "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai
-    "post_processing_template": "clean",  # clean | email | notes | code_comment | custom
-    "post_processing_custom_prompt": "",  # Custom prompt for 'custom' template
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
     "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
     # llama.cpp post-processing settings
@@ -513,6 +514,10 @@ class ToolTip:
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
+
+    def update_text(self, new_text: str):
+        """Update the tooltip text dynamically."""
+        self.text = new_text
 
 
 class ModeSelector(ctk.CTkFrame):
@@ -2601,6 +2606,9 @@ class WayfinderApp(ctk.CTk):
         self.event_queue = queue.Queue()
         self.stop_event = threading.Event()
         
+        # Store tooltips that need dynamic updates (keyed by tooltip type)
+        self.dynamic_tooltips: dict[str, list[ToolTip]] = {}
+        
         # License/feature gate for premium features
         self.feature_gate = get_feature_gate()
         
@@ -3086,6 +3094,7 @@ class WayfinderApp(ctk.CTk):
         
         self._create_dictate_tab()
         self._create_settings_tab()
+        self._create_style_tab()
         self._create_history_tab()
         
         # Show initial tab (Settings shows content, Dictate is clean)
@@ -3609,6 +3618,7 @@ class WayfinderApp(ctk.CTk):
         tabs = [
             ("dictate", "∿", "Dictate", "#C4B5FD"),     # Lavender - sine wave
             ("settings", "⚙", "Settings", "#A1A1AA"),   # Zinc - neutral
+            ("style", "✎", "Style", "#F9A8D4"),         # Pink - creative/tone
             ("history", "◷", "History", "#6EE7B7"),     # Soft mint
         ]
         
@@ -4095,6 +4105,18 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_muted"],
             ).pack(anchor="w")
     
+    def _refresh_benchmark_tooltips(self):
+        """Refresh all dynamic tooltips that depend on benchmark results."""
+        tooltip_keys = ["whisper_model", "gpu_acceleration", "accuracy_mode"]
+        
+        for key in tooltip_keys:
+            if key in self.dynamic_tooltips:
+                new_text = get_dynamic_tooltip(key, self.config)
+                for tooltip in self.dynamic_tooltips[key]:
+                    tooltip.update_text(new_text)
+        
+        self.log("   📊 Updated tooltips with new benchmark data")
+    
     def _run_inline_benchmark(self):
         """Run a quick benchmark on the current model with live timer feedback."""
         import subprocess
@@ -4119,7 +4141,10 @@ class WayfinderApp(ctk.CTk):
             pass
         
         # Get current model with proper display name
-        selected_model = self.config.get("whisper_model", "ggml-large-v3-turbo.bin")
+        # Read from "model_path" config key (where UI saves the selection)
+        model_path_config = self.config.get("model_path", "~/whisper.cpp/models/ggml-large-v3-turbo.bin")
+        # Extract just the filename from the full path
+        selected_model = Path(os.path.expanduser(model_path_config)).name
         
         # Create proper display name
         model_id = selected_model.replace("ggml-", "").replace(".bin", "")
@@ -4352,8 +4377,9 @@ class WayfinderApp(ctk.CTk):
             self.config["benchmark_fastest_processor"] = "gpu" if gpu_wins > cpu_wins else "cpu"
             save_config(self.config)
             
-            # Update display
+            # Update display and refresh tooltips with new benchmark data
             self._update_benchmark_results_display()
+            self._refresh_benchmark_tooltips()
             
             # Show completion message
             if gpu_time and cpu_time:
@@ -4617,14 +4643,10 @@ class WayfinderApp(ctk.CTk):
         self.model_btn = self.create_setting_row(
             parent, "Whisper Model", model_display,
             self.open_model_settings, tooltip=get_dynamic_tooltip("whisper_model", self.config),
+            tooltip_key="whisper_model",
         )
         
-        # Prompt
-        prompt_display = self.get_prompt_display()
-        self.prompt_btn = self.create_setting_row(
-            parent, "Prompt", prompt_display,
-            self.open_prompt_settings, tooltip=SETTING_TOOLTIPS["prompt"],
-        )
+        # Note: Prompt button removed - now configured via Style tab
         
         # GPU Acceleration toggle
         self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", True))
@@ -4632,6 +4654,7 @@ class WayfinderApp(ctk.CTk):
             parent, "GPU Acceleration",
             self.gpu_var, self.toggle_gpu,
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
+            tooltip_key="gpu_acceleration",
         )
         
         # Accuracy Mode
@@ -4641,6 +4664,7 @@ class WayfinderApp(ctk.CTk):
             parent, "Accuracy Mode", ["fast", "balanced", "high"],
             self.accuracy_mode_var, self.on_accuracy_mode_changed,
             tooltip=get_dynamic_tooltip("accuracy_mode", self.config), width=140,
+            tooltip_key="accuracy_mode",
         )
         
         # Language
@@ -4714,15 +4738,7 @@ class WayfinderApp(ctk.CTk):
             # Inline model management section (no popups)
             self._build_inline_model_section(parent, postproc_backend)
             
-            # Template selector
-            postproc_template = self.config.get("post_processing_template", "clean")
-            self.postproc_template_var = ctk.StringVar(value=postproc_template)
-            self.postproc_template_dropdown = self.create_dropdown_row(
-                parent, "Format Template", ["clean", "email", "notes", "code_comment", "custom"],
-                self.postproc_template_var, self.on_postproc_template_changed,
-                tooltip="How to format the cleaned text:\n• clean: Just remove filler words, fix punctuation\n• email: Format as professional email\n• notes: Bullet points and headers\n• code_comment: Technical documentation style\n• custom: Use your own prompt",
-                width=140,
-            )
+            # Note: Format template removed - now uses Style tab settings (output_tone + smart_formatting)
     
     def _build_hybrid_mode_settings(self, parent) -> None:
         """Build settings panel for Hybrid mode (local transcription + cloud post-processing)."""
@@ -4745,14 +4761,10 @@ class WayfinderApp(ctk.CTk):
         self.model_btn = self.create_setting_row(
             parent, "Whisper Model", model_display,
             self.open_model_settings, tooltip=get_dynamic_tooltip("whisper_model", self.config),
+            tooltip_key="whisper_model",
         )
         
-        # Prompt
-        prompt_display = self.get_prompt_display()
-        self.prompt_btn = self.create_setting_row(
-            parent, "Prompt", prompt_display,
-            self.open_prompt_settings, tooltip=SETTING_TOOLTIPS["prompt"],
-        )
+        # Note: Prompt button removed - now configured via Style tab
         
         # GPU Acceleration toggle
         self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", True))
@@ -4760,6 +4772,7 @@ class WayfinderApp(ctk.CTk):
             parent, "GPU Acceleration",
             self.gpu_var, self.toggle_gpu,
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
+            tooltip_key="gpu_acceleration",
         )
         
         # === Cloud Post-Processing Section ===
@@ -4776,14 +4789,7 @@ class WayfinderApp(ctk.CTk):
             tooltip="OpenAI = GPT-4o-mini, Anthropic = Claude Haiku", width=140,
         )
         
-        # Template selector
-        postproc_template = self.config.get("post_processing_template", "clean")
-        self.postproc_template_var = ctk.StringVar(value=postproc_template)
-        self.postproc_template_dropdown = self.create_dropdown_row(
-            parent, "Format Template", ["clean", "email", "notes", "code_comment", "custom"],
-            self.postproc_template_var, self.on_postproc_template_changed,
-            tooltip="clean=Remove fillers, email=Format as email, notes=Bullet points", width=140,
-        )
+        # Note: Format template removed - now uses Style tab settings (output_tone + smart_formatting)
         
         # API Configuration
         postproc_config_text = self._get_postproc_config_display()
@@ -4905,6 +4911,204 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["caption"], "bold"),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", pady=(0, 8))
+    
+    def _create_style_tab(self) -> None:
+        """Create the Style tab with tone presets and smart formatting toggle."""
+        frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        self.tab_frames["style"] = frame
+        
+        # Scrollable content
+        scroll = SmoothScrollableFrame(
+            frame,
+            fg_color="transparent",
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        scroll.pack(fill="both", expand=True)
+        
+        # === SECTION: Output Tone ===
+        tone_tile = ctk.CTkFrame(
+            scroll, fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["lg"], border_width=1,
+            border_color=COLORS["border_rim"],
+        )
+        tone_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        
+        tone_header = ctk.CTkFrame(tone_tile, fg_color="transparent")
+        tone_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
+        ctk.CTkLabel(
+            tone_header, text="✎   O U T P U T   T O N E",
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        
+        # Description
+        ctk.CTkLabel(
+            tone_tile,
+            text="Choose a tone that guides how your speech is transcribed and formatted.",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+            wraplength=350,
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 12))
+        
+        # Tone selection cards
+        tone_container = ctk.CTkFrame(tone_tile, fg_color="transparent")
+        tone_container.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        
+        self.tone_buttons = {}
+        current_tone = self.config.get("output_tone", "professional")
+        
+        tones = [
+            ("professional", "💼", "Professional", "Formal, polished, business-appropriate"),
+            ("casual", "💬", "Casual", "Relaxed, conversational, friendly"),
+            ("technical", "🔧", "Technical", "Precise, detailed, developer-focused"),
+        ]
+        
+        for i, (tone_id, icon, label, desc) in enumerate(tones):
+            is_selected = tone_id == current_tone
+            
+            card = ctk.CTkFrame(
+                tone_container,
+                fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_input"],
+                corner_radius=RADIUS["md"],
+                border_width=2 if is_selected else 1,
+                border_color=COLORS["accent"] if is_selected else COLORS["border_subtle"],
+            )
+            card.pack(fill="x", pady=4)
+            
+            # Make the whole card clickable
+            card_inner = ctk.CTkFrame(card, fg_color="transparent")
+            card_inner.pack(fill="x", padx=12, pady=10)
+            
+            # Icon and title row
+            title_row = ctk.CTkFrame(card_inner, fg_color="transparent")
+            title_row.pack(fill="x")
+            
+            ctk.CTkLabel(
+                title_row,
+                text=f"{icon}  {label}",
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
+            ).pack(side="left")
+            
+            if is_selected:
+                ctk.CTkLabel(
+                    title_row,
+                    text="✓",
+                    font=(self.font_body[0], self.font_sizes["body"]),
+                    text_color=COLORS["accent"],
+                ).pack(side="right")
+            
+            ctk.CTkLabel(
+                card_inner,
+                text=desc,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w", pady=(4, 0))
+            
+            # Bind click to whole card
+            for widget in [card, card_inner, title_row]:
+                widget.bind("<Button-1>", lambda e, t=tone_id: self._on_tone_selected(t))
+                for child in widget.winfo_children():
+                    child.bind("<Button-1>", lambda e, t=tone_id: self._on_tone_selected(t))
+            
+            self.tone_buttons[tone_id] = card
+        
+        # === SECTION: Smart Formatting ===
+        format_tile = ctk.CTkFrame(
+            scroll, fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["lg"], border_width=1,
+            border_color=COLORS["border_rim"],
+        )
+        format_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        
+        format_header = ctk.CTkFrame(format_tile, fg_color="transparent")
+        format_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
+        ctk.CTkLabel(
+            format_header, text="✨   S M A R T   F O R M A T T I N G",
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        
+        format_content = ctk.CTkFrame(format_tile, fg_color="transparent")
+        format_content.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        
+        # Smart formatting toggle
+        self.smart_format_var = ctk.BooleanVar(value=self.config.get("smart_formatting", True))
+        self.create_toggle_row(
+            format_content, 
+            "Auto-detect and format content", 
+            self.smart_format_var,
+            self._on_smart_formatting_toggled,
+            tooltip="When enabled, automatically detects emails, lists, code comments and formats them appropriately. When disabled, only removes filler words and fixes punctuation.",
+        )
+        
+        # Info text about what smart formatting does
+        info_frame = ctk.CTkFrame(format_content, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
+        info_frame.pack(fill="x", pady=(8, 0))
+        
+        ctk.CTkLabel(
+            info_frame,
+            text="💡 Smart formatting detects intent:\n• Email-like content → proper email format\n• Lists and bullet points → organized structure\n• Code descriptions → documentation style\n• Everything else → clean, polished prose",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=10)
+    
+    def _on_tone_selected(self, tone_id: str) -> None:
+        """Handle tone selection from Style tab."""
+        current_tone = self.config.get("output_tone", "professional")
+        if tone_id == current_tone:
+            return
+        
+        self.config["output_tone"] = tone_id
+        
+        # Also update the whisper prompt to match the tone
+        tone_prompts = {
+            "professional": "This is a professional dictation with formal language, proper punctuation, and business-appropriate terminology.",
+            "casual": "This is a casual conversation with natural, relaxed language and everyday expressions.",
+            "technical": "This is a technical dictation with precise terminology, code references, and developer-focused language.",
+        }
+        self.config["prompt"] = tone_prompts.get(tone_id, tone_prompts["professional"])
+        
+        save_config(self.config)
+        
+        # Update card styles
+        for tid, card in self.tone_buttons.items():
+            is_selected = tid == tone_id
+            card.configure(
+                fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_input"],
+                border_width=2 if is_selected else 1,
+                border_color=COLORS["accent"] if is_selected else COLORS["border_subtle"],
+            )
+        
+        # Rebuild the style tab to update checkmarks
+        self._rebuild_style_tab()
+        
+        tone_labels = {"professional": "Professional", "casual": "Casual", "technical": "Technical"}
+        self.log(f"✎ Output tone: {tone_labels.get(tone_id, tone_id)}")
+    
+    def _rebuild_style_tab(self) -> None:
+        """Rebuild the style tab to reflect current settings."""
+        # Destroy current content
+        if "style" in self.tab_frames:
+            self.tab_frames["style"].destroy()
+        
+        # Recreate
+        self._create_style_tab()
+        
+        # Re-show if it's the active tab
+        if self.active_tab == "style":
+            self.tab_frames["style"].pack(fill="both", expand=True)
+    
+    def _on_smart_formatting_toggled(self) -> None:
+        """Handle smart formatting toggle."""
+        enabled = self.smart_format_var.get()
+        self.config["smart_formatting"] = enabled
+        save_config(self.config)
+        
+        status = "enabled" if enabled else "disabled"
+        self.log(f"✨ Smart formatting {status}")
     
     def _create_history_tab(self) -> None:
         """Create the History tab content."""
@@ -5257,17 +5461,9 @@ class WayfinderApp(ctk.CTk):
         self._build_mode_settings(current_mode)
     
     def on_postproc_template_changed(self, value: str):
-        """Handle post-processing template change."""
-        self.config["post_processing_template"] = value
-        save_config(self.config)
-        template_names = {
-            "clean": "Clean (remove fillers)",
-            "email": "Email format",
-            "notes": "Notes (bullet points)",
-            "code_comment": "Code comment",
-            "custom": "Custom prompt",
-        }
-        self.log(f"⚙ Post-processing template: {template_names.get(value, value)}")
+        """Legacy handler - templates replaced by Style tab's tone + smart formatting."""
+        # Kept for backwards compatibility with old config values
+        pass
     
     def _build_inline_model_section(self, parent, backend: str) -> None:
         """Build inline model selection with download capability (no popups)."""
@@ -8033,8 +8229,12 @@ class WayfinderApp(ctk.CTk):
             command=save_settings,
         ).pack(side="right")
 
-    def create_setting_row(self, parent, label, value, command, tooltip=None):
-        """Create a premium setting row with improved typography and spacing."""
+    def create_setting_row(self, parent, label, value, command, tooltip=None, tooltip_key=None):
+        """Create a premium setting row with improved typography and spacing.
+        
+        Args:
+            tooltip_key: If provided, stores tooltips for dynamic updates (e.g., after benchmarks)
+        """
         # Row container with increased padding (20% more breathing room)
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=10)  # Increased vertical padding
@@ -8064,8 +8264,13 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_muted"],
             )
             info_icon.pack(side="left", padx=(8, 0))
-            ToolTip(label_widget, tooltip)
-            ToolTip(info_icon, tooltip)
+            tt1 = ToolTip(label_widget, tooltip)
+            tt2 = ToolTip(info_icon, tooltip)
+            # Store for dynamic updates if key provided
+            if tooltip_key:
+                if tooltip_key not in self.dynamic_tooltips:
+                    self.dynamic_tooltips[tooltip_key] = []
+                self.dynamic_tooltips[tooltip_key].extend([tt1, tt2])
         
         # Premium button with thin border
         btn = ctk.CTkButton(
@@ -8258,8 +8463,12 @@ class WayfinderApp(ctk.CTk):
         
         self.log(f"⚙ Overlay Scale: {int(new_scale * 100)}%")
 
-    def create_toggle_row(self, parent, label, variable, command, tooltip=None):
-        """Create a premium toggle row with improved typography."""
+    def create_toggle_row(self, parent, label, variable, command, tooltip=None, tooltip_key=None):
+        """Create a premium toggle row with improved typography.
+        
+        Args:
+            tooltip_key: If provided, stores tooltips for dynamic updates (e.g., after benchmarks)
+        """
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=10)  # Increased padding
         
@@ -8287,8 +8496,13 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_muted"],
             )
             info_icon.pack(side="left", padx=(8, 0))
-            ToolTip(label_widget, tooltip)
-            ToolTip(info_icon, tooltip)
+            tt1 = ToolTip(label_widget, tooltip)
+            tt2 = ToolTip(info_icon, tooltip)
+            # Store for dynamic updates if key provided
+            if tooltip_key:
+                if tooltip_key not in self.dynamic_tooltips:
+                    self.dynamic_tooltips[tooltip_key] = []
+                self.dynamic_tooltips[tooltip_key].extend([tt1, tt2])
         
         # Premium toggle - uses bright accent for "on" state
         switch = ctk.CTkSwitch(
@@ -8306,8 +8520,12 @@ class WayfinderApp(ctk.CTk):
         )
         switch.grid(row=0, column=1, sticky="e", padx=(16, 0))
 
-    def create_dropdown_row(self, parent, label, values, variable, command, tooltip=None, width=140):
-        """Create a premium dropdown row with improved typography."""
+    def create_dropdown_row(self, parent, label, values, variable, command, tooltip=None, width=140, tooltip_key=None):
+        """Create a premium dropdown row with improved typography.
+        
+        Args:
+            tooltip_key: If provided, stores tooltips for dynamic updates (e.g., after benchmarks)
+        """
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=10)  # Increased padding
         
@@ -8335,8 +8553,13 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_muted"],
             )
             info_icon.pack(side="left", padx=(8, 0))
-            ToolTip(label_widget, tooltip)
-            ToolTip(info_icon, tooltip)
+            tt1 = ToolTip(label_widget, tooltip)
+            tt2 = ToolTip(info_icon, tooltip)
+            # Store for dynamic updates if key provided
+            if tooltip_key:
+                if tooltip_key not in self.dynamic_tooltips:
+                    self.dynamic_tooltips[tooltip_key] = []
+                self.dynamic_tooltips[tooltip_key].extend([tt1, tt2])
         
         # Premium dropdown with thin border
         dropdown = ctk.CTkOptionMenu(
@@ -8840,8 +9063,8 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to select or download whisper models."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Whisper Models")
-        dialog.geometry("650x750")
-        dialog.minsize(580, 600)
+        dialog.geometry("700x850")
+        dialog.minsize(650, 750)
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         
