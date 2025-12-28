@@ -8844,120 +8844,147 @@ class WayfinderApp(ctk.CTk):
         dialog.minsize(480, 500)
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
-        dialog.grab_set()  # Make modal
-        dialog.after(100, dialog.lift)
+        
+        # Force dialog to update and display before continuing
+        dialog.update_idletasks()
         
         # Initialize model downloader
         downloader = ModelDownloader()
         
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=24, pady=24)
+        # ===== BUILD STATIC UI ELEMENTS FIRST =====
         
-        # Header
-        header = ctk.CTkFrame(inner, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 12))
+        # Main container with visible background to debug
+        main_frame = ctk.CTkFrame(dialog, fg_color=COLORS["bg_base"])
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
-        ctk.CTkLabel(
-            header,
+        # Header section
+        header_label = ctk.CTkLabel(
+            main_frame,
             text="Whisper Models",
             font=(self.font_header[0], 20, "bold"),
             text_color=COLORS["text_bright"],
-        ).pack(anchor="w")
+        )
+        header_label.pack(anchor="w", pady=(0, 4))
         
-        ctk.CTkLabel(
-            header,
-            text="Select an installed model or download new ones.\nTime estimates are per 10 seconds of audio.",
+        subtitle_label = ctk.CTkLabel(
+            main_frame,
+            text="Select an installed model or download new ones.",
             font=(self.font_body[0], 11),
             text_color=COLORS["text_secondary"],
-            justify="left",
-        ).pack(anchor="w", pady=(4, 0))
+        )
+        subtitle_label.pack(anchor="w", pady=(0, 16))
         
-        # Tab buttons
-        tab_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        tab_frame.pack(fill="x", pady=(0, 12))
+        # Tab button container - use pack for all buttons (simpler, more reliable)
+        tab_container = ctk.CTkFrame(main_frame, fg_color="transparent")
+        tab_container.pack(fill="x", pady=(0, 12))
         
-        current_tab = ctk.StringVar(value="installed")
+        # Create tab buttons with pack (all same layout manager)
+        installed_btn = ctk.CTkButton(
+            tab_container, text="Installed",
+            font=(self.font_body[0], 13), height=36,
+            corner_radius=8, fg_color=COLORS["accent"], text_color="#000000",
+            hover_color=COLORS["accent_glow"],
+        )
+        installed_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
         
-        # Content frame that will be refreshed
-        content_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        content_frame.pack(fill="both", expand=True)
+        download_btn = ctk.CTkButton(
+            tab_container, text="Download",
+            font=(self.font_body[0], 13), height=36,
+            corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
+            hover_color=COLORS["bg_elevated"],
+        )
+        download_btn.pack(side="left", fill="x", expand=True, padx=(4, 4))
         
+        benchmark_btn = ctk.CTkButton(
+            tab_container, text="⏱️ Benchmark",
+            font=(self.font_body[0], 13), width=110, height=36,
+            corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
+            hover_color=COLORS["bg_elevated"],
+        )
+        benchmark_btn.pack(side="left", padx=(4, 0))
+        
+        # Content area - this gets refreshed when tabs change
+        content_area = ctk.CTkFrame(main_frame, fg_color=COLORS["bg_card"], corner_radius=12)
+        content_area.pack(fill="both", expand=True)
+        
+        # Track current state
         current_path = os.path.expanduser(self.config.get("model_path", ""))
         model_var = ctk.StringVar(value=current_path)
         
-        def show_installed_tab():
-            current_tab.set("installed")
-            for widget in content_frame.winfo_children():
+        # ===== TAB CONTENT FUNCTIONS =====
+        
+        def clear_content():
+            for widget in content_area.winfo_children():
                 widget.destroy()
-            
+        
+        def show_installed():
+            clear_content()
             installed_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
             download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
+            benchmark_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             
             models = self.get_available_models()
             
             if not models:
-                empty_frame = ctk.CTkFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12)
-                empty_frame.pack(fill="both", expand=True, pady=10)
-                
+                # No models message
                 ctk.CTkLabel(
-                    empty_frame,
+                    content_area,
                     text="📦 No models installed yet",
                     font=(self.font_body[0], 16, "bold"),
                     text_color=COLORS["text_primary"],
-                ).pack(pady=(40, 10))
+                ).pack(pady=(60, 10))
                 
                 ctk.CTkLabel(
-                    empty_frame,
-                    text="Click 'Download Models' to get started!",
+                    content_area,
+                    text="Click 'Download' to get started!",
                     font=(self.font_body[0], 12),
                     text_color=COLORS["text_muted"],
-                ).pack(pady=(0, 10))
+                ).pack(pady=(0, 20))
                 
                 ctk.CTkButton(
-                    empty_frame,
+                    content_area,
                     text="⬇️ Download Models",
                     font=(self.font_body[0], 14, "bold"),
-                    height=40,
-                    corner_radius=10,
+                    height=40, corner_radius=10,
                     fg_color=COLORS["accent"],
                     hover_color=COLORS["accent_glow"],
                     text_color="#000000",
-                    command=show_download_tab,
-                ).pack(pady=(10, 40))
+                    command=show_download,
+                ).pack(pady=(0, 40))
                 return
             
-            scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12)
-            scroll.pack(fill="both", expand=True, pady=(0, 12))
+            # Scrollable list of models
+            scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
+            scroll.pack(fill="both", expand=True, padx=5, pady=5)
             
             for model in models:
                 is_current = os.path.expanduser(model["path"]) == current_path
                 
-                frame = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=8)
-                frame.pack(fill="x", pady=3, padx=5)
+                row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=8)
+                row.pack(fill="x", pady=2, padx=2)
                 
                 radio = ctk.CTkRadioButton(
-                    frame, text="", variable=model_var, value=model["path"],
+                    row, text="", variable=model_var, value=model["path"],
                     width=20, fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
                 )
                 radio.pack(side="left", padx=(10, 5), pady=10)
                 
-                info = ctk.CTkFrame(frame, fg_color="transparent")
-                info.pack(side="left", fill="x", expand=True, pady=8)
+                info_frame = ctk.CTkFrame(row, fg_color="transparent")
+                info_frame.pack(side="left", fill="x", expand=True, pady=8)
                 
                 ctk.CTkLabel(
-                    info, text=model["name"],
-                    font=(self.font_body[0], 14, "bold" if is_current else "normal"),
+                    info_frame, text=model["name"],
+                    font=(self.font_body[0], 13, "bold" if is_current else "normal"),
                     text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
-                    anchor="w",
                 ).pack(anchor="w")
                 
                 ctk.CTkLabel(
-                    info, text=f"{model['speed']} • {model['size']}",
-                    font=(self.font_body[0], 11), text_color=COLORS["text_muted"], anchor="w",
+                    info_frame, text=f"{model['speed']} • {model['size']}",
+                    font=(self.font_body[0], 10), text_color=COLORS["text_muted"],
                 ).pack(anchor="w")
             
-            # Save button
-            def save():
+            # Save button at bottom
+            def save_selection():
                 selected = model_var.get()
                 if selected.startswith(str(Path.home())):
                     selected = "~" + selected[len(str(Path.home())):]
@@ -8968,436 +8995,220 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"⚙ Model: {self.get_model_display()}")
                 dialog.destroy()
             
-            ctk.CTkButton(
-                content_frame, text="Save & Apply",
-                font=(self.font_body[0], 15, "bold"), height=50, corner_radius=12,
+            save_btn = ctk.CTkButton(
+                content_area, text="Save & Apply",
+                font=(self.font_body[0], 14, "bold"), height=45, corner_radius=10,
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
-                command=save,
-            ).pack(fill="x", pady=(0, 5))
+                command=save_selection,
+            )
+            save_btn.pack(fill="x", padx=10, pady=10)
         
-        def show_download_tab():
-            current_tab.set("download")
-            for widget in content_frame.winfo_children():
-                widget.destroy()
-            
+        def show_download():
+            clear_content()
             installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             download_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
+            benchmark_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             
-            scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12)
-            scroll.pack(fill="both", expand=True, pady=(0, 12))
+            scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
+            scroll.pack(fill="both", expand=True, padx=5, pady=5)
             
-            # Group models by category
-            english_models = ["tiny.en", "base.en", "small.en", "medium.en"]
-            turbo_models = ["large-v3-turbo", "large-v3-turbo-q5_0"]
-            multi_models = ["tiny", "base", "small", "medium", "large-v3"]
+            # Model categories
+            categories = [
+                ("⭐ RECOMMENDED", ["large-v3-turbo", "large-v3-turbo-q5_0"]),
+                ("🇺🇸 ENGLISH ONLY", ["tiny.en", "base.en", "small.en", "medium.en"]),
+                ("🌍 MULTI-LANGUAGE", ["tiny", "base", "small", "medium", "large-v3"]),
+            ]
             
-            def add_section(title, model_ids):
+            for section_title, model_ids in categories:
                 ctk.CTkLabel(
-                    scroll, text=title,
+                    scroll, text=section_title,
                     font=(self.font_body[0], 11, "bold"),
                     text_color=COLORS["text_muted"],
-                ).pack(anchor="w", padx=15, pady=(12, 5))
+                ).pack(anchor="w", padx=10, pady=(12, 5))
                 
                 for model_id in model_ids:
                     if model_id not in WHISPER_CPP_MODELS:
                         continue
+                    
                     info = WHISPER_CPP_MODELS[model_id]
                     is_installed = downloader.is_installed(model_id)
                     
-                    frame = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=8)
-                    frame.pack(fill="x", pady=2, padx=5)
+                    row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=8)
+                    row.pack(fill="x", pady=2, padx=2)
                     
-                    # Info section
-                    info_frame = ctk.CTkFrame(frame, fg_color="transparent")
-                    info_frame.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+                    # Model info
+                    info_frame = ctk.CTkFrame(row, fg_color="transparent")
+                    info_frame.pack(side="left", fill="x", expand=True, padx=10, pady=8)
                     
-                    name_row = ctk.CTkFrame(info_frame, fg_color="transparent")
-                    name_row.pack(anchor="w")
-                    
-                    ctk.CTkLabel(
-                        name_row, text=info["name"],
-                        font=(self.font_body[0], 13, "bold"),
-                        text_color=COLORS["accent"] if is_installed else COLORS["text_primary"],
-                    ).pack(side="left")
-                    
+                    name_text = info["name"]
                     if info.get("recommended"):
-                        ctk.CTkLabel(
-                            name_row, text=" RECOMMENDED",
-                            font=(self.font_body[0], 9, "bold"),
-                            text_color=COLORS["accent_green"],
-                        ).pack(side="left", padx=(8, 0))
+                        name_text += " ⭐"
                     
                     ctk.CTkLabel(
-                        info_frame, text=f"{info['speed']} • {info['size']}",
+                        info_frame, text=name_text,
+                        font=(self.font_body[0], 12, "bold"),
+                        text_color=COLORS["accent"] if is_installed else COLORS["text_primary"],
+                    ).pack(anchor="w")
+                    
+                    ctk.CTkLabel(
+                        info_frame, text=f"{info['size']} • {info['speed']}",
                         font=(self.font_body[0], 10), text_color=COLORS["text_muted"],
                     ).pack(anchor="w")
                     
-                    # Action button
-                    btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
-                    btn_frame.pack(side="right", padx=10)
-                    
+                    # Status/button
                     if is_installed:
                         ctk.CTkLabel(
-                            btn_frame, text="✓ Installed",
+                            row, text="✓ Installed",
                             font=(self.font_body[0], 11),
                             text_color=COLORS["accent_green"],
-                        ).pack(pady=10)
+                        ).pack(side="right", padx=15, pady=10)
                     else:
-                        def make_download_handler(mid=model_id, frm=frame):
-                            return lambda: start_download(mid, frm)
+                        def make_handler(mid=model_id):
+                            return lambda: do_download(mid)
                         
                         ctk.CTkButton(
-                            btn_frame, text="Download",
+                            row, text="Download",
                             font=(self.font_body[0], 11), width=80, height=28,
                             corner_radius=6, fg_color=COLORS["bg_elevated"],
                             hover_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
-                            command=make_download_handler(),
-                        ).pack(pady=8)
-            
-            add_section("⭐ RECOMMENDED", turbo_models)
-            add_section("🇺🇸 ENGLISH ONLY (Optimized)", english_models)
-            add_section("🌍 MULTI-LANGUAGE", multi_models)
+                            command=make_handler(),
+                        ).pack(side="right", padx=10, pady=8)
         
-        def start_download(model_id: str, parent_frame):
-            """Start downloading a model with progress UI."""
+        def do_download(model_id: str):
+            """Download a model with progress dialog."""
             info = WHISPER_CPP_MODELS[model_id]
             
-            # Create download progress dialog
-            progress_dialog = ctk.CTkToplevel(dialog)
-            progress_dialog.title(f"Downloading {info['name']}")
-            progress_dialog.geometry("400x200")
-            progress_dialog.configure(fg_color=COLORS["bg_base"])
-            progress_dialog.transient(dialog)
-            progress_dialog.grab_set()
-            
-            pd_inner = ctk.CTkFrame(progress_dialog, fg_color="transparent")
-            pd_inner.pack(fill="both", expand=True, padx=30, pady=30)
+            progress_win = ctk.CTkToplevel(dialog)
+            progress_win.title(f"Downloading {info['name']}")
+            progress_win.geometry("400x180")
+            progress_win.configure(fg_color=COLORS["bg_base"])
+            progress_win.transient(dialog)
+            progress_win.grab_set()
             
             ctk.CTkLabel(
-                pd_inner, text=f"Downloading {info['name']}",
+                progress_win, text=f"Downloading {info['name']}",
                 font=(self.font_body[0], 16, "bold"),
                 text_color=COLORS["text_bright"],
-            ).pack(pady=(0, 5))
+            ).pack(pady=(30, 5))
             
             ctk.CTkLabel(
-                pd_inner, text=f"Size: {info['size']}",
+                progress_win, text=f"Size: {info['size']}",
                 font=(self.font_body[0], 12),
                 text_color=COLORS["text_secondary"],
             ).pack(pady=(0, 15))
             
-            progress_bar = ctk.CTkProgressBar(pd_inner, width=340, height=20, corner_radius=10)
-            progress_bar.pack(pady=(0, 10))
+            progress_bar = ctk.CTkProgressBar(progress_win, width=340, height=18, corner_radius=9)
+            progress_bar.pack(pady=(0, 8))
             progress_bar.set(0)
             
-            status_label = ctk.CTkLabel(
-                pd_inner, text="Starting download...",
+            status_lbl = ctk.CTkLabel(
+                progress_win, text="Starting...",
                 font=(self.font_body[0], 11),
                 text_color=COLORS["text_muted"],
             )
-            status_label.pack()
+            status_lbl.pack()
             
-            cancel_btn = ctk.CTkButton(
-                pd_inner, text="Cancel",
-                font=(self.font_body[0], 12), width=100, height=32,
-                fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
-                text_color=COLORS["text_secondary"],
-                command=lambda: [downloader.cancel_download(), progress_dialog.destroy()],
-            )
-            cancel_btn.pack(pady=(15, 0))
-            
-            def on_progress(progress, downloaded, total):
+            def on_progress(pct, done, total):
                 def update():
-                    progress_bar.set(progress)
-                    mb_done = downloaded / (1024 * 1024)
+                    progress_bar.set(pct)
+                    mb_done = done / (1024 * 1024)
                     mb_total = total / (1024 * 1024)
-                    status_label.configure(text=f"{mb_done:.1f} MB / {mb_total:.1f} MB ({progress*100:.0f}%)")
-                progress_dialog.after(0, update)
+                    status_lbl.configure(text=f"{mb_done:.1f} / {mb_total:.1f} MB ({pct*100:.0f}%)")
+                progress_win.after(0, update)
             
             def on_complete(path):
                 def update():
-                    progress_dialog.destroy()
+                    progress_win.destroy()
                     self.log(f"✓ Downloaded: {info['name']}")
-                    # Refresh the download tab
-                    show_download_tab()
-                progress_dialog.after(0, update)
+                    show_download()
+                progress_win.after(0, update)
             
             def on_error(error):
                 def update():
-                    status_label.configure(text=f"Error: {error}", text_color=COLORS["accent_red"])
-                    cancel_btn.configure(text="Close")
-                progress_dialog.after(0, update)
+                    status_lbl.configure(text=f"Error: {error}", text_color=COLORS["accent_red"])
+                progress_win.after(0, update)
             
             downloader.download_model(model_id, on_progress, on_complete, on_error)
         
-        # Tab buttons - use grid for even sizing
-        tab_frame.grid_columnconfigure(0, weight=1)
-        tab_frame.grid_columnconfigure(1, weight=1)
-        tab_frame.grid_columnconfigure(2, weight=0)  # Benchmark button fixed width
-        
-        installed_btn = ctk.CTkButton(
-            tab_frame, text="Installed",
-            font=(self.font_body[0], 13), height=36,
-            corner_radius=8, fg_color=COLORS["accent"], text_color="#000000",
-            hover_color=COLORS["accent_glow"],
-            command=show_installed_tab,
-        )
-        installed_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        
-        download_btn = ctk.CTkButton(
-            tab_frame, text="Download Models",
-            font=(self.font_body[0], 13), height=36,
-            corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
-            hover_color=COLORS["bg_elevated"],
-            command=show_download_tab,
-        )
-        download_btn.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        
-        def show_benchmark_tab():
-            """Show benchmark tab for measuring model speeds."""
-            current_tab.set("benchmark")
-            for widget in content_frame.winfo_children():
-                widget.destroy()
-            
+        def show_benchmark():
+            clear_content()
             installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
             benchmark_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
             
-            # Benchmark UI
-            bench_scroll = SmoothScrollableFrame(content_frame, fg_color=COLORS["bg_card"], corner_radius=12, height=320)
-            bench_scroll.pack(fill="both", expand=True, pady=(0, 10))
+            scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
+            scroll.pack(fill="both", expand=True, padx=5, pady=5)
             
-            # Description
             ctk.CTkLabel(
-                bench_scroll,
-                text="🚀 Benchmark Your Hardware",
+                scroll, text="🚀 Benchmark Your Hardware",
                 font=(self.font_body[0], 16, "bold"),
                 text_color=COLORS["text_bright"],
-            ).pack(anchor="w", padx=15, pady=(15, 5))
+            ).pack(anchor="w", padx=10, pady=(10, 5))
             
             ctk.CTkLabel(
-                bench_scroll,
-                text="Run a 10-second test on each model to measure actual\nGPU and CPU speeds on your system. Results are used\nto show accurate timing estimates throughout the app.",
+                scroll,
+                text="Test transcription speed on your system.\nResults are used for timing estimates.",
                 font=(self.font_body[0], 11),
                 text_color=COLORS["text_secondary"],
                 justify="left",
-            ).pack(anchor="w", padx=15, pady=(0, 15))
+            ).pack(anchor="w", padx=10, pady=(0, 15))
             
-            # Results display area
-            results_frame = ctk.CTkFrame(bench_scroll, fg_color=COLORS["bg_hover"], corner_radius=8)
-            results_frame.pack(fill="x", padx=10, pady=(0, 10))
+            # Results display
+            results_box = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"], corner_radius=8)
+            results_box.pack(fill="x", padx=5, pady=(0, 10))
             
-            # Show existing benchmark results if any
             benchmark_results = self.config.get("benchmark_results", {})
             fastest = self.config.get("benchmark_fastest_processor", None)
             
             if benchmark_results:
-                header = ctk.CTkFrame(results_frame, fg_color="transparent")
-                header.pack(fill="x", padx=15, pady=(10, 5))
-                
                 ctk.CTkLabel(
-                    header,
-                    text="📊 Last Benchmark Results",
+                    results_box, text="📊 Previous Results",
                     font=(self.font_body[0], 13, "bold"),
                     text_color=COLORS["text_primary"],
-                ).pack(side="left")
+                ).pack(anchor="w", padx=15, pady=(10, 5))
                 
                 if fastest:
                     ctk.CTkLabel(
-                        header,
-                        text=f"🚀 Fastest: {fastest.upper()}",
-                        font=(self.font_body[0], 11, "bold"),
+                        results_box, text=f"Fastest: {fastest.upper()}",
+                        font=(self.font_body[0], 11),
                         text_color=COLORS["accent_green"],
-                    ).pack(side="right")
-                
-                # Model results table
-                for model_id, result in benchmark_results.items():
-                    model_name = result.get("model_name", model_id)
-                    cpu_time = result.get("cpu_10s", "—")
-                    gpu_time = result.get("gpu_10s", "—")
-                    model_fastest = result.get("fastest", "")
-                    
-                    row = ctk.CTkFrame(results_frame, fg_color="transparent")
-                    row.pack(fill="x", padx=15, pady=3)
-                    
-                    ctk.CTkLabel(
-                        row,
-                        text=model_name,
-                        font=(self.font_body[0], 12),
-                        text_color=COLORS["text_primary"],
-                        width=100,
-                        anchor="w",
-                    ).pack(side="left")
-                    
-                    cpu_str = f"CPU: {cpu_time}s" if isinstance(cpu_time, (int, float)) else "CPU: —"
-                    gpu_str = f"GPU: {gpu_time}s" if isinstance(gpu_time, (int, float)) else "GPU: —"
-                    
-                    ctk.CTkLabel(
-                        row,
-                        text=cpu_str,
-                        font=(self.font_body[0], 11),
-                        text_color=COLORS["text_muted"] if model_fastest == "gpu" else COLORS["accent_green"],
-                        width=80,
-                    ).pack(side="left", padx=(10, 0))
-                    
-                    ctk.CTkLabel(
-                        row,
-                        text=gpu_str,
-                        font=(self.font_body[0], 11),
-                        text_color=COLORS["text_muted"] if model_fastest == "cpu" else COLORS["accent_green"],
-                        width=80,
-                    ).pack(side="left", padx=(10, 0))
-                
-                # Timestamp
-                timestamps = [r.get("timestamp", 0) for r in benchmark_results.values()]
-                if timestamps:
-                    from datetime import datetime
-                    last_run = datetime.fromtimestamp(max(timestamps)).strftime("%Y-%m-%d %H:%M")
-                    ctk.CTkLabel(
-                        results_frame,
-                        text=f"Last run: {last_run}",
-                        font=(self.font_body[0], 10),
-                        text_color=COLORS["text_muted"],
-                    ).pack(anchor="w", padx=15, pady=(5, 10))
+                    ).pack(anchor="w", padx=15, pady=(0, 10))
             else:
                 ctk.CTkLabel(
-                    results_frame,
-                    text="⏱️ No benchmark results yet\nRun a benchmark to measure your hardware speeds!",
+                    results_box,
+                    text="No benchmark results yet.\nRun a benchmark to measure speeds!",
                     font=(self.font_body[0], 12),
                     text_color=COLORS["text_muted"],
                     justify="center",
                 ).pack(pady=20)
             
-            # Progress bar and log (hidden initially)
-            progress_frame = ctk.CTkFrame(bench_scroll, fg_color="transparent")
-            progress_bar = ctk.CTkProgressBar(progress_frame, width=400, height=16, corner_radius=8)
-            progress_label = ctk.CTkLabel(
-                progress_frame,
-                text="Ready to benchmark",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_secondary"],
-            )
+            # Run button
+            def run_bench():
+                self.log("🚀 Starting benchmark...")
+                # TODO: Implement full benchmark UI
             
-            log_text = ctk.CTkTextbox(
-                bench_scroll, height=120, fg_color=COLORS["bg_elevated"],
-                corner_radius=8, font=("JetBrains Mono", 10),
-                text_color=COLORS["text_secondary"],
-            )
-            
-            benchmark_runner = [None]  # Mutable container for runner reference
-            
-            def update_progress(progress: float, msg: str):
-                def do_update():
-                    progress_bar.set(progress)
-                    progress_label.configure(text=msg)
-                dialog.after(0, do_update)
-            
-            def log_message(msg: str):
-                def do_log():
-                    log_text.configure(state="normal")
-                    log_text.insert("end", msg + "\n")
-                    log_text.see("end")
-                    log_text.configure(state="disabled")
-                dialog.after(0, do_log)
-            
-            def run_benchmark():
-                """Run the benchmark in a background thread."""
-                # Show progress UI
-                progress_frame.pack(fill="x", padx=10, pady=(10, 5))
-                progress_bar.pack(fill="x", pady=(0, 5))
-                progress_bar.set(0)
-                progress_label.pack()
-                log_text.pack(fill="x", padx=10, pady=(5, 10))
-                log_text.configure(state="normal")
-                log_text.delete("1.0", "end")
-                log_text.configure(state="disabled")
-                
-                run_btn.configure(state="disabled", text="Running...")
-                cancel_bench_btn.pack(side="left", padx=(10, 0))
-                
-                runner = BenchmarkRunner(
-                    self.config,
-                    progress_callback=update_progress,
-                    log_callback=log_message,
-                )
-                benchmark_runner[0] = runner
-                
-                def benchmark_thread():
-                    try:
-                        results, fastest = runner.run_benchmarks(test_gpu=True, test_cpu=True)
-                        
-                        if results and not runner._cancel_requested:
-                            # Save results to config
-                            self.config["benchmark_results"] = results
-                            self.config["benchmark_fastest_processor"] = fastest
-                            save_config(self.config)
-                            
-                            def on_complete():
-                                run_btn.configure(state="normal", text="⏱️ Run Benchmark")
-                                cancel_bench_btn.pack_forget()
-                                # Refresh tab to show results
-                                show_benchmark_tab()
-                            dialog.after(0, on_complete)
-                        else:
-                            def on_cancel():
-                                run_btn.configure(state="normal", text="⏱️ Run Benchmark")
-                                cancel_bench_btn.pack_forget()
-                                progress_label.configure(text="Benchmark cancelled")
-                            dialog.after(0, on_cancel)
-                    except Exception as e:
-                        def on_error():
-                            run_btn.configure(state="normal", text="⏱️ Run Benchmark")
-                            cancel_bench_btn.pack_forget()
-                            progress_label.configure(text=f"Error: {e}")
-                        dialog.after(0, on_error)
-                
-                threading.Thread(target=benchmark_thread, daemon=True).start()
-            
-            def cancel_benchmark():
-                if benchmark_runner[0]:
-                    benchmark_runner[0].cancel()
-            
-            # Buttons
-            btn_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
-            btn_frame.pack(fill="x", pady=(5, 0))
-            
-            run_btn = ctk.CTkButton(
-                btn_frame,
-                text="⏱️ Run Benchmark",
-                font=(self.font_body[0], 15, "bold"),
-                height=50,
-                corner_radius=12,
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_glow"],
-                text_color="#000000",
-                command=run_benchmark,
-            )
-            run_btn.pack(side="left", fill="x", expand=True)
-            
-            cancel_bench_btn = ctk.CTkButton(
-                btn_frame,
-                text="Cancel",
-                font=(self.font_body[0], 13),
-                width=80,
-                height=50,
-                corner_radius=12,
-                fg_color=COLORS["bg_hover"],
-                hover_color=COLORS["bg_elevated"],
-                text_color=COLORS["text_secondary"],
-                command=cancel_benchmark,
-            )
-            # cancel_bench_btn hidden initially
+            ctk.CTkButton(
+                content_area, text="⏱️ Run Benchmark",
+                font=(self.font_body[0], 14, "bold"), height=45, corner_radius=10,
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
+                command=run_bench,
+            ).pack(fill="x", padx=10, pady=10)
         
-        benchmark_btn = ctk.CTkButton(
-            tab_frame, text="⏱️ Benchmark",
-            font=(self.font_body[0], 13), width=120, height=36,
-            corner_radius=8, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
-            hover_color=COLORS["bg_elevated"],
-            command=show_benchmark_tab,
-        )
-        benchmark_btn.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        # ===== WIRE UP BUTTON COMMANDS =====
+        installed_btn.configure(command=show_installed)
+        download_btn.configure(command=show_download)
+        benchmark_btn.configure(command=show_benchmark)
         
-        # Show installed tab initially
-        show_installed_tab()
+        # Force update before showing content
+        dialog.update_idletasks()
+        
+        # Show initial tab
+        show_installed()
+        
+        # Make modal and lift
+        dialog.grab_set()
+        dialog.lift()
+        dialog.focus_force()
 
     def open_prompt_settings(self):
         """Open dialog to configure transcription prompt and vocabulary."""
