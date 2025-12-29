@@ -2751,9 +2751,8 @@ class WayfinderApp(ctk.CTk):
         
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         
-        # Don't start minimized for now so user can see UI
-        # if self.config.get("start_minimized", True):
-        #     self.after(100, self.hide_to_tray)
+        # Always start minimized to tray - UI accessed via tray "Open Settings"
+        self.after(100, self.hide_to_tray)
         
         # Auto-start Ollama if backend is ollama and it's installed but not running
         self.after(500, self._auto_start_ollama_if_needed)
@@ -3920,12 +3919,8 @@ class WayfinderApp(ctk.CTk):
         # UI Scale slider
         self._create_scale_slider_row(system_content)
         
-        # Start minimized toggle
-        self.start_min_var = ctk.BooleanVar(value=self.config.get("start_minimized", True))
-        self.create_toggle_row(
-            system_content, "Start minimized to tray", self.start_min_var,
-            self.toggle_start_minimized, tooltip=SETTING_TOOLTIPS["start_minimized"],
-        )
+        # Note: "Start minimized" toggle removed - app always starts to tray
+        # Access UI via tray icon -> "Open Settings"
         
         # Hotkey devices setting
         device_count = len(get_all_input_devices())
@@ -11328,10 +11323,11 @@ class WayfinderApp(ctk.CTk):
                 pass
         
         # Create menu with dynamic model submenu (only installed models)
+        # UI is only accessible via "Open Settings" - app always starts minimized to tray
         menu = pystray.Menu(
-            pystray.MenuItem("Show", self.show_from_tray, default=True),
-            pystray.MenuItem("Record", self.tray_record),
+            pystray.MenuItem("Toggle Recording", self.tray_record, default=True),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Open Settings", self.show_from_tray),
             pystray.MenuItem(
                 "Model",
                 self._create_model_tray_menu,

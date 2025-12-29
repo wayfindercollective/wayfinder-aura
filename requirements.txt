@@ -41,9 +41,7 @@ Pillow>=10.0.0
 # Local inference with llama.cpp (fast, private, no cost)
 # Recommended models: Phi-3-mini, Qwen2.5-1.5B-Instruct, SmolLM2-1.7B
 # Download GGUF models from: https://huggingface.co/models?sort=trending&search=gguf
-# llama-cpp-python>=0.2.0
-
-# Cloud inference with Anthropic Claude (high quality, requires API key)
+# llama-cpp-python>=0.2.0# Cloud inference with Anthropic Claude (high quality, requires API key)
 # Get API key from: https://console.anthropic.com/
 # anthropic>=0.40.0
 
