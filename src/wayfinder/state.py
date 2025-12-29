@@ -64,3 +64,4 @@ def get_next_state(current: AppState, event: str) -> AppState:
 
 
 
+
