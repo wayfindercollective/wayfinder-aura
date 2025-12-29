@@ -8,19 +8,8 @@ cd "$SCRIPT_DIR"
 # Set FLEXIBLAS backend (fixes numpy on Fedora/Bazzite)
 export FLEXIBLAS="${FLEXIBLAS:-OPENBLAS-OPENMP}"
 
-# Wait for display to be ready (helps with autostart timing)
-# This prevents Tk scaling issues when display isn't fully initialized
+# Fallback display if not set (helps with autostart)
 if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
-    # No display yet - wait a bit for desktop to initialize
-    sleep 3
-fi
-
-# Ensure Tk can find a valid scaling value
-# This prevents "-NaN" scaling errors on autostart
-export TK_SCALING="${TK_SCALING:-1.0}"
-
-# Fallback: if still no display after waiting, try common values
-if [ -z "$DISPLAY" ]; then
     export DISPLAY="${DISPLAY:-:0}"
 fi
 
@@ -28,4 +17,5 @@ fi
 PYTHON="/usr/bin/python3"
 
 # Run with Python (most reliable on Fedora-based systems)
+# Note: Scaling handling is done in Python with cached values
 exec "$PYTHON" "$SCRIPT_DIR/main.py" "$@"

@@ -11,7 +11,8 @@ For package-style execution, use: python -m wayfinder (from project root with PY
 
 import sys
 import os
-import time
+import json
+from pathlib import Path
 
 # Ensure the src directory is in the path for package imports
 src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
@@ -19,50 +20,90 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 
-def wait_for_display(max_wait: int = 10) -> bool:
-    """Wait for display to be available (helps with autostart timing)."""
-    display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    if display:
-        return True
-    
-    # Wait for display to become available
-    for _ in range(max_wait):
-        time.sleep(1)
-        display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-        if display:
-            return True
-    
-    # Set fallback display
-    if not os.environ.get("DISPLAY"):
-        os.environ["DISPLAY"] = ":0"
-    return True
+# Scaling cache file location
+SCALING_CACHE_FILE = Path.home() / ".config" / "wayfinder-voice" / "display_scaling.json"
 
 
-def fix_tk_scaling():
+def load_cached_scaling() -> float:
+    """Load the last known good scaling value from cache."""
+    try:
+        if SCALING_CACHE_FILE.exists():
+            with open(SCALING_CACHE_FILE, "r") as f:
+                data = json.load(f)
+                scaling = data.get("scaling", 1.0)
+                # Validate it's a reasonable value
+                if isinstance(scaling, (int, float)) and 0.5 <= scaling <= 4.0:
+                    return float(scaling)
+    except Exception:
+        pass
+    return 1.0  # Safe default
+
+
+def save_cached_scaling(scaling: float) -> None:
+    """Save the current scaling value to cache for future startups."""
+    try:
+        SCALING_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(SCALING_CACHE_FILE, "w") as f:
+            json.dump({"scaling": scaling}, f)
+    except Exception:
+        pass  # Non-critical, ignore errors
+
+
+def apply_scaling_fix():
     """
-    Fix Tk9 scaling issues that can occur on autostart.
+    Apply Tk scaling fix using cached value.
     
-    On some systems (especially during autostart), Tk's scaling detection
-    returns NaN, causing a crash. This sets fallback values to prevent that.
+    This uses the last known good scaling value so the app can start
+    immediately without waiting for display detection. The scaling
+    will be updated once the display is actually available.
     """
-    # Set TK_SCALING if not already set - this provides a fallback
-    if "TK_SCALING" not in os.environ:
-        os.environ["TK_SCALING"] = "1.0"
+    cached_scaling = load_cached_scaling()
+    os.environ["TK_SCALING"] = str(cached_scaling)
+    return cached_scaling
+
+
+def detect_and_update_scaling(app) -> None:
+    """
+    Detect current display scaling and update the cache.
+    Called after the app is running to capture the real scaling.
+    """
+    try:
+        # Get current Tk scaling
+        current_scaling = app.tk.call('tk', 'scaling')
+        
+        # Validate it's a good value (not NaN, not negative, reasonable range)
+        if isinstance(current_scaling, (int, float)) and 0.5 <= current_scaling <= 4.0:
+            # Only update cache if it's different from what we have
+            cached = load_cached_scaling()
+            if abs(current_scaling - cached) > 0.01:  # Meaningful difference
+                save_cached_scaling(float(current_scaling))
+                print(f"[Scaling] Updated cached scaling: {cached} -> {current_scaling}")
+    except Exception:
+        pass  # Display might not be ready yet, that's okay
+
+
+def schedule_scaling_detection(app, delay_ms: int = 5000) -> None:
+    """
+    Schedule periodic scaling detection.
+    This runs after the app starts to detect when display becomes available.
+    """
+    def check_scaling():
+        detect_and_update_scaling(app)
+        # Check again in 30 seconds (in case display was turned on later)
+        app.after(30000, check_scaling)
     
-    # For Tcl/Tk 9.0, we may need to patch the scaling after initialization
-    # This is done by setting tk scaling explicitly after creating the root window
+    # First check after initial delay (give display time to initialize)
+    app.after(delay_ms, check_scaling)
 
 
 def main():
     """Run Wayfinder Voice."""
-    # Wait for display on autostart
-    wait_for_display()
-    
-    # Apply Tk scaling fix before importing tkinter
-    fix_tk_scaling()
+    # Apply scaling fix immediately using cached value (no waiting!)
+    cached_scaling = apply_scaling_fix()
+    print(f"[Scaling] Using cached scaling: {cached_scaling}")
     
     try:
-        # Import from the legacy module (will be migrated to wayfinder package over time)
+        # Import from the legacy module
         from wayfinder_main import WayfinderApp
         import customtkinter as ctk
         
@@ -72,14 +113,21 @@ def main():
         
         app = WayfinderApp()
         
-        # Fix Tk scaling after window creation if needed
+        # Try to apply scaling directly if the cached value seems wrong
         try:
-            current_scaling = app.tk.call('tk', 'scaling')
-            # Check if scaling is invalid (NaN or negative)
-            if not isinstance(current_scaling, (int, float)) or current_scaling <= 0:
-                app.tk.call('tk', 'scaling', 1.0)
+            current = app.tk.call('tk', 'scaling')
+            # Check if current scaling is invalid
+            if not isinstance(current, (int, float)) or current <= 0 or current != current:  # NaN check
+                app.tk.call('tk', 'scaling', cached_scaling)
         except Exception:
-            pass  # Scaling is fine, or we can't fix it
+            # If we can't even check, force our cached scaling
+            try:
+                app.tk.call('tk', 'scaling', cached_scaling)
+            except Exception:
+                pass
+        
+        # Schedule background scaling detection to update cache when display is ready
+        schedule_scaling_detection(app)
         
         app.mainloop()
         
@@ -87,21 +135,20 @@ def main():
         error_msg = str(e)
         
         # Check for Tk scaling error specifically
-        if "NaN" in error_msg or "scaling" in error_msg.lower():
-            print(f"Tk scaling error detected: {e}", file=sys.stderr)
-            print("Retrying with fixed scaling...", file=sys.stderr)
+        if "NaN" in error_msg or "scaling" in error_msg.lower() or "tk.tcl" in error_msg.lower():
+            print(f"[Scaling] Tk error detected: {e}", file=sys.stderr)
+            print(f"[Scaling] Retrying with safe scaling (1.0)...", file=sys.stderr)
             
-            # Force scaling environment variable and retry
+            # Force safe scaling and retry
             os.environ["TK_SCALING"] = "1.0"
+            save_cached_scaling(1.0)  # Update cache with safe value
             
             # Clear any cached Tk state
-            import importlib
-            if 'tkinter' in sys.modules:
-                del sys.modules['tkinter']
-            if '_tkinter' in sys.modules:
-                del sys.modules['_tkinter']
+            for mod in list(sys.modules.keys()):
+                if 'tk' in mod.lower():
+                    del sys.modules[mod]
             
-            # Retry import and run
+            # Retry
             from wayfinder_main import WayfinderApp
             import customtkinter as ctk
             
@@ -109,10 +156,14 @@ def main():
             ctk.set_default_color_theme("dark-blue")
             
             app = WayfinderApp()
-            app.tk.call('tk', 'scaling', 1.0)  # Force scaling
+            try:
+                app.tk.call('tk', 'scaling', 1.0)
+            except Exception:
+                pass
+            
+            schedule_scaling_detection(app)
             app.mainloop()
         else:
-            # Re-raise other errors
             raise
 
 
