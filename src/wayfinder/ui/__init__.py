@@ -28,6 +28,7 @@ from .components import (
     get_dynamic_tooltip,
     create_section_header,
     create_body_label,
+    CompatibilityBanner,
 )
 
 __all__ = [
@@ -50,4 +51,5 @@ __all__ = [
     "get_dynamic_tooltip",
     "create_section_header",
     "create_body_label",
+    "CompatibilityBanner",
 ]

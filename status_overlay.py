@@ -749,7 +749,7 @@ class GlassmorphicOverlay(QWidget):
         # CRITICAL: All flags must be combined in a SINGLE call
         # 
         # Window flags for overlay:
-        # - Tool: Helper window (better Wayland support)
+        # - Tool: Helper window (hides from taskbar on most systems)
         # - FramelessWindowHint: No decorations
         # - WindowStaysOnTopHint: Stay on top
         # 
@@ -784,19 +784,30 @@ class GlassmorphicOverlay(QWidget):
         self.setFixedHeight(self.scaled_height + 16)  # 8px margin each side
         self._update_size()
         
-        # Timer to periodically raise window (Wayland focus protector)
-        # 250ms is a good balance between responsiveness and CPU usage
-        self._raise_timer = QTimer(self)
-        self._raise_timer.timeout.connect(self._ensure_on_top)
-        self._raise_timer.setInterval(250)
-        
         # Set window title for KWin script identification
         self.setWindowTitle("Wayfinder Voice Overlay")
         
-        # Timer to periodically raise window (ensures stay-on-top on all compositors)
+        # Timer to periodically raise window AND reapply KWin properties
+        # This ensures the overlay stays hidden from taskbar even after display changes
         self._raise_timer = QTimer(self)
         self._raise_timer.timeout.connect(self._ensure_on_top)
-        self._raise_timer.setInterval(100)  # Every 100ms for more aggressive stay-on-top
+        self._raise_timer.setInterval(100)  # Every 100ms for aggressive stay-on-top
+        
+        # Timer to periodically reapply KWin skip-taskbar properties
+        # This catches cases where the window manager "forgets" our settings
+        self._kwin_refresh_timer = QTimer(self)
+        self._kwin_refresh_timer.timeout.connect(self._reapply_kwin_properties)
+        self._kwin_refresh_timer.setInterval(5000)  # Every 5 seconds
+        self._kwin_refresh_timer.start()
+    
+    def _reapply_kwin_properties(self):
+        """Periodically reapply KWin window properties to stay hidden from taskbar."""
+        if self.isVisible():
+            _try_kde_window_setup(
+                "Wayfinder Voice Overlay",
+                self.x(), self.y(),
+                self.width(), self.height()
+            )
     
     def _ensure_on_top(self):
         """Ensure window stays on top of other windows (Wayland focus protector)."""

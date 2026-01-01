@@ -360,10 +360,14 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
         
         recommendations.append(f"Or use '{max_intensity}' intensity with current model")
     
-    # Add any other warnings
+    # Add any other warnings (skip duplicates and intensity warnings already covered)
     for warning in compat.get("warnings", []):
-        if warning not in issues:
-            issues.append(warning.replace("⚠️ ", "").replace("💡 ", ""))
+        cleaned = warning.replace("⚠️ ", "").replace("💡 ", "")
+        # Skip if this is about intensity (already covered above)
+        if "intensity requires" in cleaned.lower():
+            continue
+        if cleaned not in issues:
+            issues.append(cleaned)
     
     return {
         "is_compatible": compat["compatible"],

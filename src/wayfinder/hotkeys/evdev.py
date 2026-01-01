@@ -20,6 +20,7 @@ from ..config import MODIFIER_CODES
 class EventType(Enum):
     """Event types for the application event queue."""
     HOTKEY_PRESSED = auto()
+    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/Technical/Casual)
     TRANSCRIPTION_DONE = auto()
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()
@@ -91,13 +92,15 @@ def hotkey_listener(
     hotkey_modifiers: list[str],
     stop_event: Event,
     enabled_devices: Optional[list[str]] = None,
-    log_callback: Optional[Callable[[str], None]] = None
+    log_callback: Optional[Callable[[str], None]] = None,
+    style_toggle_key: Optional[int] = None,
+    style_toggle_modifiers: Optional[list[str]] = None
 ):
     """
     Listen for hotkey presses using evdev.
     
     This function runs in a background thread and monitors input devices
-    for the configured hotkey combination.
+    for the configured hotkey combinations.
     
     Args:
         event_queue: Queue to put events into
@@ -106,6 +109,8 @@ def hotkey_listener(
         stop_event: Threading event to signal shutdown
         enabled_devices: List of device names to monitor (None = all)
         log_callback: Optional function to call with log messages
+        style_toggle_key: Key code for style toggle (e.g., F10 = 68)
+        style_toggle_modifiers: List of modifier names for style toggle
     """
     def log(msg: str):
         if log_callback:
@@ -125,11 +130,18 @@ def hotkey_listener(
         short_name = dev.name[:40] + "..." if len(dev.name) > 40 else dev.name
         log(f"   • {short_name}")
     
-    # Build set of required modifier key codes
+    # Build set of required modifier key codes for recording hotkey
     required_modifiers = set()
     for name in hotkey_modifiers:
         if name.lower() in MODIFIER_CODES:
             required_modifiers.update(MODIFIER_CODES[name.lower()])
+    
+    # Build set of required modifier key codes for style toggle hotkey
+    style_toggle_modifiers = style_toggle_modifiers or []
+    required_style_modifiers = set()
+    for name in style_toggle_modifiers:
+        if name.lower() in MODIFIER_CODES:
+            required_style_modifiers.update(MODIFIER_CODES[name.lower()])
     
     pressed_modifiers = set()
     all_modifier_codes = set()
@@ -138,6 +150,15 @@ def hotkey_listener(
 
     # Map file descriptors to devices
     fd_to_device = {dev.fd: dev for dev in devices}
+    
+    def check_modifiers(required_mods: set, modifier_names: list[str]) -> bool:
+        """Check if all required modifiers are currently pressed."""
+        if not required_mods:
+            return True
+        return all(
+            pressed_modifiers & set(MODIFIER_CODES.get(mod.lower(), []))
+            for mod in modifier_names
+        )
 
     try:
         while not stop_event.is_set():
@@ -158,19 +179,15 @@ def hotkey_listener(
                             elif key_event.keystate == 0:  # Key up
                                 pressed_modifiers.discard(keycode)
                         
-                        # Check for hotkey press
+                        # Check for recording hotkey press
                         if keycode == hotkey_key and key_event.keystate == 1:
-                            if required_modifiers:
-                                # Check if all required modifiers are pressed
-                                all_mods_pressed = all(
-                                    pressed_modifiers & set(MODIFIER_CODES.get(mod.lower(), []))
-                                    for mod in hotkey_modifiers
-                                )
-                                if all_mods_pressed:
-                                    event_queue.put((EventType.HOTKEY_PRESSED, None))
-                            else:
-                                # No modifiers required
+                            if check_modifiers(required_modifiers, hotkey_modifiers):
                                 event_queue.put((EventType.HOTKEY_PRESSED, None))
+                        
+                        # Check for style toggle hotkey press
+                        if style_toggle_key and keycode == style_toggle_key and key_event.keystate == 1:
+                            if check_modifiers(required_style_modifiers, style_toggle_modifiers):
+                                event_queue.put((EventType.STYLE_TOGGLE, None))
     except Exception as e:
         log(f"⚠️ Hotkey error: {e}")
 

@@ -26,6 +26,8 @@ def socket_listener(
     This allows KDE shortcuts to trigger recording via a simple script:
     ```
     echo "toggle" | nc -U /tmp/wayfinder-voice.sock
+    echo "style" | nc -U /tmp/wayfinder-voice.sock        # Cycle styles
+    echo "style:technical" | nc -U /tmp/wayfinder-voice.sock  # Set specific style
     ```
     
     Args:
@@ -58,9 +60,20 @@ def socket_listener(
             try:
                 conn, _ = server.accept()
                 data = conn.recv(64)
-                if data == b"toggle":
+                data_str = data.decode("utf-8").strip() if data else ""
+                
+                if data_str == "toggle":
                     log("🎯 Toggle received via socket")
                     event_queue.put((EventType.HOTKEY_PRESSED, None))
+                elif data_str == "style":
+                    # Cycle to next style
+                    log("✎ Style toggle received via socket")
+                    event_queue.put((EventType.STYLE_TOGGLE, None))
+                elif data_str.startswith("style:"):
+                    # Set specific style (style:professional, style:technical, style:casual)
+                    style = data_str.split(":", 1)[1]
+                    log(f"✎ Style set to '{style}' via socket")
+                    event_queue.put((EventType.STYLE_TOGGLE, style))
                 conn.close()
             except socket.timeout:
                 continue
@@ -90,6 +103,30 @@ def send_toggle():
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(SOCKET_PATH)
         sock.send(b"toggle")
+        sock.close()
+        return True
+    except Exception:
+        return False
+
+
+def send_style(style: Optional[str] = None):
+    """
+    Send a style command to a running Wayfinder Voice instance.
+    
+    Args:
+        style: Optional style name ("professional", "technical", "casual").
+               If None, cycles to the next style.
+    
+    Returns:
+        True if command was sent successfully, False otherwise.
+    """
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(SOCKET_PATH)
+        if style:
+            sock.send(f"style:{style}".encode("utf-8"))
+        else:
+            sock.send(b"style")
         sock.close()
         return True
     except Exception:

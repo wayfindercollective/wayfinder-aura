@@ -19,12 +19,31 @@ class PostProcessingError(Exception):
 # Tone-Based Prompts (New Simplified System)
 # =============================================================================
 
-# Tone guidance for different output styles
-TONE_GUIDANCE: Dict[str, str] = {
-    "professional": "Use formal, polished, business-appropriate language. Be clear and concise.",
-    "casual": "Use relaxed, conversational, friendly language. Keep it natural and approachable.",
-    "technical": "Use precise, detailed, developer-focused language. Be accurate and specific.",
+# Tone guidance for different output styles with intensity levels
+# Each style has light/standard/strong variations
+TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
+    "professional": {
+        "light": "Use clear, professional language. Maintain a polished but approachable tone.",
+        "standard": "Use formal, polished, business-appropriate language. Be clear and concise.",
+        "strong": "Use highly formal, executive-level language. Be extremely polished, precise, and authoritative. Avoid any casual expressions.",
+    },
+    "casual": {
+        "light": "Use friendly, natural language. Keep it conversational but still clear.",
+        "standard": "Use relaxed, conversational, friendly language. Keep it natural and approachable.",
+        "strong": "Use very casual, laid-back language. Be super friendly and informal, like texting a close friend. Contractions and casual expressions encouraged.",
+    },
+    "technical": {
+        "light": "Use clear technical language. Include relevant terminology where appropriate.",
+        "standard": "Use precise, detailed, developer-focused language. Be accurate and specific.",
+        "strong": "Use highly technical, expert-level language. Include specific technical terms, code references, and implementation details. Assume deep technical knowledge.",
+    },
 }
+
+# Backwards compatibility - get standard tone guidance
+def get_tone_guidance(tone: str, intensity: str = "standard") -> str:
+    """Get the tone guidance string for a given tone and intensity."""
+    tone_dict = TONE_GUIDANCE.get(tone, TONE_GUIDANCE["professional"])
+    return tone_dict.get(intensity, tone_dict["standard"])
 
 # Smart formatting prompt - auto-detects content type and formats appropriately
 SMART_FORMAT_PROMPT = """You are a transcription cleanup assistant. Process this speech transcription with these rules:
@@ -70,9 +89,13 @@ def build_prompt(text: str, config: dict) -> str:
     Returns:
         Formatted prompt ready for LLM
     """
-    # Get tone guidance
+    # Get tone and intensity
     tone = config.get("output_tone", "professional")
-    tone_guidance = TONE_GUIDANCE.get(tone, TONE_GUIDANCE["professional"])
+    intensity_key = f"{tone}_intensity"
+    intensity = config.get(intensity_key, "standard")
+    
+    # Get the tone guidance for this tone and intensity
+    tone_guidance = get_tone_guidance(tone, intensity)
     
     # Choose prompt based on smart formatting setting
     smart_formatting = config.get("smart_formatting", True)
@@ -100,6 +123,253 @@ def get_prompt_template(template_name: str, custom_prompt: str = "") -> str:
 def format_prompt(template: str, text: str) -> str:
     """Format a prompt template with the transcription text."""
     return template.replace("{text}", text)
+
+
+# =============================================================================
+# Model Compatibility System
+# =============================================================================
+
+# Model tiers based on parameter count
+MODEL_TIERS: Dict[str, Dict[str, Any]] = {
+    "tiny": {"min_params": 0, "max_params": 500_000_000, "max_intensity": "light", "smart_formatting": False},
+    "small": {"min_params": 500_000_000, "max_params": 2_000_000_000, "max_intensity": "standard", "smart_formatting": True},
+    "medium": {"min_params": 2_000_000_000, "max_params": 8_000_000_000, "max_intensity": "strong", "smart_formatting": True},
+    "large": {"min_params": 8_000_000_000, "max_params": float("inf"), "max_intensity": "strong", "smart_formatting": True},
+    "cloud": {"min_params": 0, "max_params": float("inf"), "max_intensity": "strong", "smart_formatting": True},
+}
+
+
+def get_model_tier_info(model_name: str) -> Dict[str, Any]:
+    """
+    Determine a model's tier based on its name.
+    
+    Returns dict with:
+        - tier: str (tiny, small, medium, large, cloud)
+        - max_intensity: str (light, standard, strong)
+        - smart_formatting: bool
+    """
+    model_lower = model_name.lower()
+    
+    # Cloud models (OpenAI, Anthropic) - always capable
+    cloud_indicators = ["gpt-", "claude", "o1-", "chatgpt"]
+    if any(ind in model_lower for ind in cloud_indicators):
+        return {"tier": "cloud", "max_intensity": "strong", "smart_formatting": True}
+    
+    # Parse parameter count from model name
+    param_patterns = [
+        (":0.5b", 500_000_000), ("0.5b", 500_000_000),
+        (":1b", 1_000_000_000), ("1b", 1_000_000_000),
+        (":1.5b", 1_500_000_000), ("1.5b", 1_500_000_000),
+        (":3b", 3_000_000_000), ("3b", 3_000_000_000),
+        (":7b", 7_000_000_000), ("7b", 7_000_000_000),
+        (":8b", 8_000_000_000), ("8b", 8_000_000_000),
+        (":13b", 13_000_000_000), ("13b", 13_000_000_000),
+        (":70b", 70_000_000_000), ("70b", 70_000_000_000),
+        ("360m", 360_000_000), ("135m", 135_000_000),
+        (":mini", 3_800_000_000),  # phi3:mini is ~3.8B
+        (":medium", 14_000_000_000),  # phi3:medium is ~14B
+    ]
+    
+    params = None
+    for pattern, count in param_patterns:
+        if pattern in model_lower:
+            params = count
+            break
+    
+    if params is None:
+        params = 1_500_000_000  # Default assumption for unknown models
+    
+    # Determine tier
+    for tier, info in MODEL_TIERS.items():
+        if tier == "cloud":
+            continue
+        if info["min_params"] <= params < info["max_params"]:
+            return {"tier": tier, "max_intensity": info["max_intensity"], "smart_formatting": info["smart_formatting"]}
+    
+    return {"tier": "small", "max_intensity": "standard", "smart_formatting": True}
+
+
+def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_formatting: bool) -> Dict[str, Any]:
+    """
+    Check if the requested settings are compatible with the model.
+    
+    Returns dict with:
+        - compatible: bool
+        - tier: str
+        - warnings: list of warning messages
+        - auto_adjustments: dict of adjustments that will be made
+        - upgrade_suggestion: dict or None
+    """
+    tier_info = get_model_tier_info(model_name)
+    tier = tier_info["tier"]
+    max_intensity = tier_info["max_intensity"]
+    supports_smart = tier_info["smart_formatting"]
+    
+    intensity_order = ["light", "standard", "strong"]
+    requested_level = intensity_order.index(intensity) if intensity in intensity_order else 1
+    max_level = intensity_order.index(max_intensity) if max_intensity in intensity_order else 1
+    
+    warnings = []
+    auto_adjustments = {}
+    upgrade_suggestion = None
+    compatible = True
+    
+    # Check intensity compatibility
+    if requested_level > max_level:
+        compatible = False
+        warnings.append(f"⚠️ '{intensity}' intensity requires a larger model. Using '{max_intensity}' instead.")
+        auto_adjustments["intensity"] = max_intensity
+        upgrade_suggestion = get_upgrade_suggestion_for_intensity(intensity)
+    
+    # Check smart formatting compatibility
+    if smart_formatting and not supports_smart and tier != "cloud":
+        warnings.append(f"💡 Smart formatting may be limited with this model size.")
+    
+    return {
+        "compatible": compatible,
+        "tier": tier,
+        "warnings": warnings,
+        "auto_adjustments": auto_adjustments,
+        "upgrade_suggestion": upgrade_suggestion,
+    }
+
+
+def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
+    """
+    Get specific model upgrade suggestions based on desired intensity.
+    """
+    if intensity == "strong":
+        return {
+            "min_params": "3B+",
+            "recommended_models": [
+                {"name": "qwen2.5:3b", "type": "ollama", "description": "Best for strong intensity"},
+                {"name": "llama3.2:3b", "type": "ollama", "description": "Good alternative"},
+                {"name": "phi3:medium", "type": "ollama", "description": "Fast and capable"},
+            ],
+            "message": "Strong intensity works best with 3B+ parameter models. Try: ollama pull qwen2.5:3b",
+        }
+    elif intensity == "standard":
+        return {
+            "min_params": "1B+",
+            "recommended_models": [
+                {"name": "qwen2.5:1.5b", "type": "ollama", "description": "Great balance"},
+                {"name": "llama3.2:1b", "type": "ollama", "description": "Fast option"},
+            ],
+            "message": "Standard intensity works with 1B+ parameter models.",
+        }
+    else:
+        return {
+            "min_params": "500M+",
+            "recommended_models": [
+                {"name": "smollm2:360m", "type": "ollama", "description": "Ultra fast"},
+            ],
+            "message": "Light intensity works with most models.",
+        }
+
+
+def check_settings_compatibility(config: dict) -> Dict[str, Any]:
+    """
+    Check if current config settings are compatible with the selected model.
+    
+    This is the main function for UI to call when settings change.
+    Returns a complete compatibility report with actionable feedback.
+    
+    Args:
+        config: Full configuration dictionary
+        
+    Returns:
+        Dict with:
+            - is_compatible: bool
+            - issues: list of issue descriptions
+            - recommendations: list of actionable recommendations  
+            - upgrade_message: str or None
+            - severity: "ok" | "warning" | "incompatible"
+    """
+    # Get model name based on backend
+    backend = config.get("post_processing_backend", "llama_cpp")
+    if backend == "ollama":
+        model_name = config.get("ollama_model", "")
+    elif backend == "llama_cpp":
+        model_path = config.get("llama_cpp_model_path", "")
+        model_name = Path(model_path).stem if model_path else ""
+    elif backend == "openai":
+        model_name = config.get("openai_model", "gpt-4o-mini")
+    elif backend == "anthropic":
+        model_name = config.get("anthropic_model", "claude-3-haiku")
+    else:
+        model_name = ""
+    
+    # Skip check if post-processing is disabled
+    if not config.get("post_processing_enabled", False):
+        return {
+            "is_compatible": True,
+            "issues": [],
+            "recommendations": [],
+            "upgrade_message": None,
+            "severity": "ok",
+        }
+    
+    # Skip check if no model selected
+    if not model_name:
+        return {
+            "is_compatible": False,
+            "issues": ["No post-processing model selected"],
+            "recommendations": ["Select a model in Post-Processing settings"],
+            "upgrade_message": None,
+            "severity": "warning",
+        }
+    
+    # Get tone and intensity
+    tone = config.get("output_tone", "professional")
+    intensity_key = f"{tone}_intensity"
+    intensity = config.get(intensity_key, "standard")
+    smart_formatting = config.get("smart_formatting", True)
+    
+    # Run compatibility check
+    compat = get_model_compatibility(model_name, tone, intensity, smart_formatting)
+    
+    # Build result
+    issues = []
+    recommendations = []
+    upgrade_message = None
+    
+    if not compat["compatible"]:
+        tier = compat["tier"]
+        tier_info = MODEL_TIERS.get(tier, {})
+        max_intensity = tier_info.get("max_intensity", "standard")
+        
+        issues.append(f"'{intensity.title()}' intensity requires a larger model")
+        
+        if compat["upgrade_suggestion"]:
+            suggestion = compat["upgrade_suggestion"]
+            upgrade_message = suggestion["message"]
+            recommendations.append(f"Upgrade to a {suggestion['min_params']} model")
+            
+            for model in suggestion["recommended_models"][:2]:
+                recommendations.append(f"Try: {model['name']} ({model['description']})")
+        
+        recommendations.append(f"Or use '{max_intensity}' intensity with current model")
+    
+    # Add any other warnings (skip duplicates and intensity warnings already covered)
+    for warning in compat.get("warnings", []):
+        cleaned = warning.replace("⚠️ ", "").replace("💡 ", "")
+        # Skip if this is about intensity (already covered above)
+        if "intensity requires" in cleaned.lower():
+            continue
+        if cleaned not in issues:
+            issues.append(cleaned)
+    
+    return {
+        "is_compatible": compat["compatible"],
+        "issues": issues,
+        "recommendations": recommendations,
+        "upgrade_message": upgrade_message,
+        "severity": "incompatible" if not compat["compatible"] else ("warning" if issues else "ok"),
+        "current_model": model_name,
+        "current_tier": compat["tier"],
+        "requested_intensity": intensity,
+        "effective_intensity": compat["auto_adjustments"].get("intensity", intensity),
+    }
 
 
 # =============================================================================

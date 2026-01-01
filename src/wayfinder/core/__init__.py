@@ -11,7 +11,13 @@ Core functionality modules for Wayfinder Voice.
 from .recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name
 from .transcriber import transcribe_with_config, TranscriptionError, get_backend
 from .injector import inject_text, InjectionError
-from .postprocessor import process_with_config, get_available_backends, get_template_names
+from .postprocessor import (
+    process_with_config,
+    get_available_backends,
+    get_template_names,
+    check_settings_compatibility,
+    get_upgrade_suggestion_for_intensity,
+)
 from .ollama_manager import get_ollama_manager, OllamaManager
 
 __all__ = [
@@ -32,6 +38,8 @@ __all__ = [
     "process_with_config",
     "get_available_backends",
     "get_template_names",
+    "check_settings_compatibility",
+    "get_upgrade_suggestion_for_intensity",
     # Ollama
     "get_ollama_manager",
     "OllamaManager",

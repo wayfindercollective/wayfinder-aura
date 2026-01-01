@@ -361,5 +361,192 @@ def create_body_label(parent, text: str, font_family: str = "Inter") -> ctk.CTkL
     )
 
 
+class CompatibilityBanner(ctk.CTkFrame):
+    """
+    A banner that displays model compatibility warnings and recommendations.
+    
+    Shows when the selected post-processing model can't handle the
+    requested intensity level, with actionable upgrade suggestions.
+    """
+    
+    # Severity colors
+    SEVERITY_COLORS = {
+        "ok": None,  # Hidden when ok
+        "warning": "#3D3520",  # Muted amber background
+        "incompatible": "#3D2020",  # Muted red background
+    }
+    
+    SEVERITY_BORDER_COLORS = {
+        "ok": COLORS["border"],
+        "warning": "#E5AC2A",  # Muted gold
+        "incompatible": "#E87070",  # Muted rose
+    }
+    
+    SEVERITY_ICONS = {
+        "ok": "✓",
+        "warning": "⚠",
+        "incompatible": "⚠",
+    }
+    
+    def __init__(self, parent, **kwargs):
+        """
+        Create a compatibility banner.
+        
+        Args:
+            parent: Parent widget
+        """
+        super().__init__(
+            parent,
+            fg_color=COLORS["bg_input"],
+            corner_radius=RADIUS["sm"],
+            border_width=1,
+            border_color=COLORS["border"],
+            **kwargs
+        )
+        
+        self._visible = False
+        
+        # Main content container
+        self.content = ctk.CTkFrame(self, fg_color="transparent")
+        self.content.pack(fill="x", padx=12, pady=10)
+        
+        # Header row with icon and title
+        self.header = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.header.pack(fill="x")
+        
+        self.icon_label = ctk.CTkLabel(
+            self.header,
+            text="⚠",
+            font=("Inter", 14),
+            text_color=COLORS["accent_yellow"],
+        )
+        self.icon_label.pack(side="left", padx=(0, 8))
+        
+        self.title_label = ctk.CTkLabel(
+            self.header,
+            text="Model Compatibility",
+            font=("Inter", 12, "bold"),
+            text_color=COLORS["text_bright"],
+        )
+        self.title_label.pack(side="left")
+        
+        # Issue description
+        self.issue_label = ctk.CTkLabel(
+            self.content,
+            text="",
+            font=("Inter", 11),
+            text_color=COLORS["text_secondary"],
+            wraplength=320,
+            justify="left",
+        )
+        self.issue_label.pack(anchor="w", pady=(6, 0))
+        
+        # Recommendations frame
+        self.recommendations_frame = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.recommendations_frame.pack(fill="x", pady=(8, 0))
+        
+        # Model suggestion with copy button
+        self.suggestion_frame = ctk.CTkFrame(
+            self.content,
+            fg_color=COLORS["bg_elevated"],
+            corner_radius=RADIUS["sm"],
+        )
+        self.suggestion_frame.pack(fill="x", pady=(8, 0))
+        
+        self.suggestion_label = ctk.CTkLabel(
+            self.suggestion_frame,
+            text="",
+            font=("JetBrains Mono", 11),
+            text_color=COLORS["accent"],
+        )
+        self.suggestion_label.pack(side="left", padx=10, pady=8)
+        
+        # Initially hidden
+        self.pack_forget()
+    
+    def update_status(self, compatibility: dict) -> None:
+        """
+        Update the banner based on compatibility check results.
+        
+        Args:
+            compatibility: Dict from check_settings_compatibility() with:
+                - is_compatible: bool
+                - issues: list of strings
+                - recommendations: list of strings
+                - upgrade_message: str or None
+                - severity: "ok" | "warning" | "incompatible"
+        """
+        severity = compatibility.get("severity", "ok")
+        
+        if severity == "ok" or not compatibility.get("issues"):
+            # Hide banner when everything is compatible
+            self._visible = False
+            self.pack_forget()
+            return
+        
+        # Show and update banner
+        self._visible = True
+        
+        # Update colors based on severity
+        bg_color = self.SEVERITY_COLORS.get(severity, COLORS["bg_input"])
+        border_color = self.SEVERITY_BORDER_COLORS.get(severity, COLORS["border"])
+        icon = self.SEVERITY_ICONS.get(severity, "⚠")
+        
+        self.configure(fg_color=bg_color or COLORS["bg_input"], border_color=border_color)
+        self.icon_label.configure(
+            text=icon,
+            text_color=border_color,
+        )
+        
+        # Update issue text
+        issues = compatibility.get("issues", [])
+        if issues:
+            issue_text = issues[0]
+            if len(issues) > 1:
+                issue_text += f" (+{len(issues)-1} more)"
+            self.issue_label.configure(text=issue_text)
+        
+        # Update recommendations
+        for widget in self.recommendations_frame.winfo_children():
+            widget.destroy()
+        
+        recommendations = compatibility.get("recommendations", [])
+        for rec in recommendations[:3]:  # Show max 3 recommendations
+            rec_label = ctk.CTkLabel(
+                self.recommendations_frame,
+                text=f"• {rec}",
+                font=("Inter", 10),
+                text_color=COLORS["text_muted"],
+                wraplength=300,
+                justify="left",
+            )
+            rec_label.pack(anchor="w", pady=1)
+        
+        # Update model suggestion
+        upgrade_message = compatibility.get("upgrade_message")
+        if upgrade_message:
+            # Extract the ollama pull command if present
+            if "ollama pull" in upgrade_message:
+                cmd_start = upgrade_message.find("ollama pull")
+                cmd = upgrade_message[cmd_start:].split("\n")[0].strip()
+                self.suggestion_label.configure(text=f"💡 {cmd}")
+                self.suggestion_frame.pack(fill="x", pady=(8, 0))
+            else:
+                self.suggestion_label.configure(text=f"💡 {upgrade_message[:50]}...")
+                self.suggestion_frame.pack(fill="x", pady=(8, 0))
+        else:
+            self.suggestion_frame.pack_forget()
+        
+        # Show the banner
+        self.pack(fill="x", pady=(8, 0))
+    
+    def hide(self) -> None:
+        """Hide the banner."""
+        self._visible = False
+        self.pack_forget()
+    
+    def is_visible(self) -> bool:
+        """Check if the banner is currently visible."""
+        return self._visible
 
 

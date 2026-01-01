@@ -97,7 +97,7 @@ from transcriber import transcribe_with_config, TranscriptionError
 # #region agent log
 _debug_log("transcriber imported successfully")
 # #endregion
-from postprocessor import process_with_config, get_available_backends, get_template_names
+from postprocessor import process_with_config, get_available_backends, get_template_names, check_settings_compatibility
 from ollama_manager import get_ollama_manager, OllamaManager
 from license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 # #region agent log
@@ -518,6 +518,195 @@ class ToolTip:
     def update_text(self, new_text: str):
         """Update the tooltip text dynamically."""
         self.text = new_text
+
+
+class CompatibilityBanner(ctk.CTkFrame):
+    """
+    A banner that displays model compatibility warnings and recommendations.
+    
+    Shows when the selected post-processing model can't handle the
+    requested intensity level, with actionable upgrade suggestions.
+    """
+    
+    # Severity colors
+    SEVERITY_COLORS = {
+        "ok": None,  # Hidden when ok
+        "warning": "#3D3520",  # Muted amber background
+        "incompatible": "#3D2020",  # Muted red background
+    }
+    
+    SEVERITY_BORDER_COLORS = {
+        "ok": COLORS["border"],
+        "warning": "#E5AC2A",  # Muted gold
+        "incompatible": "#E87070",  # Muted rose
+    }
+    
+    SEVERITY_ICONS = {
+        "ok": "✓",
+        "warning": "⚠",
+        "incompatible": "⚠",
+    }
+    
+    def __init__(self, parent, **kwargs):
+        """
+        Create a compatibility banner.
+        
+        Args:
+            parent: Parent widget
+        """
+        super().__init__(
+            parent,
+            fg_color=COLORS["bg_input"],
+            corner_radius=RADIUS["sm"],
+            border_width=1,
+            border_color=COLORS["border"],
+            **kwargs
+        )
+        
+        self._visible = False
+        
+        # Main content container
+        self.content = ctk.CTkFrame(self, fg_color="transparent")
+        self.content.pack(fill="x", padx=12, pady=10)
+        
+        # Header row with icon and title
+        self.header = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.header.pack(fill="x")
+        
+        self.icon_label = ctk.CTkLabel(
+            self.header,
+            text="⚠",
+            font=("Inter", 14),
+            text_color=COLORS["accent_yellow"],
+        )
+        self.icon_label.pack(side="left", padx=(0, 8))
+        
+        self.title_label = ctk.CTkLabel(
+            self.header,
+            text="Model Compatibility",
+            font=("Inter", 12, "bold"),
+            text_color=COLORS["text_bright"],
+        )
+        self.title_label.pack(side="left")
+        
+        # Issue description
+        self.issue_label = ctk.CTkLabel(
+            self.content,
+            text="",
+            font=("Inter", 11),
+            text_color=COLORS["text_secondary"],
+            wraplength=320,
+            justify="left",
+        )
+        self.issue_label.pack(anchor="w", pady=(6, 0))
+        
+        # Recommendations frame
+        self.recommendations_frame = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.recommendations_frame.pack(fill="x", pady=(8, 0))
+        
+        # Model suggestion with copy button
+        self.suggestion_frame = ctk.CTkFrame(
+            self.content,
+            fg_color=COLORS["bg_elevated"],
+            corner_radius=RADIUS["sm"],
+        )
+        self.suggestion_frame.pack(fill="x", pady=(8, 0))
+        
+        self.suggestion_label = ctk.CTkLabel(
+            self.suggestion_frame,
+            text="",
+            font=("JetBrains Mono", 11),
+            text_color=COLORS["accent"],
+        )
+        self.suggestion_label.pack(side="left", padx=10, pady=8)
+        
+        # Initially hidden
+        self.pack_forget()
+    
+    def update_status(self, compatibility: dict) -> None:
+        """
+        Update the banner based on compatibility check results.
+        
+        Args:
+            compatibility: Dict from check_settings_compatibility() with:
+                - is_compatible: bool
+                - issues: list of strings
+                - recommendations: list of strings
+                - upgrade_message: str or None
+                - severity: "ok" | "warning" | "incompatible"
+        """
+        severity = compatibility.get("severity", "ok")
+        
+        if severity == "ok" or not compatibility.get("issues"):
+            # Hide banner when everything is compatible
+            self._visible = False
+            self.pack_forget()
+            return
+        
+        # Show and update banner
+        self._visible = True
+        
+        # Update colors based on severity
+        bg_color = self.SEVERITY_COLORS.get(severity, COLORS["bg_input"])
+        border_color = self.SEVERITY_BORDER_COLORS.get(severity, COLORS["border"])
+        icon = self.SEVERITY_ICONS.get(severity, "⚠")
+        
+        self.configure(fg_color=bg_color or COLORS["bg_input"], border_color=border_color)
+        self.icon_label.configure(
+            text=icon,
+            text_color=border_color,
+        )
+        
+        # Update issue text
+        issues = compatibility.get("issues", [])
+        if issues:
+            issue_text = issues[0]
+            if len(issues) > 1:
+                issue_text += f" (+{len(issues)-1} more)"
+            self.issue_label.configure(text=issue_text)
+        
+        # Update recommendations
+        for widget in self.recommendations_frame.winfo_children():
+            widget.destroy()
+        
+        recommendations = compatibility.get("recommendations", [])
+        for rec in recommendations[:3]:  # Show max 3 recommendations
+            rec_label = ctk.CTkLabel(
+                self.recommendations_frame,
+                text=f"• {rec}",
+                font=("Inter", 10),
+                text_color=COLORS["text_muted"],
+                wraplength=300,
+                justify="left",
+            )
+            rec_label.pack(anchor="w", pady=1)
+        
+        # Update model suggestion
+        upgrade_message = compatibility.get("upgrade_message")
+        if upgrade_message:
+            # Extract the ollama pull command if present
+            if "ollama pull" in upgrade_message:
+                cmd_start = upgrade_message.find("ollama pull")
+                cmd = upgrade_message[cmd_start:].split("\n")[0].strip()
+                self.suggestion_label.configure(text=f"💡 {cmd}")
+                self.suggestion_frame.pack(fill="x", pady=(8, 0))
+            else:
+                self.suggestion_label.configure(text=f"💡 {upgrade_message[:50]}...")
+                self.suggestion_frame.pack(fill="x", pady=(8, 0))
+        else:
+            self.suggestion_frame.pack_forget()
+        
+        # Show the banner
+        self.pack(fill="x", pady=(8, 0))
+    
+    def hide(self) -> None:
+        """Hide the banner."""
+        self._visible = False
+        self.pack_forget()
+    
+    def is_visible(self) -> bool:
+        """Check if the banner is currently visible."""
+        return self._visible
 
 
 class ModeSelector(ctk.CTkFrame):
@@ -1405,6 +1594,7 @@ def resolve_audio_device(config: dict) -> int | None:
 
 class EventType(Enum):
     HOTKEY_PRESSED = auto()
+    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/Technical/Casual)
     TRANSCRIPTION_DONE = auto()
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()
@@ -1487,7 +1677,8 @@ def find_keyboard_devices(enabled_devices: list[str] = None) -> list[InputDevice
         return [d["device"] for d in all_devices]
 
 
-def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabled_devices=None, log_callback=None):
+def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabled_devices=None, log_callback=None,
+                    style_toggle_key=None, style_toggle_modifiers=None):
     import select
     
     def log(msg):
@@ -1508,10 +1699,18 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
         short_name = dev.name[:40] + "..." if len(dev.name) > 40 else dev.name
         log(f"   • {short_name}")
     
+    # Build set of required modifier key codes for recording hotkey
     required_modifiers = set()
     for name in hotkey_modifiers:
         if name.lower() in MODIFIER_CODES:
             required_modifiers.update(MODIFIER_CODES[name.lower()])
+    
+    # Build set of required modifier key codes for style toggle hotkey
+    style_toggle_modifiers = style_toggle_modifiers or []
+    required_style_modifiers = set()
+    for name in style_toggle_modifiers:
+        if name.lower() in MODIFIER_CODES:
+            required_style_modifiers.update(MODIFIER_CODES[name.lower()])
     
     pressed_modifiers = set()
     all_modifier_codes = set()
@@ -1520,6 +1719,15 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
 
     # Map file descriptors to devices
     fd_to_device = {dev.fd: dev for dev in devices}
+    
+    def check_modifiers(required_mods, modifier_names):
+        """Check if all required modifiers are currently pressed."""
+        if not required_mods:
+            return True
+        return all(
+            pressed_modifiers & set(MODIFIER_CODES.get(mod.lower(), []))
+            for mod in modifier_names
+        )
 
     try:
         while not stop_event.is_set():
@@ -1539,16 +1747,15 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                             elif key_event.keystate == 0:
                                 pressed_modifiers.discard(keycode)
                         
+                        # Check for recording hotkey press
                         if keycode == hotkey_key and key_event.keystate == 1:
-                            if required_modifiers:
-                                all_mods_pressed = all(
-                                    pressed_modifiers & set(MODIFIER_CODES.get(mod.lower(), []))
-                                    for mod in hotkey_modifiers
-                                )
-                                if all_mods_pressed:
-                                    event_queue.put((EventType.HOTKEY_PRESSED, None))
-                            else:
+                            if check_modifiers(required_modifiers, hotkey_modifiers):
                                 event_queue.put((EventType.HOTKEY_PRESSED, None))
+                        
+                        # Check for style toggle hotkey press
+                        if style_toggle_key and keycode == style_toggle_key and key_event.keystate == 1:
+                            if check_modifiers(required_style_modifiers, style_toggle_modifiers):
+                                event_queue.put((EventType.STYLE_TOGGLE, None))
     except Exception as e:
         log(f"⚠️ Hotkey error: {e}")
 
@@ -1583,9 +1790,20 @@ def socket_listener(event_queue, stop_event, log_callback=None):
             try:
                 conn, _ = server.accept()
                 data = conn.recv(64)
-                if data == b"toggle":
+                data_str = data.decode("utf-8").strip() if data else ""
+                
+                if data_str == "toggle":
                     log("🎯 Toggle received via socket")
                     event_queue.put((EventType.HOTKEY_PRESSED, None))
+                elif data_str == "style":
+                    # Cycle to next style
+                    log("✎ Style toggle received via socket")
+                    event_queue.put((EventType.STYLE_TOGGLE, None))
+                elif data_str.startswith("style:"):
+                    # Set specific style (style:professional, style:technical, style:casual)
+                    style = data_str.split(":", 1)[1]
+                    log(f"✎ Style set to '{style}' via socket")
+                    event_queue.put((EventType.STYLE_TOGGLE, style))
                 conn.close()
             except socket.timeout:
                 continue
@@ -2382,7 +2600,7 @@ class OverlayController:
     messages over stdin/stdout.
     """
     
-    def __init__(self, audio_level_callback=None, mode: str = "persistent"):
+    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional"):
         self._process: subprocess.Popen | None = None
         self._audio_level_callback = audio_level_callback
         self._audio_poll_thread: threading.Thread | None = None
@@ -2390,6 +2608,7 @@ class OverlayController:
         self._current_state = "hidden"
         self._lock = threading.Lock()
         self._mode = mode  # "persistent" or "standard"
+        self._initial_style = initial_style  # "professional", "technical", or "casual"
     
     def _start_process(self) -> bool:
         """Start the overlay subprocess if not already running."""
@@ -2415,9 +2634,9 @@ class OverlayController:
                 import sys
                 python_exe = sys.executable
                 
-                # Start subprocess with mode argument
+                # Start subprocess with mode and style arguments
                 self._process = subprocess.Popen(
-                    [python_exe, str(script_path), f"--mode={self._mode}"],
+                    [python_exe, str(script_path), f"--mode={self._mode}", f"--style={self._initial_style}"],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,  # Capture errors for debugging
@@ -2457,6 +2676,10 @@ class OverlayController:
             except Exception as e:
                 print(f"Failed to send overlay command: {e}")
                 return False
+    
+    def send_command(self, cmd: dict) -> bool:
+        """Public method to send a command to the overlay subprocess."""
+        return self._send_command(cmd)
     
     def _start_audio_polling(self):
         """Start background thread to poll audio levels."""
@@ -2573,6 +2796,52 @@ class OverlayController:
     def set_audio_level_callback(self, callback):
         """Set the callback function for getting audio levels."""
         self._audio_level_callback = callback
+    
+    def is_healthy(self) -> bool:
+        """Check if the overlay subprocess is running and responsive."""
+        with self._lock:
+            if self._process is None or self._process.poll() is not None:
+                return False
+        return True
+    
+    def refresh(self) -> bool:
+        """
+        Refresh the overlay after display wake-up or other disruptions.
+        
+        This kills the existing overlay and restarts it, restoring
+        the previous state.
+        """
+        # Remember current state
+        previous_state = self._current_state
+        
+        # Stop audio polling while refreshing
+        self._stop_audio_polling()
+        
+        # Kill existing process
+        with self._lock:
+            if self._process is not None:
+                try:
+                    self._process.kill()
+                    self._process.wait(timeout=0.5)
+                except:
+                    pass
+                self._process = None
+        
+        # Give compositor a moment to clean up the old window
+        time.sleep(0.2)
+        
+        # Restart the process
+        if not self._start_process():
+            return False
+        
+        # Restore previous state (if not hidden)
+        if previous_state != "hidden":
+            self._send_command({"cmd": "show", "state": previous_state})
+            self._current_state = previous_state
+            if previous_state == "listening":
+                self._start_audio_polling()
+        
+        return True
 
 
 # === Main Application ===
@@ -2692,9 +2961,11 @@ class WayfinderApp(ctk.CTk):
             # Use PyQt6 overlay (always on, no focus steal)
             try:
                 import PyQt6
+                initial_style = self.config.get("output_tone", "professional")
                 self.overlay_controller = OverlayController(
                     audio_level_callback=get_audio_level,
-                    mode="persistent"  # Always use persistent mode for always_on
+                    mode="persistent",  # Always use persistent mode for always_on
+                    initial_style=initial_style
                 )
                 self._use_pyqt_overlay = True
                 self.log(f"✨ Using Always On indicator (PyQt6)")
@@ -2751,11 +3022,18 @@ class WayfinderApp(ctk.CTk):
         
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         
-        # Always start minimized to tray - UI accessed via tray "Open Settings"
-        self.after(100, self.hide_to_tray)
+        # Only start minimized to tray if the user has enabled this option
+        if self.config.get("start_minimized", False):
+            self.after(100, self.hide_to_tray)
         
         # Auto-start Ollama if backend is ollama and it's installed but not running
         self.after(500, self._auto_start_ollama_if_needed)
+        
+        # Start display wake-up listener for overlay recovery
+        if self._use_pyqt_overlay:
+            self._start_display_wake_listener()
+            # Also start periodic health check for the overlay
+            self._start_overlay_health_check()
 
     # Consistent base dimensions for the window
     BASE_WINDOW_WIDTH = 480
@@ -4951,12 +5229,19 @@ class WayfinderApp(ctk.CTk):
         tone_container.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
         
         self.tone_buttons = {}
+        self.intensity_buttons = {}  # Store intensity button references
         current_tone = self.config.get("output_tone", "professional")
         
         tones = [
             ("professional", "💼", "Professional", "Formal, polished, business-appropriate"),
             ("casual", "💬", "Casual", "Relaxed, conversational, friendly"),
             ("technical", "🔧", "Technical", "Precise, detailed, developer-focused"),
+        ]
+        
+        intensity_levels = [
+            ("light", "Light"),
+            ("standard", "Standard"),
+            ("strong", "Strong"),
         ]
         
         for i, (tone_id, icon, label, desc) in enumerate(tones):
@@ -4971,9 +5256,9 @@ class WayfinderApp(ctk.CTk):
             )
             card.pack(fill="x", pady=4)
             
-            # Make the whole card clickable
+            # Make the top section clickable for tone selection
             card_inner = ctk.CTkFrame(card, fg_color="transparent")
-            card_inner.pack(fill="x", padx=12, pady=10)
+            card_inner.pack(fill="x", padx=12, pady=(10, 6))
             
             # Icon and title row
             title_row = ctk.CTkFrame(card_inner, fg_color="transparent")
@@ -5001,13 +5286,62 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_muted"],
             ).pack(anchor="w", pady=(4, 0))
             
-            # Bind click to whole card
-            for widget in [card, card_inner, title_row]:
+            # Bind click to top section for tone selection
+            for widget in [card_inner, title_row]:
                 widget.bind("<Button-1>", lambda e, t=tone_id: self._on_tone_selected(t))
                 for child in widget.winfo_children():
                     child.bind("<Button-1>", lambda e, t=tone_id: self._on_tone_selected(t))
             
+            # === Intensity Slider ===
+            intensity_frame = ctk.CTkFrame(card, fg_color="transparent")
+            intensity_frame.pack(fill="x", padx=12, pady=(0, 10))
+            
+            # Get current intensity for this tone
+            intensity_key = f"{tone_id}_intensity"
+            current_intensity = self.config.get(intensity_key, "standard")
+            
+            # Intensity label
+            ctk.CTkLabel(
+                intensity_frame,
+                text="Intensity:",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_muted"],
+            ).pack(side="left", padx=(0, 8))
+            
+            # Segmented button group for intensity
+            intensity_btn_frame = ctk.CTkFrame(intensity_frame, fg_color="transparent")
+            intensity_btn_frame.pack(side="left", fill="x", expand=True)
+            
+            self.intensity_buttons[tone_id] = {}
+            
+            for j, (intensity_id, intensity_label) in enumerate(intensity_levels):
+                is_intensity_selected = intensity_id == current_intensity
+                
+                btn = ctk.CTkButton(
+                    intensity_btn_frame,
+                    text=intensity_label,
+                    font=(self.font_body[0], self.font_sizes["small"]),
+                    width=70,
+                    height=26,
+                    corner_radius=RADIUS["sm"],
+                    fg_color=COLORS["accent_dim"] if is_intensity_selected else COLORS["bg_elevated"],
+                    hover_color=COLORS["accent_dim"] if is_intensity_selected else COLORS["bg_hover"],
+                    text_color=COLORS["text_bright"] if is_intensity_selected else COLORS["text_secondary"],
+                    command=lambda t=tone_id, i=intensity_id: self._on_intensity_changed(t, i),
+                )
+                btn.pack(side="left", padx=(0, 2))
+                self.intensity_buttons[tone_id][intensity_id] = btn
+            
             self.tone_buttons[tone_id] = card
+        
+        # === Model Compatibility Banner ===
+        # Shows warnings when selected model can't handle the intensity level
+        self.compatibility_banner_frame = ctk.CTkFrame(tone_container, fg_color="transparent")
+        self.compatibility_banner_frame.pack(fill="x", pady=(4, 0))
+        
+        self.compatibility_banner = CompatibilityBanner(self.compatibility_banner_frame)
+        # Initial check on tab creation
+        self._update_compatibility_banner()
         
         # === SECTION: Smart Formatting ===
         format_tile = ctk.CTkFrame(
@@ -5049,6 +5383,58 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
             justify="left",
         ).pack(anchor="w", padx=12, pady=10)
+        
+        # === SECTION: Style Toggle Hotkey ===
+        hotkey_tile = ctk.CTkFrame(
+            scroll, fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["lg"], border_width=1,
+            border_color=COLORS["border_rim"],
+        )
+        hotkey_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        
+        hotkey_header = ctk.CTkFrame(hotkey_tile, fg_color="transparent")
+        hotkey_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
+        ctk.CTkLabel(
+            hotkey_header, text="⌨   S T Y L E   T O G G L E   H O T K E Y",
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        
+        hotkey_content = ctk.CTkFrame(hotkey_tile, fg_color="transparent")
+        hotkey_content.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        
+        # Description
+        ctk.CTkLabel(
+            hotkey_content,
+            text="Press this key to cycle through styles (P → T → C).",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", pady=(0, 10))
+        
+        # Hotkey button row
+        hotkey_row = ctk.CTkFrame(hotkey_content, fg_color="transparent")
+        hotkey_row.pack(fill="x")
+        
+        ctk.CTkLabel(
+            hotkey_row,
+            text="Toggle Style",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        
+        self.style_hotkey_btn = ctk.CTkButton(
+            hotkey_row,
+            text=self.get_style_hotkey_display(),
+            font=(self.font_body[0], self.font_sizes["body"]),
+            width=100,
+            height=32,
+            corner_radius=RADIUS["sm"],
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"],
+            command=self.open_style_hotkey_settings,
+        )
+        self.style_hotkey_btn.pack(side="right")
     
     def _on_tone_selected(self, tone_id: str) -> None:
         """Handle tone selection from Style tab."""
@@ -5083,6 +5469,36 @@ class WayfinderApp(ctk.CTk):
         tone_labels = {"professional": "Professional", "casual": "Casual", "technical": "Technical"}
         self.log(f"✎ Output tone: {tone_labels.get(tone_id, tone_id)}")
     
+    def _on_intensity_changed(self, tone_id: str, intensity_id: str) -> None:
+        """Handle intensity change for a specific tone."""
+        intensity_key = f"{tone_id}_intensity"
+        current_intensity = self.config.get(intensity_key, "standard")
+        
+        if intensity_id == current_intensity:
+            return
+        
+        # Update config
+        self.config[intensity_key] = intensity_id
+        save_config(self.config)
+        
+        # Update button styles for this tone's intensity buttons
+        if tone_id in self.intensity_buttons:
+            for int_id, btn in self.intensity_buttons[tone_id].items():
+                is_selected = int_id == intensity_id
+                btn.configure(
+                    fg_color=COLORS["accent_dim"] if is_selected else COLORS["bg_elevated"],
+                    hover_color=COLORS["accent_dim"] if is_selected else COLORS["bg_hover"],
+                    text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
+                )
+        
+        # Log the change
+        tone_labels = {"professional": "Professional", "casual": "Casual", "technical": "Technical"}
+        intensity_labels = {"light": "Light", "standard": "Standard", "strong": "Strong"}
+        self.log(f"✎ {tone_labels.get(tone_id, tone_id)} intensity: {intensity_labels.get(intensity_id, intensity_id)}")
+        
+        # Update compatibility check
+        self._update_compatibility_banner()
+    
     def _rebuild_style_tab(self) -> None:
         """Rebuild the style tab to reflect current settings."""
         # Destroy current content
@@ -5104,6 +5520,33 @@ class WayfinderApp(ctk.CTk):
         
         status = "enabled" if enabled else "disabled"
         self.log(f"✨ Smart formatting {status}")
+        
+        # Update compatibility check
+        self._update_compatibility_banner()
+    
+    def _update_compatibility_banner(self) -> None:
+        """
+        Check current settings compatibility and update the banner.
+        
+        Called whenever tone, intensity, model, or smart formatting changes.
+        """
+        if not hasattr(self, 'compatibility_banner'):
+            return
+        
+        try:
+            compatibility = check_settings_compatibility(self.config)
+            self.compatibility_banner.update_status(compatibility)
+            
+            # Log if there are issues
+            if not compatibility.get("is_compatible", True):
+                model = compatibility.get("current_model", "unknown")
+                requested = compatibility.get("requested_intensity", "standard")
+                effective = compatibility.get("effective_intensity", requested)
+                if requested != effective:
+                    self.log(f"⚠ Model '{model}' limited to '{effective}' intensity (requested: '{requested}')")
+        except Exception as e:
+            # Don't crash if compatibility check fails
+            print(f"[Compatibility] Error checking compatibility: {e}")
     
     def _create_history_tab(self) -> None:
         """Create the History tab content."""
@@ -5435,6 +5878,8 @@ class WayfinderApp(ctk.CTk):
         # Rebuild mode settings to show/hide post-processing options
         current_mode = self.config.get("processing_mode", "local")
         self._build_mode_settings(current_mode)
+        # Update compatibility check
+        self._update_compatibility_banner()
     
     def on_postproc_backend_changed(self, value: str):
         """Handle post-processing backend change."""
@@ -5454,6 +5899,8 @@ class WayfinderApp(ctk.CTk):
         # Rebuild mode settings to show/hide model selection
         current_mode = self.config.get("processing_mode", "local")
         self._build_mode_settings(current_mode)
+        # Update compatibility check
+        self._update_compatibility_banner()
     
     def on_postproc_template_changed(self, value: str):
         """Legacy handler - templates replaced by Style tab's tone + smart formatting."""
@@ -6010,6 +6457,9 @@ class WayfinderApp(ctk.CTk):
         
         self._update_llamacpp_download_button()
         self._update_llamacpp_info_panel()
+        
+        # Update compatibility check when model changes
+        self._update_compatibility_banner()
     
     def _on_ollama_model_selected(self, selection: str) -> None:
         """Handle Ollama model selection from dropdown."""
@@ -6024,6 +6474,9 @@ class WayfinderApp(ctk.CTk):
         
         self._update_ollama_download_button()
         self._update_ollama_info_panel()
+        
+        # Update compatibility check when model changes
+        self._update_compatibility_banner()
     
     def _update_llamacpp_download_button(self) -> None:
         """Update download button state based on selected model."""
@@ -6447,6 +6900,74 @@ class WayfinderApp(ctk.CTk):
         
         ollama_mgr.start_service(callback=on_service_status)
     
+    def _start_display_wake_listener(self) -> None:
+        """Start D-Bus listener for system wake-up events to refresh the overlay.
+        
+        Uses org.freedesktop.login1.Manager.PrepareForSleep signal which fires:
+        - With True before sleep
+        - With False after wake-up
+        """
+        if not DBUS_AVAILABLE:
+            self.log("⚠️ D-Bus not available - overlay won't auto-recover after sleep")
+            return
+        
+        def listen_for_wake():
+            """Background thread to listen for wake-up events."""
+            try:
+                DBusGMainLoop(set_as_default=True)
+                bus = dbus.SystemBus()
+                
+                def on_prepare_for_sleep(sleeping):
+                    """Called when system prepares for sleep (True) or wakes up (False)."""
+                    if not sleeping:
+                        # System just woke up - refresh the overlay after a short delay
+                        # Delay gives the display time to fully initialize
+                        self.after(1500, self._on_display_wake)
+                
+                # Subscribe to the PrepareForSleep signal
+                bus.add_signal_receiver(
+                    on_prepare_for_sleep,
+                    signal_name="PrepareForSleep",
+                    dbus_interface="org.freedesktop.login1.Manager",
+                    bus_name="org.freedesktop.login1"
+                )
+                
+                # Run the GLib main loop (blocks)
+                loop = GLib.MainLoop()
+                loop.run()
+                
+            except Exception as e:
+                self.after(0, lambda: self.log(f"⚠️ Wake listener failed: {e}"))
+        
+        # Start listener in background thread
+        wake_thread = threading.Thread(target=listen_for_wake, daemon=True, name="WakeListener")
+        wake_thread.start()
+    
+    def _start_overlay_health_check(self) -> None:
+        """Start periodic health check for the overlay subprocess."""
+        def check_health():
+            if self._use_pyqt_overlay and self.overlay_controller:
+                if not self.overlay_controller.is_healthy():
+                    self.log("🔄 Overlay process died - restarting...")
+                    self.overlay_controller.refresh()
+            # Check again in 10 seconds
+            self.after(10000, check_health)
+        
+        # Start checking after 30 seconds (give app time to fully initialize)
+        self.after(30000, check_health)
+    
+    def _on_display_wake(self) -> None:
+        """Called when the display wakes up from sleep.
+        
+        Refreshes the overlay to ensure it's visible and properly positioned.
+        """
+        if self._use_pyqt_overlay and self.overlay_controller:
+            self.log("🌅 Display woke up - refreshing overlay...")
+            if self.overlay_controller.refresh():
+                self.log("✓ Overlay refreshed successfully")
+            else:
+                self.log("⚠️ Overlay refresh failed")
+    
     def _test_ollama_model(self) -> None:
         """Test the selected Ollama model with a sample transcription."""
         import threading
@@ -6717,11 +7238,12 @@ class WayfinderApp(ctk.CTk):
                         self._ollama_progress_bar.set(progress)
                     if hasattr(self, '_ollama_status_label') and self._ollama_status_label.winfo_exists():
                         self._ollama_status_label.configure(text=status_text)
-                        self.update_idletasks()  # Force UI redraw
+                    # Always force UI redraw after updates (moved outside conditionals)
+                    self.update_idletasks()
                 except Exception as e:
                     debug_log(f"UI update error: {e}")
-            # Schedule on main thread
-            self.after(0, do_update)
+            # Schedule on main thread with small delay for better UI responsiveness
+            self.after(10, do_update)
         
         def download_thread():
             debug_log("Thread started!")
@@ -8729,6 +9251,24 @@ class WayfinderApp(ctk.CTk):
             mods = "+".join(m.capitalize() for m in hotkey_modifiers)
             return f"{mods}+{key_name}"
         return key_name
+    
+    def get_style_hotkey_display(self) -> str:
+        """Get the display string for the style toggle hotkey."""
+        style_key = self.config.get("style_toggle_key", 68)
+        style_modifiers = self.config.get("style_toggle_modifiers", [])
+        
+        # Map codes to display names
+        code_to_name = {
+            59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
+            65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
+            70: "ScrollLock", 119: "Pause", 57: "Space",
+        }
+        key_name = code_to_name.get(style_key, f"Key{style_key}")
+        
+        if style_modifiers:
+            mods = "+".join(m.capitalize() for m in style_modifiers)
+            return f"{mods}+{key_name}"
+        return key_name
 
     def get_microphone_display(self) -> str:
         """Get display name for current audio input device."""
@@ -9759,6 +10299,156 @@ class WayfinderApp(ctk.CTk):
                                     return
         
         threading.Thread(target=detect_keys, daemon=True).start()
+
+    def open_style_hotkey_settings(self):
+        """Open dialog to configure the style toggle hotkey."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Style Toggle Hotkey")
+        dialog.geometry("400x380")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Style Toggle Hotkey",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 10))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Press this key to cycle through styles:\nProfessional → Technical → Casual",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+        ).pack(anchor="w", pady=(0, 15))
+        
+        # Current hotkey display
+        ctk.CTkLabel(
+            inner,
+            text=f"Current: {self.get_style_hotkey_display()}",
+            font=(self.font_body[0], 14),
+            text_color=COLORS["accent"],
+        ).pack(anchor="w", pady=(0, 15))
+        
+        # Key selection
+        ctk.CTkLabel(
+            inner,
+            text="Trigger Key:",
+            font=(self.font_body[0], 13),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w", pady=(0, 8))
+        
+        key_options = ["F10", "F9", "F8", "F7", "F6", "F5", "F4", "F3", "F2", "F1", "F11", "F12", "ScrollLock", "Pause"]
+        key_codes_map = {
+            "F1": 59, "F2": 60, "F3": 61, "F4": 62, "F5": 63, "F6": 64,
+            "F7": 65, "F8": 66, "F9": 67, "F10": 68, "F11": 87, "F12": 88,
+            "ScrollLock": 70, "Pause": 119,
+        }
+        
+        current_key = self.config.get("style_toggle_key", 68)
+        current_name = "F10"
+        for name, code in key_codes_map.items():
+            if code == current_key:
+                current_name = name
+                break
+        
+        key_var = ctk.StringVar(value=current_name)
+        ctk.CTkOptionMenu(
+            inner,
+            values=key_options,
+            variable=key_var,
+            font=(self.font_body[0], 14),
+            width=200,
+            height=40,
+            fg_color=COLORS["bg_hover"],
+            button_color=COLORS["bg_elevated"],
+            button_hover_color=COLORS["border"],
+            dropdown_fg_color=COLORS["bg_hover"],
+            dropdown_hover_color=COLORS["bg_elevated"],
+        ).pack(anchor="w", pady=(0, 20))
+        
+        # Modifiers section
+        ctk.CTkLabel(
+            inner,
+            text="Modifiers (optional):",
+            font=(self.font_body[0], 13),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w", pady=(0, 8))
+        
+        mod_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        mod_frame.pack(fill="x", pady=(0, 25))
+        
+        current_mods = self.config.get("style_toggle_modifiers", [])
+        mod_vars = {}
+        for mod in ["ctrl", "alt", "shift"]:
+            var = ctk.BooleanVar(value=mod in current_mods)
+            mod_vars[mod] = var
+            ctk.CTkCheckBox(
+                mod_frame,
+                text=mod.capitalize(),
+                variable=var,
+                font=(self.font_body[0], 13),
+                text_color=COLORS["text_primary"],
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_glow"],
+                checkmark_color="#000000",
+            ).pack(side="left", padx=(0, 20))
+        
+        # Save button
+        def save():
+            new_mods = [mod for mod, var in mod_vars.items() if var.get()]
+            key_name = key_var.get()
+            new_key = key_codes_map.get(key_name, 68)
+            
+            self.config["style_toggle_modifiers"] = new_mods
+            self.config["style_toggle_key"] = new_key
+            save_config(self.config)
+            
+            new_hotkey = self.get_style_hotkey_display()
+            
+            # Update UI button text
+            if hasattr(self, 'style_hotkey_btn'):
+                self.style_hotkey_btn.configure(text=new_hotkey)
+            
+            self.log(f"⚙ Style toggle hotkey saved: {new_hotkey}")
+            self.log("↻ Restarting hotkey listener...")
+            
+            # Restart hotkey listener with new settings
+            self.stop_event.set()
+            self.stop_event = threading.Event()
+            self.start_hotkey_listener()
+            self.log("✓ Hotkey listener restarted")
+            
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            inner,
+            text="Save & Apply",
+            font=(self.font_body[0], 15, "bold"),
+            height=50,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=save,
+        ).pack(fill="x", pady=(0, 12))
+        
+        ctk.CTkButton(
+            inner,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(fill="x")
 
     def open_microphone_settings(self):
         """Open dialog to select audio input device (microphone)."""
@@ -11782,6 +12472,10 @@ class WayfinderApp(ctk.CTk):
         enabled_devices = self.config.get("enabled_input_devices", [])
         hotkey_display = self.get_hotkey_display()
         
+        # Style toggle hotkey settings
+        style_toggle_key = self.config.get("style_toggle_key", 68)  # F10 default
+        style_toggle_modifiers = self.config.get("style_toggle_modifiers", [])
+        
         # Always start socket listener (most reliable for Wayland)
         threading.Thread(
             target=socket_listener,
@@ -11799,7 +12493,8 @@ class WayfinderApp(ctk.CTk):
             self.log("🖥️ X11 detected - using evdev")
             threading.Thread(
                 target=hotkey_listener,
-                args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log),
+                args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log,
+                      style_toggle_key, style_toggle_modifiers),
                 daemon=True,
             ).start()
 
@@ -11818,6 +12513,8 @@ class WayfinderApp(ctk.CTk):
     def handle_event(self, event_type, data):
         if event_type == EventType.HOTKEY_PRESSED:
             self.on_hotkey()
+        elif event_type == EventType.STYLE_TOGGLE:
+            self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
         elif event_type == EventType.TRANSCRIPTION_DONE:
             self.on_transcription_done(data)
         elif event_type == EventType.TRANSCRIPTION_ERROR:
@@ -11839,6 +12536,47 @@ class WayfinderApp(ctk.CTk):
             self.start_recording()
         elif self.app_state == AppState.RECORDING:
             self.stop_recording_and_process()
+    
+    def on_style_toggle(self, target_style=None):
+        """
+        Cycle through or set output styles.
+        
+        Args:
+            target_style: If None, cycle to next style. Otherwise set to specified style.
+        """
+        # Style cycle order
+        STYLE_CYCLE = ["professional", "technical", "casual"]
+        STYLE_NAMES = {"professional": "Professional", "technical": "Technical", "casual": "Casual"}
+        
+        if target_style and target_style in STYLE_CYCLE:
+            # Set specific style
+            next_style = target_style
+        else:
+            # Cycle to next style
+            current_style = self.config.get("output_tone", "professional")
+            try:
+                current_index = STYLE_CYCLE.index(current_style)
+            except ValueError:
+                current_index = 0
+            
+            next_index = (current_index + 1) % len(STYLE_CYCLE)
+            next_style = STYLE_CYCLE[next_index]
+        
+        # Skip if already on this style
+        if next_style == self.config.get("output_tone"):
+            return
+        
+        # Update config
+        self.config["output_tone"] = next_style
+        save_config(self.config)
+        
+        # Log the change
+        style_name = STYLE_NAMES.get(next_style, next_style.title())
+        self.log(f"✎ Style: {style_name}")
+        
+        # Update overlay indicator
+        if self._use_pyqt_overlay and self.overlay_controller:
+            self.overlay_controller.send_command({"cmd": "style", "value": next_style})
 
     def start_recording(self):
         try:
@@ -12207,30 +12945,67 @@ class WayfinderApp(ctk.CTk):
         self.update_state(AppState.IDLE)
 
 
+def _check_single_instance() -> bool:
+    """Check if another instance is already running using a lock file.
+    
+    Returns True if this is the only instance, False if another is running.
+    """
+    lock_file = CONFIG_DIR / "wayfinder.lock"
+    pid_to_check = None
+    
+    # Ensure config dir exists
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Check if lock file exists and contains a valid PID
+        if lock_file.exists():
+            try:
+                stored_pid = int(lock_file.read_text().strip())
+                pid_to_check = stored_pid
+                
+                # Check if that process is still running
+                if stored_pid > 0:
+                    try:
+                        os.kill(stored_pid, 0)  # Signal 0 = check if process exists
+                        # Process exists - check if it's actually wayfinder
+                        cmdline_path = Path(f"/proc/{stored_pid}/cmdline")
+                        if cmdline_path.exists():
+                            cmdline = cmdline_path.read_text()
+                            if "wayfinder" in cmdline.lower():
+                                # Another instance is running
+                                print(f"⚠️ Wayfinder Voice is already running (PID {stored_pid})")
+                                return False
+                    except (OSError, ProcessLookupError):
+                        # Process doesn't exist, we can take over
+                        pass
+            except (ValueError, FileNotFoundError):
+                # Invalid lock file, we can take over
+                pass
+        
+        # Write our PID to the lock file
+        lock_file.write_text(str(os.getpid()))
+        return True
+        
+    except Exception as e:
+        print(f"⚠️ Lock file error: {e}")
+        return True  # Proceed anyway on error
+
+
 def main():
     # #region agent log
     _debug_log("main() called - about to create WayfinderApp", {"hypothesisId": "D"})
     # #endregion
     
-    # === STARTUP CLEANUP: Kill any ghost processes from previous runs ===
+    # === SINGLE INSTANCE CHECK ===
+    if not _check_single_instance():
+        print("Use 'pkill -f wayfinder' to stop existing instances.")
+        return
+    
+    # === STARTUP CLEANUP: Kill any ghost overlay processes from previous runs ===
     try:
         # Kill any leftover overlay processes
         subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
                       capture_output=True, timeout=2)
-        # Kill any leftover main.py processes (but not ourselves)
-        our_pid = os.getpid()
-        result = subprocess.run(
-            ["pgrep", "-f", "python.*main.py"],
-            capture_output=True, text=True, timeout=2
-        )
-        if result.stdout:
-            for pid_str in result.stdout.strip().split('\n'):
-                try:
-                    pid = int(pid_str)
-                    if pid != our_pid:
-                        os.kill(pid, 9)
-                except (ValueError, OSError):
-                    pass
     except:
         pass
     
@@ -12271,6 +13046,14 @@ def main():
         try:
             subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
                           capture_output=True, timeout=1)
+        except:
+            pass
+        
+        # Remove the lock file
+        try:
+            lock_file = CONFIG_DIR / "wayfinder.lock"
+            if lock_file.exists():
+                lock_file.unlink()
         except:
             pass
     

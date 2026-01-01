@@ -50,6 +50,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
     "hotkey_modifiers": [],
     
+    # Style toggle hotkey (cycles Professional → Technical → Casual)
+    "style_toggle_key": 68,  # F10 default
+    "style_toggle_modifiers": [],
+    
     # Audio settings
     "audio_device": None,
     "sample_rate": 16000,
@@ -108,6 +112,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Style settings (unified tone for transcription and post-processing)
     "output_tone": "professional",  # professional | casual | technical
     "smart_formatting": True,  # Auto-detect and format content (email, lists, code, etc.)
+    
+    # Per-style intensity settings (each style remembers its own intensity)
+    "professional_intensity": "standard",  # light | standard | strong
+    "technical_intensity": "standard",     # light | standard | strong
+    "casual_intensity": "standard",        # light | standard | strong
     
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": False,  # Enable LLM post-processing

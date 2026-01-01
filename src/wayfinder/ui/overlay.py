@@ -285,6 +285,38 @@ STATE_LABELS = {
 }
 
 
+# === Style Badge Colors ===
+# Colors for the output tone indicator (P/T/C badge)
+
+@dataclass
+class StyleColors:
+    """Color palette for output style indicator."""
+    letter: str      # Single letter to display
+    color: str       # Main badge color
+    glow: str        # Glow color (slightly muted)
+
+STYLE_PALETTES = {
+    "professional": StyleColors(
+        letter="P",
+        color="#7AA2F7",    # Soft blue
+        glow="#5D7FBF",     # Muted blue glow
+    ),
+    "technical": StyleColors(
+        letter="T",
+        color="#E5AC2A",    # Amber/gold
+        glow="#B88A22",     # Muted amber glow
+    ),
+    "casual": StyleColors(
+        letter="C",
+        color="#73DACA",    # Soft teal
+        glow="#5AAE9E",     # Muted teal glow
+    ),
+}
+
+# Style cycle order for toggle
+STYLE_CYCLE = ["professional", "technical", "casual"]
+
+
 # === Squircle Path Generator (Kappa-based Bezier) ===
 
 def create_squircle_path(rect: QRectF, n: float = 4.5) -> QPainterPath:
@@ -688,6 +720,9 @@ class GlassmorphicOverlay(QWidget):
         self._target_width = 200
         self._current_width = 200.0
         
+        # Style indicator state (professional/technical/casual)
+        self._current_style = "professional"
+        
         # Animation components
         self.wave_renderer = LiquidWaveRenderer()
         self.border_chaser = BorderChaser()
@@ -707,8 +742,12 @@ class GlassmorphicOverlay(QWidget):
         self._glow_color = ColorAnimator(QColor("#21262D"), self)
         self._wave_color = ColorAnimator(QColor("#3D444D"), self)
         
+        # Style badge color animator
+        initial_style = STYLE_PALETTES.get("professional", STYLE_PALETTES["professional"])
+        self._style_badge_color = ColorAnimator(QColor(initial_style.color), self)
+        
         for animator in [self._border_color_top, self._border_color_bottom, 
-                         self._glow_color, self._wave_color]:
+                         self._glow_color, self._wave_color, self._style_badge_color]:
             animator.colorChanged.connect(lambda _: self.update())
         
         # Setup window
@@ -1143,6 +1182,31 @@ class GlassmorphicOverlay(QWidget):
         """Update audio level for wave visualization."""
         self.wave_renderer.update_audio_level(level)
     
+    def set_style_indicator(self, style: str, animate: bool = True):
+        """
+        Update the style badge indicator.
+        
+        Args:
+            style: One of "professional", "technical", "casual"
+            animate: Whether to animate the color transition
+        """
+        if style not in STYLE_PALETTES:
+            style = "professional"
+        
+        if style == self._current_style:
+            return
+        
+        self._current_style = style
+        palette = STYLE_PALETTES[style]
+        
+        duration = 200 if animate else 0
+        self._style_badge_color.animate_to(QColor(palette.color), duration)
+        self.update()
+    
+    def get_style_indicator(self) -> str:
+        """Get the current style indicator value."""
+        return self._current_style
+    
     def _on_frame(self):
         """Called each frame to update animations."""
         dt = 0.033  # 30 FPS (capped per designer spec for CPU optimization)
@@ -1216,6 +1280,9 @@ class GlassmorphicOverlay(QWidget):
         # Draw text (only if there's text to draw)
         if label:
             self._draw_text(painter, bar_rect)
+        
+        # Draw style badge (always visible in READY state, left side when text is shown)
+        self._draw_style_badge(painter, bar_rect)
         
         painter.end()
     
@@ -1304,6 +1371,57 @@ class GlassmorphicOverlay(QWidget):
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
         
         painter.restore()
+    
+    def _draw_style_badge(self, painter: QPainter, rect: QRectF):
+        """Draw the style indicator badge (P/T/C) on the left side of the overlay."""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Get current style palette
+        palette = STYLE_PALETTES.get(self._current_style, STYLE_PALETTES["professional"])
+        badge_color = self._style_badge_color.color
+        
+        # Badge dimensions - compact and unobtrusive
+        badge_size = int(12 * self._scale)
+        badge_x = rect.left() + 4 * self._scale
+        badge_y = rect.center().y() - badge_size / 2
+        
+        badge_rect = QRectF(badge_x, badge_y, badge_size, badge_size)
+        
+        # Draw subtle glow behind badge
+        glow_color = QColor(badge_color)
+        glow_color.setAlphaF(0.25)
+        glow_rect = badge_rect.adjusted(-2, -2, 2, 2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(glow_color))
+        painter.drawEllipse(glow_rect)
+        
+        # Draw semi-transparent background circle
+        bg_color = QColor(13, 17, 23, int(255 * 0.7))  # GitHub Dark with transparency
+        painter.setBrush(QBrush(bg_color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(badge_rect)
+        
+        # Draw colored border ring
+        border_color = QColor(badge_color)
+        border_color.setAlphaF(0.8)
+        pen = QPen(border_color, 1.2 * self._scale)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(badge_rect)
+        
+        # Draw the letter
+        letter_font = QFont(self._font_family, int(6 * self._scale))
+        letter_font.setWeight(QFont.Weight.Bold)
+        painter.setFont(letter_font)
+        
+        letter_color = QColor(badge_color)
+        letter_color.setAlphaF(0.95)
+        painter.setPen(QPen(letter_color))
+        
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, palette.letter)
+        
+        painter.restore()
 
 
 # === IPC Command Handler ===
@@ -1321,17 +1439,21 @@ def run_overlay():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
-    # Parse mode argument
+    # Parse command line arguments
     mode = "persistent"  # default
+    initial_style = "professional"  # default
     for arg in sys.argv:
         if arg.startswith("--mode="):
             mode = arg.split("=", 1)[1]
+        elif arg.startswith("--style="):
+            initial_style = arg.split("=", 1)[1]
     
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     
     overlay = GlassmorphicOverlay()
     overlay._overlay_mode = mode  # Store mode for later use
+    overlay.set_style_indicator(initial_style, animate=False)  # Set initial style
     
     if mode == "persistent":
         # Start in READY state (visible, grey)
@@ -1406,6 +1528,10 @@ def run_overlay():
         elif command == "scale":
             scale = cmd.get("value", 1.0)
             overlay.set_scale(scale)
+        
+        elif command == "style":
+            style = cmd.get("value", "professional")
+            overlay.set_style_indicator(style)
         
         elif command == "quit":
             app.quit()

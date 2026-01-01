@@ -13,7 +13,7 @@ from .evdev import (
     get_all_input_devices,
     find_keyboard_devices,
 )
-from .socket import socket_listener, send_toggle
+from .socket import socket_listener, send_toggle, send_style
 from .dbus import wayland_hotkey_listener, is_dbus_available
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "find_keyboard_devices",
     "socket_listener",
     "send_toggle",
+    "send_style",
     "wayland_hotkey_listener",
     "is_dbus_available",
 ]
