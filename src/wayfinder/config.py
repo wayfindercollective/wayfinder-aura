@@ -50,7 +50,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
     "hotkey_modifiers": [],
     
-    # Style toggle hotkey (cycles Professional → Technical → Casual)
+    # Style toggle hotkey (cycles Professional → AI Prompt → Casual)
     "style_toggle_key": 68,  # F10 default
     "style_toggle_modifiers": [],
     
@@ -110,12 +110,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     
     # Style settings (unified tone for transcription and post-processing)
-    "output_tone": "professional",  # professional | casual | technical
+    "output_tone": "professional",  # professional | casual | ai_prompt
     "smart_formatting": True,  # Auto-detect and format content (email, lists, code, etc.)
     
     # Per-style intensity settings (each style remembers its own intensity)
     "professional_intensity": "standard",  # light | standard | strong
-    "technical_intensity": "standard",     # light | standard | strong
+    "ai_prompt_intensity": "standard",     # light | standard | strong
     "casual_intensity": "standard",        # light | standard | strong
     
     # Post-processing settings (LLM cleanup)

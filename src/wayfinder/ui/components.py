@@ -234,6 +234,22 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
 # ═══════════════════════════════════════════════════════════════════════════════
 # LATENCY GUIDE: ⚡ = none, 🟢 = <10ms, 🟡 = 10-100ms, 🔴 = 100ms+, 🚀 = speedup
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# Model recommendations for post-processing (based on testing)
+MODEL_RECOMMENDATIONS = """
+✅ Recommended:
+  • qwen2.5:1.5b — Best balance (fast + accurate)
+  • phi3:mini — Reliable, slightly formal
+
+⚠️ Use with caution:
+  • llama3.2:1b — Fast but has safety filter quirks
+  
+❌ Not recommended:
+  • smollm2:360m — Too small, often hallucinates
+
+💡 Tip: Use 'light' or 'standard' intensity for best results.
+"""
+
 SETTING_TOOLTIPS: dict[str, str] = {
     # ⚡ No latency impact - UI/configuration only
     "hotkey": "The keyboard shortcut to start/stop voice recording.\n⚡ Latency: None",
@@ -265,6 +281,12 @@ SETTING_TOOLTIPS: dict[str, str] = {
     "backend": "Transcription engine selection.\n⚙️ whisper.cpp: CPU-optimized, lower memory\n⚙️ Faster-Whisper: Better GPU utilization (up to 10x faster)",
     "gpu_acceleration": "Use GPU for transcription.\n🚀 Enabled: 3-10x faster than CPU (requires CUDA/ROCm/Vulkan)",
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
+    
+    # Post-processing tooltips
+    "ollama_model": "Ollama model for text cleanup.\n\n✅ Best: qwen2.5:1.5b (fast + accurate)\n✅ Good: phi3:mini (reliable)\n⚠️ Quirky: llama3.2:1b (safety filters)\n❌ Avoid: smollm2:360m (too small)\n\n💡 Use light/standard intensity for best results.",
+    "post_processing": "Clean up transcription with an LLM.\nRemoves filler words, fixes grammar, formats output.\n🟡 Latency: +100-500ms depending on model",
+    "output_tone": "Style for processed output:\n• Professional — Polished, business-appropriate\n• AI Prompt — Optimized for talking to LLMs\n• Casual — Relaxed, conversational",
+    "intensity": "How aggressively to clean up text:\n• Light — Minimal cleanup, preserves natural speech\n• Standard — Balanced cleanup (recommended)\n• Strong — Heavy cleanup, may alter phrasing",
 }
 
 

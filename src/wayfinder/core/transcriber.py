@@ -887,6 +887,9 @@ def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> 
                     print("[Post-processing] ⚠ ANTHROPIC_API_KEY not set in environment")
                 else:
                     print(f"[Post-processing] Using Anthropic ({config.get('anthropic_model', 'claude-3-haiku')})")
+            elif backend == "ollama":
+                model_name = config.get("ollama_model", "phi3:mini")
+                print(f"[Post-processing] Using Ollama ({model_name})")
             elif backend == "llama_cpp":
                 model_path = config.get("llama_cpp_model_path", "")
                 if not model_path:

@@ -21,21 +21,22 @@ class PostProcessingError(Exception):
 
 # Tone guidance for different output styles with intensity levels
 # Each style has light/standard/strong variations
+# Note: All intensities are kept relatively light to preserve natural speech
 TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
     "professional": {
-        "light": "Use clear, professional language. Maintain a polished but approachable tone.",
-        "standard": "Use formal, polished, business-appropriate language. Be clear and concise.",
-        "strong": "Use highly formal, executive-level language. Be extremely polished, precise, and authoritative. Avoid any casual expressions.",
+        "light": "Keep the natural phrasing. Just clean up obvious speech artifacts.",
+        "standard": "Use clear, professional language. Maintain a polished but approachable tone.",
+        "strong": "Use formal, polished, business-appropriate language. Be clear and concise.",
     },
     "casual": {
-        "light": "Use friendly, natural language. Keep it conversational but still clear.",
-        "standard": "Use relaxed, conversational, friendly language. Keep it natural and approachable.",
-        "strong": "Use very casual, laid-back language. Be super friendly and informal, like texting a close friend. Contractions and casual expressions encouraged.",
+        "light": "Keep the natural conversational style. Just remove filler words.",
+        "standard": "Use friendly, natural language. Keep it conversational but still clear.",
+        "strong": "Use relaxed, conversational, friendly language. Keep it natural and approachable.",
     },
-    "technical": {
-        "light": "Use clear technical language. Include relevant terminology where appropriate.",
-        "standard": "Use precise, detailed, developer-focused language. Be accurate and specific.",
-        "strong": "Use highly technical, expert-level language. Include specific technical terms, code references, and implementation details. Assume deep technical knowledge.",
+    "ai_prompt": {
+        "light": "Keep the natural phrasing. This is input for an AI assistant.",
+        "standard": "Clean up speech artifacts while preserving the conversational request style. Format as a clear prompt or question for an AI.",
+        "strong": "Format as a clear, well-structured prompt for an AI assistant. Preserve the intent and specifics of the request while making it easy for an LLM to understand.",
     },
 }
 
@@ -48,27 +49,28 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
 
 FORMATTING_RULES: Dict[str, Dict[str, str]] = {
     "professional": {
-        "light": "Use proper punctuation and capitalization. Keep formatting clean and readable.",
-        "standard": "Use perfect punctuation and capitalization. Format professionally with clear paragraph structure.",
-        "strong": "Use impeccable punctuation and grammar. Formal structure with precise formatting. Executive-level polish on every sentence.",
+        "light": "Use standard punctuation. Keep formatting simple and readable.",
+        "standard": "Use proper punctuation and capitalization. Keep formatting clean and readable.",
+        "strong": "Use proper punctuation and capitalization. Format with clear structure.",
     },
     "casual": {
-        "light": "Use standard punctuation, but don't over-formalize. Natural flow is more important than perfect grammar.",
-        "standard": "Relaxed punctuation is fine. Lowercase sentence starts are acceptable. Keep it natural like speaking.",
-        "strong": "Minimal punctuation - skip periods at end of messages, lowercase is totally fine, abbreviations ok. Text-message style vibes.",
+        "light": "Keep natural punctuation. Don't over-formalize.",
+        "standard": "Use standard punctuation, but don't over-formalize. Natural flow is more important than perfect grammar.",
+        "strong": "Relaxed punctuation is fine. Keep it natural like speaking.",
     },
-    "technical": {
-        "light": "Use standard punctuation with technical clarity. Code terms should be clear.",
-        "standard": "Use precise punctuation. Technical terms should be exact. Code references in backticks when appropriate.",
-        "strong": "Use exact punctuation for technical precision. Documentation-ready formatting. Code blocks, specific terminology, and structured output.",
+    "ai_prompt": {
+        "light": "Keep natural punctuation. Format as you would type to an AI assistant.",
+        "standard": "Use clear punctuation. Format as a conversational prompt or question.",
+        "strong": "Use clear punctuation and structure. Format as a well-organized prompt for an AI assistant.",
     },
 }
 
 # Filler word removal rules - also intensity-aware
+# Note: All levels are kept relatively gentle to preserve natural speech
 FILLER_RULES: Dict[str, str] = {
-    "light": "Remove obvious filler words (um, uh, ah) but keep natural speech patterns like 'like' or 'you know' if they add conversational flow.",
-    "standard": "Remove filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well, right.",
-    "strong": "Remove ALL filler words and verbal tics. Clean up any hesitation markers, false starts, and repetitions.",
+    "light": "Remove only obvious filler sounds (um, uh, ah). Keep natural speech patterns.",
+    "standard": "Remove obvious filler words (um, uh, ah, like, you know) but keep natural speech patterns.",
+    "strong": "Remove filler words: um, uh, ah, like, you know, basically, actually, I mean.",
 }
 
 
@@ -109,12 +111,12 @@ MODEL_TIERS = {
 MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
     "llama3.2:1b": {
         "issues": ["safety_filter_email"],
-        "workaround": "Disable smart_formatting for professional/technical modes",
+        "workaround": "Disable smart_formatting for professional/ai_prompt modes",
         "avoid_words": ["email"],  # These words trigger false-positive safety
     },
     "llama3.2:3b": {
         "issues": ["safety_filter_email"],
-        "workaround": "Disable smart_formatting for professional/technical modes",
+        "workaround": "Disable smart_formatting for professional/ai_prompt modes",
         "avoid_words": ["email"],
     },
     "smollm2:360m": {
@@ -217,7 +219,7 @@ def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_fo
     
     # Check for model-specific quirks
     if "safety_filter_email" in quirks.get("issues", []):
-        if smart_formatting and tone in ["professional", "technical"]:
+        if smart_formatting and tone in ["professional", "ai_prompt"]:
             result["warnings"].append(
                 f"⚠️ {model_name} may refuse '{tone}' mode due to safety filters. "
                 "Disabling smart formatting automatically."
@@ -400,43 +402,155 @@ def get_filler_rules(intensity: str = "standard") -> str:
     """Get the filler word removal rules for a given intensity."""
     return FILLER_RULES.get(intensity, FILLER_RULES["standard"])
 
+# Refusal detection patterns - phrases that indicate model is refusing to process
+REFUSAL_PATTERNS = [
+    "i cannot provide",
+    "i can't provide",
+    "i cannot transcribe",
+    "i can't transcribe",
+    "i cannot help with",
+    "i can't help with",
+    "i'm unable to",
+    "i am unable to",
+    "i cannot assist",
+    "i can't assist",
+    "as an ai",
+    "as a language model",
+    "i apologize, but",
+    "sorry, but i cannot",
+    "i'm not able to",
+    "cannot process this",
+    "this could be interpreted as",
+    "if you need help with",
+    "can i help you with something else",
+]
+
+
+def is_refusal_response(response: str) -> bool:
+    """
+    Detect if the LLM response is a refusal rather than actual processed text.
+    
+    Args:
+        response: The LLM's response text
+        
+    Returns:
+        True if this looks like a refusal/safety filter response
+    """
+    if not response:
+        return False
+    
+    response_lower = response.lower()
+    
+    # Check for refusal patterns
+    for pattern in REFUSAL_PATTERNS:
+        if pattern in response_lower:
+            return True
+    
+    # If response is much longer than expected for cleanup and contains apologies
+    if len(response) > 200 and ("apologize" in response_lower or "sorry" in response_lower):
+        return True
+    
+    return False
+
+
+def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bool:
+    """
+    Detect if the LLM response is a hallucination (completely different from input).
+    
+    Uses simple word overlap to detect when the model generates unrelated content
+    instead of cleaning up the transcription.
+    
+    Args:
+        original: The original transcription text
+        response: The LLM's response text
+        threshold: Minimum word overlap ratio (0.0-1.0) to consider valid
+        
+    Returns:
+        True if this looks like a hallucination (low overlap with original)
+    """
+    if not original or not response:
+        return False
+    
+    # Normalize texts
+    def get_words(text: str) -> set:
+        # Extract lowercase alphanumeric words
+        import re
+        return set(re.findall(r'\b[a-z]+\b', text.lower()))
+    
+    original_words = get_words(original)
+    response_words = get_words(response)
+    
+    if not original_words:
+        return False
+    
+    # Calculate overlap ratio
+    common_words = original_words & response_words
+    
+    # Ignore common filler/stop words that would be removed
+    stop_words = {'um', 'uh', 'like', 'you', 'know', 'basically', 'actually', 
+                  'i', 'mean', 'so', 'well', 'right', 'the', 'a', 'an', 'and', 
+                  'or', 'but', 'is', 'are', 'was', 'were', 'be', 'been', 'to',
+                  'of', 'in', 'for', 'on', 'with', 'at', 'by', 'it', 'this', 'that'}
+    
+    # Meaningful words from original (excluding stop words)
+    meaningful_original = original_words - stop_words
+    meaningful_common = common_words - stop_words
+    
+    if not meaningful_original:
+        # If original is only stop words, check total overlap
+        overlap_ratio = len(common_words) / len(original_words) if original_words else 0
+    else:
+        # Check meaningful word overlap
+        overlap_ratio = len(meaningful_common) / len(meaningful_original)
+    
+    # If response is much longer and has low overlap, it's likely hallucination
+    length_ratio = len(response) / len(original) if original else 1
+    
+    # Stricter threshold if response is much longer (sign of generation vs cleanup)
+    effective_threshold = threshold
+    if length_ratio > 3:
+        effective_threshold = threshold * 1.5  # Require more overlap for long responses
+    
+    is_hallucinated = overlap_ratio < effective_threshold
+    
+    if is_hallucinated:
+        print(f"[Post-processing] ⚠ Hallucination detected: {overlap_ratio:.1%} word overlap (threshold: {effective_threshold:.1%})")
+    
+    return is_hallucinated
+
+
 # Smart formatting prompt - auto-detects content type and formats appropriately
 # Uses dynamic placeholders for tone-aware formatting rules
-# NOTE: Avoid words like "email" that trigger safety filters in some models
-SMART_FORMAT_PROMPT = """You are a transcription cleanup assistant. Process this speech transcription:
+# NOTE: Carefully worded to avoid triggering safety filters in smaller models
+SMART_FORMAT_PROMPT = """You are cleaning up a voice transcription. Your ONLY job is to fix the spoken words, not generate new content.
 
-1. FILLER WORDS: {filler_rules}
+TASK: Clean this spoken text that was transcribed from audio. Keep the EXACT meaning - just fix delivery issues.
 
-2. FORMATTING: {formatting_rules}
+RULES:
+1. {filler_rules}
+2. {formatting_rules}
+3. If the speaker listed things, use bullet points. If they wrote a message, add greeting/sign-off.
+4. {tone_guidance}
 
-3. STRUCTURE: Auto-detect the content type and format appropriately:
-   - If it's a message to someone: format with greeting/sign-off
-   - If it contains lists or multiple items: use bullet points
-   - If it describes code or technical concepts: use documentation style
-   - Otherwise: clean prose paragraphs
+CRITICAL: Output ONLY the cleaned version of what was spoken. No commentary, no explanations, no "Here is the cleaned text:".
 
-4. TONE: {tone_guidance}
-
-IMPORTANT: Output ONLY the cleaned text. No explanations, no labels, no "Here is...".
-
-Transcription:
+Spoken text to clean:
 {text}
 
-Cleaned:"""
+Cleaned version:"""
 
 # Clean-only prompt - minimal processing, just removes fillers
 # Also uses dynamic formatting rules based on tone/intensity
-CLEAN_ONLY_PROMPT = """Clean up this transcribed speech. Keep the exact structure and meaning - only clean up the delivery.
+CLEAN_ONLY_PROMPT = """You are cleaning up a voice transcription. Fix delivery issues only - keep the exact meaning.
 
-1. FILLER WORDS: {filler_rules}
+RULES:
+1. {filler_rules}
+2. {formatting_rules}  
+3. {tone_guidance}
 
-2. FORMATTING: {formatting_rules}
+CRITICAL: Output ONLY the cleaned text. No commentary or explanations.
 
-3. TONE: {tone_guidance}
-
-IMPORTANT: Output ONLY the cleaned text. No explanations, no labels.
-
-Transcription:
+Spoken text:
 {text}
 
 Cleaned:"""
@@ -453,7 +567,7 @@ Clean:"""
 SIMPLE_TONES = {
     "professional": "formal and polished",
     "casual": "friendly and relaxed",
-    "technical": "precise and clear",
+    "ai_prompt": "clear and conversational, for an AI assistant",
 }
 
 
@@ -689,22 +803,36 @@ class LlamaCppBackend(PostProcessorBackend):
                 full_prompt,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
-                stop=["Transcription:", "\n\n\n"],  # Stop tokens
+                stop=["Transcription:", "Spoken text:", "\n\n\n"],  # Stop tokens
                 echo=False,
             )
             
             result = response["choices"][0]["text"].strip()
             
-            # Clean up any artifacts
-            result = self._clean_response(result)
+            # Clean up any artifacts and check for refusals
+            result = self._clean_response(result, original_text=text)
             
             return result if result else text
             
         except Exception as e:
             raise PostProcessingError(f"llama.cpp processing failed: {e}")
     
-    def _clean_response(self, text: str) -> str:
-        """Clean up LLM response artifacts."""
+    def _clean_response(self, text: str, original_text: str = "") -> str:
+        """
+        Clean up LLM response artifacts and detect refusals/hallucinations.
+        
+        Args:
+            text: The LLM response
+            original_text: The original input (returned if refusal/hallucination detected)
+            
+        Returns:
+            Cleaned text, or original_text if refusal/hallucination detected
+        """
+        # Check for refusal first
+        if is_refusal_response(text):
+            print("[Post-processing] ⚠ Model refused to process - using original text")
+            return original_text if original_text else text
+        
         # Remove common artifacts
         lines = text.split("\n")
         cleaned_lines = []
@@ -715,11 +843,18 @@ class LlamaCppBackend(PostProcessorBackend):
             if not cleaned_lines and not line:
                 continue
             # Skip lines that look like prompts/instructions
-            if line.lower().startswith(("transcription:", "cleaned text:", "result:", "formatted")):
+            if line.lower().startswith(("transcription:", "cleaned text:", "result:", "formatted", "spoken text:", "cleaned version:")):
                 continue
             cleaned_lines.append(line)
         
-        return "\n".join(cleaned_lines).strip()
+        cleaned = "\n".join(cleaned_lines).strip()
+        
+        # Check for hallucination (model generated unrelated content)
+        if original_text and is_hallucination(original_text, cleaned):
+            print("[Post-processing] ⚠ Model hallucinated - using original text")
+            return original_text
+        
+        return cleaned
 
 
 # =============================================================================
@@ -817,6 +952,16 @@ class AnthropicBackend(PostProcessorBackend):
             )
             
             result = message.content[0].text.strip()
+            
+            # Check for refusal (rare with Claude but possible)
+            if is_refusal_response(result):
+                print("[Post-processing] ⚠ Model refused to process - using original text")
+                return text
+            
+            # Check for hallucination
+            if is_hallucination(text, result):
+                print("[Post-processing] ⚠ Model hallucinated - using original text")
+                return text
             
             return result if result else text
             
@@ -920,6 +1065,16 @@ class OpenAIBackend(PostProcessorBackend):
             
             result = response.choices[0].message.content.strip()
             
+            # Check for refusal (rare with OpenAI but possible)
+            if is_refusal_response(result):
+                print("[Post-processing] ⚠ Model refused to process - using original text")
+                return text
+            
+            # Check for hallucination
+            if is_hallucination(text, result):
+                print("[Post-processing] ⚠ Model hallucinated - using original text")
+                return text
+            
             return result if result else text
             
         except Exception as e:
@@ -1000,31 +1155,60 @@ class OllamaBackend(PostProcessorBackend):
         try:
             import requests
             
-            # Format the prompt
-            full_prompt = format_prompt(prompt_template, text)
+            # The prompt_template is already fully formatted (text embedded by build_prompt)
+            # No need to call format_prompt again
+            full_prompt = prompt_template
             
-            # Call Ollama API
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": full_prompt,
-                    "stream": False,
-                    "options": {
-                        "num_predict": self.max_tokens,
-                        "temperature": self.temperature,
+            # Debug: Log what we're sending (truncated for readability)
+            prompt_preview = full_prompt[:200] + "..." if len(full_prompt) > 200 else full_prompt
+            print(f"[Post-processing] Sending to {self.model}...")
+            
+            # Call Ollama API using chat endpoint for better instruction following
+            # Use longer timeout (60s) for first-time model loading
+            try:
+                response = requests.post(
+                    f"{self.base_url}/api/chat",
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a transcription cleanup assistant. You ONLY clean up spoken text - never generate new content. Output ONLY the cleaned text, nothing else."
+                            },
+                            {
+                                "role": "user", 
+                                "content": full_prompt
+                            }
+                        ],
+                        "stream": False,
+                        "options": {
+                            "num_predict": self.max_tokens,
+                            "temperature": self.temperature,
+                        },
                     },
-                },
-                timeout=30,
-            )
+                    timeout=60,  # Longer timeout for model loading
+                )
+            except requests.exceptions.Timeout:
+                print(f"[Post-processing] ⚠ Ollama timeout after 60s - model may still be loading")
+                raise PostProcessingError("Ollama timeout - model may be loading, try again")
             
             if response.status_code != 200:
                 raise PostProcessingError(f"Ollama API error: {response.status_code}")
             
-            result = response.json().get("response", "").strip()
+            # Chat API returns message.content instead of response
+            response_json = response.json()
+            if "message" in response_json:
+                result = response_json.get("message", {}).get("content", "").strip()
+            else:
+                # Fallback for generate API format
+                result = response_json.get("response", "").strip()
             
-            # Clean up any artifacts
-            result = self._clean_response(result)
+            # Debug: Log response preview
+            result_preview = result[:150] + "..." if len(result) > 150 else result
+            print(f"[Post-processing] Response: {result_preview}")
+            
+            # Clean up any artifacts and check for refusals
+            result = self._clean_response(result, original_text=text)
             
             return result if result else text
             
@@ -1033,8 +1217,22 @@ class OllamaBackend(PostProcessorBackend):
         except Exception as e:
             raise PostProcessingError(f"Ollama processing failed: {e}")
     
-    def _clean_response(self, text: str) -> str:
-        """Clean up LLM response artifacts."""
+    def _clean_response(self, text: str, original_text: str = "") -> str:
+        """
+        Clean up LLM response artifacts and detect refusals/hallucinations.
+        
+        Args:
+            text: The LLM response
+            original_text: The original input (returned if refusal/hallucination detected)
+            
+        Returns:
+            Cleaned text, or original_text if refusal/hallucination detected
+        """
+        # Check for refusal first
+        if is_refusal_response(text):
+            print("[Post-processing] ⚠ Model refused to process - using original text")
+            return original_text if original_text else text
+        
         # Remove common artifacts
         lines = text.split("\n")
         cleaned_lines = []
@@ -1045,11 +1243,18 @@ class OllamaBackend(PostProcessorBackend):
             if not cleaned_lines and not line:
                 continue
             # Skip lines that look like prompts/instructions
-            if line.lower().startswith(("transcription:", "cleaned text:", "result:", "formatted")):
+            if line.lower().startswith(("transcription:", "cleaned text:", "result:", "formatted", "spoken text:", "cleaned version:")):
                 continue
             cleaned_lines.append(line)
         
-        return "\n".join(cleaned_lines).strip()
+        cleaned = "\n".join(cleaned_lines).strip()
+        
+        # Check for hallucination (model generated unrelated content)
+        if original_text and is_hallucination(original_text, cleaned):
+            print("[Post-processing] ⚠ Model hallucinated - using original text")
+            return original_text
+        
+        return cleaned
 
 
 # =============================================================================
@@ -1110,7 +1315,7 @@ def process_with_config(text: str, config: dict) -> str:
     This is the main entry point for post-processing.
     
     Uses the new tone-based system with optional smart formatting:
-    - output_tone: professional | casual | technical
+    - output_tone: professional | casual | ai_prompt
     - smart_formatting: True (auto-detect content type) | False (clean only)
     
     Includes model compatibility checking and auto-adjustments.
@@ -1249,7 +1454,7 @@ def get_tone_options() -> list:
     return [
         {"id": "professional", "name": "Professional", "description": "Formal, polished, business-appropriate"},
         {"id": "casual", "name": "Casual", "description": "Relaxed, conversational, friendly"},
-        {"id": "technical", "name": "Technical", "description": "Precise, detailed, developer-focused"},
+        {"id": "ai_prompt", "name": "AI Prompt", "description": "Optimized for speaking with AI assistants and LLMs"},
     ]
 
 

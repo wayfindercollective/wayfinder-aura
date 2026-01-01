@@ -16,6 +16,97 @@ class PostProcessingError(Exception):
 
 
 # =============================================================================
+# Refusal and Hallucination Detection
+# =============================================================================
+
+# Refusal detection patterns - phrases that indicate model is refusing to process
+REFUSAL_PATTERNS = [
+    "i cannot provide",
+    "i can't provide",
+    "i cannot transcribe",
+    "i can't transcribe",
+    "i cannot help with",
+    "i can't help with",
+    "i'm unable to",
+    "i am unable to",
+    "i cannot assist",
+    "i can't assist",
+    "as an ai",
+    "as a language model",
+    "i apologize, but",
+    "sorry, but i cannot",
+    "i'm not able to",
+    "cannot process this",
+    "this could be interpreted as",
+    "if you need help with",
+    "can i help you with something else",
+]
+
+
+def is_refusal_response(response: str) -> bool:
+    """Detect if the LLM response is a refusal rather than actual processed text."""
+    if not response:
+        return False
+    
+    response_lower = response.lower()
+    
+    for pattern in REFUSAL_PATTERNS:
+        if pattern in response_lower:
+            print(f"[Post-processing] Refusal detected: matched pattern '{pattern}'")
+            return True
+    
+    if len(response) > 200 and ("apologize" in response_lower or "sorry" in response_lower):
+        print(f"[Post-processing] Refusal detected: long apologetic response")
+        return True
+    
+    return False
+
+
+def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bool:
+    """
+    Detect if the LLM response is a hallucination (completely different from input).
+    Uses simple word overlap to detect when the model generates unrelated content.
+    """
+    if not original or not response:
+        return False
+    
+    import re
+    def get_words(text: str) -> set:
+        return set(re.findall(r'\b[a-z]+\b', text.lower()))
+    
+    original_words = get_words(original)
+    response_words = get_words(response)
+    
+    if not original_words:
+        return False
+    
+    common_words = original_words & response_words
+    
+    stop_words = {'um', 'uh', 'like', 'you', 'know', 'basically', 'actually', 
+                  'i', 'mean', 'so', 'well', 'right', 'the', 'a', 'an', 'and', 
+                  'or', 'but', 'is', 'are', 'was', 'were', 'be', 'been', 'to',
+                  'of', 'in', 'for', 'on', 'with', 'at', 'by', 'it', 'this', 'that'}
+    
+    meaningful_original = original_words - stop_words
+    meaningful_common = common_words - stop_words
+    
+    if not meaningful_original:
+        overlap_ratio = len(common_words) / len(original_words) if original_words else 0
+    else:
+        overlap_ratio = len(meaningful_common) / len(meaningful_original)
+    
+    length_ratio = len(response) / len(original) if original else 1
+    effective_threshold = threshold * 1.5 if length_ratio > 3 else threshold
+    
+    is_hallucinated = overlap_ratio < effective_threshold
+    
+    if is_hallucinated:
+        print(f"[Post-processing] ⚠ Hallucination detected: {overlap_ratio:.1%} word overlap (threshold: {effective_threshold:.1%})")
+    
+    return is_hallucinated
+
+
+# =============================================================================
 # Tone-Based Prompts (New Simplified System)
 # =============================================================================
 
@@ -23,19 +114,19 @@ class PostProcessingError(Exception):
 # Each style has light/standard/strong variations
 TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
     "professional": {
-        "light": "Use clear, professional language. Maintain a polished but approachable tone.",
-        "standard": "Use formal, polished, business-appropriate language. Be clear and concise.",
-        "strong": "Use highly formal, executive-level language. Be extremely polished, precise, and authoritative. Avoid any casual expressions.",
+        "light": "Professional tone.",
+        "standard": "Formal, business-appropriate tone.",
+        "strong": "Very formal, executive tone.",
     },
     "casual": {
-        "light": "Use friendly, natural language. Keep it conversational but still clear.",
-        "standard": "Use relaxed, conversational, friendly language. Keep it natural and approachable.",
-        "strong": "Use very casual, laid-back language. Be super friendly and informal, like texting a close friend. Contractions and casual expressions encouraged.",
+        "light": "Friendly, natural tone.",
+        "standard": "Casual, conversational tone.",
+        "strong": "Very casual, like texting a friend.",
     },
-    "technical": {
-        "light": "Use clear technical language. Include relevant terminology where appropriate.",
-        "standard": "Use precise, detailed, developer-focused language. Be accurate and specific.",
-        "strong": "Use highly technical, expert-level language. Include specific technical terms, code references, and implementation details. Assume deep technical knowledge.",
+    "ai_prompt": {
+        "light": "Keep the natural phrasing. This is input for an AI assistant.",
+        "standard": "Clean up for an AI assistant. Format as a clear prompt or question.",
+        "strong": "Format as a well-structured prompt for an AI assistant.",
     },
 }
 
@@ -45,37 +136,17 @@ def get_tone_guidance(tone: str, intensity: str = "standard") -> str:
     tone_dict = TONE_GUIDANCE.get(tone, TONE_GUIDANCE["professional"])
     return tone_dict.get(intensity, tone_dict["standard"])
 
-# Smart formatting prompt - auto-detects content type and formats appropriately
-SMART_FORMAT_PROMPT = """You are a transcription cleanup assistant. Process this speech transcription with these rules:
+# Smart formatting prompt - simplified to avoid model confusion
+# NOTE: phi3 and similar models work best with very direct, simple instructions
+# The exact phrasing "Clean up this text. Remove filler words. Keep exact meaning:" works best
+SMART_FORMAT_PROMPT = """Clean up this text. Remove filler words. Keep exact meaning:
 
-1. Remove ALL filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well, right
-2. Fix punctuation and capitalization
-3. AUTO-DETECT the content type and format appropriately:
-   - If it reads like an email (mentions sending, recipients, subjects): format as email with greeting/sign-off
-   - If it contains lists or multiple items: use bullet points
-   - If it describes code or technical concepts: use documentation style
-   - Otherwise: clean prose paragraphs
+{text}"""
 
-4. Tone: {tone_guidance}
+# Clean-only prompt - same as smart format for consistency
+CLEAN_ONLY_PROMPT = """Clean up this text. Remove filler words. Keep exact meaning:
 
-IMPORTANT: Output ONLY the cleaned text. No explanations, no labels, no "Here is...".
-
-Transcription:
-{text}
-
-Cleaned:"""
-
-# Clean-only prompt - minimal processing, just removes fillers
-CLEAN_ONLY_PROMPT = """Clean up this transcribed speech. Remove filler words (um, uh, ah, like, you know, basically, actually, I mean), fix punctuation and capitalization. Keep the exact structure and meaning - only clean up the delivery.
-
-Tone: {tone_guidance}
-
-IMPORTANT: Output ONLY the cleaned text. No explanations, no labels.
-
-Transcription:
-{text}
-
-Cleaned:"""
+{text}"""
 
 
 def build_prompt(text: str, config: dict) -> str:
@@ -835,7 +906,7 @@ class OllamaBackend(PostProcessorBackend):
         
         Args:
             text: The raw transcription text
-            prompt_template: The prompt template to use
+            prompt_template: The prompt template to use (already formatted with text)
             
         Returns:
             Cleaned/formatted text
@@ -852,31 +923,55 @@ class OllamaBackend(PostProcessorBackend):
         try:
             import requests
             
-            # Format the prompt
-            full_prompt = format_prompt(prompt_template, text)
+            # The prompt_template is already fully formatted (text embedded by build_prompt)
+            full_prompt = prompt_template
             
-            # Call Ollama API
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": full_prompt,
-                    "stream": False,
-                    "options": {
-                        "num_predict": self.max_tokens,
-                        "temperature": self.temperature,
+            # Debug: Log what we're sending
+            print(f"[Post-processing] Sending to {self.model}...")
+            
+            # Call Ollama API using chat endpoint for better instruction following
+            # NOTE: No system prompt - the user message contains all necessary instructions
+            # System prompts can confuse phi3 and similar models
+            try:
+                response = requests.post(
+                    f"{self.base_url}/api/chat",
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {
+                                "role": "user", 
+                                "content": full_prompt
+                            }
+                        ],
+                        "stream": False,
+                        "options": {
+                            "num_predict": self.max_tokens,
+                            "temperature": self.temperature,
+                        },
                     },
-                },
-                timeout=30,
-            )
+                    timeout=60,  # Longer timeout for model loading
+                )
+            except requests.exceptions.Timeout:
+                print(f"[Post-processing] ⚠ Ollama timeout after 60s - model may still be loading")
+                raise PostProcessingError("Ollama timeout - model may be loading, try again")
             
             if response.status_code != 200:
                 raise PostProcessingError(f"Ollama API error: {response.status_code}")
             
-            result = response.json().get("response", "").strip()
+            # Chat API returns message.content instead of response
+            response_json = response.json()
+            if "message" in response_json:
+                result = response_json.get("message", {}).get("content", "").strip()
+            else:
+                # Fallback for generate API format
+                result = response_json.get("response", "").strip()
             
-            # Clean up any artifacts
-            result = self._clean_response(result)
+            # Debug: Log response preview
+            result_preview = result[:150] + "..." if len(result) > 150 else result
+            print(f"[Post-processing] Response: {result_preview}")
+            
+            # Clean up any artifacts and check for refusals/hallucinations
+            result = self._clean_response(result, original_text=text)
             
             return result if result else text
             
@@ -885,10 +980,21 @@ class OllamaBackend(PostProcessorBackend):
         except Exception as e:
             raise PostProcessingError(f"Ollama processing failed: {e}")
     
-    def _clean_response(self, text: str) -> str:
-        """Clean up LLM response artifacts."""
+    def _clean_response(self, text: str, original_text: str = "") -> str:
+        """
+        Clean up LLM response artifacts and detect refusals/hallucinations.
+        
+        Args:
+            text: The LLM response
+            original_text: The original input (returned if refusal/hallucination detected)
+        """
         if not text:
-            return text
+            return original_text if original_text else text
+        
+        # Check for refusal first
+        if is_refusal_response(text):
+            print("[Post-processing] ⚠ Model refused to process - using original text")
+            return original_text if original_text else text
         
         # Strip surrounding quotes (models often wrap output in quotes)
         text = text.strip()
@@ -921,9 +1027,19 @@ class OllamaBackend(PostProcessorBackend):
             if any(phrase in line.lower() for phrase in 
                 ["here is", "here's the", "i have", "i've", "the corrected", "the cleaned"]):
                 continue
+            # Skip prompt artifacts
+            if line.lower().startswith(("spoken text:", "cleaned version:", "cleaned:")):
+                continue
             cleaned_lines.append(line)
         
-        return "\n".join(cleaned_lines).strip()
+        cleaned = "\n".join(cleaned_lines).strip()
+        
+        # Check for hallucination (model generated unrelated content)
+        if original_text and is_hallucination(original_text, cleaned):
+            print("[Post-processing] ⚠ Model hallucinated - using original text")
+            return original_text
+        
+        return cleaned
 
 
 # =============================================================================
@@ -984,7 +1100,7 @@ def process_with_config(text: str, config: dict) -> str:
     This is the main entry point for post-processing.
     
     Uses the new tone-based system with optional smart formatting:
-    - output_tone: professional | casual | technical
+    - output_tone: professional | casual | ai_prompt
     - smart_formatting: True (auto-detect content type) | False (clean only)
     
     Args:
@@ -1117,6 +1233,6 @@ def get_tone_options() -> list:
     return [
         {"id": "professional", "name": "Professional", "description": "Formal, polished, business-appropriate"},
         {"id": "casual", "name": "Casual", "description": "Relaxed, conversational, friendly"},
-        {"id": "technical", "name": "Technical", "description": "Precise, detailed, developer-focused"},
+        {"id": "ai_prompt", "name": "AI Prompt", "description": "Optimized for speaking with AI assistants and LLMs"},
     ]
 

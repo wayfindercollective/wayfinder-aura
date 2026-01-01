@@ -266,6 +266,27 @@ class OllamaManager:
         
         def start_thread():
             try:
+                # Set up environment for GPU support
+                env = os.environ.copy()
+                
+                # Auto-detect RDNA 4 GPUs (RX 9000 series) and enable Vulkan backend
+                # RDNA 4 (gfx12) isn't fully supported by ROCm in Ollama yet, but Vulkan works great
+                if "OLLAMA_VULKAN" not in env:
+                    try:
+                        kfd_props = Path("/sys/class/kfd/kfd/topology/nodes")
+                        if kfd_props.exists():
+                            for node in kfd_props.iterdir():
+                                props_file = node / "properties"
+                                if props_file.exists():
+                                    content = props_file.read_text()
+                                    # gfx_target_version 120000 = RDNA 4 (gfx1200)
+                                    if "gfx_target_version 120" in content:
+                                        env["OLLAMA_VULKAN"] = "1"
+                                        env["HSA_OVERRIDE_GFX_VERSION"] = "12.0.0"
+                                        break
+                    except Exception:
+                        pass
+                
                 # Start ollama serve in background with proper pipe handling
                 # Use PIPE for stderr to detect errors, but don't block on it
                 self._service_process = subprocess.Popen(
@@ -273,6 +294,7 @@ class OllamaManager:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     start_new_session=True,  # Detach from parent process group
+                    env=env,  # Use modified environment with GPU overrides
                 )
                 
                 # Wait for service to become available with early exit on process death

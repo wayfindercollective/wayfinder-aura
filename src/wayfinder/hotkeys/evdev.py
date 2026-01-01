@@ -20,7 +20,7 @@ from ..config import MODIFIER_CODES
 class EventType(Enum):
     """Event types for the application event queue."""
     HOTKEY_PRESSED = auto()
-    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/Technical/Casual)
+    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/AI Prompt/Casual)
     TRANSCRIPTION_DONE = auto()
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()

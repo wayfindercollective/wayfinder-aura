@@ -179,7 +179,7 @@ DEFAULT_CONFIG = {
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     # Style settings (unified tone for transcription and post-processing)
-    "output_tone": "professional",  # professional | casual | technical
+    "output_tone": "professional",  # professional | casual | ai_prompt
     "smart_formatting": True,  # Auto-detect and format content (email, lists, code, etc.)
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": False,  # Enable LLM post-processing
@@ -1594,7 +1594,7 @@ def resolve_audio_device(config: dict) -> int | None:
 
 class EventType(Enum):
     HOTKEY_PRESSED = auto()
-    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/Technical/Casual)
+    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/AI Prompt/Casual)
     TRANSCRIPTION_DONE = auto()
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()
@@ -1800,7 +1800,7 @@ def socket_listener(event_queue, stop_event, log_callback=None):
                     log("✎ Style toggle received via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, None))
                 elif data_str.startswith("style:"):
-                    # Set specific style (style:professional, style:technical, style:casual)
+                    # Set specific style (style:professional, style:ai_prompt, style:casual)
                     style = data_str.split(":", 1)[1]
                     log(f"✎ Style set to '{style}' via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, style))
@@ -2608,7 +2608,7 @@ class OverlayController:
         self._current_state = "hidden"
         self._lock = threading.Lock()
         self._mode = mode  # "persistent" or "standard"
-        self._initial_style = initial_style  # "professional", "technical", or "casual"
+        self._initial_style = initial_style  # "professional", "ai_prompt", or "casual"
     
     def _start_process(self) -> bool:
         """Start the overlay subprocess if not already running."""
@@ -5235,7 +5235,7 @@ class WayfinderApp(ctk.CTk):
         tones = [
             ("professional", "💼", "Professional", "Formal, polished, business-appropriate"),
             ("casual", "💬", "Casual", "Relaxed, conversational, friendly"),
-            ("technical", "🔧", "Technical", "Precise, detailed, developer-focused"),
+            ("ai_prompt", "🤖", "AI Prompt", "Optimized for speaking with AI assistants"),
         ]
         
         intensity_levels = [
@@ -5448,7 +5448,7 @@ class WayfinderApp(ctk.CTk):
         tone_prompts = {
             "professional": "This is a professional dictation with formal language, proper punctuation, and business-appropriate terminology.",
             "casual": "This is a casual conversation with natural, relaxed language and everyday expressions.",
-            "technical": "This is a technical dictation with precise terminology, code references, and developer-focused language.",
+            "ai_prompt": "This is a conversational prompt for an AI assistant. Clear questions and requests.",
         }
         self.config["prompt"] = tone_prompts.get(tone_id, tone_prompts["professional"])
         
@@ -5466,7 +5466,7 @@ class WayfinderApp(ctk.CTk):
         # Rebuild the style tab to update checkmarks
         self._rebuild_style_tab()
         
-        tone_labels = {"professional": "Professional", "casual": "Casual", "technical": "Technical"}
+        tone_labels = {"professional": "Professional", "casual": "Casual", "ai_prompt": "AI Prompt"}
         self.log(f"✎ Output tone: {tone_labels.get(tone_id, tone_id)}")
     
     def _on_intensity_changed(self, tone_id: str, intensity_id: str) -> None:
@@ -5492,7 +5492,7 @@ class WayfinderApp(ctk.CTk):
                 )
         
         # Log the change
-        tone_labels = {"professional": "Professional", "casual": "Casual", "technical": "Technical"}
+        tone_labels = {"professional": "Professional", "casual": "Casual", "ai_prompt": "AI Prompt"}
         intensity_labels = {"light": "Light", "standard": "Standard", "strong": "Strong"}
         self.log(f"✎ {tone_labels.get(tone_id, tone_id)} intensity: {intensity_labels.get(intensity_id, intensity_id)}")
         
@@ -5753,10 +5753,15 @@ class WayfinderApp(ctk.CTk):
         
         # Update related settings based on mode
         if mode == "local":
-            # Local mode: use local transcription backend, disable cloud post-processing
+            # Local mode: use local transcription backend
+            # Post-processing stays as configured - Ollama/llama.cpp are local and private
             if self.config.get("transcription_backend") in ("openai_whisper", "groq_whisper"):
                 self.config["transcription_backend"] = "whisper_cpp"
-            self.config["post_processing_enabled"] = False
+            # Ensure post-processing uses a local backend if enabled
+            if self.config.get("post_processing_enabled", False):
+                backend = self.config.get("post_processing_backend", "llama_cpp")
+                if backend not in ["llama_cpp", "ollama"]:
+                    self.config["post_processing_backend"] = "ollama"
             self.log("🔒 Mode: Local (100% private)")
             
         elif mode == "hybrid":
@@ -6264,6 +6269,10 @@ class WayfinderApp(ctk.CTk):
         model_dropdown.pack(side="left", padx=(0, 8))
         self._ollama_model_dropdown = model_dropdown
         
+        # Add tooltip with model recommendations
+        model_tooltip = "✅ Best: qwen2.5:1.5b (fast + accurate)\n✅ Good: phi3:mini (reliable)\n⚠️ Quirky: llama3.2:1b (safety filters)\n❌ Avoid: smollm2:360m (hallucinates)\n\n💡 Use light/standard intensity"
+        ToolTip(model_dropdown, model_tooltip)
+        
         # Download button (will show size)
         self._ollama_download_btn = ctk.CTkButton(
             right_frame,
@@ -6429,7 +6438,7 @@ class WayfinderApp(ctk.CTk):
             ToolTip(start_btn, "Start the Ollama service in the background")
         else:
             # Ollama is running - show Test button
-            test_btn = ctk.CTkButton(
+            self._ollama_test_btn = ctk.CTkButton(
                 action_frame,
                 text="Test Model",
                 font=(self.font_body[0], self.font_sizes["small"]),
@@ -6440,8 +6449,8 @@ class WayfinderApp(ctk.CTk):
                 height=24,
                 command=self._test_ollama_model,
             )
-            test_btn.pack(side="right", padx=(0, 8))
-            ToolTip(test_btn, "Test the selected model with a sample transcription")
+            self._ollama_test_btn.pack(side="right", padx=(0, 8))
+            ToolTip(self._ollama_test_btn, "Test the selected model with a sample transcription")
     
     def _on_llamacpp_model_selected(self, selection: str) -> None:
         """Handle llama.cpp model selection from dropdown."""
@@ -6572,9 +6581,21 @@ class WayfinderApp(ctk.CTk):
         if selection in self._ollama_model_data:
             data = self._ollama_model_data[selection]
             info = data.get("info", {})
+            model_name = data.get("name", "").lower()
             
-            # Update description
+            # Update description with recommendation badge
             desc = info.get("description", "")
+            
+            # Add recommendation indicator based on model
+            if "qwen2.5" in model_name and ("1.5b" in model_name or "3b" in model_name):
+                desc = "✅ Recommended  •  " + desc
+            elif "phi3" in model_name:
+                desc = "✅ Good  •  " + desc
+            elif "llama3.2:1b" in model_name:
+                desc = "⚠️ Has quirks  •  " + desc
+            elif "smollm" in model_name or "360m" in model_name:
+                desc = "❌ Too small  •  " + desc
+            
             self._ollama_desc_label.configure(text=desc)
             
             # Update stats
@@ -6970,152 +6991,114 @@ class WayfinderApp(ctk.CTk):
     
     def _test_ollama_model(self) -> None:
         """Test the selected Ollama model with a sample transcription."""
-        import threading
         import time
+        import requests
         
         model_name = self.config.get("ollama_model", "phi3:mini")
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
         
         # Prevent multiple simultaneous tests
         if getattr(self, '_ollama_test_running', False):
-            self.log("⚠️ Test already in progress")
+            self.log("⚠️ Test already running")
             return
+        
         self._ollama_test_running = True
-        
-        # Helper to safely update status text on main thread
-        def update_status(text: str, color: str):
-            def do_update():
-                try:
-                    if hasattr(self, '_ollama_status_text'):
-                        widget = self._ollama_status_text
-                        if widget and widget.winfo_exists():
-                            widget.configure(text=text, text_color=color)
-                            self.update_idletasks()  # Force immediate redraw
-                except Exception:
-                    pass  # Widget destroyed, ignore
-            self.after(0, do_update)
-        
-        # Update status immediately
-        update_status(f"🧪 Connecting to Ollama...", COLORS["text_secondary"])
         self.log(f"🧪 Testing model: {model_name}")
         
-        def test_thread():
-            start_time = time.time()
-            test_input = "hello how r u doing today"
-            result = ""
+        # Update button state
+        try:
+            if hasattr(self, '_ollama_test_btn') and self._ollama_test_btn.winfo_exists():
+                self._ollama_test_btn.configure(state="disabled", text="Testing...")
+        except Exception:
+            pass
+        
+        # Update status
+        try:
+            if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+                self._ollama_status_text.configure(text="🧪 Testing...", text_color=COLORS["text_secondary"])
+        except Exception:
+            pass
+        
+        self.update_idletasks()  # Force UI update
+        
+        start_time = time.time()
+        test_input = "hello how r u doing today"
+        
+        try:
+            # Step 1: Check Ollama
+            self.log("   Connecting to Ollama...")
+            self.update_idletasks()
+            
+            tags_response = requests.get(f"{base_url}/api/tags", timeout=5)
+            if tags_response.status_code != 200:
+                raise Exception(f"HTTP {tags_response.status_code}")
+            
+            self.log("   ✓ Connected")
+            
+            # Step 2: Check model
+            models = [m.get("name", "") for m in tags_response.json().get("models", [])]
+            model_base = model_name.split(":")[0]
+            if not any(model_name == m or m.startswith(model_base) for m in models):
+                raise Exception(f"Model not found. Available: {', '.join(models[:3])}")
+            
+            self.log(f"   ✓ Model found")
+            self.update_idletasks()
+            
+            # Step 3: Quick inference
+            response = requests.post(
+                f"{base_url}/api/generate",
+                json={
+                    "model": model_name,
+                    "prompt": f"Correct: \"{test_input}\"",
+                    "stream": False,
+                    "options": {"temperature": 0.1, "num_predict": 20}
+                },
+                timeout=30,
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"Inference failed: HTTP {response.status_code}")
+            
+            data = response.json()
+            result = data.get("response", "").strip()
+            token_count = data.get("eval_count", 0)
+            elapsed = time.time() - start_time
+            
+            if not result:
+                raise Exception("Empty response")
+            
+            # Success
+            self.log(f"✓ Test passed in {elapsed:.2f}s ({token_count} tokens)")
+            self.log(f"   Output: \"{result[:60]}...\"")
             
             try:
-                import requests
-                import json
+                if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+                    self._ollama_status_text.configure(
+                        text=f"✓ Working • {elapsed:.1f}s",
+                        text_color=COLORS["accent"]
+                    )
+            except Exception:
+                pass
                 
-                # Step 1: Check Ollama is running
-                update_status("🧪 Checking Ollama...", COLORS["text_secondary"])
-                self.after(0, lambda: self.log("   Step 1: Checking Ollama connection..."))
-                
-                try:
-                    tags_response = requests.get(f"{base_url}/api/tags", timeout=5)
-                    if tags_response.status_code != 200:
-                        raise Exception(f"Ollama returned HTTP {tags_response.status_code}")
-                except requests.exceptions.ConnectionError:
-                    raise Exception("Cannot connect to Ollama - is it running?")
-                except requests.exceptions.Timeout:
-                    raise Exception("Ollama connection timed out")
-                
-                # Step 2: Check model exists
-                update_status(f"🧪 Checking model...", COLORS["text_secondary"])
-                self.after(0, lambda: self.log("   Step 2: Verifying model exists..."))
-                
-                models = [m.get("name", "") for m in tags_response.json().get("models", [])]
-                model_base = model_name.split(":")[0]
-                model_exists = any(model_name == m or m.startswith(model_base) for m in models)
-                
-                if not model_exists:
-                    available = ", ".join(models[:3]) if models else "none"
-                    raise Exception(f"Model '{model_name}' not found. Available: {available}")
-                
-                # Step 3: Run inference with streaming for feedback
-                update_status(f"🧪 Running inference...", COLORS["text_secondary"])
-                self.after(0, lambda: self.log("   Step 3: Running inference test..."))
-                
-                # Use streaming to show progress
-                response = requests.post(
-                    f"{base_url}/api/generate",
-                    json={
-                        "model": model_name,
-                        "prompt": f"Correct this text: \"{test_input}\"",
-                        "stream": True,  # Stream for better feedback
-                        "options": {"temperature": 0.1, "num_predict": 50}
-                    },
-                    stream=True,
-                    timeout=(10, 30),  # 10s connect, 30s read
-                )
-                
-                if response.status_code != 200:
-                    raise Exception(f"Inference failed: HTTP {response.status_code}")
-                
-                # Collect streamed response
-                result_parts = []
-                token_count = 0
-                for line in response.iter_lines():
-                    if line:
-                        try:
-                            data = json.loads(line)
-                            if "response" in data:
-                                result_parts.append(data["response"])
-                                token_count += 1
-                                if token_count % 5 == 0:  # Update every 5 tokens
-                                    update_status(f"🧪 Generating... ({token_count} tokens)", COLORS["text_secondary"])
-                            if data.get("done", False):
-                                break
-                        except json.JSONDecodeError:
-                            pass
-                
-                result = "".join(result_parts).strip()
-                elapsed = time.time() - start_time
-                
-                if not result:
-                    raise Exception("Model returned empty response")
-                
-                # Success!
-                def on_success():
-                    self._ollama_test_running = False
-                    try:
-                        if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-                            self._ollama_status_text.configure(
-                                text=f"✓ Working • {elapsed:.1f}s • {token_count} tokens",
-                                text_color=COLORS["accent"]
-                            )
-                            self.update_idletasks()
-                    except Exception:
-                        pass
-                    self.log(f"✓ Test passed in {elapsed:.2f}s")
-                    self.log(f"   Input:  \"{test_input}\"")
-                    self.log(f"   Output: \"{result[:80]}{'...' if len(result) > 80 else ''}\"")
-                
-                self.after(0, on_success)
-                
-            except Exception as e:
-                elapsed = time.time() - start_time
-                error_msg = str(e)
-                if len(error_msg) > 50:
-                    error_msg = error_msg[:47] + "..."
-                
-                def on_error():
-                    self._ollama_test_running = False
-                    try:
-                        if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-                            self._ollama_status_text.configure(
-                                text=f"✗ {error_msg}",
-                                text_color="#CF7B7B"
-                            )
-                            self.update_idletasks()
-                    except Exception:
-                        pass
-                    self.log(f"❌ Test failed after {elapsed:.1f}s: {str(e)}")
-                
-                self.after(0, on_error)
-        
-        threading.Thread(target=test_thread, daemon=True).start()
+        except Exception as e:
+            elapsed = time.time() - start_time
+            self.log(f"❌ Test failed: {e}")
+            try:
+                if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
+                    self._ollama_status_text.configure(
+                        text=f"✗ {str(e)[:40]}",
+                        text_color="#CF7B7B"
+                    )
+            except Exception:
+                pass
+        finally:
+            self._ollama_test_running = False
+            try:
+                if hasattr(self, '_ollama_test_btn') and self._ollama_test_btn.winfo_exists():
+                    self._ollama_test_btn.configure(state="normal", text="Test Model")
+            except Exception:
+                pass
+            self.update_idletasks()
     
     def _start_ollama_service(self) -> None:
         """Start the Ollama service."""
@@ -10321,7 +10304,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             inner,
-            text="Press this key to cycle through styles:\nProfessional → Technical → Casual",
+            text="Press this key to cycle through styles:\nProfessional → AI Prompt → Casual",
             font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
             justify="left",
@@ -12545,8 +12528,8 @@ class WayfinderApp(ctk.CTk):
             target_style: If None, cycle to next style. Otherwise set to specified style.
         """
         # Style cycle order
-        STYLE_CYCLE = ["professional", "technical", "casual"]
-        STYLE_NAMES = {"professional": "Professional", "technical": "Technical", "casual": "Casual"}
+        STYLE_CYCLE = ["professional", "ai_prompt", "casual"]
+        STYLE_NAMES = {"professional": "Professional", "ai_prompt": "AI Prompt", "casual": "Casual"}
         
         if target_style and target_style in STYLE_CYCLE:
             # Set specific style
@@ -12880,10 +12863,13 @@ class WayfinderApp(ctk.CTk):
         return ""
 
     def transcribe_and_inject(self, audio_path):
+        import time as time_module
         try:
             self.log("🔄 Transcribing...")
+            trans_start = time_module.perf_counter()
             text = transcribe_with_config(audio_path, self.config)
-            self.log(f"📝 \"{text[:50]}{'...' if len(text) > 50 else ''}\"")
+            trans_elapsed = time_module.perf_counter() - trans_start
+            self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
             self.event_queue.put((EventType.TRANSCRIPTION_DONE, text))
         except Exception as e:
             self.event_queue.put((EventType.TRANSCRIPTION_ERROR, str(e)))
@@ -12898,12 +12884,23 @@ class WayfinderApp(ctk.CTk):
         # Apply post-processing if enabled
         processed_text = text.strip()
         if self.config.get("post_processing_enabled", False):
+            import time as time_module
+            backend = self.config.get("post_processing_backend", "ollama")
+            model = self.config.get("ollama_model", "") if backend == "ollama" else ""
+            self.log(f"🔄 Post-processing with {backend}" + (f" ({model})" if model else "") + "...")
+            
+            pp_start = time_module.perf_counter()
             try:
                 processed_text = process_with_config(processed_text, self.config)
+                pp_elapsed = time_module.perf_counter() - pp_start
+                
                 if processed_text != text.strip():
-                    self.log("✨ Post-processed transcription")
+                    self.log(f"✨ Post-processed in {pp_elapsed:.2f}s")
+                else:
+                    self.log(f"ℹ️ No changes ({pp_elapsed:.2f}s)")
             except Exception as e:
-                self.log(f"⚠️ Post-processing failed: {e}")
+                pp_elapsed = time_module.perf_counter() - pp_start
+                self.log(f"⚠️ Post-processing failed ({pp_elapsed:.2f}s): {e}")
                 # Fall back to original text
                 processed_text = text.strip()
         

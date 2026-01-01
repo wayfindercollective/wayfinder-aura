@@ -27,7 +27,7 @@ def socket_listener(
     ```
     echo "toggle" | nc -U /tmp/wayfinder-voice.sock
     echo "style" | nc -U /tmp/wayfinder-voice.sock        # Cycle styles
-    echo "style:technical" | nc -U /tmp/wayfinder-voice.sock  # Set specific style
+    echo "style:ai_prompt" | nc -U /tmp/wayfinder-voice.sock  # Set specific style
     ```
     
     Args:
@@ -70,7 +70,7 @@ def socket_listener(
                     log("✎ Style toggle received via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, None))
                 elif data_str.startswith("style:"):
-                    # Set specific style (style:professional, style:technical, style:casual)
+                    # Set specific style (style:professional, style:ai_prompt, style:casual)
                     style = data_str.split(":", 1)[1]
                     log(f"✎ Style set to '{style}' via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, style))
@@ -114,7 +114,7 @@ def send_style(style: Optional[str] = None):
     Send a style command to a running Wayfinder Voice instance.
     
     Args:
-        style: Optional style name ("professional", "technical", "casual").
+        style: Optional style name ("professional", "ai_prompt", "casual").
                If None, cycles to the next style.
     
     Returns:
