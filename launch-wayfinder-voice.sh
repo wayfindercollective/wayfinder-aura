@@ -8,12 +8,6 @@ cd "$SCRIPT_DIR"
 # Set FLEXIBLAS backend (fixes numpy on Fedora/Bazzite)
 export FLEXIBLAS="${FLEXIBLAS:-OPENBLAS-OPENMP}"
 
-# Force Vulkan to use discrete GPU if available (ggml_vulkan device selection)
-# On systems with iGPU + dGPU, device 0 is often the slower iGPU
-# Set GGML_VK_VISIBLE_DEVICES=1 to force the discrete GPU
-# Users can override this by setting the variable before running
-export GGML_VK_VISIBLE_DEVICES="${GGML_VK_VISIBLE_DEVICES:-1}"
-
 # Fallback display if not set (helps with autostart)
 if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     export DISPLAY="${DISPLAY:-:0}"
@@ -21,6 +15,26 @@ fi
 
 # Use system Python explicitly (has tkinter and correct deps)
 PYTHON="/usr/bin/python3"
+
+# Auto-detect optimal Vulkan device if not already set
+# This handles systems with both integrated and discrete GPUs
+if [ -z "$GGML_VK_VISIBLE_DEVICES" ]; then
+    # Use Python to detect the optimal device
+    OPTIMAL_DEVICE=$("$PYTHON" -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR/src')
+try:
+    from wayfinder.utils.gpu import get_optimal_vulkan_device
+    print(get_optimal_vulkan_device())
+except:
+    print('0')  # Default to device 0 if detection fails
+" 2>/dev/null)
+    
+    if [ -n "$OPTIMAL_DEVICE" ] && [ "$OPTIMAL_DEVICE" != "0" ]; then
+        export GGML_VK_VISIBLE_DEVICES="$OPTIMAL_DEVICE"
+        echo "[GPU] Auto-selected Vulkan device $OPTIMAL_DEVICE (discrete GPU detected)"
+    fi
+fi
 
 # Run with Python (most reliable on Fedora-based systems)
 # Note: Scaling handling is done in Python with cached values
