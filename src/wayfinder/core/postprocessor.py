@@ -178,6 +178,7 @@ def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_fo
         - warnings: list[str] - any warnings to show user
         - recommendations: list[str] - suggested changes
         - auto_adjustments: dict - automatic adjustments to apply
+        - upgrade_suggestion: dict - specific model upgrade recommendation
     """
     tier = detect_model_tier(model_name)
     tier_info = MODEL_TIERS[tier]
@@ -189,6 +190,7 @@ def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_fo
         "warnings": [],
         "recommendations": [],
         "auto_adjustments": {},
+        "upgrade_suggestion": None,
     }
     
     # Check intensity vs tier capability
@@ -202,6 +204,9 @@ def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_fo
         )
         result["recommendations"].append(f"Consider using '{max_intensity}' intensity instead")
         result["auto_adjustments"]["intensity"] = max_intensity
+        
+        # Add specific upgrade suggestion
+        result["upgrade_suggestion"] = get_upgrade_suggestion_for_intensity(intensity)
     
     # Check smart_formatting for tiny models
     if tier == "tiny" and smart_formatting:
@@ -226,6 +231,153 @@ def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_fo
         result["recommendations"].append("Consider upgrading to a 1B+ model for better results")
     
     return result
+
+
+def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
+    """
+    Get specific model upgrade suggestions based on desired intensity.
+    
+    Returns dict with:
+        - min_params: str - minimum parameter count
+        - recommended_models: list - specific model recommendations
+        - message: str - user-friendly message
+    """
+    if intensity == "strong":
+        return {
+            "min_params": "3B+",
+            "recommended_models": [
+                {"name": "qwen2.5:3b", "type": "ollama", "description": "Best for strong intensity"},
+                {"name": "llama3.2:3b", "type": "ollama", "description": "Good alternative"},
+                {"name": "phi3:medium", "type": "ollama", "description": "Fast and capable"},
+            ],
+            "message": "Strong intensity works best with 3B+ parameter models. "
+                       "Try: ollama pull qwen2.5:3b",
+        }
+    elif intensity == "standard":
+        return {
+            "min_params": "1B+",
+            "recommended_models": [
+                {"name": "qwen2.5:1.5b", "type": "ollama", "description": "Great balance"},
+                {"name": "llama3.2:1b", "type": "ollama", "description": "Fast option"},
+                {"name": "phi3:mini", "type": "ollama", "description": "Reliable"},
+            ],
+            "message": "Standard intensity works with 1B+ parameter models.",
+        }
+    else:  # light
+        return {
+            "min_params": "500M+",
+            "recommended_models": [
+                {"name": "smollm2:360m", "type": "ollama", "description": "Ultra fast"},
+                {"name": "qwen2.5:0.5b", "type": "ollama", "description": "Compact"},
+            ],
+            "message": "Light intensity works with most models.",
+        }
+
+
+def check_settings_compatibility(config: dict) -> Dict[str, Any]:
+    """
+    Check if current config settings are compatible with the selected model.
+    
+    This is the main function for UI to call when settings change.
+    Returns a complete compatibility report with actionable feedback.
+    
+    Args:
+        config: Full configuration dictionary
+        
+    Returns:
+        Dict with:
+            - is_compatible: bool
+            - issues: list of issue descriptions
+            - recommendations: list of actionable recommendations  
+            - upgrade_message: str or None - specific upgrade instruction
+            - severity: "ok" | "warning" | "incompatible"
+    """
+    # Get model name based on backend
+    backend = config.get("post_processing_backend", "llama_cpp")
+    if backend == "ollama":
+        model_name = config.get("ollama_model", "")
+    elif backend == "llama_cpp":
+        model_path = config.get("llama_cpp_model_path", "")
+        model_name = Path(model_path).stem if model_path else ""
+    elif backend == "openai":
+        model_name = config.get("openai_model", "gpt-4o-mini")
+    elif backend == "anthropic":
+        model_name = config.get("anthropic_model", "claude-3-haiku")
+    else:
+        model_name = ""
+    
+    # Skip check if post-processing is disabled
+    if not config.get("post_processing_enabled", False):
+        return {
+            "is_compatible": True,
+            "issues": [],
+            "recommendations": [],
+            "upgrade_message": None,
+            "severity": "ok",
+        }
+    
+    # Skip check if no model selected
+    if not model_name:
+        return {
+            "is_compatible": False,
+            "issues": ["No post-processing model selected"],
+            "recommendations": ["Select a model in Post-Processing settings"],
+            "upgrade_message": None,
+            "severity": "warning",
+        }
+    
+    # Get tone and intensity
+    tone = config.get("output_tone", "professional")
+    intensity_key = f"{tone}_intensity"
+    intensity = config.get(intensity_key, "standard")
+    smart_formatting = config.get("smart_formatting", True)
+    
+    # Run compatibility check
+    compat = get_model_compatibility(model_name, tone, intensity, smart_formatting)
+    
+    # Build result
+    issues = []
+    recommendations = []
+    upgrade_message = None
+    
+    if not compat["compatible"]:
+        tier = compat["tier"]
+        tier_info = MODEL_TIERS.get(tier, {})
+        max_intensity = tier_info.get("max_intensity", "standard")
+        
+        issues.append(
+            f"'{intensity.title()}' intensity requires a larger model"
+        )
+        
+        if compat["upgrade_suggestion"]:
+            suggestion = compat["upgrade_suggestion"]
+            upgrade_message = suggestion["message"]
+            recommendations.append(f"Upgrade to a {suggestion['min_params']} model")
+            
+            # Add specific model suggestions
+            for model in suggestion["recommended_models"][:2]:
+                recommendations.append(f"Try: {model['name']} ({model['description']})")
+        
+        recommendations.append(f"Or use '{max_intensity}' intensity with current model")
+    
+    # Add any other warnings
+    for warning in compat.get("warnings", []):
+        if warning not in issues:
+            issues.append(warning.replace("⚠️ ", "").replace("💡 ", ""))
+    
+    return {
+        "is_compatible": compat["compatible"],
+        "issues": issues,
+        "recommendations": recommendations,
+        "upgrade_message": upgrade_message,
+        "severity": "incompatible" if not compat["compatible"] else (
+            "warning" if issues else "ok"
+        ),
+        "current_model": model_name,
+        "current_tier": compat["tier"],
+        "requested_intensity": intensity,
+        "effective_intensity": compat["auto_adjustments"].get("intensity", intensity),
+    }
 
 
 def get_tone_guidance(tone: str, intensity: str = "standard") -> str:
