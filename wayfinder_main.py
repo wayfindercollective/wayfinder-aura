@@ -1640,7 +1640,13 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
             except:
                 pass
     
+    log(f"🔧 Hotkey listener starting (record={hotkey_key}, style={style_toggle_key})...")
+    print(f"[DEBUG] Hotkey listener thread started: record={hotkey_key}, style={style_toggle_key}", flush=True)
+    
     devices = find_keyboard_devices(enabled_devices)
+    print(f"[DEBUG] Found {len(devices)} devices to monitor:", flush=True)
+    for d in devices:
+        print(f"[DEBUG]   - {d.name} ({d.path})", flush=True)
     if not devices:
         log("⚠️ No input devices found!")
         log("   Check: sudo usermod -aG input $USER")
@@ -1699,15 +1705,25 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                             elif key_event.keystate == 0:
                                 pressed_modifiers.discard(keycode)
                         
+                        # Debug: log all key presses (F-keys only to reduce noise)
+                        if key_event.keystate == 1 and 59 <= keycode <= 88:
+                            print(f"[DEBUG] Key pressed: code={keycode} from {device.name[:30]}", flush=True)
+                        
                         # Check for recording hotkey press
                         if keycode == hotkey_key and key_event.keystate == 1:
                             if check_modifiers(required_modifiers, hotkey_modifiers):
                                 event_queue.put((EventType.HOTKEY_PRESSED, None))
                         
                         # Check for style toggle hotkey press
-                        if style_toggle_key and keycode == style_toggle_key and key_event.keystate == 1:
-                            if check_modifiers(required_style_modifiers, style_toggle_modifiers):
-                                event_queue.put((EventType.STYLE_TOGGLE, None))
+                        if style_toggle_key and key_event.keystate == 1:
+                            # Debug: log when we see the style toggle key
+                            if keycode == style_toggle_key:
+                                print(f"[DEBUG] Style toggle key {keycode} detected!", flush=True)
+                                log(f"🎯 Style toggle key {keycode} pressed!")
+                                if check_modifiers(required_style_modifiers, style_toggle_modifiers):
+                                    event_queue.put((EventType.STYLE_TOGGLE, None))
+                                else:
+                                    log(f"   (modifiers not matched)")
     except Exception as e:
         log(f"⚠️ Hotkey error: {e}")
 
@@ -1723,6 +1739,8 @@ def socket_listener(event_queue, stop_event, log_callback=None):
                 log_callback(msg)
             except:
                 pass
+    
+    print("[DEBUG] Socket listener thread starting...", flush=True)
     
     # Remove old socket if exists
     try:
@@ -12747,6 +12765,12 @@ class WayfinderApp(ctk.CTk):
             self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
         else:
             self.log("🖥️ X11 detected - using evdev")
+        
+        # Log the hotkey configuration
+        hotkey_name = self.get_hotkey_display()
+        style_key_name = {59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6", 
+                         65: "F7", 66: "F8", 67: "F9", 68: "F10"}.get(style_toggle_key, f"Key{style_toggle_key}")
+        self.log(f"⌨️ Record hotkey: {hotkey_name} | Style toggle: {style_key_name}")
         
         # Use evdev on both X11 and Wayland (works if user is in 'input' group)
         threading.Thread(
