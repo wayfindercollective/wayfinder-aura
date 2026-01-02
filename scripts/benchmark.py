@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark script for Wayfinder Voice transcription performance.
+Benchmark script for Wayfinder Aura transcription performance.
 Tests various models and configurations on your specific hardware.
 
 Usage:
@@ -241,7 +241,7 @@ def main():
     signal.signal(signal.SIGINT, cleanup_and_exit)
     signal.signal(signal.SIGTERM, cleanup_and_exit)
     
-    parser = argparse.ArgumentParser(description="Benchmark Wayfinder Voice transcription")
+    parser = argparse.ArgumentParser(description="Benchmark Wayfinder Aura transcription")
     parser.add_argument("--quick", action="store_true", help="Quick test (tiny model only)")
     parser.add_argument("--gpu", action="store_true", help="GPU benchmarks only")
     parser.add_argument("--cpu", action="store_true", help="CPU benchmarks only")

@@ -1,6 +1,6 @@
-# Building Wayfinder Voice Flatpak
+# Building Wayfinder Aura Flatpak
 
-This guide explains how to build and publish the Wayfinder Voice Flatpak.
+This guide explains how to build and publish the Wayfinder Aura Flatpak.
 
 ## Prerequisites
 
@@ -47,7 +47,7 @@ flatpak/
 ├── io.github.user.WayfinderVoice.yml      # Main Flatpak manifest
 ├── io.github.user.WayfinderVoice.desktop  # Desktop entry
 ├── io.github.user.WayfinderVoice.metainfo.xml  # AppStream metadata
-├── wayfinder-voice-launcher.sh            # Launch script
+├── wayfinder-aura-launcher.sh            # Launch script
 ├── flatpak-requirements.txt               # Python deps for Flatpak
 ├── python-deps.json                       # Generated pip sources
 ├── generate-pip-sources.sh                # Helper script

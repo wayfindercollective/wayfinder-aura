@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Wayfinder Voice - Glassmorphic Status Overlay
+Wayfinder Aura - Glassmorphic Status Overlay
 
 A premium PyQt6-based status indicator with:
 - Squircle (superellipse) shape for weighted, intentional feel
@@ -140,7 +140,7 @@ def _setup_kwin_window_rule(x: int, y: int, width: int, height: int) -> bool:
         script_content = f'''
         // KWin script - set overlay properties (not position - app handles that)
         workspace.windowAdded.connect(function(client) {{
-            if (client.caption && client.caption.indexOf("Wayfinder Voice Overlay") !== -1) {{
+            if (client.caption && client.caption.indexOf("Wayfinder Aura Overlay") !== -1) {{
                 // Only set properties, not position
                 client.keepAbove = true;
                 client.skipTaskbar = true;
@@ -154,7 +154,7 @@ def _setup_kwin_window_rule(x: int, y: int, width: int, height: int) -> bool:
         var windows = workspace.windowList();
         for (var i = 0; i < windows.length; i++) {{
             var w = windows[i];
-            if (w.caption && w.caption.indexOf("Wayfinder Voice Overlay") !== -1) {{
+            if (w.caption && w.caption.indexOf("Wayfinder Aura Overlay") !== -1) {{
                 w.keepAbove = true;
                 w.skipTaskbar = true;
                 w.skipPager = true;
@@ -311,10 +311,15 @@ STYLE_PALETTES = {
         color="#73DACA",    # Soft teal
         glow="#5AAE9E",     # Muted teal glow
     ),
+    "personal": StyleColors(
+        letter="Y",         # "Y" for You/Your style
+        color="#BB9AF7",    # Soft purple
+        glow="#9A7ACC",     # Muted purple glow
+    ),
 }
 
 # Style cycle order for toggle
-STYLE_CYCLE = ["professional", "ai_prompt", "casual"]
+STYLE_CYCLE = ["professional", "ai_prompt", "casual", "personal"]
 
 
 # === Squircle Path Generator (Kappa-based Bezier) ===
@@ -700,10 +705,10 @@ class GlassmorphicOverlay(QWidget):
     - Smooth state transitions
     """
     
-    # Base dimensions - ultra compact for minimal intrusion
-    BASE_HEIGHT = 20
-    BASE_PADDING_H = 8
-    BASE_WAVE_WIDTH = 40
+    # Base dimensions - compact but readable
+    BASE_HEIGHT = 32
+    BASE_PADDING_H = 12
+    BASE_WAVE_WIDTH = 60
     
     def __init__(self, scale: float = 1.0):
         # Scale factor must be set first (before any property access)
@@ -830,7 +835,7 @@ class GlassmorphicOverlay(QWidget):
         self._raise_timer.setInterval(250)
         
         # Set window title for KWin script identification
-        self.setWindowTitle("Wayfinder Voice Overlay")
+        self.setWindowTitle("Wayfinder Aura Overlay")
         
         # Timer to periodically raise window (ensures stay-on-top on all compositors)
         self._raise_timer = QTimer(self)
@@ -889,7 +894,7 @@ class GlassmorphicOverlay(QWidget):
                 
                 # Use KWin script to force position (only way on Wayland)
                 _force_kde_window_position(
-                    "Wayfinder Voice Overlay",
+                    "Wayfinder Aura Overlay",
                     x, y,
                     self.width(), self.height()
                 )
@@ -952,11 +957,11 @@ class GlassmorphicOverlay(QWidget):
     
     def _update_font(self):
         """Update font with current scale."""
-        base_size = 7  # Ultra compact base size
-        scaled_size = max(6, int(base_size * self._scale))
+        base_size = 10  # Readable base size
+        scaled_size = max(8, int(base_size * self._scale))
         self._font = QFont(self._font_family, scaled_size)
         self._font.setWeight(QFont.Weight.Medium)
-        self._font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.3 * self._scale)
+        self._font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.4 * self._scale)
     
     def _setup_timers(self):
         """Setup animation timers."""
@@ -1161,7 +1166,7 @@ class GlassmorphicOverlay(QWidget):
             
             # Force position via KWin (the only way that works on Wayland)
             _force_kde_window_position(
-                "Wayfinder Voice Overlay",
+                "Wayfinder Aura Overlay",
                 x, y,
                 final_width, final_height
             )
@@ -1381,9 +1386,9 @@ class GlassmorphicOverlay(QWidget):
         palette = STYLE_PALETTES.get(self._current_style, STYLE_PALETTES["professional"])
         badge_color = self._style_badge_color.color
         
-        # Badge dimensions - compact and unobtrusive
-        badge_size = int(12 * self._scale)
-        badge_x = rect.left() + 4 * self._scale
+        # Badge dimensions - visible but unobtrusive
+        badge_size = int(16 * self._scale)
+        badge_x = rect.left() + 6 * self._scale
         badge_y = rect.center().y() - badge_size / 2
         
         badge_rect = QRectF(badge_x, badge_y, badge_size, badge_size)
@@ -1411,7 +1416,7 @@ class GlassmorphicOverlay(QWidget):
         painter.drawEllipse(badge_rect)
         
         # Draw the letter
-        letter_font = QFont(self._font_family, int(6 * self._scale))
+        letter_font = QFont(self._font_family, int(8 * self._scale))
         letter_font.setWeight(QFont.Weight.Bold)
         painter.setFont(letter_font)
         
@@ -1480,7 +1485,7 @@ def run_overlay():
             
             # Force position via KWin after showing
             QTimer.singleShot(100, lambda: _force_kde_window_position(
-                "Wayfinder Voice Overlay",
+                "Wayfinder Aura Overlay",
                 x, y,
                 final_width, final_height
             ))

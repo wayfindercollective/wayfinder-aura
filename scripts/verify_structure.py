@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Verify the Wayfinder Voice project structure is correct.
+Verify the Wayfinder Aura project structure is correct.
 
 Run from project root:
     python scripts/verify_structure.py

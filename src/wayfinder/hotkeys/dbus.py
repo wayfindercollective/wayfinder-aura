@@ -1,5 +1,5 @@
 """
-D-Bus GlobalShortcuts portal listener for Wayfinder Voice.
+D-Bus GlobalShortcuts portal listener for Wayfinder Aura.
 
 Uses the XDG GlobalShortcuts portal for Wayland-compatible global hotkeys.
 This is the proper way to do global hotkeys on Wayland/KDE.
@@ -20,6 +20,10 @@ try:
     DBUS_AVAILABLE = True
 except ImportError:
     DBUS_AVAILABLE = False
+
+# Application ID for portal registration
+# This must match the desktop file name (without .desktop extension)
+APP_ID = os.environ.get("FLATPAK_ID", "wayfinder-aura")
 
 
 def is_dbus_available() -> bool:
@@ -72,12 +76,15 @@ def wayland_hotkey_listener(
             "org.freedesktop.portal.GlobalShortcuts"
         )
         
-        # Create session
-        log("🔗 Connecting to GlobalShortcuts portal...")
+        # Create session with proper app identification
+        log(f"🔗 Connecting to GlobalShortcuts portal as '{APP_ID}'...")
+        
+        # Use app_id-based tokens for proper KDE Global Shortcuts integration
+        session_token = APP_ID.replace(".", "_").replace("-", "_")
         
         session_options = dbus.Dictionary({
-            "handle_token": dbus.String("wayfinder_voice_session"),
-            "session_handle_token": dbus.String("wayfinder_voice"),
+            "handle_token": dbus.String(f"{session_token}_session"),
+            "session_handle_token": dbus.String(session_token),
         }, signature="sv")
         
         request_path = shortcuts_iface.CreateSession(session_options)
@@ -89,7 +96,7 @@ def wayland_hotkey_listener(
         
         # Try to get the session
         user = os.environ.get('USER', 'user')
-        session_path = f"/org/freedesktop/portal/desktop/session/{user}/wayfinder_voice"
+        session_path = f"/org/freedesktop/portal/desktop/session/{user}/{session_token}"
         
         # Bind shortcuts
         shortcuts = dbus.Array([
@@ -103,7 +110,7 @@ def wayland_hotkey_listener(
         ], signature="(sa{sv})")
         
         bind_options = dbus.Dictionary({
-            "handle_token": dbus.String("wayfinder_bind"),
+            "handle_token": dbus.String(f"{session_token}_bind"),
         }, signature="sv")
         
         try:

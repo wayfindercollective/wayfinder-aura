@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Wayfinder Voice - Local voice dictation for Linux
+Wayfinder Aura - Local voice dictation for Linux
 
 This is the main entry point that maintains backwards compatibility.
 Run with: python main.py
@@ -21,7 +21,7 @@ if src_dir not in sys.path:
 
 
 # Scaling cache file location
-SCALING_CACHE_FILE = Path.home() / ".config" / "wayfinder-voice" / "display_scaling.json"
+SCALING_CACHE_FILE = Path.home() / ".config" / "wayfinder-aura" / "display_scaling.json"
 
 
 def load_cached_scaling() -> float:
@@ -97,7 +97,7 @@ def schedule_scaling_detection(app, delay_ms: int = 5000) -> None:
 
 
 def main():
-    """Run Wayfinder Voice."""
+    """Run Wayfinder Aura."""
     # Apply scaling fix immediately using cached value (no waiting!)
     cached_scaling = apply_scaling_fix()
     print(f"[Scaling] Using cached scaling: {cached_scaling}")

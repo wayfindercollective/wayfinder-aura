@@ -1,8 +1,8 @@
-# Wayfinder Voice
+# Wayfinder Aura
 
 Local voice dictation for Linux (Wayland/X11) using whisper.cpp for transcription. Press a hotkey, speak, and your words are typed wherever your cursor is.
 
-![Wayfinder Voice UI](assets/icon.png)
+![Wayfinder Aura UI](assets/icon.png)
 
 ## Features
 
@@ -48,19 +48,19 @@ pip install -r requirements.txt
 
 ### For Users (Installed App)
 
-The app is installed to `~/.local/opt/wayfinder-voice/`
+The app is installed to `~/.local/opt/wayfinder-aura/`
 
 ```bash
 # Already set up:
-# - App menu shortcut: "Wayfinder Voice"
+# - App menu shortcut: "Wayfinder Aura"
 # - Auto-starts on login
-# - Run from: ~/.local/opt/wayfinder-voice/launch-wayfinder-voice.sh
+# - Run from: ~/.local/opt/wayfinder-aura/launch-wayfinder-aura.sh
 ```
 
 ### For Development
 
 ```bash
-cd ~/Dev/wayfinder-voice
+cd ~/Dev/wayfinder-aura
 python main.py
 ```
 
@@ -69,12 +69,12 @@ python main.py
 After making changes in the Dev folder:
 
 ```bash
-cp ~/Dev/wayfinder-voice/*.py ~/.local/opt/wayfinder-voice/
+cp ~/Dev/wayfinder-aura/*.py ~/.local/opt/wayfinder-aura/
 ```
 
 ## Configuration
 
-Config is stored at `~/.config/wayfinder-voice/config.json`
+Config is stored at `~/.config/wayfinder-aura/config.json`
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -98,7 +98,7 @@ Config is stored at `~/.config/wayfinder-voice/config.json`
 ## File Structure
 
 ```
-wayfinder-voice/
+wayfinder-aura/
 ├── src/wayfinder/           # Main package (modular structure)
 │   ├── config.py            # Configuration management
 │   ├── state.py             # State machine
@@ -161,7 +161,7 @@ wayfinder-voice/
 
 For Wayland/KDE, add a custom shortcut that runs:
 ```bash
-~/.local/opt/wayfinder-voice/trigger_record.py
+~/.local/opt/wayfinder-aura/trigger_record.py
 ```
 
 ## Troubleshooting
@@ -185,7 +185,7 @@ The launcher script handles this automatically by setting `FLEXIBLAS=OPENBLAS-OP
 
 ```bash
 ./build.sh
-# Output: dist/wayfinder-voice
+# Output: dist/wayfinder-aura
 ```
 
 Note: PyInstaller builds may have issues with flexiblas on Fedora. The Python launcher is more reliable.

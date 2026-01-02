@@ -1,5 +1,5 @@
 """
-Text injection module for Wayfinder Voice.
+Text injection module for Wayfinder Aura.
 Handles text injection on Wayland using ydotool.
 """
 

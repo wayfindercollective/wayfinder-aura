@@ -1,5 +1,5 @@
 """
-Core functionality modules for Wayfinder Voice.
+Core functionality modules for Wayfinder Aura.
 
 - recorder: Audio recording with sounddevice
 - transcriber: Multi-backend speech-to-text
@@ -19,6 +19,7 @@ from .postprocessor import (
     get_upgrade_suggestion_for_intensity,
 )
 from .ollama_manager import get_ollama_manager, OllamaManager
+from .voice_profile import VoiceProfile, get_voice_profile, reset_voice_profile
 
 __all__ = [
     # Recorder
@@ -43,6 +44,10 @@ __all__ = [
     # Ollama
     "get_ollama_manager",
     "OllamaManager",
+    # Voice Profile
+    "VoiceProfile",
+    "get_voice_profile",
+    "reset_voice_profile",
 ]
 
 

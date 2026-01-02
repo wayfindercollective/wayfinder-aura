@@ -1,5 +1,5 @@
 """
-Unix socket-based hotkey listener for Wayfinder Voice.
+Unix socket-based hotkey listener for Wayfinder Aura.
 
 Allows external scripts to trigger recording via a simple socket connection.
 Useful for KDE shortcuts on Wayland where direct input monitoring is restricted.
@@ -25,9 +25,9 @@ def socket_listener(
     
     This allows KDE shortcuts to trigger recording via a simple script:
     ```
-    echo "toggle" | nc -U /tmp/wayfinder-voice.sock
-    echo "style" | nc -U /tmp/wayfinder-voice.sock        # Cycle styles
-    echo "style:ai_prompt" | nc -U /tmp/wayfinder-voice.sock  # Set specific style
+    echo "toggle" | nc -U /tmp/wayfinder-aura.sock
+    echo "style" | nc -U /tmp/wayfinder-aura.sock        # Cycle styles
+    echo "style:ai_prompt" | nc -U /tmp/wayfinder-aura.sock  # Set specific style
     ```
     
     Args:
@@ -92,7 +92,7 @@ def socket_listener(
 
 def send_toggle():
     """
-    Send a toggle command to a running Wayfinder Voice instance.
+    Send a toggle command to a running Wayfinder Aura instance.
     
     This can be used from external scripts to trigger recording.
     
@@ -111,7 +111,7 @@ def send_toggle():
 
 def send_style(style: Optional[str] = None):
     """
-    Send a style command to a running Wayfinder Voice instance.
+    Send a style command to a running Wayfinder Aura instance.
     
     Args:
         style: Optional style name ("professional", "ai_prompt", "casual").

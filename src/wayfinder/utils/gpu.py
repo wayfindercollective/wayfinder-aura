@@ -1,5 +1,5 @@
 """
-GPU detection utilities for Wayfinder Voice.
+GPU detection utilities for Wayfinder Aura.
 
 Detects GPU vendor, capabilities, and optimal settings.
 Handles Vulkan device selection for systems with multiple GPUs (iGPU + dGPU).

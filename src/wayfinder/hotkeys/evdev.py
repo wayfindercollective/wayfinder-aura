@@ -1,5 +1,5 @@
 """
-evdev-based hotkey listener for Wayfinder Voice.
+evdev-based hotkey listener for Wayfinder Aura.
 
 Monitors input devices directly for hotkey presses.
 Works on X11 and can work on Wayland with proper permissions.

@@ -1,5 +1,5 @@
 """
-Transcription module for Wayfinder Voice.
+Transcription module for Wayfinder Aura.
 Supports multiple backends: whisper.cpp (with Vulkan GPU) and Faster-Whisper (with ROCm).
 """
 
@@ -852,13 +852,33 @@ def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> 
     # Build enhanced prompt if punctuation is enabled
     ensure_punct = config.get("ensure_punctuation", True)
     
+    # Start with copy to avoid modifying original
+    config = config.copy()
+    original_prompt = config.get("prompt", "")
+    
+    # Add voice profile context when "personal" style is selected
+    if config.get("output_tone") == "personal":
+        try:
+            from .voice_profile import get_voice_profile
+            voice_profile = get_voice_profile(
+                history_limit=config.get("voice_learning_history_limit", 100),
+                regen_interval=config.get("voice_learning_regen_interval", 20),
+            )
+            profile_context = voice_profile.get_prompt_context()
+            if profile_context:
+                # Prepend voice profile context to prompt for better recognition
+                original_prompt = f"{profile_context} {original_prompt}".strip()
+                print(f"[Personal Style] Using voice profile ({len(profile_context)} chars)")
+        except Exception as e:
+            print(f"[Personal Style] ⚠ Could not load voice profile: {e}")
+    
     if ensure_punct:
         # Add punctuation hint to the prompt
-        original_prompt = config.get("prompt", "")
         punct_hint = "Use proper punctuation including periods, commas, and capitalization."
         if punct_hint not in original_prompt:
-            config = config.copy()  # Don't modify original
-            config["prompt"] = f"{original_prompt} {punct_hint}".strip()
+            original_prompt = f"{original_prompt} {punct_hint}".strip()
+    
+    config["prompt"] = original_prompt
     
     backend = get_backend(config)
     text = backend.transcribe(audio_path, context=context)

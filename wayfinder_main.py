@@ -1,19 +1,8 @@
 #!/usr/bin/env python3
 """
-Wayfinder Voice - Local voice dictation for Bazzite (Wayland)
+Wayfinder Aura - Local voice dictation for Linux (Wayland/X11)
 Toggle-to-record with whisper.cpp transcription.
 """
-
-# #region agent log
-import json as _json_debug
-def _debug_log(msg, data=None):
-    try:
-        with open("/home/bazzite/Dev/wayfinder-voice/.cursor/debug.log", "a") as f:
-            payload = {"location": "main.py:startup", "message": msg, "data": data or {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "hypothesisId": "A-E"}
-            f.write(_json_debug.dumps(payload) + "\n")
-    except: pass
-_debug_log("Script starting - before any imports")
-# #endregion
 
 import atexit
 import json
@@ -32,77 +21,29 @@ from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 
-# #region agent log
-_debug_log("Standard library imports complete", {"hypothesisId": "A"})
-# #endregion
+SOCKET_PATH = "/tmp/wayfinder-aura.sock"
 
-SOCKET_PATH = "/tmp/wayfinder-voice.sock"
-
-# #region agent log
-_debug_log("About to import customtkinter", {"hypothesisId": "D"})
-# #endregion
 import customtkinter as ctk
-# #region agent log
-_debug_log("customtkinter imported successfully", {"hypothesisId": "D"})
-# #endregion
-
-# #region agent log
-_debug_log("About to import evdev", {"hypothesisId": "C"})
-# #endregion
 import evdev
 from evdev import InputDevice, categorize, ecodes
-# #region agent log
-_debug_log("evdev imported successfully", {"hypothesisId": "C"})
-# #endregion
-
-# #region agent log
-_debug_log("About to import PIL and pystray", {"hypothesisId": "D"})
-# #endregion
 from PIL import Image, ImageDraw, ImageFilter
 import pystray
-# #region agent log
-_debug_log("PIL and pystray imported successfully", {"hypothesisId": "D"})
-# #endregion
 
 # D-Bus for Wayland GlobalShortcuts
-# #region agent log
-_debug_log("About to import D-Bus/GLib", {"hypothesisId": "E"})
-# #endregion
 try:
     import dbus
     from dbus.mainloop.glib import DBusGMainLoop
     from gi.repository import GLib
     DBUS_AVAILABLE = True
-    # #region agent log
-    _debug_log("D-Bus/GLib imported successfully", {"hypothesisId": "E"})
-    # #endregion
 except ImportError:
     DBUS_AVAILABLE = False
-    # #region agent log
-    _debug_log("D-Bus/GLib not available (ImportError)", {"hypothesisId": "E"})
-    # #endregion
 
-# #region agent log
-_debug_log("About to import local modules (injector, recorder, transcriber)", {"hypothesisId": "B"})
-# #endregion
 from injector import inject_text, InjectionError
-# #region agent log
-_debug_log("injector imported successfully")
-# #endregion
 from recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name
-# #region agent log
-_debug_log("recorder imported successfully - sounddevice/numpy loaded", {"hypothesisId": "A,B"})
-# #endregion
 from transcriber import transcribe_with_config, TranscriptionError
-# #region agent log
-_debug_log("transcriber imported successfully")
-# #endregion
 from postprocessor import process_with_config, get_available_backends, get_template_names, check_settings_compatibility
 from ollama_manager import get_ollama_manager, OllamaManager
 from license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
-# #region agent log
-_debug_log("All imports complete - moving to configuration")
-# #endregion
 
 
 # === Configuration ===
@@ -110,13 +51,13 @@ _debug_log("All imports complete - moving to configuration")
 # Detect Flatpak environment
 IS_FLATPAK = os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
 
-CONFIG_DIR = Path.home() / ".config" / "wayfinder-voice"
+CONFIG_DIR = Path.home() / ".config" / "wayfinder-aura"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # Handle icon path for Flatpak vs regular install
 if IS_FLATPAK:
-    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.user.WayfinderVoice')}.png"
+    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.user.WayfinderAura')}.png"
     if not ICON_PATH.exists():
         ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
 else:
@@ -136,6 +77,9 @@ DEFAULT_CONFIG = {
     "model_path": _default_model_path,
     "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
     "hotkey_modifiers": [],
+    # Style toggle hotkey (cycles Professional → AI Prompt → Casual → Personal)
+    "style_toggle_key": 68,  # F10 default
+    "style_toggle_modifiers": [],
     "audio_device": None,
     "sample_rate": 16000,
     "prompt": "Hello, this is a dictation with proper punctuation and grammar.",
@@ -161,6 +105,9 @@ DEFAULT_CONFIG = {
     # Vocabulary and hallucination suppression
     "custom_vocabulary": [],  # User's personal terms appended to prompt
     "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
+    # Voice profile learning (auto-enabled when output_tone is "personal")
+    "voice_learning_history_limit": 100,  # Max transcriptions to keep in learning history
+    "voice_learning_regen_interval": 20,  # Regenerate profile summary every N transcriptions
     # Chunked recording settings
     "chunked_mode": True,  # Enable chunked processing for long recordings
     "chunk_duration": 15,  # Seconds per chunk (shorter = faster feedback)
@@ -179,8 +126,13 @@ DEFAULT_CONFIG = {
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     # Style settings (unified tone for transcription and post-processing)
-    "output_tone": "professional",  # professional | casual | ai_prompt
+    "output_tone": "professional",  # professional | casual | ai_prompt | personal
     "smart_formatting": True,  # Auto-detect and format content (email, lists, code, etc.)
+    # Per-style intensity settings (each style remembers its own intensity)
+    "professional_intensity": "standard",  # light | standard | strong
+    "ai_prompt_intensity": "standard",     # light | standard | strong
+    "casual_intensity": "standard",        # light | standard | strong
+    "personal_intensity": "standard",      # light | standard | strong (learns from your speech)
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": False,  # Enable LLM post-processing
     "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai
@@ -1594,7 +1546,7 @@ def resolve_audio_device(config: dict) -> int | None:
 
 class EventType(Enum):
     HOTKEY_PRESSED = auto()
-    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/AI Prompt/Casual)
+    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/AI Prompt/Casual/Personal)
     TRANSCRIPTION_DONE = auto()
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()
@@ -1800,7 +1752,7 @@ def socket_listener(event_queue, stop_event, log_callback=None):
                     log("✎ Style toggle received via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, None))
                 elif data_str.startswith("style:"):
-                    # Set specific style (style:professional, style:ai_prompt, style:casual)
+                    # Set specific style (style:professional, style:ai_prompt, style:casual, style:personal)
                     style = data_str.split(":", 1)[1]
                     log(f"✎ Style set to '{style}' via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, style))
@@ -1833,6 +1785,9 @@ def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callbac
         log("⚠️ D-Bus not available for Wayland shortcuts")
         return False
     
+    # Application ID for portal registration (matches desktop file name)
+    app_id = os.environ.get("FLATPAK_ID", "wayfinder-aura")
+    
     try:
         DBusGMainLoop(set_as_default=True)
         bus = dbus.SessionBus()
@@ -1847,12 +1802,15 @@ def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callbac
             "org.freedesktop.portal.GlobalShortcuts"
         )
         
-        # Create session
-        log("🔗 Connecting to GlobalShortcuts portal...")
+        # Create session with proper app identification
+        log(f"🔗 Connecting to GlobalShortcuts portal as '{app_id}'...")
+        
+        # Use app_id-based tokens for proper KDE Global Shortcuts integration
+        session_token = app_id.replace(".", "_").replace("-", "_")
         
         session_options = dbus.Dictionary({
-            "handle_token": dbus.String("wayfinder_voice_session"),
-            "session_handle_token": dbus.String("wayfinder_voice"),
+            "handle_token": dbus.String(f"{session_token}_session"),
+            "session_handle_token": dbus.String(session_token),
         }, signature="sv")
         
         request_path = shortcuts_iface.CreateSession(session_options)
@@ -1863,7 +1821,8 @@ def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callbac
         time.sleep(0.5)
         
         # Try to get the session
-        session_path = f"/org/freedesktop/portal/desktop/session/{os.environ.get('USER', 'user')}/wayfinder_voice"
+        user = os.environ.get('USER', 'user')
+        session_path = f"/org/freedesktop/portal/desktop/session/{user}/{session_token}"
         
         # Bind shortcuts
         shortcuts = dbus.Array([
@@ -1877,7 +1836,7 @@ def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callbac
         ], signature="(sa{sv})")
         
         bind_options = dbus.Dictionary({
-            "handle_token": dbus.String("wayfinder_bind"),
+            "handle_token": dbus.String(f"{session_token}_bind"),
         }, signature="sv")
         
         try:
@@ -1936,9 +1895,6 @@ def get_monitor_refresh_rate() -> int:
     Detect the monitor's refresh rate.
     Returns the refresh rate in Hz, or 60 as fallback.
     """
-    # #region agent log
-    _debug_log("get_monitor_refresh_rate() called", {"hypothesisId": "F-xrandr"})
-    # #endregion
     # Try xrandr first (works on X11 and XWayland)
     try:
         result = subprocess.run(
@@ -2608,7 +2564,7 @@ class OverlayController:
         self._current_state = "hidden"
         self._lock = threading.Lock()
         self._mode = mode  # "persistent" or "standard"
-        self._initial_style = initial_style  # "professional", "ai_prompt", or "casual"
+        self._initial_style = initial_style  # "professional", "ai_prompt", "casual", or "personal"
     
     def _start_process(self) -> bool:
         """Start the overlay subprocess if not already running."""
@@ -2848,28 +2804,17 @@ class OverlayController:
 
 class WayfinderApp(ctk.CTk):
     def __init__(self):
-        # #region agent log
-        _debug_log("WayfinderApp.__init__ starting - calling super().__init__()", {"hypothesisId": "D"})
-        # #endregion
         super().__init__()
-        # #region agent log
-        _debug_log("super().__init__() complete - Tk window created", {"hypothesisId": "D"})
-        # #endregion
         
         # Set WM_CLASS so Linux desktop environments show the correct icon
         # This must match the .desktop file's StartupWMClass
-        self.tk.call('tk', 'appname', 'wayfinder-voice')
+        self.tk.call('tk', 'appname', 'wayfinder-aura')
         
-        # #region agent log
-        _debug_log("Loading config")
-        # #endregion
         self.config = load_config()
         
-        # Load API keys from config into environment (if stored)
-        if self.config.get("anthropic_api_key"):
-            os.environ["ANTHROPIC_API_KEY"] = self.config["anthropic_api_key"]
-        if self.config.get("openai_api_key"):
-            os.environ["OPENAI_API_KEY"] = self.config["openai_api_key"]
+        # Note: API keys are read from environment variables only (ANTHROPIC_API_KEY, OPENAI_API_KEY)
+        # This is more secure than storing keys in config files
+        # Keys can be set in ~/.bashrc, systemd service, or Flatpak configuration
         
         self.app_state = AppState.IDLE
         self.event_queue = queue.Queue()
@@ -2881,9 +2826,6 @@ class WayfinderApp(ctk.CTk):
         # License/feature gate for premium features
         self.feature_gate = get_feature_gate()
         
-        # #region agent log
-        _debug_log("About to resolve audio device", {"hypothesisId": "B"})
-        # #endregion
         # Resolve audio device (intelligent selection if not explicitly set)
         self._resolved_audio_device = resolve_audio_device(self.config)
         
@@ -2894,22 +2836,13 @@ class WayfinderApp(ctk.CTk):
                 self.config["audio_device"] = self._resolved_audio_device
                 save_config(self.config)
         
-        # #region agent log
-        _debug_log("Audio device resolved", {"device": str(self._resolved_audio_device), "hypothesisId": "B"})
-        # #endregion
         
-        # #region agent log
-        _debug_log("About to create AudioRecorder", {"hypothesisId": "B"})
-        # #endregion
         # Standard recorder for short recordings
         self.recorder = AudioRecorder(
             sample_rate=self.config["sample_rate"],
             device=self._resolved_audio_device,
             preprocessing=self.config.get("audio_preprocessing", "light"),
         )
-        # #region agent log
-        _debug_log("AudioRecorder created successfully", {"hypothesisId": "B"})
-        # #endregion
         
         # Chunked recorder for indefinite recording
         self.chunked_recorder: ChunkedRecorder | None = None
@@ -2937,9 +2870,6 @@ class WayfinderApp(ctk.CTk):
         # Dialog tracking to prevent multiple instances
         self._device_settings_dialog: ctk.CTkToplevel | None = None
         
-        # #region agent log
-        _debug_log("About to call setup_window()", {"hypothesisId": "D"})
-        # #endregion
         self.setup_window()
         
         # Create indicator with voice-reactive callback
@@ -2983,9 +2913,6 @@ class WayfinderApp(ctk.CTk):
             self._use_pyqt_overlay = False
             self.log(f"✨ Using Disappearing indicator (CTk)")
         
-        # #region agent log
-        _debug_log("About to create FloatingIndicator", {"hypothesisId": "D"})
-        # #endregion
         # Only create CTk indicator if NOT using PyQt overlay
         if not self._use_pyqt_overlay:
             self.indicator = FloatingIndicator(
@@ -2995,22 +2922,10 @@ class WayfinderApp(ctk.CTk):
             )
         else:
             self.indicator = None
-        # #region agent log
-        _debug_log("FloatingIndicator created - about to setup_tray()", {"hypothesisId": "D"})
-        # #endregion
         self.setup_tray()
-        # #region agent log
-        _debug_log("Tray setup complete - about to setup_ui()")
-        # #endregion
         self.setup_ui()
-        # #region agent log
-        _debug_log("UI setup complete - about to start_hotkey_listener()", {"hypothesisId": "C"})
-        # #endregion
         self.setup_scaling_shortcuts()
         self.start_hotkey_listener()
-        # #region agent log
-        _debug_log("Hotkey listener started - about to poll_events()")
-        # #endregion
         self.poll_events()
         
         # Log animation refresh rate info
@@ -4678,8 +4593,8 @@ class WayfinderApp(ctk.CTk):
         import wave
         import numpy as np
         
-        # Check if API key is configured
-        api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+        # Check if API key is configured (from environment variable only)
+        api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
             self.api_benchmark_status_label.configure(text="❌ OpenAI API key not configured")
             return
@@ -5236,6 +5151,7 @@ class WayfinderApp(ctk.CTk):
             ("professional", "💼", "Professional", "Formal, polished, business-appropriate"),
             ("casual", "💬", "Casual", "Relaxed, conversational, friendly"),
             ("ai_prompt", "🤖", "AI Prompt", "Optimized for speaking with AI assistants"),
+            ("personal", "🎤", "Personal", "Your natural voice, learned from your speech"),
         ]
         
         intensity_levels = [
@@ -5343,6 +5259,10 @@ class WayfinderApp(ctk.CTk):
         # Initial check on tab creation
         self._update_compatibility_banner()
         
+        # === Voice Profile Section (only shown when Personal style is selected) ===
+        if current_tone == "personal":
+            self._build_voice_profile_section(tone_container)
+        
         # === SECTION: Smart Formatting ===
         format_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
@@ -5406,7 +5326,7 @@ class WayfinderApp(ctk.CTk):
         # Description
         ctk.CTkLabel(
             hotkey_content,
-            text="Press this key to cycle through styles (P → T → C).",
+            text="Press this key to cycle through styles (P → T → C → 🎤).",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", pady=(0, 10))
@@ -5466,7 +5386,7 @@ class WayfinderApp(ctk.CTk):
         # Rebuild the style tab to update checkmarks
         self._rebuild_style_tab()
         
-        tone_labels = {"professional": "Professional", "casual": "Casual", "ai_prompt": "AI Prompt"}
+        tone_labels = {"professional": "Professional", "casual": "Casual", "ai_prompt": "AI Prompt", "personal": "Personal"}
         self.log(f"✎ Output tone: {tone_labels.get(tone_id, tone_id)}")
     
     def _on_intensity_changed(self, tone_id: str, intensity_id: str) -> None:
@@ -5492,7 +5412,7 @@ class WayfinderApp(ctk.CTk):
                 )
         
         # Log the change
-        tone_labels = {"professional": "Professional", "casual": "Casual", "ai_prompt": "AI Prompt"}
+        tone_labels = {"professional": "Professional", "casual": "Casual", "ai_prompt": "AI Prompt", "personal": "Personal"}
         intensity_labels = {"light": "Light", "standard": "Standard", "strong": "Strong"}
         self.log(f"✎ {tone_labels.get(tone_id, tone_id)} intensity: {intensity_labels.get(intensity_id, intensity_id)}")
         
@@ -5886,6 +5806,376 @@ class WayfinderApp(ctk.CTk):
         # Update compatibility check
         self._update_compatibility_banner()
     
+    def _build_voice_profile_section(self, parent):
+        """Build voice profile section for the Style tab when Personal is selected."""
+        profile_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"])
+        profile_frame.pack(fill="x", pady=(8, 0))
+        
+        try:
+            from wayfinder.core.voice_profile import get_voice_profile
+            voice_profile = get_voice_profile(
+                history_limit=self.config.get("voice_learning_history_limit", 100),
+                regen_interval=self.config.get("voice_learning_regen_interval", 20),
+            )
+            stats = voice_profile.get_stats()
+        except Exception as e:
+            print(f"[Voice Profile] Error loading stats: {e}")
+            stats = {"history_count": 0, "vocabulary_count": 0, "has_summary": False}
+        
+        history_count = stats.get("history_count", 0)
+        vocab_count = stats.get("vocabulary_count", 0)
+        has_summary = stats.get("has_summary", False)
+        
+        # Info row
+        info_row = ctk.CTkFrame(profile_frame, fg_color="transparent")
+        info_row.pack(fill="x", padx=12, pady=(10, 5))
+        
+        if history_count == 0:
+            ctk.CTkLabel(
+                info_row,
+                text="🎤 Start speaking to build your personal voice profile!",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_muted"],
+            ).pack(side="left")
+        else:
+            status_parts = [f"📚 Learning from {history_count} transcriptions"]
+            if vocab_count > 0:
+                status_parts.append(f"📝 {vocab_count} terms")
+            if has_summary:
+                status_parts.append("✨ Profile ready")
+            
+            ctk.CTkLabel(
+                info_row,
+                text=" • ".join(status_parts),
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["accent"] if has_summary else COLORS["text_muted"],
+            ).pack(side="left")
+        
+        # Action buttons
+        btn_row = ctk.CTkFrame(profile_frame, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(0, 10))
+        
+        ctk.CTkButton(
+            btn_row,
+            text="View Profile",
+            font=(self.font_body[0], 11),
+            height=28,
+            width=90,
+            corner_radius=6,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_card"],
+            text_color=COLORS["text_primary"],
+            command=self.open_voice_profile_dialog,
+        ).pack(side="left", padx=(0, 8))
+        
+        if history_count > 0:
+            ctk.CTkButton(
+                btn_row,
+                text="Clear",
+                font=(self.font_body[0], 11),
+                height=28,
+                width=60,
+                corner_radius=6,
+                fg_color=COLORS["bg_hover"],
+                hover_color="#3A2020",
+                text_color=COLORS["text_muted"],
+                command=self.clear_voice_profile,
+            ).pack(side="left")
+    
+    def _build_voice_profile_status(self, parent):
+        """Build voice profile status display with action buttons."""
+        try:
+            from wayfinder.core.voice_profile import get_voice_profile
+            voice_profile = get_voice_profile(
+                history_limit=self.config.get("voice_learning_history_limit", 100),
+                regen_interval=self.config.get("voice_learning_regen_interval", 20),
+            )
+            stats = voice_profile.get_stats()
+        except Exception as e:
+            print(f"[Voice Profile] Error loading stats: {e}")
+            stats = {"history_count": 0, "vocabulary_count": 0, "has_summary": False}
+        
+        # Status container
+        status_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
+        status_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(8, 0))
+        
+        # Stats row
+        stats_row = ctk.CTkFrame(status_frame, fg_color="transparent")
+        stats_row.pack(fill="x", padx=12, pady=(10, 5))
+        
+        # Learning count
+        history_count = stats.get("history_count", 0)
+        vocab_count = stats.get("vocabulary_count", 0)
+        has_summary = stats.get("has_summary", False)
+        
+        status_text = f"📚 {history_count} transcriptions"
+        if vocab_count > 0:
+            status_text += f" • 📝 {vocab_count} terms learned"
+        if has_summary:
+            status_text += " • ✨ Profile active"
+        
+        ctk.CTkLabel(
+            stats_row,
+            text=status_text,
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left")
+        
+        # Action buttons row
+        btn_row = ctk.CTkFrame(status_frame, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(5, 10))
+        
+        # View Profile button
+        ctk.CTkButton(
+            btn_row,
+            text="View Profile",
+            font=(self.font_body[0], 11),
+            height=28,
+            width=90,
+            corner_radius=6,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_primary"],
+            command=self.open_voice_profile_dialog,
+        ).pack(side="left", padx=(0, 8))
+        
+        # Clear Data button
+        ctk.CTkButton(
+            btn_row,
+            text="Clear Data",
+            font=(self.font_body[0], 11),
+            height=28,
+            width=80,
+            corner_radius=6,
+            fg_color=COLORS["bg_hover"],
+            hover_color="#3A2020",  # Reddish hover
+            text_color=COLORS["text_muted"],
+            command=self.clear_voice_profile,
+        ).pack(side="left")
+    
+    def open_voice_profile_dialog(self):
+        """Open dialog to view and edit voice profile."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Voice Profile")
+        dialog.geometry("550x600")
+        dialog.configure(fg_color=COLORS["bg_base"])
+        dialog.transient(self)
+        dialog.after(100, dialog.lift)
+        
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(
+            inner,
+            text="Voice Profile",
+            font=(self.font_header[0], 22, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ctk.CTkLabel(
+            inner,
+            text="Your personal voice profile, learned from transcriptions.",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w", pady=(0, 20))
+        
+        # Load profile data
+        try:
+            from wayfinder.core.voice_profile import get_voice_profile
+            voice_profile = get_voice_profile()
+            stats = voice_profile.get_stats()
+        except Exception as e:
+            ctk.CTkLabel(
+                inner,
+                text=f"Error loading profile: {e}",
+                font=(self.font_body[0], 12),
+                text_color="#CF7B7B",
+            ).pack(anchor="w")
+            return
+        
+        # Stats section
+        stats_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_input"], corner_radius=10)
+        stats_frame.pack(fill="x", pady=(0, 15))
+        
+        history_count = stats.get("history_count", 0)
+        vocab_count = stats.get("vocabulary_count", 0)
+        total_words = stats.get("total_words", 0)
+        
+        ctk.CTkLabel(
+            stats_frame,
+            text=f"📊 Statistics: {history_count} transcriptions • {total_words:,} words • {vocab_count} unique terms",
+            font=(self.font_body[0], 12),
+            text_color=COLORS["text_primary"],
+        ).pack(padx=15, pady=12)
+        
+        # Profile Summary section
+        ctk.CTkLabel(
+            inner,
+            text="Profile Summary",
+            font=(self.font_body[0], 13, "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(10, 5))
+        
+        summary = stats.get("summary", "")
+        summary_text = ctk.CTkTextbox(
+            inner,
+            font=(self.font_body[0], 12),
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["text_primary"],
+            corner_radius=10,
+            height=100,
+            wrap="word",
+        )
+        summary_text.pack(fill="x", pady=(0, 5))
+        if summary:
+            summary_text.insert("1.0", summary)
+        else:
+            summary_text.insert("1.0", "(No profile summary yet — keep talking to build one!)")
+            summary_text.configure(text_color=COLORS["text_muted"])
+        
+        # Learned Vocabulary section
+        ctk.CTkLabel(
+            inner,
+            text="Learned Vocabulary",
+            font=(self.font_body[0], 13, "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(15, 5))
+        
+        vocabulary = stats.get("vocabulary", [])
+        vocab_display = ", ".join(vocabulary[:30]) if vocabulary else "(No vocabulary learned yet)"
+        
+        vocab_label = ctk.CTkLabel(
+            inner,
+            text=vocab_display,
+            font=(self.font_body[0], 11),
+            text_color=COLORS["accent"] if vocabulary else COLORS["text_muted"],
+            wraplength=490,
+            justify="left",
+        )
+        vocab_label.pack(anchor="w", pady=(0, 15))
+        
+        # Buttons
+        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=(10, 0))
+        
+        def save_summary():
+            new_summary = summary_text.get("1.0", "end").strip()
+            try:
+                voice_profile.set_summary(new_summary)
+                self.log("✓ Voice profile summary saved")
+                dialog.destroy()
+            except Exception as e:
+                self.log(f"⚠ Error saving profile: {e}")
+        
+        def regenerate_profile():
+            if not self.config.get("post_processing_enabled", False):
+                self.log("⚠ Enable Post-Processing to regenerate profile")
+                return
+            
+            llm_callback = self._get_llm_callback_for_voice_learning()
+            if voice_profile.regenerate_profile(llm_callback):
+                self.log("🔄 Regenerating voice profile...")
+                dialog.destroy()
+            else:
+                self.log("⚠ Profile regeneration already in progress or not enough data")
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="Save Changes",
+            font=(self.font_body[0], 13, "bold"),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            command=save_summary,
+        ).pack(side="left", padx=(0, 10))
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="Regenerate Profile",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_primary"],
+            command=regenerate_profile,
+        ).pack(side="left", padx=(0, 10))
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="Close",
+            font=(self.font_body[0], 13),
+            height=40,
+            corner_radius=10,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=dialog.destroy,
+        ).pack(side="left")
+    
+    def clear_voice_profile(self):
+        """Clear all voice profile data after confirmation."""
+        # Simple confirmation via a popup
+        confirm_dialog = ctk.CTkToplevel(self)
+        confirm_dialog.title("Clear Voice Profile")
+        confirm_dialog.geometry("350x150")
+        confirm_dialog.configure(fg_color=COLORS["bg_base"])
+        confirm_dialog.transient(self)
+        confirm_dialog.after(100, confirm_dialog.lift)
+        
+        ctk.CTkLabel(
+            confirm_dialog,
+            text="Clear all voice learning data?\n\nThis cannot be undone.",
+            font=(self.font_body[0], 13),
+            text_color=COLORS["text_primary"],
+            justify="center",
+        ).pack(pady=20)
+        
+        btn_frame = ctk.CTkFrame(confirm_dialog, fg_color="transparent")
+        btn_frame.pack(pady=10)
+        
+        def do_clear():
+            try:
+                from wayfinder.core.voice_profile import get_voice_profile
+                voice_profile = get_voice_profile()
+                voice_profile.clear()
+                self.log("🗑️ Voice profile data cleared")
+                confirm_dialog.destroy()
+                # Rebuild settings to update status
+                current_mode = self.config.get("processing_mode", "local")
+                self._build_mode_settings(current_mode)
+            except Exception as e:
+                self.log(f"⚠ Error clearing profile: {e}")
+                confirm_dialog.destroy()
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="Clear Data",
+            font=(self.font_body[0], 13, "bold"),
+            height=36,
+            width=100,
+            corner_radius=8,
+            fg_color="#8B3030",
+            hover_color="#A03030",
+            text_color="#FFFFFF",
+            command=do_clear,
+        ).pack(side="left", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="Cancel",
+            font=(self.font_body[0], 13),
+            height=36,
+            width=80,
+            corner_radius=8,
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=confirm_dialog.destroy,
+        ).pack(side="left", padx=10)
+    
     def on_postproc_backend_changed(self, value: str):
         """Handle post-processing backend change."""
         self.config["post_processing_backend"] = value
@@ -5931,7 +6221,7 @@ class WayfinderApp(ctk.CTk):
     
     def _build_llamacpp_inline_section(self, parent) -> None:
         """Build inline llama.cpp model selection with download."""
-        models_dir = Path.home() / ".local" / "share" / "wayfinder-voice" / "llm-models"
+        models_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
         models_dir.mkdir(parents=True, exist_ok=True)
         
         current_model_path = self.config.get("llama_cpp_model_path", "")
@@ -5994,7 +6284,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         info_icon.pack(side="left", padx=(6, 0))
-        llamacpp_tooltip = "GGUF models run locally via llama.cpp.\nModels are downloaded to ~/.local/share/wayfinder-voice/llm-models/\nGPU acceleration is automatic on Linux with CUDA/ROCm."
+        llamacpp_tooltip = "GGUF models run locally via llama.cpp.\nModels are downloaded to ~/.local/share/wayfinder-aura/llm-models/\nGPU acceleration is automatic on Linux with CUDA/ROCm."
         ToolTip(label_widget, llamacpp_tooltip)
         ToolTip(info_icon, llamacpp_tooltip)
         
@@ -6622,7 +6912,7 @@ class WayfinderApp(ctk.CTk):
         
         model_id = data["id"]
         model_info = data["info"]
-        models_dir = Path.home() / ".local" / "share" / "wayfinder-voice" / "llm-models"
+        models_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
         models_dir.mkdir(parents=True, exist_ok=True)
         
         self._inline_download_active = True
@@ -7145,7 +7435,7 @@ class WayfinderApp(ctk.CTk):
     def _download_selected_ollama_model(self) -> None:
         """Download the currently selected Ollama model."""
         import traceback
-        log_file = Path.home() / ".local" / "share" / "wayfinder-voice" / "debug.log"
+        log_file = Path.home() / ".local" / "share" / "wayfinder-aura" / "debug.log"
         
         def debug_log(msg):
             try:
@@ -7464,7 +7754,7 @@ class WayfinderApp(ctk.CTk):
         ).pack(anchor="w", pady=(0, 16))
         
         # Models directory
-        models_dir = Path.home() / ".local" / "share" / "wayfinder-voice" / "llm-models"
+        models_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
         models_dir.mkdir(parents=True, exist_ok=True)
         
         # Content container
@@ -8371,19 +8661,19 @@ class WayfinderApp(ctk.CTk):
             model_name = self.config.get("ollama_model", "phi3:mini")
             return model_name[:25] + "..." if len(model_name) > 25 else model_name
         elif backend == "anthropic":
-            # Check config first, then environment variable
-            api_key = self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+            # API keys are read from environment variables only for security
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
             model = self.config.get("anthropic_model", "claude-3-haiku-20240307")
             if api_key:
                 return f"{model.split('-')[1].title()}: ✓ Key set"
-            return "⚠ API key not set"
+            return "⚠ Set ANTHROPIC_API_KEY env var"
         elif backend == "openai":
-            # Check config first, then environment variable
-            api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+            # API keys are read from environment variables only for security
+            api_key = os.environ.get("OPENAI_API_KEY", "")
             model = self.config.get("openai_model", "gpt-4o-mini")
             if api_key:
                 return f"{model}: ✓ Key set"
-            return "⚠ API key not set"
+            return "⚠ Set OPENAI_API_KEY env var"
         return "Not configured"
     
     def open_postproc_settings(self):
@@ -8486,10 +8776,11 @@ class WayfinderApp(ctk.CTk):
         settings_container.pack(fill="both", expand=True)
         
         # Variables to store form data (persist across provider switches)
+        # Note: API keys are read from environment variables only for security
         form_data = {
-            "openai_key": ctk.StringVar(value=self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")),
+            "openai_key": ctk.StringVar(value=os.environ.get("OPENAI_API_KEY", "")),
             "openai_model": ctk.StringVar(value=self.config.get("openai_model", "gpt-4o-mini")),
-            "anthropic_key": ctk.StringVar(value=self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")),
+            "anthropic_key": ctk.StringVar(value=os.environ.get("ANTHROPIC_API_KEY", "")),
             "anthropic_model": ctk.StringVar(value=self.config.get("anthropic_model", "claude-3-haiku-20240307")),
         }
         
@@ -8674,14 +8965,14 @@ class WayfinderApp(ctk.CTk):
             # Save OpenAI settings
             openai_key = form_data["openai_key"].get().strip()
             if openai_key:
-                self.config["openai_api_key"] = openai_key
+                # Set for current session only - not stored in config for security
                 os.environ["OPENAI_API_KEY"] = openai_key
             self.config["openai_model"] = form_data["openai_model"].get()
             
             # Save Anthropic settings
             anthropic_key = form_data["anthropic_key"].get().strip()
             if anthropic_key:
-                self.config["anthropic_api_key"] = anthropic_key
+                # Set for current session only - not stored in config for security
                 os.environ["ANTHROPIC_API_KEY"] = anthropic_key
             self.config["anthropic_model"] = form_data["anthropic_model"].get()
             
@@ -10304,7 +10595,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             inner,
-            text="Press this key to cycle through styles:\nProfessional → AI Prompt → Casual",
+            text="Press this key to cycle through styles:\nProfessional → AI Prompt → Casual → Personal",
             font=(self.font_body[0], 12),
             text_color=COLORS["text_secondary"],
             justify="left",
@@ -11956,9 +12247,6 @@ class WayfinderApp(ctk.CTk):
     def create_model_setter(self, model_name: str):
         """Create a callback function for setting a specific model from tray menu."""
         def setter(icon=None, item=None):
-            # #region agent log
-            _debug_log("create_model_setter callback called from pystray thread", {"model": model_name, "hypothesisId": "G-threading"})
-            # #endregion
             # Schedule on main thread - pystray callbacks run on a different thread
             # and Tk is NOT thread-safe
             self.after(0, lambda: self._apply_model_from_tray(model_name))
@@ -11966,9 +12254,6 @@ class WayfinderApp(ctk.CTk):
     
     def _apply_model_from_tray(self, model_name: str):
         """Apply model selection from tray menu - runs on main Tk thread."""
-        # #region agent log
-        _debug_log("_apply_model_from_tray on main thread", {"model": model_name, "hypothesisId": "G-threading"})
-        # #endregion
         models_dir = Path.home() / "whisper.cpp" / "models"
         model_path = models_dir / f"ggml-{model_name}.bin"
         
@@ -12016,17 +12301,12 @@ class WayfinderApp(ctk.CTk):
         icon_image = self.get_tray_icon(AppState.IDLE)
         self.tray_icon = pystray.Icon("wayfinder-aura", icon_image, "Wayfinder Aura", menu)
         
-        # #region agent log
         def _tray_thread_wrapper():
-            _debug_log("Tray thread starting", {"hypothesisId": "F-tray"})
             try:
                 self.tray_icon.run()
             except Exception as e:
-                _debug_log("Tray thread exception", {"error": str(e), "hypothesisId": "F-tray"})
                 raise
-            _debug_log("Tray thread exited normally", {"hypothesisId": "F-tray"})
         threading.Thread(target=_tray_thread_wrapper, daemon=True).start()
-        # #endregion
 
     def get_tray_icon(self, state: AppState, pulse_scale: float = 1.0) -> Image.Image:
         """Create a navigation arrow tray icon.
@@ -12102,9 +12382,6 @@ class WayfinderApp(ctk.CTk):
         return icon
 
     def update_tray(self, state: AppState):
-        # #region agent log
-        _debug_log("update_tray called", {"state": state.name, "hypothesisId": "G-threading"})
-        # #endregion
         if self.tray_icon:
             # Create icon image first (this is thread-safe)
             new_icon = self.get_tray_icon(state)
@@ -12114,9 +12391,6 @@ class WayfinderApp(ctk.CTk):
                 self.tray_icon.icon = new_icon
                 self.tray_icon.title = new_title
             except Exception as e:
-                # #region agent log
-                _debug_log("update_tray exception", {"error": str(e), "hypothesisId": "G-threading"})
-                # #endregion
                 pass
         
         # Start/stop tray pulse animation based on state
@@ -12470,21 +12744,19 @@ class WayfinderApp(ctk.CTk):
         is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
         
         if is_wayland:
-            self.log("🖥️ Wayland detected")
-            self.log("💡 Configure shortcut in System Settings → Shortcuts → Applications → Wayfinder Aura")
+            self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
         else:
             self.log("🖥️ X11 detected - using evdev")
-            threading.Thread(
-                target=hotkey_listener,
-                args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log,
-                      style_toggle_key, style_toggle_modifiers),
-                daemon=True,
-            ).start()
+        
+        # Use evdev on both X11 and Wayland (works if user is in 'input' group)
+        threading.Thread(
+            target=hotkey_listener,
+            args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log,
+                  style_toggle_key, style_toggle_modifiers),
+            daemon=True,
+        ).start()
 
     def poll_events(self):
-        # #region agent log
-        _debug_log("poll_events() called", {"hypothesisId": "F-runtime"})
-        # #endregion
         try:
             while True:
                 event_type, data = self.event_queue.get_nowait()
@@ -12527,9 +12799,9 @@ class WayfinderApp(ctk.CTk):
         Args:
             target_style: If None, cycle to next style. Otherwise set to specified style.
         """
-        # Style cycle order
-        STYLE_CYCLE = ["professional", "ai_prompt", "casual"]
-        STYLE_NAMES = {"professional": "Professional", "ai_prompt": "AI Prompt", "casual": "Casual"}
+        # Style cycle order (Personal learns from your speech patterns)
+        STYLE_CYCLE = ["professional", "ai_prompt", "casual", "personal"]
+        STYLE_NAMES = {"professional": "Professional", "ai_prompt": "AI Prompt", "casual": "Casual", "personal": "Personal"}
         
         if target_style and target_style in STYLE_CYCLE:
             # Set specific style
@@ -12881,6 +13153,10 @@ class WayfinderApp(ctk.CTk):
             self.on_error("No speech detected")
             return
         
+        # Add to voice learning history when "Personal" style is active
+        if self.config.get("output_tone") == "personal":
+            self._add_to_voice_learning(text.strip())
+        
         # Apply post-processing if enabled
         processed_text = text.strip()
         if self.config.get("post_processing_enabled", False):
@@ -12941,6 +13217,42 @@ class WayfinderApp(ctk.CTk):
             self.indicator.hide()
         self.update_state(AppState.IDLE)
 
+    def _add_to_voice_learning(self, text: str):
+        """Add transcription to voice learning history."""
+        try:
+            from wayfinder.core.voice_profile import get_voice_profile
+            
+            voice_profile = get_voice_profile(
+                history_limit=self.config.get("voice_learning_history_limit", 100),
+                regen_interval=self.config.get("voice_learning_regen_interval", 20),
+            )
+            
+            # Create LLM callback for profile regeneration (uses post-processing backend)
+            llm_callback = None
+            if self.config.get("post_processing_enabled", False):
+                llm_callback = self._get_llm_callback_for_voice_learning()
+            
+            voice_profile.add_transcription(text, llm_callback=llm_callback)
+            
+        except Exception as e:
+            print(f"[Voice Learning] ⚠ Error: {e}")
+    
+    def _get_llm_callback_for_voice_learning(self):
+        """Create an LLM callback for voice profile regeneration."""
+        def call_llm(prompt: str) -> str:
+            try:
+                from wayfinder.core.postprocessor import get_backend
+                backend = get_backend(self.config)
+                if backend.is_available():
+                    # Use backend's process method with our custom prompt
+                    # The prompt is already complete, just need to run it through
+                    return backend.process("", prompt)
+                return ""
+            except Exception as e:
+                print(f"[Voice Learning] LLM call failed: {e}")
+                return ""
+        return call_llm
+
 
 def _check_single_instance() -> bool:
     """Check if another instance is already running using a lock file.
@@ -12970,7 +13282,7 @@ def _check_single_instance() -> bool:
                             cmdline = cmdline_path.read_text()
                             if "wayfinder" in cmdline.lower():
                                 # Another instance is running
-                                print(f"⚠️ Wayfinder Voice is already running (PID {stored_pid})")
+                                print(f"⚠️ Wayfinder Aura is already running (PID {stored_pid})")
                                 return False
                     except (OSError, ProcessLookupError):
                         # Process doesn't exist, we can take over
@@ -12989,9 +13301,6 @@ def _check_single_instance() -> bool:
 
 
 def main():
-    # #region agent log
-    _debug_log("main() called - about to create WayfinderApp", {"hypothesisId": "D"})
-    # #endregion
     
     # === SINGLE INSTANCE CHECK ===
     if not _check_single_instance():
@@ -13056,7 +13365,6 @@ def main():
     
     def signal_handler(signum, frame):
         """Handle SIGTERM/SIGINT for graceful shutdown."""
-        _debug_log(f"Signal {signum} received - cleaning up")
         cleanup_all()
         os._exit(0)
     
@@ -13070,23 +13378,13 @@ def main():
     try:
         app = WayfinderApp()
         
-        # #region agent log
-        _debug_log("WayfinderApp created successfully - starting mainloop", {"hypothesisId": "D"})
-        # #endregion
         app.mainloop()
     except KeyboardInterrupt:
-        _debug_log("KeyboardInterrupt caught")
         cleanup_all()
     except Exception as e:
-        # #region agent log
-        _debug_log("Exception in main()", {"error": str(e), "type": type(e).__name__})
-        # #endregion
         cleanup_all()
         raise
 
 
 if __name__ == "__main__":
-    # #region agent log
-    _debug_log("__main__ block executing")
-    # #endregion
     main()

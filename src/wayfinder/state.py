@@ -1,5 +1,5 @@
 """
-State machine for Wayfinder Voice.
+State machine for Wayfinder Aura.
 
 Defines application states and transitions for the recording workflow.
 """

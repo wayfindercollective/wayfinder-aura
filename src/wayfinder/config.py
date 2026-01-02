@@ -1,5 +1,5 @@
 """
-Configuration management for Wayfinder Voice.
+Configuration management for Wayfinder Aura.
 
 Handles loading, saving, and defaults for all application settings.
 """
@@ -13,7 +13,7 @@ from typing import Any
 IS_FLATPAK = os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
 
 # Configuration paths
-CONFIG_DIR = Path.home() / ".config" / "wayfinder-voice"
+CONFIG_DIR = Path.home() / ".config" / "wayfinder-aura"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # Get the package directory (for assets, etc.)
@@ -21,11 +21,11 @@ PACKAGE_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = PACKAGE_DIR.parent.parent  # src/wayfinder -> project root
 
 # Socket path for IPC
-SOCKET_PATH = "/tmp/wayfinder-voice.sock"
+SOCKET_PATH = "/tmp/wayfinder-aura.sock"
 
 # Handle icon path for Flatpak vs regular install
 if IS_FLATPAK:
-    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.user.WayfinderVoice')}.png"
+    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.user.WayfinderAura')}.png"
     if not ICON_PATH.exists():
         ICON_PATH = PROJECT_ROOT / "assets" / "icon.png"
 else:
@@ -50,7 +50,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
     "hotkey_modifiers": [],
     
-    # Style toggle hotkey (cycles Professional → AI Prompt → Casual)
+    # Style toggle hotkey (cycles Professional → AI Prompt → Casual → Personal)
     "style_toggle_key": 68,  # F10 default
     "style_toggle_modifiers": [],
     
@@ -88,6 +88,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "custom_vocabulary": [],  # User's personal terms appended to prompt
     "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
     
+    # Voice profile learning (auto-enabled when output_tone is "personal")
+    "voice_learning_history_limit": 100,  # Max transcriptions to keep in learning history
+    "voice_learning_regen_interval": 20,  # Regenerate profile summary every N transcriptions
+    
     # Chunked recording settings
     "chunked_mode": True,  # Enable chunked processing for long recordings
     "chunk_duration": 15,  # Seconds per chunk (shorter = faster feedback)
@@ -110,13 +114,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     
     # Style settings (unified tone for transcription and post-processing)
-    "output_tone": "professional",  # professional | casual | ai_prompt
+    "output_tone": "professional",  # professional | casual | ai_prompt | personal
     "smart_formatting": True,  # Auto-detect and format content (email, lists, code, etc.)
     
     # Per-style intensity settings (each style remembers its own intensity)
     "professional_intensity": "standard",  # light | standard | strong
     "ai_prompt_intensity": "standard",     # light | standard | strong
     "casual_intensity": "standard",        # light | standard | strong
+    "personal_intensity": "standard",      # light | standard | strong (learns from your speech)
     
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": False,  # Enable LLM post-processing

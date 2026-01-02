@@ -1,5 +1,5 @@
 """
-Wayfinder Voice - Main Application Module
+Wayfinder Aura - Main Application Module
 
 This module will eventually contain the core WayfinderApp class.
 Currently serves as a bridge to the legacy main.py during migration.
@@ -84,6 +84,8 @@ from .core import (
     InjectionError,
     process_with_config,
     get_ollama_manager,
+    VoiceProfile,
+    get_voice_profile,
 )
 
 __all__ = [
@@ -143,6 +145,9 @@ __all__ = [
     "InjectionError",
     "process_with_config",
     "get_ollama_manager",
+    # Voice Profile
+    "VoiceProfile",
+    "get_voice_profile",
 ]
 
 

@@ -1,14 +1,14 @@
-# Wayfinder Voice - Development Guide
+# Wayfinder Aura - Development Guide
 
 ## Project Overview
 
-Wayfinder Voice is a local voice dictation app for Linux. It uses whisper.cpp for speech-to-text and injects the transcribed text at the cursor position.
+Wayfinder Aura is a local voice dictation app for Linux. It uses whisper.cpp for speech-to-text and injects the transcribed text at the cursor position.
 
 ## Development Setup
 
 ```bash
 # Clone/navigate to project
-cd ~/Dev/wayfinder-voice
+cd ~/Dev/wayfinder-aura
 
 # Install dependencies
 pip install -r requirements.txt
@@ -25,7 +25,7 @@ PYTHONPATH=src python -m wayfinder
 The project is organized as a Python package for better maintainability:
 
 ```
-wayfinder-voice/
+wayfinder-aura/
 ├── src/wayfinder/          # Main package (modular, agent-friendly)
 │   ├── __init__.py         # Package init
 │   ├── __main__.py         # Entry point for python -m wayfinder
@@ -59,7 +59,7 @@ wayfinder-voice/
 ├── flatpak/                # Flatpak packaging
 ├── pyproject.toml          # Modern Python packaging
 ├── requirements.txt        # Dependencies
-└── wayfinder-voice.spec    # PyInstaller spec
+└── wayfinder-aura.spec    # PyInstaller spec
 ```
 
 ## Key Modules
@@ -135,7 +135,7 @@ Events flow through `event_queue` and are processed by `poll_events()`.
 Three methods (used based on environment):
 
 1. **evdev** (X11): Monitors /dev/input devices
-2. **Socket** (Wayland): Listens on `/tmp/wayfinder-voice.sock`
+2. **Socket** (Wayland): Listens on `/tmp/wayfinder-aura.sock`
 3. **D-Bus** (Wayland): XDG GlobalShortcuts portal (experimental)
 
 ## Testing Changes
@@ -152,18 +152,18 @@ python -c "from recorder import AudioRecorder; r = AudioRecorder(); print('OK')"
 
 ```bash
 # Copy changed files to install location
-cp ~/Dev/wayfinder-voice/*.py ~/.local/opt/wayfinder-voice/
+cp ~/Dev/wayfinder-aura/*.py ~/.local/opt/wayfinder-aura/
 
 # Restart the app
-pkill -f "opt/wayfinder-voice"
-~/.local/opt/wayfinder-voice/launch-wayfinder-voice.sh &
+pkill -f "opt/wayfinder-aura"
+~/.local/opt/wayfinder-aura/launch-wayfinder-aura.sh &
 ```
 
 ## Building Executable
 
 ```bash
 ./build.sh
-# Creates: dist/wayfinder-voice
+# Creates: dist/wayfinder-aura
 
 # Note: flexiblas issues on Fedora - use Python launcher instead
 ```
@@ -183,7 +183,7 @@ Wayland blocks direct input monitoring. Use:
 
 ## GPU Acceleration
 
-Wayfinder Voice supports GPU acceleration for faster transcription. Two backends are available:
+Wayfinder Aura supports GPU acceleration for faster transcription. Two backends are available:
 
 ### Option 1: whisper.cpp with Vulkan (Recommended for AMD)
 
@@ -204,7 +204,7 @@ cmake --build build --config Release -j$(nproc)
 # Should show -ngl flag
 ```
 
-After rebuilding, enable GPU in Wayfinder Voice settings:
+After rebuilding, enable GPU in Wayfinder Aura settings:
 1. Open Settings → Advanced → GPU Acceleration
 2. Enable "GPU Acceleration"
 3. GPU Layers: "Auto (all)" for maximum speed
@@ -224,7 +224,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install faster-whisper
 ```
 
-Configure in Wayfinder Voice:
+Configure in Wayfinder Aura:
 1. Open Settings → Advanced → GPU Acceleration
 2. Set Backend to "Faster-Whisper"
 3. Enable "GPU Acceleration"

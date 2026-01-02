@@ -1,4 +1,4 @@
-# Wayfinder Voice - Python Dependencies
+# Wayfinder Aura - Python Dependencies
 # Install with: pip install -r requirements.txt
 
 # UI Framework

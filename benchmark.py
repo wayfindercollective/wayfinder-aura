@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive Benchmark Suite for Wayfinder Voice
+Comprehensive Benchmark Suite for Wayfinder Aura
 
 Tests all aspects of the transcription and post-processing pipeline:
 - Transcription backends (whisper.cpp, Faster-Whisper)
@@ -1137,7 +1137,7 @@ def main():
     signal.signal(signal.SIGTERM, cleanup_and_exit)
     
     parser = argparse.ArgumentParser(
-        description="Comprehensive benchmark suite for Wayfinder Voice"
+        description="Comprehensive benchmark suite for Wayfinder Aura"
     )
     parser.add_argument("--quick", action="store_true", 
                         help="Quick test (minimal config)")

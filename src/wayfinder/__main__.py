@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Wayfinder Voice - Entry point for `python -m wayfinder`
+Wayfinder Aura - Entry point for `python -m wayfinder`
 
-This module allows running Wayfinder Voice as a package:
+This module allows running Wayfinder Aura as a package:
     python -m wayfinder
     
 Or via the console script after pip install:
-    wayfinder-voice
+    wayfinder-aura
 """
 
 import sys
@@ -15,7 +15,7 @@ import os
 
 def main():
     """
-    Main entry point for Wayfinder Voice.
+    Main entry point for Wayfinder Aura.
     
     Currently delegates to wayfinder_main.py during the migration period.
     As more functionality is extracted to the wayfinder package, this will

@@ -1,5 +1,5 @@
 """
-UI components for Wayfinder Voice.
+UI components for Wayfinder Aura.
 
 - theme: Colors, fonts, and styling constants
 - components: Reusable CustomTkinter widgets

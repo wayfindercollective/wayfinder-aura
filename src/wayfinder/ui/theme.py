@@ -1,5 +1,5 @@
 """
-Premium Design System for Wayfinder Voice (2025).
+Premium Design System for Wayfinder Aura (2025).
 
 Contains all colors, typography, spacing, and styling constants.
 Pre-blended colors for depth simulation (Tkinter doesn't support alpha).

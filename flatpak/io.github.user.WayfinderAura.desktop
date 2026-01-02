@@ -1,0 +1,24 @@
+[Desktop Entry]
+Type=Application
+Name=Wayfinder Aura
+GenericName=Voice Dictation
+Comment=Local voice dictation using whisper.cpp - speak and your words are typed
+Exec=wayfinder-aura
+Icon=io.github.user.WayfinderAura
+Terminal=false
+Categories=Utility;Audio;Accessibility;
+Keywords=voice;dictation;speech;whisper;transcription;speech-to-text;
+StartupNotify=true
+StartupWMClass=wayfinder-aura
+Actions=toggle-recording;cycle-style;
+
+[Desktop Action toggle-recording]
+Name=Toggle Recording
+Exec=wayfinder-aura --toggle
+Icon=io.github.user.WayfinderAura
+
+[Desktop Action cycle-style]
+Name=Cycle Output Style
+Exec=wayfinder-aura --cycle-style
+Icon=io.github.user.WayfinderAura
+

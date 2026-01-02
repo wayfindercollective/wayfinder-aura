@@ -4,40 +4,26 @@ This document tracks the migration from the monolithic `wayfinder_main.py` to th
 
 ## Current Status
 
-The package structure is in place and all modules are functional. However, `wayfinder_main.py` still imports from the root-level files for backwards compatibility.
+**Phase 1 Complete**: The package structure is fully in place. Root-level Python files are now thin
+re-export shims that import from the package. This allows `wayfinder_main.py` to continue working
+with its existing imports while the canonical source of truth is in `src/wayfinder/`.
 
-## Root Files (Legacy - Keep for Now)
+## Root Files (Shims)
 
-These files are still imported by `wayfinder_main.py` and must remain in the root:
+These files now re-export from the package for backward compatibility with `wayfinder_main.py`:
 
-| File | Status | Package Location |
-|------|--------|------------------|
-| `recorder.py` | Duplicated | `src/wayfinder/core/recorder.py` |
-| `transcriber.py` | Duplicated | `src/wayfinder/core/transcriber.py` |
-| `injector.py` | Duplicated | `src/wayfinder/core/injector.py` |
-| `postprocessor.py` | Duplicated | `src/wayfinder/core/postprocessor.py` |
-| `ollama_manager.py` | Duplicated | `src/wayfinder/core/ollama_manager.py` |
-| `license.py` | Duplicated | `src/wayfinder/license.py` |
-| `status_overlay.py` | Duplicated | `src/wayfinder/ui/overlay.py` |
+| File | Type | Package Location |
+|------|------|------------------|
+| `recorder.py` | Shim | `src/wayfinder/core/recorder.py` |
+| `transcriber.py` | Shim | `src/wayfinder/core/transcriber.py` |
+| `injector.py` | Shim | `src/wayfinder/core/injector.py` |
+| `postprocessor.py` | Shim | `src/wayfinder/core/postprocessor.py` |
+| `ollama_manager.py` | Shim | `src/wayfinder/core/ollama_manager.py` |
+| `license.py` | Shim | `src/wayfinder/license.py` |
+| `status_overlay.py` | Original | `src/wayfinder/ui/overlay.py` |
 | `wayfinder_main.py` | Legacy main | To be broken into modules |
 
-## To Complete the Migration
-
-### Phase 1: Update wayfinder_main.py Imports (Safe)
-
-Change imports in `wayfinder_main.py` from:
-```python
-from recorder import AudioRecorder
-from transcriber import transcribe_with_config
-```
-
-To:
-```python
-from wayfinder.core import AudioRecorder
-from wayfinder.core import transcribe_with_config
-```
-
-After this, the root-level core files can be deleted.
+## Remaining Migration Tasks
 
 ### Phase 2: Extract Dialogs from wayfinder_main.py
 

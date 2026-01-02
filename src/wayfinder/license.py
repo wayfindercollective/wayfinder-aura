@@ -1,5 +1,5 @@
 """
-Wayfinder Voice - License Management System
+Wayfinder Aura - License Management System
 
 Offline-first license validation for premium features.
 No phone home, no tracking, privacy-respecting.
@@ -23,9 +23,47 @@ from typing import Optional
 # Characters that aren't confusing (no 0/O, 1/I/L, etc.)
 LICENSE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 
-# This should be kept SECRET in your actual release
-# Generate a new one with: secrets.token_hex(32)
-LICENSE_SECRET = "YOUR_SECRET_KEY_CHANGE_THIS_IN_PRODUCTION_abc123"
+
+def _get_license_secret() -> str:
+    """
+    Get the license signing secret from environment variable.
+    
+    SECURITY: The license secret MUST be set via WAYFINDER_LICENSE_SECRET environment
+    variable in production. For development/testing, a deterministic fallback is used.
+    
+    For production deployment:
+    1. Generate a secret: python -c "import secrets; print(secrets.token_hex(32))"
+    2. Set environment variable: export WAYFINDER_LICENSE_SECRET="your_64_char_hex_secret"
+    3. For Flatpak/systemd: add to environment configuration
+    
+    Returns:
+        The license secret string (64 hex characters recommended)
+    """
+    import os
+    import warnings
+    
+    secret = os.environ.get("WAYFINDER_LICENSE_SECRET")
+    
+    if secret:
+        return secret
+    
+    # Development fallback - generates deterministic secret from machine ID
+    # This allows testing without setting env var, but is NOT secure for production
+    warnings.warn(
+        "WAYFINDER_LICENSE_SECRET not set. Using development fallback. "
+        "Set WAYFINDER_LICENSE_SECRET environment variable for production.",
+        RuntimeWarning,
+        stacklevel=2
+    )
+    
+    # Generate a deterministic but unique-per-machine development secret
+    # This is NOT cryptographically secure but allows local testing
+    machine_data = f"{platform.node()}:{platform.machine()}:wayfinder-dev-secret"
+    return hashlib.sha256(machine_data.encode()).hexdigest()
+
+
+# License secret - loaded from environment for security
+LICENSE_SECRET = _get_license_secret()
 
 
 @dataclass
@@ -225,7 +263,7 @@ def validate_license_key(key: str, machine_id: Optional[str] = None) -> LicenseI
 
 def get_license_path() -> Path:
     """Get path to license storage file."""
-    config_dir = Path.home() / ".config" / "wayfinder-voice"
+    config_dir = Path.home() / ".config" / "wayfinder-aura"
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir / "license.json"
 

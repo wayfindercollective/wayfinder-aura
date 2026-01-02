@@ -1,5 +1,5 @@
 """
-Hotkey detection modules for Wayfinder Voice.
+Hotkey detection modules for Wayfinder Aura.
 
 Supports multiple detection methods:
 - evdev: Direct input device monitoring (X11)

@@ -1,8 +1,8 @@
-# Wayfinder Voice - Website Copy Brief
+# Wayfinder Aura - Website Copy Brief
 
 ## Product Summary
 
-**Wayfinder Voice** is a premium, local-first voice dictation application for Linux that transforms spoken words into typed text anywhere on your screen. Unlike cloud-based alternatives, everything runs locally on your machine using state-of-the-art AI models.
+**Wayfinder Aura** is a premium, local-first voice dictation application for Linux that transforms spoken words into typed text anywhere on your screen. Unlike cloud-based alternatives, everything runs locally on your machine using state-of-the-art AI models.
 
 ---
 

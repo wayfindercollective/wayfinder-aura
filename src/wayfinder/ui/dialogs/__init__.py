@@ -1,5 +1,5 @@
 """
-Dialog windows for Wayfinder Voice.
+Dialog windows for Wayfinder Aura.
 
 Future extraction targets (currently in wayfinder_main.py):
 - settings: Main settings dialog

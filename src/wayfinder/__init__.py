@@ -1,5 +1,5 @@
 """
-Wayfinder Voice - Local voice dictation for Linux.
+Wayfinder Aura - Local voice dictation for Linux.
 
 A privacy-focused voice dictation app using whisper.cpp for transcription.
 
@@ -19,7 +19,7 @@ Usage:
 """
 
 __version__ = "1.0.0"
-__app_name__ = "Wayfinder Voice"
+__app_name__ = "Wayfinder Aura"
 
 
 def main():

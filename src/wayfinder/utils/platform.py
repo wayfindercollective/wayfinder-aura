@@ -1,5 +1,5 @@
 """
-Platform-specific utilities for Wayfinder Voice.
+Platform-specific utilities for Wayfinder Aura.
 
 Handles platform detection, environment setup, and OS-specific helpers.
 """
@@ -49,19 +49,19 @@ def get_session_type() -> str:
 def get_config_dir() -> Path:
     """Get the XDG config directory for the app."""
     xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-    return Path(xdg_config) / "wayfinder-voice"
+    return Path(xdg_config) / "wayfinder-aura"
 
 
 def get_data_dir() -> Path:
     """Get the XDG data directory for the app."""
     xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
-    return Path(xdg_data) / "wayfinder-voice"
+    return Path(xdg_data) / "wayfinder-aura"
 
 
 def get_cache_dir() -> Path:
     """Get the XDG cache directory for the app."""
     xdg_cache = os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))
-    return Path(xdg_cache) / "wayfinder-voice"
+    return Path(xdg_cache) / "wayfinder-aura"
 
 
 def ensure_directories():

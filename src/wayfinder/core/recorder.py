@@ -1,5 +1,5 @@
 """
-Audio recording module for Wayfinder Voice.
+Audio recording module for Wayfinder Aura.
 Captures audio using sounddevice with callback-based streaming.
 Automatically resamples to 16kHz for Whisper compatibility.
 Includes audio preprocessing for improved transcription accuracy.

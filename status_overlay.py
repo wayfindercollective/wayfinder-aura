@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Wayfinder Voice - Glassmorphic Status Overlay
+Wayfinder Aura - Glassmorphic Status Overlay
 
 A premium PyQt6-based status indicator with:
 - Squircle (superellipse) shape for weighted, intentional feel
@@ -140,7 +140,7 @@ def _setup_kwin_window_rule(x: int, y: int, width: int, height: int) -> bool:
         script_content = f'''
         // KWin script - set overlay properties (not position - app handles that)
         workspace.windowAdded.connect(function(client) {{
-            if (client.caption && client.caption.indexOf("Wayfinder Voice Overlay") !== -1) {{
+            if (client.caption && client.caption.indexOf("Wayfinder Aura Overlay") !== -1) {{
                 // Only set properties, not position
                 client.keepAbove = true;
                 client.skipTaskbar = true;
@@ -154,7 +154,7 @@ def _setup_kwin_window_rule(x: int, y: int, width: int, height: int) -> bool:
         var windows = workspace.windowList();
         for (var i = 0; i < windows.length; i++) {{
             var w = windows[i];
-            if (w.caption && w.caption.indexOf("Wayfinder Voice Overlay") !== -1) {{
+            if (w.caption && w.caption.indexOf("Wayfinder Aura Overlay") !== -1) {{
                 w.keepAbove = true;
                 w.skipTaskbar = true;
                 w.skipPager = true;
@@ -785,7 +785,7 @@ class GlassmorphicOverlay(QWidget):
         self._update_size()
         
         # Set window title for KWin script identification
-        self.setWindowTitle("Wayfinder Voice Overlay")
+        self.setWindowTitle("Wayfinder Aura Overlay")
         
         # Timer to periodically raise window AND reapply KWin properties
         # This ensures the overlay stays hidden from taskbar even after display changes
@@ -804,7 +804,7 @@ class GlassmorphicOverlay(QWidget):
         """Periodically reapply KWin window properties to stay hidden from taskbar."""
         if self.isVisible():
             _try_kde_window_setup(
-                "Wayfinder Voice Overlay",
+                "Wayfinder Aura Overlay",
                 self.x(), self.y(),
                 self.width(), self.height()
             )
@@ -861,7 +861,7 @@ class GlassmorphicOverlay(QWidget):
                 
                 # Use KWin script to force position (only way on Wayland)
                 _force_kde_window_position(
-                    "Wayfinder Voice Overlay",
+                    "Wayfinder Aura Overlay",
                     x, y,
                     self.width(), self.height()
                 )
@@ -1133,7 +1133,7 @@ class GlassmorphicOverlay(QWidget):
             
             # Force position via KWin (the only way that works on Wayland)
             _force_kde_window_position(
-                "Wayfinder Voice Overlay",
+                "Wayfinder Aura Overlay",
                 x, y,
                 final_width, final_height
             )
@@ -1369,7 +1369,7 @@ def run_overlay():
             
             # Force position via KWin after showing
             QTimer.singleShot(100, lambda: _force_kde_window_position(
-                "Wayfinder Voice Overlay",
+                "Wayfinder Aura Overlay",
                 x, y,
                 final_width, final_height
             ))

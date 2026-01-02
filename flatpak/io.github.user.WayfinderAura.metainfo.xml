@@ -1,25 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- 
-  AppStream metadata for Wayfinder Voice
+  AppStream metadata for Wayfinder Aura
   IMPORTANT: Change "io.github.user" to your actual GitHub username
-  Validate with: appstream-util validate io.github.user.WayfinderVoice.metainfo.xml
+  Validate with: appstream-util validate io.github.user.WayfinderAura.metainfo.xml
 -->
 <component type="desktop-application">
-  <id>io.github.user.WayfinderVoice</id>
+  <id>io.github.user.WayfinderAura</id>
   
-  <name>Wayfinder Voice</name>
+  <name>Wayfinder Aura</name>
   <summary>Local voice dictation using whisper.cpp</summary>
   
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   
   <developer id="io.github.user">
-    <name>Wayfinder Voice Developer</name>
+    <name>Wayfinder Aura Developer</name>
   </developer>
   
   <description>
     <p>
-      Wayfinder Voice is a local voice dictation application for Linux. Press a hotkey, 
+      Wayfinder Aura is a local voice dictation application for Linux. Press a hotkey, 
       speak, and your words are typed wherever your cursor is. All processing happens 
       on your machine using whisper.cpp — your voice never leaves your computer.
     </p>
@@ -39,22 +39,22 @@
     </p>
   </description>
   
-  <launchable type="desktop-id">io.github.user.WayfinderVoice.desktop</launchable>
+  <launchable type="desktop-id">io.github.user.WayfinderAura.desktop</launchable>
   
   <screenshots>
     <screenshot type="default">
-      <caption>Wayfinder Voice main interface showing recording status</caption>
-      <image>https://raw.githubusercontent.com/user/wayfinder-voice/main/screenshots/main-window.png</image>
+      <caption>Wayfinder Aura main interface showing recording status</caption>
+      <image>https://raw.githubusercontent.com/user/wayfinder-aura/main/screenshots/main-window.png</image>
     </screenshot>
     <screenshot>
       <caption>Settings panel with model selection and hotkey configuration</caption>
-      <image>https://raw.githubusercontent.com/user/wayfinder-voice/main/screenshots/settings.png</image>
+      <image>https://raw.githubusercontent.com/user/wayfinder-aura/main/screenshots/settings.png</image>
     </screenshot>
   </screenshots>
   
-  <url type="homepage">https://github.com/user/wayfinder-voice</url>
-  <url type="bugtracker">https://github.com/user/wayfinder-voice/issues</url>
-  <url type="vcs-browser">https://github.com/user/wayfinder-voice</url>
+  <url type="homepage">https://github.com/user/wayfinder-aura</url>
+  <url type="bugtracker">https://github.com/user/wayfinder-aura/issues</url>
+  <url type="vcs-browser">https://github.com/user/wayfinder-aura</url>
   
   <content_rating type="oars-1.1" />
   
@@ -80,7 +80,7 @@
   </keywords>
   
   <provides>
-    <binary>wayfinder-voice</binary>
+    <binary>wayfinder-aura</binary>
   </provides>
   
   <requires>
@@ -95,7 +95,7 @@
   <releases>
     <release version="1.0.0" date="2024-12-22">
       <description>
-        <p>Initial release of Wayfinder Voice</p>
+        <p>Initial release of Wayfinder Aura</p>
         <ul>
           <li>Local voice dictation with whisper.cpp</li>
           <li>Hotkey-triggered recording</li>

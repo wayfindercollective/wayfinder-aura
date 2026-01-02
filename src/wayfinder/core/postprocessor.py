@@ -1,5 +1,5 @@
 """
-Post-processing module for Wayfinder Voice.
+Post-processing module for Wayfinder Aura.
 Cleans up transcription output using LLM backends (local or cloud).
 Supports llama-cpp-python for local inference and Anthropic Claude for cloud.
 """
@@ -38,6 +38,12 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
         "standard": "Clean up speech artifacts while preserving the conversational request style. Format as a clear prompt or question for an AI.",
         "strong": "Format as a clear, well-structured prompt for an AI assistant. Preserve the intent and specifics of the request while making it easy for an LLM to understand.",
     },
+    "personal": {
+        # Personal style uses voice profile - these are fallbacks when no profile exists
+        "light": "Keep the exact phrasing. Only fix obvious transcription errors.",
+        "standard": "Clean up speech artifacts while keeping the user's natural speaking style and vocabulary.",
+        "strong": "Polish the text while preserving the user's characteristic phrases and word choices.",
+    },
 }
 
 # =============================================================================
@@ -62,6 +68,11 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
         "light": "Keep natural punctuation. Format as you would type to an AI assistant.",
         "standard": "Use clear punctuation. Format as a conversational prompt or question.",
         "strong": "Use clear punctuation and structure. Format as a well-organized prompt for an AI assistant.",
+    },
+    "personal": {
+        "light": "Keep the user's natural punctuation style.",
+        "standard": "Use standard punctuation while keeping natural flow.",
+        "strong": "Clean up punctuation but preserve characteristic patterns.",
     },
 }
 
@@ -568,6 +579,7 @@ SIMPLE_TONES = {
     "professional": "formal and polished",
     "casual": "friendly and relaxed",
     "ai_prompt": "clear and conversational, for an AI assistant",
+    "personal": "natural, keeping the user's own speaking style",
 }
 
 
@@ -580,6 +592,7 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
     professional-strong gets executive-level polish.
     
     Also applies model compatibility adjustments when needed.
+    Includes voice profile context when voice learning is enabled.
     
     Args:
         text: The transcription text to process
@@ -594,6 +607,20 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
     intensity_key = f"{tone}_intensity"
     intensity = config.get(intensity_key, "standard")
     smart_formatting = config.get("smart_formatting", True)
+    
+    # Get voice profile context when "personal" style is selected
+    voice_profile_context = ""
+    is_personal_style = tone == "personal"
+    if is_personal_style:
+        try:
+            from .voice_profile import get_voice_profile
+            voice_profile = get_voice_profile(
+                history_limit=config.get("voice_learning_history_limit", 100),
+                regen_interval=config.get("voice_learning_regen_interval", 20),
+            )
+            voice_profile_context = voice_profile.get_prompt_context()
+        except Exception as e:
+            print(f"[Post-processing] ⚠ Could not load voice profile: {e}")
     
     # Get model name for compatibility check
     backend = config.get("post_processing_backend", "llama_cpp")
@@ -626,9 +653,16 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
         return prompt, compatibility
     
     # Get all the dynamic rules based on tone + intensity
-    tone_guidance = get_tone_guidance(tone, intensity)
     formatting_rules = get_formatting_rules(tone, intensity)
     filler_rules = get_filler_rules(intensity)
+    
+    # For "personal" style, use voice profile as THE tone guidance
+    if is_personal_style and voice_profile_context:
+        # Voice profile becomes the style instruction
+        tone_guidance = f"Match this user's natural speaking style: {voice_profile_context}"
+    else:
+        # Use standard tone guidance
+        tone_guidance = get_tone_guidance(tone, intensity)
     
     # Choose prompt based on smart formatting setting
     if smart_formatting:
@@ -1455,6 +1489,7 @@ def get_tone_options() -> list:
         {"id": "professional", "name": "Professional", "description": "Formal, polished, business-appropriate"},
         {"id": "casual", "name": "Casual", "description": "Relaxed, conversational, friendly"},
         {"id": "ai_prompt", "name": "AI Prompt", "description": "Optimized for speaking with AI assistants and LLMs"},
+        {"id": "personal", "name": "Personal", "description": "Your natural voice, learned from your speech patterns"},
     ]
 
 

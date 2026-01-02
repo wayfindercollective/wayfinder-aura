@@ -1,5 +1,5 @@
 """
-Reusable UI components for Wayfinder Voice.
+Reusable UI components for Wayfinder Aura.
 
 Contains common widgets used throughout the application:
 - ToolTip: Hover tooltips for widgets

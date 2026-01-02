@@ -1,5 +1,5 @@
 """
-Ollama Manager for Wayfinder Voice.
+Ollama Manager for Wayfinder Aura.
 Handles detection, installation, and service management of Ollama.
 Works on SteamOS, Bazzite, and standard Linux distributions.
 """

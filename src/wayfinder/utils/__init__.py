@@ -1,8 +1,9 @@
 """
-Utility modules for Wayfinder Voice.
+Utility modules for Wayfinder Aura.
 
 - gpu: GPU detection and capability checking
 - platform: Platform-specific helpers
+- lazy_imports: Lazy loading for optional heavy dependencies
 """
 
 from .gpu import (
@@ -30,6 +31,28 @@ from .platform import (
     get_text_injector,
 )
 
+from .lazy_imports import (
+    LazyModule,
+    get_pyqt6,
+    get_faster_whisper,
+    get_scipy,
+    get_anthropic,
+    get_llama_cpp,
+    is_pyqt6_available,
+    is_faster_whisper_available,
+    is_scipy_available,
+    is_anthropic_available,
+    is_llama_cpp_available,
+    get_optional_dependencies_status,
+)
+
+from .logging import (
+    configure_logging,
+    get_logger,
+    set_level,
+    get_log_file_path,
+)
+
 __all__ = [
     # GPU
     "GPUInfo",
@@ -52,4 +75,22 @@ __all__ = [
     "is_ydotool_available",
     "is_xdotool_available",
     "get_text_injector",
+    # Lazy Imports
+    "LazyModule",
+    "get_pyqt6",
+    "get_faster_whisper",
+    "get_scipy",
+    "get_anthropic",
+    "get_llama_cpp",
+    "is_pyqt6_available",
+    "is_faster_whisper_available",
+    "is_scipy_available",
+    "is_anthropic_available",
+    "is_llama_cpp_available",
+    "get_optional_dependencies_status",
+    # Logging
+    "configure_logging",
+    "get_logger",
+    "set_level",
+    "get_log_file_path",
 ]

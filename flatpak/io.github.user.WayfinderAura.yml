@@ -1,0 +1,255 @@
+# Flatpak manifest for Wayfinder Aura
+# 
+# Quick test build:
+#   flatpak-builder --user --install --force-clean build-dir io.github.user.WayfinderAura.yml
+#
+# For Flathub submission:
+#   1. Fork this repo and update app-id to your organization
+#   2. Generate python-deps.json with flatpak-pip-generator
+#   3. Verify all SHA256 hashes match
+#   4. Submit PR to flathub/flathub
+#
+# App ID Guidelines:
+#   - For personal projects: io.github.YOURUSERNAME.WayfinderAura
+#   - For organization: com.yourorg.WayfinderAura
+#   - Update all references below when changing
+
+app-id: io.github.user.WayfinderAura
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: wayfinder-aura
+
+finish-args:
+  # Display - Wayland preferred, X11 fallback
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  
+  # Audio recording (PipeWire/PulseAudio) - essential for voice dictation
+  - --socket=pulseaudio
+  
+  # D-Bus for system integration
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --talk-name=org.freedesktop.portal.GlobalShortcuts
+  - --talk-name=org.freedesktop.portal.RemoteDesktop
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.gnome.SessionManager
+  
+  # App config and cache storage
+  - --filesystem=xdg-config/wayfinder-aura:create
+  - --filesystem=xdg-cache/wayfinder-aura:create
+  
+  # Whisper model access (user's existing models)
+  - --filesystem=~/.local/share/whisper.cpp:ro
+  - --filesystem=~/whisper.cpp/models:ro
+  
+  # GPU acceleration (Vulkan for whisper.cpp)
+  - --device=dri
+  
+  # Network for API-based transcription (OpenAI, Groq)
+  - --share=network
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - '*.a'
+  - '*.la'
+  - /lib/python*/site-packages/pip*
+  - /lib/python*/site-packages/setuptools*
+  - /lib/python*/site-packages/wheel*
+
+modules:
+  # PortAudio for sounddevice
+  - name: portaudio
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    sources:
+      - type: archive
+        url: https://github.com/PortAudio/portaudio/archive/refs/tags/v19.7.0.tar.gz
+        sha256: 5af29ba58bbdbb7bbcefaaecc77ec8fc413f0db6f4c4e286c40c8c405c8d64db
+
+  # whisper.cpp - The transcription engine
+  - name: whisper-cpp
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DWHISPER_BUILD_EXAMPLES=ON
+      - -DWHISPER_BUILD_TESTS=OFF
+      - -DBUILD_SHARED_LIBS=OFF
+      # Vulkan GPU support
+      - -DGGML_VULKAN=ON
+    sources:
+      - type: git
+        url: https://github.com/ggerganov/whisper.cpp.git
+        tag: v1.7.2
+    post-install:
+      - install -Dm755 bin/whisper-cli ${FLATPAK_DEST}/bin/whisper-cli
+
+  # Bundled whisper model (small.en for free tier)
+  - name: whisper-model-small
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 ggml-small.en.bin ${FLATPAK_DEST}/share/whisper-models/ggml-small.en.bin
+    sources:
+      - type: file
+        url: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+        sha256: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1c71f7f2c8
+        dest-filename: ggml-small.en.bin
+
+  # wtype for Wayland text injection
+  - name: wtype
+    buildsystem: meson
+    sources:
+      - type: git
+        url: https://github.com/atx/wtype.git
+        tag: v0.4
+
+  # ydotool for X11/Wayland text injection
+  - name: ydotool
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    sources:
+      - type: git
+        url: https://github.com/ReimuNotMoe/ydotool.git
+        tag: v1.0.4
+
+  # Python dependencies
+  # Note: For Flathub, regenerate these with flatpak-pip-generator
+  # pip install flatpak-pip-generator
+  # flatpak-pip-generator -r requirements.txt
+  
+  - name: python3-numpy
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} numpy
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/b9/14/78635daab4b07c0f84afb6c0f5d4e3de2ddca68c88669f79018557e38069/numpy-2.2.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 7ef2e1253ee87a185a92b55eb5e4e0cdc4e36854fe6d0d5d1d2cd96e1a1f6b6a
+
+  - name: python3-scipy
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} scipy
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/56/46/2449e6e646f0b10a6e87d8464ae27061583310f0d9830c1c1e5f7e0746f4/scipy-1.14.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 631f07b3734d34aced009aaf6fedfd0eb3498a97e581c3b1e5f14a04164a456d
+
+  - name: python3-pillow
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} Pillow
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/38/0d/84200ed6a871ce386ddc82904bfadc0c6b28b0c0ec78176871a4679e40b3/pillow-11.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
+        sha256: 00177a63030d612148e659b55ba99527803288cea7c75fb05766ab7981a8c1b7
+
+  - name: python3-pystray
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} pystray
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/83/7e/dc8b0ad4b7fbb57e2e9dcce5b4ee0b6ae1e7c42907250b6774637499c93e/pystray-0.19.5-py3-none-any.whl
+        sha256: c69a1fadc3a14ab47f1e69680779cf546739e3624a8ada00eb9ada0bd76f3ec5
+
+  - name: python3-sounddevice
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} sounddevice
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/80/2d/b04ae180312b81e861d6eb3d682e7e04d8c8fb557c5009648da68e7cae0d/sounddevice-0.5.1-py3-none-any.whl
+        sha256: e2017f182888c25e496db66a522831d3a2d1bb7e4086e6b124a76541e4b5618c
+
+  - name: python3-customtkinter
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} customtkinter
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/41/99/2e03457dc6bb45c058e2f9b15aac86c498f8e20e74a0aa3fc9ff197aa6c6/customtkinter-5.2.2-py3-none-any.whl
+        sha256: 28896b95abe8a0e67a55fb6f74ce54815e3a85aae5dd890e1f7026cb56dfded2
+
+  - name: python3-evdev
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} evdev
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/24/c7/8dd31b57b665f3f284a246f5c9aca9f2e2db0ee0ef2f1d1f5e6e8a5d9b9e/evdev-1.7.1.tar.gz
+        sha256: 0c72c370bda29d56c1c5c8f2e19c3f9e9b94cf03e5f0e2e4fba7c3b8a5b7f8b0
+
+  - name: python3-requests
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} requests
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/f9/9b/335f9764261e915ed497fcdeb11df5dfd6f7bf257d4a6a2a686d80da4d54/requests-2.32.3-py3-none-any.whl
+        sha256: 70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6
+
+  - name: python3-openai
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} openai
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/openai/openai-1.55.0-py3-none-any.whl
+        sha256: placeholder_update_before_build
+
+  - name: python3-groq
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} groq
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/groq/groq-0.11.0-py3-none-any.whl
+        sha256: placeholder_update_before_build
+
+  # Main application
+  - name: wayfinder-aura
+    buildsystem: simple
+    build-commands:
+      # Main application files
+      - install -Dm755 main.py ${FLATPAK_DEST}/lib/wayfinder-aura/main.py
+      - install -Dm644 wayfinder_main.py ${FLATPAK_DEST}/lib/wayfinder-aura/wayfinder_main.py
+      
+      # Compatibility shims
+      - install -Dm644 recorder.py ${FLATPAK_DEST}/lib/wayfinder-aura/recorder.py
+      - install -Dm644 transcriber.py ${FLATPAK_DEST}/lib/wayfinder-aura/transcriber.py
+      - install -Dm644 injector.py ${FLATPAK_DEST}/lib/wayfinder-aura/injector.py
+      - install -Dm644 postprocessor.py ${FLATPAK_DEST}/lib/wayfinder-aura/postprocessor.py
+      - install -Dm644 ollama_manager.py ${FLATPAK_DEST}/lib/wayfinder-aura/ollama_manager.py
+      - install -Dm644 license.py ${FLATPAK_DEST}/lib/wayfinder-aura/license.py
+      - install -Dm644 trigger_record.py ${FLATPAK_DEST}/lib/wayfinder-aura/trigger_record.py
+      
+      # Package structure
+      - cp -r src/wayfinder ${FLATPAK_DEST}/lib/wayfinder-aura/src/
+      
+      # Assets
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/lib/wayfinder-aura/assets/icon.png
+      
+      # Launcher script
+      - install -Dm755 flatpak/wayfinder-aura-launcher.sh ${FLATPAK_DEST}/bin/wayfinder-aura
+      
+      # Icons at multiple sizes
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.user.WayfinderAura.png
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.user.WayfinderAura.png
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/64x64/apps/io.github.user.WayfinderAura.png
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/48x48/apps/io.github.user.WayfinderAura.png
+      
+      # Desktop file
+      - install -Dm644 flatpak/io.github.user.WayfinderAura.desktop ${FLATPAK_DEST}/share/applications/io.github.user.WayfinderAura.desktop
+      
+      # AppStream metadata for software centers
+      - install -Dm644 flatpak/io.github.user.WayfinderAura.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.user.WayfinderAura.metainfo.xml
+    sources:
+      - type: dir
+        path: ..
