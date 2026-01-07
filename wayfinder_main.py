@@ -2592,14 +2592,17 @@ class OverlayController:
             
             # Clean up any stale overlay processes before starting a new one
             try:
-                subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
+                subprocess.run(["pkill", "-9", "-f", "overlay.py"], 
                               capture_output=True, timeout=1)
             except:
                 pass
             
             try:
-                # Find the overlay script
-                script_path = Path(__file__).parent / "status_overlay.py"
+                # Find the overlay script (prefer new location in src/)
+                script_path = Path(__file__).parent / "src" / "wayfinder" / "ui" / "overlay.py"
+                if not script_path.exists():
+                    # Fallback to old location
+                    script_path = Path(__file__).parent / "status_overlay.py"
                 if not script_path.exists():
                     print(f"Overlay script not found: {script_path}")
                     return False
@@ -9566,7 +9569,7 @@ class WayfinderApp(ctk.CTk):
         # Kill any running overlay processes
         import subprocess as sp
         try:
-            sp.run(["pkill", "-9", "-f", "status_overlay.py"], 
+            sp.run(["pkill", "-9", "-f", "overlay.py"], 
                    capture_output=True, timeout=2)
         except:
             pass
@@ -9639,7 +9642,7 @@ class WayfinderApp(ctk.CTk):
             import subprocess as sp
             import sys
             try:
-                sp.run(["pkill", "-9", "-f", "status_overlay.py"], capture_output=True, timeout=1)
+                sp.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
             except:
                 pass
             # Restart the app
@@ -12656,7 +12659,7 @@ class WayfinderApp(ctk.CTk):
         
         # Force kill any remaining overlay processes as safety net
         try:
-            subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
+            subprocess.run(["pkill", "-9", "-f", "overlay.py"], 
                           capture_output=True, timeout=1)
         except:
             pass
@@ -13503,7 +13506,7 @@ def main():
     # === STARTUP CLEANUP: Kill any ghost overlay processes from previous runs ===
     try:
         # Kill any leftover overlay processes
-        subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
+        subprocess.run(["pkill", "-9", "-f", "overlay.py"], 
                       capture_output=True, timeout=2)
     except:
         pass
@@ -13543,7 +13546,7 @@ def main():
         
         # Force kill any overlay processes as safety net
         try:
-            subprocess.run(["pkill", "-9", "-f", "status_overlay.py"], 
+            subprocess.run(["pkill", "-9", "-f", "overlay.py"], 
                           capture_output=True, timeout=1)
         except:
             pass
