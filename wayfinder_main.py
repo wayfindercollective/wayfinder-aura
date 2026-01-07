@@ -5444,6 +5444,26 @@ class WayfinderApp(ctk.CTk):
         # Update compatibility check
         self._update_compatibility_banner()
     
+    def _update_style_selection(self, new_tone: str) -> None:
+        """
+        Update style card visuals without rebuilding the entire tab.
+        This provides a smooth, flicker-free update when cycling styles via hotkey.
+        """
+        if not hasattr(self, 'tone_buttons') or not self.tone_buttons:
+            return
+        
+        # Update card styles (border and background)
+        for tid, card in self.tone_buttons.items():
+            is_selected = tid == new_tone
+            try:
+                card.configure(
+                    fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_input"],
+                    border_width=2 if is_selected else 1,
+                    border_color=COLORS["accent"] if is_selected else COLORS["border_subtle"],
+                )
+            except Exception:
+                pass  # Widget might not exist
+    
     def _rebuild_style_tab(self) -> None:
         """Rebuild the style tab to reflect current settings."""
         # Destroy current content
@@ -12995,9 +13015,9 @@ class WayfinderApp(ctk.CTk):
         if self._use_pyqt_overlay and self.overlay_controller:
             self.overlay_controller.send_command({"cmd": "style", "value": next_style})
         
-        # Update main UI Style tab to match
+        # Update main UI Style tab to match (smooth, no flicker)
         try:
-            self._rebuild_style_tab()
+            self._update_style_selection(next_style)
         except Exception:
             pass  # UI might not be ready
 
