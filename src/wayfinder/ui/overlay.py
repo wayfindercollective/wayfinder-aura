@@ -711,7 +711,7 @@ class GlassmorphicOverlay(QWidget):
     
     # Layout constants
     TASKBAR_HEIGHT = 44  # Standard KDE Plasma taskbar height
-    TASKBAR_GAP = 4  # Small gap above taskbar to prevent overlap
+    TASKBAR_GAP = 2  # Small gap above taskbar to prevent overlap
     
     def __init__(self, scale: float = 0.7):
         # Scale factor must be set first (before any property access)
