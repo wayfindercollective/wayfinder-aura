@@ -12,6 +12,12 @@ from .gpu import (
     get_gpu_info,
     get_optimal_thread_count,
     get_system_info,
+    get_optimal_vulkan_device,
+    get_vulkan_env_vars,
+    get_gpu_choices,
+    benchmark_gpu_devices,
+    run_gpu_benchmark_and_cache,
+    detect_vulkan_devices,
 )
 
 from .platform import (
@@ -60,6 +66,12 @@ __all__ = [
     "get_gpu_info",
     "get_optimal_thread_count",
     "get_system_info",
+    "get_optimal_vulkan_device",
+    "get_vulkan_env_vars",
+    "get_gpu_choices",
+    "benchmark_gpu_devices",
+    "run_gpu_benchmark_and_cache",
+    "detect_vulkan_devices",
     # Platform
     "is_flatpak",
     "is_wayland",

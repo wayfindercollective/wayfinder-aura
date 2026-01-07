@@ -145,7 +145,7 @@ DEFAULT_CONFIG = {
     "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
     # Ollama post-processing settings
     "ollama_base_url": "http://localhost:11434",  # Ollama API URL
-    "ollama_model": "smollm2:360m",  # Ollama model name - smallest/fastest for quick start (230MB)
+    "ollama_model": "qwen2.5:1.5b",  # Ollama model name - good balance of speed and quality (~1GB)
     # Cloud post-processing settings (API keys read from environment variables only)
     # Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment
     "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
@@ -6439,7 +6439,7 @@ class WayfinderApp(ctk.CTk):
     def _build_ollama_inline_section(self, parent) -> None:
         """Build inline Ollama model selection with download."""
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
-        current_model = self.config.get("ollama_model", "smollm2:360m")
+        current_model = self.config.get("ollama_model", "qwen2.5:1.5b")
         
         # Check Ollama availability and get installed models
         ollama_available = False
@@ -6459,9 +6459,9 @@ class WayfinderApp(ctk.CTk):
         
         # Recommended models with full info
         recommended_models = [
-            {"name": "llama3.2:1b"},
-            {"name": "phi3:mini"},
             {"name": "qwen2.5:1.5b"},
+            {"name": "phi3:mini"},
+            {"name": "llama3.2:1b"},
             {"name": "smollm2:360m"},
         ]
         
@@ -7332,7 +7332,7 @@ class WayfinderApp(ctk.CTk):
         if not ollama_mgr.is_service_running():
             return
         
-        default_model = self.config.get("ollama_model", "smollm2:360m")
+        default_model = self.config.get("ollama_model", "qwen2.5:1.5b")
         installed_models = ollama_mgr.list_models()
         
         # Check if default model (or variant) is installed
@@ -7436,7 +7436,7 @@ class WayfinderApp(ctk.CTk):
         import time
         import requests
         
-        model_name = self.config.get("ollama_model", "smollm2:360m")
+        model_name = self.config.get("ollama_model", "qwen2.5:1.5b")
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
         
         # Prevent multiple simultaneous tests
@@ -8314,7 +8314,7 @@ class WayfinderApp(ctk.CTk):
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
         ollama_available = False
         available_models = []
-        current_model = self.config.get("ollama_model", "smollm2:360m")
+        current_model = self.config.get("ollama_model", "qwen2.5:1.5b")
         
         try:
             import requests
@@ -8466,10 +8466,10 @@ class WayfinderApp(ctk.CTk):
         
         # Recommended models with download buttons
         recommended_models = [
+            {"name": "qwen2.5:1.5b", "desc": "Best balance (default)", "recommended": True},
             {"name": "phi3:mini", "desc": "Fast, small (3.8GB)", "recommended": True},
-            {"name": "qwen2.5:1.5b", "desc": "Good balance (1.5B params)", "recommended": True},
             {"name": "llama3.2:1b", "desc": "Meta's latest (1B params)", "recommended": False},
-            {"name": "smollm2:360m", "desc": "Ultra-small, fastest", "recommended": False},
+            {"name": "smollm2:360m", "desc": "Ultra-small, hallucinates", "recommended": False},
         ]
         
         for model_info in recommended_models:
@@ -8810,7 +8810,7 @@ class WayfinderApp(ctk.CTk):
                 return name[:25] + "..." if len(name) > 25 else name
             return "No model selected"
         elif backend == "ollama":
-            model_name = self.config.get("ollama_model", "smollm2:360m")
+            model_name = self.config.get("ollama_model", "qwen2.5:1.5b")
             return model_name[:25] + "..." if len(model_name) > 25 else model_name
         elif backend == "anthropic":
             # API keys are read from environment variables only for security

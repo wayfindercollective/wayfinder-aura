@@ -102,6 +102,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "transcription_backend": "whisper_cpp",  # whisper_cpp | faster_whisper
     "use_gpu": True,  # Enable GPU acceleration
     "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
+    "gpu_device": "auto",  # "auto" = benchmark and pick fastest, or "0", "1", "2" for manual selection
+    "gpu_benchmark_cache": {},  # Cached GPU benchmark results: {"0": 0.6, "1": 7.5, "2": 52.0, "fastest": "0"}
     
     # Faster-Whisper specific settings
     "faster_whisper_model": "large-v3-turbo",  # tiny, base, small, medium, large-v3, large-v3-turbo
@@ -137,7 +139,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Ollama post-processing settings
     "ollama_base_url": "http://localhost:11434",  # Ollama API URL
-    "ollama_model": "smollm2:360m",  # Ollama model name - smallest/fastest for quick start (230MB)
+    "ollama_model": "qwen2.5:1.5b",  # Ollama model name - good balance of speed and quality (~1GB)
     
     # Cloud post-processing settings (API keys read from environment variables only)
     # Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment

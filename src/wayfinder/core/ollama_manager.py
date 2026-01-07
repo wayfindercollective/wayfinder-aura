@@ -30,12 +30,21 @@ class OllamaManager:
     # Recommended models for post-processing (small and fast)
     RECOMMENDED_MODELS = [
         {
-            "name": "smollm2:360m",
-            "display_name": "SmolLM2 360M",
-            "size": "230 MB",
-            "description": "Tiny and instant. Best for simple cleanup.",
-            "speed": "Instant",
-            "quality": "Basic",
+            "name": "qwen2.5:1.5b",
+            "display_name": "Qwen2.5 1.5B",
+            "size": "986 MB",
+            "description": "Great speed/quality balance. Default choice.",
+            "speed": "Very Fast",
+            "quality": "Good",
+            "recommended": True,
+        },
+        {
+            "name": "phi3:mini",
+            "display_name": "Phi-3 Mini",
+            "size": "2.2 GB",
+            "description": "Microsoft's powerhouse. Excellent quality.",
+            "speed": "Fast",
+            "quality": "High",
         },
         {
             "name": "llama3.2:1b",
@@ -46,21 +55,12 @@ class OllamaManager:
             "quality": "Good",
         },
         {
-            "name": "phi3:mini",
-            "display_name": "Phi-3 Mini",
-            "size": "2.2 GB",
-            "description": "Microsoft's powerhouse. Excellent quality.",
-            "speed": "Fast",
-            "quality": "High",
-            "recommended": True,
-        },
-        {
-            "name": "qwen2.5:1.5b",
-            "display_name": "Qwen2.5 1.5B",
-            "size": "986 MB",
-            "description": "Great speed/quality balance.",
-            "speed": "Very Fast",
-            "quality": "Good",
+            "name": "smollm2:360m",
+            "display_name": "SmolLM2 360M",
+            "size": "230 MB",
+            "description": "Tiny but hallucinates. Not recommended.",
+            "speed": "Instant",
+            "quality": "Poor",
         },
     ]
     

@@ -28,21 +28,30 @@ PYTHON="/usr/bin/python3"
 
 # Auto-detect optimal Vulkan device if not already set
 # This handles systems with both integrated and discrete GPUs
+# Uses config for manual override and cached benchmark results
 if [ -z "$GGML_VK_VISIBLE_DEVICES" ]; then
-    # Use Python to detect the optimal device
+    # Use Python to detect the optimal device (config-aware)
     OPTIMAL_DEVICE=$("$PYTHON" -c "
 import sys
+import json
+from pathlib import Path
 sys.path.insert(0, '$SCRIPT_DIR/src')
 try:
     from wayfinder.utils.gpu import get_optimal_vulkan_device
-    print(get_optimal_vulkan_device())
+    # Load config for manual override and benchmark cache
+    config_file = Path.home() / '.config' / 'wayfinder-aura' / 'config.json'
+    config = {}
+    if config_file.exists():
+        with open(config_file) as f:
+            config = json.load(f)
+    print(get_optimal_vulkan_device(config))
 except:
     print('0')  # Default to device 0 if detection fails
 " 2>/dev/null)
     
     if [ -n "$OPTIMAL_DEVICE" ] && [ "$OPTIMAL_DEVICE" != "0" ]; then
         export GGML_VK_VISIBLE_DEVICES="$OPTIMAL_DEVICE"
-        echo "[GPU] Auto-selected Vulkan device $OPTIMAL_DEVICE (discrete GPU detected)"
+        echo "[GPU] Using Vulkan device $OPTIMAL_DEVICE"
     fi
 fi
 
