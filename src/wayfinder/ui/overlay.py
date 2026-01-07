@@ -1057,15 +1057,17 @@ class GlassmorphicOverlay(QWidget):
         """Calculate required width for text and wave."""
         from PyQt6.QtGui import QFontMetrics
         
-        if not text:
-            # READY state: compact pill with just centered wave
-            # Moderate breathing room (half the previous amount)
-            return self.WAVE_WIDTH + int(self.PADDING_H * 1.5)
+        # Space for integrated style letter + divider
+        style_letter_width = int(18 * self._scale)
         
-        # LISTENING/PROCESSING: full width with text + wave
+        if not text:
+            # READY state: compact pill with style letter + centered wave
+            return style_letter_width + self.WAVE_WIDTH + int(self.PADDING_H * 1.0)
+        
+        # LISTENING/PROCESSING: full width with letter + text + wave
         fm = QFontMetrics(self._font)
         text_width = fm.horizontalAdvance(text)
-        return self.PADDING_H * 2 + text_width + 20 + self.WAVE_WIDTH
+        return self.PADDING_H * 2 + style_letter_width + text_width + 10 + self.WAVE_WIDTH
     
     def set_state(self, state: OverlayState, animate: bool = True):
         """
@@ -1301,6 +1303,8 @@ class GlassmorphicOverlay(QWidget):
         
         # Draw wave visualization
         label = STATE_LABELS.get(self._state, "")
+        style_letter_width = int(18 * self._scale)  # Space for style letter + divider
+        
         if label:
             # LISTENING/PROCESSING: wave on right side, text on left
             wave_rect = QRectF(
@@ -1310,9 +1314,10 @@ class GlassmorphicOverlay(QWidget):
                 bar_rect.height() - 8
             )
         else:
-            # READY state: center the wave in the compact pill
+            # READY state: wave to the right of the style letter
             wave_width = self.WAVE_WIDTH - 10
-            wave_x = bar_rect.left() + (bar_rect.width() - wave_width) / 2
+            # Position wave after the style letter area
+            wave_x = bar_rect.left() + style_letter_width + self.PADDING_H * 0.5
             wave_rect = QRectF(
                 wave_x,
                 bar_rect.top() + 4,
@@ -1404,11 +1409,12 @@ class GlassmorphicOverlay(QWidget):
         text_color.setAlphaF(0.92)
         painter.setPen(QPen(text_color))
         
-        # Position text with padding
+        # Position text with padding - offset for integrated style letter
+        style_letter_width = int(18 * self._scale)  # Space for letter + divider
         text_rect = QRectF(
-            rect.left() + self.PADDING_H,
+            rect.left() + self.PADDING_H + style_letter_width,
             rect.top(),
-            rect.width() - self.WAVE_WIDTH - self.PADDING_H * 2,
+            rect.width() - self.WAVE_WIDTH - self.PADDING_H * 2 - style_letter_width,
             rect.height()
         )
         
@@ -1417,7 +1423,7 @@ class GlassmorphicOverlay(QWidget):
         painter.restore()
     
     def _draw_style_badge(self, painter: QPainter, rect: QRectF):
-        """Draw the style indicator badge (P/T/C) on the left side of the overlay."""
+        """Draw the integrated style letter on the left side of the pill."""
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
@@ -1425,45 +1431,42 @@ class GlassmorphicOverlay(QWidget):
         palette = STYLE_PALETTES.get(self._current_style, STYLE_PALETTES["professional"])
         badge_color = self._style_badge_color.color
         
-        # Badge dimensions - visible but unobtrusive
-        badge_size = int(16 * self._scale)
-        badge_x = rect.left() + 6 * self._scale
-        badge_y = rect.center().y() - badge_size / 2
+        # Integrated style letter dimensions
+        letter_width = int(14 * self._scale)
+        letter_x = rect.left() + self.PADDING_H * 0.6
         
-        badge_rect = QRectF(badge_x, badge_y, badge_size, badge_size)
+        # Letter rect (vertically centered)
+        letter_rect = QRectF(
+            letter_x,
+            rect.top(),
+            letter_width,
+            rect.height()
+        )
         
-        # Draw subtle glow behind badge
-        glow_color = QColor(badge_color)
-        glow_color.setAlphaF(0.25)
-        glow_rect = badge_rect.adjusted(-2, -2, 2, 2)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(glow_color))
-        painter.drawEllipse(glow_rect)
-        
-        # Draw semi-transparent background circle
-        bg_color = QColor(13, 17, 23, int(255 * 0.7))  # GitHub Dark with transparency
-        painter.setBrush(QBrush(bg_color))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(badge_rect)
-        
-        # Draw colored border ring
-        border_color = QColor(badge_color)
-        border_color.setAlphaF(0.8)
-        pen = QPen(border_color, 1.2 * self._scale)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(badge_rect)
-        
-        # Draw the letter
-        letter_font = QFont(self._font_family, int(8 * self._scale))
+        # Draw the style letter with the style color
+        letter_font = QFont(self._font_family, int(10 * self._scale))
         letter_font.setWeight(QFont.Weight.Bold)
         painter.setFont(letter_font)
         
         letter_color = QColor(badge_color)
-        letter_color.setAlphaF(0.95)
+        letter_color.setAlphaF(0.9)
         painter.setPen(QPen(letter_color))
         
-        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, palette.letter)
+        painter.drawText(letter_rect, Qt.AlignmentFlag.AlignCenter, palette.letter)
+        
+        # Draw subtle vertical divider after the letter
+        divider_x = letter_x + letter_width + 2 * self._scale
+        divider_top = rect.top() + rect.height() * 0.25
+        divider_bottom = rect.bottom() - rect.height() * 0.25
+        
+        divider_color = QColor("#FFFFFF")
+        divider_color.setAlphaF(0.15)
+        pen = QPen(divider_color, 1.0 * self._scale)
+        painter.setPen(pen)
+        painter.drawLine(
+            int(divider_x), int(divider_top),
+            int(divider_x), int(divider_bottom)
+        )
         
         painter.restore()
 
