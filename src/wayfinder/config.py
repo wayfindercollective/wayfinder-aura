@@ -124,8 +124,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "personal_intensity": "standard",      # light | standard | strong (learns from your speech)
     
     # Post-processing settings (LLM cleanup)
-    "post_processing_enabled": False,  # Enable LLM post-processing
-    "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai
+    "post_processing_enabled": True,  # Enable LLM post-processing
+    "post_processing_backend": "ollama",  # llama_cpp | ollama | anthropic | openai
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
     "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
     

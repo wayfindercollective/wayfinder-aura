@@ -134,8 +134,8 @@ DEFAULT_CONFIG = {
     "casual_intensity": "standard",        # light | standard | strong
     "personal_intensity": "standard",      # light | standard | strong (learns from your speech)
     # Post-processing settings (LLM cleanup)
-    "post_processing_enabled": False,  # Enable LLM post-processing
-    "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai
+    "post_processing_enabled": True,  # Enable LLM post-processing
+    "post_processing_backend": "ollama",  # llama_cpp | ollama | anthropic | openai
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
     "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
     # llama.cpp post-processing settings
@@ -4798,7 +4798,7 @@ class WayfinderApp(ctk.CTk):
     def _build_mode_settings(self, mode: str) -> None:
         """Build the settings panel for the selected processing mode."""
         # Validate and reset post-processing backend based on mode
-        current_backend = self.config.get("post_processing_backend", "llama_cpp")
+        current_backend = self.config.get("post_processing_backend", "ollama")
         if mode == "local":
             # Local mode: only allow local backends
             if current_backend not in ["llama_cpp", "ollama"]:
@@ -4898,7 +4898,7 @@ class WayfinderApp(ctk.CTk):
         self._create_mode_section_header(parent, "Post-Processing (LLM Cleanup)")
         
         # Post-processing toggle
-        postproc_enabled = self.config.get("post_processing_enabled", False)
+        postproc_enabled = self.config.get("post_processing_enabled", True)
         self.postproc_enabled_var = ctk.BooleanVar(value=postproc_enabled)
         self.create_toggle_row(
             parent, "Enable Post-Processing",
@@ -4908,7 +4908,7 @@ class WayfinderApp(ctk.CTk):
         
         # Post-processing backend and options (only show if enabled)
         if postproc_enabled:
-            postproc_backend = self.config.get("post_processing_backend", "llama_cpp")
+            postproc_backend = self.config.get("post_processing_backend", "ollama")
             # Ensure we're using a local backend for local mode
             if postproc_backend not in ["llama_cpp", "ollama"]:
                 postproc_backend = "llama_cpp"
@@ -5696,8 +5696,8 @@ class WayfinderApp(ctk.CTk):
             if self.config.get("transcription_backend") in ("openai_whisper", "groq_whisper"):
                 self.config["transcription_backend"] = "whisper_cpp"
             # Ensure post-processing uses a local backend if enabled
-            if self.config.get("post_processing_enabled", False):
-                backend = self.config.get("post_processing_backend", "llama_cpp")
+            if self.config.get("post_processing_enabled", True):
+                backend = self.config.get("post_processing_backend", "ollama")
                 if backend not in ["llama_cpp", "ollama"]:
                     self.config["post_processing_backend"] = "ollama"
             self.log("🔒 Mode: Local (100% private)")
@@ -6086,7 +6086,7 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"⚠ Error saving profile: {e}")
         
         def regenerate_profile():
-            if not self.config.get("post_processing_enabled", False):
+            if not self.config.get("post_processing_enabled", True):
                 self.log("⚠ Enable Post-Processing to regenerate profile")
                 return
             
@@ -7200,14 +7200,21 @@ class WayfinderApp(ctk.CTk):
         
         Always starts Ollama in the background so it's ready for use,
         regardless of which post-processing backend is currently selected.
+        Warns user if Ollama is the selected backend but not installed.
         """
         ollama_mgr = get_ollama_manager()
+        backend = self.config.get("post_processing_backend", "ollama")
+        postproc_enabled = self.config.get("post_processing_enabled", True)
         
-        # Skip if not installed
+        # Check if Ollama is installed
         if not ollama_mgr.is_installed():
+            # Warn user if Ollama is the selected backend and post-processing is enabled
+            if backend == "ollama" and postproc_enabled:
+                self.log("⚠️ Ollama is not installed - post-processing will not work")
+                self.log("💡 Install Ollama from the Settings panel or use: curl -fsSL https://ollama.com/install.sh | sh")
             return
         
-        # Skip if already running
+        # Check if already running
         if ollama_mgr.is_service_running():
             self.log("✓ Ollama is running")
             return
@@ -7220,7 +7227,6 @@ class WayfinderApp(ctk.CTk):
                 if success:
                     self.log(f"✓ {message}")
                     # Refresh the post-processing UI to show updated status
-                    backend = self.config.get("post_processing_backend", "llama_cpp")
                     if backend == "ollama":
                         self._rebuild_postproc_section()
                 else:
@@ -8666,7 +8672,7 @@ class WayfinderApp(ctk.CTk):
     def _get_postproc_config_display(self) -> str:
         """Get display text for post-processing configuration button."""
         import os
-        backend = self.config.get("post_processing_backend", "llama_cpp")
+        backend = self.config.get("post_processing_backend", "ollama")
         if backend == "llama_cpp":
             model_path = self.config.get("llama_cpp_model_path", "")
             if model_path:
@@ -13183,7 +13189,7 @@ class WayfinderApp(ctk.CTk):
         
         # Apply post-processing if enabled
         processed_text = text.strip()
-        if self.config.get("post_processing_enabled", False):
+        if self.config.get("post_processing_enabled", True):
             import time as time_module
             backend = self.config.get("post_processing_backend", "ollama")
             model = self.config.get("ollama_model", "") if backend == "ollama" else ""
@@ -13218,6 +13224,16 @@ class WayfinderApp(ctk.CTk):
     def do_inject(self, text):
         try:
             typing_speed = self.config.get("typing_speed", "instant")
+            
+            # For AI Prompt mode, replace newlines with spaces to avoid sending Enter keys
+            # which would submit the prompt prematurely in chat interfaces
+            output_tone = self.config.get("output_tone", "professional")
+            if output_tone == "ai_prompt":
+                # Replace newlines with spaces, then collapse multiple spaces
+                text = text.replace("\n", " ").replace("\r", " ")
+                import re
+                text = re.sub(r'\s+', ' ', text).strip()
+            
             inject_text(text, typing_speed=typing_speed)
             self.event_queue.put((EventType.INJECTION_DONE, None))
         except Exception as e:
@@ -13253,7 +13269,7 @@ class WayfinderApp(ctk.CTk):
             
             # Create LLM callback for profile regeneration (uses post-processing backend)
             llm_callback = None
-            if self.config.get("post_processing_enabled", False):
+            if self.config.get("post_processing_enabled", True):
                 llm_callback = self._get_llm_callback_for_voice_learning()
             
             voice_profile.add_transcription(text, llm_callback=llm_callback)

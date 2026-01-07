@@ -306,7 +306,7 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
             - severity: "ok" | "warning" | "incompatible"
     """
     # Get model name based on backend
-    backend = config.get("post_processing_backend", "llama_cpp")
+    backend = config.get("post_processing_backend", "ollama")
     if backend == "ollama":
         model_name = config.get("ollama_model", "")
     elif backend == "llama_cpp":
@@ -320,7 +320,7 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
         model_name = ""
     
     # Skip check if post-processing is disabled
-    if not config.get("post_processing_enabled", False):
+    if not config.get("post_processing_enabled", True):
         return {
             "is_compatible": True,
             "issues": [],
@@ -623,7 +623,7 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
             print(f"[Post-processing] ⚠ Could not load voice profile: {e}")
     
     # Get model name for compatibility check
-    backend = config.get("post_processing_backend", "llama_cpp")
+    backend = config.get("post_processing_backend", "ollama")
     if backend == "ollama":
         model_name = config.get("ollama_model", "")
     elif backend == "llama_cpp":
@@ -1305,7 +1305,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
     Returns:
         A PostProcessorBackend instance
     """
-    backend_type = config.get("post_processing_backend", "llama_cpp")
+    backend_type = config.get("post_processing_backend", "ollama")
     
     if backend_type == "ollama":
         return OllamaBackend(
@@ -1362,7 +1362,7 @@ def process_with_config(text: str, config: dict) -> str:
         Cleaned/formatted text, or original text if post-processing is disabled/fails
     """
     # Check if post-processing is enabled
-    if not config.get("post_processing_enabled", False):
+    if not config.get("post_processing_enabled", True):
         return text
     
     if not text or not text.strip():
@@ -1380,7 +1380,7 @@ def process_with_config(text: str, config: dict) -> str:
         backend = get_backend(config)
         
         if not backend.is_available():
-            backend_type = config.get("post_processing_backend", "llama_cpp")
+            backend_type = config.get("post_processing_backend", "ollama")
             if backend_type == "openai":
                 print(f"[Post-processing] ⚠ OpenAI not available - check OPENAI_API_KEY env var")
             elif backend_type == "anthropic":

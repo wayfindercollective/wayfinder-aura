@@ -740,7 +740,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
     if backend_type == "faster_whisper":
         return FasterWhisperBackend(
             model_size=config.get("faster_whisper_model", "small"),
-            use_gpu=config.get("use_gpu", False),
+            use_gpu=config.get("use_gpu", True),
             compute_type=config.get("faster_whisper_compute_type", "float16"),
             prompt=config.get("prompt", "Hello, this is a dictation with proper punctuation and grammar."),
             language=config.get("language", "en"),
@@ -775,7 +775,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             prompt=config.get("prompt", "Hello, this is a dictation with proper punctuation and grammar."),
             threads=config.get("threads", 6),
             timeout=config.get("timeout", 120),
-            use_gpu=config.get("use_gpu", False),
+            use_gpu=config.get("use_gpu", True),
             gpu_layers=config.get("gpu_layers", 0),
             beam_size=config.get("beam_size", 5),
             best_of=config.get("best_of", 3),
@@ -888,11 +888,11 @@ def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> 
         text = ensure_punctuation_postprocess(text)
     
     # Apply LLM post-processing if enabled
-    if config.get("post_processing_enabled", False) and text:
+    if config.get("post_processing_enabled", True) and text:
         try:
             from .postprocessor import process_with_config
             import os
-            backend = config.get("post_processing_backend", "llama_cpp")
+            backend = config.get("post_processing_backend", "ollama")
             
             # Debug: Check if API key is available for cloud backends
             if backend == "openai":
