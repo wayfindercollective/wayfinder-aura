@@ -2705,14 +2705,6 @@ class OverlayController:
     
     def update(self, state: str):
         """Update the overlay to a new state."""
-        # Debug logging
-        try:
-            with open("/tmp/wayfinder-overlay-debug.log", "a") as f:
-                import time
-                f.write(f"{time.time():.3f}: CONTROLLER.update({state}) process={self._process is not None}\n")
-        except:
-            pass
-        
         if self._process is None or self._process.poll() is not None:
             self.show(state)
             return
@@ -2720,15 +2712,6 @@ class OverlayController:
         old_state = self._current_state
         self._current_state = state
         cmd = {"cmd": "show", "state": state}
-        
-        # Debug: log command being sent
-        try:
-            with open("/tmp/wayfinder-overlay-debug.log", "a") as f:
-                import time
-                f.write(f"{time.time():.3f}: CONTROLLER._send_command({cmd})\n")
-        except:
-            pass
-        
         self._send_command(cmd)
         
         if state == "listening" and old_state != "listening":
@@ -13124,13 +13107,6 @@ class WayfinderApp(ctk.CTk):
         
         # Update floating indicator / overlay to processing
         if self._use_pyqt_overlay and self.overlay_controller:
-            # Debug: log overlay command
-            try:
-                with open("/tmp/wayfinder-overlay-debug.log", "a") as f:
-                    import time
-                    f.write(f"{time.time():.3f}: MAIN: calling overlay_controller.update('processing')\n")
-            except:
-                pass
             self.overlay_controller.update("processing")
         elif self.indicator:
             self.indicator.update("Processing...", COLORS["accent_yellow"])
@@ -13381,14 +13357,12 @@ class WayfinderApp(ctk.CTk):
         try:
             typing_speed = self.config.get("typing_speed", "instant")
             
-            # For AI Prompt mode, replace newlines with spaces to avoid sending Enter keys
-            # which would submit the prompt prematurely in chat interfaces
-            output_tone = self.config.get("output_tone", "professional")
-            if output_tone == "ai_prompt":
-                # Replace newlines with spaces, then collapse multiple spaces
-                text = text.replace("\n", " ").replace("\r", " ")
-                import re
-                text = re.sub(r'\s+', ' ', text).strip()
+            # Replace newlines with spaces to avoid sending Enter keys via ydotool
+            # This prevents unwanted line breaks and accidental form submissions
+            # Collapse multiple spaces and strip whitespace
+            import re
+            text = text.replace("\n", " ").replace("\r", " ")
+            text = re.sub(r'\s+', ' ', text).strip()
             
             inject_text(text, typing_speed=typing_speed)
             self.event_queue.put((EventType.INJECTION_DONE, None))
