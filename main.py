@@ -98,6 +98,16 @@ def schedule_scaling_detection(app, delay_ms: int = 5000) -> None:
 
 def main():
     """Run Wayfinder Aura."""
+    # === GPU SETUP (do this FIRST, before any imports that might use GPU) ===
+    # This sets GGML_VK_VISIBLE_DEVICES once, and all subprocesses inherit it
+    try:
+        from wayfinder.utils.gpu_simple import setup_gpu_environment
+        from wayfinder.config import load_config
+        config = load_config()
+        setup_gpu_environment(config)
+    except Exception as e:
+        print(f"[GPU] Warning: Could not setup GPU environment: {e}")
+    
     # Apply scaling fix immediately using cached value (no waiting!)
     cached_scaling = apply_scaling_fix()
     print(f"[Scaling] Using cached scaling: {cached_scaling}")
