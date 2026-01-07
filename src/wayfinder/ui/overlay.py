@@ -307,7 +307,7 @@ STYLE_PALETTES = {
         glow="#B88A22",     # Muted amber glow
     ),
     "casual": StyleColors(
-        letter="Chill",     # Relaxed, conversational vibe
+        letter="Chat",      # Conversational, friendly
         color="#73DACA",    # Soft teal
         glow="#5AAE9E",     # Muted teal glow
     ),
