@@ -1093,7 +1093,6 @@ class GlassmorphicOverlay(QWidget):
         # Enforce minimum display time for PROCESSING state
         # Otherwise it flashes by too fast to see (< 20ms sometimes)
         if self._state == OverlayState.PROCESSING and state == OverlayState.READY:
-            import time
             elapsed = getattr(self, '_processing_start_time', 0)
             if elapsed:
                 elapsed_ms = (time.time() - elapsed) * 1000
@@ -1101,8 +1100,11 @@ class GlassmorphicOverlay(QWidget):
                 if elapsed_ms < min_display_ms:
                     remaining = int(min_display_ms - elapsed_ms)
                     _log(f"set_state: DELAYING transition by {remaining}ms (min display time)")
-                    from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(remaining, lambda: self.set_state(state, animate))
+                    # Use module-level QTimer, don't import locally (causes shadowing issues)
+                    self._delayed_state_timer = QTimer()
+                    self._delayed_state_timer.setSingleShot(True)
+                    self._delayed_state_timer.timeout.connect(lambda: self.set_state(state, animate))
+                    self._delayed_state_timer.start(remaining)
                     return
         
         old_state = self._state
