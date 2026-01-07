@@ -12961,8 +12961,8 @@ class WayfinderApp(ctk.CTk):
         Args:
             target_style: If None, cycle to next style. Otherwise set to specified style.
         """
-        # Style cycle order (Personal learns from your speech patterns)
-        STYLE_CYCLE = ["professional", "ai_prompt", "casual", "personal"]
+        # Style cycle order (matches UI top-to-bottom)
+        STYLE_CYCLE = ["professional", "casual", "ai_prompt", "personal"]
         STYLE_NAMES = {"professional": "Professional", "ai_prompt": "AI Prompt", "casual": "Casual", "personal": "Personal"}
         
         if target_style and target_style in STYLE_CYCLE:
