@@ -1035,11 +1035,12 @@ class GlassmorphicOverlay(QWidget):
     
     def _position_at_bottom(self):
         """Position overlay at bottom center of screen, visual bottom touching taskbar."""
-        x, y = self._calculate_position(self.width(), self.height())
+        w, h = self.width(), self.height()
+        x, y = self._calculate_position(w, h)
         
         # Try multiple methods to set position (Wayland workarounds)
         # Method 1: setGeometry with explicit size
-        self.setGeometry(x, y, self.width(), self.height())
+        self.setGeometry(x, y, w, h)
         
         # Method 2: move after geometry is set
         self.move(x, y)
@@ -1051,6 +1052,10 @@ class GlassmorphicOverlay(QWidget):
                 self.windowHandle().setPosition(QPoint(x, y))
         except Exception:
             pass
+        
+        # Method 4: Force via KWin script (the ONLY reliable way on Wayland/KDE)
+        if self.isVisible():
+            _force_kde_window_position("Wayfinder Aura Overlay", x, y, w, h)
     
     def _update_size(self):
         """Update widget width based on current width (called during animations)."""
@@ -1069,6 +1074,8 @@ class GlassmorphicOverlay(QWidget):
         # Re-apply mask when size changes
         if self.isVisible():
             self._apply_squircle_mask()
+            # Force reposition after size change (critical for Wayland)
+            self._position_at_bottom()
     
     def _on_width_changed(self, width: float):
         """Handle width animation updates."""
