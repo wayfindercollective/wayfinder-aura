@@ -12994,6 +12994,12 @@ class WayfinderApp(ctk.CTk):
         # Update overlay indicator
         if self._use_pyqt_overlay and self.overlay_controller:
             self.overlay_controller.send_command({"cmd": "style", "value": next_style})
+        
+        # Update main UI Style tab to match
+        try:
+            self._rebuild_style_tab()
+        except Exception:
+            pass  # UI might not be ready
 
     def start_recording(self):
         try:
