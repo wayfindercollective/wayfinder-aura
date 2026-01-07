@@ -297,22 +297,22 @@ class StyleColors:
 
 STYLE_PALETTES = {
     "professional": StyleColors(
-        letter="P",
+        letter="Pro",
         color="#7AA2F7",    # Soft blue
         glow="#5D7FBF",     # Muted blue glow
     ),
     "ai_prompt": StyleColors(
-        letter="A",
+        letter="AI",
         color="#E5AC2A",    # Amber/gold
         glow="#B88A22",     # Muted amber glow
     ),
     "casual": StyleColors(
-        letter="C",
+        letter="Chill",     # Relaxed, conversational vibe
         color="#73DACA",    # Soft teal
         glow="#5AAE9E",     # Muted teal glow
     ),
     "personal": StyleColors(
-        letter="Y",         # "Y" for You/Your style
+        letter="You",       # Your personal voice
         color="#BB9AF7",    # Soft purple
         glow="#9A7ACC",     # Muted purple glow
     ),
@@ -1057,17 +1057,17 @@ class GlassmorphicOverlay(QWidget):
         """Calculate required width for text and wave."""
         from PyQt6.QtGui import QFontMetrics
         
-        # Space for integrated style letter + divider
-        style_letter_width = int(18 * self._scale)
+        # Space for integrated style label + divider (dynamic based on label text)
+        style_label_width = self._get_style_label_width() + int(4 * self._scale)
         
         if not text:
-            # READY state: compact pill with style letter + centered wave
-            return style_letter_width + self.WAVE_WIDTH + int(self.PADDING_H * 1.0)
+            # READY state: compact pill with style label + centered wave
+            return style_label_width + self.WAVE_WIDTH + int(self.PADDING_H * 0.8)
         
-        # LISTENING/PROCESSING: full width with letter + text + wave
+        # LISTENING/PROCESSING: full width with label + text + wave
         fm = QFontMetrics(self._font)
         text_width = fm.horizontalAdvance(text)
-        return self.PADDING_H * 2 + style_letter_width + text_width + 10 + self.WAVE_WIDTH
+        return self.PADDING_H * 2 + style_label_width + text_width + 6 + self.WAVE_WIDTH
     
     def set_state(self, state: OverlayState, animate: bool = True):
         """
@@ -1303,7 +1303,7 @@ class GlassmorphicOverlay(QWidget):
         
         # Draw wave visualization
         label = STATE_LABELS.get(self._state, "")
-        style_letter_width = int(18 * self._scale)  # Space for style letter + divider
+        style_label_width = self._get_style_label_width() + int(4 * self._scale)
         
         if label:
             # LISTENING/PROCESSING: wave on right side, text on left
@@ -1314,10 +1314,10 @@ class GlassmorphicOverlay(QWidget):
                 bar_rect.height() - 8
             )
         else:
-            # READY state: wave to the right of the style letter
+            # READY state: wave to the right of the style label
             wave_width = self.WAVE_WIDTH - 10
-            # Position wave after the style letter area
-            wave_x = bar_rect.left() + style_letter_width + self.PADDING_H * 0.5
+            # Position wave after the style label area
+            wave_x = bar_rect.left() + style_label_width + self.PADDING_H * 0.3
             wave_rect = QRectF(
                 wave_x,
                 bar_rect.top() + 4,
@@ -1409,12 +1409,12 @@ class GlassmorphicOverlay(QWidget):
         text_color.setAlphaF(0.92)
         painter.setPen(QPen(text_color))
         
-        # Position text with padding - offset for integrated style letter
-        style_letter_width = int(18 * self._scale)  # Space for letter + divider
+        # Position text with padding - offset for integrated style label
+        style_label_width = self._get_style_label_width() + int(4 * self._scale)
         text_rect = QRectF(
-            rect.left() + self.PADDING_H + style_letter_width,
+            rect.left() + self.PADDING_H + style_label_width,
             rect.top(),
-            rect.width() - self.WAVE_WIDTH - self.PADDING_H * 2 - style_letter_width,
+            rect.width() - self.WAVE_WIDTH - self.PADDING_H * 2 - style_label_width,
             rect.height()
         )
         
@@ -1422,8 +1422,17 @@ class GlassmorphicOverlay(QWidget):
         
         painter.restore()
     
+    def _get_style_label_width(self) -> int:
+        """Calculate width needed for the current style label."""
+        from PyQt6.QtGui import QFontMetrics
+        palette = STYLE_PALETTES.get(self._current_style, STYLE_PALETTES["professional"])
+        label_font = QFont(self._font_family, int(9 * self._scale))
+        label_font.setWeight(QFont.Weight.Medium)
+        fm = QFontMetrics(label_font)
+        return fm.horizontalAdvance(palette.letter) + int(8 * self._scale)
+    
     def _draw_style_badge(self, painter: QPainter, rect: QRectF):
-        """Draw the integrated style letter on the left side of the pill."""
+        """Draw the integrated style label on the left side of the pill."""
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
@@ -1431,36 +1440,37 @@ class GlassmorphicOverlay(QWidget):
         palette = STYLE_PALETTES.get(self._current_style, STYLE_PALETTES["professional"])
         badge_color = self._style_badge_color.color
         
-        # Integrated style letter dimensions
-        letter_width = int(14 * self._scale)
-        letter_x = rect.left() + self.PADDING_H * 0.6
+        # Calculate label width dynamically
+        label_width = self._get_style_label_width()
+        label_x = rect.left() + self.PADDING_H * 0.4
         
-        # Letter rect (vertically centered)
-        letter_rect = QRectF(
-            letter_x,
+        # Label rect (vertically centered)
+        label_rect = QRectF(
+            label_x,
             rect.top(),
-            letter_width,
+            label_width,
             rect.height()
         )
         
-        # Draw the style letter with the style color
-        letter_font = QFont(self._font_family, int(10 * self._scale))
-        letter_font.setWeight(QFont.Weight.Bold)
-        painter.setFont(letter_font)
+        # Draw the style label - more blended (lower opacity, lighter weight)
+        label_font = QFont(self._font_family, int(9 * self._scale))
+        label_font.setWeight(QFont.Weight.Medium)
+        painter.setFont(label_font)
         
-        letter_color = QColor(badge_color)
-        letter_color.setAlphaF(0.9)
-        painter.setPen(QPen(letter_color))
+        # Blend with main text color but tinted with style color
+        label_color = QColor(badge_color)
+        label_color.setAlphaF(0.7)  # More subtle
+        painter.setPen(QPen(label_color))
         
-        painter.drawText(letter_rect, Qt.AlignmentFlag.AlignCenter, palette.letter)
+        painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, palette.letter)
         
-        # Draw subtle vertical divider after the letter
-        divider_x = letter_x + letter_width + 2 * self._scale
-        divider_top = rect.top() + rect.height() * 0.25
-        divider_bottom = rect.bottom() - rect.height() * 0.25
+        # Draw very subtle vertical divider after the label
+        divider_x = label_x + label_width
+        divider_top = rect.top() + rect.height() * 0.3
+        divider_bottom = rect.bottom() - rect.height() * 0.3
         
         divider_color = QColor("#FFFFFF")
-        divider_color.setAlphaF(0.15)
+        divider_color.setAlphaF(0.08)  # Very subtle
         pen = QPen(divider_color, 1.0 * self._scale)
         painter.setPen(pen)
         painter.drawLine(
