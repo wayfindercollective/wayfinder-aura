@@ -707,9 +707,9 @@ class GlassmorphicOverlay(QWidget):
     BASE_HEIGHT = 32
     BASE_PADDING_H = 12
     BASE_WAVE_WIDTH = 60
+    BASE_GLOW_MARGIN = 8  # Base space around squircle for glow effects
     
     # Layout constants
-    GLOW_MARGIN = 8  # Space around squircle for glow effects
     TASKBAR_HEIGHT = 44  # Standard KDE Plasma taskbar height
     
     def __init__(self, scale: float = 0.7):
@@ -781,9 +781,14 @@ class GlassmorphicOverlay(QWidget):
         return int(self.BASE_HEIGHT * self._scale)
     
     @property
+    def glow_margin(self):
+        """Scaled glow margin - keeps proportions consistent at all scales."""
+        return max(4, int(self.BASE_GLOW_MARGIN * self._scale))  # Min 4px to ensure glow visibility
+    
+    @property
     def widget_height(self):
         """Total widget height including glow margins."""
-        return self.scaled_height + (self.GLOW_MARGIN * 2)
+        return self.scaled_height + (self.glow_margin * 2)
     
     def _calculate_position(self, widget_width: int, widget_height: int) -> tuple[int, int]:
         """
@@ -1022,7 +1027,7 @@ class GlassmorphicOverlay(QWidget):
                     # Calculate exact widget size
                     # Initial width for "Listening..." text (approximate)
                     estimated_content_width = 200  # Will be recalculated when shown
-                    estimated_width = estimated_content_width + (self.GLOW_MARGIN * 2)
+                    estimated_width = estimated_content_width + (self.glow_margin * 2)
                     estimated_height = self.widget_height
                     
                     # Use same positioning formula as _calculate_position
@@ -1059,7 +1064,7 @@ class GlassmorphicOverlay(QWidget):
     
     def _update_size(self):
         """Update widget width based on current width (called during animations)."""
-        width = int(self._current_width) + (self.GLOW_MARGIN * 2)
+        width = int(self._current_width) + (self.glow_margin * 2)
         self.setFixedWidth(width)
         self._position_at_bottom()
         # Re-apply mask when size changes
@@ -1068,7 +1073,7 @@ class GlassmorphicOverlay(QWidget):
     
     def _update_size_full(self):
         """Update both widget width AND height (called when scale changes)."""
-        width = int(self._current_width) + (self.GLOW_MARGIN * 2)
+        width = int(self._current_width) + (self.glow_margin * 2)
         height = self.widget_height
         self.setFixedSize(width, height)
         # Re-apply mask when size changes
@@ -1216,7 +1221,7 @@ class GlassmorphicOverlay(QWidget):
         # Calculate final size based on current state's text
         label = STATE_LABELS.get(self._state, "")
         content_width = self._calculate_target_width(label)
-        final_width = content_width + (self.GLOW_MARGIN * 2)  # content + glow margins
+        final_width = content_width + (self.glow_margin * 2)  # content + glow margins
         final_height = self.widget_height
         
         # Stop any running width animation and set final value immediately
@@ -1305,8 +1310,8 @@ class GlassmorphicOverlay(QWidget):
         # Calculate centered rect for the squircle
         # Margin provides room for subtle glow
         bar_rect = QRectF(
-            self.GLOW_MARGIN,
-            self.GLOW_MARGIN,
+            self.glow_margin,
+            self.glow_margin,
             self._current_width,
             self.scaled_height
         )
@@ -1548,7 +1553,7 @@ def run_overlay():
         # Calculate initial size for "Ready" text
         label = STATE_LABELS.get(OverlayState.READY, "Ready")
         content_width = overlay._calculate_target_width(label)
-        final_width = content_width + (overlay.GLOW_MARGIN * 2)
+        final_width = content_width + (overlay.glow_margin * 2)
         final_height = overlay.widget_height
         
         # Use overlay's unified position calculation
