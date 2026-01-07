@@ -5169,6 +5169,8 @@ class WayfinderApp(ctk.CTk):
         tone_container.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
         
         self.tone_buttons = {}
+        self.tone_checkmarks = {}  # Store checkmark label references
+        self.tone_title_labels = {}  # Store title label references
         self.intensity_buttons = {}  # Store intensity button references
         current_tone = self.config.get("output_tone", "professional")
         
@@ -5205,20 +5207,25 @@ class WayfinderApp(ctk.CTk):
             title_row = ctk.CTkFrame(card_inner, fg_color="transparent")
             title_row.pack(fill="x")
             
-            ctk.CTkLabel(
+            title_label = ctk.CTkLabel(
                 title_row,
                 text=f"{icon}  {label}",
                 font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
-            ).pack(side="left")
+            )
+            title_label.pack(side="left")
+            self.tone_title_labels[tone_id] = title_label
             
+            # Always create checkmark, but only show if selected
+            checkmark = ctk.CTkLabel(
+                title_row,
+                text="✓",
+                font=(self.font_body[0], self.font_sizes["body"]),
+                text_color=COLORS["accent"],
+            )
             if is_selected:
-                ctk.CTkLabel(
-                    title_row,
-                    text="✓",
-                    font=(self.font_body[0], self.font_sizes["body"]),
-                    text_color=COLORS["accent"],
-                ).pack(side="right")
+                checkmark.pack(side="right")
+            self.tone_checkmarks[tone_id] = checkmark
             
             ctk.CTkLabel(
                 card_inner,
@@ -5463,6 +5470,29 @@ class WayfinderApp(ctk.CTk):
                 )
             except Exception:
                 pass  # Widget might not exist
+        
+        # Update title label colors
+        if hasattr(self, 'tone_title_labels'):
+            for tid, label in self.tone_title_labels.items():
+                is_selected = tid == new_tone
+                try:
+                    label.configure(
+                        text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"]
+                    )
+                except Exception:
+                    pass
+        
+        # Update checkmark visibility
+        if hasattr(self, 'tone_checkmarks'):
+            for tid, checkmark in self.tone_checkmarks.items():
+                is_selected = tid == new_tone
+                try:
+                    if is_selected:
+                        checkmark.pack(side="right")
+                    else:
+                        checkmark.pack_forget()
+                except Exception:
+                    pass
     
     def _rebuild_style_tab(self) -> None:
         """Rebuild the style tab to reflect current settings."""
