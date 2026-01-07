@@ -1075,11 +1075,16 @@ class GlassmorphicOverlay(QWidget):
             state: Target state
             animate: Whether to animate the transition
         """
+        import sys
+        print(f"[OVERLAY DEBUG] set_state called: current={self._state} -> new={state}", file=sys.stderr, flush=True)
+        
         if state == self._state:
+            print(f"[OVERLAY DEBUG] state unchanged, returning early", file=sys.stderr, flush=True)
             return
         
         old_state = self._state
         self._state = state
+        print(f"[OVERLAY DEBUG] state changed to {self._state}", file=sys.stderr, flush=True)
         
         duration = 250 if animate else 0  # 250ms ease-out = engineered, not vibe-coded
         
@@ -1120,6 +1125,9 @@ class GlassmorphicOverlay(QWidget):
             self._glow_intensity.animate_to(0.8, duration)
         else:
             self._glow_intensity.animate_to(0.3, duration)
+        
+        # Force immediate repaint to show new text (don't wait for animators)
+        self.update()
         
         # Show and fade in if hidden
         if old_state == OverlayState.HIDDEN:
@@ -1262,6 +1270,11 @@ class GlassmorphicOverlay(QWidget):
         
         # Draw wave visualization
         label = STATE_LABELS.get(self._state, "")
+        # Debug: log what we're drawing
+        if hasattr(self, '_last_debug_state') and self._last_debug_state != self._state:
+            import sys
+            print(f"[OVERLAY DEBUG] paintEvent: state={self._state}, label={label!r}", file=sys.stderr, flush=True)
+            self._last_debug_state = self._state
         if label:
             # LISTENING/PROCESSING: wave on right side, text on left
             wave_rect = QRectF(
@@ -1521,6 +1534,9 @@ def run_overlay():
                 "processing": OverlayState.PROCESSING,
             }
             state = state_map.get(state_name, OverlayState.LISTENING)
+            # Debug: log state changes
+            import sys
+            print(f"[OVERLAY DEBUG] show command: state_name={state_name} -> state={state}", file=sys.stderr, flush=True)
             overlay.set_state(state)
         
         elif command == "hide":
