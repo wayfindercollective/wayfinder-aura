@@ -217,13 +217,11 @@ from PyQt6.QtGui import (
     QColor,
     QFont,
     QFontDatabase,
-    QGradient,
     QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
     QRadialGradient,
-    QRegion,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -710,7 +708,11 @@ class GlassmorphicOverlay(QWidget):
     BASE_PADDING_H = 12
     BASE_WAVE_WIDTH = 60
     
-    def __init__(self, scale: float = 1.0):
+    # Layout constants
+    GLOW_MARGIN = 8  # Space around squircle for glow effects
+    TASKBAR_HEIGHT = 44  # Standard KDE Plasma taskbar height
+    
+    def __init__(self, scale: float = 0.7):
         # Scale factor must be set first (before any property access)
         self._scale = max(0.5, min(2.0, scale))
         
@@ -778,13 +780,64 @@ class GlassmorphicOverlay(QWidget):
         """Scaled height for content area."""
         return int(self.BASE_HEIGHT * self._scale)
     
+    @property
+    def widget_height(self):
+        """Total widget height including glow margins."""
+        return self.scaled_height + (self.GLOW_MARGIN * 2)
+    
+    def _calculate_position(self, widget_width: int, widget_height: int) -> tuple[int, int]:
+        """
+        Calculate overlay position: centered horizontally, just above taskbar.
+        
+        The squircle content has GLOW_MARGIN pixels of padding around it for glow effects.
+        The glow extends slightly beyond the squircle, so we position the widget such that
+        the widget bottom sits at the taskbar top. This leaves the squircle's visual bottom
+        GLOW_MARGIN pixels above the taskbar, with the glow filling that gap.
+        
+        Visual layout:
+            +------------------+  <- widget top (y)
+            |   GLOW_MARGIN    |
+            |  +------------+  |  <- squircle top
+            |  | squircle   |  |
+            |  +------------+  |  <- squircle bottom
+            |   GLOW_MARGIN    |  <- glow fills this space
+            +------------------+  <- widget bottom = taskbar top
+            [     TASKBAR     ]
+        
+        Returns:
+            (x, y) position tuple
+        """
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return (0, 0)
+        
+        geom = screen.geometry()
+        
+        # Center horizontally
+        x = geom.x() + (geom.width() - widget_width) // 2
+        
+        # Position widget bottom at taskbar top
+        # The squircle bottom will be GLOW_MARGIN pixels above the taskbar,
+        # with the glow effect filling the gap nicely
+        y = geom.y() + geom.height() - self.TASKBAR_HEIGHT - widget_height
+        
+        return (x, y)
+    
     def set_scale(self, scale: float):
         """Update the overlay scale and resize."""
         if abs(scale - self._scale) < 0.01:
             return
         self._scale = max(0.5, min(2.0, scale))
         self._update_font()
-        self._update_size()
+        
+        # Recalculate target width for current state's text (width depends on scale)
+        label = STATE_LABELS.get(self._state, "")
+        new_target_width = self._calculate_target_width(label)
+        self._current_width = float(new_target_width)
+        self._target_width = new_target_width
+        
+        # Update both width AND height (height changes with scale)
+        self._update_size_full()
         self._position_at_bottom()
         self.update()  # Trigger repaint
     
@@ -824,8 +877,8 @@ class GlassmorphicOverlay(QWidget):
         # Try to enable blur on KDE Plasma
         self._request_blur()
         
-        # Set initial size (minimal margin for subtle glow)
-        self.setFixedHeight(self.scaled_height + 16)  # 8px margin each side
+        # Set initial size (with glow margin)
+        self.setFixedHeight(self.widget_height)
         self._update_size()
         
         # Timer to periodically raise window (Wayland focus protector)
@@ -882,44 +935,27 @@ class GlassmorphicOverlay(QWidget):
     def _try_kde_keep_above(self):
         """Attempt to set window position via KDE KWin scripting (only way that works on Wayland)."""
         try:
-            screen = QApplication.primaryScreen()
-            if screen:
-                geom = screen.geometry()
-                # Position: centered horizontally, just above taskbar
-                # Taskbar is typically 44-48px on 1080p
-                TASKBAR_HEIGHT = 44
-                
-                x = (geom.width() - self.width()) // 2
-                y = geom.height() - self.height() - TASKBAR_HEIGHT
-                
-                # Use KWin script to force position (only way on Wayland)
-                _force_kde_window_position(
-                    "Wayfinder Aura Overlay",
-                    x, y,
-                    self.width(), self.height()
-                )
+            # Use unified position calculation
+            x, y = self._calculate_position(self.width(), self.height())
+            
+            # Use KWin script to force position (only way on Wayland)
+            _force_kde_window_position(
+                "Wayfinder Aura Overlay",
+                x, y,
+                self.width(), self.height()
+            )
         except Exception as e:
             print(f"KWin positioning failed: {e}", file=sys.stderr)
     
     def _apply_squircle_mask(self):
-        """Apply window mask to clip black corners (Wayland fix)."""
-        # Calculate the squircle bounds
-        margin = 8
-        bar_rect = QRectF(
-            margin,
-            margin,
-            self._current_width,
-            self.scaled_height
-        )
+        """Clear any window mask - rely on transparent background instead.
         
-        # Create expanded path for glow area (minimal)
-        glow_margin = 6
-        glow_rect = bar_rect.adjusted(-glow_margin, -glow_margin, glow_margin, glow_margin)
-        glow_path = create_squircle_path(glow_rect, n=4.5)
-        
-        # Apply mask - physically clips black corners
-        mask_region = QRegion(glow_path.toFillPolygon().toPolygon())
-        self.setMask(mask_region)
+        Previously this applied a polygon mask to clip corners, but the polygon
+        approximation of the squircle curves created visible rectangular artifacts.
+        Modern Wayland compositors handle transparency correctly without a mask.
+        """
+        # Clear any existing mask - let transparency handle it
+        self.clearMask()
     
     def _setup_kde_blur(self):
         """Setup KDE Plasma blur behind window."""
@@ -982,40 +1018,24 @@ class GlassmorphicOverlay(QWidget):
                 screen = app.primaryScreen()
                 if screen:
                     geom = screen.geometry()
-                    TASKBAR_HEIGHT = 0
-                    GAP = 0
                     
                     # Calculate exact widget size
                     # Initial width for "Listening..." text (approximate)
                     estimated_content_width = 200  # Will be recalculated when shown
-                    estimated_width = estimated_content_width + 16  # + glow margins
-                    estimated_height = self.scaled_height + 16
+                    estimated_width = estimated_content_width + (self.GLOW_MARGIN * 2)
+                    estimated_height = self.widget_height
                     
+                    # Use same positioning formula as _calculate_position
                     x = geom.x() + (geom.width() - estimated_width) // 2
-                    y = geom.y() + geom.height() - estimated_height - TASKBAR_HEIGHT - GAP
+                    y = geom.y() + geom.height() - self.TASKBAR_HEIGHT - estimated_height
                     
                     _setup_kwin_window_rule(x, y, estimated_width, estimated_height)
         except Exception as e:
             print(f"KWin positioning rule setup failed: {e}", file=sys.stderr)
     
     def _position_at_bottom(self):
-        """Position overlay at bottom center of screen, just above taskbar."""
-        screen = QApplication.primaryScreen()
-        if not screen:
-            return
-        
-        # Get screen geometry
-        geom = screen.geometry()
-        screen_width = geom.width()
-        screen_height = geom.height()
-        
-        # Position above taskbar (44px is standard KDE Plasma taskbar height)
-        TASKBAR_HEIGHT = 44
-        GAP = 8  # Small gap above taskbar
-        
-        # Calculate target position - centered horizontally, above taskbar
-        x = geom.x() + (screen_width - self.width()) // 2
-        y = geom.y() + screen_height - self.height() - TASKBAR_HEIGHT - GAP
+        """Position overlay at bottom center of screen, visual bottom touching taskbar."""
+        x, y = self._calculate_position(self.width(), self.height())
         
         # Try multiple methods to set position (Wayland workarounds)
         # Method 1: setGeometry with explicit size
@@ -1033,10 +1053,19 @@ class GlassmorphicOverlay(QWidget):
             pass
     
     def _update_size(self):
-        """Update widget size based on current width."""
-        width = int(self._current_width) + 16  # Extra for glow (8px each side)
+        """Update widget width based on current width (called during animations)."""
+        width = int(self._current_width) + (self.GLOW_MARGIN * 2)
         self.setFixedWidth(width)
         self._position_at_bottom()
+        # Re-apply mask when size changes
+        if self.isVisible():
+            self._apply_squircle_mask()
+    
+    def _update_size_full(self):
+        """Update both widget width AND height (called when scale changes)."""
+        width = int(self._current_width) + (self.GLOW_MARGIN * 2)
+        height = self.widget_height
+        self.setFixedSize(width, height)
         # Re-apply mask when size changes
         if self.isVisible():
             self._apply_squircle_mask()
@@ -1180,8 +1209,8 @@ class GlassmorphicOverlay(QWidget):
         # Calculate final size based on current state's text
         label = STATE_LABELS.get(self._state, "")
         content_width = self._calculate_target_width(label)
-        final_width = content_width + 16  # content + glow margins
-        final_height = self.scaled_height + 16
+        final_width = content_width + (self.GLOW_MARGIN * 2)  # content + glow margins
+        final_height = self.widget_height
         
         # Stop any running width animation and set final value immediately
         if self._width_animator._animation:
@@ -1193,24 +1222,18 @@ class GlassmorphicOverlay(QWidget):
         # Lock size to prevent "growing" animation
         self.setFixedSize(final_width, final_height)
         
-        # Calculate position: centered, just above taskbar
-        screen = QApplication.primaryScreen()
-        if screen:
-            geom = screen.geometry()
-            TASKBAR_HEIGHT = 44  # Standard KDE taskbar height
-            
-            x = (geom.width() - final_width) // 2
-            y = geom.height() - final_height - TASKBAR_HEIGHT
-            
-            # Try Qt first (won't work on Wayland but doesn't hurt)
-            self.setGeometry(x, y, final_width, final_height)
-            
-            # Force position via KWin (the only way that works on Wayland)
-            _force_kde_window_position(
-                "Wayfinder Aura Overlay",
-                x, y,
-                final_width, final_height
-            )
+        # Calculate position using unified method
+        x, y = self._calculate_position(final_width, final_height)
+        
+        # Try Qt first (won't work on Wayland but doesn't hurt)
+        self.setGeometry(x, y, final_width, final_height)
+        
+        # Force position via KWin (the only way that works on Wayland)
+        _force_kde_window_position(
+            "Wayfinder Aura Overlay",
+            x, y,
+            final_width, final_height
+        )
         
         # Check mode for how to show
         mode = getattr(self, '_overlay_mode', 'persistent')
@@ -1274,10 +1297,9 @@ class GlassmorphicOverlay(QWidget):
         
         # Calculate centered rect for the squircle
         # Margin provides room for subtle glow
-        margin = 8  # Space for glow
         bar_rect = QRectF(
-            margin,
-            margin,
+            self.GLOW_MARGIN,
+            self.GLOW_MARGIN,
             self._current_width,
             self.scaled_height
         )
@@ -1515,32 +1537,27 @@ def run_overlay():
     if mode == "persistent":
         # Start in READY state (visible, grey)
         overlay._overlay_mode = mode
-        # Calculate position: centered, just above taskbar
-        screen = app.primaryScreen()
-        if screen:
-            geom = screen.geometry()
-            TASKBAR_HEIGHT = 44  # Standard KDE taskbar height
-            
-            # Calculate initial size for "Ready" text
-            label = STATE_LABELS.get(OverlayState.READY, "Ready")
-            content_width = overlay._calculate_target_width(label)
-            final_width = content_width + 16
-            final_height = overlay.scaled_height + 16
-            
-            x = (geom.width() - final_width) // 2
-            y = geom.height() - final_height - TASKBAR_HEIGHT
-            
-            # Try Qt positioning (may not work on Wayland)
-            overlay.setGeometry(x, y, final_width, final_height)
-            overlay.show()
-            overlay.set_state(OverlayState.READY, animate=False)
-            
-            # Force position via KWin after showing
-            QTimer.singleShot(100, lambda: _force_kde_window_position(
-                "Wayfinder Aura Overlay",
-                x, y,
-                final_width, final_height
-            ))
+        
+        # Calculate initial size for "Ready" text
+        label = STATE_LABELS.get(OverlayState.READY, "Ready")
+        content_width = overlay._calculate_target_width(label)
+        final_width = content_width + (overlay.GLOW_MARGIN * 2)
+        final_height = overlay.widget_height
+        
+        # Use overlay's unified position calculation
+        x, y = overlay._calculate_position(final_width, final_height)
+        
+        # Try Qt positioning (may not work on Wayland)
+        overlay.setGeometry(x, y, final_width, final_height)
+        overlay.show()
+        overlay.set_state(OverlayState.READY, animate=False)
+        
+        # Force position via KWin after showing
+        QTimer.singleShot(100, lambda: _force_kde_window_position(
+            "Wayfinder Aura Overlay",
+            x, y,
+            final_width, final_height
+        ))
     # In "standard" mode, window starts hidden
     
     # Command processing timer

@@ -311,33 +311,85 @@ def detect_ggml_devices() -> List[GgmlDevice]:
     if not whisper_cli:
         return devices
     
+    # Find the smallest model available for quick probing
+    model_dirs = [
+        Path.home() / "whisper.cpp" / "models",
+        Path.home() / ".local" / "share" / "whisper.cpp",
+        Path("/app/share/whisper-models"),
+    ]
+    # Prefer smallest models for faster startup
+    model_patterns = [
+        "ggml-tiny.en.bin", "ggml-tiny.bin",
+        "ggml-base.en.bin", "ggml-base.bin",
+        "ggml-small.en.bin", "ggml-small.bin",
+    ]
+    
+    model_path = None
+    for model_dir in model_dirs:
+        if not model_dir.exists():
+            continue
+        for pattern in model_patterns:
+            path = model_dir / pattern
+            if path.exists():
+                model_path = str(path)
+                break
+        if model_path:
+            break
+    
+    # Create a minimal silence WAV file for probing (avoids needing external files)
+    import tempfile
+    import wave
+    import struct
+    
     try:
-        # Run with debug to get device list (will fail without model, but that's ok)
+        # Create 0.1 second of silence (minimal audio)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            temp_audio = f.name
+            with wave.open(f.name, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                # 0.1 second of silence (1600 samples)
+                wav.writeframes(struct.pack("<" + "h" * 1600, *([0] * 1600)))
+        
+        # Run whisper with the probe audio - GPU detection happens during init
+        # We use --no-prints to minimize output but GPU info still appears
+        cmd = [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"]
+        if model_path is None:
+            # No model available, can't probe ggml devices
+            return devices
+        
         result = subprocess.run(
-            [whisper_cli, "--help"],
+            cmd,
             capture_output=True,
             text=True,
-            timeout=5,
-            env={**os.environ, "GGML_VK_DEBUG": "1"},
+            timeout=30,  # Should be fast with tiny model + minimal audio
         )
         
-        # The device list appears in stderr
-        output = result.stderr + result.stdout
+        # The device list appears in stdout during model init
+        output = result.stdout + result.stderr
         
         for line in output.split("\n"):
-            if "ggml_vulkan:" in line and "=" in line:
-                # Parse: "ggml_vulkan: 0 = Name (driver) | uma: 1 | ... | matrix cores: none"
+            # Look for ggml_vulkan device lines
+            # Format: "ggml_vulkan: 0 = Name (driver) | uma: 1 | fp16: 1 | ... | matrix cores: none"
+            if "ggml_vulkan:" in line and "=" in line and "|" in line:
                 try:
                     parts = line.split("=", 1)
-                    idx = int(parts[0].split(":")[-1].strip())
+                    idx_part = parts[0].split(":")[-1].strip()
+                    # Handle "Found 2 Vulkan devices:" line
+                    if "Found" in idx_part or not idx_part.isdigit():
+                        continue
+                    idx = int(idx_part)
                     rest = parts[1]
                     
                     # Extract name (everything before first |)
                     name = rest.split("|")[0].strip()
                     
-                    # Check for uma and coopmat
+                    # Check for uma (integrated GPU) and coopmat (matrix cores)
                     is_uma = "uma: 1" in rest
-                    has_coopmat = "coopmat" in rest.lower() and "none" not in rest.lower().split("matrix cores")[-1][:20]
+                    # Check for matrix core support (coopmat = cooperative matrix)
+                    has_coopmat = ("coopmat" in rest.lower() or "KHR_coopmat" in rest) and \
+                                  "none" not in rest.lower().split("matrix cores")[-1][:20] if "matrix cores" in rest else False
                     
                     devices.append(GgmlDevice(
                         index=idx,
@@ -347,9 +399,15 @@ def detect_ggml_devices() -> List[GgmlDevice]:
                     ))
                 except (ValueError, IndexError):
                     continue
-                    
+        
     except Exception:
         pass
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(temp_audio)
+        except:
+            pass
     
     return devices
 
@@ -452,44 +510,61 @@ def benchmark_gpu_devices(
     if not model_path or not Path(model_path).exists():
         return {"error": "no model found", "fastest": "0"}
     
-    # Get available devices
-    vulkan_info = detect_vulkan_devices()
-    if not vulkan_info.devices:
-        return {"error": "no vulkan devices", "fastest": "0"}
+    # IMPORTANT: Use ggml's device ordering, NOT vulkaninfo's!
+    # ggml may order devices differently than vulkaninfo, so we must
+    # detect devices the way ggml sees them to get correct benchmark results.
+    ggml_devices = detect_ggml_devices()
+    
+    # Fallback to vulkaninfo if ggml detection fails
+    if not ggml_devices:
+        vulkan_info = detect_vulkan_devices()
+        if not vulkan_info.devices:
+            return {"error": "no vulkan devices", "fastest": "0"}
+        # Convert vulkan devices to simple list of indices (might be wrong order!)
+        device_indices = [d.index for d in vulkan_info.devices 
+                         if not d.is_cpu and d.vendor != "software"]
+    else:
+        # Use ggml's device ordering - prefer discrete GPUs (uma=0)
+        device_indices = [d.index for d in ggml_devices]
+    
+    if not device_indices:
+        return {"error": "no GPU devices found", "fastest": "0"}
     
     # Create a short test audio file (3 seconds)
     try:
-        import numpy as np
+        import struct
         sample_rate = 16000
         duration = 3
         samples = int(duration * sample_rate)
-        t = np.linspace(0, duration, samples)
-        speech = np.sin(2 * np.pi * 200 * t) * 0.3
-        speech += np.sin(2 * np.pi * 400 * t) * 0.2
-        speech += np.random.randn(samples) * 0.1
-        speech = speech / np.max(np.abs(speech)) * 0.7
-        audio_int16 = (speech * 32767).astype(np.int16)
+        
+        # Generate simple test tones without numpy
+        import math
+        audio_data = []
+        for i in range(samples):
+            t = i / sample_rate
+            # Simple sine wave mix
+            sample = int(32767 * 0.3 * (
+                math.sin(2 * math.pi * 200 * t) +
+                0.7 * math.sin(2 * math.pi * 400 * t)
+            ))
+            sample = max(-32767, min(32767, sample))
+            audio_data.append(sample)
         
         temp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         with wave.open(temp_audio.name, "wb") as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)
             wav.setframerate(sample_rate)
-            wav.writeframes(audio_int16.tobytes())
-    except ImportError:
-        return {"error": "numpy not available", "fastest": "0"}
+            wav.writeframes(struct.pack("<" + "h" * len(audio_data), *audio_data))
     except Exception as e:
         return {"error": f"audio creation failed: {e}", "fastest": "0"}
     
     try:
-        # Test each GPU device (skip CPU/llvmpipe - too slow)
-        for device in vulkan_info.devices:
-            if device.is_cpu or device.vendor == "software":
-                continue  # Skip software renderers
-            
-            device_idx = str(device.index)
+        # Test each GPU device using GGML's device indices
+        for device_idx in device_indices:
+            device_idx_str = str(device_idx)
             env = os.environ.copy()
-            env["GGML_VK_VISIBLE_DEVICES"] = device_idx
+            env["GGML_VK_VISIBLE_DEVICES"] = device_idx_str
             
             cmd = [
                 whisper_cli,
@@ -511,9 +586,9 @@ def benchmark_gpu_devices(
                 elapsed = time.perf_counter() - start
                 
                 if result.returncode == 0:
-                    results[device_idx] = round(elapsed, 3)
+                    results[device_idx_str] = round(elapsed, 3)
             except subprocess.TimeoutExpired:
-                results[device_idx] = float(timeout)  # Timed out = slow
+                results[device_idx_str] = float(timeout)  # Timed out = slow
             except Exception:
                 pass  # Skip failed devices
         
@@ -574,13 +649,32 @@ def get_optimal_vulkan_device(config: Optional[dict] = None) -> int:
         return ggml_device
     
     # 4. Fall back to vulkaninfo detection
+    # WARNING: ggml's device ordering often differs from vulkaninfo on AMD iGPU+dGPU systems!
+    # If ggml detection failed, we can't reliably trust vulkaninfo ordering.
     info = detect_vulkan_devices()
     
     # If there's only one device or no discrete GPU, use default
     if not info.has_multiple_gpus or not info.has_discrete_gpu:
         return 0
     
-    # Find the first discrete GPU
+    # Check if this is an AMD iGPU+dGPU system where ordering might differ
+    has_amd_igpu = any(d.is_integrated and d.vendor == "amd" for d in info.devices)
+    has_amd_dgpu = any(d.is_discrete and d.vendor == "amd" for d in info.devices)
+    
+    if has_amd_igpu and has_amd_dgpu:
+        # AMD iGPU+dGPU system - ggml often sees integrated as device 0
+        # Run a quick benchmark to determine the correct device
+        print("[GPU] AMD iGPU+dGPU detected, running quick benchmark to find fastest device...")
+        benchmark = benchmark_gpu_devices()
+        if "fastest" in benchmark and benchmark["fastest"] != "error":
+            fastest = benchmark["fastest"]
+            print(f"[GPU] Benchmark complete: device {fastest} is fastest")
+            # Cache this result for future use
+            if config is not None:
+                config["gpu_benchmark_cache"] = benchmark
+            return int(fastest)
+    
+    # Find the first discrete GPU in vulkaninfo (might be wrong for ggml)
     for d in info.devices:
         if d.is_discrete:
             return d.index
@@ -599,12 +693,19 @@ def get_vulkan_env_vars(config: Optional[dict] = None) -> dict[str, str]:
     Returns:
         Dict of environment variables to set (can be empty if not needed).
     """
+    # Detect available devices
+    vulkan_info = detect_vulkan_devices()
+    
+    # If there's only one GPU, no need to set device
+    if not vulkan_info.has_multiple_gpus:
+        return {}
+    
     optimal = get_optimal_vulkan_device(config)
     env = {}
     
-    # Only set if we need a non-default device
-    if optimal and optimal != 0:
-        env["GGML_VK_VISIBLE_DEVICES"] = str(optimal)
+    # Always set device explicitly when multiple GPUs exist
+    # This ensures ggml uses the correct device regardless of its internal ordering
+    env["GGML_VK_VISIBLE_DEVICES"] = str(optimal)
     
     return env
 

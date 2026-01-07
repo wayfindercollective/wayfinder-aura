@@ -220,11 +220,30 @@ class WhisperCppBackend(TranscriptionBackend):
             cmd.append("--no-gpu")
 
         try:
+            # Build environment with optimal GPU device selection
+            # This is critical for systems with multiple GPUs (iGPU + dGPU)
+            # where ggml's device ordering may differ from the system default
+            env = os.environ.copy()
+            if self.use_gpu:
+                from ..utils.gpu import get_vulkan_env_vars
+                # Try to get config for user's manual GPU selection
+                try:
+                    from ..config import load_config
+                    config = load_config()
+                except Exception:
+                    config = None
+                gpu_env = get_vulkan_env_vars(config)
+                env.update(gpu_env)
+                # Log which GPU is being used
+                if "GGML_VK_VISIBLE_DEVICES" in gpu_env:
+                    print(f"[Transcription] Using GPU device {gpu_env['GGML_VK_VISIBLE_DEVICES']}")
+            
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                env=env,
             )
 
             if result.returncode != 0:
