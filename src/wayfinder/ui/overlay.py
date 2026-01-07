@@ -704,13 +704,14 @@ class GlassmorphicOverlay(QWidget):
     """
     
     # Base dimensions - compact but readable
-    BASE_HEIGHT = 32
-    BASE_PADDING_H = 12
-    BASE_WAVE_WIDTH = 60
-    BASE_GLOW_MARGIN = 8  # Base space around squircle for glow effects
+    BASE_HEIGHT = 24  # Thinner profile (was 32)
+    BASE_PADDING_H = 10
+    BASE_WAVE_WIDTH = 50
+    BASE_GLOW_MARGIN = 6  # Base space around squircle for glow effects
     
     # Layout constants
     TASKBAR_HEIGHT = 44  # Standard KDE Plasma taskbar height
+    TASKBAR_GAP = 4  # Small gap above taskbar to prevent overlap
     
     def __init__(self, scale: float = 0.7):
         # Scale factor must be set first (before any property access)
@@ -794,19 +795,15 @@ class GlassmorphicOverlay(QWidget):
         """
         Calculate overlay position: centered horizontally, just above taskbar.
         
-        The squircle content has GLOW_MARGIN pixels of padding around it for glow effects.
-        The glow extends slightly beyond the squircle, so we position the widget such that
-        the widget bottom sits at the taskbar top. This leaves the squircle's visual bottom
-        GLOW_MARGIN pixels above the taskbar, with the glow filling that gap.
-        
         Visual layout:
             +------------------+  <- widget top (y)
-            |   GLOW_MARGIN    |
+            |   glow_margin    |
             |  +------------+  |  <- squircle top
             |  | squircle   |  |
             |  +------------+  |  <- squircle bottom
-            |   GLOW_MARGIN    |  <- glow fills this space
-            +------------------+  <- widget bottom = taskbar top
+            |   glow_margin    |  <- glow fills this space
+            +------------------+  <- widget bottom
+                 TASKBAR_GAP      <- small gap to prevent overlap
             [     TASKBAR     ]
         
         Returns:
@@ -821,10 +818,8 @@ class GlassmorphicOverlay(QWidget):
         # Center horizontally
         x = geom.x() + (geom.width() - widget_width) // 2
         
-        # Position widget bottom at taskbar top
-        # The squircle bottom will be GLOW_MARGIN pixels above the taskbar,
-        # with the glow effect filling the gap nicely
-        y = geom.y() + geom.height() - self.TASKBAR_HEIGHT - widget_height
+        # Position widget bottom above taskbar with a small gap
+        y = geom.y() + geom.height() - self.TASKBAR_HEIGHT - self.TASKBAR_GAP - widget_height
         
         return (x, y)
     
@@ -1032,7 +1027,7 @@ class GlassmorphicOverlay(QWidget):
                     
                     # Use same positioning formula as _calculate_position
                     x = geom.x() + (geom.width() - estimated_width) // 2
-                    y = geom.y() + geom.height() - self.TASKBAR_HEIGHT - estimated_height
+                    y = geom.y() + geom.height() - self.TASKBAR_HEIGHT - self.TASKBAR_GAP - estimated_height
                     
                     _setup_kwin_window_rule(x, y, estimated_width, estimated_height)
         except Exception as e:
