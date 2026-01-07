@@ -2316,50 +2316,58 @@ class FloatingIndicator:
             self._init_dot_items(color)
             return
         
-        # Parse color
-        r = int(color[1:3], 16)
-        g = int(color[3:5], 16)
-        b = int(color[5:7], 16)
-        
-        canvas_size = 28  # Bigger for visibility
-        cx, cy = canvas_size // 2, canvas_size // 2
-        bg_r, bg_g, bg_b = 24, 24, 31  # pill_bg
-        
-        # Update ring animation - larger for bigger dot
-        ring_progress = self._ring_phase % 1.0
-        if ring_progress > 0.05 and ring_progress < 0.95:
-            ring_radius = 6 + ring_progress * 8  # Bigger ring expansion
-            ring_alpha = 0.6 * (1 - ring_progress)
-            ring_r = int(r * ring_alpha + bg_r * (1 - ring_alpha))
-            ring_g = int(g * ring_alpha + bg_g * (1 - ring_alpha))
-            ring_b = int(b * ring_alpha + bg_b * (1 - ring_alpha))
-            ring_color = f"#{ring_r:02x}{ring_g:02x}{ring_b:02x}"
+        # Wrap all canvas operations in try/except - Tk 9.0 can crash on coords
+        try:
+            # Validate scale to avoid NaN/Inf crashes
+            if not isinstance(scale, (int, float)) or scale != scale or abs(scale) > 100:
+                scale = 1.0
             
-            self.dot_canvas.coords(self._dot_ring_id,
-                cx - ring_radius, cy - ring_radius, cx + ring_radius, cy + ring_radius)
-            self.dot_canvas.itemconfig(self._dot_ring_id, outline=ring_color, state="normal")
-        else:
-            self.dot_canvas.itemconfig(self._dot_ring_id, state="hidden")
-        
-        # Update glow layers - larger radii for bigger dot
-        glow_configs = [(10, 0.25), (7, 0.5), (4, 0.75)]
-        for i, (base_radius, alpha) in enumerate(glow_configs):
-            if i < len(self._dot_glow_ids):
-                glow_radius = base_radius * scale
-                gr = int(r * alpha + bg_r * (1 - alpha))
-                gg = int(g * alpha + bg_g * (1 - alpha))
-                gb = int(b * alpha + bg_b * (1 - alpha))
-                glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+            # Parse color
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            
+            canvas_size = 28  # Bigger for visibility
+            cx, cy = canvas_size // 2, canvas_size // 2
+            bg_r, bg_g, bg_b = 24, 24, 31  # pill_bg
+            
+            # Update ring animation - larger for bigger dot
+            ring_progress = self._ring_phase % 1.0
+            if ring_progress > 0.05 and ring_progress < 0.95:
+                ring_radius = 6 + ring_progress * 8  # Bigger ring expansion
+                ring_alpha = 0.6 * (1 - ring_progress)
+                ring_r = int(r * ring_alpha + bg_r * (1 - ring_alpha))
+                ring_g = int(g * ring_alpha + bg_g * (1 - ring_alpha))
+                ring_b = int(b * ring_alpha + bg_b * (1 - ring_alpha))
+                ring_color = f"#{ring_r:02x}{ring_g:02x}{ring_b:02x}"
                 
-                self.dot_canvas.coords(self._dot_glow_ids[i],
-                    cx - glow_radius, cy - glow_radius, cx + glow_radius, cy + glow_radius)
-                self.dot_canvas.itemconfig(self._dot_glow_ids[i], fill=glow_color)
-        
-        # Update core - bigger for visibility
-        core_radius = 4 * scale
-        self.dot_canvas.coords(self._dot_core_id,
-            cx - core_radius, cy - core_radius, cx + core_radius, cy + core_radius)
-        self.dot_canvas.itemconfig(self._dot_core_id, fill=color)
+                self.dot_canvas.coords(self._dot_ring_id,
+                    cx - ring_radius, cy - ring_radius, cx + ring_radius, cy + ring_radius)
+                self.dot_canvas.itemconfig(self._dot_ring_id, outline=ring_color, state="normal")
+            else:
+                self.dot_canvas.itemconfig(self._dot_ring_id, state="hidden")
+            
+            # Update glow layers - larger radii for bigger dot
+            glow_configs = [(10, 0.25), (7, 0.5), (4, 0.75)]
+            for i, (base_radius, alpha) in enumerate(glow_configs):
+                if i < len(self._dot_glow_ids):
+                    glow_radius = base_radius * scale
+                    gr = int(r * alpha + bg_r * (1 - alpha))
+                    gg = int(g * alpha + bg_g * (1 - alpha))
+                    gb = int(b * alpha + bg_b * (1 - alpha))
+                    glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+                    
+                    self.dot_canvas.coords(self._dot_glow_ids[i],
+                        cx - glow_radius, cy - glow_radius, cx + glow_radius, cy + glow_radius)
+                    self.dot_canvas.itemconfig(self._dot_glow_ids[i], fill=glow_color)
+            
+            # Update core - bigger for visibility
+            core_radius = 4 * scale
+            self.dot_canvas.coords(self._dot_core_id,
+                cx - core_radius, cy - core_radius, cx + core_radius, cy + core_radius)
+            self.dot_canvas.itemconfig(self._dot_core_id, fill=color)
+        except Exception:
+            pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
     
     def _init_wave_items(self, color: str) -> None:
         """Create waveform bar items ONCE - called during show()."""
@@ -2396,53 +2404,60 @@ class FloatingIndicator:
             self._init_wave_items(color)
             return
         
-        import math
-        
-        width = 200  # Match canvas width
-        height = 32  # Match canvas height
-        center_y = height // 2
-        max_amp = height // 2  # Full height available
-        bar_width = 3
-        bar_gap = 4
-        
-        # Parse color
-        r = int(color[1:3], 16)
-        g = int(color[3:5], 16)
-        b = int(color[5:7], 16)
-        bg_r, bg_g, bg_b = 14, 14, 16  # Match new deep charcoal
-        
-        # HYPER voice-reactive amplitude - FREAK OUT when speaking!
-        audio_level = self._current_audio_level
-        # Small base motion when quiet
-        base_breath = 0.15 + 0.1 * (0.5 + 0.5 * math.sin(self._wave_breath))
-        # MASSIVE exponential voice boost - fills space FAST when speaking
-        voice_boost = (audio_level ** 0.3) * 3.0  # Very sensitive, huge multiplier
-        amplitude_factor = min(1.0, base_breath + voice_boost)
-        
-        # Update each bar
-        for i, bar_id in enumerate(self._wave_bar_ids):
-            x = i * (bar_width + bar_gap) + bar_gap // 2
+        # Wrap all canvas operations in try/except - Tk 9.0 can crash on coords
+        try:
+            import math
             
-            # Calculate bar height - chaotic multi-frequency waves
-            phase = self._wave_time + i * 0.4
-            # Multiple overlapping frequencies for organic chaos
-            wave_val = (math.sin(phase * 1.2) * 0.35 + 
-                       math.sin(phase * 2.1 + 0.7) * 0.35 + 
-                       math.sin(phase * 0.7 + 1.2) * 0.3)
-            # Bars fill the space when voice is detected
-            bar_height = max(1, (0.2 + abs(wave_val) * 0.8) * max_amp * amplitude_factor)
+            width = 200  # Match canvas width
+            height = 32  # Match canvas height
+            center_y = height // 2
+            max_amp = height // 2  # Full height available
+            bar_width = 3
+            bar_gap = 4
             
-            # Intense color variation
-            alpha = 0.4 + 0.6 * abs(wave_val) * amplitude_factor
-            br = int(r * alpha + bg_r * (1 - alpha))
-            bg = int(g * alpha + bg_g * (1 - alpha))
-            bb = int(b * alpha + bg_b * (1 - alpha))
-            bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
+            # Parse color
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            bg_r, bg_g, bg_b = 14, 14, 16  # Match new deep charcoal
             
-            # Update bar position and color
-            self.wave_canvas.coords(bar_id,
-                x, center_y - bar_height, x + bar_width, center_y + bar_height)
-            self.wave_canvas.itemconfig(bar_id, fill=bar_color)
+            # HYPER voice-reactive amplitude - FREAK OUT when speaking!
+            audio_level = self._current_audio_level
+            # Validate audio_level to avoid NaN
+            if not isinstance(audio_level, (int, float)) or audio_level != audio_level:
+                audio_level = 0.0
+            # Small base motion when quiet
+            base_breath = 0.15 + 0.1 * (0.5 + 0.5 * math.sin(self._wave_breath))
+            # MASSIVE exponential voice boost - fills space FAST when speaking
+            voice_boost = (audio_level ** 0.3) * 3.0  # Very sensitive, huge multiplier
+            amplitude_factor = min(1.0, base_breath + voice_boost)
+            
+            # Update each bar
+            for i, bar_id in enumerate(self._wave_bar_ids):
+                x = i * (bar_width + bar_gap) + bar_gap // 2
+                
+                # Calculate bar height - chaotic multi-frequency waves
+                phase = self._wave_time + i * 0.4
+                # Multiple overlapping frequencies for organic chaos
+                wave_val = (math.sin(phase * 1.2) * 0.35 + 
+                           math.sin(phase * 2.1 + 0.7) * 0.35 + 
+                           math.sin(phase * 0.7 + 1.2) * 0.3)
+                # Bars fill the space when voice is detected
+                bar_height = max(1, (0.2 + abs(wave_val) * 0.8) * max_amp * amplitude_factor)
+                
+                # Intense color variation
+                alpha = 0.4 + 0.6 * abs(wave_val) * amplitude_factor
+                br = int(r * alpha + bg_r * (1 - alpha))
+                bg = int(g * alpha + bg_g * (1 - alpha))
+                bb = int(b * alpha + bg_b * (1 - alpha))
+                bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
+                
+                # Update bar position and color
+                self.wave_canvas.coords(bar_id,
+                    x, center_y - bar_height, x + bar_width, center_y + bar_height)
+                self.wave_canvas.itemconfig(bar_id, fill=bar_color)
+        except Exception:
+            pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
         
     def _start_pulse(self) -> None:
         """Start the pulsing animation."""
@@ -3752,64 +3767,71 @@ class WayfinderApp(ctk.CTk):
             self._init_hero_wave_items()
             return
         
-        import math
-        
-        canvas = self.hero_canvas
-        w = canvas.winfo_width()
-        h = canvas.winfo_height()
-        
-        if w <= 1:
-            w = 400
-        if h <= 1:
-            h = 80
-        
-        center_y = h // 2
-        max_amp = (h // 2) - 2  # Use nearly full height
-        # Must match _init_hero_wave_items dimensions
-        bar_width = 3
-        bar_gap = 2
-        
-        # Get current color based on state
-        color = STATE_COLORS.get(self.app_state, COLORS["accent"])
-        r = int(color[1:3], 16)
-        g = int(color[3:5], 16)
-        b = int(color[5:7], 16)
-        
-        bg_r = int(COLORS["bg_card"][1:3], 16)
-        bg_g = int(COLORS["bg_card"][3:5], 16)
-        bg_b = int(COLORS["bg_card"][5:7], 16)
-        
-        # Calculate amplitude - DRAMATIC and space-filling!
-        audio_level = self._hero_audio_level
-        # High base amplitude so bars are always visible and moving
-        base_breath = 0.6 + 0.3 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.3))
-        # MASSIVE voice boost - fills the space when speaking
-        voice_boost = (audio_level ** 0.4) * 2.0  # More sensitive, bigger boost
-        amplitude_factor = min(1.0, base_breath + voice_boost)
-        
-        # Update each bar
-        for i, bar_id in enumerate(self._hero_wave_bar_ids):
-            x = i * (bar_width + bar_gap) + bar_gap // 2
+        # Wrap all canvas operations in try/except - Tk 9.0 can crash on coords
+        try:
+            import math
             
-            # Calculate bar height - more dramatic wave pattern
-            phase = self._hero_wave_time + i * 0.2
-            # Multi-frequency waves for organic, dramatic motion
-            wave_val = (math.sin(phase) * 0.4 + 
-                       math.sin(phase * 1.7 + 0.5) * 0.35 + 
-                       math.sin(phase * 0.6 + 1.0) * 0.25)
-            # Bars always have significant height, scale up dramatically
-            bar_height = max(8, (0.3 + abs(wave_val) * 0.7) * max_amp * amplitude_factor)
+            canvas = self.hero_canvas
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
             
-            # Vary color intensity per bar for wave effect
-            alpha = 0.5 + 0.5 * abs(wave_val)
-            br = int(r * alpha + bg_r * (1 - alpha))
-            bg = int(g * alpha + bg_g * (1 - alpha))
-            bb = int(b * alpha + bg_b * (1 - alpha))
-            bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
+            if w <= 1:
+                w = 400
+            if h <= 1:
+                h = 80
             
-            # Update bar position and color (STABLE - no delete/recreate)
-            canvas.coords(bar_id, x, center_y - bar_height, x + bar_width, center_y + bar_height)
-            canvas.itemconfig(bar_id, fill=bar_color)
+            center_y = h // 2
+            max_amp = (h // 2) - 2  # Use nearly full height
+            # Must match _init_hero_wave_items dimensions
+            bar_width = 3
+            bar_gap = 2
+            
+            # Get current color based on state
+            color = STATE_COLORS.get(self.app_state, COLORS["accent"])
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            
+            bg_r = int(COLORS["bg_card"][1:3], 16)
+            bg_g = int(COLORS["bg_card"][3:5], 16)
+            bg_b = int(COLORS["bg_card"][5:7], 16)
+            
+            # Calculate amplitude - DRAMATIC and space-filling!
+            audio_level = self._hero_audio_level
+            # Validate audio_level to avoid NaN
+            if not isinstance(audio_level, (int, float)) or audio_level != audio_level:
+                audio_level = 0.0
+            # High base amplitude so bars are always visible and moving
+            base_breath = 0.6 + 0.3 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.3))
+            # MASSIVE voice boost - fills the space when speaking
+            voice_boost = (audio_level ** 0.4) * 2.0  # More sensitive, bigger boost
+            amplitude_factor = min(1.0, base_breath + voice_boost)
+            
+            # Update each bar
+            for i, bar_id in enumerate(self._hero_wave_bar_ids):
+                x = i * (bar_width + bar_gap) + bar_gap // 2
+                
+                # Calculate bar height - more dramatic wave pattern
+                phase = self._hero_wave_time + i * 0.2
+                # Multi-frequency waves for organic, dramatic motion
+                wave_val = (math.sin(phase) * 0.4 + 
+                           math.sin(phase * 1.7 + 0.5) * 0.35 + 
+                           math.sin(phase * 0.6 + 1.0) * 0.25)
+                # Bars always have significant height, scale up dramatically
+                bar_height = max(8, (0.3 + abs(wave_val) * 0.7) * max_amp * amplitude_factor)
+                
+                # Vary color intensity per bar for wave effect
+                alpha = 0.5 + 0.5 * abs(wave_val)
+                br = int(r * alpha + bg_r * (1 - alpha))
+                bg = int(g * alpha + bg_g * (1 - alpha))
+                bb = int(b * alpha + bg_b * (1 - alpha))
+                bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
+                
+                # Update bar position and color (STABLE - no delete/recreate)
+                canvas.coords(bar_id, x, center_y - bar_height, x + bar_width, center_y + bar_height)
+                canvas.itemconfig(bar_id, fill=bar_color)
+        except Exception:
+            pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
     
     def _create_sidebar(self, parent) -> None:
         """Create the vertical sidebar navigation."""
@@ -12883,41 +12905,49 @@ class WayfinderApp(ctk.CTk):
             self._init_mic_pulse_items(color)
             return
         
-        size = 80
-        cx, cy = size // 2, size // 2
-        
-        # Parse color
-        r = int(color[1:3], 16)
-        g = int(color[3:5], 16)
-        b = int(color[5:7], 16)
-        
-        bg_r = int(COLORS["bg_card"][1:3], 16)
-        bg_g = int(COLORS["bg_card"][3:5], 16)
-        bg_b = int(COLORS["bg_card"][5:7], 16)
-        
-        # Update glow layers
-        glow_configs = [
-            (int(38 * pulse), 0.06 * pulse),
-            (int(34 * pulse), 0.12 * pulse),
-            (int(30 * pulse), 0.22 * pulse),
-        ]
-        
-        for i, (radius, intensity) in enumerate(glow_configs):
-            if i < len(self._mic_glow_ids):
-                gr = int(bg_r + (r - bg_r) * intensity)
-                gg = int(bg_g + (g - bg_g) * intensity)
-                gb = int(bg_b + (b - bg_b) * intensity)
-                glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
-                
-                canvas.coords(self._mic_glow_ids[i],
-                    cx - radius, cy - radius, cx + radius, cy + radius)
-                canvas.itemconfig(self._mic_glow_ids[i], fill=glow_color)
-        
-        # Update main button
-        button_radius = int(24 * (0.95 + 0.05 * pulse))
-        canvas.coords(self._mic_button_id,
-            cx - button_radius, cy - button_radius, cx + button_radius, cy + button_radius)
-        canvas.itemconfig(self._mic_button_id, fill=color)
+        # Wrap all canvas operations in try/except - Tk 9.0 can crash on coords
+        try:
+            # Validate pulse to avoid NaN/Inf crashes
+            if not isinstance(pulse, (int, float)) or pulse != pulse or abs(pulse) > 100:
+                pulse = 1.0
+            
+            size = 80
+            cx, cy = size // 2, size // 2
+            
+            # Parse color
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            
+            bg_r = int(COLORS["bg_card"][1:3], 16)
+            bg_g = int(COLORS["bg_card"][3:5], 16)
+            bg_b = int(COLORS["bg_card"][5:7], 16)
+            
+            # Update glow layers
+            glow_configs = [
+                (int(38 * pulse), 0.06 * pulse),
+                (int(34 * pulse), 0.12 * pulse),
+                (int(30 * pulse), 0.22 * pulse),
+            ]
+            
+            for i, (radius, intensity) in enumerate(glow_configs):
+                if i < len(self._mic_glow_ids):
+                    gr = int(bg_r + (r - bg_r) * intensity)
+                    gg = int(bg_g + (g - bg_g) * intensity)
+                    gb = int(bg_b + (b - bg_b) * intensity)
+                    glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+                    
+                    canvas.coords(self._mic_glow_ids[i],
+                        cx - radius, cy - radius, cx + radius, cy + radius)
+                    canvas.itemconfig(self._mic_glow_ids[i], fill=glow_color)
+            
+            # Update main button
+            button_radius = int(24 * (0.95 + 0.05 * pulse))
+            canvas.coords(self._mic_button_id,
+                cx - button_radius, cy - button_radius, cx + button_radius, cy + button_radius)
+            canvas.itemconfig(self._mic_button_id, fill=color)
+        except Exception:
+            pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
     
     # Legacy method for compatibility
     def _draw_status_indicator(self, color: str):
