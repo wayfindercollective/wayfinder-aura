@@ -1515,6 +1515,11 @@ class GlassmorphicOverlay(QWidget):
 def run_overlay():
     """Run the overlay as a standalone application with stdin command handling."""
     import signal
+    import io
+    
+    # Make stdin unbuffered for immediate command processing
+    # This is critical for responsive state changes
+    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, line_buffering=True)
     
     # Handle termination signals for clean shutdown
     def signal_handler(signum, frame):

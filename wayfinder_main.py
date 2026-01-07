@@ -2685,9 +2685,9 @@ class OverlayController:
     def _stop_audio_polling(self):
         """Stop audio level polling."""
         self._stop_event.set()
-        if self._audio_poll_thread is not None:
-            self._audio_poll_thread.join(timeout=0.5)
-            self._audio_poll_thread = None
+        # Don't block waiting for thread - let it exit naturally
+        # This prevents UI lag when transitioning states
+        self._audio_poll_thread = None
     
     def _audio_poll_loop(self):
         """Background loop to send audio levels to overlay."""
@@ -2700,7 +2700,7 @@ class OverlayController:
                     self._send_command({"cmd": "level", "value": level})
                 except:
                     pass
-            self._stop_event.wait(0.016)  # ~60 Hz
+            self._stop_event.wait(0.033)  # ~30 Hz (reduced to minimize command flooding)
     
     def show(self, state: str = "listening"):
         """
@@ -13005,7 +13005,7 @@ class WayfinderApp(ctk.CTk):
                 self.handle_event(event_type, data)
         except queue.Empty:
             pass
-        self.after(100, self.poll_events)
+        self.after(50, self.poll_events)  # Poll faster for responsiveness
 
     def handle_event(self, event_type, data):
         if event_type == EventType.HOTKEY_PRESSED:
