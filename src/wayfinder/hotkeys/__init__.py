@@ -12,6 +12,7 @@ from .evdev import (
     hotkey_listener,
     get_all_input_devices,
     find_keyboard_devices,
+    MOUSE_BUTTON_CODES,
 )
 from .socket import socket_listener, send_toggle, send_style
 from .dbus import wayland_hotkey_listener, is_dbus_available
@@ -21,6 +22,7 @@ __all__ = [
     "hotkey_listener",
     "get_all_input_devices",
     "find_keyboard_devices",
+    "MOUSE_BUTTON_CODES",
     "socket_listener",
     "send_toggle",
     "send_style",

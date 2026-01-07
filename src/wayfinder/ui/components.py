@@ -252,9 +252,9 @@ MODEL_RECOMMENDATIONS = """
 
 SETTING_TOOLTIPS: dict[str, str] = {
     # ⚡ No latency impact - UI/configuration only
-    "hotkey": "The keyboard shortcut to start/stop voice recording.\n⚡ Latency: None",
+    "hotkey": "The keyboard or mouse button to start/stop voice recording.\nSupports F-keys, mouse middle/side/extra buttons.\n⚡ Latency: None",
     "microphone": "Select which microphone/audio input device to use.\n⚡ Latency: None",
-    "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\n⚡ Latency: None",
+    "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\nMice are auto-detected when using mouse button hotkeys.\n⚡ Latency: None",
     "benchmark": "Measure transcription speed on your hardware.\nResults customize speed estimates throughout the app.\n⏱️ Run once to get accurate timing predictions.",
     "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
     "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",

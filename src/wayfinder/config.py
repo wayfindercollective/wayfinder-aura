@@ -50,7 +50,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
     "hotkey_modifiers": [],
     
-    # Style toggle hotkey (cycles Professional → AI Prompt → Casual → Personal)
+    # Style toggle hotkey (cycles Minimal → Professional → Casual → AI Prompt → Personal)
     "style_toggle_key": 68,  # F10 default
     "style_toggle_modifiers": [],
     
@@ -115,15 +115,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     "overlay_scale": 0.7,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     
-    # Style settings (unified tone for transcription and post-processing)
-    "output_tone": "professional",  # professional | casual | ai_prompt | personal
-    "smart_formatting": True,  # Auto-detect and format content (email, lists, code, etc.)
-    
-    # Per-style intensity settings (each style remembers its own intensity)
-    "professional_intensity": "standard",  # light | standard | strong
-    "ai_prompt_intensity": "standard",     # light | standard | strong
-    "casual_intensity": "standard",        # light | standard | strong
-    "personal_intensity": "standard",      # light | standard | strong (learns from your speech)
+    # Style settings (5 presets that cycle via hotkey)
+    "output_tone": "professional",  # minimal | professional | casual | ai_prompt | personal
+    "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
     
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": True,  # Enable LLM post-processing
@@ -162,6 +156,14 @@ KEY_CODES: dict[str, int] = {
     "f7": 65, "f8": 66, "f9": 67, "f10": 68, "f11": 87, "f12": 88,
     "space": 57, "enter": 28, "tab": 15, "backspace": 14,
     "scrolllock": 70, "pause": 119,
+    # Mouse buttons (BTN_* codes from Linux input)
+    "mouse_left": 272,      # BTN_LEFT (0x110)
+    "mouse_right": 273,     # BTN_RIGHT (0x111)
+    "mouse_middle": 274,    # BTN_MIDDLE (0x112)
+    "mouse_side": 275,      # BTN_SIDE (0x113) - often "back" button
+    "mouse_extra": 276,     # BTN_EXTRA (0x114) - often "forward" button
+    "mouse_forward": 277,   # BTN_FORWARD (0x115)
+    "mouse_back": 278,      # BTN_BACK (0x116)
 }
 
 # Modifier key codes (left and right variants)
@@ -210,6 +212,18 @@ def save_config(config: dict) -> None:
         json.dump(config, f, indent=2)
 
 
+# Human-readable names for mouse buttons
+MOUSE_BUTTON_NAMES: dict[int, str] = {
+    272: "Mouse Left",
+    273: "Mouse Right",
+    274: "Mouse Middle",
+    275: "Mouse Side",
+    276: "Mouse Extra",
+    277: "Mouse Forward",
+    278: "Mouse Back",
+}
+
+
 def get_key_name(key_code: int) -> str:
     """
     Get the display name for a key code.
@@ -220,6 +234,10 @@ def get_key_name(key_code: int) -> str:
     Returns:
         Human-readable key name
     """
+    # Check mouse buttons first (for nicer display)
+    if key_code in MOUSE_BUTTON_NAMES:
+        return MOUSE_BUTTON_NAMES[key_code]
+    
     for name, code in KEY_CODES.items():
         if code == key_code:
             return name.upper()

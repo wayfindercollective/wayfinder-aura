@@ -29,6 +29,18 @@ class EventType(Enum):
     CHUNKED_TRANSCRIPTION_DONE = auto()  # All chunks transcribed
 
 
+# Mouse button codes (matching config.py KEY_CODES)
+MOUSE_BUTTON_CODES = {
+    272,  # BTN_LEFT
+    273,  # BTN_RIGHT
+    274,  # BTN_MIDDLE
+    275,  # BTN_SIDE
+    276,  # BTN_EXTRA
+    277,  # BTN_FORWARD
+    278,  # BTN_BACK
+}
+
+
 def get_all_input_devices() -> list[dict]:
     """
     Get all input devices that could potentially send hotkeys.
@@ -44,14 +56,19 @@ def get_all_input_devices() -> list[dict]:
         if ecodes.EV_KEY in capabilities:
             key_caps = capabilities[ecodes.EV_KEY]
             has_fkeys = ecodes.KEY_F1 in key_caps and ecodes.KEY_F12 in key_caps
+            # Check for mouse buttons (middle, side, extra, etc.)
+            has_mouse_buttons = any(btn in key_caps for btn in MOUSE_BUTTON_CODES)
             
             name_lower = device.name.lower()
             is_virtual = "virtual" in name_lower or "ydotool" in name_lower
             
-            if has_fkeys and not is_virtual:
+            # Include keyboards (have F-keys) or mice (have mouse buttons)
+            if (has_fkeys or has_mouse_buttons) and not is_virtual:
                 # Determine device type for display
                 device_type = "keyboard"
-                if "mouse" in name_lower:
+                if has_mouse_buttons and not has_fkeys:
+                    device_type = "mouse"
+                elif "mouse" in name_lower:
                     device_type = "mouse"
                 elif "gamepad" in name_lower or "controller" in name_lower:
                     device_type = "gamepad"

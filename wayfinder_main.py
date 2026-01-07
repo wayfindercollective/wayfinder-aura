@@ -77,7 +77,7 @@ DEFAULT_CONFIG = {
     "model_path": _default_model_path,
     "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
     "hotkey_modifiers": [],
-    # Style toggle hotkey (cycles Professional → AI Prompt → Casual → Personal)
+    # Style toggle hotkey (cycles Minimal → Professional → Casual → AI Prompt → Personal)
     "style_toggle_key": 68,  # F10 default
     "style_toggle_modifiers": [],
     "audio_device": None,
@@ -125,14 +125,9 @@ DEFAULT_CONFIG = {
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
-    # Style settings (unified tone for transcription and post-processing)
-    "output_tone": "professional",  # professional | casual | ai_prompt | personal
-    "smart_formatting": True,  # Auto-detect and format content (email, lists, code, etc.)
-    # Per-style intensity settings (each style remembers its own intensity)
-    "professional_intensity": "standard",  # light | standard | strong
-    "ai_prompt_intensity": "standard",     # light | standard | strong
-    "casual_intensity": "standard",        # light | standard | strong
-    "personal_intensity": "standard",      # light | standard | strong (learns from your speech)
+    # Style settings (5 presets that cycle via hotkey)
+    "output_tone": "professional",  # minimal | professional | casual | ai_prompt | personal
+    "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": True,  # Enable LLM post-processing
     "post_processing_backend": "ollama",  # llama_cpp | ollama | anthropic | openai
@@ -164,6 +159,9 @@ KEY_CODES = {
     "f7": 65, "f8": 66, "f9": 67, "f10": 68, "f11": 87, "f12": 88,
     "space": 57, "enter": 28, "tab": 15, "backspace": 14,
     "scrolllock": 70, "pause": 119,
+    # Mouse buttons (BTN_* codes from Linux input)
+    "mouse_left": 272, "mouse_right": 273, "mouse_middle": 274,
+    "mouse_side": 275, "mouse_extra": 276, "mouse_forward": 277, "mouse_back": 278,
 }
 
 MODIFIER_CODES = {
@@ -5148,7 +5146,7 @@ class WayfinderApp(ctk.CTk):
         ).pack(anchor="w", pady=(0, 8))
     
     def _create_style_tab(self) -> None:
-        """Create the Style tab with tone presets and smart formatting toggle."""
+        """Create the Style tab with 5 preset options and Strong mode toggle."""
         frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
         self.tab_frames["style"] = frame
         
@@ -5161,7 +5159,7 @@ class WayfinderApp(ctk.CTk):
         )
         scroll.pack(fill="both", expand=True)
         
-        # === SECTION: Output Tone ===
+        # === SECTION: Output Style ===
         tone_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"], border_width=1,
@@ -5172,7 +5170,7 @@ class WayfinderApp(ctk.CTk):
         tone_header = ctk.CTkFrame(tone_tile, fg_color="transparent")
         tone_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            tone_header, text="✎   O U T P U T   T O N E",
+            tone_header, text="✎   O U T P U T   S T Y L E",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -5180,33 +5178,28 @@ class WayfinderApp(ctk.CTk):
         # Description
         ctk.CTkLabel(
             tone_tile,
-            text="Choose a tone that guides how your speech is transcribed and formatted.",
+            text="Choose how your speech is cleaned up. Use the hotkey to cycle through styles.",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
             wraplength=350,
         ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 12))
         
-        # Tone selection cards
+        # Style selection cards
         tone_container = ctk.CTkFrame(tone_tile, fg_color="transparent")
         tone_container.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
         
         self.tone_buttons = {}
         self.tone_checkmarks = {}  # Store checkmark label references
         self.tone_title_labels = {}  # Store title label references
-        self.intensity_buttons = {}  # Store intensity button references
         current_tone = self.config.get("output_tone", "professional")
         
+        # 5 style presets - each with distinct purpose
         tones = [
-            ("professional", "💼", "Professional", "Formal, polished, business-appropriate"),
-            ("casual", "💬", "Casual", "Relaxed, conversational, friendly"),
-            ("ai_prompt", "🤖", "AI Prompt", "Optimized for speaking with AI assistants"),
-            ("personal", "🎤", "Personal", "Your natural voice, learned from your speech"),
-        ]
-        
-        intensity_levels = [
-            ("light", "Light"),
-            ("standard", "Standard"),
-            ("strong", "Strong"),
+            ("minimal", "🎤", "Minimal", "Just removes um/uh. Your exact words, nothing changed."),
+            ("professional", "💼", "Professional", "Clean + business-appropriate tone"),
+            ("casual", "💬", "Casual", "Clean + relaxed texting style"),
+            ("ai_prompt", "🤖", "AI Prompt", "Clean + formatted for AI assistants"),
+            ("personal", "✨", "Personal", "Clean + your learned speech patterns"),
         ]
         
         for i, (tone_id, icon, label, desc) in enumerate(tones):
@@ -5221,9 +5214,9 @@ class WayfinderApp(ctk.CTk):
             )
             card.pack(fill="x", pady=4)
             
-            # Make the top section clickable for tone selection
+            # Make the card clickable
             card_inner = ctk.CTkFrame(card, fg_color="transparent")
-            card_inner.pack(fill="x", padx=12, pady=(10, 6))
+            card_inner.pack(fill="x", padx=12, pady=10)
             
             # Icon and title row
             title_row = ctk.CTkFrame(card_inner, fg_color="transparent")
@@ -5256,103 +5249,61 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_muted"],
             ).pack(anchor="w", pady=(4, 0))
             
-            # Bind click to top section for tone selection
-            for widget in [card_inner, title_row]:
+            # Bind click for style selection
+            for widget in [card, card_inner, title_row]:
                 widget.bind("<Button-1>", lambda e, t=tone_id: self._on_tone_selected(t))
                 for child in widget.winfo_children():
                     child.bind("<Button-1>", lambda e, t=tone_id: self._on_tone_selected(t))
             
-            # === Intensity Slider ===
-            intensity_frame = ctk.CTkFrame(card, fg_color="transparent")
-            intensity_frame.pack(fill="x", padx=12, pady=(0, 10))
-            
-            # Get current intensity for this tone
-            intensity_key = f"{tone_id}_intensity"
-            current_intensity = self.config.get(intensity_key, "standard")
-            
-            # Intensity label
-            ctk.CTkLabel(
-                intensity_frame,
-                text="Intensity:",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_muted"],
-            ).pack(side="left", padx=(0, 8))
-            
-            # Segmented button group for intensity
-            intensity_btn_frame = ctk.CTkFrame(intensity_frame, fg_color="transparent")
-            intensity_btn_frame.pack(side="left", fill="x", expand=True)
-            
-            self.intensity_buttons[tone_id] = {}
-            
-            for j, (intensity_id, intensity_label) in enumerate(intensity_levels):
-                is_intensity_selected = intensity_id == current_intensity
-                
-                btn = ctk.CTkButton(
-                    intensity_btn_frame,
-                    text=intensity_label,
-                    font=(self.font_body[0], self.font_sizes["small"]),
-                    width=70,
-                    height=26,
-                    corner_radius=RADIUS["sm"],
-                    fg_color=COLORS["accent_dim"] if is_intensity_selected else COLORS["bg_elevated"],
-                    hover_color=COLORS["accent_dim"] if is_intensity_selected else COLORS["bg_hover"],
-                    text_color=COLORS["text_bright"] if is_intensity_selected else COLORS["text_secondary"],
-                    command=lambda t=tone_id, i=intensity_id: self._on_intensity_changed(t, i),
-                )
-                btn.pack(side="left", padx=(0, 2))
-                self.intensity_buttons[tone_id][intensity_id] = btn
-            
             self.tone_buttons[tone_id] = card
         
         # === Model Compatibility Banner ===
-        # Shows warnings when selected model can't handle the intensity level
         self.compatibility_banner_frame = ctk.CTkFrame(tone_container, fg_color="transparent")
         self.compatibility_banner_frame.pack(fill="x", pady=(4, 0))
         
         self.compatibility_banner = CompatibilityBanner(self.compatibility_banner_frame)
-        # Initial check on tab creation
         self._update_compatibility_banner()
         
         # === Voice Profile Section (only shown when Personal style is selected) ===
         if current_tone == "personal":
             self._build_voice_profile_section(tone_container)
         
-        # === SECTION: Smart Formatting ===
-        format_tile = ctk.CTkFrame(
+        # === SECTION: Strong Mode ===
+        strong_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"], border_width=1,
             border_color=COLORS["border_rim"],
         )
-        format_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        strong_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         
-        format_header = ctk.CTkFrame(format_tile, fg_color="transparent")
-        format_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
+        strong_header = ctk.CTkFrame(strong_tile, fg_color="transparent")
+        strong_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            format_header, text="✨   S M A R T   F O R M A T T I N G",
+            strong_header, text="💪   S T R O N G   M O D E",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
         
-        format_content = ctk.CTkFrame(format_tile, fg_color="transparent")
-        format_content.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        strong_content = ctk.CTkFrame(strong_tile, fg_color="transparent")
+        strong_content.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
         
-        # Smart formatting toggle
-        self.smart_format_var = ctk.BooleanVar(value=self.config.get("smart_formatting", True))
+        # Strong mode toggle
+        self.strong_mode_var = ctk.BooleanVar(value=self.config.get("strong_mode", False))
         self.create_toggle_row(
-            format_content, 
-            "Auto-detect and format content", 
-            self.smart_format_var,
-            self._on_smart_formatting_toggled,
-            tooltip="When enabled, automatically detects emails, lists, code comments and formats them appropriately. When disabled, only removes filler words and fixes punctuation.",
+            strong_content, 
+            "Enable sentence restructuring", 
+            self.strong_mode_var,
+            self._on_strong_mode_toggled,
+            tooltip="When enabled, the AI can restructure sentences for better flow. When disabled, your words are preserved exactly (just cleaned up).",
         )
         
-        # Info text about what smart formatting does
-        info_frame = ctk.CTkFrame(format_content, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
+        # Info text explaining the difference
+        info_frame = ctk.CTkFrame(strong_content, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
         info_frame.pack(fill="x", pady=(8, 0))
         
         ctk.CTkLabel(
             info_frame,
-            text="💡 Smart formatting detects intent:\n• Email-like content → proper email format\n• Lists and bullet points → organized structure\n• Code descriptions → documentation style\n• Everything else → clean, polished prose",
+            text="💡 Strong mode allows:\n• Restructuring sentences for clarity\n• Adding bullet points for lists\n• Reformatting messages appropriately\n\nWithout strong mode, your exact words are kept.",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
             justify="left",
@@ -5380,7 +5331,7 @@ class WayfinderApp(ctk.CTk):
         # Description
         ctk.CTkLabel(
             hotkey_content,
-            text="Press this key to cycle through styles (P → T → C → 🎤).",
+            text="Press this key to cycle: 🎤 → 💼 → 💬 → 🤖 → ✨",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", pady=(0, 10))
@@ -5420,9 +5371,11 @@ class WayfinderApp(ctk.CTk):
         
         # Also update the whisper prompt to match the tone
         tone_prompts = {
+            "minimal": "Dictation with natural speech.",
             "professional": "This is a professional dictation with formal language, proper punctuation, and business-appropriate terminology.",
             "casual": "This is a casual conversation with natural, relaxed language and everyday expressions.",
             "ai_prompt": "This is a conversational prompt for an AI assistant. Clear questions and requests.",
+            "personal": "Natural dictation in the user's personal speaking style.",
         }
         self.config["prompt"] = tone_prompts.get(tone_id, tone_prompts["professional"])
         
@@ -5437,11 +5390,17 @@ class WayfinderApp(ctk.CTk):
                 border_color=COLORS["accent"] if is_selected else COLORS["border_subtle"],
             )
         
-        # Rebuild the style tab to update checkmarks
+        # Rebuild the style tab to update checkmarks and show/hide voice profile section
         self._rebuild_style_tab()
         
-        tone_labels = {"professional": "Professional", "casual": "Casual", "ai_prompt": "AI Prompt", "personal": "Personal"}
-        self.log(f"✎ Output tone: {tone_labels.get(tone_id, tone_id)}")
+        tone_labels = {
+            "minimal": "🎤 Minimal",
+            "professional": "💼 Professional",
+            "casual": "💬 Casual",
+            "ai_prompt": "🤖 AI Prompt",
+            "personal": "✨ Personal"
+        }
+        self.log(f"✎ Style: {tone_labels.get(tone_id, tone_id)}")
     
     def _on_intensity_changed(self, tone_id: str, intensity_id: str) -> None:
         """Handle intensity change for a specific tone."""
@@ -5530,13 +5489,25 @@ class WayfinderApp(ctk.CTk):
             self.tab_frames["style"].pack(fill="both", expand=True)
     
     def _on_smart_formatting_toggled(self) -> None:
-        """Handle smart formatting toggle."""
+        """Handle smart formatting toggle (legacy - kept for compatibility)."""
         enabled = self.smart_format_var.get()
         self.config["smart_formatting"] = enabled
         save_config(self.config)
         
         status = "enabled" if enabled else "disabled"
         self.log(f"✨ Smart formatting {status}")
+        
+        # Update compatibility check
+        self._update_compatibility_banner()
+    
+    def _on_strong_mode_toggled(self) -> None:
+        """Handle strong mode toggle."""
+        enabled = self.strong_mode_var.get()
+        self.config["strong_mode"] = enabled
+        save_config(self.config)
+        
+        status = "enabled" if enabled else "disabled"
+        self.log(f"💪 Strong mode {status}")
         
         # Update compatibility check
         self._update_compatibility_banner()
@@ -10639,11 +10610,19 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
         ).pack(anchor="w", pady=(0, 8))
         
-        key_options = ["F9", "F10", "F8", "F7", "F6", "F5", "F4", "F3", "F2", "F1", "F11", "F12", "ScrollLock", "Pause"]
+        key_options = [
+            "F9", "F10", "F8", "F7", "F6", "F5", "F4", "F3", "F2", "F1", "F11", "F12", 
+            "ScrollLock", "Pause",
+            "── Mouse ──",
+            "Mouse Middle", "Mouse Side", "Mouse Extra", "Mouse Forward", "Mouse Back",
+        ]
         key_codes_map = {
             "F1": 59, "F2": 60, "F3": 61, "F4": 62, "F5": 63, "F6": 64,
             "F7": 65, "F8": 66, "F9": 67, "F10": 68, "F11": 87, "F12": 88,
             "ScrollLock": 70, "Pause": 119,
+            # Mouse buttons
+            "Mouse Middle": 274, "Mouse Side": 275, "Mouse Extra": 276,
+            "Mouse Forward": 277, "Mouse Back": 278,
         }
         
         current_key = self.config.get("hotkey_key", 67)
@@ -10845,11 +10824,19 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
         ).pack(anchor="w", pady=(0, 8))
         
-        key_options = ["F10", "F9", "F8", "F7", "F6", "F5", "F4", "F3", "F2", "F1", "F11", "F12", "ScrollLock", "Pause"]
+        key_options = [
+            "F10", "F9", "F8", "F7", "F6", "F5", "F4", "F3", "F2", "F1", "F11", "F12", 
+            "ScrollLock", "Pause",
+            "── Mouse ──",
+            "Mouse Middle", "Mouse Side", "Mouse Extra", "Mouse Forward", "Mouse Back",
+        ]
         key_codes_map = {
             "F1": 59, "F2": 60, "F3": 61, "F4": 62, "F5": 63, "F6": 64,
             "F7": 65, "F8": 66, "F9": 67, "F10": 68, "F11": 87, "F12": 88,
             "ScrollLock": 70, "Pause": 119,
+            # Mouse buttons
+            "Mouse Middle": 274, "Mouse Side": 275, "Mouse Extra": 276,
+            "Mouse Forward": 277, "Mouse Back": 278,
         }
         
         current_key = self.config.get("style_toggle_key", 68)
@@ -13036,14 +13023,20 @@ class WayfinderApp(ctk.CTk):
     
     def on_style_toggle(self, target_style=None):
         """
-        Cycle through or set output styles.
+        Cycle through or set output styles (5 presets).
         
         Args:
             target_style: If None, cycle to next style. Otherwise set to specified style.
         """
-        # Style cycle order (matches UI top-to-bottom)
-        STYLE_CYCLE = ["professional", "casual", "ai_prompt", "personal"]
-        STYLE_NAMES = {"professional": "Professional", "ai_prompt": "AI Prompt", "casual": "Casual", "personal": "Personal"}
+        # Style cycle order: Minimal → Professional → Casual → AI Prompt → Personal
+        STYLE_CYCLE = ["minimal", "professional", "casual", "ai_prompt", "personal"]
+        STYLE_NAMES = {
+            "minimal": "🎤 Minimal",
+            "professional": "💼 Professional",
+            "casual": "💬 Casual",
+            "ai_prompt": "🤖 AI Prompt",
+            "personal": "✨ Personal"
+        }
         
         if target_style and target_style in STYLE_CYCLE:
             # Set specific style
@@ -13409,28 +13402,9 @@ class WayfinderApp(ctk.CTk):
         if self.config.get("output_tone") == "personal":
             self._add_to_voice_learning(text.strip())
         
-        # Apply post-processing if enabled
+        # Note: Post-processing is already applied in transcribe_with_config()
+        # The text received here is already fully processed
         processed_text = text.strip()
-        if self.config.get("post_processing_enabled", True):
-            import time as time_module
-            backend = self.config.get("post_processing_backend", "ollama")
-            model = self.config.get("ollama_model", "") if backend == "ollama" else ""
-            self.log(f"🔄 Post-processing with {backend}" + (f" ({model})" if model else "") + "...")
-            
-            pp_start = time_module.perf_counter()
-            try:
-                processed_text = process_with_config(processed_text, self.config)
-                pp_elapsed = time_module.perf_counter() - pp_start
-                
-                if processed_text != text.strip():
-                    self.log(f"✨ Post-processed in {pp_elapsed:.2f}s")
-                else:
-                    self.log(f"ℹ️ No changes ({pp_elapsed:.2f}s)")
-            except Exception as e:
-                pp_elapsed = time_module.perf_counter() - pp_start
-                self.log(f"⚠️ Post-processing failed ({pp_elapsed:.2f}s): {e}")
-                # Fall back to original text
-                processed_text = text.strip()
         
         # Store and display in Dictate tab
         self.last_transcription = processed_text

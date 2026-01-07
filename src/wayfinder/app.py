@@ -21,6 +21,7 @@ from .config import (
     ICON_PATH,
     KEY_CODES,
     MODIFIER_CODES,
+    MOUSE_BUTTON_NAMES,
     IS_FLATPAK,
 )
 
@@ -98,6 +99,7 @@ __all__ = [
     "ICON_PATH",
     "KEY_CODES",
     "MODIFIER_CODES",
+    "MOUSE_BUTTON_NAMES",
     "IS_FLATPAK",
     # State
     "AppState",
