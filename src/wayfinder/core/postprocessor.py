@@ -30,8 +30,8 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
     },
     "casual": {
         "light": "Keep the natural conversational style. Just remove filler words.",
-        "standard": "Use friendly, natural language. Keep it conversational but still clear.",
-        "strong": "Use relaxed, conversational, friendly language. Keep it natural and approachable.",
+        "standard": "Text message style. Friendly and casual like chatting with a friend.",
+        "strong": "Super casual texting style. Short and quick like you're typing fast to a friend.",
     },
     "ai_prompt": {
         "light": "Keep the natural phrasing. This is input for an AI assistant.",
@@ -61,8 +61,8 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
     },
     "casual": {
         "light": "Keep natural punctuation. Don't over-formalize.",
-        "standard": "Use standard punctuation, but don't over-formalize. Natural flow is more important than perfect grammar.",
-        "strong": "Relaxed punctuation is fine. Keep it natural like speaking.",
+        "standard": "Minimal punctuation like texting. Skip periods at end of sentences. Only use question marks when needed.",
+        "strong": "No periods. Text message style. Only question marks when asking something. All lowercase is fine.",
     },
     "ai_prompt": {
         "light": "Keep natural punctuation. Format as you would type to an AI assistant.",
