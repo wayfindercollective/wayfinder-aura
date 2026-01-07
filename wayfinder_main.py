@@ -13191,7 +13191,11 @@ class WayfinderApp(ctk.CTk):
             self._duration_update_job = None
         self._recording_start_time = None
         
-        # Update floating indicator / overlay to processing
+        # Track when we entered processing state for minimum display time
+        import time as time_module
+        self._processing_start_time = time_module.time()
+        
+        # Update floating indicator / overlay to processing FIRST
         if self._use_pyqt_overlay and self.overlay_controller:
             self.overlay_controller.update("processing")
         elif self.indicator:
@@ -13457,6 +13461,24 @@ class WayfinderApp(ctk.CTk):
 
     def on_injection_done(self):
         self.log("✓ Text inserted")
+        
+        # Ensure processing state was visible for at least 800ms
+        # This prevents the overlay from flashing too quickly
+        import time as time_module
+        if hasattr(self, '_processing_start_time') and self._processing_start_time:
+            elapsed_ms = (time_module.time() - self._processing_start_time) * 1000
+            min_display_ms = 800
+            if elapsed_ms < min_display_ms:
+                remaining_ms = int(min_display_ms - elapsed_ms)
+                # Schedule the ready state after remaining time
+                self.after(remaining_ms, self._finish_injection)
+                return
+        
+        self._finish_injection()
+    
+    def _finish_injection(self):
+        """Complete the injection and return overlay to ready state."""
+        self._processing_start_time = None
         # Return overlay to ready state
         if self._use_pyqt_overlay and self.overlay_controller:
             self.overlay_controller.show("ready")  # Return to grey ready state
@@ -13466,12 +13488,18 @@ class WayfinderApp(ctk.CTk):
 
     def on_error(self, message):
         self.log(f"⚠ {message}")
-        # Return overlay to ready state
-        if self._use_pyqt_overlay and self.overlay_controller:
-            self.overlay_controller.show("ready")  # Return to grey ready state
-        elif self.indicator:
-            self.indicator.hide()
-        self.update_state(AppState.IDLE)
+        
+        # Ensure processing state was visible for at least 800ms
+        import time as time_module
+        if hasattr(self, '_processing_start_time') and self._processing_start_time:
+            elapsed_ms = (time_module.time() - self._processing_start_time) * 1000
+            min_display_ms = 800
+            if elapsed_ms < min_display_ms:
+                remaining_ms = int(min_display_ms - elapsed_ms)
+                self.after(remaining_ms, self._finish_injection)
+                return
+        
+        self._finish_injection()
 
     def _add_to_voice_learning(self, text: str):
         """Add transcription to voice learning history."""

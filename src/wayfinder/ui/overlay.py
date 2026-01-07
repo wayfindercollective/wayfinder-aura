@@ -1098,7 +1098,7 @@ class GlassmorphicOverlay(QWidget):
             elapsed = getattr(self, '_processing_start_time', 0)
             if elapsed:
                 elapsed_ms = (time.time() - elapsed) * 1000
-                min_display_ms = 400  # Show "Processing..." for at least 400ms
+                min_display_ms = 800  # Show "Processing..." for at least 800ms
                 if elapsed_ms < min_display_ms:
                     remaining = int(min_display_ms - elapsed_ms)
                     _log(f"set_state: DELAYING transition by {remaining}ms (min display time)")
