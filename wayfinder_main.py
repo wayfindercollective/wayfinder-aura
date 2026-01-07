@@ -7201,6 +7201,8 @@ class WayfinderApp(ctk.CTk):
         Always starts Ollama in the background so it's ready for use,
         regardless of which post-processing backend is currently selected.
         Warns user if Ollama is the selected backend but not installed.
+        
+        Includes retry logic for robustness when systemd service is starting.
         """
         ollama_mgr = get_ollama_manager()
         backend = self.config.get("post_processing_backend", "ollama")
@@ -7214,26 +7216,70 @@ class WayfinderApp(ctk.CTk):
                 self.log("💡 Install Ollama from the Settings panel or use: curl -fsSL https://ollama.com/install.sh | sh")
             return
         
-        # Check if already running
+        # Check if already running (with retry for slow systemd startup)
+        def check_and_start_ollama(attempt: int = 1, max_attempts: int = 5):
+            if ollama_mgr.is_service_running():
+                self.log("✓ Ollama is running")
+                if backend == "ollama":
+                    self._rebuild_postproc_section()
+                return
+            
+            if attempt < max_attempts:
+                # Service might be starting up, retry after a delay
+                self.log(f"⏳ Waiting for Ollama service... (attempt {attempt}/{max_attempts})")
+                self.after(2000, lambda: check_and_start_ollama(attempt + 1, max_attempts))
+                return
+            
+            # After max attempts, try to start it ourselves
+            self.log("🚀 Starting Ollama service...")
+            
+            def on_service_status(success: bool, message: str):
+                def update():
+                    if success:
+                        self.log(f"✓ {message}")
+                        # Refresh the post-processing UI to show updated status
+                        if backend == "ollama":
+                            self._rebuild_postproc_section()
+                    else:
+                        self.log(f"⚠️ {message}")
+                        # Try systemctl as fallback
+                        self._try_systemctl_ollama()
+                self.after(0, update)
+            
+            ollama_mgr.start_service(callback=on_service_status)
+        
+        # Start the check/start sequence
+        check_and_start_ollama()
+    
+    def _try_systemctl_ollama(self) -> None:
+        """Try to start Ollama via systemctl as a fallback."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["systemctl", "start", "ollama"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                self.log("✓ Ollama started via systemctl")
+                # Check again after a short delay
+                self.after(3000, self._verify_ollama_running)
+            else:
+                self.log("⚠️ Could not start Ollama - check 'systemctl status ollama'")
+        except Exception as e:
+            self.log(f"⚠️ Failed to start Ollama via systemctl: {e}")
+    
+    def _verify_ollama_running(self) -> None:
+        """Verify Ollama is running and update UI."""
+        ollama_mgr = get_ollama_manager()
         if ollama_mgr.is_service_running():
             self.log("✓ Ollama is running")
-            return
-        
-        # Auto-start in background
-        self.log("🚀 Starting Ollama service...")
-        
-        def on_service_status(success: bool, message: str):
-            def update():
-                if success:
-                    self.log(f"✓ {message}")
-                    # Refresh the post-processing UI to show updated status
-                    if backend == "ollama":
-                        self._rebuild_postproc_section()
-                else:
-                    self.log(f"⚠️ {message}")
-            self.after(0, update)
-        
-        ollama_mgr.start_service(callback=on_service_status)
+            backend = self.config.get("post_processing_backend", "ollama")
+            if backend == "ollama":
+                self._rebuild_postproc_section()
+        else:
+            self.log("⚠️ Ollama still not responding - post-processing may not work")
     
     def _start_display_wake_listener(self) -> None:
         """Start D-Bus listener for system wake-up events to refresh the overlay.
