@@ -1090,8 +1090,29 @@ class GlassmorphicOverlay(QWidget):
             _log(f"set_state: EARLY RETURN (state unchanged)")
             return
         
+        # Enforce minimum display time for PROCESSING state
+        # Otherwise it flashes by too fast to see (< 20ms sometimes)
+        if self._state == OverlayState.PROCESSING and state == OverlayState.READY:
+            import time
+            elapsed = getattr(self, '_processing_start_time', 0)
+            if elapsed:
+                elapsed_ms = (time.time() - elapsed) * 1000
+                min_display_ms = 400  # Show "Processing..." for at least 400ms
+                if elapsed_ms < min_display_ms:
+                    remaining = int(min_display_ms - elapsed_ms)
+                    _log(f"set_state: DELAYING transition by {remaining}ms (min display time)")
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(remaining, lambda: self.set_state(state, animate))
+                    return
+        
         old_state = self._state
         self._state = state
+        
+        # Track when we entered PROCESSING state
+        if state == OverlayState.PROCESSING:
+            import time
+            self._processing_start_time = time.time()
+        
         _log(f"set_state: CHANGED to {self._state}")
         
         duration = 250 if animate else 0  # 250ms ease-out = engineered, not vibe-coded
