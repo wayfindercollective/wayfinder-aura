@@ -60,7 +60,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Transcription settings
     "prompt": "Hello, this is a dictation with proper punctuation and grammar.",
-    "threads": 6,
+    "threads": 4,  # Default to 4, auto-adjusted on first run based on CPU cores
     "timeout": 120,
     "min_recording_duration": 0.5,
     
@@ -137,7 +137,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Ollama post-processing settings
     "ollama_base_url": "http://localhost:11434",  # Ollama API URL
-    "ollama_model": "phi3:mini",  # Ollama model name (e.g., phi3:mini, qwen2.5:1.5b)
+    "ollama_model": "smollm2:360m",  # Ollama model name - smallest/fastest for quick start (230MB)
     
     # Cloud post-processing settings (API keys read from environment variables only)
     # Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment

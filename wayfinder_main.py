@@ -83,7 +83,7 @@ DEFAULT_CONFIG = {
     "audio_device": None,
     "sample_rate": 16000,
     "prompt": "Hello, this is a dictation with proper punctuation and grammar.",
-    "threads": 6,
+    "threads": 4,  # Default to 4, auto-adjusted on first run based on CPU cores
     "timeout": 120,
     "min_recording_duration": 0.5,
     "start_minimized": False,
@@ -145,7 +145,7 @@ DEFAULT_CONFIG = {
     "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
     # Ollama post-processing settings
     "ollama_base_url": "http://localhost:11434",  # Ollama API URL
-    "ollama_model": "phi3:mini",  # Ollama model name (e.g., phi3:mini, qwen2.5:1.5b)
+    "ollama_model": "smollm2:360m",  # Ollama model name - smallest/fastest for quick start (230MB)
     # Cloud post-processing settings (API keys read from environment variables only)
     # Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment
     "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
@@ -2959,6 +2959,9 @@ class WayfinderApp(ctk.CTk):
         if self.config.get("start_minimized", False):
             self.after(100, self.hide_to_tray)
         
+        # Run startup dependency checks
+        self.after(300, self._check_startup_dependencies)
+        
         # Auto-start Ollama if backend is ollama and it's installed but not running
         self.after(500, self._auto_start_ollama_if_needed)
         
@@ -3326,7 +3329,7 @@ class WayfinderApp(ctk.CTk):
         else:
             self.log(f"⚪ GPU: Not detected (using CPU)")
         
-        threads_config = self.config.get("threads", 6)
+        threads_config = self.config.get("threads", 4)
         if cpu_count < threads_config:
             optimal = get_optimal_thread_count()
             self.log(f"💡 Tip: {cpu_count} CPU cores detected, consider setting threads to {optimal}")
@@ -6436,7 +6439,7 @@ class WayfinderApp(ctk.CTk):
     def _build_ollama_inline_section(self, parent) -> None:
         """Build inline Ollama model selection with download."""
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
-        current_model = self.config.get("ollama_model", "phi3:mini")
+        current_model = self.config.get("ollama_model", "smollm2:360m")
         
         # Check Ollama availability and get installed models
         ollama_available = False
@@ -7195,6 +7198,43 @@ class WayfinderApp(ctk.CTk):
         
         ollama_mgr.install(progress_callback=on_progress, complete_callback=on_complete)
     
+    def _check_startup_dependencies(self) -> None:
+        """Check critical dependencies on startup and warn/adjust as needed."""
+        import shutil
+        from pathlib import Path
+        
+        # Check 1: Verify transcription backend is available
+        backend = self.config.get("transcription_backend", "whisper_cpp")
+        
+        if backend == "whisper_cpp":
+            whisper_binary = self.config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
+            whisper_binary = os.path.expanduser(whisper_binary)
+            
+            if not Path(whisper_binary).exists():
+                # Try to find it elsewhere
+                found = shutil.which("whisper-cli")
+                if found:
+                    self.config["whisper_binary"] = found
+                    save_config(self.config)
+                    self.log(f"✓ Found whisper-cli at {found}")
+                else:
+                    self.log("⚠️ whisper-cli not found - transcription won't work")
+                    self.log("💡 Install: git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp && make")
+        
+        # Check 2: Adjust thread count on first run
+        if "threads_auto_adjusted" not in self.config:
+            optimal_threads = get_optimal_thread_count()
+            if self.config.get("threads", 4) != optimal_threads:
+                self.config["threads"] = optimal_threads
+                self.config["threads_auto_adjusted"] = True
+                save_config(self.config)
+                self.log(f"⚙️ Threads auto-set to {optimal_threads} (based on CPU cores)")
+        
+        # Check 3: Verify ydotool is available
+        if not shutil.which("ydotool"):
+            self.log("⚠️ ydotool not found - text injection won't work")
+            self.log("💡 Install: sudo dnf install ydotool && sudo systemctl enable --now ydotool")
+    
     def _auto_start_ollama_if_needed(self) -> None:
         """Auto-start Ollama on app boot if installed.
         
@@ -7222,6 +7262,8 @@ class WayfinderApp(ctk.CTk):
                 self.log("✓ Ollama is running")
                 if backend == "ollama":
                     self._rebuild_postproc_section()
+                    # Check if default model is installed, auto-download if not
+                    self.after(1000, self._ensure_default_ollama_model)
                 return
             
             if attempt < max_attempts:
@@ -7278,8 +7320,48 @@ class WayfinderApp(ctk.CTk):
             backend = self.config.get("post_processing_backend", "ollama")
             if backend == "ollama":
                 self._rebuild_postproc_section()
+                # Check if default model is installed, auto-download if not
+                self.after(1000, self._ensure_default_ollama_model)
         else:
             self.log("⚠️ Ollama still not responding - post-processing may not work")
+    
+    def _ensure_default_ollama_model(self) -> None:
+        """Ensure the default Ollama model is installed, auto-download if not."""
+        ollama_mgr = get_ollama_manager()
+        
+        if not ollama_mgr.is_service_running():
+            return
+        
+        default_model = self.config.get("ollama_model", "smollm2:360m")
+        installed_models = ollama_mgr.list_models()
+        
+        # Check if default model (or variant) is installed
+        model_base = default_model.split(":")[0]
+        is_installed = any(model_base in m for m in installed_models)
+        
+        if is_installed:
+            return
+        
+        # No models or default not installed - auto-download
+        if not installed_models:
+            self.log(f"📦 No Ollama models found - downloading {default_model} (230MB)...")
+        else:
+            self.log(f"📦 Default model not found - downloading {default_model}...")
+        
+        def on_progress(status: str, progress: float):
+            if progress >= 0:
+                self.after(0, lambda: self.log(f"   {status}"))
+        
+        def on_complete(success: bool, message: str):
+            def update():
+                if success:
+                    self.log(f"✓ {message}")
+                    self._rebuild_postproc_section()
+                else:
+                    self.log(f"⚠️ {message}")
+            self.after(0, update)
+        
+        ollama_mgr.pull_model(default_model, progress_callback=on_progress, complete_callback=on_complete)
     
     def _start_display_wake_listener(self) -> None:
         """Start D-Bus listener for system wake-up events to refresh the overlay.
@@ -7354,7 +7436,7 @@ class WayfinderApp(ctk.CTk):
         import time
         import requests
         
-        model_name = self.config.get("ollama_model", "phi3:mini")
+        model_name = self.config.get("ollama_model", "smollm2:360m")
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
         
         # Prevent multiple simultaneous tests
@@ -8232,7 +8314,7 @@ class WayfinderApp(ctk.CTk):
         base_url = self.config.get("ollama_base_url", "http://localhost:11434")
         ollama_available = False
         available_models = []
-        current_model = self.config.get("ollama_model", "phi3:mini")
+        current_model = self.config.get("ollama_model", "smollm2:360m")
         
         try:
             import requests
@@ -8728,7 +8810,7 @@ class WayfinderApp(ctk.CTk):
                 return name[:25] + "..." if len(name) > 25 else name
             return "No model selected"
         elif backend == "ollama":
-            model_name = self.config.get("ollama_model", "phi3:mini")
+            model_name = self.config.get("ollama_model", "smollm2:360m")
             return model_name[:25] + "..." if len(model_name) > 25 else model_name
         elif backend == "anthropic":
             # API keys are read from environment variables only for security
