@@ -1573,15 +1573,32 @@ def run_overlay():
     def process_commands():
         """Check for and process stdin commands."""
         try:
-            # Non-blocking read from stdin
-            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+            # Read ALL available commands in one poll cycle
+            # This prevents state change commands from getting stuck behind level updates
+            commands = []
+            while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline().strip()
-                if line:
-                    try:
-                        cmd = json.loads(line)
-                        handle_command(overlay, cmd)
-                    except json.JSONDecodeError:
-                        pass
+                if not line:
+                    break  # EOF or empty line
+                try:
+                    cmd = json.loads(line)
+                    commands.append(cmd)
+                except json.JSONDecodeError:
+                    pass
+            
+            # Process commands, prioritizing state changes over level updates
+            # Sort: state-changing commands first, level updates last
+            state_commands = [c for c in commands if c.get("cmd") != "level"]
+            level_commands = [c for c in commands if c.get("cmd") == "level"]
+            
+            # Process state commands immediately
+            for cmd in state_commands:
+                handle_command(overlay, cmd)
+            
+            # Only process the LAST level command (skip intermediate ones)
+            if level_commands:
+                handle_command(overlay, level_commands[-1])
+                
         except Exception:
             pass
     
