@@ -5501,23 +5501,26 @@ class WayfinderApp(ctk.CTk):
         
         # === 🎭 SECRET: Caricature Mode Keyboard Detection ===
         # Track keystrokes to detect "lol" or "haha"
-        self._secret_key_buffer = ""
+        if not hasattr(self, '_secret_key_buffer'):
+            self._secret_key_buffer = ""
+            # Bind keyboard to root window for easter egg detection
+            self.bind("<Key>", self._on_style_tab_key)
         
         # Show indicator if caricature mode is already active
         if self.config.get("caricature_mode", False):
             self._show_caricature_indicator(strong_content)
-        
-        # Bind keyboard to main frame for easter egg detection
-        frame.bind("<Key>", self._on_style_tab_key)
-        frame.bind("<FocusIn>", lambda e: frame.focus_set())
     
     def _on_style_tab_key(self, event):
-        """Handle keystrokes on Style tab for easter egg detection."""
+        """Handle keystrokes for easter egg detection (only on Style tab)."""
+        # Only trigger on Style tab
+        if not hasattr(self, 'active_tab') or self.active_tab != "style":
+            return
+        
         if not hasattr(self, '_secret_key_buffer'):
             self._secret_key_buffer = ""
         
         # Only track letter keys
-        char = event.char.lower()
+        char = event.char.lower() if event.char else ""
         if char.isalpha():
             self._secret_key_buffer += char
             # Keep only last 5 characters
