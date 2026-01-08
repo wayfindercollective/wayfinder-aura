@@ -309,10 +309,10 @@ STYLE_PALETTES = {
         color="#73DACA",    # Soft teal
         glow="#5AAE9E",     # Muted teal glow
     ),
-    "ai_prompt": StyleColors(
-        letter="AI",
-        color="#E5AC2A",    # Amber/gold
-        glow="#B88A22",     # Muted amber glow
+    "dev": StyleColors(
+        letter="Dev",
+        color="#98C379",    # Green (like code/terminal)
+        glow="#7A9F61",     # Muted green glow
     ),
     "personal": StyleColors(
         letter="You",       # Your personal voice
@@ -322,7 +322,7 @@ STYLE_PALETTES = {
 }
 
 # Style cycle order for toggle (matches hotkey cycle)
-STYLE_CYCLE = ["minimal", "professional", "casual", "ai_prompt", "personal"]
+STYLE_CYCLE = ["minimal", "professional", "casual", "dev", "personal"]
 
 
 # === Squircle Path Generator (Kappa-based Bezier) ===
@@ -733,7 +733,7 @@ class GlassmorphicOverlay(QWidget):
         self._target_width = 200
         self._current_width = 200.0
         
-        # Style indicator state (professional/ai_prompt/casual)
+        # Style indicator state (professional/dev/casual)
         self._current_style = "professional"
         
         # Animation components
@@ -1268,7 +1268,7 @@ class GlassmorphicOverlay(QWidget):
         Update the style badge indicator.
         
         Args:
-            style: One of "professional", "ai_prompt", "casual"
+            style: One of "minimal", "professional", "casual", "dev", "personal"
             animate: Whether to animate the color transition
         """
         if style not in STYLE_PALETTES:

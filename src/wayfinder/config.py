@@ -50,7 +50,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
     "hotkey_modifiers": [],
     
-    # Style toggle hotkey (cycles Minimal → Professional → Casual → AI Prompt → Personal)
+    # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal)
     "style_toggle_key": 68,  # F10 default
     "style_toggle_modifiers": [],
     
@@ -116,7 +116,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "overlay_scale": 0.7,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     
     # Style settings (5 presets that cycle via hotkey)
-    "output_tone": "professional",  # minimal | professional | casual | ai_prompt | personal
+    "output_tone": "professional",  # minimal | professional | casual | dev | personal
     "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
     "caricature_mode": False,  # 🎭 Secret easter egg! Unlocked by typing "lol" on Style tab.
     

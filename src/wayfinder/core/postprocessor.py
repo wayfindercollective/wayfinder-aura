@@ -53,9 +53,9 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
         "strong": "Rewrite as casual texting. Short, relaxed, like messaging a friend.",
         "caricature": "EXTREME internet/Gen-Z speak. Use 'fr fr', 'no cap', 'lowkey', 'highkey', 'bussin', 'ong', 'slay', 'its giving', 'understood the assignment'. Add skull emojis 💀. Make it sound like a parody of chronically online speech.",
     },
-    "ai_prompt": {
-        "standard": "Keep the user's words. Format as a clear question or request for an AI.",
-        "strong": "Restructure as a well-organized prompt. Make it easy for an LLM to understand and respond.",
+    "dev": {
+        "standard": "Keep the user's words. This is developer/coding context - recognize git commands (pull, push, commit, merge, branch, main, dev), programming terms, and technical jargon.",
+        "strong": "Format as a clear developer request or prompt. Recognize technical terms, file paths, function names, and git terminology.",
         "caricature": "OVER-ENGINEERED PROMPT. Add excessive context like 'You are a world-renowned expert with 47 years of experience'. Include 'Think step by step', 'Take a deep breath', 'I'll tip you $500', 'My career depends on this'. Make it a parody of prompt engineering.",
     },
     "personal": {
@@ -86,9 +86,9 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
         "strong": "No periods. Text message style. Lowercase is fine. Only use ? when asking.",
         "caricature": "all lowercase. no punctuation except for excessive question marks??? and exclamation marks!!! add emojis freely 💀😭🔥",
     },
-    "ai_prompt": {
-        "standard": "Use clear punctuation. Format as a natural question or request.",
-        "strong": "Use clear punctuation. Add structure (bullets, numbered steps) if it helps clarity.",
+    "dev": {
+        "standard": "Use clear punctuation. Preserve technical terms exactly (git commands, file paths, function names).",
+        "strong": "Use clear punctuation. Add structure (bullets, code blocks) if it helps clarity. Preserve all technical terminology.",
         "caricature": "Add XML-style tags like <context>, <task>, <constraints>. Number everything. Add a [CRITICAL] and [IMPORTANT] section.",
     },
     "personal": {
@@ -147,12 +147,12 @@ MODEL_TIERS = {
 MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
     "llama3.2:1b": {
         "issues": ["safety_filter_email"],
-        "workaround": "Disable smart_formatting for professional/ai_prompt modes",
+        "workaround": "Disable smart_formatting for professional/dev modes",
         "avoid_words": ["email"],  # These words trigger false-positive safety
     },
     "llama3.2:3b": {
         "issues": ["safety_filter_email"],
-        "workaround": "Disable smart_formatting for professional/ai_prompt modes",
+        "workaround": "Disable smart_formatting for professional/dev modes",
         "avoid_words": ["email"],
     },
     "smollm2:360m": {
@@ -255,7 +255,7 @@ def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_fo
     
     # Check for model-specific quirks
     if "safety_filter_email" in quirks.get("issues", []):
-        if smart_formatting and tone in ["professional", "ai_prompt"]:
+        if smart_formatting and tone in ["professional", "dev"]:
             result["warnings"].append(
                 f"⚠️ {model_name} may refuse '{tone}' mode due to safety filters. "
                 "Disabling smart formatting automatically."
@@ -653,7 +653,7 @@ SIMPLE_TONES = {
     "minimal": "exact, change nothing except removing um/uh",
     "professional": "formal and polished",
     "casual": "friendly and relaxed",
-    "ai_prompt": "clear, for an AI assistant",
+    "dev": "clear developer context, recognize git and coding terms",
     "personal": "natural, keeping the user's own speaking style",
 }
 
@@ -756,7 +756,7 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
         "minimal": "minimal/raw",
         "professional": "professional/business",
         "casual": "casual/texting",
-        "ai_prompt": "AI prompt",
+        "dev": "developer/coding",
         "personal": "personal",
     }
     
@@ -1459,7 +1459,7 @@ def process_with_config(text: str, config: dict) -> str:
     This is the main entry point for post-processing.
     
     Uses the new tone-based system with optional smart formatting:
-    - output_tone: professional | casual | ai_prompt
+    - output_tone: minimal | professional | casual | dev | personal
     - smart_formatting: True (auto-detect content type) | False (clean only)
     
     Includes model compatibility checking and auto-adjustments.
@@ -1599,7 +1599,7 @@ def get_tone_options() -> list:
         {"id": "minimal", "name": "Minimal", "icon": "🎤", "description": "Just removes um/uh. Your exact words."},
         {"id": "professional", "name": "Professional", "icon": "💼", "description": "Clean, business-appropriate tone"},
         {"id": "casual", "name": "Casual", "icon": "💬", "description": "Relaxed, texting style"},
-        {"id": "ai_prompt", "name": "AI Prompt", "icon": "🤖", "description": "Formatted for AI assistants"},
+        {"id": "dev", "name": "Dev", "icon": "🖥️", "description": "Developer mode - recognizes git, code, and tech terms"},
         {"id": "personal", "name": "Personal", "icon": "✨", "description": "Your learned speech patterns"},
     ]
 

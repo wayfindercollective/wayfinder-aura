@@ -126,7 +126,7 @@ DEFAULT_CONFIG = {
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     # Style settings (5 presets that cycle via hotkey)
-    "output_tone": "professional",  # minimal | professional | casual | ai_prompt | personal
+    "output_tone": "professional",  # minimal | professional | casual | dev | personal
     "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": True,  # Enable LLM post-processing
@@ -1906,7 +1906,7 @@ def socket_listener(event_queue, stop_event, log_callback=None):
                     log("✎ Style toggle received via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, None))
                 elif data_str.startswith("style:"):
-                    # Set specific style (style:professional, style:ai_prompt, style:casual, style:personal)
+                    # Set specific style (style:professional, style:dev, style:casual, style:personal)
                     style = data_str.split(":", 1)[1]
                     log(f"✎ Style set to '{style}' via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, style))
@@ -2733,7 +2733,7 @@ class OverlayController:
         self._current_state = "hidden"
         self._lock = threading.Lock()
         self._mode = mode  # "persistent" or "standard"
-        self._initial_style = initial_style  # "professional", "ai_prompt", "casual", or "personal"
+        self._initial_style = initial_style  # "professional", "dev", "casual", or "personal"
     
     def _start_process(self) -> bool:
         """Start the overlay subprocess if not already running."""
@@ -5336,7 +5336,7 @@ class WayfinderApp(ctk.CTk):
             ("minimal", "🎤", "Minimal", "Just removes um/uh. Your exact words, nothing changed."),
             ("professional", "💼", "Professional", "Clean + business-appropriate tone"),
             ("casual", "💬", "Casual", "Clean + relaxed texting style"),
-            ("ai_prompt", "🤖", "AI Prompt", "Clean + formatted for AI assistants"),
+            ("dev", "🖥️", "Dev", "Developer mode - recognizes git & code terms"),
             ("personal", "✨", "Personal", "Clean + your learned speech patterns"),
         ]
         
@@ -5469,7 +5469,7 @@ class WayfinderApp(ctk.CTk):
         # Description
         ctk.CTkLabel(
             hotkey_content,
-            text="Press this key to cycle: 🎤 → 💼 → 💬 → 🤖 → ✨",
+            text="Press this key to cycle: 🎤 → 💼 → 💬 → 🖥️ → ✨",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", pady=(0, 10))
@@ -5633,11 +5633,12 @@ class WayfinderApp(ctk.CTk):
         self.config["output_tone"] = tone_id
         
         # Also update the whisper prompt to match the tone
+        # Dev mode includes vocabulary hints to help recognize git/coding terms
         tone_prompts = {
             "minimal": "Dictation with natural speech.",
             "professional": "This is a professional dictation with formal language, proper punctuation, and business-appropriate terminology.",
             "casual": "This is a casual conversation with natural, relaxed language and everyday expressions.",
-            "ai_prompt": "This is a conversational prompt for an AI assistant. Clear questions and requests.",
+            "dev": "Developer dictation for coding and git. Terms: main, dev, branch, pull, push, commit, merge, rebase, checkout, stash, diff, log, fetch, clone, fork, repo, PR, issue, Cursor, VS Code, npm, pip, yarn, pnpm, API, JSON, TypeScript, Python, JavaScript, React, function, class, variable, const, let, import, export, async, await, promise, callback, component, props, state, hook, useState, useEffect.",
             "personal": "Natural dictation in the user's personal speaking style.",
         }
         self.config["prompt"] = tone_prompts.get(tone_id, tone_prompts["professional"])
@@ -5660,7 +5661,7 @@ class WayfinderApp(ctk.CTk):
             "minimal": "🎤 Minimal",
             "professional": "💼 Professional",
             "casual": "💬 Casual",
-            "ai_prompt": "🤖 AI Prompt",
+            "dev": "🖥️ Dev",
             "personal": "✨ Personal"
         }
         self.log(f"✎ Style: {tone_labels.get(tone_id, tone_id)}")
@@ -5688,7 +5689,7 @@ class WayfinderApp(ctk.CTk):
                 )
         
         # Log the change
-        tone_labels = {"professional": "Professional", "casual": "Casual", "ai_prompt": "AI Prompt", "personal": "Personal"}
+        tone_labels = {"professional": "Professional", "casual": "Casual", "dev": "Dev", "personal": "Personal"}
         intensity_labels = {"light": "Light", "standard": "Standard", "strong": "Strong"}
         self.log(f"✎ {tone_labels.get(tone_id, tone_id)} intensity: {intensity_labels.get(intensity_id, intensity_id)}")
         
@@ -13292,12 +13293,12 @@ class WayfinderApp(ctk.CTk):
             target_style: If None, cycle to next style. Otherwise set to specified style.
         """
         # Style cycle order: Minimal → Professional → Casual → AI Prompt → Personal
-        STYLE_CYCLE = ["minimal", "professional", "casual", "ai_prompt", "personal"]
+        STYLE_CYCLE = ["minimal", "professional", "casual", "dev", "personal"]
         STYLE_NAMES = {
             "minimal": "🎤 Minimal",
             "professional": "💼 Professional",
             "casual": "💬 Casual",
-            "ai_prompt": "🤖 AI Prompt",
+            "dev": "🖥️ Dev",
             "personal": "✨ Personal"
         }
         
