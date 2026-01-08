@@ -16,72 +16,97 @@ class PostProcessingError(Exception):
 
 
 # =============================================================================
-# Tone-Based Prompts (New Simplified System)
+# Simplified Style System (5 Presets)
+# =============================================================================
+#
+# The new system has 5 presets that cycle via hotkey:
+#   1. Minimal - Universal cleanup, just removes um/uh/ah (no style applied)
+#   2. Professional - Clean + business-appropriate tone
+#   3. Casual - Clean + relaxed texting style  
+#   4. AI Prompt - Clean + formatted for AI assistants
+#   5. Personal - Clean + user's learned speech patterns
+#
+# Each styled preset (2-5) has two intensities:
+#   - Standard: Cleans up speech, applies style lightly, KEEPS user's words
+#   - Strong: Full transformation, may restructure sentences
+#
+# "Minimal" is always the same - just filler sound removal.
+
+# =============================================================================
+# Tone Guidance (Style-specific instructions for the LLM)
 # =============================================================================
 
-# Tone guidance for different output styles with intensity levels
-# Each style has light/standard/strong variations
-# Note: All intensities are kept relatively light to preserve natural speech
 TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
+    "minimal": {
+        # Minimal is the same regardless of intensity - just cleanup
+        "standard": "Keep the exact phrasing and sentence structure. Only fix obvious transcription errors.",
+        "strong": "Keep the exact phrasing and sentence structure. Only fix obvious transcription errors.",
+        "caricature": "Add MORE filler words and verbal tics. Make it sound like a nervous person speaking. Add [clears throat], [sighs], [ummmm], [long pause] annotations.",
+    },
     "professional": {
-        "light": "Keep the natural phrasing. Just clean up obvious speech artifacts.",
-        "standard": "Use clear, professional language. Maintain a polished but approachable tone.",
-        "strong": "Use formal, polished, business-appropriate language. Be clear and concise.",
+        "standard": "Keep the user's words and sentence structure. Make it sound professional with proper grammar.",
+        "strong": "Rewrite for executive clarity. Be concise, formal, and polished. Remove fluff.",
+        "caricature": "MAXIMUM CORPORATE BUZZWORDS. Synergize everything. Circle back constantly. Leverage core competencies. Move the needle. Touch base offline. Make it sound like a parody of a LinkedIn influencer or management consultant.",
     },
     "casual": {
-        "light": "Keep the natural conversational style. Just remove filler words.",
-        "standard": "Text message style. Friendly and casual like chatting with a friend.",
-        "strong": "Super casual texting style. Short and quick like you're typing fast to a friend.",
+        "standard": "Keep the user's words. Make it sound natural and conversational.",
+        "strong": "Rewrite as casual texting. Short, relaxed, like messaging a friend.",
+        "caricature": "EXTREME internet/Gen-Z speak. Use 'fr fr', 'no cap', 'lowkey', 'highkey', 'bussin', 'ong', 'slay', 'its giving', 'understood the assignment'. Add skull emojis 💀. Make it sound like a parody of chronically online speech.",
     },
     "ai_prompt": {
-        "light": "Keep the natural phrasing. This is input for an AI assistant.",
-        "standard": "Clean up speech artifacts while preserving the conversational request style. Format as a clear prompt or question for an AI.",
-        "strong": "Format as a clear, well-structured prompt for an AI assistant. Preserve the intent and specifics of the request while making it easy for an LLM to understand.",
+        "standard": "Keep the user's words. Format as a clear question or request for an AI.",
+        "strong": "Restructure as a well-organized prompt. Make it easy for an LLM to understand and respond.",
+        "caricature": "OVER-ENGINEERED PROMPT. Add excessive context like 'You are a world-renowned expert with 47 years of experience'. Include 'Think step by step', 'Take a deep breath', 'I'll tip you $500', 'My career depends on this'. Make it a parody of prompt engineering.",
     },
     "personal": {
         # Personal style uses voice profile - these are fallbacks when no profile exists
-        "light": "Keep the exact phrasing. Only fix obvious transcription errors.",
-        "standard": "Clean up speech artifacts while keeping the user's natural speaking style and vocabulary.",
-        "strong": "Polish the text while preserving the user's characteristic phrases and word choices.",
+        "standard": "Keep the user's characteristic phrases and word choices. Just clean up delivery.",
+        "strong": "Polish while preserving the user's unique voice and speaking patterns.",
+        "caricature": "EXAGGERATE the user's speech patterns to absurd levels. If they use filler words, triple them. If they have verbal tics, amplify them. Make it a loving parody of how they speak.",
     },
 }
 
 # =============================================================================
-# Formatting Rules (Options A + B: Tone + Intensity aware)
+# Formatting Rules (Punctuation & Structure)
 # =============================================================================
-# These control punctuation, capitalization, and structure based on BOTH
-# the tone AND intensity settings. This prevents conflicts like casual-strong
-# still having perfect punctuation.
 
 FORMATTING_RULES: Dict[str, Dict[str, str]] = {
+    "minimal": {
+        "standard": "Keep natural punctuation exactly as transcribed.",
+        "strong": "Keep natural punctuation exactly as transcribed.",
+        "caricature": "Add dramatic punctuation... lots of ellipses... and [annotations] for [awkward pauses] and [nervous laughter].",
+    },
     "professional": {
-        "light": "Use standard punctuation. Keep formatting simple and readable.",
-        "standard": "Use proper punctuation and capitalization. Keep formatting clean and readable.",
-        "strong": "Use proper punctuation and capitalization. Format with clear structure.",
+        "standard": "Use proper punctuation and capitalization.",
+        "strong": "Use proper punctuation. Structure with clear paragraphs if needed.",
+        "caricature": "Use EXCESSIVE capitalization for EMPHASIS. Add bullet points and sub-bullets everywhere. Sign off with corporate platitudes.",
     },
     "casual": {
-        "light": "Keep natural punctuation. Don't over-formalize.",
-        "standard": "Minimal punctuation like texting. Skip periods at end of sentences. Only use question marks when needed.",
-        "strong": "No periods. Text message style. Only question marks when asking something. All lowercase is fine.",
+        "standard": "Relaxed punctuation. Periods optional at end of sentences.",
+        "strong": "No periods. Text message style. Lowercase is fine. Only use ? when asking.",
+        "caricature": "all lowercase. no punctuation except for excessive question marks??? and exclamation marks!!! add emojis freely 💀😭🔥",
     },
     "ai_prompt": {
-        "light": "Keep natural punctuation. Format as you would type to an AI assistant.",
-        "standard": "Use clear punctuation. Format as a conversational prompt or question.",
-        "strong": "Use clear punctuation and structure. Format as a well-organized prompt for an AI assistant.",
+        "standard": "Use clear punctuation. Format as a natural question or request.",
+        "strong": "Use clear punctuation. Add structure (bullets, numbered steps) if it helps clarity.",
+        "caricature": "Add XML-style tags like <context>, <task>, <constraints>. Number everything. Add a [CRITICAL] and [IMPORTANT] section.",
     },
     "personal": {
-        "light": "Keep the user's natural punctuation style.",
-        "standard": "Use standard punctuation while keeping natural flow.",
-        "strong": "Clean up punctuation but preserve characteristic patterns.",
+        "standard": "Match the user's typical punctuation habits.",
+        "strong": "Clean punctuation while keeping the user's style.",
+        "caricature": "Exaggerate punctuation quirks. If they use lots of commas, use MORE. Add their verbal tics as written words.",
     },
 }
 
-# Filler word removal rules - also intensity-aware
-# Note: All levels are kept relatively gentle to preserve natural speech
+# =============================================================================
+# Filler Word Rules (What to remove)
+# =============================================================================
+
 FILLER_RULES: Dict[str, str] = {
-    "light": "Remove only obvious filler sounds (um, uh, ah). Keep natural speech patterns.",
-    "standard": "Remove obvious filler words (um, uh, ah, like, you know) but keep natural speech patterns.",
-    "strong": "Remove filler words: um, uh, ah, like, you know, basically, actually, I mean.",
+    "minimal": "Remove ONLY filler sounds: um, uh, ah, er. Keep everything else including 'like', 'you know', 'basically'.",
+    "standard": "Remove filler words: um, uh, ah, like, you know. Keep the user's sentence structure.",
+    "strong": "Remove all filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well.",
+    "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
 }
 
 
@@ -339,14 +364,27 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
             "severity": "warning",
         }
     
-    # Get tone and intensity
+    # Get tone and intensity (new simplified system)
     tone = config.get("output_tone", "professional")
-    intensity_key = f"{tone}_intensity"
-    intensity = config.get(intensity_key, "standard")
-    smart_formatting = config.get("smart_formatting", True)
+    use_strong = config.get("strong_mode", False)
+    intensity = "strong" if use_strong else "standard"
+    
+    # Minimal style doesn't need compatibility check - it's just filler removal
+    if tone == "minimal":
+        return {
+            "is_compatible": True,
+            "issues": [],
+            "recommendations": [],
+            "upgrade_message": None,
+            "severity": "ok",
+            "current_model": model_name,
+            "current_tier": detect_model_tier(model_name),
+            "requested_intensity": "standard",
+            "effective_intensity": "standard",
+        }
     
     # Run compatibility check
-    compat = get_model_compatibility(model_name, tone, intensity, smart_formatting)
+    compat = get_model_compatibility(model_name, tone, intensity, False)
     
     # Build result
     issues = []
@@ -359,7 +397,7 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
         max_intensity = tier_info.get("max_intensity", "standard")
         
         issues.append(
-            f"'{intensity.title()}' intensity requires a larger model"
+            f"Strong mode requires a larger model"
         )
         
         if compat["upgrade_suggestion"]:
@@ -371,13 +409,12 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
             for model in suggestion["recommended_models"][:2]:
                 recommendations.append(f"Try: {model['name']} ({model['description']})")
         
-        recommendations.append(f"Or use '{max_intensity}' intensity with current model")
+        recommendations.append("Or disable Strong mode")
     
-    # Add any other warnings (skip duplicates and intensity warnings already covered)
+    # Add any other warnings (skip duplicates)
     for warning in compat.get("warnings", []):
         cleaned = warning.replace("⚠️ ", "").replace("💡 ", "")
-        # Skip if this is about intensity (already covered above)
-        if "intensity requires" in cleaned.lower():
+        if "intensity requires" in cleaned.lower() or "strong mode" in cleaned.lower():
             continue
         if cleaned not in issues:
             issues.append(cleaned)
@@ -409,8 +446,11 @@ def get_formatting_rules(tone: str, intensity: str = "standard") -> str:
     return tone_dict.get(intensity, tone_dict["standard"])
 
 
-def get_filler_rules(intensity: str = "standard") -> str:
-    """Get the filler word removal rules for a given intensity."""
+def get_filler_rules(tone: str, intensity: str = "standard") -> str:
+    """Get the filler word removal rules for a given tone and intensity."""
+    # Minimal always uses minimal filler rules regardless of intensity
+    if tone == "minimal":
+        return FILLER_RULES["minimal"]
     return FILLER_RULES.get(intensity, FILLER_RULES["standard"])
 
 # Refusal detection patterns - phrases that indicate model is refusing to process
@@ -530,45 +570,79 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bo
     return is_hallucinated
 
 
-# Smart formatting prompt - auto-detects content type and formats appropriately
-# Uses dynamic placeholders for tone-aware formatting rules
-# NOTE: Carefully worded to avoid triggering safety filters in smaller models
-SMART_FORMAT_PROMPT = """You are cleaning up a voice transcription. Your ONLY job is to fix the spoken words, not generate new content.
+# =============================================================================
+# Prompt Templates
+# =============================================================================
 
-TASK: Clean this spoken text that was transcribed from audio. Keep the EXACT meaning - just fix delivery issues.
+# Minimal cleanup prompt - just removes filler sounds, nothing else
+MINIMAL_PROMPT = """Remove filler sounds (um, uh, ah, er) from this transcription. Keep EVERYTHING else exactly as spoken.
+
+DO NOT change words, sentence structure, or add punctuation. Just remove um/uh/ah sounds.
+
+Spoken: {text}
+
+Cleaned:"""
+
+# Standard prompt - cleans up speech while preserving user's words
+STANDARD_PROMPT = """Clean up this voice transcription. Keep the user's words and meaning intact.
 
 RULES:
 1. {filler_rules}
 2. {formatting_rules}
-3. If the speaker listed things, use bullet points. If they wrote a message, add greeting/sign-off.
-4. {tone_guidance}
-
-CRITICAL: Output ONLY the cleaned version of what was spoken. No commentary, no explanations, no "Here is the cleaned text:".
-
-Spoken text to clean:
-{text}
-
-Cleaned version:"""
-
-# Clean-only prompt - minimal processing, just removes fillers
-# Also uses dynamic formatting rules based on tone/intensity
-CLEAN_ONLY_PROMPT = """You are cleaning up a voice transcription. Fix delivery issues only - keep the exact meaning.
-
-RULES:
-1. {filler_rules}
-2. {formatting_rules}  
 3. {tone_guidance}
+4. Do NOT rewrite or restructure sentences. Keep the user's phrasing.
 
-CRITICAL: Output ONLY the cleaned text. No commentary or explanations.
+Output ONLY the cleaned text. No commentary.
 
-Spoken text:
-{text}
+Spoken: {text}
 
 Cleaned:"""
 
+# Strong prompt - allows restructuring and transformation
+STRONG_PROMPT = """Transform this voice transcription into polished {style_name} text.
+
+RULES:
+1. {filler_rules}
+2. {formatting_rules}
+3. {tone_guidance}
+4. You may restructure sentences for clarity and flow.
+5. If listing items, use bullet points. If it's a message, format appropriately.
+
+Output ONLY the transformed text. No commentary.
+
+Spoken: {text}
+
+Result:"""
+
+# =============================================================================
+# 🎭 CARICATURE MODE (Secret Easter Egg!)
+# =============================================================================
+# This is an intentionally over-the-top, silly mode for fun.
+# Unlocked by typing "lol" or "haha" on the Style tab.
+
+CARICATURE_PROMPT = """🎭 CARICATURE MODE ACTIVATED 🎭
+
+Transform this transcription into an ABSURDLY EXAGGERATED {style_name} parody.
+This is meant to be FUNNY and OVER-THE-TOP. Go absolutely wild!
+
+STYLE GUIDANCE:
+{tone_guidance}
+
+FORMATTING:
+{formatting_rules}
+
+FILLER WORDS:
+{filler_rules}
+
+BE RIDICULOUS. BE SILLY. MAKE IT A PARODY.
+The goal is comedy, not accuracy. Lean into stereotypes of this style.
+
+Original: {text}
+
+🎭 Caricature version:"""
+
 # Simplified prompt for tiny models (<500M params)
-# Uses minimal instructions that small models can follow
-SIMPLE_CLEANUP_PROMPT = """Clean this text. Remove "um", "uh", "like", "you know". Fix grammar. Be {tone_simple}.
+SIMPLE_CLEANUP_PROMPT = """Clean this text. Remove "um", "uh". Be {tone_simple}.
 
 Text: {text}
 
@@ -576,9 +650,10 @@ Clean:"""
 
 # Simple tone descriptions for tiny models
 SIMPLE_TONES = {
+    "minimal": "exact, change nothing except removing um/uh",
     "professional": "formal and polished",
     "casual": "friendly and relaxed",
-    "ai_prompt": "clear and conversational, for an AI assistant",
+    "ai_prompt": "clear, for an AI assistant",
     "personal": "natural, keeping the user's own speaking style",
 }
 
@@ -587,12 +662,9 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
     """
     Build the appropriate prompt based on config settings.
     
-    Uses Options A + B: Both tone AND intensity affect formatting rules.
-    This ensures casual-strong gets text-message style formatting while
-    professional-strong gets executive-level polish.
-    
-    Also applies model compatibility adjustments when needed.
-    Includes voice profile context when voice learning is enabled.
+    New simplified system:
+    - Minimal: Just removes um/uh/ah, no style processing
+    - Other styles: Standard (preserve words) or Strong (transform)
     
     Args:
         text: The transcription text to process
@@ -604,9 +676,21 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
     """
     # Get tone and intensity
     tone = config.get("output_tone", "professional")
-    intensity_key = f"{tone}_intensity"
-    intensity = config.get(intensity_key, "standard")
-    smart_formatting = config.get("smart_formatting", True)
+    
+    # 🎭 Caricature mode (secret easter egg!) takes priority
+    use_caricature = config.get("caricature_mode", False)
+    use_strong = config.get("strong_mode", False)
+    
+    if use_caricature:
+        intensity = "caricature"
+    elif use_strong:
+        intensity = "strong"
+    else:
+        intensity = "standard"
+    
+    # Minimal style ignores intensity - always does minimal cleanup (unless caricature!)
+    if tone == "minimal" and not use_caricature:
+        intensity = "standard"  # Doesn't matter for minimal, but keep consistent
     
     # Get voice profile context when "personal" style is selected
     voice_profile_context = ""
@@ -635,11 +719,9 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
     # Check compatibility and get auto-adjustments
     compatibility = {"warnings": [], "auto_adjustments": {}, "tier": "standard"}
     if apply_compatibility and model_name:
-        compatibility = get_model_compatibility(model_name, tone, intensity, smart_formatting)
+        compatibility = get_model_compatibility(model_name, tone, intensity, False)  # smart_formatting removed
         
-        # Apply auto-adjustments
-        if "smart_formatting" in compatibility["auto_adjustments"]:
-            smart_formatting = compatibility["auto_adjustments"]["smart_formatting"]
+        # Apply auto-adjustments for intensity
         if "intensity" in compatibility["auto_adjustments"]:
             intensity = compatibility["auto_adjustments"]["intensity"]
     
@@ -652,38 +734,66 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
         prompt = SIMPLE_CLEANUP_PROMPT.format(tone_simple=tone_simple, text=text)
         return prompt, compatibility
     
+    # === MINIMAL STYLE: Special case - just remove filler sounds ===
+    if tone == "minimal":
+        prompt = MINIMAL_PROMPT.format(text=text)
+        return prompt, compatibility
+    
+    # === STYLED PROCESSING ===
+    
     # Get all the dynamic rules based on tone + intensity
     formatting_rules = get_formatting_rules(tone, intensity)
-    filler_rules = get_filler_rules(intensity)
+    filler_rules = get_filler_rules(tone, intensity)
     
     # For "personal" style, use voice profile as THE tone guidance
     if is_personal_style and voice_profile_context:
-        # Voice profile becomes the style instruction
         tone_guidance = f"Match this user's natural speaking style: {voice_profile_context}"
     else:
-        # Use standard tone guidance
         tone_guidance = get_tone_guidance(tone, intensity)
     
-    # Choose prompt based on smart formatting setting
-    if smart_formatting:
-        template = SMART_FORMAT_PROMPT
-    else:
-        template = CLEAN_ONLY_PROMPT
+    # Style names for prompts
+    style_names = {
+        "minimal": "minimal/raw",
+        "professional": "professional/business",
+        "casual": "casual/texting",
+        "ai_prompt": "AI prompt",
+        "personal": "personal",
+    }
     
-    # Fill in all placeholders
-    prompt = template.format(
-        tone_guidance=tone_guidance,
-        formatting_rules=formatting_rules,
-        filler_rules=filler_rules,
-        text=text
-    )
+    # Choose prompt template based on intensity
+    if intensity == "caricature":
+        # 🎭 CARICATURE MODE - Go absolutely wild!
+        prompt = CARICATURE_PROMPT.format(
+            style_name=style_names.get(tone, tone),
+            tone_guidance=tone_guidance,
+            formatting_rules=formatting_rules,
+            filler_rules=filler_rules,
+            text=text
+        )
+    elif intensity == "strong":
+        # Strong mode allows restructuring
+        prompt = STRONG_PROMPT.format(
+            style_name=style_names.get(tone, tone),
+            tone_guidance=tone_guidance,
+            formatting_rules=formatting_rules,
+            filler_rules=filler_rules,
+            text=text
+        )
+    else:
+        # Standard mode preserves user's words
+        prompt = STANDARD_PROMPT.format(
+            tone_guidance=tone_guidance,
+            formatting_rules=formatting_rules,
+            filler_rules=filler_rules,
+            text=text
+        )
     
     return prompt, compatibility
 
 
 # Legacy compatibility - keeping for any external code that might use these
 PROMPT_TEMPLATES: Dict[str, str] = {
-    "clean": CLEAN_ONLY_PROMPT,
+    "clean": STANDARD_PROMPT,
 }
 
 
@@ -1484,12 +1594,13 @@ def get_template_descriptions() -> Dict[str, str]:
 
 
 def get_tone_options() -> list:
-    """Get list of available output tones."""
+    """Get list of available output tones (5 presets)."""
     return [
-        {"id": "professional", "name": "Professional", "description": "Formal, polished, business-appropriate"},
-        {"id": "casual", "name": "Casual", "description": "Relaxed, conversational, friendly"},
-        {"id": "ai_prompt", "name": "AI Prompt", "description": "Optimized for speaking with AI assistants and LLMs"},
-        {"id": "personal", "name": "Personal", "description": "Your natural voice, learned from your speech patterns"},
+        {"id": "minimal", "name": "Minimal", "icon": "🎤", "description": "Just removes um/uh. Your exact words."},
+        {"id": "professional", "name": "Professional", "icon": "💼", "description": "Clean, business-appropriate tone"},
+        {"id": "casual", "name": "Casual", "icon": "💬", "description": "Relaxed, texting style"},
+        {"id": "ai_prompt", "name": "AI Prompt", "icon": "🤖", "description": "Formatted for AI assistants"},
+        {"id": "personal", "name": "Personal", "icon": "✨", "description": "Your learned speech patterns"},
     ]
 
 

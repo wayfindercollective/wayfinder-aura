@@ -294,20 +294,25 @@ class StyleColors:
     glow: str        # Glow color (slightly muted)
 
 STYLE_PALETTES = {
+    "minimal": StyleColors(
+        letter="Raw",       # Raw/unprocessed
+        color="#9AA5CE",    # Soft gray-blue
+        glow="#7A85AE",     # Muted gray glow
+    ),
     "professional": StyleColors(
         letter="Pro",
         color="#7AA2F7",    # Soft blue
         glow="#5D7FBF",     # Muted blue glow
     ),
-    "ai_prompt": StyleColors(
-        letter="AI",
-        color="#E5AC2A",    # Amber/gold
-        glow="#B88A22",     # Muted amber glow
-    ),
     "casual": StyleColors(
         letter="Chat",      # Conversational, friendly
         color="#73DACA",    # Soft teal
         glow="#5AAE9E",     # Muted teal glow
+    ),
+    "ai_prompt": StyleColors(
+        letter="AI",
+        color="#E5AC2A",    # Amber/gold
+        glow="#B88A22",     # Muted amber glow
     ),
     "personal": StyleColors(
         letter="You",       # Your personal voice
@@ -316,8 +321,8 @@ STYLE_PALETTES = {
     ),
 }
 
-# Style cycle order for toggle
-STYLE_CYCLE = ["professional", "ai_prompt", "casual", "personal"]
+# Style cycle order for toggle (matches hotkey cycle)
+STYLE_CYCLE = ["minimal", "professional", "casual", "ai_prompt", "personal"]
 
 
 # === Squircle Path Generator (Kappa-based Bezier) ===

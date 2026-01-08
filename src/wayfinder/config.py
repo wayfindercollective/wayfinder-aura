@@ -118,6 +118,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Style settings (5 presets that cycle via hotkey)
     "output_tone": "professional",  # minimal | professional | casual | ai_prompt | personal
     "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
+    "caricature_mode": False,  # 🎭 Secret easter egg! Unlocked by typing "lol" on Style tab.
     
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": True,  # Enable LLM post-processing

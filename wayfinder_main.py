@@ -470,6 +470,144 @@ class ToolTip:
         self.text = new_text
 
 
+# =============================================================================
+# 🎭 CONFETTI ANIMATION (Easter Egg!)
+# =============================================================================
+
+class ConfettiOverlay(ctk.CTkToplevel):
+    """
+    Fun confetti animation overlay for celebrating easter eggs!
+    Used when caricature mode is unlocked.
+    """
+    
+    CONFETTI_COLORS = [
+        "#FF6B6B",  # Red
+        "#4ECDC4",  # Teal
+        "#45B7D1",  # Blue
+        "#96CEB4",  # Green
+        "#FFEAA7",  # Yellow
+        "#DDA0DD",  # Plum
+        "#98D8C8",  # Mint
+        "#F7DC6F",  # Gold
+        "#BB8FCE",  # Purple
+        "#F1948A",  # Salmon
+    ]
+    
+    def __init__(self, parent, num_particles=50, duration_ms=2500):
+        super().__init__(parent)
+        
+        self.overrideredirect(True)
+        self.wm_attributes("-topmost", True)
+        self.wm_attributes("-alpha", 0.95)
+        
+        # Make window transparent (Linux/X11)
+        try:
+            self.wm_attributes("-transparent", True)
+        except:
+            pass
+        
+        # Cover the parent window
+        self.geometry(f"{parent.winfo_width()}x{parent.winfo_height()}+{parent.winfo_rootx()}+{parent.winfo_rooty()}")
+        
+        # Canvas for particles
+        self.canvas = ctk.CTkCanvas(
+            self, 
+            bg=COLORS["bg_surface"],
+            highlightthickness=0,
+        )
+        self.canvas.pack(fill="both", expand=True)
+        
+        # Make canvas semi-transparent
+        self.configure(fg_color="transparent")
+        
+        import random
+        self.particles = []
+        width = parent.winfo_width()
+        height = parent.winfo_height()
+        
+        for _ in range(num_particles):
+            x = random.randint(0, width)
+            y = random.randint(-height, 0)  # Start above
+            size = random.randint(8, 16)
+            color = random.choice(self.CONFETTI_COLORS)
+            speed = random.uniform(3, 8)
+            wobble = random.uniform(-2, 2)
+            rotation = random.uniform(0, 360)
+            rotation_speed = random.uniform(-10, 10)
+            
+            # Create confetti piece (rectangle or circle)
+            if random.random() > 0.5:
+                # Square confetti
+                particle = self.canvas.create_rectangle(
+                    x, y, x + size, y + size * 0.6,
+                    fill=color, outline=""
+                )
+            else:
+                # Circle confetti
+                particle = self.canvas.create_oval(
+                    x, y, x + size, y + size,
+                    fill=color, outline=""
+                )
+            
+            self.particles.append({
+                "id": particle,
+                "x": x,
+                "y": y,
+                "speed": speed,
+                "wobble": wobble,
+                "wobble_offset": random.uniform(0, 6.28),
+            })
+        
+        # Draw celebration text
+        self.canvas.create_text(
+            width // 2, height // 2 - 20,
+            text="🎭 CARICATURE MODE UNLOCKED! 🎭",
+            font=("Inter", 24, "bold"),
+            fill=COLORS["accent"],
+        )
+        self.canvas.create_text(
+            width // 2, height // 2 + 20,
+            text="Get ready for some silly fun!",
+            font=("Inter", 14),
+            fill=COLORS["text_secondary"],
+        )
+        
+        # Animation
+        self._frame = 0
+        self._max_frames = duration_ms // 16
+        self._animate()
+        
+        # Auto-destroy
+        self.after(duration_ms, self.destroy)
+    
+    def _animate(self):
+        """Animate confetti falling."""
+        import math
+        
+        if self._frame >= self._max_frames:
+            return
+        
+        height = self.winfo_height()
+        
+        for p in self.particles:
+            # Update position
+            p["y"] += p["speed"]
+            p["x"] += math.sin(self._frame * 0.1 + p["wobble_offset"]) * p["wobble"]
+            
+            # Move particle
+            self.canvas.move(p["id"], 
+                            math.sin(self._frame * 0.1 + p["wobble_offset"]) * p["wobble"],
+                            p["speed"])
+            
+            # Wrap around if off screen
+            if p["y"] > height + 20:
+                p["y"] = -20
+                self.canvas.coords(p["id"], p["x"], -20, p["x"] + 10, -10)
+        
+        self._frame += 1
+        self.after(16, self._animate)
+
+
 class CompatibilityBanner(ctk.CTkFrame):
     """
     A banner that displays model compatibility warnings and recommendations.
@@ -5360,6 +5498,128 @@ class WayfinderApp(ctk.CTk):
             command=self.open_style_hotkey_settings,
         )
         self.style_hotkey_btn.pack(side="right")
+        
+        # === 🎭 SECRET: Caricature Mode Keyboard Detection ===
+        # Track keystrokes to detect "lol" or "haha"
+        self._secret_key_buffer = ""
+        
+        # Show indicator if caricature mode is already active
+        if self.config.get("caricature_mode", False):
+            self._show_caricature_indicator(strong_content)
+        
+        # Bind keyboard to main frame for easter egg detection
+        frame.bind("<Key>", self._on_style_tab_key)
+        frame.bind("<FocusIn>", lambda e: frame.focus_set())
+    
+    def _on_style_tab_key(self, event):
+        """Handle keystrokes on Style tab for easter egg detection."""
+        if not hasattr(self, '_secret_key_buffer'):
+            self._secret_key_buffer = ""
+        
+        # Only track letter keys
+        char = event.char.lower()
+        if char.isalpha():
+            self._secret_key_buffer += char
+            # Keep only last 5 characters
+            self._secret_key_buffer = self._secret_key_buffer[-5:]
+            
+            # Check for secret codes
+            if "lol" in self._secret_key_buffer or "haha" in self._secret_key_buffer:
+                self._toggle_caricature_mode()
+                self._secret_key_buffer = ""  # Reset buffer
+    
+    def _toggle_caricature_mode(self):
+        """Toggle caricature mode on/off with celebration effects!"""
+        current = self.config.get("caricature_mode", False)
+        new_state = not current
+        
+        self.config["caricature_mode"] = new_state
+        save_config(self.config)
+        
+        if new_state:
+            # 🎉 UNLOCKED! Play celebration
+            self._play_silly_sound()
+            self._show_confetti()
+            self.log("🎭 CARICATURE MODE ACTIVATED! Things are about to get silly...")
+        else:
+            # Deactivated
+            self.log("🎭 Caricature mode deactivated. Back to normal!")
+        
+        # Rebuild style tab to show/hide indicator
+        self._rebuild_style_tab()
+    
+    def _play_silly_sound(self):
+        """Play a silly celebration sound."""
+        try:
+            import subprocess
+            import os
+            
+            # Try different sound methods
+            # Method 1: paplay (PulseAudio)
+            # Method 2: aplay (ALSA)
+            # Method 3: play (sox)
+            # Method 4: Python beep (fallback)
+            
+            # Try to find a system sound
+            sound_paths = [
+                "/usr/share/sounds/freedesktop/stereo/complete.oga",
+                "/usr/share/sounds/freedesktop/stereo/bell.oga",
+                "/usr/share/sounds/Yaru/stereo/complete.oga",
+                "/usr/share/sounds/gnome/default/alerts/glass.ogg",
+            ]
+            
+            for sound_path in sound_paths:
+                if os.path.exists(sound_path):
+                    try:
+                        subprocess.Popen(
+                            ["paplay", sound_path],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        return
+                    except:
+                        pass
+            
+            # Fallback: Try system bell
+            try:
+                print("\a", end="", flush=True)  # Terminal bell
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"[Easter Egg] Couldn't play sound: {e}")
+    
+    def _show_confetti(self):
+        """Show confetti celebration animation."""
+        try:
+            # Create confetti overlay
+            confetti = ConfettiOverlay(self, num_particles=60, duration_ms=3000)
+            confetti.focus_set()
+        except Exception as e:
+            print(f"[Easter Egg] Couldn't show confetti: {e}")
+    
+    def _show_caricature_indicator(self, parent):
+        """Show indicator that caricature mode is active."""
+        indicator_frame = ctk.CTkFrame(
+            parent,
+            fg_color="#4A1942",  # Deep magenta
+            corner_radius=RADIUS["sm"],
+        )
+        indicator_frame.pack(fill="x", pady=(12, 0))
+        
+        ctk.CTkLabel(
+            indicator_frame,
+            text="🎭 CARICATURE MODE ACTIVE 🎭",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            text_color="#FF6B9D",
+        ).pack(pady=8)
+        
+        ctk.CTkLabel(
+            indicator_frame,
+            text="Type 'lol' again to disable",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        ).pack(pady=(0, 8))
     
     def _on_tone_selected(self, tone_id: str) -> None:
         """Handle tone selection from Style tab."""
