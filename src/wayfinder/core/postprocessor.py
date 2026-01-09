@@ -41,28 +41,61 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
         # Minimal is the same regardless of intensity - just cleanup
         "standard": "Keep the exact phrasing and sentence structure. Only fix obvious transcription errors.",
         "strong": "Keep the exact phrasing and sentence structure. Only fix obvious transcription errors.",
-        "caricature": "Add MORE filler words and verbal tics. Make it sound like a nervous person speaking. Add [clears throat], [sighs], [ummmm], [long pause] annotations.",
+        "caricature": """MAXIMUM VERBAL DISASTER. Transform into an anxious mess of a speech:
+- Add [clears throat], [nervous laughter], [ummmm], [long uncomfortable pause], [audible gulp] everywhere
+- Triple all hesitations: 'um' becomes 'um... ummmm... uhhhhh'
+- Add [sweating intensifies], [looks around nervously], [voice cracking]
+- Make every sentence a question? Even statements?
+- Insert [forgets what they were saying] at least once
+- Make it sound like someone giving their first ever public speech while terrified""",
     },
     "professional": {
         "standard": "Keep the user's words and sentence structure. Make it sound professional with proper grammar.",
         "strong": "Rewrite for executive clarity. Be concise, formal, and polished. Remove fluff.",
-        "caricature": "MAXIMUM CORPORATE BUZZWORDS. Synergize everything. Circle back constantly. Leverage core competencies. Move the needle. Touch base offline. Make it sound like a parody of a LinkedIn influencer or management consultant.",
+        "caricature": """MAXIMUM CORPORATE BUZZWORDS. Transform into an absurd LinkedIn influencer post:
+- Every sentence must 'synergize', 'leverage', or 'circle back'
+- Add phrases like 'Let's unpack this', 'Moving the needle', 'Boil the ocean', 'Low-hanging fruit'
+- Include humble brags like 'After my morning 4am meditation and cold plunge...'
+- Sign off with 'Thoughts? 👇' or 'Agree? ♻️ to your network'
+- Add a motivational story that's clearly made up: 'I once fired 847 employees and it taught me everything about LEADERSHIP'
+- Make it sound like the most insufferable LinkedIn post ever written""",
     },
     "casual": {
         "standard": "Keep the user's words. Make it sound natural and conversational.",
         "strong": "Rewrite as casual texting. Short, relaxed, like messaging a friend.",
-        "caricature": "EXTREME internet/Gen-Z speak. Use 'fr fr', 'no cap', 'lowkey', 'highkey', 'bussin', 'ong', 'slay', 'its giving', 'understood the assignment'. Add skull emojis 💀. Make it sound like a parody of chronically online speech.",
+        "caricature": """MAXIMUM CHRONICALLY ONLINE SPEAK. Transform into absurd Gen-Z internet slang:
+- Use 'fr fr', 'no cap', 'lowkey', 'highkey', 'bussin', 'ong', 'slay', 'its giving', 'understood the assignment', 'ate and left no crumbs'
+- Add 'HELP 💀', 'im deceased', 'screaming crying throwing up'
+- Include 'not me doing X', 'me when', 'pov:', 'real ones know'
+- Every other word should be 'like' or 'literally'
+- Add skull emojis 💀 and crying emojis 😭 LIBERALLY
+- Make it unreadable to anyone over 30
+- all lowercase except for random CAPS for emphasis""",
     },
     "dev": {
         "standard": "Keep the user's words. This is developer/coding context - recognize git commands (pull, push, commit, merge, branch, main, dev), programming terms, and technical jargon.",
         "strong": "Format as a clear developer request or prompt. Recognize technical terms, file paths, function names, and git terminology.",
-        "caricature": "OVER-ENGINEERED PROMPT. Add excessive context like 'You are a world-renowned expert with 47 years of experience'. Include 'Think step by step', 'Take a deep breath', 'I'll tip you $500', 'My career depends on this'. Make it a parody of prompt engineering.",
+        "caricature": """MAXIMUM PROMPT ENGINEERING PARODY. Transform into an absurdly over-engineered AI prompt:
+- Start with 'You are a LEGENDARY 10x developer with 47 years of experience at FAANG companies'
+- Add 'Think step by step. Take a deep breath. Believe in yourself.'
+- Include 'I will tip you $2000 if you get this right. My entire career depends on this.'
+- Add CAPS for EMPHASIS on random WORDS
+- Include 'CRITICAL:', 'IMPORTANT:', 'WARNING:' sections
+- Reference that you've 'tried 17 other AI models and none could solve this'
+- End with 'Please and thank you, my life depends on this working 🙏'
+- Make it sound like the most desperate, over-the-top AI prompt ever written""",
     },
     "personal": {
         # Personal style uses voice profile - these are fallbacks when no profile exists
         "standard": "Keep the user's characteristic phrases and word choices. Just clean up delivery.",
         "strong": "Polish while preserving the user's unique voice and speaking patterns.",
-        "caricature": "EXAGGERATE the user's speech patterns to absurd levels. If they use filler words, triple them. If they have verbal tics, amplify them. Make it a loving parody of how they speak.",
+        "caricature": """MAXIMUM SELF-PARODY. Become an absurdly exaggerated version of the speaker:
+- If they use any filler words, use them 10x more
+- If they have any verbal quirks, amplify to comedic levels
+- Add 'this is SO me' energy to everything
+- Make it sound like an SNL impression of them
+- Exaggerate any patterns you detect: do they start sentences a certain way? Do it EVERY sentence
+- The speaker should laugh at how accurately ridiculous this is""",
     },
 }
 
@@ -74,27 +107,27 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
     "minimal": {
         "standard": "Keep natural punctuation exactly as transcribed.",
         "strong": "Keep natural punctuation exactly as transcribed.",
-        "caricature": "Add dramatic punctuation... lots of ellipses... and [annotations] for [awkward pauses] and [nervous laughter].",
+        "caricature": "Use... SO many ellipses... everywhere... Add [annotations] constantly: [clears throat], [nervous laughter], [dies inside], [sweating].",
     },
     "professional": {
         "standard": "Use proper punctuation and capitalization.",
         "strong": "Use proper punctuation. Structure with clear paragraphs if needed.",
-        "caricature": "Use EXCESSIVE capitalization for EMPHASIS. Add bullet points and sub-bullets everywhere. Sign off with corporate platitudes.",
+        "caricature": "Use EXCESSIVE CAPS for EMPHASIS on KEY BUSINESS TERMS. Add unnecessary bullet points. Include a 'Key Takeaways' section. Sign off with 'Best, [Name] | Thought Leader | Disruptor | Coffee Enthusiast ☕'.",
     },
     "casual": {
         "standard": "Relaxed punctuation. Periods optional at end of sentences.",
         "strong": "No periods. Text message style. Lowercase is fine. Only use ? when asking.",
-        "caricature": "all lowercase. no punctuation except for excessive question marks??? and exclamation marks!!! add emojis freely 💀😭🔥",
+        "caricature": "all lowercase always. no periods ever. excessive question marks??? multiple exclamation marks!!! add emojis constantly 💀😭🔥✨ break up sentences for dramatic. effect. like. this.",
     },
     "dev": {
         "standard": "Use clear punctuation. Preserve technical terms exactly (git commands, file paths, function names).",
         "strong": "Use clear punctuation. Add structure (bullets, code blocks) if it helps clarity. Preserve all technical terminology.",
-        "caricature": "Add XML-style tags like <context>, <task>, <constraints>. Number everything. Add a [CRITICAL] and [IMPORTANT] section.",
+        "caricature": "Use XML tags: <context>, <objective>, <constraints>, <expected_output>. Add numbered steps. Include [CRITICAL], [IMPORTANT], [WARNING], [NOTE] prefixes. Use ```code blocks``` for emphasis. Add a ## Prerequisites section.",
     },
     "personal": {
         "standard": "Match the user's typical punctuation habits.",
         "strong": "Clean punctuation while keeping the user's style.",
-        "caricature": "Exaggerate punctuation quirks. If they use lots of commas, use MORE. Add their verbal tics as written words.",
+        "caricature": "Exaggerate ALL their quirks. Commas become,,, excessive. Add 'like' and 'you know' as written text constantly. Turn their verbal tics into a signature style.",
     },
 }
 
@@ -161,8 +194,8 @@ MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
         "tier_override": "tiny",
     },
     "phi3:mini": {
-        "issues": [],  # Generally works well
-        "tier_override": "small",
+        "issues": [],  # Generally works well - 3.8B model
+        "tier_override": "standard",  # phi3:mini is 3.8B params, supports strong/caricature
     },
     "qwen2.5:1.5b": {
         "issues": [],  # Generally works well
@@ -207,6 +240,147 @@ def get_model_quirks(model_name: str) -> Dict[str, Any]:
     return {"issues": [], "workaround": None}
 
 
+# Known model parameter counts for accurate tier detection
+MODEL_PARAM_COUNTS: Dict[str, Dict[str, Any]] = {
+    # Llama models
+    "llama3.2:1b": {"params": "1B", "tier": "small"},
+    "llama3.2:3b": {"params": "3B", "tier": "standard"},
+    "llama3.1:8b": {"params": "8B", "tier": "standard"},
+    "llama3.1:70b": {"params": "70B", "tier": "large"},
+    # Qwen models
+    "qwen2.5:0.5b": {"params": "500M", "tier": "tiny"},
+    "qwen2.5:1.5b": {"params": "1.5B", "tier": "small"},
+    "qwen2.5:3b": {"params": "3B", "tier": "standard"},
+    "qwen2.5:7b": {"params": "7B", "tier": "standard"},
+    "qwen2.5:14b": {"params": "14B", "tier": "large"},
+    "qwen2.5:32b": {"params": "32B", "tier": "large"},
+    # Phi models
+    "phi3:mini": {"params": "3.8B", "tier": "standard"},
+    "phi3:small": {"params": "7B", "tier": "standard"},
+    "phi3:medium": {"params": "14B", "tier": "large"},
+    # SmolLM models
+    "smollm2:135m": {"params": "135M", "tier": "tiny"},
+    "smollm2:360m": {"params": "360M", "tier": "tiny"},
+    "smollm2:1.7b": {"params": "1.7B", "tier": "small"},
+    # Gemma models
+    "gemma2:2b": {"params": "2B", "tier": "small"},
+    "gemma2:9b": {"params": "9B", "tier": "standard"},
+    "gemma2:27b": {"params": "27B", "tier": "large"},
+    # Mistral models
+    "mistral:7b": {"params": "7B", "tier": "standard"},
+    "mistral-nemo": {"params": "12B", "tier": "large"},
+}
+
+
+def analyze_model(model_name: str) -> Dict[str, Any]:
+    """
+    Analyze a specific model and return detailed compatibility information.
+    
+    Returns dict with:
+        - model_name: str
+        - params: str - parameter count if known
+        - tier: str - detected tier
+        - max_intensity: str - maximum supported intensity
+        - supports_standard: bool
+        - supports_strong: bool
+        - supports_caricature: bool
+        - quirks: list - any known issues
+        - recommendation: str - usage recommendation
+    """
+    model_lower = model_name.lower()
+    
+    # Try to get known param count
+    params = "Unknown"
+    for known_model, info in MODEL_PARAM_COUNTS.items():
+        if known_model in model_lower or model_lower in known_model:
+            params = info["params"]
+            break
+    
+    tier = detect_model_tier(model_name)
+    tier_info = MODEL_TIERS[tier]
+    max_intensity = tier_info["max_intensity"]
+    quirks = get_model_quirks(model_name)
+    
+    # Determine capability flags
+    intensity_order = ["light", "standard", "strong"]
+    max_idx = intensity_order.index(max_intensity) if max_intensity in intensity_order else 0
+    
+    supports_standard = max_idx >= 1  # standard or higher
+    supports_strong = max_idx >= 2    # strong only
+    supports_caricature = max_idx >= 2  # caricature needs same as strong
+    
+    # Generate recommendation
+    if tier == "tiny":
+        recommendation = "Best for minimal cleanup only. Upgrade to 1B+ for styled output."
+    elif tier == "small":
+        recommendation = "Good for standard intensity. Upgrade to 3B+ for strong/caricature modes."
+    elif tier == "standard":
+        recommendation = "Full capability! Supports all modes including caricature."
+    else:  # large
+        recommendation = "Premium model - best quality for all modes."
+    
+    return {
+        "model_name": model_name,
+        "params": params,
+        "tier": tier,
+        "tier_description": tier_info["description"],
+        "max_intensity": max_intensity,
+        "supports_standard": supports_standard,
+        "supports_strong": supports_strong,
+        "supports_caricature": supports_caricature,
+        "quirks": quirks.get("issues", []),
+        "recommendation": recommendation,
+    }
+
+
+def analyze_all_models(model_list: list) -> Dict[str, Any]:
+    """
+    Analyze a list of models and return compatibility summary.
+    
+    Args:
+        model_list: List of model names (e.g. from ollama list)
+        
+    Returns dict with:
+        - models: list of individual model analyses
+        - caricature_capable: list of models that support caricature
+        - strong_capable: list of models that support strong mode
+        - recommended_for_caricature: str - best model for caricature from available
+        - summary: str - human-readable summary
+    """
+    analyses = [analyze_model(model) for model in model_list]
+    
+    caricature_capable = [a["model_name"] for a in analyses if a["supports_caricature"]]
+    strong_capable = [a["model_name"] for a in analyses if a["supports_strong"]]
+    standard_capable = [a["model_name"] for a in analyses if a["supports_standard"]]
+    
+    # Find best model for caricature (prefer larger tiers)
+    tier_priority = {"large": 0, "standard": 1, "small": 2, "tiny": 3}
+    sorted_for_caricature = sorted(
+        [a for a in analyses if a["supports_caricature"]],
+        key=lambda x: tier_priority.get(x["tier"], 4)
+    )
+    recommended = sorted_for_caricature[0]["model_name"] if sorted_for_caricature else None
+    
+    # Generate summary
+    if caricature_capable:
+        summary = f"✅ {len(caricature_capable)} model(s) support caricature mode: {', '.join(caricature_capable)}"
+    elif strong_capable:
+        summary = f"⚠️ No models support caricature. {len(strong_capable)} model(s) support strong mode."
+    elif standard_capable:
+        summary = f"⚠️ Your models only support standard intensity. Install a 3B+ model for caricature."
+    else:
+        summary = "⚠️ Your models are very small. Consider installing larger models."
+    
+    return {
+        "models": analyses,
+        "caricature_capable": caricature_capable,
+        "strong_capable": strong_capable,
+        "standard_capable": standard_capable,
+        "recommended_for_caricature": recommended,
+        "summary": summary,
+    }
+
+
 def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_formatting: bool) -> Dict[str, Any]:
     """
     Check model compatibility with current settings and return recommendations.
@@ -232,9 +406,12 @@ def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_fo
     }
     
     # Check intensity vs tier capability
-    intensity_order = ["light", "standard", "strong"]
+    # caricature requires the same tier as strong (3B+ "standard" tier)
+    intensity_order = ["light", "standard", "strong", "caricature"]
     max_intensity = tier_info["max_intensity"]
-    if intensity_order.index(intensity) > intensity_order.index(max_intensity):
+    # Map caricature to strong for comparison since they need same tier
+    effective_intensity = "strong" if intensity == "caricature" else intensity
+    if intensity_order.index(effective_intensity) > intensity_order.index(max_intensity):
         result["compatible"] = False
         result["warnings"].append(
             f"⚠️ {model_name} may struggle with '{intensity}' intensity. "
@@ -280,16 +457,29 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
         - recommended_models: list - specific model recommendations
         - message: str - user-friendly message
     """
-    if intensity == "strong":
+    if intensity == "caricature":
         return {
             "min_params": "3B+",
             "recommended_models": [
-                {"name": "qwen2.5:3b", "type": "ollama", "description": "Best for strong intensity"},
-                {"name": "llama3.2:3b", "type": "ollama", "description": "Good alternative"},
-                {"name": "phi3:medium", "type": "ollama", "description": "Fast and capable"},
+                {"name": "phi3:mini", "type": "ollama", "description": "3.8B - great for caricature"},
+                {"name": "qwen2.5:3b", "type": "ollama", "description": "3B - good creativity"},
+                {"name": "llama3.2:3b", "type": "ollama", "description": "3B - reliable option"},
+                {"name": "phi3:medium", "type": "ollama", "description": "14B - best quality"},
+            ],
+            "message": "Caricature mode requires 3B+ parameter models for creative text generation. "
+                       "Try: ollama pull phi3:mini (already installed!) or qwen2.5:3b",
+        }
+    elif intensity == "strong":
+        return {
+            "min_params": "3B+",
+            "recommended_models": [
+                {"name": "phi3:mini", "type": "ollama", "description": "3.8B - fast and capable"},
+                {"name": "qwen2.5:3b", "type": "ollama", "description": "3B - best for strong intensity"},
+                {"name": "llama3.2:3b", "type": "ollama", "description": "3B - good alternative"},
+                {"name": "phi3:medium", "type": "ollama", "description": "14B - best quality"},
             ],
             "message": "Strong intensity works best with 3B+ parameter models. "
-                       "Try: ollama pull qwen2.5:3b",
+                       "Try: ollama pull phi3:mini (3.8B) or qwen2.5:3b",
         }
     elif intensity == "standard":
         return {
@@ -297,7 +487,7 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
             "recommended_models": [
                 {"name": "qwen2.5:1.5b", "type": "ollama", "description": "Great balance"},
                 {"name": "llama3.2:1b", "type": "ollama", "description": "Fast option"},
-                {"name": "phi3:mini", "type": "ollama", "description": "Reliable"},
+                {"name": "phi3:mini", "type": "ollama", "description": "3.8B - reliable"},
             ],
             "message": "Standard intensity works with 1B+ parameter models.",
         }
@@ -366,11 +556,20 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
     
     # Get tone and intensity (new simplified system)
     tone = config.get("output_tone", "professional")
+    use_caricature = config.get("caricature_mode", False)
     use_strong = config.get("strong_mode", False)
-    intensity = "strong" if use_strong else "standard"
+    
+    # Determine intensity level (caricature > strong > standard)
+    if use_caricature:
+        intensity = "caricature"
+    elif use_strong:
+        intensity = "strong"
+    else:
+        intensity = "standard"
     
     # Minimal style doesn't need compatibility check - it's just filler removal
-    if tone == "minimal":
+    # UNLESS caricature is enabled (caricature transforms even minimal style)
+    if tone == "minimal" and not use_caricature:
         return {
             "is_compatible": True,
             "issues": [],
@@ -396,8 +595,16 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
         tier_info = MODEL_TIERS.get(tier, {})
         max_intensity = tier_info.get("max_intensity", "standard")
         
+        # Provide specific message based on what mode is enabled
+        if intensity == "caricature":
+            mode_name = "Caricature mode"
+            disable_suggestion = "Or disable Caricature mode"
+        else:
+            mode_name = "Strong mode"
+            disable_suggestion = "Or disable Strong mode"
+        
         issues.append(
-            f"Strong mode requires a larger model"
+            f"{mode_name} requires a 3B+ parameter model"
         )
         
         if compat["upgrade_suggestion"]:
@@ -409,7 +616,7 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
             for model in suggestion["recommended_models"][:2]:
                 recommendations.append(f"Try: {model['name']} ({model['description']})")
         
-        recommendations.append("Or disable Strong mode")
+        recommendations.append(disable_suggestion)
     
     # Add any other warnings (skip duplicates)
     for warning in compat.get("warnings", []):
@@ -620,26 +827,35 @@ Result:"""
 # This is an intentionally over-the-top, silly mode for fun.
 # Unlocked by typing "lol" or "haha" on the Style tab.
 
-CARICATURE_PROMPT = """🎭 CARICATURE MODE ACTIVATED 🎭
+CARICATURE_PROMPT = """🎭🎭🎭 MAXIMUM CARICATURE MODE 🎭🎭🎭
 
-Transform this transcription into an ABSURDLY EXAGGERATED {style_name} parody.
-This is meant to be FUNNY and OVER-THE-TOP. Go absolutely wild!
+You are a COMEDY WRITER creating an ABSURD PARODY. Your job is to take whatever the user said and transform it into the most RIDICULOUS, OVER-THE-TOP, EXAGGERATED version possible.
 
-STYLE GUIDANCE:
+THIS IS NOT A NORMAL TRANSCRIPTION. This is COMEDY. Be SILLY. Be RIDICULOUS. Crank everything to 11.
+
+CRITICAL: Do NOT just clean up the text. You MUST transform it dramatically. If the output looks similar to the input, you have FAILED.
+
+STYLE TO PARODY: {style_name}
+
+HOW TO PARODY THIS STYLE:
 {tone_guidance}
 
-FORMATTING:
+FORMATTING (go overboard with this):
 {formatting_rules}
 
 FILLER WORDS:
 {filler_rules}
 
-BE RIDICULOUS. BE SILLY. MAKE IT A PARODY.
-The goal is comedy, not accuracy. Lean into stereotypes of this style.
+RULES:
+1. EXAGGERATE everything - if they mention something once, make it seem like the most important thing ever
+2. ADD absurd elements that fit the style stereotype
+3. Make it OBVIOUSLY a parody - the user should laugh reading this
+4. The more ridiculous, the better - there are NO limits here
+5. Do NOT be subtle. Subtlety is failure.
 
-Original: {text}
+Original text: {text}
 
-🎭 Caricature version:"""
+🎭 ABSURDLY EXAGGERATED VERSION (go WILD):"""
 
 # Simplified prompt for tiny models (<500M params)
 SIMPLE_CLEANUP_PROMPT = """Clean this text. Remove "um", "uh". Be {tone_simple}.

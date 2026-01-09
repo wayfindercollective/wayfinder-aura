@@ -476,136 +476,141 @@ class ToolTip:
 
 class ConfettiOverlay(ctk.CTkToplevel):
     """
-    Fun confetti animation overlay for celebrating easter eggs!
-    Used when caricature mode is unlocked.
+    Fun celebration toast for easter eggs!
+    Shows as a floating notification instead of covering the whole window.
+    
+    Click anywhere to dismiss early.
     """
     
-    CONFETTI_COLORS = [
-        "#FF6B6B",  # Red
-        "#4ECDC4",  # Teal
-        "#45B7D1",  # Blue
-        "#96CEB4",  # Green
-        "#FFEAA7",  # Yellow
-        "#DDA0DD",  # Plum
-        "#98D8C8",  # Mint
-        "#F7DC6F",  # Gold
-        "#BB8FCE",  # Purple
-        "#F1948A",  # Salmon
-    ]
+    CONFETTI_EMOJIS = ["🎉", "🎊", "✨", "🌟", "💫", "🎭", "🥳", "🎈"]
     
     def __init__(self, parent, num_particles=50, duration_ms=2500):
         super().__init__(parent)
         
+        self._destroyed = False  # Track if already destroyed
+        
         self.overrideredirect(True)
         self.wm_attributes("-topmost", True)
-        self.wm_attributes("-alpha", 0.95)
         
-        # Make window transparent (Linux/X11)
+        # Try to set transparency
         try:
-            self.wm_attributes("-transparent", True)
+            self.wm_attributes("-alpha", 0.95)
         except:
             pass
         
-        # Cover the parent window
-        self.geometry(f"{parent.winfo_width()}x{parent.winfo_height()}+{parent.winfo_rootx()}+{parent.winfo_rooty()}")
+        # Toast size - compact notification style
+        toast_width = 380
+        toast_height = 120
         
-        # Canvas for particles
-        self.canvas = ctk.CTkCanvas(
-            self, 
-            bg=COLORS["bg_surface"],
-            highlightthickness=0,
+        # Position in top-center of parent window
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        parent_w = parent.winfo_width()
+        
+        pos_x = parent_x + (parent_w - toast_width) // 2
+        pos_y = parent_y + 60  # Below title bar
+        
+        self.geometry(f"{toast_width}x{toast_height}+{pos_x}+{pos_y}")
+        
+        # Main container with celebration styling
+        self.configure(fg_color="#1A0A1A")  # Deep purple-black
+        
+        main_frame = ctk.CTkFrame(
+            self,
+            fg_color="#2D1B2D",  # Dark magenta
+            corner_radius=16,
+            border_width=2,
+            border_color="#FF6B9D",  # Hot pink border
         )
-        self.canvas.pack(fill="both", expand=True)
+        main_frame.pack(fill="both", expand=True, padx=3, pady=3)
         
-        # Make canvas semi-transparent
-        self.configure(fg_color="transparent")
+        # Animated emoji row
+        emoji_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        emoji_frame.pack(fill="x", pady=(12, 4))
         
         import random
-        self.particles = []
-        width = parent.winfo_width()
-        height = parent.winfo_height()
+        emojis = random.sample(self.CONFETTI_EMOJIS, 5)
+        self.emoji_labels = []
+        for emoji in emojis:
+            lbl = ctk.CTkLabel(
+                emoji_frame,
+                text=emoji,
+                font=("Inter", 20),
+                text_color="#FFFFFF",
+            )
+            lbl.pack(side="left", expand=True)
+            self.emoji_labels.append(lbl)
         
-        for _ in range(num_particles):
-            x = random.randint(0, width)
-            y = random.randint(-height, 0)  # Start above
-            size = random.randint(8, 16)
-            color = random.choice(self.CONFETTI_COLORS)
-            speed = random.uniform(3, 8)
-            wobble = random.uniform(-2, 2)
-            rotation = random.uniform(0, 360)
-            rotation_speed = random.uniform(-10, 10)
-            
-            # Create confetti piece (rectangle or circle)
-            if random.random() > 0.5:
-                # Square confetti
-                particle = self.canvas.create_rectangle(
-                    x, y, x + size, y + size * 0.6,
-                    fill=color, outline=""
-                )
-            else:
-                # Circle confetti
-                particle = self.canvas.create_oval(
-                    x, y, x + size, y + size,
-                    fill=color, outline=""
-                )
-            
-            self.particles.append({
-                "id": particle,
-                "x": x,
-                "y": y,
-                "speed": speed,
-                "wobble": wobble,
-                "wobble_offset": random.uniform(0, 6.28),
-            })
-        
-        # Draw celebration text
-        self.canvas.create_text(
-            width // 2, height // 2 - 20,
+        # Title
+        ctk.CTkLabel(
+            main_frame,
             text="🎭 CARICATURE MODE UNLOCKED! 🎭",
-            font=("Inter", 24, "bold"),
-            fill=COLORS["accent"],
-        )
-        self.canvas.create_text(
-            width // 2, height // 2 + 20,
-            text="Get ready for some silly fun!",
-            font=("Inter", 14),
-            fill=COLORS["text_secondary"],
-        )
+            font=("Inter", 16, "bold"),
+            text_color="#FF6B9D",
+        ).pack(pady=(4, 2))
         
-        # Animation
+        # Subtitle
+        ctk.CTkLabel(
+            main_frame,
+            text="Get ready for some silly fun! (click to dismiss)",
+            font=("Inter", 11),
+            text_color="#B8A0B8",
+        ).pack(pady=(0, 8))
+        
+        # Click anywhere to dismiss
+        self.bind("<Button-1>", self._dismiss)
+        main_frame.bind("<Button-1>", self._dismiss)
+        emoji_frame.bind("<Button-1>", self._dismiss)
+        # Also bind Escape key
+        self.bind("<Escape>", self._dismiss)
+        self.bind("<Key>", self._dismiss)
+        
+        # Animate emojis
         self._frame = 0
-        self._max_frames = duration_ms // 16
-        self._animate()
+        self._animate_emojis()
         
-        # Auto-destroy
-        self.after(duration_ms, self.destroy)
+        # Auto-destroy after duration
+        self.after(duration_ms, self._safe_destroy)
+        
+        # Safety fallback: destroy after 5 seconds no matter what
+        self.after(5000, self._force_destroy)
     
-    def _animate(self):
-        """Animate confetti falling."""
-        import math
-        
-        if self._frame >= self._max_frames:
+    def _animate_emojis(self):
+        """Animate emoji bounce effect."""
+        if self._destroyed:
             return
         
-        height = self.winfo_height()
-        
-        for p in self.particles:
-            # Update position
-            p["y"] += p["speed"]
-            p["x"] += math.sin(self._frame * 0.1 + p["wobble_offset"]) * p["wobble"]
+        try:
+            import math
+            for i, lbl in enumerate(self.emoji_labels):
+                # Staggered bounce
+                offset = math.sin((self._frame + i * 3) * 0.2) * 2
+                lbl.configure(font=("Inter", 20 + int(offset)))
             
-            # Move particle
-            self.canvas.move(p["id"], 
-                            math.sin(self._frame * 0.1 + p["wobble_offset"]) * p["wobble"],
-                            p["speed"])
-            
-            # Wrap around if off screen
-            if p["y"] > height + 20:
-                p["y"] = -20
-                self.canvas.coords(p["id"], p["x"], -20, p["x"] + 10, -10)
-        
-        self._frame += 1
-        self.after(16, self._animate)
+            self._frame += 1
+            if self._frame < 150:  # ~2.5 seconds at 60fps
+                self.after(16, self._animate_emojis)
+        except Exception:
+            pass
+    
+    def _dismiss(self, event=None):
+        """Dismiss the toast when clicked or key pressed."""
+        self._safe_destroy()
+    
+    def _safe_destroy(self):
+        """Safely destroy the window, preventing double-destroy errors."""
+        if self._destroyed:
+            return
+        self._destroyed = True
+        try:
+            self.destroy()
+        except Exception:
+            pass
+    
+    def _force_destroy(self):
+        """Force destroy as a safety fallback."""
+        if not self._destroyed:
+            self._safe_destroy()
 
 
 class CompatibilityBanner(ctk.CTkFrame):
@@ -5406,46 +5411,88 @@ class WayfinderApp(ctk.CTk):
         if current_tone == "personal":
             self._build_voice_profile_section(tone_container)
         
-        # === SECTION: Strong Mode ===
-        strong_tile = ctk.CTkFrame(
-            scroll, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
-        )
-        strong_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        # === Mode Toggles (Strong + Caricature) - inline for easy access ===
+        modes_frame = ctk.CTkFrame(tone_tile, fg_color="transparent")
+        modes_frame.pack(fill="x", padx=SPACING["tile_pad"], pady=(8, SPACING["tile_pad_y"]))
         
-        strong_header = ctk.CTkFrame(strong_tile, fg_color="transparent")
-        strong_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
-        ctk.CTkLabel(
-            strong_header, text="💪   S T R O N G   M O D E",
-            font=(self.font_header[0], self.font_sizes["caption"]),
-            text_color=COLORS["text_secondary"],
-        ).pack(side="left")
+        # Horizontal container for both toggles
+        toggles_row = ctk.CTkFrame(modes_frame, fg_color="transparent")
+        toggles_row.pack(fill="x")
         
-        strong_content = ctk.CTkFrame(strong_tile, fg_color="transparent")
-        strong_content.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        # Strong mode toggle (left side)
+        strong_container = ctk.CTkFrame(toggles_row, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
+        strong_container.pack(side="left", fill="x", expand=True, padx=(0, 6))
         
-        # Strong mode toggle
+        strong_inner = ctk.CTkFrame(strong_container, fg_color="transparent")
+        strong_inner.pack(fill="x", padx=12, pady=10)
+        
         self.strong_mode_var = ctk.BooleanVar(value=self.config.get("strong_mode", False))
-        self.create_toggle_row(
-            strong_content, 
-            "Enable sentence restructuring", 
-            self.strong_mode_var,
-            self._on_strong_mode_toggled,
-            tooltip="When enabled, the AI can restructure sentences for better flow. When disabled, your words are preserved exactly (just cleaned up).",
+        
+        strong_label = ctk.CTkLabel(
+            strong_inner,
+            text="💪 Strong Mode",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
         )
+        strong_label.pack(side="left")
         
-        # Info text explaining the difference
-        info_frame = ctk.CTkFrame(strong_content, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
-        info_frame.pack(fill="x", pady=(8, 0))
+        strong_toggle = ctk.CTkSwitch(
+            strong_inner,
+            text="",
+            variable=self.strong_mode_var,
+            command=self._on_strong_mode_toggled,
+            width=40,
+            height=22,
+            switch_width=36,
+            switch_height=18,
+            corner_radius=9,
+            fg_color=COLORS["bg_elevated"],
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+            button_hover_color=COLORS["text_bright"],
+        )
+        strong_toggle.pack(side="right")
         
-        ctk.CTkLabel(
-            info_frame,
-            text="💡 Strong mode allows:\n• Restructuring sentences for clarity\n• Adding bullet points for lists\n• Reformatting messages appropriately\n\nWithout strong mode, your exact words are kept.",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_muted"],
-            justify="left",
-        ).pack(anchor="w", padx=12, pady=10)
+        # Add tooltip for strong mode
+        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your exact words.")
+        
+        # Caricature mode toggle (right side) - always visible now!
+        caricature_container = ctk.CTkFrame(toggles_row, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
+        caricature_container.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        
+        caricature_inner = ctk.CTkFrame(caricature_container, fg_color="transparent")
+        caricature_inner.pack(fill="x", padx=12, pady=10)
+        
+        self.caricature_mode_var = ctk.BooleanVar(value=self.config.get("caricature_mode", False))
+        
+        caricature_label = ctk.CTkLabel(
+            caricature_inner,
+            text="🎭 Caricature",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["accent"] if self.config.get("caricature_mode", False) else COLORS["text_primary"],
+        )
+        caricature_label.pack(side="left")
+        self._caricature_label = caricature_label  # Store reference for updating
+        
+        caricature_toggle = ctk.CTkSwitch(
+            caricature_inner,
+            text="",
+            variable=self.caricature_mode_var,
+            command=self._on_caricature_mode_toggled,
+            width=40,
+            height=22,
+            switch_width=36,
+            switch_height=18,
+            corner_radius=9,
+            fg_color=COLORS["bg_elevated"],
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+            button_hover_color=COLORS["text_bright"],
+        )
+        caricature_toggle.pack(side="right")
+        
+        # Add tooltip for caricature mode
+        ToolTip(caricature_container, "Maximum parody mode! Exaggerates your style hilariously.")
         
         # === SECTION: Style Toggle Hotkey ===
         hotkey_tile = ctk.CTkFrame(
@@ -5500,15 +5547,11 @@ class WayfinderApp(ctk.CTk):
         self.style_hotkey_btn.pack(side="right")
         
         # === 🎭 SECRET: Caricature Mode Keyboard Detection ===
-        # Track keystrokes to detect "lol" or "haha"
+        # Track keystrokes to detect "lol" or "haha" (easter egg still works!)
         if not hasattr(self, '_secret_key_buffer'):
             self._secret_key_buffer = ""
             # Bind keyboard to root window for easter egg detection
             self.bind("<Key>", self._on_style_tab_key)
-        
-        # Show indicator if caricature mode is already active
-        if self.config.get("caricature_mode", False):
-            self._show_caricature_indicator(strong_content)
     
     def _on_style_tab_key(self, event):
         """Handle keystrokes for easter egg detection (only on Style tab)."""
@@ -5532,24 +5575,44 @@ class WayfinderApp(ctk.CTk):
                 self._secret_key_buffer = ""  # Reset buffer
     
     def _toggle_caricature_mode(self):
-        """Toggle caricature mode on/off with celebration effects!"""
+        """Toggle caricature mode on/off with celebration effects! (Used by easter egg)"""
         current = self.config.get("caricature_mode", False)
         new_state = not current
-        
-        self.config["caricature_mode"] = new_state
+        self._set_caricature_mode(new_state, from_easter_egg=True)
+    
+    def _on_caricature_mode_toggled(self):
+        """Handle caricature mode toggle from the UI switch."""
+        new_state = self.caricature_mode_var.get()
+        self._set_caricature_mode(new_state, from_easter_egg=False)
+    
+    def _set_caricature_mode(self, enabled: bool, from_easter_egg: bool = False):
+        """Set caricature mode state with optional celebration effects."""
+        self.config["caricature_mode"] = enabled
         save_config(self.config)
         
-        if new_state:
-            # 🎉 UNLOCKED! Play celebration
-            self._play_silly_sound()
-            self._show_confetti()
+        # Sync the toggle variable if it exists
+        if hasattr(self, 'caricature_mode_var'):
+            self.caricature_mode_var.set(enabled)
+        
+        # Update label color
+        if hasattr(self, '_caricature_label'):
+            self._caricature_label.configure(
+                text_color=COLORS["accent"] if enabled else COLORS["text_primary"]
+            )
+        
+        if enabled:
+            # 🎉 Celebration effects (always for easter egg, subtle for toggle)
+            if from_easter_egg:
+                self._play_silly_sound()
+                self._show_confetti()
             self.log("🎭 CARICATURE MODE ACTIVATED! Things are about to get silly...")
         else:
-            # Deactivated
+            # Deactivated - clean up any lingering confetti
+            self._cleanup_confetti()
             self.log("🎭 Caricature mode deactivated. Back to normal!")
         
-        # Rebuild style tab to show/hide indicator
-        self._rebuild_style_tab()
+        # Update compatibility check - caricature requires 3B+ model
+        self._update_compatibility_banner()
     
     def _play_silly_sound(self):
         """Play a silly celebration sound."""
@@ -5595,34 +5658,28 @@ class WayfinderApp(ctk.CTk):
     def _show_confetti(self):
         """Show confetti celebration animation."""
         try:
+            # Clean up any existing confetti first
+            if hasattr(self, '_confetti_overlay') and self._confetti_overlay:
+                try:
+                    self._confetti_overlay._safe_destroy()
+                except Exception:
+                    pass
+            
             # Create confetti overlay
-            confetti = ConfettiOverlay(self, num_particles=60, duration_ms=3000)
-            confetti.focus_set()
+            self._confetti_overlay = ConfettiOverlay(self, num_particles=60, duration_ms=3000)
+            self._confetti_overlay.focus_set()
         except Exception as e:
             print(f"[Easter Egg] Couldn't show confetti: {e}")
     
-    def _show_caricature_indicator(self, parent):
-        """Show indicator that caricature mode is active."""
-        indicator_frame = ctk.CTkFrame(
-            parent,
-            fg_color="#4A1942",  # Deep magenta
-            corner_radius=RADIUS["sm"],
-        )
-        indicator_frame.pack(fill="x", pady=(12, 0))
-        
-        ctk.CTkLabel(
-            indicator_frame,
-            text="🎭 CARICATURE MODE ACTIVE 🎭",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            text_color="#FF6B9D",
-        ).pack(pady=8)
-        
-        ctk.CTkLabel(
-            indicator_frame,
-            text="Type 'lol' again to disable",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_muted"],
-        ).pack(pady=(0, 8))
+    def _cleanup_confetti(self):
+        """Force cleanup of any lingering confetti overlay."""
+        if hasattr(self, '_confetti_overlay') and self._confetti_overlay:
+            try:
+                self._confetti_overlay._safe_destroy()
+            except Exception:
+                pass
+            self._confetti_overlay = None
+    
     
     def _on_tone_selected(self, tone_id: str) -> None:
         """Handle tone selection from Style tab."""
