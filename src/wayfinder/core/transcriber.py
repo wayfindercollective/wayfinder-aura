@@ -846,7 +846,12 @@ def ensure_punctuation_postprocess(text: str) -> str:
     return text.strip()
 
 
-def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> str:
+def transcribe_with_config(
+    audio_path: str, 
+    config: dict, 
+    context: str = "",
+    skip_post_processing: bool = False,
+) -> str:
     """
     Transcribe using settings from config dictionary.
     This is the main entry point for transcription.
@@ -855,6 +860,8 @@ def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> 
         audio_path: Path to the WAV file to transcribe
         config: Configuration dictionary with transcription settings
         context: Optional context from previous transcription (helps continuity)
+        skip_post_processing: If True, skip LLM post-processing (useful for chunked mode
+            where post-processing should happen on the final combined text)
 
     Returns:
         Transcribed text string
@@ -897,8 +904,8 @@ def transcribe_with_config(audio_path: str, config: dict, context: str = "") -> 
     if ensure_punct and text:
         text = ensure_punctuation_postprocess(text)
     
-    # Apply LLM post-processing if enabled
-    if config.get("post_processing_enabled", True) and text:
+    # Apply LLM post-processing if enabled (and not skipped for chunked mode)
+    if config.get("post_processing_enabled", True) and text and not skip_post_processing:
         try:
             from .postprocessor import process_with_config
             import os

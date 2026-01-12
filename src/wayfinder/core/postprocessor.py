@@ -683,6 +683,175 @@ REFUSAL_PATTERNS = [
     "can i help you with something else",
 ]
 
+# Prompt leakage patterns - phrases that indicate the LLM echoed back the prompt
+PROMPT_LEAKAGE_PATTERNS = [
+    # Common instruction fragments that leak into output
+    "critical: you must",
+    "you must preserve all",
+    "do not drop, skip",
+    "do not summarize",
+    "every sentence from the input",
+    "every sentence must appear",
+    "input text:",
+    "output (all content",
+    "output (full text",
+    "output only the",
+    "no commentary",
+    "note: there are no sentences",
+    "note: all sentences",
+    "all words and phrases remain intact",
+    "i must know you to preserve",
+    "cleaned text:",
+    "processed text:",
+    "here is the cleaned",
+    "here's the cleaned",
+    # Additional instruction fragments
+    "rules:",
+    "1. remove filler",
+    "2. formatting",
+    "3. tone",
+    "4. do not rewrite",
+]
+
+
+def remove_prompt_leakage(text: str) -> str:
+    """
+    Remove any prompt instruction fragments that leaked into the output.
+    
+    Some smaller LLMs echo back parts of the prompt instead of just outputting
+    the cleaned text. This function detects and removes those fragments.
+    
+    Args:
+        text: The LLM response that may contain leaked prompt fragments
+        
+    Returns:
+        Cleaned text with prompt fragments removed
+    """
+    if not text:
+        return text
+    
+    text_lower = text.lower()
+    
+    # Check if text contains prompt leakage patterns
+    contains_leakage = any(pattern in text_lower for pattern in PROMPT_LEAKAGE_PATTERNS)
+    
+    if not contains_leakage:
+        return text
+    
+    print("[Post-processing] ⚠ Detected prompt leakage, cleaning up...")
+    
+    import re
+    
+    # Remove common instruction prefixes/suffixes
+    # Pattern: "CRITICAL: You MUST preserve..." at start
+    text = re.sub(
+        r'^(?:CRITICAL|Note|Important|Rules?)[:.].*?(?:output|text)[:.]?\s*',
+        '',
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    
+    # Pattern: "INPUT TEXT: ..." marker and everything before actual content
+    if "input text:" in text_lower:
+        # Find where INPUT TEXT: appears and take only what's after it
+        match = re.search(r'input text:\s*', text, flags=re.IGNORECASE)
+        if match:
+            text = text[match.end():]
+    
+    # Pattern: "OUTPUT (all content preserved):" or similar
+    text = re.sub(
+        r'\s*output\s*\([^)]*\)\s*[:.]?\s*',
+        '',
+        text,
+        flags=re.IGNORECASE
+    )
+    
+    # Remove trailing notes like "Note: There are no sentences missing..."
+    text = re.sub(
+        r'\s*note:\s*(?:there are no|all|every).*$',
+        '',
+        text,
+        flags=re.IGNORECASE
+    )
+    
+    # Remove instruction lines that appear anywhere
+    lines = text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        line_lower = line.lower().strip()
+        # Skip lines that are clearly instructions
+        if any(line_lower.startswith(prefix) for prefix in [
+            'critical:', 'note:', 'rules:', 'important:',
+            '1.', '2.', '3.', '4.', '5.',  # Numbered rules
+        ]):
+            # Check if it looks like an instruction (contains instruction words)
+            if any(word in line_lower for word in [
+                'must preserve', 'do not', 'must appear', 'every sentence',
+                'remove filler', 'formatting', 'keep the user'
+            ]):
+                continue
+        cleaned_lines.append(line)
+    
+    text = '\n'.join(cleaned_lines)
+    
+    return text.strip()
+
+
+def remove_repeated_sentences(text: str, min_length: int = 20) -> str:
+    """
+    Remove repeated sentences, especially at the end of transcriptions.
+    
+    Whisper sometimes hallucinates by repeating the last sentence multiple times.
+    This function detects and collapses those repetitions.
+    
+    Args:
+        text: The transcription text
+        min_length: Minimum sentence length to check for repetition
+        
+    Returns:
+        Text with repeated sentences removed
+    """
+    if not text or len(text) < min_length * 2:
+        return text
+    
+    import re
+    
+    # Split into sentences (roughly)
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    
+    if len(sentences) < 2:
+        return text
+    
+    # Check for repeated sentences at the end
+    # Look at the last few sentences
+    unique_sentences = []
+    seen = set()
+    repetition_found = False
+    
+    for sentence in sentences:
+        # Normalize for comparison (lowercase, strip extra spaces)
+        normalized = ' '.join(sentence.lower().split())
+        
+        # Skip very short fragments
+        if len(normalized) < min_length:
+            unique_sentences.append(sentence)
+            continue
+        
+        if normalized in seen:
+            repetition_found = True
+            # Skip this repeated sentence
+            continue
+        
+        seen.add(normalized)
+        unique_sentences.append(sentence)
+    
+    if repetition_found:
+        original_count = len(sentences)
+        new_count = len(unique_sentences)
+        print(f"[Post-processing] ⚠ Removed {original_count - new_count} repeated sentence(s)")
+    
+    return ' '.join(unique_sentences)
+
 
 def is_refusal_response(response: str) -> bool:
     """
@@ -713,10 +882,12 @@ def is_refusal_response(response: str) -> bool:
 
 def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bool:
     """
-    Detect if the LLM response is a hallucination (completely different from input).
+    Detect if the LLM response is a hallucination (completely different from input)
+    or if it inappropriately truncated the input.
     
-    Uses simple word overlap to detect when the model generates unrelated content
-    instead of cleaning up the transcription.
+    Uses word overlap AND length ratio to detect when the model:
+    1. Generates unrelated content instead of cleaning up
+    2. Drops significant portions of the input text
     
     Args:
         original: The original transcription text
@@ -724,7 +895,7 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bo
         threshold: Minimum word overlap ratio (0.0-1.0) to consider valid
         
     Returns:
-        True if this looks like a hallucination (low overlap with original)
+        True if this looks like a hallucination or truncation
     """
     if not original or not response:
         return False
@@ -761,7 +932,7 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bo
         # Check meaningful word overlap
         overlap_ratio = len(meaningful_common) / len(meaningful_original)
     
-    # If response is much longer and has low overlap, it's likely hallucination
+    # Length ratio check (response / original)
     length_ratio = len(response) / len(original) if original else 1
     
     # Stricter threshold if response is much longer (sign of generation vs cleanup)
@@ -771,10 +942,25 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bo
     
     is_hallucinated = overlap_ratio < effective_threshold
     
+    # NEW: Check for inappropriate truncation
+    # If the response is significantly shorter than the original (less than 40% of length)
+    # AND the original was reasonably long (more than 50 chars), it's likely the LLM
+    # dropped important content. This catches cases where LLM only keeps the last sentence.
+    is_truncated = False
+    if len(original) > 50 and length_ratio < 0.4:
+        # Response is less than 40% the length of original
+        # Check if meaningful words from original are mostly missing
+        missing_meaningful = meaningful_original - meaningful_common
+        if len(missing_meaningful) > len(meaningful_common):
+            # More meaningful words are missing than kept - this is truncation
+            is_truncated = True
+            print(f"[Post-processing] ⚠ Truncation detected: response is {length_ratio:.0%} of original, "
+                  f"missing {len(missing_meaningful)} meaningful words (kept {len(meaningful_common)})")
+    
     if is_hallucinated:
         print(f"[Post-processing] ⚠ Hallucination detected: {overlap_ratio:.1%} word overlap (threshold: {effective_threshold:.1%})")
     
-    return is_hallucinated
+    return is_hallucinated or is_truncated
 
 
 # =============================================================================
@@ -784,14 +970,18 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bo
 # Minimal cleanup prompt - just removes filler sounds, nothing else
 MINIMAL_PROMPT = """Remove filler sounds (um, uh, ah, er) from this transcription. Keep EVERYTHING else exactly as spoken.
 
+CRITICAL: You MUST preserve ALL sentences and ALL content. Do NOT drop, skip, or summarize any part of the text.
+
 DO NOT change words, sentence structure, or add punctuation. Just remove um/uh/ah sounds.
 
-Spoken: {text}
+INPUT TEXT: {text}
 
-Cleaned:"""
+OUTPUT (full text with only um/uh removed):"""
 
 # Standard prompt - cleans up speech while preserving user's words
 STANDARD_PROMPT = """Clean up this voice transcription. Keep the user's words and meaning intact.
+
+CRITICAL: You MUST preserve ALL sentences and ALL content from the input. Do NOT drop, skip, summarize, or shorten the text. Every sentence from the input must appear in the output.
 
 RULES:
 1. {filler_rules}
@@ -801,12 +991,14 @@ RULES:
 
 Output ONLY the cleaned text. No commentary.
 
-Spoken: {text}
+INPUT TEXT: {text}
 
-Cleaned:"""
+OUTPUT (all content preserved):"""
 
 # Strong prompt - allows restructuring and transformation
 STRONG_PROMPT = """Transform this voice transcription into polished {style_name} text.
+
+CRITICAL: You MUST preserve ALL the content and meaning from the input. Do NOT drop, skip, or omit any sentences or ideas. Every topic mentioned must be in the output.
 
 RULES:
 1. {filler_rules}
@@ -817,9 +1009,9 @@ RULES:
 
 Output ONLY the transformed text. No commentary.
 
-Spoken: {text}
+INPUT TEXT: {text}
 
-Result:"""
+OUTPUT (all content preserved, polished):"""
 
 # =============================================================================
 # 🎭 CARICATURE MODE (Secret Easter Egg!)
@@ -833,7 +1025,7 @@ You are a COMEDY WRITER creating an ABSURD PARODY. Your job is to take whatever 
 
 THIS IS NOT A NORMAL TRANSCRIPTION. This is COMEDY. Be SILLY. Be RIDICULOUS. Crank everything to 11.
 
-CRITICAL: Do NOT just clean up the text. You MUST transform it dramatically. If the output looks similar to the input, you have FAILED.
+CRITICAL: You MUST address ALL topics and ALL sentences from the input. Do NOT skip any part. If they mentioned vibe coding workshops AND something about order, you must parody BOTH. Every topic gets the ridiculous treatment!
 
 STYLE TO PARODY: {style_name}
 
@@ -852,17 +1044,18 @@ RULES:
 3. Make it OBVIOUSLY a parody - the user should laugh reading this
 4. The more ridiculous, the better - there are NO limits here
 5. Do NOT be subtle. Subtlety is failure.
+6. COVER ALL TOPICS from the input - do NOT drop any part of what they said
 
-Original text: {text}
+INPUT TEXT: {text}
 
-🎭 ABSURDLY EXAGGERATED VERSION (go WILD):"""
+🎭 ABSURDLY EXAGGERATED VERSION (cover ALL topics, go WILD):"""
 
 # Simplified prompt for tiny models (<500M params)
-SIMPLE_CLEANUP_PROMPT = """Clean this text. Remove "um", "uh". Be {tone_simple}.
+SIMPLE_CLEANUP_PROMPT = """Clean this text. Remove "um", "uh". Keep ALL sentences. Be {tone_simple}.
 
 Text: {text}
 
-Clean:"""
+Full cleaned text:"""
 
 # Simple tone descriptions for tiny models
 SIMPLE_TONES = {
@@ -1193,6 +1386,12 @@ class LlamaCppBackend(PostProcessorBackend):
             print("[Post-processing] ⚠ Model refused to process - using original text")
             return original_text if original_text else text
         
+        # Remove prompt leakage (LLM echoing back instructions)
+        text = remove_prompt_leakage(text)
+        
+        # Remove repeated sentences (Whisper hallucination loops)
+        text = remove_repeated_sentences(text)
+        
         # Remove common artifacts
         lines = text.split("\n")
         cleaned_lines = []
@@ -1318,6 +1517,12 @@ class AnthropicBackend(PostProcessorBackend):
                 print("[Post-processing] ⚠ Model refused to process - using original text")
                 return text
             
+            # Remove prompt leakage (rare with Claude but check anyway)
+            result = remove_prompt_leakage(result)
+            
+            # Remove repeated sentences (Whisper hallucination loops)
+            result = remove_repeated_sentences(result)
+            
             # Check for hallucination
             if is_hallucination(text, result):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
@@ -1430,6 +1635,12 @@ class OpenAIBackend(PostProcessorBackend):
                 print("[Post-processing] ⚠ Model refused to process - using original text")
                 return text
             
+            # Remove prompt leakage (rare with OpenAI but check anyway)
+            result = remove_prompt_leakage(result)
+            
+            # Remove repeated sentences (Whisper hallucination loops)
+            result = remove_repeated_sentences(result)
+            
             # Check for hallucination
             if is_hallucination(text, result):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
@@ -1533,7 +1744,7 @@ class OllamaBackend(PostProcessorBackend):
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "You are a transcription cleanup assistant. You ONLY clean up spoken text - never generate new content. Output ONLY the cleaned text, nothing else."
+                                "content": "You are a transcription cleanup assistant. You ONLY clean up spoken text - never generate new content. CRITICAL: You must preserve ALL sentences and content from the input. Never drop, skip, or summarize parts of the text. Output ONLY the cleaned text, nothing else."
                             },
                             {
                                 "role": "user", 
@@ -1592,6 +1803,12 @@ class OllamaBackend(PostProcessorBackend):
         if is_refusal_response(text):
             print("[Post-processing] ⚠ Model refused to process - using original text")
             return original_text if original_text else text
+        
+        # Remove prompt leakage (LLM echoing back instructions)
+        text = remove_prompt_leakage(text)
+        
+        # Remove repeated sentences (Whisper hallucination loops)
+        text = remove_repeated_sentences(text)
         
         # Remove common artifacts
         lines = text.split("\n")

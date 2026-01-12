@@ -13459,7 +13459,13 @@ class WayfinderApp(ctk.CTk):
                         if prev_text and prev_text != "[error]":
                             context = prev_text
             
-            text = transcribe_with_config(chunk_path, self.config, context=context)
+            # Skip post-processing per-chunk - will be applied to final combined text
+            text = transcribe_with_config(
+                chunk_path, 
+                self.config, 
+                context=context,
+                skip_post_processing=True,
+            )
             with self.chunk_transcription_lock:
                 # Ensure list is large enough
                 while len(self.chunk_transcriptions) <= chunk_index:
@@ -13589,6 +13595,20 @@ class WayfinderApp(ctk.CTk):
         # Combine all transcriptions with overlap deduplication
         with self.chunk_transcription_lock:
             combined_text = self._deduplicate_overlap_text(self.chunk_transcriptions)
+        
+        # Apply post-processing to the final combined text (not per-chunk)
+        # This gives the LLM full context and avoids per-chunk prompt leakage issues
+        if combined_text.strip() and self.config.get("post_processing_enabled", True):
+            try:
+                from wayfinder.core.postprocessor import process_with_config
+                self.log("🔧 Post-processing combined text...")
+                original_text = combined_text
+                combined_text = process_with_config(combined_text, self.config)
+                if combined_text != original_text:
+                    self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
+            except Exception as e:
+                self.log(f"⚠ Post-processing error: {e}")
+                # Continue with original combined text
         
         # Cleanup
         if self.chunked_recorder:
