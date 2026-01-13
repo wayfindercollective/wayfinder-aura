@@ -1286,9 +1286,10 @@ class LlamaCppBackend(PostProcessorBackend):
         """Check if llama-cpp-python is installed and model exists."""
         try:
             import llama_cpp
-            if self.model_path:
-                return Path(self.model_path).exists()
-            return True  # Library is available, model path may be set later
+            # Must have a model path configured AND the file must exist
+            if not self.model_path:
+                return False  # No model configured
+            return Path(self.model_path).exists()
         except ImportError:
             return False
     
@@ -1904,6 +1905,8 @@ def process_with_config(text: str, config: dict) -> str:
     Returns:
         Cleaned/formatted text, or original text if post-processing is disabled/fails
     """
+    import time
+    
     # Check if post-processing is enabled
     if not config.get("post_processing_enabled", True):
         return text
@@ -1928,12 +1931,54 @@ def process_with_config(text: str, config: dict) -> str:
                 print(f"[Post-processing] ⚠ OpenAI not available - check OPENAI_API_KEY env var")
             elif backend_type == "anthropic":
                 print(f"[Post-processing] ⚠ Anthropic not available - check ANTHROPIC_API_KEY env var")
+            elif backend_type == "llama_cpp":
+                # Check if llama-cpp-python is installed
+                try:
+                    import llama_cpp
+                    llama_installed = True
+                except ImportError:
+                    llama_installed = False
+                
+                model_path = config.get("llama_cpp_model_path", "")
+                if not llama_installed:
+                    print(f"[Post-processing] ⚠ llama.cpp: llama-cpp-python not installed")
+                    print(f"[Post-processing] 💡 Install with: pip install llama-cpp-python")
+                elif not model_path:
+                    print(f"[Post-processing] ⚠ llama.cpp: No model selected - download one from Settings")
+                else:
+                    print(f"[Post-processing] ⚠ llama.cpp: Model not found at {model_path}")
             else:
-                print(f"[Post-processing] ⚠ llama.cpp not available - no model selected")
+                print(f"[Post-processing] ⚠ Ollama not available - is the service running?")
             return text
         
+        # Get timing info
+        tone = config.get("output_tone", "professional")
+        backend_type = config.get("post_processing_backend", "ollama")
+        if backend_type == "ollama":
+            model_name = config.get("ollama_model", "unknown")
+        elif backend_type == "llama_cpp":
+            model_path = config.get("llama_cpp_model_path", "")
+            model_name = Path(model_path).stem if model_path else "no model"
+        elif backend_type == "openai":
+            model_name = config.get("openai_model", "gpt-4o-mini")
+        elif backend_type == "anthropic":
+            model_name = config.get("anthropic_model", "claude-3-haiku")
+        else:
+            model_name = "unknown"
+        input_words = len(text.split())
+        
+        print(f"[Post-processing] 🎯 Style: {tone} | Model: {model_name} | Input: {input_words} words")
+        
         # Process with the built prompt (prompt already includes the text)
+        start_time = time.time()
         result = backend.process(text, prompt)
+        elapsed = time.time() - start_time
+        
+        output_words = len(result.split())
+        words_per_sec = input_words / elapsed if elapsed > 0 else 0
+        
+        print(f"[Post-processing] ⏱ Completed in {elapsed:.2f}s ({words_per_sec:.1f} words/sec) | Output: {output_words} words")
+        
         return result
         
     except PostProcessingError as e:

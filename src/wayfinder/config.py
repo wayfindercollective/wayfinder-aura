@@ -36,9 +36,13 @@ if IS_FLATPAK:
     _default_whisper_binary = "/app/bin/whisper-cli"
     _default_model_dir = os.environ.get("WHISPER_MODELS_DIR", "/app/share/whisper-models")
     _default_model_path = f"{_default_model_dir}/ggml-small.en.bin"
+    # LLM model for post-processing (bundled in Flatpak)
+    _default_llm_model_path = "/app/share/llm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 else:
     _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
     _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
+    # LLM model for post-processing (user's downloaded models)
+    _default_llm_model_path = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models" / "qwen2.5-1.5b-instruct-q4_k_m.gguf")
 
 # Default configuration values
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -122,12 +126,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": True,  # Enable LLM post-processing
-    "post_processing_backend": "ollama",  # llama_cpp | ollama | anthropic | openai
+    "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai (llama_cpp is default for self-contained distribution)
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
     "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
     
     # llama.cpp post-processing settings
-    "llama_cpp_model_path": "",  # Path to GGUF model file
+    "llama_cpp_model_path": _default_llm_model_path,  # Path to GGUF model file
     "llama_cpp_n_ctx": 2048,  # Context window size
     "llama_cpp_n_threads": 4,  # CPU threads
     "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)

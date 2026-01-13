@@ -6637,14 +6637,26 @@ class WayfinderApp(ctk.CTk):
         
         # Determine current selection display
         current_display = None
+        first_installed = None
         for display_name, data in model_data.items():
             if data["selected"]:
                 current_display = display_name
                 break
+            # Track the first installed model as fallback
+            if data["installed"] and first_installed is None:
+                first_installed = display_name
         
-        if not current_display and model_options:
-            # Default to first option
-            current_display = model_options[0]
+        if not current_display:
+            if first_installed:
+                # Auto-select the first installed model and save to config
+                current_display = first_installed
+                installed_data = model_data[first_installed]
+                self.config["llama_cpp_model_path"] = installed_data["path"]
+                save_config(self.config)
+                print(f"[Config] Auto-selected installed model: {installed_data['info']['name']}")
+            elif model_options:
+                # Default to first option if nothing installed
+                current_display = model_options[0]
         
         # Row 1: Label + Browse on left, Dropdown + Download on right
         row1 = ctk.CTkFrame(parent, fg_color="transparent")

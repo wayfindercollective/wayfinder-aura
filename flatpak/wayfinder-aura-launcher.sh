@@ -19,6 +19,13 @@ else
     export WHISPER_MODELS_DIR="/app/share/whisper-models"
 fi
 
+# LLM models for post-processing - prefer user's models, fallback to bundled
+if [ -d "${HOME}/.local/share/wayfinder-aura/llm-models" ]; then
+    export LLM_MODELS_DIR="${HOME}/.local/share/wayfinder-aura/llm-models"
+else
+    export LLM_MODELS_DIR="/app/share/llm-models"
+fi
+
 # Whisper binary
 export WHISPER_BIN="/app/bin/whisper-cli"
 

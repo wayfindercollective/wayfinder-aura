@@ -45,10 +45,13 @@ finish-args:
   - --filesystem=~/.local/share/whisper.cpp:ro
   - --filesystem=~/whisper.cpp/models:ro
   
-  # GPU acceleration (Vulkan for whisper.cpp)
+  # LLM model access (user's downloaded models for post-processing)
+  - --filesystem=~/.local/share/wayfinder-aura/llm-models:create
+  
+  # GPU acceleration (Vulkan for whisper.cpp and llama.cpp)
   - --device=dri
   
-  # Network for API-based transcription (OpenAI, Groq)
+  # Network for API-based transcription (OpenAI, Groq) and model downloads
   - --share=network
 
 cleanup:
@@ -99,6 +102,37 @@ modules:
         url: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
         sha256: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1c71f7f2c8
         dest-filename: ggml-small.en.bin
+
+  # llama.cpp - LLM inference engine for post-processing
+  - name: llama-cpp
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DLLAMA_BUILD_EXAMPLES=OFF
+      - -DLLAMA_BUILD_TESTS=OFF
+      - -DLLAMA_BUILD_SERVER=OFF
+      - -DBUILD_SHARED_LIBS=ON
+      # Vulkan GPU support (works on AMD + NVIDIA + Intel)
+      - -DGGML_VULKAN=ON
+    sources:
+      - type: git
+        url: https://github.com/ggerganov/llama.cpp.git
+        tag: b4568
+    post-install:
+      # Install the shared library for llama-cpp-python
+      - install -Dm755 libllama.so ${FLATPAK_DEST}/lib/libllama.so
+      - install -Dm755 libggml*.so ${FLATPAK_DEST}/lib/ || true
+
+  # Bundled LLM model for post-processing (Qwen2.5-1.5B - good balance of speed/quality)
+  - name: llm-model-qwen
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 qwen2.5-1.5b-instruct-q4_k_m.gguf ${FLATPAK_DEST}/share/llm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+    sources:
+      - type: file
+        url: https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+        sha256: 6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e
+        dest-filename: qwen2.5-1.5b-instruct-q4_k_m.gguf
 
   # wtype for Wayland text injection
   - name: wtype
@@ -201,8 +235,8 @@ modules:
       - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} openai
     sources:
       - type: file
-        url: https://files.pythonhosted.org/packages/openai/openai-1.55.0-py3-none-any.whl
-        sha256: placeholder_update_before_build
+        url: https://files.pythonhosted.org/packages/py3/o/openai/openai-2.15.0-py3-none-any.whl
+        sha256: 6ae23b932cd7230f7244e52954daa6602716d6b9bf235401a107af731baea6c3
 
   - name: python3-groq
     buildsystem: simple
@@ -210,8 +244,24 @@ modules:
       - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} groq
     sources:
       - type: file
-        url: https://files.pythonhosted.org/packages/groq/groq-0.11.0-py3-none-any.whl
-        sha256: placeholder_update_before_build
+        url: https://files.pythonhosted.org/packages/py3/g/groq/groq-1.0.0-py3-none-any.whl
+        sha256: 6e22bf92ffad988f01d2d4df7729add66b8fd5dbfb2154b5bbf3af245b72c731
+
+  # llama-cpp-python - Python bindings for llama.cpp (post-processing)
+  # Built from source to use our Vulkan-enabled llama.cpp
+  - name: python3-llama-cpp-python
+    buildsystem: simple
+    build-options:
+      env:
+        # Use system llama.cpp library we built earlier
+        CMAKE_ARGS: "-DGGML_VULKAN=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF"
+        LLAMA_CPP_LIB: "/app/lib/libllama.so"
+    build-commands:
+      - pip3 install --verbose --no-build-isolation --prefix=${FLATPAK_DEST} .
+    sources:
+      - type: git
+        url: https://github.com/abetlen/llama-cpp-python.git
+        tag: v0.3.4
 
   # Main application
   - name: wayfinder-aura
