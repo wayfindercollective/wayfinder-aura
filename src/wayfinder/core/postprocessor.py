@@ -50,7 +50,7 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
 - Make it sound like someone giving their first ever public speech while terrified""",
     },
     "professional": {
-        "standard": "Keep the user's words and sentence structure. Make it sound professional with proper grammar.",
+        "standard": "Keep the user's EXACT words - do NOT rephrase. Just fix grammar and punctuation to sound professional.",
         "strong": "Rewrite for executive clarity. Be concise, formal, and polished. Remove fluff.",
         "caricature": """MAXIMUM CORPORATE BUZZWORDS. Transform into an absurd LinkedIn influencer post:
 - Every sentence must 'synergize', 'leverage', or 'circle back'
@@ -61,7 +61,7 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
 - Make it sound like the most insufferable LinkedIn post ever written""",
     },
     "casual": {
-        "standard": "Keep the user's words. Make it sound natural and conversational.",
+        "standard": "Keep the user's EXACT words - do NOT rephrase. Just make punctuation relaxed and conversational.",
         "strong": "Rewrite as casual texting. Short, relaxed, like messaging a friend.",
         "caricature": """MAXIMUM CHRONICALLY ONLINE SPEAK. Transform into absurd Gen-Z internet slang:
 - Use 'fr fr', 'no cap', 'lowkey', 'highkey', 'bussin', 'ong', 'slay', 'its giving', 'understood the assignment', 'ate and left no crumbs'
@@ -73,7 +73,7 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
 - all lowercase except for random CAPS for emphasis""",
     },
     "dev": {
-        "standard": "Keep the user's words. This is developer/coding context - recognize git commands (pull, push, commit, merge, branch, main, dev), programming terms, and technical jargon.",
+        "standard": "Keep the user's EXACT words - do NOT rephrase. Just recognize this is developer context with git commands (main, dev, branch, merge, commit, push, pull), programming terms, and technical jargon.",
         "strong": "Format as a clear developer request or prompt. Recognize technical terms, file paths, function names, and git terminology.",
         "caricature": """MAXIMUM PROMPT ENGINEERING PARODY. Transform into an absurdly over-engineered AI prompt:
 - Start with 'You are a LEGENDARY 10x developer with 47 years of experience at FAANG companies'
@@ -87,7 +87,7 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
     },
     "personal": {
         # Personal style uses voice profile - these are fallbacks when no profile exists
-        "standard": "Keep the user's characteristic phrases and word choices. Just clean up delivery.",
+        "standard": "Keep the user's EXACT words and phrases - do NOT rephrase. Just clean up filler words.",
         "strong": "Polish while preserving the user's unique voice and speaking patterns.",
         "caricature": """MAXIMUM SELF-PARODY. Become an absurdly exaggerated version of the speaker:
 - If they use any filler words, use them 10x more
@@ -978,22 +978,23 @@ INPUT TEXT: {text}
 
 OUTPUT (full text with only um/uh removed):"""
 
-# Standard prompt - cleans up speech while preserving user's words
-STANDARD_PROMPT = """Clean up this voice transcription. Keep the user's words and meaning intact.
+# Standard prompt - cleans up speech while preserving user's words EXACTLY
+STANDARD_PROMPT = """Clean up this voice transcription. You MUST keep the user's EXACT words.
 
-CRITICAL: You MUST preserve ALL sentences and ALL content from the input. Do NOT drop, skip, summarize, or shorten the text. Every sentence from the input must appear in the output.
-
-RULES:
+CRITICAL RULES - FOLLOW EXACTLY:
 1. {filler_rules}
 2. {formatting_rules}
 3. {tone_guidance}
-4. Do NOT rewrite or restructure sentences. Keep the user's phrasing.
+4. Do NOT paraphrase. Do NOT reword. Do NOT restructure sentences.
+5. Do NOT change vocabulary or word choice. Keep their exact phrasing.
+6. Only fix obvious transcription errors (wrong homophones, missing words).
+7. Preserve ALL sentences - do NOT drop, skip, or summarize.
 
-Output ONLY the cleaned text. No commentary.
+Your job is CLEANUP, not rewriting. The user's words are intentional.
 
 INPUT TEXT: {text}
 
-OUTPUT (all content preserved):"""
+OUTPUT (exact words, cleaned up):"""
 
 # Strong prompt - allows restructuring and transformation
 STRONG_PROMPT = """Transform this voice transcription into polished {style_name} text.

@@ -10,6 +10,31 @@ from pathlib import Path
 from typing import Optional
 
 
+# Developer vocabulary - common terms that Whisper often mishears
+# These get added to the prompt when output_tone is "dev" to improve recognition
+DEV_VOCABULARY = [
+    # Git terminology
+    "main", "dev", "master", "branch", "branches", "merge", "commit", "commits",
+    "push", "pull", "fetch", "rebase", "checkout", "stash", "cherry-pick",
+    "upstream", "origin", "remote", "clone", "fork", "diff", "HEAD", "staging",
+    "repo", "repository", "git", "GitHub", "GitLab", "Bitbucket",
+    # Common commands
+    "npm", "npx", "yarn", "pnpm", "pip", "cargo", "brew", "apt", "sudo",
+    "cd", "ls", "mkdir", "rm", "mv", "cp", "grep", "sed", "awk", "curl", "wget",
+    # Programming terms
+    "API", "REST", "GraphQL", "JSON", "YAML", "TOML", "XML", "HTML", "CSS",
+    "TypeScript", "JavaScript", "Python", "Rust", "Go", "Java", "C++",
+    "function", "class", "method", "variable", "const", "let", "var",
+    "async", "await", "import", "export", "module", "package",
+    "frontend", "backend", "fullstack", "server", "client", "localhost",
+    "Docker", "Kubernetes", "CI", "CD", "deploy", "production", "staging",
+    "debug", "console", "log", "error", "exception", "stack trace",
+    # File paths / extensions
+    ".js", ".ts", ".py", ".rs", ".go", ".json", ".yaml", ".yml", ".md",
+    "src", "lib", "bin", "node_modules", "package.json", "requirements.txt",
+]
+
+
 class TranscriptionError(Exception):
     """Raised when transcription fails."""
     pass
@@ -872,6 +897,16 @@ def transcribe_with_config(
     # Start with copy to avoid modifying original
     config = config.copy()
     original_prompt = config.get("prompt", "")
+    
+    # Add developer vocabulary when "dev" mode is selected
+    # This helps Whisper recognize common git/programming terms (e.g., "main" not "Maine")
+    if config.get("output_tone") == "dev":
+        existing_vocab = config.get("custom_vocabulary", [])
+        # Merge dev vocabulary with user's custom vocabulary (avoid duplicates)
+        existing_lower = {v.lower() for v in existing_vocab}
+        new_vocab = [term for term in DEV_VOCABULARY if term.lower() not in existing_lower]
+        config["custom_vocabulary"] = existing_vocab + new_vocab
+        print(f"[Dev Mode] Added {len(new_vocab)} developer vocabulary terms for better recognition")
     
     # Add voice profile context when "personal" style is selected
     if config.get("output_tone") == "personal":
