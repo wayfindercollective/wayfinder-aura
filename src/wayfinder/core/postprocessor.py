@@ -201,12 +201,22 @@ MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
         "hallucination_threshold": 0.45,
     },
     "phi3:mini": {
-        "issues": [],  # Generally works well - 3.8B model
+        "issues": ["rewrites_standard_mode"],
+        "workaround": "Ignores 'keep exact words' in standard mode - rewrites sentences. Use for strong mode only, or switch to qwen2.5:1.5b.",
         "tier_override": "standard",  # phi3:mini is 3.8B params, supports strong/caricature
+        "best_for": ["strong", "caricature"],  # Not good for standard mode
+        "avoid_for": ["standard"],  # Will rewrite even with simple prompts
     },
     "qwen2.5:1.5b": {
-        "issues": [],  # Generally works well
+        "issues": [],  # Excellent - follows instructions well
         "tier_override": "small",
+        "best_for": ["standard", "strong"],  # Great for both modes
+        "recommended": True,  # Top recommendation
+    },
+    "llama3.2:3b": {
+        "issues": [],
+        "tier_override": "standard",
+        "best_for": ["standard", "strong"],
     },
 }
 
@@ -2181,25 +2191,93 @@ def get_recommended_models() -> list:
         {
             "tier": "recommended",
             "models": [
-                {"name": "qwen2.5:1.5b", "description": "Best balance of speed and quality"},
-                {"name": "phi3:mini", "description": "Fast, good instruction following"},
-                {"name": "llama3.2:3b", "description": "Higher quality, slightly slower"},
+                {"name": "qwen2.5:1.5b", "description": "⭐ Best overall - fast, follows instructions well"},
+                {"name": "llama3.2:1b", "description": "Fast, good for standard mode"},
+                {"name": "llama3.2:3b", "description": "Higher quality, good for all modes"},
+            ],
+        },
+        {
+            "tier": "strong_mode",
+            "description": "Best for Strong mode (restructuring allowed)",
+            "models": [
+                {"name": "phi3:mini", "description": "Great for strong mode - polishes well"},
+                {"name": "qwen2.5:3b", "description": "Good balance of speed and quality"},
+                {"name": "qwen2.5:7b", "description": "Excellent quality, slower"},
             ],
         },
         {
             "tier": "budget",
             "models": [
-                {"name": "llama3.2:1b", "description": "Fast but has quirks with some modes"},
-                {"name": "smollm2:360m", "description": "Very fast, basic cleanup only"},
+                {"name": "smollm2:360m", "description": "Ultra fast but may hallucinate"},
             ],
         },
         {
-            "tier": "premium",
+            "tier": "cloud",
             "models": [
-                {"name": "qwen2.5:7b", "description": "Excellent quality, slower"},
                 {"name": "gpt-4o-mini", "description": "Cloud API, very high quality"},
                 {"name": "claude-3-haiku", "description": "Cloud API, excellent quality"},
             ],
         },
     ]
+
+
+def get_model_recommendation_for_style(style: str, strong_mode: bool = False) -> Dict[str, Any]:
+    """
+    Get model recommendations based on the selected style and mode.
+    
+    Args:
+        style: The output tone (minimal, professional, casual, dev, personal)
+        strong_mode: Whether strong mode is enabled
+        
+    Returns:
+        Dict with recommended models and warnings
+    """
+    if strong_mode:
+        return {
+            "recommended": ["phi3:mini", "qwen2.5:3b", "qwen2.5:7b"],
+            "also_works": ["qwen2.5:1.5b", "llama3.2:3b"],
+            "avoid": [],
+            "message": "Strong mode allows restructuring. Larger models (3B+) give best results.",
+        }
+    
+    # Standard mode - need models that follow "keep exact words" instructions
+    if style == "minimal":
+        return {
+            "recommended": ["qwen2.5:1.5b", "llama3.2:1b"],
+            "also_works": ["smollm2:360m", "llama3.2:3b"],
+            "avoid": [],
+            "message": "Minimal mode just removes filler. Most models work well.",
+        }
+    elif style == "dev":
+        return {
+            "recommended": ["qwen2.5:1.5b", "llama3.2:1b"],
+            "also_works": ["llama3.2:3b"],
+            "avoid": ["phi3:mini"],
+            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
+            "message": "Dev mode adds git/code context. Use qwen2.5:1.5b for best results.",
+        }
+    elif style == "professional":
+        return {
+            "recommended": ["qwen2.5:1.5b", "llama3.2:1b"],
+            "also_works": ["llama3.2:3b"],
+            "avoid": ["phi3:mini"],
+            "avoid_reason": "phi3:mini rewrites sentences even in standard mode", 
+            "message": "Professional mode fixes punctuation. qwen2.5:1.5b keeps your words intact.",
+        }
+    elif style == "casual":
+        return {
+            "recommended": ["qwen2.5:1.5b", "llama3.2:1b"],
+            "also_works": ["llama3.2:3b", "smollm2:360m"],
+            "avoid": ["phi3:mini"],
+            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
+            "message": "Casual mode uses relaxed punctuation. Most small models work well.",
+        }
+    else:  # personal or unknown
+        return {
+            "recommended": ["qwen2.5:1.5b"],
+            "also_works": ["llama3.2:1b", "llama3.2:3b"],
+            "avoid": ["phi3:mini"],
+            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
+            "message": "Personal mode preserves your speaking style. qwen2.5:1.5b recommended.",
+        }
 
