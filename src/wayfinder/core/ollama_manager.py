@@ -47,20 +47,30 @@ class OllamaManager:
             "quality": "High",
         },
         {
+            "name": "llama3.2:3b",
+            "display_name": "Llama 3.2 3B",
+            "size": "2.0 GB",
+            "description": "Meta's capable model. Good quality.",
+            "speed": "Fast",
+            "quality": "High",
+        },
+        {
             "name": "llama3.2:1b",
             "display_name": "Llama 3.2 1B",
             "size": "1.3 GB",
-            "description": "Meta's efficient model. Good all-rounder.",
+            "description": "⚠️ Prone to hallucination. Use qwen2.5:1.5b instead.",
             "speed": "Very Fast",
-            "quality": "Good",
+            "quality": "Poor",
+            "warning": True,
         },
         {
             "name": "smollm2:360m",
             "display_name": "SmolLM2 360M",
             "size": "230 MB",
-            "description": "Tiny but hallucinates. Not recommended.",
+            "description": "⚠️ Tiny but hallucinates. Not recommended.",
             "speed": "Instant",
             "quality": "Poor",
+            "warning": True,
         },
     ]
     
