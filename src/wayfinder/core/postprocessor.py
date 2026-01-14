@@ -1728,29 +1728,31 @@ class OllamaBackend(PostProcessorBackend):
             # Call Ollama API using chat endpoint for better instruction following
             # Use longer timeout (60s) for first-time model loading
             
-            # Build system prompt with anti-hallucination guidance
-            # More aggressive for models known to hallucinate
-            quirks = get_model_quirks(self.model)
-            if "hallucination_prone" in quirks.get("issues", []):
+            # Detect if this is caricature mode from the prompt
+            is_caricature = "SILLY" in full_prompt or "EXAGGERATED" in full_prompt
+            
+            # Build system prompt based on mode
+            if is_caricature:
+                # Caricature mode - allow creative, funny output
                 system_prompt = (
-                    "You are a transcription cleanup assistant. "
-                    "CRITICAL RULES - FOLLOW EXACTLY:\n"
-                    "1. You ONLY clean up the text provided - NEVER invent or imagine new content\n"
-                    "2. If the input mentions 'leads' or 'pulse' or 'UI' - you did NOT hear those words, do NOT output them\n"
-                    "3. Output ONLY words from the input. Do NOT add topics, features, or ideas not in the input\n"
-                    "4. Keep the SAME MEANING as the input - just remove filler words (um, uh, like)\n"
-                    "5. If unsure, output the input unchanged\n"
-                    "Output ONLY the cleaned text, nothing else."
+                    "You are a comedy writer. Make the text funny and exaggerated. "
+                    "Add slang, emojis, and silly elements. Be creative and entertaining!"
                 )
             else:
-                system_prompt = (
-                    "You are a transcription cleanup assistant. "
-                    "You ONLY clean up spoken text - never generate new content. "
-                    "CRITICAL: You must preserve ALL sentences and content from the input. "
-                    "Never drop, skip, or summarize parts of the text. "
-                    "Do NOT add new topics, ideas, or words not in the original. "
-                    "Output ONLY the cleaned text, nothing else."
-                )
+                # Normal cleanup mode - preserve content
+                quirks = get_model_quirks(self.model)
+                if "hallucination_prone" in quirks.get("issues", []):
+                    system_prompt = (
+                        "You are a transcription cleanup assistant. "
+                        "CRITICAL: Only clean up the text - do NOT invent new content. "
+                        "Keep the same meaning. If unsure, output unchanged."
+                    )
+                else:
+                    system_prompt = (
+                        "You are a transcription cleanup assistant. "
+                        "Clean up the text but preserve all content and meaning. "
+                        "Do NOT add new topics or ideas."
+                    )
             
             try:
                 response = requests.post(
