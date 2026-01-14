@@ -45,23 +45,23 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
     },
     "professional": {
         "standard": "Use proper capitalization and punctuation.",
-        "strong": "Rewrite for executive clarity. Be concise, formal, and polished. Remove fluff.",
+        "strong": "Clean and professional, suitable for a work email. Clear and polite.",
         "caricature": "Corporate buzzwords overload. Use: synergy, leverage, circle back, low-hanging fruit. End with 'Thoughts? 👇'",
     },
     "casual": {
         "standard": "Relaxed punctuation, lowercase okay.",
-        "strong": "Rewrite as casual texting. Short, relaxed, like messaging a friend.",
+        "strong": "Friendly and relaxed, like texting a friend. Natural, not extreme.",
         "caricature": "Extreme Gen-Z slang. Use: fr fr, no cap, lowkey, slay, 💀😭. All lowercase. Be dramatic and funny.",
     },
     "dev": {
         "standard": "Developer context. Recognize: git, main, dev, branch, commit, merge, push, pull.",
-        "strong": "Format as a clear developer request or prompt. Recognize technical terms, file paths, function names, and git terminology.",
+        "strong": "Clear and technical. Good for Slack messages or code comments. Recognize git and programming terms.",
         "caricature": "Over-engineered AI prompt style. Add CRITICAL:, IMPORTANT:, use CAPS for emphasis. End with 'my career depends on this 🙏'",
     },
     "personal": {
         # Personal style uses voice profile - these are fallbacks when no profile exists
         "standard": "",
-        "strong": "Polish while preserving the user's unique voice and speaking patterns.",
+        "strong": "Lightly polish while keeping the user's natural voice.",
         "caricature": "Exaggerate their speaking style. Add extra filler words, amplify any verbal quirks. Make it a funny impression.",
     },
 }
@@ -1002,23 +1002,14 @@ Text: {text}
 
 Cleaned:"""
 
-# Strong prompt - allows restructuring and transformation
-STRONG_PROMPT = """Transform this voice transcription into polished {style_name} text.
+# Strong prompt - mild polish, practical for emails/messages
+STRONG_PROMPT = """Polish this text lightly. Keep it natural but clean.
 
-CRITICAL: You MUST preserve ALL the content and meaning from the input. Do NOT drop, skip, or omit any sentences or ideas. Every topic mentioned must be in the output.
+{tone_guidance}
 
-RULES:
-1. {filler_rules}
-2. {formatting_rules}
-3. {tone_guidance}
-4. You may restructure sentences for clarity and flow.
-5. If listing items, use bullet points. If it's a message, format appropriately.
+Text: {text}
 
-Output ONLY the transformed text. No commentary.
-
-INPUT TEXT: {text}
-
-OUTPUT (all content preserved, polished):"""
+Polished:"""
 
 # =============================================================================
 # 🎭 CARICATURE MODE (Secret Easter Egg!)
@@ -1194,7 +1185,7 @@ PROMPT_TEMPLATES: Dict[str, str] = {
 
 def get_prompt_template(template_name: str, custom_prompt: str = "") -> str:
     """Legacy function - now uses build_prompt internally."""
-    return CLEAN_ONLY_PROMPT
+    return STANDARD_PROMPT
 
 
 def format_prompt(template: str, text: str) -> str:
