@@ -50,7 +50,7 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
     },
     "casual": {
         "standard": "Relaxed punctuation, lowercase okay.",
-        "strong": "Friendly text to a coworker. No slang or abbreviations. Just relaxed and natural.",
+        "strong": "Friendly text message. Light slang okay (gonna, wanna, cool). Keep all the user's meaning. Relaxed tone.",
         "caricature": "Extreme Gen-Z slang. Use: fr fr, no cap, lowkey, slay, 💀😭. All lowercase. Be dramatic and funny.",
     },
     "dev": {
