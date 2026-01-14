@@ -45,12 +45,12 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
     },
     "professional": {
         "standard": "Use proper capitalization and punctuation.",
-        "strong": "Clean and professional, suitable for a work email. Clear and polite.",
+        "strong": "Professional email style. Clear, polite, direct. Remove casual filler.",
         "caricature": "Corporate buzzwords overload. Use: synergy, leverage, circle back, low-hanging fruit. End with 'Thoughts? 👇'",
     },
     "casual": {
         "standard": "Relaxed punctuation, lowercase okay.",
-        "strong": "Friendly and relaxed, like texting a friend. Natural, not extreme.",
+        "strong": "Casual and friendly, like a text message. Use 'hey', contractions, shorter sentences.",
         "caricature": "Extreme Gen-Z slang. Use: fr fr, no cap, lowkey, slay, 💀😭. All lowercase. Be dramatic and funny.",
     },
     "dev": {
@@ -1002,14 +1002,14 @@ Text: {text}
 
 Cleaned:"""
 
-# Strong prompt - mild polish, practical for emails/messages
-STRONG_PROMPT = """Polish this text lightly. Keep it natural but clean.
+# Strong prompt - practical polish for emails/messages
+STRONG_PROMPT = """Rewrite this text in the style described. Keep the same meaning.
 
-{tone_guidance}
+Style: {tone_guidance}
 
 Text: {text}
 
-Polished:"""
+Rewritten:"""
 
 # =============================================================================
 # 🎭 CARICATURE MODE (Secret Easter Egg!)
