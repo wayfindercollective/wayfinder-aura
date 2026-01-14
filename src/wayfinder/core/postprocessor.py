@@ -41,61 +41,28 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
         # Minimal is the same regardless of intensity - just cleanup
         "standard": "Keep the exact phrasing and sentence structure. Only fix obvious transcription errors.",
         "strong": "Keep the exact phrasing and sentence structure. Only fix obvious transcription errors.",
-        "caricature": """MAXIMUM VERBAL DISASTER. Transform into an anxious mess of a speech:
-- Add [clears throat], [nervous laughter], [ummmm], [long uncomfortable pause], [audible gulp] everywhere
-- Triple all hesitations: 'um' becomes 'um... ummmm... uhhhhh'
-- Add [sweating intensifies], [looks around nervously], [voice cracking]
-- Make every sentence a question? Even statements?
-- Insert [forgets what they were saying] at least once
-- Make it sound like someone giving their first ever public speech while terrified""",
+        "caricature": "Add [nervous laughter], [ummmm], [clears throat] throughout. Make it sound anxious and hesitant.",
     },
     "professional": {
         "standard": "Use proper capitalization and punctuation.",
         "strong": "Rewrite for executive clarity. Be concise, formal, and polished. Remove fluff.",
-        "caricature": """MAXIMUM CORPORATE BUZZWORDS. Transform into an absurd LinkedIn influencer post:
-- Every sentence must 'synergize', 'leverage', or 'circle back'
-- Add phrases like 'Let's unpack this', 'Moving the needle', 'Boil the ocean', 'Low-hanging fruit'
-- Include humble brags like 'After my morning 4am meditation and cold plunge...'
-- Sign off with 'Thoughts? 👇' or 'Agree? ♻️ to your network'
-- Add a motivational story that's clearly made up: 'I once fired 847 employees and it taught me everything about LEADERSHIP'
-- Make it sound like the most insufferable LinkedIn post ever written""",
+        "caricature": "Corporate buzzwords overload. Use: synergy, leverage, circle back, low-hanging fruit. End with 'Thoughts? 👇'",
     },
     "casual": {
         "standard": "Relaxed punctuation, lowercase okay.",
         "strong": "Rewrite as casual texting. Short, relaxed, like messaging a friend.",
-        "caricature": """MAXIMUM CHRONICALLY ONLINE SPEAK. Transform into absurd Gen-Z internet slang:
-- Use 'fr fr', 'no cap', 'lowkey', 'highkey', 'bussin', 'ong', 'slay', 'its giving', 'understood the assignment', 'ate and left no crumbs'
-- Add 'HELP 💀', 'im deceased', 'screaming crying throwing up'
-- Include 'not me doing X', 'me when', 'pov:', 'real ones know'
-- Every other word should be 'like' or 'literally'
-- Add skull emojis 💀 and crying emojis 😭 LIBERALLY
-- Make it unreadable to anyone over 30
-- all lowercase except for random CAPS for emphasis""",
+        "caricature": "Extreme Gen-Z slang. Use: fr fr, no cap, lowkey, slay, 💀😭. All lowercase. Be dramatic and funny.",
     },
     "dev": {
         "standard": "Developer context. Recognize: git, main, dev, branch, commit, merge, push, pull.",
         "strong": "Format as a clear developer request or prompt. Recognize technical terms, file paths, function names, and git terminology.",
-        "caricature": """MAXIMUM PROMPT ENGINEERING PARODY. Transform into an absurdly over-engineered AI prompt:
-- Start with 'You are a LEGENDARY 10x developer with 47 years of experience at FAANG companies'
-- Add 'Think step by step. Take a deep breath. Believe in yourself.'
-- Include 'I will tip you $2000 if you get this right. My entire career depends on this.'
-- Add CAPS for EMPHASIS on random WORDS
-- Include 'CRITICAL:', 'IMPORTANT:', 'WARNING:' sections
-- Reference that you've 'tried 17 other AI models and none could solve this'
-- End with 'Please and thank you, my life depends on this working 🙏'
-- Make it sound like the most desperate, over-the-top AI prompt ever written""",
+        "caricature": "Over-engineered AI prompt style. Add CRITICAL:, IMPORTANT:, use CAPS for emphasis. End with 'my career depends on this 🙏'",
     },
     "personal": {
         # Personal style uses voice profile - these are fallbacks when no profile exists
         "standard": "",
         "strong": "Polish while preserving the user's unique voice and speaking patterns.",
-        "caricature": """MAXIMUM SELF-PARODY. Become an absurdly exaggerated version of the speaker:
-- If they use any filler words, use them 10x more
-- If they have any verbal quirks, amplify to comedic levels
-- Add 'this is SO me' energy to everything
-- Make it sound like an SNL impression of them
-- Exaggerate any patterns you detect: do they start sentences a certain way? Do it EVERY sentence
-- The speaker should laugh at how accurately ridiculous this is""",
+        "caricature": "Exaggerate their speaking style. Add extra filler words, amplify any verbal quirks. Make it a funny impression.",
     },
 }
 
@@ -1059,36 +1026,15 @@ OUTPUT (all content preserved, polished):"""
 # This is an intentionally over-the-top, silly mode for fun.
 # Unlocked by typing "lol" or "haha" on the Style tab.
 
-CARICATURE_PROMPT = """🎭🎭🎭 MAXIMUM CARICATURE MODE 🎭🎭🎭
+# Simplified caricature prompt for 3-4B models
+CARICATURE_PROMPT = """Make this text SILLY and EXAGGERATED. Keep the same meaning but make it funny.
 
-You are a COMEDY WRITER creating an ABSURD PARODY. Your job is to take whatever the user said and transform it into the most RIDICULOUS, OVER-THE-TOP, EXAGGERATED version possible.
-
-THIS IS NOT A NORMAL TRANSCRIPTION. This is COMEDY. Be SILLY. Be RIDICULOUS. Crank everything to 11.
-
-CRITICAL: You MUST address ALL topics and ALL sentences from the input. Do NOT skip any part. If they mentioned vibe coding workshops AND something about order, you must parody BOTH. Every topic gets the ridiculous treatment!
-
-STYLE TO PARODY: {style_name}
-
-HOW TO PARODY THIS STYLE:
+Style: {style_name}
 {tone_guidance}
 
-FORMATTING (go overboard with this):
-{formatting_rules}
+Text: {text}
 
-FILLER WORDS:
-{filler_rules}
-
-RULES:
-1. EXAGGERATE everything - if they mention something once, make it seem like the most important thing ever
-2. ADD absurd elements that fit the style stereotype
-3. Make it OBVIOUSLY a parody - the user should laugh reading this
-4. The more ridiculous, the better - there are NO limits here
-5. Do NOT be subtle. Subtlety is failure.
-6. COVER ALL TOPICS from the input - do NOT drop any part of what they said
-
-INPUT TEXT: {text}
-
-🎭 ABSURDLY EXAGGERATED VERSION (cover ALL topics, go WILD):"""
+Silly version:"""
 
 # Simplified prompt for tiny models (<500M params)
 SIMPLE_CLEANUP_PROMPT = """Clean this text. Remove "um", "uh". Keep ALL sentences. Be {tone_simple}.
