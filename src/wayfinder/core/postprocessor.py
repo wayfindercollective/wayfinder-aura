@@ -50,7 +50,7 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
 - Make it sound like someone giving their first ever public speech while terrified""",
     },
     "professional": {
-        "standard": "Keep the user's EXACT words - do NOT rephrase. Just fix grammar and punctuation to sound professional.",
+        "standard": "Use proper capitalization and punctuation.",
         "strong": "Rewrite for executive clarity. Be concise, formal, and polished. Remove fluff.",
         "caricature": """MAXIMUM CORPORATE BUZZWORDS. Transform into an absurd LinkedIn influencer post:
 - Every sentence must 'synergize', 'leverage', or 'circle back'
@@ -61,7 +61,7 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
 - Make it sound like the most insufferable LinkedIn post ever written""",
     },
     "casual": {
-        "standard": "Keep the user's EXACT words - do NOT rephrase. Just make punctuation relaxed and conversational.",
+        "standard": "Relaxed punctuation, lowercase okay.",
         "strong": "Rewrite as casual texting. Short, relaxed, like messaging a friend.",
         "caricature": """MAXIMUM CHRONICALLY ONLINE SPEAK. Transform into absurd Gen-Z internet slang:
 - Use 'fr fr', 'no cap', 'lowkey', 'highkey', 'bussin', 'ong', 'slay', 'its giving', 'understood the assignment', 'ate and left no crumbs'
@@ -73,7 +73,7 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
 - all lowercase except for random CAPS for emphasis""",
     },
     "dev": {
-        "standard": "Keep the user's EXACT words - do NOT rephrase. Just recognize this is developer context with git commands (main, dev, branch, merge, commit, push, pull), programming terms, and technical jargon.",
+        "standard": "Developer context. Recognize: git, main, dev, branch, commit, merge, push, pull.",
         "strong": "Format as a clear developer request or prompt. Recognize technical terms, file paths, function names, and git terminology.",
         "caricature": """MAXIMUM PROMPT ENGINEERING PARODY. Transform into an absurdly over-engineered AI prompt:
 - Start with 'You are a LEGENDARY 10x developer with 47 years of experience at FAANG companies'
@@ -87,7 +87,7 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
     },
     "personal": {
         # Personal style uses voice profile - these are fallbacks when no profile exists
-        "standard": "Keep the user's EXACT words and phrases - do NOT rephrase. Just clean up filler words.",
+        "standard": "",
         "strong": "Polish while preserving the user's unique voice and speaking patterns.",
         "caricature": """MAXIMUM SELF-PARODY. Become an absurdly exaggerated version of the speaker:
 - If they use any filler words, use them 10x more
@@ -179,9 +179,10 @@ MODEL_TIERS = {
 # Known model-specific issues
 MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
     "llama3.2:1b": {
-        "issues": ["safety_filter_email"],
-        "workaround": "Disable smart_formatting for professional/dev modes",
+        "issues": ["safety_filter_email", "hallucination_prone"],
+        "workaround": "Prone to hallucination - generates unrelated content. Use qwen2.5:1.5b instead.",
         "avoid_words": ["email"],  # These words trigger false-positive safety
+        "hallucination_threshold": 0.5,  # Stricter threshold for this model
     },
     "llama3.2:3b": {
         "issues": ["safety_filter_email"],
@@ -189,9 +190,15 @@ MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
         "avoid_words": ["email"],
     },
     "smollm2:360m": {
-        "issues": ["weak_instruction_following"],
-        "workaround": "Use simplified prompts only",
+        "issues": ["weak_instruction_following", "hallucination_prone"],
+        "workaround": "Use simplified prompts only. Very prone to hallucination.",
         "tier_override": "tiny",
+        "hallucination_threshold": 0.6,  # Very strict for tiny models
+    },
+    "smollm2:1.7b": {
+        "issues": ["hallucination_prone"],
+        "workaround": "May hallucinate on longer inputs. Consider qwen2.5:1.5b for better results.",
+        "hallucination_threshold": 0.45,
     },
     "phi3:mini": {
         "issues": [],  # Generally works well - 3.8B model
@@ -880,7 +887,7 @@ def is_refusal_response(response: str) -> bool:
     return False
 
 
-def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bool:
+def is_hallucination(original: str, response: str, threshold: float = 0.3, model_name: str = "") -> bool:
     """
     Detect if the LLM response is a hallucination (completely different from input)
     or if it inappropriately truncated the input.
@@ -888,17 +895,26 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bo
     Uses word overlap AND length ratio to detect when the model:
     1. Generates unrelated content instead of cleaning up
     2. Drops significant portions of the input text
+    3. Adds significantly more content than the original (fabrication)
     
     Args:
         original: The original transcription text
         response: The LLM's response text
         threshold: Minimum word overlap ratio (0.0-1.0) to consider valid
+        model_name: Optional model name to apply model-specific thresholds
         
     Returns:
         True if this looks like a hallucination or truncation
     """
     if not original or not response:
         return False
+    
+    # Apply model-specific thresholds for known problematic models
+    effective_threshold = threshold
+    if model_name:
+        quirks = get_model_quirks(model_name)
+        if "hallucination_threshold" in quirks:
+            effective_threshold = quirks["hallucination_threshold"]
     
     # Normalize texts
     def get_words(text: str) -> set:
@@ -919,7 +935,15 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bo
     stop_words = {'um', 'uh', 'like', 'you', 'know', 'basically', 'actually', 
                   'i', 'mean', 'so', 'well', 'right', 'the', 'a', 'an', 'and', 
                   'or', 'but', 'is', 'are', 'was', 'were', 'be', 'been', 'to',
-                  'of', 'in', 'for', 'on', 'with', 'at', 'by', 'it', 'this', 'that'}
+                  'of', 'in', 'for', 'on', 'with', 'at', 'by', 'it', 'this', 'that',
+                  'its', 'just', 'can', 'could', 'would', 'should', 'will', 'do',
+                  'does', 'did', 'have', 'has', 'had', 'here', 'there', 'what',
+                  'when', 'where', 'who', 'why', 'how', 'which', 'if', 'then',
+                  'than', 'more', 'most', 'some', 'any', 'all', 'each', 'every',
+                  'no', 'not', 'only', 'own', 'same', 'other', 'such', 'very',
+                  'too', 'also', 'back', 'now', 'even', 'new', 'want', 'way',
+                  'because', 'about', 'into', 'through', 'during', 'before',
+                  'after', 'above', 'below', 'between', 'under', 'again', 'once'}
     
     # Meaningful words from original (excluding stop words)
     meaningful_original = original_words - stop_words
@@ -935,14 +959,27 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bo
     # Length ratio check (response / original)
     length_ratio = len(response) / len(original) if original else 1
     
+    # Check for response being much LONGER than original (sign of fabrication)
+    # Cleanup should make text shorter or roughly the same length, not 3x longer
+    is_fabricated = False
+    if length_ratio > 2.5:
+        # Response is more than 2.5x the length - very suspicious for cleanup
+        # Check if there are many new words not in original
+        new_words = response_words - original_words - stop_words
+        if len(new_words) > len(meaningful_original):
+            is_fabricated = True
+            print(f"[Post-processing] ⚠ Fabrication detected: response is {length_ratio:.1f}x longer, "
+                  f"added {len(new_words)} new meaningful words (original had {len(meaningful_original)})")
+    
     # Stricter threshold if response is much longer (sign of generation vs cleanup)
-    effective_threshold = threshold
+    if length_ratio > 1.5:
+        effective_threshold = max(effective_threshold, threshold * 1.3)
     if length_ratio > 3:
-        effective_threshold = threshold * 1.5  # Require more overlap for long responses
+        effective_threshold = max(effective_threshold, threshold * 1.5)
     
     is_hallucinated = overlap_ratio < effective_threshold
     
-    # NEW: Check for inappropriate truncation
+    # Check for inappropriate truncation
     # If the response is significantly shorter than the original (less than 40% of length)
     # AND the original was reasonably long (more than 50 chars), it's likely the LLM
     # dropped important content. This catches cases where LLM only keeps the last sentence.
@@ -958,9 +995,10 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3) -> bo
                   f"missing {len(missing_meaningful)} meaningful words (kept {len(meaningful_common)})")
     
     if is_hallucinated:
-        print(f"[Post-processing] ⚠ Hallucination detected: {overlap_ratio:.1%} word overlap (threshold: {effective_threshold:.1%})")
+        print(f"[Post-processing] ⚠ Hallucination detected: {overlap_ratio:.1%} word overlap "
+              f"(threshold: {effective_threshold:.1%}, model: {model_name or 'unknown'})")
     
-    return is_hallucinated or is_truncated
+    return is_hallucinated or is_truncated or is_fabricated
 
 
 # =============================================================================
@@ -978,23 +1016,14 @@ INPUT TEXT: {text}
 
 OUTPUT (full text with only um/uh removed):"""
 
-# Standard prompt - cleans up speech while preserving user's words EXACTLY
-STANDARD_PROMPT = """Clean up this voice transcription. You MUST keep the user's EXACT words.
+# Standard prompt - minimal cleanup, preserve user's words
+STANDARD_PROMPT = """Remove filler words (um, uh, like, you know) and fix punctuation. Keep the user's exact words.
 
-CRITICAL RULES - FOLLOW EXACTLY:
-1. {filler_rules}
-2. {formatting_rules}
-3. {tone_guidance}
-4. Do NOT paraphrase. Do NOT reword. Do NOT restructure sentences.
-5. Do NOT change vocabulary or word choice. Keep their exact phrasing.
-6. Only fix obvious transcription errors (wrong homophones, missing words).
-7. Preserve ALL sentences - do NOT drop, skip, or summarize.
+{tone_guidance}
 
-Your job is CLEANUP, not rewriting. The user's words are intentional.
+Text: {text}
 
-INPUT TEXT: {text}
-
-OUTPUT (exact words, cleaned up):"""
+Cleaned:"""
 
 # Strong prompt - allows restructuring and transformation
 STRONG_PROMPT = """Transform this voice transcription into polished {style_name} text.
@@ -1365,20 +1394,23 @@ class LlamaCppBackend(PostProcessorBackend):
             result = response["choices"][0]["text"].strip()
             
             # Clean up any artifacts and check for refusals
-            result = self._clean_response(result, original_text=text)
+            # Extract model name from path for hallucination detection
+            model_name = Path(self.model_path).stem if self.model_path else ""
+            result = self._clean_response(result, original_text=text, model_name=model_name)
             
             return result if result else text
             
         except Exception as e:
             raise PostProcessingError(f"llama.cpp processing failed: {e}")
     
-    def _clean_response(self, text: str, original_text: str = "") -> str:
+    def _clean_response(self, text: str, original_text: str = "", model_name: str = "") -> str:
         """
         Clean up LLM response artifacts and detect refusals/hallucinations.
         
         Args:
             text: The LLM response
             original_text: The original input (returned if refusal/hallucination detected)
+            model_name: The model name for model-specific hallucination thresholds
             
         Returns:
             Cleaned text, or original_text if refusal/hallucination detected
@@ -1411,7 +1443,7 @@ class LlamaCppBackend(PostProcessorBackend):
         cleaned = "\n".join(cleaned_lines).strip()
         
         # Check for hallucination (model generated unrelated content)
-        if original_text and is_hallucination(original_text, cleaned):
+        if original_text and is_hallucination(original_text, cleaned, model_name=model_name):
             print("[Post-processing] ⚠ Model hallucinated - using original text")
             return original_text
         
@@ -1526,7 +1558,7 @@ class AnthropicBackend(PostProcessorBackend):
             result = remove_repeated_sentences(result)
             
             # Check for hallucination
-            if is_hallucination(text, result):
+            if is_hallucination(text, result, model_name=self.model):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
                 return text
             
@@ -1644,7 +1676,7 @@ class OpenAIBackend(PostProcessorBackend):
             result = remove_repeated_sentences(result)
             
             # Check for hallucination
-            if is_hallucination(text, result):
+            if is_hallucination(text, result, model_name=self.model):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
                 return text
             
@@ -1662,7 +1694,8 @@ class OllamaBackend(PostProcessorBackend):
     """
     Local LLM backend using Ollama API.
     Requires Ollama to be installed and running locally.
-    Recommended models: phi3:mini, qwen2.5:1.5b, llama3.2:1b
+    Recommended models: phi3:mini, qwen2.5:1.5b, llama3.2:3b
+    Note: llama3.2:1b is prone to hallucination - avoid for best results.
     """
     
     def __init__(
@@ -1738,6 +1771,31 @@ class OllamaBackend(PostProcessorBackend):
             
             # Call Ollama API using chat endpoint for better instruction following
             # Use longer timeout (60s) for first-time model loading
+            
+            # Build system prompt with anti-hallucination guidance
+            # More aggressive for models known to hallucinate
+            quirks = get_model_quirks(self.model)
+            if "hallucination_prone" in quirks.get("issues", []):
+                system_prompt = (
+                    "You are a transcription cleanup assistant. "
+                    "CRITICAL RULES - FOLLOW EXACTLY:\n"
+                    "1. You ONLY clean up the text provided - NEVER invent or imagine new content\n"
+                    "2. If the input mentions 'leads' or 'pulse' or 'UI' - you did NOT hear those words, do NOT output them\n"
+                    "3. Output ONLY words from the input. Do NOT add topics, features, or ideas not in the input\n"
+                    "4. Keep the SAME MEANING as the input - just remove filler words (um, uh, like)\n"
+                    "5. If unsure, output the input unchanged\n"
+                    "Output ONLY the cleaned text, nothing else."
+                )
+            else:
+                system_prompt = (
+                    "You are a transcription cleanup assistant. "
+                    "You ONLY clean up spoken text - never generate new content. "
+                    "CRITICAL: You must preserve ALL sentences and content from the input. "
+                    "Never drop, skip, or summarize parts of the text. "
+                    "Do NOT add new topics, ideas, or words not in the original. "
+                    "Output ONLY the cleaned text, nothing else."
+                )
+            
             try:
                 response = requests.post(
                     f"{self.base_url}/api/chat",
@@ -1746,7 +1804,7 @@ class OllamaBackend(PostProcessorBackend):
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "You are a transcription cleanup assistant. You ONLY clean up spoken text - never generate new content. CRITICAL: You must preserve ALL sentences and content from the input. Never drop, skip, or summarize parts of the text. Output ONLY the cleaned text, nothing else."
+                                "content": system_prompt
                             },
                             {
                                 "role": "user", 
@@ -1781,7 +1839,7 @@ class OllamaBackend(PostProcessorBackend):
             print(f"[Post-processing] Response: {result_preview}")
             
             # Clean up any artifacts and check for refusals
-            result = self._clean_response(result, original_text=text)
+            result = self._clean_response(result, original_text=text, model_name=self.model)
             
             return result if result else text
             
@@ -1790,13 +1848,14 @@ class OllamaBackend(PostProcessorBackend):
         except Exception as e:
             raise PostProcessingError(f"Ollama processing failed: {e}")
     
-    def _clean_response(self, text: str, original_text: str = "") -> str:
+    def _clean_response(self, text: str, original_text: str = "", model_name: str = "") -> str:
         """
         Clean up LLM response artifacts and detect refusals/hallucinations.
         
         Args:
             text: The LLM response
             original_text: The original input (returned if refusal/hallucination detected)
+            model_name: The model name for model-specific hallucination thresholds
             
         Returns:
             Cleaned text, or original_text if refusal/hallucination detected
@@ -1829,7 +1888,7 @@ class OllamaBackend(PostProcessorBackend):
         cleaned = "\n".join(cleaned_lines).strip()
         
         # Check for hallucination (model generated unrelated content)
-        if original_text and is_hallucination(original_text, cleaned):
+        if original_text and is_hallucination(original_text, cleaned, model_name=model_name):
             print("[Post-processing] ⚠ Model hallucinated - using original text")
             return original_text
         
