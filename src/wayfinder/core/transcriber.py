@@ -34,6 +34,22 @@ DEV_VOCABULARY = [
     "src", "lib", "bin", "node_modules", "package.json", "requirements.txt",
 ]
 
+# Casual vocabulary - informal terms that Whisper tends to formalize
+# These get added to the prompt when output_tone is "casual" to preserve casual speech
+CASUAL_VOCABULARY = [
+    # Contractions/informal speech
+    "gonna", "wanna", "gotta", "kinda", "sorta", "coulda", "shoulda", "woulda",
+    "dunno", "lemme", "gimme", "gotcha", "ya", "yep", "yup", "nope", "nah",
+    # Casual affirmatives/responses  
+    "yeah", "okay", "ok", "alright", "cool", "awesome", "nice", "sweet",
+    "sure", "totally", "definitely", "absolutely", "exactly", "right",
+    # Casual connectors
+    "cuz", "cause", "tho", "tho", "btw", "tbh", "idk", "imo",
+    # Casual expressions
+    "like", "literally", "basically", "honestly", "actually", "seriously",
+    "pretty much", "kind of", "sort of", "you know", "I mean", "I guess",
+]
+
 
 class TranscriptionError(Exception):
     """Raised when transcription fails."""
@@ -898,15 +914,25 @@ def transcribe_with_config(
     config = config.copy()
     original_prompt = config.get("prompt", "")
     
-    # Add developer vocabulary when "dev" mode is selected
-    # This helps Whisper recognize common git/programming terms (e.g., "main" not "Maine")
-    if config.get("output_tone") == "dev":
+    # Add vocabulary based on selected mode
+    # This helps Whisper recognize context-specific terms
+    output_tone = config.get("output_tone")
+    
+    if output_tone == "dev":
+        # Developer vocabulary: git commands, programming terms
         existing_vocab = config.get("custom_vocabulary", [])
-        # Merge dev vocabulary with user's custom vocabulary (avoid duplicates)
         existing_lower = {v.lower() for v in existing_vocab}
         new_vocab = [term for term in DEV_VOCABULARY if term.lower() not in existing_lower]
         config["custom_vocabulary"] = existing_vocab + new_vocab
         print(f"[Dev Mode] Added {len(new_vocab)} developer vocabulary terms for better recognition")
+    
+    elif output_tone == "casual":
+        # Casual vocabulary: informal speech patterns Whisper tends to formalize
+        existing_vocab = config.get("custom_vocabulary", [])
+        existing_lower = {v.lower() for v in existing_vocab}
+        new_vocab = [term for term in CASUAL_VOCABULARY if term.lower() not in existing_lower]
+        config["custom_vocabulary"] = existing_vocab + new_vocab
+        print(f"[Casual Mode] Added {len(new_vocab)} casual vocabulary terms to preserve informal speech")
     
     # Add voice profile context when "personal" style is selected
     if config.get("output_tone") == "personal":
