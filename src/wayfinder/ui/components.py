@@ -237,17 +237,20 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
 
 # Model recommendations for post-processing (based on testing)
 MODEL_RECOMMENDATIONS = """
-✅ Recommended:
-  • qwen2.5:1.5b — Best balance (fast + accurate)
-  • phi3:mini — Reliable, slightly formal
+✅ Standard Mode (keeps your words):
+  • qwen2.5:1.5b — ⭐ Best overall (fast + accurate)
+  • llama3.2:1b — Fast, good for standard mode
+  • llama3.2:3b — Higher quality option
+
+✅ Strong Mode (allows restructuring):
+  • qwen2.5:3b — Best for strong mode
+  • phi3:mini — Good for polishing text
 
 ⚠️ Use with caution:
-  • llama3.2:1b — Fast but has safety filter quirks
-  
-❌ Not recommended:
-  • smollm2:360m — Too small, often hallucinates
+  • phi3:mini — Rewrites in standard mode (use strong only)
+  • smollm2:360m — May hallucinate
 
-💡 Tip: Use 'light' or 'standard' intensity for best results.
+💡 Tip: Use qwen2.5:1.5b for standard mode, qwen2.5:3b for strong mode.
 """
 
 SETTING_TOOLTIPS: dict[str, str] = {

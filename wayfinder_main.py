@@ -1464,29 +1464,46 @@ LLM_GGUF_MODELS = {
 
 # Ollama model info for display
 OLLAMA_MODEL_INFO = {
+    "qwen2.5:1.5b": {
+        "size": "986 MB",
+        "description": "⭐ Best overall. Fast, follows instructions well.",
+        "speed": "Very Fast",
+        "accuracy": "Good",
+        "recommended": True,
+    },
+    "qwen2.5:3b": {
+        "size": "1.9 GB",
+        "description": "Best for Strong mode. Great quality + speed balance.",
+        "speed": "Fast",
+        "accuracy": "High",
+        "best_for": "strong",
+    },
     "llama3.2:1b": {
         "size": "1.3 GB",
-        "description": "Meta's latest efficient model. Good all-rounder.",
+        "description": "Meta's efficient model. Good for standard mode.",
         "speed": "Very Fast",
         "accuracy": "Good",
     },
-    "phi3:mini": {
-        "size": "2.2 GB",
-        "description": "Microsoft's compact powerhouse. Excellent text cleanup.",
+    "llama3.2:3b": {
+        "size": "2.0 GB",
+        "description": "Meta's balanced model. Good for all modes.",
         "speed": "Fast",
         "accuracy": "High",
     },
-    "qwen2.5:1.5b": {
-        "size": "986 MB",
-        "description": "Alibaba's efficient model. Great speed/quality balance.",
-        "speed": "Very Fast",
-        "accuracy": "Good",
+    "phi3:mini": {
+        "size": "2.2 GB",
+        "description": "⚠️ Strong mode only - rewrites in standard mode.",
+        "speed": "Fast",
+        "accuracy": "High",
+        "best_for": "strong",
+        "warning": "Rewrites sentences in standard mode",
     },
     "smollm2:360m": {
         "size": "229 MB",
-        "description": "HuggingFace's tiny model. Instant inference.",
+        "description": "⚠️ May hallucinate. Use for testing only.",
         "speed": "Instant",
         "accuracy": "Basic",
+        "warning": "Prone to hallucination",
     },
 }
 
