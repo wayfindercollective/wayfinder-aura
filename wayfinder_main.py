@@ -46,7 +46,6 @@ from ollama_manager import get_ollama_manager, OllamaManager
 from license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 
 # Import from new modular structure
-from src.wayfinder.ui.dialogs import AudioCalibrationDialog
 from src.wayfinder.core.recorder import AudioCalibrator
 
 
@@ -4249,12 +4248,8 @@ class WayfinderApp(ctk.CTk):
             self._on_audio_processing_selected, tooltip=SETTING_TOOLTIPS["audio_preprocessing"], width=180,
         )
         
-        # Audio Calibration button
-        self.calibrate_btn = self.create_setting_row(
-            audio_content, "Audio Calibration", "Test & optimize",
-            self._open_audio_calibration,
-            tooltip="Test your microphone and automatically\nconfigure optimal audio settings.",
-        )
+        # Audio Calibration inline section
+        self._build_audio_calibration_section(audio_content)
         
         # === BENTO TILE 2: Processing Mode ===
         mode_tile = ctk.CTkFrame(
@@ -10301,37 +10296,275 @@ class WayfinderApp(ctk.CTk):
         
         self.log(f"⚙ Audio processing: {level}")
 
-    def _open_audio_calibration(self):
-        """Open the audio calibration wizard dialog."""
-        # Get current audio device
+    def _build_audio_calibration_section(self, parent):
+        """Build inline audio calibration section."""
+        # Container frame
+        self._calib_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self._calib_frame.pack(fill="x", pady=(8, 0))
+        
+        # Header row with expand/collapse button
+        header_row = ctk.CTkFrame(self._calib_frame, fg_color="transparent")
+        header_row.pack(fill="x")
+        
+        ctk.CTkLabel(
+            header_row,
+            text="Audio Calibration",
+            font=(self.font_body[0], 13),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left", padx=(8, 0))
+        
+        self._calib_toggle_btn = ctk.CTkButton(
+            header_row,
+            text="Test Mic",
+            font=(self.font_body[0], 12),
+            fg_color=COLORS["bg_elevated"],
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_bright"],
+            corner_radius=RADIUS["sm"],
+            height=32,
+            width=80,
+            command=self._toggle_calibration,
+        )
+        self._calib_toggle_btn.pack(side="right", padx=(0, 8))
+        
+        # Expandable content (initially hidden)
+        self._calib_content = ctk.CTkFrame(
+            self._calib_frame,
+            fg_color=COLORS["bg_elevated"],
+            corner_radius=RADIUS["sm"],
+        )
+        # Don't pack yet - shown when expanded
+        
+        # Instructions
+        self._calib_instruction = ctk.CTkLabel(
+            self._calib_content,
+            text="Speak normally for 5 seconds to test your microphone.",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_secondary"],
+        )
+        self._calib_instruction.pack(pady=(12, 8), padx=12)
+        
+        # Level meter frame
+        meter_frame = ctk.CTkFrame(self._calib_content, fg_color="transparent")
+        meter_frame.pack(fill="x", padx=12, pady=(0, 8))
+        
+        ctk.CTkLabel(
+            meter_frame,
+            text="Level:",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+            width=40,
+        ).pack(side="left")
+        
+        # Simple level bar
+        self._calib_meter_bg = ctk.CTkFrame(
+            meter_frame,
+            fg_color=COLORS["bg_input"],
+            corner_radius=4,
+            height=16,
+        )
+        self._calib_meter_bg.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        
+        self._calib_meter_bar = ctk.CTkFrame(
+            self._calib_meter_bg,
+            fg_color=COLORS["accent"],
+            corner_radius=4,
+            height=12,
+        )
+        self._calib_meter_bar.place(x=2, y=2, width=0, height=12)
+        
+        # Progress/status
+        self._calib_status = ctk.CTkLabel(
+            self._calib_content,
+            text="Ready",
+            font=(self.font_body[0], 12, "bold"),
+            text_color=COLORS["text_primary"],
+        )
+        self._calib_status.pack(pady=(0, 8))
+        
+        # Results frame (shown after test)
+        self._calib_results = ctk.CTkFrame(self._calib_content, fg_color="transparent")
+        # Don't pack yet
+        
+        # Result labels
+        self._calib_quality_label = ctk.CTkLabel(
+            self._calib_results,
+            text="",
+            font=(self.font_body[0], 13, "bold"),
+            text_color=COLORS["accent"],
+        )
+        self._calib_quality_label.pack(pady=(0, 4))
+        
+        self._calib_detail_label = ctk.CTkLabel(
+            self._calib_results,
+            text="",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_secondary"],
+            wraplength=280,
+        )
+        self._calib_detail_label.pack(pady=(0, 8))
+        
+        # Apply button (shown after test)
+        self._calib_apply_btn = ctk.CTkButton(
+            self._calib_results,
+            text="Apply Recommended Settings",
+            font=(self.font_body[0], 12),
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            text_color=COLORS["text_bright"],
+            corner_radius=RADIUS["sm"],
+            height=32,
+            command=self._apply_calibration,
+        )
+        self._calib_apply_btn.pack(pady=(0, 4))
+        
+        # State
+        self._calib_expanded = False
+        self._calib_recording = False
+        self._calib_calibrator = None
+        self._calib_result = None
+        self._calib_update_job = None
+    
+    def _toggle_calibration(self):
+        """Toggle calibration panel and start/stop test."""
+        if self._calib_recording:
+            # Stop the test
+            self._stop_calibration_test()
+        elif self._calib_expanded:
+            # Start a new test
+            self._start_calibration_test()
+        else:
+            # Expand and start
+            self._calib_expanded = True
+            self._calib_content.pack(fill="x", pady=(8, 0))
+            self._calib_results.pack_forget()
+            self._start_calibration_test()
+    
+    def _start_calibration_test(self):
+        """Start the calibration recording."""
+        self._calib_recording = True
+        self._calib_toggle_btn.configure(text="Stop", fg_color=COLORS["error"])
+        self._calib_status.configure(text="🎤 Recording... Speak now!", text_color=COLORS["accent"])
+        self._calib_results.pack_forget()
+        self._calib_instruction.configure(text="Speak at your normal volume for 5 seconds...")
+        
+        # Get device
         device_id = self.config.get("audio_device")
         if device_id is None and hasattr(self, '_resolved_audio_device'):
             device_id = self._resolved_audio_device
         
-        def apply_calibration_settings(settings: dict):
-            """Apply settings from calibration wizard."""
-            # Apply audio preprocessing setting
-            if "audio_preprocessing" in settings:
-                level = settings["audio_preprocessing"]
-                self.config["audio_preprocessing"] = level
-                save_config(self.config)
-                
-                # Update the dropdown if it exists
-                if hasattr(self, 'preprocess_var'):
-                    self.preprocess_var.set(level.capitalize())
-                
-                # Update recorder if it exists
-                if hasattr(self, 'recorder') and self.recorder:
-                    self.recorder.preprocessing = level
-                
-                self.log(f"⚙ Audio calibration applied: {level} preprocessing")
+        # Start calibrator
+        self._calib_calibrator = AudioCalibrator(device=device_id)
+        self._calib_calibrator.start()
+        self._calib_start_time = time.time()
         
-        # Open calibration dialog
-        dialog = AudioCalibrationDialog(
-            self,
-            device_id=device_id,
-            on_apply=apply_calibration_settings,
-        )
+        # Start update loop
+        self._update_calibration()
+    
+    def _update_calibration(self):
+        """Update calibration UI during recording."""
+        if not self._calib_recording or not self._calib_calibrator:
+            return
+        
+        elapsed = time.time() - self._calib_start_time
+        remaining = max(0, 5.0 - elapsed)
+        
+        # Update level meter
+        level = self._calib_calibrator.get_current_level()
+        meter_width = int(level * 280)  # Approximate width
+        
+        # Color based on level
+        if level > 0.95:
+            color = COLORS["error"]
+        elif level > 0.8:
+            color = COLORS["accent_yellow"]
+        else:
+            color = COLORS["accent"]
+        
+        self._calib_meter_bar.configure(fg_color=color)
+        self._calib_meter_bar.place(x=2, y=2, width=meter_width, height=12)
+        
+        # Update status
+        self._calib_status.configure(text=f"Recording... {remaining:.1f}s")
+        
+        if elapsed >= 5.0:
+            self._stop_calibration_test()
+        else:
+            self._calib_update_job = self.after(50, self._update_calibration)
+    
+    def _stop_calibration_test(self):
+        """Stop calibration and show results."""
+        self._calib_recording = False
+        
+        if self._calib_update_job:
+            self.after_cancel(self._calib_update_job)
+            self._calib_update_job = None
+        
+        self._calib_toggle_btn.configure(text="Test Again", fg_color=COLORS["bg_elevated"])
+        
+        if self._calib_calibrator:
+            self._calib_result = self._calib_calibrator.stop_and_analyze()
+            self._calib_calibrator = None
+            self._show_calibration_results()
+    
+    def _show_calibration_results(self):
+        """Display calibration results."""
+        if not self._calib_result:
+            return
+        
+        r = self._calib_result
+        
+        # Quality text and color
+        quality_info = {
+            "excellent": ("✅ Excellent", COLORS["success"]),
+            "good": ("✅ Good", COLORS["success"]),
+            "fair": ("⚠️ Fair", COLORS["accent_yellow"]),
+            "poor": ("❌ Poor", COLORS["error"]),
+        }
+        quality_text, quality_color = quality_info.get(r.overall_quality, ("Unknown", COLORS["text_primary"]))
+        
+        self._calib_quality_label.configure(text=f"Audio Quality: {quality_text}", text_color=quality_color)
+        
+        # Details
+        details = []
+        if r.clipping_detected:
+            details.append(f"⚠ Clipping: {r.clipping_percentage:.1f}% - turn down mic gain")
+        if r.peak_level < 0.2:
+            details.append("⚠ Signal quiet - turn up mic gain")
+        if r.noise_floor > 0.03:
+            details.append(f"⚠ Noise floor: {r.noise_floor*100:.1f}%")
+        
+        details.append(f"Recommended: {r.recommended_preprocessing.capitalize()} preprocessing")
+        
+        self._calib_detail_label.configure(text="\n".join(details))
+        self._calib_status.configure(text="Test complete", text_color=COLORS["text_primary"])
+        self._calib_instruction.configure(text="Review results below:")
+        
+        # Show results and apply button
+        self._calib_results.pack(fill="x", padx=8, pady=(0, 8))
+    
+    def _apply_calibration(self):
+        """Apply recommended calibration settings."""
+        if not self._calib_result:
+            return
+        
+        level = self._calib_result.recommended_preprocessing
+        self.config["audio_preprocessing"] = level
+        save_config(self.config)
+        
+        # Update dropdown
+        if hasattr(self, 'preprocess_var'):
+            self.preprocess_var.set(level.capitalize())
+        
+        # Update recorder
+        if hasattr(self, 'recorder') and self.recorder:
+            self.recorder.preprocessing = level
+        
+        self.log(f"⚙ Applied calibration: {level} preprocessing")
+        
+        # Update UI to show applied
+        self._calib_apply_btn.configure(text="✓ Applied!", state="disabled")
+        self.after(2000, lambda: self._calib_apply_btn.configure(text="Apply Recommended Settings", state="normal"))
 
     def get_model_display(self) -> str:
         """Get display name for current model."""
