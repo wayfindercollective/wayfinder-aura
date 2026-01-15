@@ -902,6 +902,11 @@ def is_hallucination(original: str, response: str, threshold: float = 0.3, model
     original_words = get_words(original)
     response_words = get_words(response)
     
+    # Check for garbage output (dots, random characters, no actual words)
+    if original_words and not response_words:
+        print(f"[Post-processing] ⚠ Garbage output detected: response contains no actual words")
+        return True
+    
     if not original_words:
         return False
     
@@ -1360,6 +1365,11 @@ class LlamaCppBackend(PostProcessorBackend):
         Returns:
             Cleaned text, or original_text if refusal/hallucination detected
         """
+        # Check for empty/garbage output early
+        if not text or not text.strip():
+            print("[Post-processing] ⚠ Empty response - using original text")
+            return original_text if original_text else ""
+        
         # Check for refusal first
         if is_refusal_response(text):
             print("[Post-processing] ⚠ Model refused to process - using original text")
@@ -1807,6 +1817,11 @@ class OllamaBackend(PostProcessorBackend):
         Returns:
             Cleaned text, or original_text if refusal/hallucination detected
         """
+        # Check for empty/garbage output early
+        if not text or not text.strip():
+            print("[Post-processing] ⚠ Empty response - using original text")
+            return original_text if original_text else ""
+        
         # Check for refusal first
         if is_refusal_response(text):
             print("[Post-processing] ⚠ Model refused to process - using original text")
