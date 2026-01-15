@@ -841,6 +841,69 @@ def get_backend(config: dict) -> TranscriptionBackend:
         )
 
 
+def clean_whisper_artifacts(text: str) -> str:
+    """
+    Clean up common Whisper transcription artifacts.
+    
+    This runs on ALL transcriptions regardless of post-processing settings.
+    Removes known Whisper hallucination patterns:
+    - Repeated dots/periods (. . . . . or .........)
+    - Repeated punctuation patterns
+    - Trailing silence artifacts
+    - [BLANK_AUDIO] markers
+    - Music/sound effect markers like ♪ or [Music]
+    """
+    if not text or not text.strip():
+        return text
+    
+    import re
+    
+    original = text
+    
+    # Remove [BLANK_AUDIO] and similar markers (case insensitive)
+    text = re.sub(r'\[BLANK_AUDIO\]', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[SILENCE\]', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[MUSIC\]', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[APPLAUSE\]', '', text, flags=re.IGNORECASE)
+    
+    # Remove music note symbols
+    text = re.sub(r'♪+', '', text)
+    
+    # Remove repeated dots with spaces: ". . . . ." or ". . ."
+    # This pattern captures 2 or more dots separated by spaces
+    text = re.sub(r'(\.\s*){2,}', '. ', text)
+    
+    # Remove repeated dots without spaces: "......" or "…"
+    text = re.sub(r'\.{3,}', '...', text)  # Normalize to max 3 dots (ellipsis)
+    text = re.sub(r'…+', '...', text)  # Unicode ellipsis
+    
+    # Remove standalone ellipsis at start/end
+    text = re.sub(r'^\s*\.{1,3}\s*', '', text)
+    text = re.sub(r'\s*\.{2,3}\s*$', '.', text)
+    
+    # Remove repeated commas, question marks, exclamation marks
+    text = re.sub(r',{2,}', ',', text)
+    text = re.sub(r'\?{2,}', '?', text)
+    text = re.sub(r'!{2,}', '!', text)
+    
+    # Remove trailing/leading dots that aren't sentence endings
+    # e.g., ". . ." at the end becomes nothing
+    text = re.sub(r'\s+\.\s*$', '.', text)
+    
+    # Clean up multiple spaces
+    text = re.sub(r'\s+', ' ', text)
+    
+    text = text.strip()
+    
+    # Log if we cleaned something
+    if text != original.strip():
+        removed_chars = len(original.strip()) - len(text)
+        if removed_chars > 5:  # Only log if we removed substantial artifacts
+            print(f"[Transcription] Cleaned {removed_chars} chars of Whisper artifacts")
+    
+    return text
+
+
 def ensure_punctuation_postprocess(text: str) -> str:
     """
     Post-process transcription to ensure proper punctuation.
@@ -960,6 +1023,11 @@ def transcribe_with_config(
     
     backend = get_backend(config)
     text = backend.transcribe(audio_path, context=context)
+    
+    # ALWAYS clean up Whisper artifacts (dots, [BLANK_AUDIO], etc.)
+    # This runs regardless of post-processing settings
+    if text:
+        text = clean_whisper_artifacts(text)
     
     # Apply basic post-processing if punctuation is enabled
     if ensure_punct and text:

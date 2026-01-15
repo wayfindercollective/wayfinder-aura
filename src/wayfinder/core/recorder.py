@@ -824,3 +824,287 @@ class ChunkedRecorder:
             except Exception:
                 pass
         self._temp_files = []
+
+
+# =============================================================================
+# Audio Calibration
+# =============================================================================
+
+class AudioCalibrationResult:
+    """Results from audio calibration analysis."""
+    
+    def __init__(
+        self,
+        peak_level: float,
+        rms_level: float,
+        noise_floor: float,
+        clipping_detected: bool,
+        clipping_percentage: float,
+        signal_to_noise: float,
+        recommended_preprocessing: str,
+        issues: list[str],
+        recommendations: list[str],
+    ):
+        self.peak_level = peak_level
+        self.rms_level = rms_level
+        self.noise_floor = noise_floor
+        self.clipping_detected = clipping_detected
+        self.clipping_percentage = clipping_percentage
+        self.signal_to_noise = signal_to_noise
+        self.recommended_preprocessing = recommended_preprocessing
+        self.issues = issues
+        self.recommendations = recommendations
+    
+    @property
+    def overall_quality(self) -> str:
+        """Get overall audio quality assessment."""
+        if self.clipping_detected and self.clipping_percentage > 1.0:
+            return "poor"
+        elif self.clipping_detected or self.signal_to_noise < 20:
+            return "fair"
+        elif self.signal_to_noise > 40 and not self.clipping_detected:
+            return "excellent"
+        else:
+            return "good"
+    
+    @property
+    def quality_icon(self) -> str:
+        """Get icon for quality level."""
+        icons = {
+            "excellent": "✅",
+            "good": "✅",
+            "fair": "⚠️",
+            "poor": "❌",
+        }
+        return icons.get(self.overall_quality, "❓")
+
+
+def analyze_audio_calibration(
+    audio_data: np.ndarray,
+    sample_rate: int = 16000,
+) -> AudioCalibrationResult:
+    """
+    Analyze recorded audio to detect issues and recommend settings.
+    
+    Args:
+        audio_data: Audio samples as float32 array (-1.0 to 1.0)
+        sample_rate: Sample rate in Hz
+        
+    Returns:
+        AudioCalibrationResult with analysis and recommendations
+    """
+    # Flatten if multi-channel
+    if audio_data.ndim > 1:
+        audio_data = audio_data.flatten()
+    
+    issues = []
+    recommendations = []
+    
+    # === Basic level analysis ===
+    peak_level = float(np.max(np.abs(audio_data)))
+    rms_level = float(np.sqrt(np.mean(audio_data ** 2)))
+    
+    # === Clipping detection ===
+    # Samples very close to or at max level indicate clipping
+    clipping_threshold = 0.99
+    clipping_samples = np.sum(np.abs(audio_data) >= clipping_threshold)
+    total_samples = len(audio_data)
+    clipping_percentage = (clipping_samples / total_samples) * 100
+    clipping_detected = clipping_percentage > 0.1  # More than 0.1% clipping
+    
+    # === Noise floor estimation ===
+    # Sort samples by absolute value and take the 10th percentile as noise floor
+    sorted_abs = np.sort(np.abs(audio_data))
+    noise_floor_idx = int(len(sorted_abs) * 0.1)
+    noise_floor = float(sorted_abs[noise_floor_idx]) if noise_floor_idx < len(sorted_abs) else 0.001
+    
+    # Ensure noise floor isn't zero for SNR calculation
+    noise_floor = max(noise_floor, 0.0001)
+    
+    # === Signal-to-noise ratio (rough estimate) ===
+    # Use RMS as signal, noise floor as noise
+    if noise_floor > 0:
+        signal_to_noise = 20 * np.log10(rms_level / noise_floor) if rms_level > noise_floor else 0
+    else:
+        signal_to_noise = 60  # Assume good if noise floor is 0
+    
+    # === Issue detection and recommendations ===
+    
+    # Clipping issues
+    if clipping_percentage > 5.0:
+        issues.append(f"Severe clipping detected ({clipping_percentage:.1f}% of samples)")
+        recommendations.append("Turn down your microphone gain significantly")
+        recommendations.append("Move the microphone further from your mouth")
+    elif clipping_percentage > 1.0:
+        issues.append(f"Clipping detected ({clipping_percentage:.1f}% of samples)")
+        recommendations.append("Turn down your microphone gain slightly")
+    elif clipping_detected:
+        issues.append(f"Minor clipping detected ({clipping_percentage:.2f}% of samples)")
+        recommendations.append("Consider reducing microphone gain")
+    
+    # Signal level issues
+    if peak_level < 0.1:
+        issues.append("Signal is very quiet")
+        recommendations.append("Turn up your microphone gain")
+        recommendations.append("Move closer to the microphone")
+    elif peak_level < 0.3:
+        issues.append("Signal is somewhat quiet")
+        recommendations.append("Consider turning up microphone gain slightly")
+    
+    # Noise floor issues
+    if noise_floor > 0.05:
+        issues.append("High background noise detected")
+        recommendations.append("Try to reduce background noise in your environment")
+        recommendations.append("Use a noise gate or 'Heavy' audio preprocessing")
+    elif noise_floor > 0.02:
+        issues.append("Moderate background noise")
+        recommendations.append("Consider using 'Medium' audio preprocessing")
+    
+    # === Determine recommended preprocessing ===
+    if clipping_detected and clipping_percentage > 1.0:
+        # Hot signal - don't normalize, it will make clipping worse
+        recommended_preprocessing = "off"
+        recommendations.insert(0, "Disable audio preprocessing (normalization makes clipping worse)")
+    elif peak_level < 0.2:
+        # Quiet signal - normalization will help
+        recommended_preprocessing = "light"
+        if "Consider turning up microphone gain" not in recommendations:
+            recommendations.append("Audio normalization will boost your signal")
+    elif noise_floor > 0.03:
+        # Noisy environment - use filtering
+        recommended_preprocessing = "medium"
+    elif noise_floor > 0.05:
+        # Very noisy - use noise gate
+        recommended_preprocessing = "heavy"
+    else:
+        # Normal signal - light preprocessing is fine
+        recommended_preprocessing = "light"
+    
+    # Add positive feedback if everything looks good
+    if not issues:
+        if signal_to_noise > 40:
+            issues.append("Excellent audio quality!")
+        elif signal_to_noise > 30:
+            issues.append("Good audio quality")
+        else:
+            issues.append("Audio quality is acceptable")
+    
+    return AudioCalibrationResult(
+        peak_level=peak_level,
+        rms_level=rms_level,
+        noise_floor=noise_floor,
+        clipping_detected=clipping_detected,
+        clipping_percentage=clipping_percentage,
+        signal_to_noise=signal_to_noise,
+        recommended_preprocessing=recommended_preprocessing,
+        issues=issues,
+        recommendations=recommendations,
+    )
+
+
+class AudioCalibrator:
+    """
+    Records and analyzes audio for calibration purposes.
+    
+    Usage:
+        calibrator = AudioCalibrator(device=device_id)
+        calibrator.start()
+        # ... wait for user to speak ...
+        result = calibrator.stop_and_analyze()
+        print(result.recommendations)
+    """
+    
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        device: int | None = None,
+    ):
+        self.target_sample_rate = sample_rate
+        self.device = device
+        self.recording_sample_rate = None
+        self._frames: list[np.ndarray] = []
+        self._stream: sd.InputStream | None = None
+    
+    def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:
+        """Callback for audio stream."""
+        if status:
+            print(f"Audio calibration status: {status}")
+        self._frames.append(indata.copy())
+    
+    def start(self) -> None:
+        """Start recording for calibration."""
+        self._frames = []
+        
+        # Find supported sample rate
+        self.recording_sample_rate = get_supported_sample_rate(
+            device=self.device,
+            target_rate=self.target_sample_rate,
+        )
+        
+        self._stream = sd.InputStream(
+            samplerate=self.recording_sample_rate,
+            channels=1,
+            device=self.device,
+            dtype=np.float32,
+            callback=self._audio_callback,
+        )
+        self._stream.start()
+    
+    def stop_and_analyze(self) -> AudioCalibrationResult:
+        """Stop recording and analyze the audio."""
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        
+        if not self._frames:
+            # Return empty result
+            return AudioCalibrationResult(
+                peak_level=0,
+                rms_level=0,
+                noise_floor=0,
+                clipping_detected=False,
+                clipping_percentage=0,
+                signal_to_noise=0,
+                recommended_preprocessing="light",
+                issues=["No audio recorded"],
+                recommendations=["Try recording again"],
+            )
+        
+        # Concatenate frames
+        audio_data = np.concatenate(self._frames, axis=0)
+        
+        # Flatten if multi-channel
+        if audio_data.ndim > 1:
+            audio_data = audio_data.flatten()
+        
+        # Resample if needed
+        if self.recording_sample_rate != self.target_sample_rate:
+            audio_data = resample_audio(
+                audio_data,
+                self.recording_sample_rate,
+                self.target_sample_rate,
+            )
+        
+        return analyze_audio_calibration(audio_data, self.target_sample_rate)
+    
+    def get_current_level(self) -> float:
+        """Get current audio level for live feedback."""
+        if not self._frames:
+            return 0.0
+        recent_frames = self._frames[-5:] if len(self._frames) >= 5 else self._frames
+        audio = np.concatenate(recent_frames, axis=0)
+        rms = np.sqrt(np.mean(audio ** 2))
+        return min(1.0, rms * 3)
+    
+    def get_duration(self) -> float:
+        """Get duration of recorded audio in seconds."""
+        if not self._frames:
+            return 0.0
+        total_samples = sum(f.shape[0] for f in self._frames)
+        rate = self.recording_sample_rate or self.target_sample_rate
+        return total_samples / rate
+    
+    def is_recording(self) -> bool:
+        """Check if currently recording."""
+        return self._stream is not None and self._stream.active

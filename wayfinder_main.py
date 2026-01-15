@@ -45,6 +45,10 @@ from postprocessor import process_with_config, get_available_backends, get_templ
 from ollama_manager import get_ollama_manager, OllamaManager
 from license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 
+# Import from new modular structure
+from src.wayfinder.ui.dialogs import AudioCalibrationDialog
+from src.wayfinder.core.recorder import AudioCalibrator
+
 
 # === Configuration ===
 
@@ -4243,6 +4247,13 @@ class WayfinderApp(ctk.CTk):
         self.preprocess_dropdown = self.create_dropdown_row(
             audio_content, "Audio Processing", preprocess_options, self.preprocess_var,
             self._on_audio_processing_selected, tooltip=SETTING_TOOLTIPS["audio_preprocessing"], width=180,
+        )
+        
+        # Audio Calibration button
+        self.calibrate_btn = self.create_setting_row(
+            audio_content, "Audio Calibration", "Test & optimize",
+            self._open_audio_calibration,
+            tooltip="Test your microphone and automatically\nconfigure optimal audio settings.",
         )
         
         # === BENTO TILE 2: Processing Mode ===
@@ -10289,6 +10300,38 @@ class WayfinderApp(ctk.CTk):
             self.recorder.preprocessing = level
         
         self.log(f"⚙ Audio processing: {level}")
+
+    def _open_audio_calibration(self):
+        """Open the audio calibration wizard dialog."""
+        # Get current audio device
+        device_id = self.config.get("audio_device")
+        if device_id is None and hasattr(self, '_resolved_audio_device'):
+            device_id = self._resolved_audio_device
+        
+        def apply_calibration_settings(settings: dict):
+            """Apply settings from calibration wizard."""
+            # Apply audio preprocessing setting
+            if "audio_preprocessing" in settings:
+                level = settings["audio_preprocessing"]
+                self.config["audio_preprocessing"] = level
+                save_config(self.config)
+                
+                # Update the dropdown if it exists
+                if hasattr(self, 'preprocess_var'):
+                    self.preprocess_var.set(level.capitalize())
+                
+                # Update recorder if it exists
+                if hasattr(self, 'recorder') and self.recorder:
+                    self.recorder.preprocessing = level
+                
+                self.log(f"⚙ Audio calibration applied: {level} preprocessing")
+        
+        # Open calibration dialog
+        dialog = AudioCalibrationDialog(
+            self,
+            device_id=device_id,
+            on_apply=apply_calibration_settings,
+        )
 
     def get_model_display(self) -> str:
         """Get display name for current model."""

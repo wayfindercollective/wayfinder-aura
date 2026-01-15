@@ -8,7 +8,16 @@ Core functionality modules for Wayfinder Aura.
 - ollama_manager: Ollama service management
 """
 
-from .recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name
+from .recorder import (
+    AudioRecorder,
+    ChunkedRecorder,
+    find_best_input_device,
+    list_input_devices,
+    get_input_device_by_name,
+    AudioCalibrator,
+    AudioCalibrationResult,
+    analyze_audio_calibration,
+)
 from .transcriber import transcribe_with_config, TranscriptionError, get_backend
 from .injector import inject_text, InjectionError
 from .postprocessor import (
@@ -28,6 +37,9 @@ __all__ = [
     "find_best_input_device",
     "list_input_devices",
     "get_input_device_by_name",
+    "AudioCalibrator",
+    "AudioCalibrationResult",
+    "analyze_audio_calibration",
     # Transcriber
     "transcribe_with_config",
     "TranscriptionError",
