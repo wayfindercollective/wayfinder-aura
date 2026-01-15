@@ -994,13 +994,11 @@ INPUT TEXT: {text}
 OUTPUT (full text with only um/uh removed):"""
 
 # Standard prompt - minimal cleanup, preserve user's words
-STANDARD_PROMPT = """Remove filler words (um, uh, like, you know) and fix punctuation. Keep the user's exact words.
-
-{tone_guidance}
+STANDARD_PROMPT = """Remove filler words and fix punctuation. Keep exact words.
 
 Text: {text}
 
-Cleaned:"""
+Output:"""
 
 # Strong prompt - practical polish for emails/messages
 STRONG_PROMPT = """Rewrite this text in the style described. Keep the same meaning.
