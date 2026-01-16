@@ -10369,9 +10369,10 @@ class WayfinderApp(ctk.CTk):
             self._calib_meter_bg,
             fg_color=COLORS["accent"],
             corner_radius=4,
+            width=0,
             height=12,
         )
-        self._calib_meter_bar.place(x=2, y=2, width=0, height=12)
+        self._calib_meter_bar.place(x=2, y=2)
         
         # Progress/status
         self._calib_status = ctk.CTkLabel(
@@ -10481,8 +10482,7 @@ class WayfinderApp(ctk.CTk):
         else:
             color = COLORS["accent"]
         
-        self._calib_meter_bar.configure(fg_color=color)
-        self._calib_meter_bar.place(x=2, y=2, width=meter_width, height=12)
+        self._calib_meter_bar.configure(fg_color=color, width=meter_width)
         
         # Update status
         self._calib_status.configure(text=f"Recording... {remaining:.1f}s")
