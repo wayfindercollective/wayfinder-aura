@@ -10671,7 +10671,7 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⚙ Audio processing: {level}")
 
     def _build_audio_calibration_section(self, parent):
-        """Build simple mic test section - record and playback."""
+        """Build simple mic test section - record and playback with level meter."""
         # Container frame
         self._mic_test_frame = ctk.CTkFrame(parent, fg_color="transparent")
         self._mic_test_frame.pack(fill="x", pady=(8, 0))
@@ -10701,7 +10701,7 @@ class WayfinderApp(ctk.CTk):
             corner_radius=RADIUS["sm"],
             height=32,
             width=70,
-            command=self._play_mic_test,
+            command=self._toggle_playback,
             state="disabled",
         )
         self._mic_play_btn.pack(side="left", padx=(0, 4))
@@ -10720,6 +10720,35 @@ class WayfinderApp(ctk.CTk):
         )
         self._mic_test_btn.pack(side="left")
         
+        # Level meter (shown during recording)
+        self._mic_meter_frame = ctk.CTkFrame(self._mic_test_frame, fg_color="transparent")
+        # Don't pack yet - shown during recording
+        
+        ctk.CTkLabel(
+            self._mic_meter_frame,
+            text="Level:",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+            width=40,
+        ).pack(side="left", padx=(8, 0))
+        
+        self._mic_meter_bg = ctk.CTkFrame(
+            self._mic_meter_frame,
+            fg_color=COLORS["bg_input"],
+            corner_radius=4,
+            height=14,
+        )
+        self._mic_meter_bg.pack(side="left", fill="x", expand=True, padx=(4, 8))
+        
+        self._mic_meter_bar = ctk.CTkFrame(
+            self._mic_meter_bg,
+            fg_color=COLORS["accent_green"],
+            corner_radius=3,
+            width=0,
+            height=10,
+        )
+        self._mic_meter_bar.place(x=2, y=2)
+        
         # Status label (shows recording time or "Ready")
         self._mic_test_status = ctk.CTkLabel(
             self._mic_test_frame,
@@ -10731,6 +10760,7 @@ class WayfinderApp(ctk.CTk):
         
         # State
         self._mic_test_recording = False
+        self._mic_test_playing = False
         self._mic_test_recorder = None
         self._mic_test_audio_path = None
         self._mic_test_update_job = None
@@ -10762,11 +10792,14 @@ class WayfinderApp(ctk.CTk):
             self._mic_test_recording = True
             self._mic_test_start_time = time.time()
             
-            # Update UI
+            # Update UI - show meter
+            self._mic_meter_frame.pack(fill="x", pady=(6, 0))
+            self._mic_meter_bar.configure(width=0)
+            self._mic_meter_bar.place(x=2, y=2)
             self._mic_test_btn.configure(text="■ Stop", fg_color=COLORS["accent"])
             self._mic_play_btn.configure(state="disabled")
             self._mic_test_status.configure(
-                text="🎤 Recording... (click Stop when done)",
+                text="🎤 Recording...",
                 text_color=COLORS["accent"],
             )
             
@@ -10780,11 +10813,34 @@ class WayfinderApp(ctk.CTk):
             )
     
     def _update_mic_test(self):
-        """Update mic test UI during recording."""
-        if not self._mic_test_recording:
+        """Update mic test UI during recording - including level meter."""
+        if not self._mic_test_recording or not self._mic_test_recorder:
             return
         
         elapsed = time.time() - self._mic_test_start_time
+        
+        # Get audio level and update meter
+        level = self._mic_test_recorder.get_audio_level()
+        
+        # Calculate meter width
+        self._mic_meter_bg.update_idletasks()
+        bg_width = self._mic_meter_bg.winfo_width()
+        if bg_width < 10:
+            bg_width = 200
+        meter_width = max(2, int(level * (bg_width - 4)))
+        
+        # Color based on level
+        if level > 0.9:
+            color = COLORS["accent_red"]  # Clipping
+        elif level > 0.6:
+            color = COLORS["accent_yellow"]  # Hot
+        else:
+            color = COLORS["accent_green"]  # Good
+        
+        self._mic_meter_bar.configure(fg_color=color, width=meter_width)
+        self._mic_meter_bar.place(x=2, y=2)
+        
+        # Update status with time
         self._mic_test_status.configure(
             text=f"🎤 Recording... {elapsed:.1f}s",
             text_color=COLORS["accent"],
@@ -10794,7 +10850,7 @@ class WayfinderApp(ctk.CTk):
         if elapsed >= 10.0:
             self._stop_mic_test()
         else:
-            self._mic_test_update_job = self.after(100, self._update_mic_test)
+            self._mic_test_update_job = self.after(50, self._update_mic_test)
     
     def _stop_mic_test(self):
         """Stop mic test recording."""
@@ -10803,6 +10859,9 @@ class WayfinderApp(ctk.CTk):
         if self._mic_test_update_job:
             self.after_cancel(self._mic_test_update_job)
             self._mic_test_update_job = None
+        
+        # Hide meter
+        self._mic_meter_frame.pack_forget()
         
         if self._mic_test_recorder:
             try:
@@ -10814,7 +10873,7 @@ class WayfinderApp(ctk.CTk):
                     text=f"✓ Recorded {duration:.1f}s - click Play to listen",
                     text_color=COLORS["accent_green"],
                 )
-                self._mic_play_btn.configure(state="normal")
+                self._mic_play_btn.configure(state="normal", text="▶ Play")
                 
             except Exception as e:
                 self._mic_test_status.configure(
@@ -10827,12 +10886,27 @@ class WayfinderApp(ctk.CTk):
         # Reset button
         self._mic_test_btn.configure(text="● Record", fg_color=COLORS["accent_red"])
     
+    def _toggle_playback(self):
+        """Toggle playback - play or stop."""
+        if self._mic_test_playing:
+            self._stop_playback()
+        else:
+            self._play_mic_test()
+    
     def _play_mic_test(self):
         """Play back the recorded mic test."""
         if not self._mic_test_audio_path:
             return
         
         import threading
+        
+        self._mic_test_playing = True
+        self._mic_play_btn.configure(text="■ Stop", fg_color=COLORS["accent"])
+        self._mic_test_btn.configure(state="disabled")
+        self._mic_test_status.configure(
+            text="🔊 Playing...",
+            text_color=COLORS["accent"],
+        )
         
         def play_audio():
             try:
@@ -10845,33 +10919,46 @@ class WayfinderApp(ctk.CTk):
                     frames = wf.readframes(wf.getnframes())
                     audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
                 
-                # Update UI
-                self.after(0, lambda: self._mic_test_status.configure(
-                    text="🔊 Playing...",
-                    text_color=COLORS["accent"],
-                ))
-                self.after(0, lambda: self._mic_play_btn.configure(state="disabled"))
-                
-                # Play audio
+                # Play audio (can be stopped with sd.stop())
                 sd.play(audio, sample_rate)
                 sd.wait()
                 
-                # Done
-                self.after(0, lambda: self._mic_test_status.configure(
-                    text="✓ Playback complete - Record again or adjust settings",
-                    text_color=COLORS["accent_green"],
-                ))
-                self.after(0, lambda: self._mic_play_btn.configure(state="normal"))
+                # Done (only update if we weren't stopped)
+                if self._mic_test_playing:
+                    self.after(0, self._on_playback_done)
                 
             except Exception as e:
-                self.after(0, lambda: self._mic_test_status.configure(
-                    text=f"❌ Playback error: {str(e)[:40]}",
-                    text_color=COLORS["accent_red"],
-                ))
-                self.after(0, lambda: self._mic_play_btn.configure(state="normal"))
+                self.after(0, lambda: self._on_playback_error(str(e)))
         
         thread = threading.Thread(target=play_audio, daemon=True)
         thread.start()
+    
+    def _stop_playback(self):
+        """Stop audio playback."""
+        import sounddevice as sd
+        self._mic_test_playing = False
+        sd.stop()
+        self._on_playback_done()
+    
+    def _on_playback_done(self):
+        """Called when playback finishes or is stopped."""
+        self._mic_test_playing = False
+        self._mic_play_btn.configure(text="▶ Play", fg_color=COLORS["bg_elevated"], state="normal")
+        self._mic_test_btn.configure(state="normal")
+        self._mic_test_status.configure(
+            text="✓ Ready - Record again or adjust settings",
+            text_color=COLORS["accent_green"],
+        )
+    
+    def _on_playback_error(self, error_msg: str):
+        """Called when playback fails."""
+        self._mic_test_playing = False
+        self._mic_play_btn.configure(text="▶ Play", fg_color=COLORS["bg_elevated"], state="normal")
+        self._mic_test_btn.configure(state="normal")
+        self._mic_test_status.configure(
+            text=f"❌ Playback error: {error_msg[:40]}",
+            text_color=COLORS["accent_red"],
+        )
 
     # Legacy calibration methods removed - using simple mic test instead
     def _toggle_calibration(self):
