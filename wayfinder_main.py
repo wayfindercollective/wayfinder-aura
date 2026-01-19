@@ -10827,30 +10827,32 @@ class WayfinderApp(ctk.CTk):
         
         self.log(f"🎤 Starting audio calibration with device: {device_id}")
         
-        # Try to start calibrator with error handling
-        try:
-            self.log("  Creating AudioCalibrator...")
-            self._calib_calibrator = AudioCalibrator(device=device_id)
-            self.log("  Starting audio stream...")
-            self._calib_calibrator.start()
-            self.log("  Audio stream started successfully")
-        except Exception as e:
-            import traceback
-            error_msg = str(e)
-            self.log(f"⚠ Audio calibration failed: {error_msg}")
-            self.log(f"  Traceback: {traceback.format_exc()}")
-            self._calib_status.configure(
-                text=f"❌ Audio error", 
-                text_color=COLORS["error"]
-            )
-            self._calib_instruction.configure(
-                text=f"Failed to open microphone. Check your audio device settings.\n({error_msg[:60]}...)" if len(error_msg) > 60 else f"Failed to open microphone: {error_msg}"
-            )
-            self._calib_toggle_btn.configure(text="Retry", fg_color=COLORS["accent"])
-            self._calib_calibrator = None
-            return
+        # Run audio initialization in a thread to avoid blocking UI
+        import threading
         
-        # Success - update UI to recording state
+        def init_audio():
+            try:
+                self.log("  Creating AudioCalibrator...")
+                self._calib_calibrator = AudioCalibrator(device=device_id)
+                self.log("  Starting audio stream...")
+                self._calib_calibrator.start()
+                self.log("  Audio stream started successfully")
+                # Schedule UI update on main thread
+                self.after(0, self._on_calibration_started)
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                self.log(f"⚠ Audio calibration failed: {error_msg}")
+                self.log(f"  Traceback: {traceback.format_exc()}")
+                # Schedule error display on main thread
+                self.after(0, lambda: self._on_calibration_error(error_msg))
+        
+        # Start audio init in background thread
+        thread = threading.Thread(target=init_audio, daemon=True)
+        thread.start()
+    
+    def _on_calibration_started(self):
+        """Called when calibration audio stream started successfully."""
         self._calib_recording = True
         self._calib_toggle_btn.configure(text="Stop", fg_color=COLORS["error"])
         self._calib_status.configure(text="🎤 Recording... Speak now!", text_color=COLORS["accent"])
@@ -10863,6 +10865,18 @@ class WayfinderApp(ctk.CTk):
         
         # Start update loop
         self._update_calibration()
+    
+    def _on_calibration_error(self, error_msg: str):
+        """Called when calibration audio initialization fails."""
+        self._calib_status.configure(
+            text=f"❌ Audio error", 
+            text_color=COLORS["error"]
+        )
+        self._calib_instruction.configure(
+            text=f"Failed to open microphone. Check your audio device settings.\n({error_msg[:60]}...)" if len(error_msg) > 60 else f"Failed to open microphone: {error_msg}"
+        )
+        self._calib_toggle_btn.configure(text="Retry", fg_color=COLORS["accent"])
+        self._calib_calibrator = None
     
     def _update_calibration(self):
         """Update calibration UI during recording."""
