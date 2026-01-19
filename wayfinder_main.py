@@ -4918,8 +4918,17 @@ class WayfinderApp(ctk.CTk):
         def update_timer():
             if timer_running[0]:
                 elapsed[0] += 1
-                self.api_benchmark_status_label.configure(text=f"Testing... {elapsed[0]}s")
-                self.after(1000, update_timer)
+                try:
+                    # Check if widget still exists before updating
+                    if hasattr(self, 'api_benchmark_status_label') and self.api_benchmark_status_label.winfo_exists():
+                        self.api_benchmark_status_label.configure(text=f"Testing... {elapsed[0]}s")
+                        self.after(1000, update_timer)
+                    else:
+                        # Widget destroyed, stop timer
+                        timer_running[0] = False
+                except Exception:
+                    # Widget destroyed or other error, stop timer
+                    timer_running[0] = False
         
         def stop_timer():
             timer_running[0] = False
@@ -5040,18 +5049,23 @@ class WayfinderApp(ctk.CTk):
             # Log completion
             self.log(f"   📊 API test completed")
             
-            # Reset button
+            # Reset button (with widget existence check)
             try:
-                self.api_benchmark_btn.configure(
-                    state="normal",
-                    text="☁️ Test API Latency",
-                    fg_color=COLORS["accent"],
-                )
+                if hasattr(self, 'api_benchmark_btn') and self.api_benchmark_btn.winfo_exists():
+                    self.api_benchmark_btn.configure(
+                        state="normal",
+                        text="☁️ Test API Latency",
+                        fg_color=COLORS["accent"],
+                    )
             except Exception as e:
                 self.log(f"   ⚠ UI update error: {e}")
             
             if error:
-                self.api_benchmark_status_label.configure(text=f"❌ {error[:40]}")
+                try:
+                    if hasattr(self, 'api_benchmark_status_label') and self.api_benchmark_status_label.winfo_exists():
+                        self.api_benchmark_status_label.configure(text=f"❌ {error[:40]}")
+                except Exception:
+                    pass
                 self.log(f"   ❌ API BENCHMARK FAILED: {error}")
                 return
             
@@ -5071,8 +5085,12 @@ class WayfinderApp(ctk.CTk):
             # Update display
             self._update_api_benchmark_display()
             
-            # Show completion message
-            self.api_benchmark_status_label.configure(text=f"✓ Done! Latency: {latency:.1f}s")
+            # Show completion message (with widget existence check)
+            try:
+                if hasattr(self, 'api_benchmark_status_label') and self.api_benchmark_status_label.winfo_exists():
+                    self.api_benchmark_status_label.configure(text=f"✓ Done! Latency: {latency:.1f}s")
+            except Exception:
+                pass
         
         def background_thread():
             latency, error = run_api_test()
