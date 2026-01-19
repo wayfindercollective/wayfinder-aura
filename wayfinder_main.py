@@ -4963,9 +4963,9 @@ class WayfinderApp(ctk.CTk):
             """Run the actual API latency test."""
             audio_file = None
             try:
-                # Create test audio
-                audio_file = create_test_audio(10)
-                self.after(0, lambda: self.log("   📁 Created 10s test audio"))
+                # Create test audio (use shorter 5s for faster testing)
+                audio_file = create_test_audio(5)
+                self.after(0, lambda: self.log("   📁 Created 5s test audio"))
                 
                 # Time the API call based on provider
                 if is_groq:
@@ -4975,8 +4975,10 @@ class WayfinderApp(ctk.CTk):
                     except ImportError:
                         return None, "groq package not installed"
                     
-                    # Create client
-                    client = groq.Groq(api_key=api_key, timeout=120.0)
+                    self.after(0, lambda: self.log("   ⚡ Creating Groq client..."))
+                    
+                    # Create client with shorter timeout
+                    client = groq.Groq(api_key=api_key, timeout=30.0)
                     
                     self.after(0, lambda: self.log("   ⚡ Sending to Groq..."))
                     start_time = time.perf_counter()
@@ -4988,6 +4990,9 @@ class WayfinderApp(ctk.CTk):
                             response_format="text",
                             language="en",
                         )
+                    
+                    latency = time.perf_counter() - start_time
+                    self.after(0, lambda l=latency: self.log(f"   ✓ Groq response: {l:.2f}s"))
                 else:
                     # Import OpenAI client
                     try:
@@ -4995,8 +5000,8 @@ class WayfinderApp(ctk.CTk):
                     except ImportError:
                         return None, "openai package not installed"
                     
-                    # Create client
-                    client = openai.OpenAI(api_key=api_key, timeout=120.0)
+                    # Create client with shorter timeout
+                    client = openai.OpenAI(api_key=api_key, timeout=60.0)
                     
                     self.after(0, lambda: self.log("   ☁️ Sending to OpenAI..."))
                     start_time = time.perf_counter()
@@ -5008,14 +5013,18 @@ class WayfinderApp(ctk.CTk):
                             response_format="text",
                             language="en",
                         )
-                
-                latency = time.perf_counter() - start_time
-                self.after(0, lambda: self.log(f"   ✓ Response received: {latency:.2f}s"))
+                    
+                    latency = time.perf_counter() - start_time
+                    self.after(0, lambda l=latency: self.log(f"   ✓ OpenAI response: {l:.2f}s"))
                 
                 return latency, None
                 
             except Exception as e:
-                return None, str(e)
+                import traceback
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                self.after(0, lambda msg=error_msg: self.log(f"   ❌ Error: {msg}"))
+                traceback.print_exc()
+                return None, error_msg
             finally:
                 # Cleanup
                 if audio_file and os.path.exists(audio_file):
@@ -5025,14 +5034,21 @@ class WayfinderApp(ctk.CTk):
                         pass
         
         def on_complete(latency, error):
+            # Stop timer FIRST
             stop_timer()
             
+            # Log completion
+            self.log(f"   📊 API test completed")
+            
             # Reset button
-            self.api_benchmark_btn.configure(
-                state="normal",
-                text="☁️ Test API Latency",
-                fg_color=COLORS["accent"],
-            )
+            try:
+                self.api_benchmark_btn.configure(
+                    state="normal",
+                    text="☁️ Test API Latency",
+                    fg_color=COLORS["accent"],
+                )
+            except Exception as e:
+                self.log(f"   ⚠ UI update error: {e}")
             
             if error:
                 self.api_benchmark_status_label.configure(text=f"❌ {error[:40]}")
@@ -5046,7 +5062,7 @@ class WayfinderApp(ctk.CTk):
             api_results = self.config.get("api_benchmark_results", {})
             result_key = "groq" if is_groq else "openai"
             api_results[result_key] = {
-                "latency_10s": round(latency, 2),
+                "latency_5s": round(latency, 2),
                 "timestamp": int(time.time()),
             }
             self.config["api_benchmark_results"] = api_results
@@ -5083,13 +5099,15 @@ class WayfinderApp(ctk.CTk):
         
         if api_results and result_key in api_results:
             result = api_results[result_key]
-            latency = result.get("latency_10s")
+            # Support both old 10s and new 5s results
+            latency = result.get("latency_5s") or result.get("latency_10s")
+            audio_duration = "5s" if result.get("latency_5s") else "10s"
             timestamp = result.get("timestamp", 0)
             
             if latency:
                 ctk.CTkLabel(
                     self.api_benchmark_results_frame,
-                    text=f"{provider_name} Whisper: {latency:.1f}s (10s audio)",
+                    text=f"{provider_name} Whisper: {latency:.1f}s ({audio_duration} audio)",
                     font=(self.font_body[0], 12),
                     text_color=COLORS["text_primary"],
                 ).pack(anchor="w", pady=2)
