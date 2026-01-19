@@ -1718,6 +1718,7 @@ class EventType(Enum):
     INJECTION_ERROR = auto()
     CHUNK_TRANSCRIBED = auto()  # A chunk was transcribed during recording
     CHUNKED_TRANSCRIPTION_DONE = auto()  # All chunks transcribed
+    LOG_MESSAGE = auto()  # Thread-safe log message (avoids Tk threading crash)
 
 
 # === Tray Icon ===
@@ -10420,14 +10421,20 @@ class WayfinderApp(ctk.CTk):
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_line = f"[{timestamp}] {message}\n"
         
-        def update():
+        # Use event queue for thread-safe logging (avoids Tk threading crash)
+        # The actual UI update happens in _do_log() called from handle_event()
+        try:
+            self.event_queue.put((EventType.LOG_MESSAGE, log_line))
+        except:
+            pass
+    
+    def _do_log(self, log_line: str):
+        """Actually update the log textbox (must be called from main thread)."""
+        try:
             self.log_textbox.configure(state="normal")
             self.log_textbox.insert("end", log_line)
             self.log_textbox.see("end")
             self.log_textbox.configure(state="disabled")
-        
-        try:
-            self.after(0, update)
         except:
             pass
 
@@ -10664,338 +10671,229 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⚙ Audio processing: {level}")
 
     def _build_audio_calibration_section(self, parent):
-        """Build inline audio calibration section."""
+        """Build simple mic test section - record and playback."""
         # Container frame
-        self._calib_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        self._calib_frame.pack(fill="x", pady=(8, 0))
+        self._mic_test_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self._mic_test_frame.pack(fill="x", pady=(8, 0))
         
-        # Header row with expand/collapse button
-        header_row = ctk.CTkFrame(self._calib_frame, fg_color="transparent")
+        # Header row
+        header_row = ctk.CTkFrame(self._mic_test_frame, fg_color="transparent")
         header_row.pack(fill="x")
         
         ctk.CTkLabel(
             header_row,
-            text="Audio Calibration",
+            text="Mic Test",
             font=(self.font_body[0], 13),
             text_color=COLORS["text_primary"],
         ).pack(side="left", padx=(8, 0))
         
-        self._calib_toggle_btn = ctk.CTkButton(
-            header_row,
-            text="Test Mic",
+        # Buttons on the right
+        btn_frame = ctk.CTkFrame(header_row, fg_color="transparent")
+        btn_frame.pack(side="right", padx=(0, 8))
+        
+        self._mic_play_btn = ctk.CTkButton(
+            btn_frame,
+            text="▶ Play",
             font=(self.font_body[0], 12),
             fg_color=COLORS["bg_elevated"],
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_bright"],
             corner_radius=RADIUS["sm"],
             height=32,
-            width=80,
-            command=self._toggle_calibration,
+            width=70,
+            command=self._play_mic_test,
+            state="disabled",
         )
-        self._calib_toggle_btn.pack(side="right", padx=(0, 8))
+        self._mic_play_btn.pack(side="left", padx=(0, 4))
         
-        # Expandable content (initially hidden)
-        self._calib_content = ctk.CTkFrame(
-            self._calib_frame,
-            fg_color=COLORS["bg_elevated"],
-            corner_radius=RADIUS["sm"],
-        )
-        # Don't pack yet - shown when expanded
-        
-        # Instructions
-        self._calib_instruction = ctk.CTkLabel(
-            self._calib_content,
-            text="Speak normally for 5 seconds to test your microphone.",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["text_secondary"],
-        )
-        self._calib_instruction.pack(pady=(12, 8), padx=12)
-        
-        # Level meter frame
-        meter_frame = ctk.CTkFrame(self._calib_content, fg_color="transparent")
-        meter_frame.pack(fill="x", padx=12, pady=(0, 8))
-        
-        ctk.CTkLabel(
-            meter_frame,
-            text="Level:",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["text_muted"],
-            width=40,
-        ).pack(side="left")
-        
-        # Simple level bar
-        self._calib_meter_bg = ctk.CTkFrame(
-            meter_frame,
-            fg_color=COLORS["bg_input"],
-            corner_radius=4,
-            height=16,
-        )
-        self._calib_meter_bg.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        
-        self._calib_meter_bar = ctk.CTkFrame(
-            self._calib_meter_bg,
-            fg_color=COLORS["accent"],
-            corner_radius=4,
-            width=0,
-            height=12,
-        )
-        self._calib_meter_bar.place(x=2, y=2)
-        
-        # Progress/status
-        self._calib_status = ctk.CTkLabel(
-            self._calib_content,
-            text="Ready",
-            font=(self.font_body[0], 12, "bold"),
-            text_color=COLORS["text_primary"],
-        )
-        self._calib_status.pack(pady=(0, 8))
-        
-        # Results frame (shown after test)
-        self._calib_results = ctk.CTkFrame(self._calib_content, fg_color="transparent")
-        # Don't pack yet
-        
-        # Result labels
-        self._calib_quality_label = ctk.CTkLabel(
-            self._calib_results,
-            text="",
-            font=(self.font_body[0], 13, "bold"),
-            text_color=COLORS["accent"],
-        )
-        self._calib_quality_label.pack(pady=(0, 4))
-        
-        self._calib_detail_label = ctk.CTkLabel(
-            self._calib_results,
-            text="",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["text_secondary"],
-            wraplength=280,
-        )
-        self._calib_detail_label.pack(pady=(0, 8))
-        
-        # Apply button (shown after test)
-        self._calib_apply_btn = ctk.CTkButton(
-            self._calib_results,
-            text="Apply Recommended Settings",
+        self._mic_test_btn = ctk.CTkButton(
+            btn_frame,
+            text="● Record",
             font=(self.font_body[0], 12),
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_hover"],
+            fg_color=COLORS["error"],
+            hover_color="#c55",
             text_color=COLORS["text_bright"],
             corner_radius=RADIUS["sm"],
             height=32,
-            command=self._apply_calibration,
+            width=80,
+            command=self._toggle_mic_test,
         )
-        self._calib_apply_btn.pack(pady=(0, 4))
+        self._mic_test_btn.pack(side="left")
+        
+        # Status label (shows recording time or "Ready")
+        self._mic_test_status = ctk.CTkLabel(
+            self._mic_test_frame,
+            text="Click Record to test your mic",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+        )
+        self._mic_test_status.pack(pady=(4, 0), padx=8, anchor="w")
         
         # State
-        self._calib_expanded = False
-        self._calib_recording = False
-        self._calib_calibrator = None
-        self._calib_result = None
-        self._calib_update_job = None
+        self._mic_test_recording = False
+        self._mic_test_recorder = None
+        self._mic_test_audio_path = None
+        self._mic_test_update_job = None
     
-    def _toggle_calibration(self):
-        """Toggle calibration panel and start/stop test."""
-        if self._calib_recording:
-            # Stop the test
-            self._stop_calibration_test()
+    def _toggle_mic_test(self):
+        """Start or stop mic test recording."""
+        if self._mic_test_recording:
+            self._stop_mic_test()
         else:
-            # Expand panel if not already
-            if not self._calib_expanded:
-                self._calib_expanded = True
-                self._calib_content.pack(fill="x", pady=(8, 0))
-            
-            # Reset UI state before starting
-            self._calib_results.pack_forget()
-            self._calib_instruction.configure(text="Speak normally for 5 seconds to test your microphone.")
-            self._calib_status.configure(text="Starting...", text_color=COLORS["text_primary"])
-            self._calib_meter_bar.place(x=2, y=2, width=0, height=12)
-            
-            # Force UI update before starting (audio init can block)
-            self.update_idletasks()
-            
-            # Start the test after a brief delay to let UI update
-            self.after(50, self._start_calibration_test)
+            self._start_mic_test()
     
-    def _start_calibration_test(self):
-        """Start the calibration recording."""
-        self._calib_results.pack_forget()
-        
-        # Get device
+    def _start_mic_test(self):
+        """Start recording for mic test."""
+        # Get device and preprocessing settings
         device_id = self.config.get("audio_device")
         if device_id is None and hasattr(self, '_resolved_audio_device'):
             device_id = self._resolved_audio_device
-        
-        self.log(f"🎤 Starting audio calibration with device: {device_id}")
-        
-        # Run audio initialization in a thread to avoid blocking UI
-        import threading
-        
-        def init_audio():
-            try:
-                self.log("  Creating AudioCalibrator...")
-                self._calib_calibrator = AudioCalibrator(device=device_id)
-                self.log("  Starting audio stream...")
-                self._calib_calibrator.start()
-                self.log("  Audio stream started successfully")
-                # Schedule UI update on main thread
-                self.after(0, self._on_calibration_started)
-            except Exception as e:
-                import traceback
-                error_msg = str(e)
-                self.log(f"⚠ Audio calibration failed: {error_msg}")
-                self.log(f"  Traceback: {traceback.format_exc()}")
-                # Schedule error display on main thread
-                self.after(0, lambda: self._on_calibration_error(error_msg))
-        
-        # Start audio init in background thread
-        thread = threading.Thread(target=init_audio, daemon=True)
-        thread.start()
-    
-    def _on_calibration_started(self):
-        """Called when calibration audio stream started successfully."""
-        self._calib_recording = True
-        self._calib_toggle_btn.configure(text="Stop", fg_color=COLORS["error"])
-        self._calib_status.configure(text="🎤 Recording... Speak now!", text_color=COLORS["accent"])
-        self._calib_instruction.configure(text="Speak at your normal volume for 5 seconds...")
-        self._calib_start_time = time.time()
-        self.log("  UI updated to recording state")
-        
-        # Reset meter bar
-        self._calib_meter_bar.place(x=2, y=2, width=0, height=12)
-        
-        # Start update loop
-        self._update_calibration()
-    
-    def _on_calibration_error(self, error_msg: str):
-        """Called when calibration audio initialization fails."""
-        self._calib_status.configure(
-            text=f"❌ Audio error", 
-            text_color=COLORS["error"]
-        )
-        self._calib_instruction.configure(
-            text=f"Failed to open microphone. Check your audio device settings.\n({error_msg[:60]}...)" if len(error_msg) > 60 else f"Failed to open microphone: {error_msg}"
-        )
-        self._calib_toggle_btn.configure(text="Retry", fg_color=COLORS["accent"])
-        self._calib_calibrator = None
-    
-    def _update_calibration(self):
-        """Update calibration UI during recording."""
-        if not self._calib_recording or not self._calib_calibrator:
-            return
+        preprocessing = self.config.get("audio_preprocessing", "light")
         
         try:
-            elapsed = time.time() - self._calib_start_time
-            remaining = max(0, 5.0 - elapsed)
+            # Use the same AudioRecorder as main recording
+            self._mic_test_recorder = AudioRecorder(
+                sample_rate=16000,
+                channels=1,
+                device=device_id,
+                preprocessing=preprocessing,
+            )
+            self._mic_test_recorder.start()
+            self._mic_test_recording = True
+            self._mic_test_start_time = time.time()
             
-            # Update level meter
-            level = self._calib_calibrator.get_current_level()
+            # Update UI
+            self._mic_test_btn.configure(text="■ Stop", fg_color=COLORS["accent"])
+            self._mic_play_btn.configure(state="disabled")
+            self._mic_test_status.configure(
+                text="🎤 Recording... (click Stop when done)",
+                text_color=COLORS["accent"],
+            )
             
-            # Get the actual width of the meter background for accurate scaling
-            self._calib_meter_bg.update_idletasks()
-            bg_width = self._calib_meter_bg.winfo_width()
-            if bg_width < 10:  # Fallback if not yet rendered
-                bg_width = 280
-            meter_width = max(1, int(level * (bg_width - 4)))  # -4 for padding, min 1 to show something
+            # Start update loop
+            self._update_mic_test()
             
-            # Color based on level
-            if level > 0.95:
-                color = COLORS["error"]
-            elif level > 0.8:
-                color = COLORS["accent_yellow"]
-            else:
-                color = COLORS["accent"]
-            
-            # Use place() to update position and size (configure alone doesn't update placed widgets properly)
-            self._calib_meter_bar.configure(fg_color=color)
-            self._calib_meter_bar.place(x=2, y=2, width=meter_width, height=12)
-            
-            # Update status
-            self._calib_status.configure(text=f"Recording... {remaining:.1f}s")
-            
-            if elapsed >= 5.0:
-                self._stop_calibration_test()
-            else:
-                self._calib_update_job = self.after(50, self._update_calibration)
         except Exception as e:
-            import traceback
-            self.log(f"⚠ Calibration update error: {e}")
-            self.log(f"  Traceback: {traceback.format_exc()}")
-            self._calib_status.configure(text="❌ Update error", text_color=COLORS["error"])
-            self._stop_calibration_test()
+            self._mic_test_status.configure(
+                text=f"❌ Error: {str(e)[:50]}",
+                text_color=COLORS["error"],
+            )
+    
+    def _update_mic_test(self):
+        """Update mic test UI during recording."""
+        if not self._mic_test_recording:
+            return
+        
+        elapsed = time.time() - self._mic_test_start_time
+        self._mic_test_status.configure(
+            text=f"🎤 Recording... {elapsed:.1f}s",
+            text_color=COLORS["accent"],
+        )
+        
+        # Auto-stop after 10 seconds
+        if elapsed >= 10.0:
+            self._stop_mic_test()
+        else:
+            self._mic_test_update_job = self.after(100, self._update_mic_test)
+    
+    def _stop_mic_test(self):
+        """Stop mic test recording."""
+        self._mic_test_recording = False
+        
+        if self._mic_test_update_job:
+            self.after_cancel(self._mic_test_update_job)
+            self._mic_test_update_job = None
+        
+        if self._mic_test_recorder:
+            try:
+                # Save the recording
+                self._mic_test_audio_path = self._mic_test_recorder.stop()
+                duration = self._mic_test_recorder.get_duration()
+                
+                self._mic_test_status.configure(
+                    text=f"✓ Recorded {duration:.1f}s - click Play to listen",
+                    text_color=COLORS["success"],
+                )
+                self._mic_play_btn.configure(state="normal")
+                
+            except Exception as e:
+                self._mic_test_status.configure(
+                    text=f"❌ Error: {str(e)[:50]}",
+                    text_color=COLORS["error"],
+                )
+            
+            self._mic_test_recorder = None
+        
+        # Reset button
+        self._mic_test_btn.configure(text="● Record", fg_color=COLORS["error"])
+    
+    def _play_mic_test(self):
+        """Play back the recorded mic test."""
+        if not self._mic_test_audio_path:
+            return
+        
+        import threading
+        
+        def play_audio():
+            try:
+                import sounddevice as sd
+                import wave
+                import numpy as np
+                
+                with wave.open(self._mic_test_audio_path, 'rb') as wf:
+                    sample_rate = wf.getframerate()
+                    frames = wf.readframes(wf.getnframes())
+                    audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+                
+                # Update UI
+                self.after(0, lambda: self._mic_test_status.configure(
+                    text="🔊 Playing...",
+                    text_color=COLORS["accent"],
+                ))
+                self.after(0, lambda: self._mic_play_btn.configure(state="disabled"))
+                
+                # Play audio
+                sd.play(audio, sample_rate)
+                sd.wait()
+                
+                # Done
+                self.after(0, lambda: self._mic_test_status.configure(
+                    text="✓ Playback complete - Record again or adjust settings",
+                    text_color=COLORS["success"],
+                ))
+                self.after(0, lambda: self._mic_play_btn.configure(state="normal"))
+                
+            except Exception as e:
+                self.after(0, lambda: self._mic_test_status.configure(
+                    text=f"❌ Playback error: {str(e)[:40]}",
+                    text_color=COLORS["error"],
+                ))
+                self.after(0, lambda: self._mic_play_btn.configure(state="normal"))
+        
+        thread = threading.Thread(target=play_audio, daemon=True)
+        thread.start()
+
+    # Legacy calibration methods removed - using simple mic test instead
+    def _toggle_calibration(self):
+        """Legacy method - redirects to mic test."""
+        self._toggle_mic_test()
+    
+    # Old calibration methods removed - using simple mic test now
+    def _update_calibration(self):
+        """Legacy - no longer used."""
+        pass
     
     def _stop_calibration_test(self):
-        """Stop calibration and show results."""
-        self._calib_recording = False
-        
-        if self._calib_update_job:
-            self.after_cancel(self._calib_update_job)
-            self._calib_update_job = None
-        
-        self._calib_toggle_btn.configure(text="Test Again", fg_color=COLORS["bg_elevated"])
-        
-        if self._calib_calibrator:
-            self._calib_result = self._calib_calibrator.stop_and_analyze()
-            self._calib_calibrator = None
-            self._show_calibration_results()
+        """Legacy - no longer used."""
+        pass
     
     def _show_calibration_results(self):
-        """Display calibration results."""
-        if not self._calib_result:
-            return
-        
-        r = self._calib_result
-        
-        # Quality text and color
-        quality_info = {
-            "excellent": ("✅ Excellent", COLORS["success"]),
-            "good": ("✅ Good", COLORS["success"]),
-            "fair": ("⚠️ Fair", COLORS["accent_yellow"]),
-            "poor": ("❌ Poor", COLORS["error"]),
-        }
-        quality_text, quality_color = quality_info.get(r.overall_quality, ("Unknown", COLORS["text_primary"]))
-        
-        self._calib_quality_label.configure(text=f"Audio Quality: {quality_text}", text_color=quality_color)
-        
-        # Details
-        details = []
-        if r.clipping_detected:
-            details.append(f"⚠ Clipping: {r.clipping_percentage:.1f}% - turn down mic gain")
-        if r.peak_level < 0.2:
-            details.append("⚠ Signal quiet - turn up mic gain")
-        if r.noise_floor > 0.03:
-            details.append(f"⚠ Noise floor: {r.noise_floor*100:.1f}%")
-        
-        details.append(f"Recommended: {r.recommended_preprocessing.capitalize()} preprocessing")
-        
-        self._calib_detail_label.configure(text="\n".join(details))
-        self._calib_status.configure(text="Test complete", text_color=COLORS["text_primary"])
-        self._calib_instruction.configure(text="Review results below:")
-        
-        # Show results and apply button
-        self._calib_results.pack(fill="x", padx=8, pady=(0, 8))
+        """Legacy - no longer used."""
+        pass
     
     def _apply_calibration(self):
-        """Apply recommended calibration settings."""
-        if not self._calib_result:
-            return
-        
-        level = self._calib_result.recommended_preprocessing
-        self.config["audio_preprocessing"] = level
-        save_config(self.config)
-        
-        # Update dropdown
-        if hasattr(self, 'preprocess_var'):
-            self.preprocess_var.set(level.capitalize())
-        
-        # Update recorder
-        if hasattr(self, 'recorder') and self.recorder:
-            self.recorder.preprocessing = level
-        
-        self.log(f"⚙ Applied calibration: {level} preprocessing")
-        
-        # Update UI to show applied
-        self._calib_apply_btn.configure(text="✓ Applied!", state="disabled")
-        self.after(2000, lambda: self._calib_apply_btn.configure(text="Apply Recommended Settings", state="normal"))
+        """Legacy - no longer used."""
+        pass
 
     def get_model_display(self) -> str:
         """Get display name for current model."""
@@ -14071,6 +13969,8 @@ class WayfinderApp(ctk.CTk):
             self.log(f"✓ Chunk {chunk_index + 1}{context_indicator}: \"{preview}\"")
         elif event_type == EventType.CHUNKED_TRANSCRIPTION_DONE:
             self.on_transcription_done(data)
+        elif event_type == EventType.LOG_MESSAGE:
+            self._do_log(data)
 
     def on_hotkey(self):
         if self.app_state == AppState.IDLE:
