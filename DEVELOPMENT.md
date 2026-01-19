@@ -1,5 +1,7 @@
 # Wayfinder Aura - Development Guide
 
+> **For AI Agents**: See [AGENTS.md](AGENTS.md) for comprehensive technical documentation including architecture diagrams, module guides, and common pitfalls.
+
 ## Project Overview
 
 Wayfinder Aura is a local voice dictation app for Linux. It uses whisper.cpp for speech-to-text and injects the transcribed text at the cursor position.
@@ -144,8 +146,11 @@ Three methods (used based on environment):
 # Run from dev folder
 python main.py
 
+# Run tests
+pytest tests/
+
 # Test specific component
-python -c "from recorder import AudioRecorder; r = AudioRecorder(); print('OK')"
+PYTHONPATH=src python -c "from wayfinder.core import AudioRecorder; print('OK')"
 ```
 
 ## Deploying to Installed App

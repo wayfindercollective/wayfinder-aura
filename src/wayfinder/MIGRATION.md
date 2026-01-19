@@ -2,24 +2,23 @@
 
 This document tracks the migration from the monolithic `wayfinder_main.py` to the modular package structure.
 
+> **For AI Agents**: See [../../AGENTS.md](../../AGENTS.md) for comprehensive technical documentation.
+
 ## Current Status
 
-**Phase 1 Complete**: The package structure is fully in place. Root-level Python files are now thin
-re-export shims that import from the package. This allows `wayfinder_main.py` to continue working
-with its existing imports while the canonical source of truth is in `src/wayfinder/`.
+**Phase 1.5 Complete**: Root-level shim files have been removed. All imports in `wayfinder_main.py`
+now use the `wayfinder.*` package paths directly. The canonical source of truth is `src/wayfinder/`.
 
-## Root Files (Shims)
+## Root Files Status
 
-These files now re-export from the package for backward compatibility with `wayfinder_main.py`:
-
-| File | Type | Package Location |
-|------|------|------------------|
-| `recorder.py` | Shim | `src/wayfinder/core/recorder.py` |
-| `transcriber.py` | Shim | `src/wayfinder/core/transcriber.py` |
-| `injector.py` | Shim | `src/wayfinder/core/injector.py` |
-| `postprocessor.py` | Shim | `src/wayfinder/core/postprocessor.py` |
-| `ollama_manager.py` | Shim | `src/wayfinder/core/ollama_manager.py` |
-| `license.py` | Shim | `src/wayfinder/license.py` |
+| File | Status | Notes |
+|------|--------|-------|
+| `recorder.py` | **DELETED** | Import from `wayfinder.core.recorder` |
+| `transcriber.py` | **DELETED** | Import from `wayfinder.core.transcriber` |
+| `injector.py` | **DELETED** | Import from `wayfinder.core.injector` |
+| `postprocessor.py` | **DELETED** | Import from `wayfinder.core.postprocessor` |
+| `ollama_manager.py` | **DELETED** | Import from `wayfinder.core.ollama_manager` |
+| `license.py` | **DELETED** | Import from `wayfinder.license` |
 | `status_overlay.py` | Original | `src/wayfinder/ui/overlay.py` |
 | `wayfinder_main.py` | Legacy main | To be broken into modules |
 
@@ -49,16 +48,16 @@ After all extractions, `wayfinder_main.py` should contain only:
 ## For AI Agents
 
 When making changes:
-1. **Prefer the package modules** in `src/wayfinder/` for new code
-2. **Keep root files in sync** if you modify package modules (for now)
-3. **Test both import paths** until migration is complete
+1. **Always edit** files in `src/wayfinder/` for core functionality
+2. **Use package imports** like `from wayfinder.core import AudioRecorder`
+3. **UI changes** still go in `wayfinder_main.py` until dialogs are extracted
 
 ```bash
 # Test package imports
 PYTHONPATH=src python -c "from wayfinder.core import AudioRecorder; print('OK')"
 
-# Test root imports (used by wayfinder_main.py)
-python -c "from recorder import AudioRecorder; print('OK')"
+# Run tests
+pytest tests/
 ```
 
 

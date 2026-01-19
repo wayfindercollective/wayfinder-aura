@@ -38,15 +38,12 @@ try:
 except ImportError:
     DBUS_AVAILABLE = False
 
-from injector import inject_text, InjectionError
-from recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name
-from transcriber import transcribe_with_config, TranscriptionError
-from postprocessor import process_with_config, get_available_backends, get_template_names, check_settings_compatibility
-from ollama_manager import get_ollama_manager, OllamaManager
-from license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
-
-# Import from new modular structure
-from src.wayfinder.core.recorder import AudioCalibrator
+from wayfinder.core.injector import inject_text, InjectionError
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator
+from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
+from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
+from wayfinder.core.ollama_manager import get_ollama_manager, OllamaManager
+from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 
 
 # === Configuration ===
@@ -10509,7 +10506,7 @@ class WayfinderApp(ctk.CTk):
         
         try:
             # Use the existing safe device listing
-            from recorder import list_input_devices
+            from wayfinder.core.recorder import list_input_devices
             all_devices = list_input_devices()
             
             for dev in all_devices:
@@ -10554,7 +10551,7 @@ class WayfinderApp(ctk.CTk):
         # Also build a reverse map of device name -> display name for name-based lookup
         self._mic_name_to_display = {}
         try:
-            from recorder import list_input_devices
+            from wayfinder.core.recorder import list_input_devices
             for dev in list_input_devices():
                 dev_name = dev.get('name', '')
                 for display_name, idx in device_map.items():
@@ -10610,7 +10607,7 @@ class WayfinderApp(ctk.CTk):
                 self.config["audio_device"] = device_idx
                 # Also save the device name for reconnection
                 try:
-                    from recorder import list_input_devices
+                    from wayfinder.core.recorder import list_input_devices
                     for dev in list_input_devices():
                         if dev['index'] == device_idx:
                             self.config["audio_device_name"] = dev['name']
@@ -12905,7 +12902,7 @@ class WayfinderApp(ctk.CTk):
 
     def open_backend_settings(self):
         """Open dialog to select transcription backend."""
-        from transcriber import WhisperCppBackend, FasterWhisperBackend, OpenAIWhisperBackend, GroqWhisperBackend
+        from wayfinder.core.transcriber import WhisperCppBackend, FasterWhisperBackend, OpenAIWhisperBackend, GroqWhisperBackend
         
         dialog = ctk.CTkToplevel(self)
         dialog.title("Transcription Backend")
