@@ -1861,8 +1861,9 @@ class AnthropicBackend(PostProcessorBackend):
             # Remove repeated sentences (Whisper hallucination loops)
             result = remove_repeated_sentences(result)
             
-            # Check for hallucination
-            if is_hallucination(text, result, model_name=self.model):
+            # Check for hallucination - skip for caricature mode (expects creative output)
+            is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
+            if not is_caricature and is_hallucination(text, result, model_name=self.model):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
                 return text
             
@@ -1997,8 +1998,9 @@ class OpenAIBackend(PostProcessorBackend):
             # Remove repeated sentences (Whisper hallucination loops)
             result = remove_repeated_sentences(result)
             
-            # Check for hallucination
-            if is_hallucination(text, result, model_name=self.model):
+            # Check for hallucination - skip for caricature mode (expects creative output)
+            is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
+            if not is_caricature and is_hallucination(text, result, model_name=self.model):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
                 return text
             
