@@ -10787,8 +10787,11 @@ class WayfinderApp(ctk.CTk):
             self._calib_status.configure(text="Starting...", text_color=COLORS["text_primary"])
             self._calib_meter_bar.place(x=2, y=2, width=0, height=12)
             
-            # Start the test
-            self._start_calibration_test()
+            # Force UI update before starting (audio init can block)
+            self.update_idletasks()
+            
+            # Start the test after a brief delay to let UI update
+            self.after(50, self._start_calibration_test)
     
     def _start_calibration_test(self):
         """Start the calibration recording."""
@@ -10799,13 +10802,20 @@ class WayfinderApp(ctk.CTk):
         if device_id is None and hasattr(self, '_resolved_audio_device'):
             device_id = self._resolved_audio_device
         
+        self.log(f"🎤 Starting audio calibration with device: {device_id}")
+        
         # Try to start calibrator with error handling
         try:
+            self.log("  Creating AudioCalibrator...")
             self._calib_calibrator = AudioCalibrator(device=device_id)
+            self.log("  Starting audio stream...")
             self._calib_calibrator.start()
+            self.log("  Audio stream started successfully")
         except Exception as e:
+            import traceback
             error_msg = str(e)
             self.log(f"⚠ Audio calibration failed: {error_msg}")
+            self.log(f"  Traceback: {traceback.format_exc()}")
             self._calib_status.configure(
                 text=f"❌ Audio error", 
                 text_color=COLORS["error"]
@@ -10823,6 +10833,7 @@ class WayfinderApp(ctk.CTk):
         self._calib_status.configure(text="🎤 Recording... Speak now!", text_color=COLORS["accent"])
         self._calib_instruction.configure(text="Speak at your normal volume for 5 seconds...")
         self._calib_start_time = time.time()
+        self.log("  UI updated to recording state")
         
         # Reset meter bar
         self._calib_meter_bar.place(x=2, y=2, width=0, height=12)
@@ -10835,38 +10846,45 @@ class WayfinderApp(ctk.CTk):
         if not self._calib_recording or not self._calib_calibrator:
             return
         
-        elapsed = time.time() - self._calib_start_time
-        remaining = max(0, 5.0 - elapsed)
-        
-        # Update level meter
-        level = self._calib_calibrator.get_current_level()
-        
-        # Get the actual width of the meter background for accurate scaling
-        self._calib_meter_bg.update_idletasks()
-        bg_width = self._calib_meter_bg.winfo_width()
-        if bg_width < 10:  # Fallback if not yet rendered
-            bg_width = 280
-        meter_width = max(1, int(level * (bg_width - 4)))  # -4 for padding, min 1 to show something
-        
-        # Color based on level
-        if level > 0.95:
-            color = COLORS["error"]
-        elif level > 0.8:
-            color = COLORS["accent_yellow"]
-        else:
-            color = COLORS["accent"]
-        
-        # Use place() to update position and size (configure alone doesn't update placed widgets properly)
-        self._calib_meter_bar.configure(fg_color=color)
-        self._calib_meter_bar.place(x=2, y=2, width=meter_width, height=12)
-        
-        # Update status
-        self._calib_status.configure(text=f"Recording... {remaining:.1f}s")
-        
-        if elapsed >= 5.0:
+        try:
+            elapsed = time.time() - self._calib_start_time
+            remaining = max(0, 5.0 - elapsed)
+            
+            # Update level meter
+            level = self._calib_calibrator.get_current_level()
+            
+            # Get the actual width of the meter background for accurate scaling
+            self._calib_meter_bg.update_idletasks()
+            bg_width = self._calib_meter_bg.winfo_width()
+            if bg_width < 10:  # Fallback if not yet rendered
+                bg_width = 280
+            meter_width = max(1, int(level * (bg_width - 4)))  # -4 for padding, min 1 to show something
+            
+            # Color based on level
+            if level > 0.95:
+                color = COLORS["error"]
+            elif level > 0.8:
+                color = COLORS["accent_yellow"]
+            else:
+                color = COLORS["accent"]
+            
+            # Use place() to update position and size (configure alone doesn't update placed widgets properly)
+            self._calib_meter_bar.configure(fg_color=color)
+            self._calib_meter_bar.place(x=2, y=2, width=meter_width, height=12)
+            
+            # Update status
+            self._calib_status.configure(text=f"Recording... {remaining:.1f}s")
+            
+            if elapsed >= 5.0:
+                self._stop_calibration_test()
+            else:
+                self._calib_update_job = self.after(50, self._update_calibration)
+        except Exception as e:
+            import traceback
+            self.log(f"⚠ Calibration update error: {e}")
+            self.log(f"  Traceback: {traceback.format_exc()}")
+            self._calib_status.configure(text="❌ Update error", text_color=COLORS["error"])
             self._stop_calibration_test()
-        else:
-            self._calib_update_job = self.after(50, self._update_calibration)
     
     def _stop_calibration_test(self):
         """Stop calibration and show results."""
