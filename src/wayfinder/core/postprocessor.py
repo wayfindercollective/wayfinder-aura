@@ -322,7 +322,7 @@ def analyze_all_models(model_list: list) -> Dict[str, Any]:
     Analyze a list of models and return compatibility summary.
     
     Args:
-        model_list: List of model names (e.g. from ollama list)
+        model_list: List of model names (e.g. GGUF filenames)
         
     Returns dict with:
         - models: list of individual model analyses
@@ -445,33 +445,31 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
         return {
             "min_params": "3B+",
             "recommended_models": [
-                {"name": "phi3:mini", "type": "ollama", "description": "3.8B - great for caricature"},
-                {"name": "qwen2.5:3b", "type": "ollama", "description": "3B - good creativity"},
-                {"name": "llama3.2:3b", "type": "ollama", "description": "3B - reliable option"},
-                {"name": "phi3:medium", "type": "ollama", "description": "14B - best quality"},
+                {"name": "Phi-3-mini-4k-instruct-Q4_K_M.gguf", "type": "gguf", "description": "3.8B - great for caricature"},
+                {"name": "Qwen2.5-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - good creativity"},
+                {"name": "Llama-3.2-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - reliable option"},
             ],
             "message": "Caricature mode requires 3B+ parameter models for creative text generation. "
-                       "Try: ollama pull phi3:mini (already installed!) or qwen2.5:3b",
+                       "Download a 3B+ GGUF model from huggingface.co",
         }
     elif intensity == "strong":
         return {
             "min_params": "3B+",
             "recommended_models": [
-                {"name": "phi3:mini", "type": "ollama", "description": "3.8B - fast and capable"},
-                {"name": "qwen2.5:3b", "type": "ollama", "description": "3B - best for strong intensity"},
-                {"name": "llama3.2:3b", "type": "ollama", "description": "3B - good alternative"},
-                {"name": "phi3:medium", "type": "ollama", "description": "14B - best quality"},
+                {"name": "Phi-3-mini-4k-instruct-Q4_K_M.gguf", "type": "gguf", "description": "3.8B - fast and capable"},
+                {"name": "Qwen2.5-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - best for strong intensity"},
+                {"name": "Llama-3.2-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - good alternative"},
             ],
             "message": "Strong intensity works best with 3B+ parameter models. "
-                       "Try: ollama pull phi3:mini (3.8B) or qwen2.5:3b",
+                       "Download a 3B+ GGUF model from huggingface.co",
         }
     elif intensity == "standard":
         return {
             "min_params": "1B+",
             "recommended_models": [
-                {"name": "qwen2.5:1.5b", "type": "ollama", "description": "Great balance"},
-                {"name": "llama3.2:1b", "type": "ollama", "description": "Fast option"},
-                {"name": "phi3:mini", "type": "ollama", "description": "3.8B - reliable"},
+                {"name": "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "Great balance"},
+                {"name": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "Fast option"},
+                {"name": "Phi-3-mini-4k-instruct-Q4_K_M.gguf", "type": "gguf", "description": "3.8B - reliable"},
             ],
             "message": "Standard intensity works with 1B+ parameter models.",
         }
@@ -479,8 +477,8 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
         return {
             "min_params": "500M+",
             "recommended_models": [
-                {"name": "smollm2:360m", "type": "ollama", "description": "Ultra fast"},
-                {"name": "qwen2.5:0.5b", "type": "ollama", "description": "Compact"},
+                {"name": "SmolLM2-360M-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "Ultra fast"},
+                {"name": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "Compact"},
             ],
             "message": "Light intensity works with most models.",
         }
@@ -505,10 +503,8 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
             - severity: "ok" | "warning" | "incompatible"
     """
     # Get model name based on backend
-    backend = config.get("post_processing_backend", "ollama")
-    if backend == "ollama":
-        model_name = config.get("ollama_model", "")
-    elif backend == "llama_cpp":
+    backend = config.get("post_processing_backend", "llama_cpp")
+    if backend == "llama_cpp":
         model_path = config.get("llama_cpp_model_path", "")
         model_name = Path(model_path).stem if model_path else ""
     elif backend == "openai":
@@ -651,6 +647,19 @@ FILLER_REGEX_PATTERNS = [
     r'\b[Mm]m+\b',           # mm, mmm
     r'\b[Uu]hm+\b',          # uhm, uhmm
     r'\b[Oo]h+\b(?=\s*,)',   # "oh," at start of clause (but keep "oh!" exclamations)
+    # Common verbal fillers (only when standalone/at clause boundaries)
+    r',?\s*\byou know\b,?\s*',      # ", you know," 
+    r',?\s*\blike\b,\s*',            # ", like," (only with surrounding commas to avoid "I like pizza")
+    r',?\s*\bI mean\b,?\s*',         # ", I mean,"
+    r',?\s*\bbasically\b,?\s*',      # ", basically,"
+    r',?\s*\bactually\b,?\s*',       # ", actually,"
+    r',?\s*\bliterally\b,?\s*',      # ", literally,"
+    r',?\s*\bhonestly\b,?\s*',       # ", honestly,"
+    r',?\s*\bso\b,\s+',              # "so, " at start (with comma to avoid "so that")
+    r'^\s*[Ss]o,?\s+',               # "So " at very start of text
+    r',?\s*\bkind of\b,?\s*',        # ", kind of,"
+    r',?\s*\bsort of\b,?\s*',        # ", sort of,"
+    r',?\s*\bright\b\??\s*',         # ", right?" / ", right,"
 ]
 
 # Compiled regex for efficiency
@@ -659,42 +668,57 @@ _FILLER_REGEX = re.compile('|'.join(FILLER_REGEX_PATTERNS), re.IGNORECASE)
 
 def fast_filler_removal(text: str) -> str:
     """
-    Remove filler sounds using fast regex matching.
+    Remove filler sounds and verbal tics using fast regex matching.
     
     This is ~1000x faster than LLM-based processing.
-    Only removes: um, uh, ah, er, eh, hmm, mm
-    Does NOT change words, structure, or punctuation.
+    Removes:
+    - Filler sounds: um, uh, ah, er, eh, hmm, mm
+    - Verbal fillers: "you know", "like", "I mean", "basically", etc.
+    - Repeated words: "the the" -> "the"
+    
+    Does NOT restructure sentences or change meaning.
     
     Args:
         text: Transcription text
         
     Returns:
-        Text with filler sounds removed
+        Text with fillers removed
     """
     if not text:
         return text
     
     original_len = len(text)
     
-    # Remove filler sounds
-    cleaned = _FILLER_REGEX.sub('', text)
+    # Remove filler sounds and verbal fillers
+    # Replace with single space (not empty string) to preserve word boundaries
+    # The cleanup at the end will normalize multiple spaces
+    cleaned = _FILLER_REGEX.sub(' ', text)
+    
+    # Remove repeated words: "the the" -> "the", "I I" -> "I"
+    cleaned = re.sub(r'\b(\w+)\s+\1\b', r'\1', cleaned, flags=re.IGNORECASE)
     
     # Clean up resulting double spaces and punctuation artifacts
     # "I, um, went" -> "I, , went" -> "I, went"
     cleaned = re.sub(r',\s*,', ',', cleaned)  # double commas
     cleaned = re.sub(r'\s+,', ',', cleaned)   # space before comma
     cleaned = re.sub(r',\s+\.', '.', cleaned) # comma then period
+    cleaned = re.sub(r'\.\s*\.', '.', cleaned) # double periods
     cleaned = re.sub(r'\s{2,}', ' ', cleaned) # multiple spaces
     cleaned = re.sub(r'^\s*,\s*', '', cleaned) # leading comma
+    cleaned = re.sub(r',\s*$', '.', cleaned)  # trailing comma -> period
     cleaned = cleaned.strip()
     
     # Capitalize first letter if we have content
     if cleaned and cleaned[0].islower():
         cleaned = cleaned[0].upper() + cleaned[1:]
     
+    # Ensure ends with punctuation
+    if cleaned and cleaned[-1] not in '.!?':
+        cleaned += '.'
+    
     removed = original_len - len(cleaned)
     if removed > 5:
-        print(f"[Fast Cleanup] Removed {removed} chars of filler sounds")
+        print(f"[Minimal] Removed {removed} chars of filler")
     
     return cleaned
 
@@ -1069,14 +1093,22 @@ OUTPUT (full text with only um/uh removed):"""
 # Standard prompt - minimal cleanup, preserve user's words
 STANDARD_PROMPT = """Remove filler words and fix punctuation. Keep exact words.
 
+{tone_guidance}
+{formatting_rules}
+{filler_rules}
+
 Text: {text}
 
 Output:"""
 
 # Strong prompt - practical polish for emails/messages
+# Includes full context for cloud backends (OpenAI, Anthropic, xAI Grok)
 STRONG_PROMPT = """Rewrite this text in the style described. Keep the same meaning.
 
-Style: {tone_guidance}
+Style: {style_name}
+Tone: {tone_guidance}
+Formatting: {formatting_rules}
+Cleanup: {filler_rules}
 
 Text: {text}
 
@@ -1089,10 +1121,12 @@ Rewritten:"""
 # Unlocked by typing "lol" or "haha" on the Style tab.
 
 # Simplified caricature prompt for 3-4B models
+# Full context included for cloud backends
 CARICATURE_PROMPT = """Make this text SILLY and EXAGGERATED. Keep the same meaning but make it funny.
 
 Style: {style_name}
-{tone_guidance}
+Tone: {tone_guidance}
+Formatting: {formatting_rules}
 
 Text: {text}
 
@@ -1164,10 +1198,8 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
             print(f"[Post-processing] ⚠ Could not load voice profile: {e}")
     
     # Get model name for compatibility check
-    backend = config.get("post_processing_backend", "ollama")
-    if backend == "ollama":
-        model_name = config.get("ollama_model", "")
-    elif backend == "llama_cpp":
+    backend = config.get("post_processing_backend", "llama_cpp")
+    if backend == "llama_cpp":
         model_path = config.get("llama_cpp_model_path", "")
         model_name = Path(model_path).stem if model_path else ""
     else:
@@ -1846,8 +1878,13 @@ class AnthropicBackend(PostProcessorBackend):
 
 class OpenAIBackend(PostProcessorBackend):
     """
-    Cloud LLM backend using OpenAI API.
+    Cloud LLM backend using OpenAI API or OpenAI-compatible APIs.
     Uses GPT-4o-mini for fast, cheap, high-quality results.
+    
+    Supports custom base_url for:
+    - xAI Grok: base_url="https://api.x.ai/v1"
+    - Azure OpenAI: base_url="https://<resource>.openai.azure.com/openai/deployments/<deployment>"
+    - Local OpenAI-compatible servers (LM Studio, Ollama, vLLM, etc.)
     """
     
     def __init__(
@@ -1856,14 +1893,23 @@ class OpenAIBackend(PostProcessorBackend):
         model: str = "gpt-4o-mini",
         max_tokens: int = 1024,
         temperature: float = 0.1,
+        base_url: str = "",  # Custom API base URL for OpenAI-compatible APIs
     ):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "")
         self._client = None
     
     def get_name(self) -> str:
+        if self.base_url:
+            if "x.ai" in self.base_url:
+                return "xAI Grok (Cloud)"
+            elif "azure" in self.base_url.lower():
+                return "Azure OpenAI (Cloud)"
+            else:
+                return "OpenAI-Compatible (Cloud)"
         return "OpenAI (Cloud)"
     
     def is_available(self) -> bool:
@@ -1887,7 +1933,11 @@ class OpenAIBackend(PostProcessorBackend):
         
         try:
             import openai
-            self._client = openai.OpenAI(api_key=self.api_key)
+            # Use custom base_url if provided (for xAI Grok, Azure, etc.)
+            if self.base_url:
+                self._client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+            else:
+                self._client = openai.OpenAI(api_key=self.api_key)
             return self._client
             
         except Exception as e:
@@ -1959,221 +2009,6 @@ class OpenAIBackend(PostProcessorBackend):
 
 
 # =============================================================================
-# Ollama Backend (Local)
-# =============================================================================
-
-class OllamaBackend(PostProcessorBackend):
-    """
-    Local LLM backend using Ollama API.
-    Requires Ollama to be installed and running locally.
-    Recommended models: phi3:mini, qwen2.5:1.5b, llama3.2:3b
-    Note: llama3.2:1b is prone to hallucination - avoid for best results.
-    """
-    
-    def __init__(
-        self,
-        base_url: str = "http://localhost:11434",
-        model: str = "phi3:mini",
-        max_tokens: int = 1024,
-        temperature: float = 0.1,
-    ):
-        self.base_url = base_url.rstrip('/')
-        self.model = model
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self._client = None
-    
-    def get_name(self) -> str:
-        return "Ollama (Local)"
-    
-    def is_available(self) -> bool:
-        """Check if Ollama is installed and running."""
-        try:
-            import requests
-            response = requests.get(f"{self.base_url}/api/tags", timeout=2)
-            return response.status_code == 200
-        except:
-            return False
-    
-    def _get_client(self):
-        """Get or create the requests session."""
-        if self._client is not None:
-            return self._client
-        
-        try:
-            import requests
-            self._client = requests.Session()
-            return self._client
-        except ImportError:
-            raise PostProcessingError(
-                "requests package is not installed. "
-                "Install with: pip install requests"
-            )
-    
-    def process(self, text: str, prompt_template: str) -> str:
-        """
-        Process text using Ollama API.
-        
-        Args:
-            text: The raw transcription text
-            prompt_template: The prompt template to use
-            
-        Returns:
-            Cleaned/formatted text
-        """
-        if not self.is_available():
-            raise PostProcessingError(
-                "Ollama is not running. "
-                "Please start Ollama service: ollama serve"
-            )
-        
-        if not text or not text.strip():
-            return text
-        
-        try:
-            import requests
-            
-            # The prompt_template is already fully formatted (text embedded by build_prompt)
-            # No need to call format_prompt again
-            full_prompt = prompt_template
-            
-            # Debug: Log what we're sending (truncated for readability)
-            prompt_preview = full_prompt[:200] + "..." if len(full_prompt) > 200 else full_prompt
-            print(f"[Post-processing] Sending to {self.model}...")
-            
-            # Call Ollama API using chat endpoint for better instruction following
-            # Use longer timeout (60s) for first-time model loading
-            
-            # Detect if this is caricature mode from the prompt
-            is_caricature = "SILLY" in full_prompt or "EXAGGERATED" in full_prompt
-            
-            # Build system prompt based on mode
-            if is_caricature:
-                # Caricature mode - allow creative, funny output
-                system_prompt = (
-                    "You are a comedy writer. Make the text funny and exaggerated. "
-                    "Add slang, emojis, and silly elements. Be creative and entertaining!"
-                )
-            else:
-                # Normal cleanup mode - preserve content
-                quirks = get_model_quirks(self.model)
-                if "hallucination_prone" in quirks.get("issues", []):
-                    system_prompt = (
-                        "You are a transcription cleanup assistant. "
-                        "CRITICAL: Only clean up the text - do NOT invent new content. "
-                        "Keep the same meaning. If unsure, output unchanged."
-                    )
-                else:
-                    system_prompt = (
-                        "You are a transcription cleanup assistant. "
-                        "Clean up the text but preserve all content and meaning. "
-                        "Do NOT add new topics or ideas."
-                    )
-            
-            try:
-                response = requests.post(
-                    f"{self.base_url}/api/chat",
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": system_prompt
-                            },
-                            {
-                                "role": "user", 
-                                "content": full_prompt
-                            }
-                        ],
-                        "stream": False,
-                        "options": {
-                            "num_predict": self.max_tokens,
-                            "temperature": self.temperature,
-                        },
-                    },
-                    timeout=60,  # Longer timeout for model loading
-                )
-            except requests.exceptions.Timeout:
-                print(f"[Post-processing] ⚠ Ollama timeout after 60s - model may still be loading")
-                raise PostProcessingError("Ollama timeout - model may be loading, try again")
-            
-            if response.status_code != 200:
-                raise PostProcessingError(f"Ollama API error: {response.status_code}")
-            
-            # Chat API returns message.content instead of response
-            response_json = response.json()
-            if "message" in response_json:
-                result = response_json.get("message", {}).get("content", "").strip()
-            else:
-                # Fallback for generate API format
-                result = response_json.get("response", "").strip()
-            
-            # Debug: Log response preview
-            result_preview = result[:150] + "..." if len(result) > 150 else result
-            print(f"[Post-processing] Response: {result_preview}")
-            
-            # Clean up any artifacts and check for refusals
-            result = self._clean_response(result, original_text=text, model_name=self.model)
-            
-            return result if result else text
-            
-        except requests.exceptions.RequestException as e:
-            raise PostProcessingError(f"Ollama API call failed: {e}")
-        except Exception as e:
-            raise PostProcessingError(f"Ollama processing failed: {e}")
-    
-    def _clean_response(self, text: str, original_text: str = "", model_name: str = "") -> str:
-        """
-        Clean up LLM response artifacts and detect refusals/hallucinations.
-        
-        Args:
-            text: The LLM response
-            original_text: The original input (returned if refusal/hallucination detected)
-            model_name: The model name for model-specific hallucination thresholds
-            
-        Returns:
-            Cleaned text, or original_text if refusal/hallucination detected
-        """
-        # Check for empty/garbage output early
-        if not text or not text.strip():
-            print("[Post-processing] ⚠ Empty response - using original text")
-            return original_text if original_text else ""
-        
-        # Check for refusal first
-        if is_refusal_response(text):
-            print("[Post-processing] ⚠ Model refused to process - using original text")
-            return original_text if original_text else text
-        
-        # Remove prompt leakage (LLM echoing back instructions)
-        text = remove_prompt_leakage(text)
-        
-        # Remove repeated sentences (Whisper hallucination loops)
-        text = remove_repeated_sentences(text)
-        
-        # Remove common artifacts
-        lines = text.split("\n")
-        cleaned_lines = []
-        
-        for line in lines:
-            line = line.strip()
-            # Skip empty lines at start
-            if not cleaned_lines and not line:
-                continue
-            # Skip lines that look like prompts/instructions
-            if line.lower().startswith(("transcription:", "cleaned text:", "result:", "formatted", "spoken text:", "cleaned version:")):
-                continue
-            cleaned_lines.append(line)
-        
-        cleaned = "\n".join(cleaned_lines).strip()
-        
-        # Check for hallucination (model generated unrelated content)
-        if original_text and is_hallucination(original_text, cleaned, model_name=model_name):
-            print("[Post-processing] ⚠ Model hallucinated - using original text")
-            return original_text
-        
-        return cleaned
-
-
 # =============================================================================
 # Factory Functions
 # =============================================================================
@@ -2188,16 +2023,9 @@ def get_backend(config: dict) -> PostProcessorBackend:
     Returns:
         A PostProcessorBackend instance
     """
-    backend_type = config.get("post_processing_backend", "ollama")
+    backend_type = config.get("post_processing_backend", "llama_cpp")
     
-    if backend_type == "ollama":
-        return OllamaBackend(
-            base_url=config.get("ollama_base_url", "http://localhost:11434"),
-            model=config.get("ollama_model", "phi3:mini"),
-            max_tokens=config.get("post_processing_max_tokens", 1024),
-            temperature=config.get("post_processing_temperature", 0.1),
-        )
-    elif backend_type == "anthropic":
+    if backend_type == "anthropic":
         # API key is read from environment variable only (secure)
         return AnthropicBackend(
             api_key="",  # Will be read from ANTHROPIC_API_KEY env var
@@ -2207,11 +2035,13 @@ def get_backend(config: dict) -> PostProcessorBackend:
         )
     elif backend_type == "openai":
         # API key is read from environment variable only (secure)
+        # base_url allows using xAI Grok, Azure OpenAI, or other compatible APIs
         return OpenAIBackend(
             api_key="",  # Will be read from OPENAI_API_KEY env var
             model=config.get("openai_model", "gpt-4o-mini"),
             max_tokens=config.get("post_processing_max_tokens", 1024),
             temperature=config.get("post_processing_temperature", 0.1),
+            base_url=config.get("openai_base_url", ""),  # For xAI Grok: "https://api.x.ai/v1"
         )
     else:
         # Default to llama.cpp - prefer CLI backend if available
@@ -2263,20 +2093,15 @@ def process_with_config(text: str, config: dict) -> str:
     """
     import time
     
-    # Check if post-processing is enabled
-    if not config.get("post_processing_enabled", True):
-        return text
-    
     if not text or not text.strip():
         return text
     
-    # === FAST MODE: Regex-based filler removal (no LLM) ===
-    # Use this when fast_filler_removal is enabled AND style is minimal
-    # This is ~1000x faster than LLM processing
-    use_fast_mode = config.get("fast_filler_removal", False)
     tone = config.get("output_tone", "professional")
     
-    if use_fast_mode and tone == "minimal":
+    # === MINIMAL STYLE: Always use regex-based filler removal (no LLM) ===
+    # Minimal style uses instant regex cleanup - runs even if LLM post-processing is disabled
+    # This is ~1000x faster than LLM processing
+    if tone == "minimal":
         start_time = time.time()
         input_words = len(text.split())
         
@@ -2284,9 +2109,13 @@ def process_with_config(text: str, config: dict) -> str:
         
         elapsed = time.time() - start_time
         output_words = len(result.split())
-        print(f"[Fast Cleanup] ⚡ Completed in {elapsed*1000:.1f}ms | {input_words} → {output_words} words")
+        print(f"[Minimal] ⚡ Regex cleanup in {elapsed*1000:.1f}ms | {input_words} → {output_words} words")
         
         return result
+    
+    # For non-minimal styles, check if LLM post-processing is enabled
+    if not config.get("post_processing_enabled", True):
+        return text
     
     try:
         # Build the prompt using new tone-based system with compatibility checks
@@ -2300,12 +2129,13 @@ def process_with_config(text: str, config: dict) -> str:
         backend = get_backend(config)
         
         if not backend.is_available():
-            backend_type = config.get("post_processing_backend", "ollama")
+            backend_type = config.get("post_processing_backend", "llama_cpp")
             if backend_type == "openai":
                 print(f"[Post-processing] ⚠ OpenAI not available - check OPENAI_API_KEY env var")
             elif backend_type == "anthropic":
                 print(f"[Post-processing] ⚠ Anthropic not available - check ANTHROPIC_API_KEY env var")
-            elif backend_type == "llama_cpp":
+            else:
+                # llama.cpp backend
                 # Check if llama-cpp-python is installed
                 try:
                     import llama_cpp
@@ -2321,16 +2151,12 @@ def process_with_config(text: str, config: dict) -> str:
                     print(f"[Post-processing] ⚠ llama.cpp: No model selected - download one from Settings")
                 else:
                     print(f"[Post-processing] ⚠ llama.cpp: Model not found at {model_path}")
-            else:
-                print(f"[Post-processing] ⚠ Ollama not available - is the service running?")
             return text
         
         # Get timing info
         tone = config.get("output_tone", "professional")
-        backend_type = config.get("post_processing_backend", "ollama")
-        if backend_type == "ollama":
-            model_name = config.get("ollama_model", "unknown")
-        elif backend_type == "llama_cpp":
+        backend_type = config.get("post_processing_backend", "llama_cpp")
+        if backend_type == "llama_cpp":
             model_path = config.get("llama_cpp_model_path", "")
             model_name = Path(model_path).stem if model_path else "no model"
         elif backend_type == "openai":
@@ -2418,18 +2244,6 @@ def get_available_backends() -> list:
         "available": openai_available,
         "requires_api_key": True,
         "description": "Cloud processing using GPT-4o-mini. Fast and reliable.",
-    })
-    
-    # Check Ollama
-    ollama_backend = OllamaBackend()
-    ollama_available = ollama_backend.is_available()
-    
-    backends.append({
-        "id": "ollama",
-        "name": "Ollama (Local)",
-        "available": ollama_available,
-        "requires_model": True,
-        "description": "Local inference using Ollama. Recommended: phi3:mini, qwen2.5:1.5b",
     })
     
     return backends

@@ -73,8 +73,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
     
-    # Processing mode: local (100% private), hybrid (local transcription + cloud post-processing), remote (cloud transcription)
-    "processing_mode": "local",  # local | hybrid | remote
+    # Processing mode: local (100% private, offline) or remote (cloud APIs for speed/quality)
+    "processing_mode": "local",  # local | remote
     
     # Accuracy enhancement settings
     "beam_size": 5,  # Beam search size (1-5 recommended, higher is slow)
@@ -131,7 +131,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": True,  # Enable LLM post-processing
-    "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai (llama_cpp is default for self-contained distribution)
+    "post_processing_backend": "llama_cpp",  # llama_cpp | anthropic | openai
     "fast_filler_removal": False,  # When True, use instant regex-based filler removal (no LLM) - best for "minimal" style
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
     "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
@@ -144,15 +144,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
     "llama_cpp_use_cli": True,  # Use CLI backend (faster, no Python bindings needed)
     
-    # Ollama post-processing settings
-    "ollama_base_url": "http://localhost:11434",  # Ollama API URL
-    "ollama_model": "qwen2.5:1.5b",  # Ollama model name - good balance of speed and quality (~1GB)
-    
     # Cloud API settings (keys stored in config, loaded into environment on startup)
     "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
     "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
     "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
+    "openai_base_url": "",  # Custom base URL for OpenAI-compatible APIs (xAI Grok: "https://api.x.ai/v1")
     
     # Benchmark results - populated by running benchmark
     # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}

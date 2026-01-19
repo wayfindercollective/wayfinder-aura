@@ -42,7 +42,6 @@ from wayfinder.core.injector import inject_text, InjectionError
 from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
-from wayfinder.core.ollama_manager import get_ollama_manager, OllamaManager
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 
 
@@ -89,8 +88,8 @@ DEFAULT_CONFIG = {
     "start_minimized": False,
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
-    # Processing mode: local (100% private), hybrid (local transcription + cloud post-processing), remote (cloud transcription)
-    "processing_mode": "local",  # local | hybrid | remote
+    # Processing mode: local (100% private, offline) or remote (cloud APIs for speed/quality)
+    "processing_mode": "local",  # local | remote
     # Accuracy enhancement settings
     "beam_size": 5,  # Beam search size (1-5 recommended, higher is slow)
     "best_of": 3,  # Number of best candidates to consider
@@ -132,7 +131,7 @@ DEFAULT_CONFIG = {
     "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": True,  # Enable LLM post-processing
-    "post_processing_backend": "ollama",  # llama_cpp | ollama | anthropic | openai
+    "post_processing_backend": "llama_cpp",  # llama_cpp | anthropic | openai
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
     "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
     # llama.cpp post-processing settings
@@ -140,9 +139,6 @@ DEFAULT_CONFIG = {
     "llama_cpp_n_ctx": 2048,  # Context window size
     "llama_cpp_n_threads": 4,  # CPU threads
     "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
-    # Ollama post-processing settings
-    "ollama_base_url": "http://localhost:11434",  # Ollama API URL
-    "ollama_model": "qwen2.5:1.5b",  # Ollama model name - good balance of speed and quality (~1GB)
     # Groq Whisper API settings (ultra-fast cloud transcription)
     "groq_whisper_model": "whisper-large-v3",  # whisper-large-v3 (same quality as local, 10x faster)
     # Cloud API settings (keys stored in config, loaded into environment on startup)
@@ -152,6 +148,7 @@ DEFAULT_CONFIG = {
     "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
     "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
+    "openai_base_url": "",  # Custom base URL for OpenAI-compatible APIs (xAI Grok: "https://api.x.ai/v1")
     # Benchmark results - populated by running benchmark
     # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}
     "benchmark_results": {},
@@ -784,15 +781,8 @@ class CompatibilityBanner(ctk.CTkFrame):
         # Update model suggestion
         upgrade_message = compatibility.get("upgrade_message")
         if upgrade_message:
-            # Extract the ollama pull command if present
-            if "ollama pull" in upgrade_message:
-                cmd_start = upgrade_message.find("ollama pull")
-                cmd = upgrade_message[cmd_start:].split("\n")[0].strip()
-                self.suggestion_label.configure(text=f"💡 {cmd}")
-                self.suggestion_frame.pack(fill="x", pady=(8, 0))
-            else:
-                self.suggestion_label.configure(text=f"💡 {upgrade_message[:50]}...")
-                self.suggestion_frame.pack(fill="x", pady=(8, 0))
+            self.suggestion_label.configure(text=f"💡 {upgrade_message[:60]}...")
+            self.suggestion_frame.pack(fill="x", pady=(8, 0))
         else:
             self.suggestion_frame.pack_forget()
         
@@ -812,7 +802,7 @@ class CompatibilityBanner(ctk.CTkFrame):
 class ModeSelector(ctk.CTkFrame):
     """
     Segmented control widget for selecting processing mode.
-    Three mutually exclusive options: Local | Hybrid | Remote
+    Two mutually exclusive options: Local | Remote
     """
     
     def __init__(
@@ -825,7 +815,7 @@ class ModeSelector(ctk.CTkFrame):
     ):
         super().__init__(parent, fg_color="transparent", **kwargs)
         
-        self.values = values or ["local", "hybrid", "remote"]
+        self.values = values or ["local", "remote"]
         self.current_value = current_value
         self.command = command
         self.buttons: dict[str, ctk.CTkButton] = {}
@@ -833,7 +823,6 @@ class ModeSelector(ctk.CTkFrame):
         # Display labels and icons for each mode
         self.display_info = {
             "local": {"label": "Local", "icon": "🔒", "desc": "100% Private"},
-            "hybrid": {"label": "Hybrid", "icon": "🔗", "desc": "Local + Cloud AI"},
             "remote": {"label": "Remote", "icon": "☁️", "desc": "Cloud Processing"},
         }
         
@@ -1466,51 +1455,6 @@ LLM_GGUF_MODELS = {
         "description": "Meta's latest efficient model. Good all-rounder for text tasks.",
         "speed": "Very Fast",
         "accuracy": "Good",
-    },
-}
-
-# Ollama model info for display
-OLLAMA_MODEL_INFO = {
-    "qwen2.5:1.5b": {
-        "size": "986 MB",
-        "description": "⭐ Best overall. Fast, follows instructions well.",
-        "speed": "Very Fast",
-        "accuracy": "Good",
-        "recommended": True,
-    },
-    "qwen2.5:3b": {
-        "size": "1.9 GB",
-        "description": "Best for Strong mode. Great quality + speed balance.",
-        "speed": "Fast",
-        "accuracy": "High",
-        "best_for": "strong",
-    },
-    "llama3.2:1b": {
-        "size": "1.3 GB",
-        "description": "Meta's efficient model. Good for standard mode.",
-        "speed": "Very Fast",
-        "accuracy": "Good",
-    },
-    "llama3.2:3b": {
-        "size": "2.0 GB",
-        "description": "Meta's balanced model. Good for all modes.",
-        "speed": "Fast",
-        "accuracy": "High",
-    },
-    "phi3:mini": {
-        "size": "2.2 GB",
-        "description": "⚠️ Strong mode only - rewrites in standard mode.",
-        "speed": "Fast",
-        "accuracy": "High",
-        "best_for": "strong",
-        "warning": "Rewrites sentences in standard mode",
-    },
-    "smollm2:360m": {
-        "size": "229 MB",
-        "description": "⚠️ May hallucinate. Use for testing only.",
-        "speed": "Instant",
-        "accuracy": "Basic",
-        "warning": "Prone to hallucination",
     },
 }
 
@@ -3227,9 +3171,6 @@ class WayfinderApp(ctk.CTk):
         # Run startup dependency checks
         self.after(300, self._check_startup_dependencies)
         
-        # Auto-start Ollama if backend is ollama and it's installed but not running
-        self.after(500, self._auto_start_ollama_if_needed)
-        
         # Start display wake-up listener for overlay recovery
         if self._use_pyqt_overlay:
             self._start_display_wake_listener()
@@ -4285,7 +4226,7 @@ class WayfinderApp(ctk.CTk):
         return content
     
     def _create_settings_tab(self) -> None:
-        """Create the Settings tab with Local/Hybrid/Remote processing modes."""
+        """Create the Settings tab with Local/Remote processing modes."""
         frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
         self.tab_frames["settings"] = frame
         
@@ -4352,14 +4293,14 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
         
-        # Mode selector (Local | Hybrid | Remote)
+        # Mode selector (Local | Remote)
         mode_selector_frame = ctk.CTkFrame(mode_tile, fg_color="transparent")
         mode_selector_frame.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, 12))
         
         current_mode = self.config.get("processing_mode", "local")
         self.mode_selector = ModeSelector(
             mode_selector_frame,
-            values=["local", "hybrid", "remote"],
+            values=["local", "remote"],
             current_value=current_mode,
             command=self._on_processing_mode_changed,
         )
@@ -4461,7 +4402,7 @@ class WayfinderApp(ctk.CTk):
         self._create_overlay_scale_slider_row(overlay_content)
         
         # === BENTO TILE 4: Benchmark (inline, no popup) ===
-        # This tile is for local/hybrid modes only - hidden in remote mode
+        # This tile is for local mode only - hidden in remote mode
         self.local_benchmark_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"], border_width=1,
@@ -5172,21 +5113,20 @@ class WayfinderApp(ctk.CTk):
     def _build_mode_settings(self, mode: str) -> None:
         """Build the settings panel for the selected processing mode."""
         # Validate and reset post-processing backend based on mode
-        current_backend = self.config.get("post_processing_backend", "ollama")
+        current_backend = self.config.get("post_processing_backend", "llama_cpp")
         if mode == "local":
-            # Local mode: only allow local backends
-            if current_backend not in ["llama_cpp", "ollama"]:
+            # Local mode: only allow llama_cpp backend
+            if current_backend != "llama_cpp":
                 self.config["post_processing_backend"] = "llama_cpp"
                 save_config(self.config)
-        elif mode == "hybrid":
-            # Hybrid mode: only allow cloud backends for post-processing
+        # Remote mode uses cloud backends
+        elif mode == "remote":
             if current_backend not in ["openai", "anthropic"]:
                 self.config["post_processing_backend"] = "openai"
                 save_config(self.config)
-        # Remote mode doesn't use post-processing (transcription is already cloud)
         
         # Show/hide local benchmark tile based on mode
-        # Local and Hybrid use local whisper, Remote doesn't
+        # Local uses local whisper, Remote doesn't
         if hasattr(self, 'local_benchmark_tile') and self.local_benchmark_tile.winfo_exists():
             if mode == "remote":
                 self.local_benchmark_tile.pack_forget()
@@ -5200,8 +5140,6 @@ class WayfinderApp(ctk.CTk):
         
         if mode == "local":
             self._build_local_mode_settings(self.mode_settings_container)
-        elif mode == "hybrid":
-            self._build_hybrid_mode_settings(self.mode_settings_container)
         elif mode == "remote":
             self._build_remote_mode_settings(self.mode_settings_container)
     
@@ -5282,102 +5220,17 @@ class WayfinderApp(ctk.CTk):
         
         # Post-processing backend and options (only show if enabled)
         if postproc_enabled:
-            postproc_backend = self.config.get("post_processing_backend", "ollama")
-            # Ensure we're using a local backend for local mode
-            if postproc_backend not in ["llama_cpp", "ollama"]:
+            postproc_backend = self.config.get("post_processing_backend", "llama_cpp")
+            # Ensure we're using llama_cpp for local mode
+            if postproc_backend != "llama_cpp":
                 postproc_backend = "llama_cpp"
                 self.config["post_processing_backend"] = postproc_backend
                 save_config(self.config)
-            self.postproc_backend_var = ctk.StringVar(value=postproc_backend)
-            
-            # Get all available backends, but filter to only local ones for local mode
-            all_backends = get_available_backends()
-            backend_options = []
-            backend_display_map = {}
-            
-            # Filter to only local backends (llama_cpp and ollama)
-            local_backend_ids = ["llama_cpp", "ollama"]
-            for b in all_backends:
-                backend_id = b["id"]
-                if backend_id in local_backend_ids:
-                    backend_options.append(backend_id)
-                    backend_display_map[backend_id] = b["name"]
-            
-            # If no backends available, at least show llama_cpp
-            if not backend_options:
-                backend_options = ["llama_cpp"]
-                backend_display_map["llama_cpp"] = "llama.cpp (Local)"
-            
-            self.postproc_backend_dropdown = self.create_dropdown_row(
-                parent, "Post-Processing Backend", backend_options,
-                self.postproc_backend_var, self.on_postproc_backend_changed,
-                tooltip="llama_cpp: Uses llama.cpp with GGUF models. Fast GPU inference on Linux.\nollama: Uses Ollama service. Easy model management, run 'ollama serve' first.",
-                width=160,
-            )
             
             # Inline model management section (no popups)
             self._build_inline_model_section(parent, postproc_backend)
             
             # Note: Format template removed - now uses Style tab settings (output_tone + smart_formatting)
-    
-    def _build_hybrid_mode_settings(self, parent) -> None:
-        """Build settings panel for Hybrid mode (local transcription + cloud post-processing)."""
-        # Cloud warning
-        warning_frame = ctk.CTkFrame(parent, fg_color="#2A2A1A", corner_radius=RADIUS["sm"])
-        warning_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(0, 12))
-        
-        ctk.CTkLabel(
-            warning_frame,
-            text="⚠️  Transcribed text will be sent to cloud for cleanup",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color="#CFB77B",
-        ).pack(padx=12, pady=8)
-        
-        # === Local Transcription Section ===
-        self._create_mode_section_header(parent, "Local Transcription")
-        
-        # Whisper Model
-        model_display = self.get_model_display()
-        self.model_btn = self.create_setting_row(
-            parent, "Whisper Model", model_display,
-            self.open_model_settings, tooltip=get_dynamic_tooltip("whisper_model", self.config),
-            tooltip_key="whisper_model",
-        )
-        
-        # Note: Prompt button removed - now configured via Style tab
-        
-        # GPU Acceleration toggle
-        self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", True))
-        self.create_toggle_row(
-            parent, "GPU Acceleration",
-            self.gpu_var, self.toggle_gpu,
-            tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
-            tooltip_key="gpu_acceleration",
-        )
-        
-        # === Cloud Post-Processing Section ===
-        self._create_mode_section_header(parent, "Cloud Post-Processing")
-        
-        # Provider selector (anthropic or openai for cloud)
-        postproc_backend = self.config.get("post_processing_backend", "openai")
-        if postproc_backend == "llama_cpp":
-            postproc_backend = "openai"  # Default to cloud provider for hybrid
-        self.postproc_backend_var = ctk.StringVar(value=postproc_backend)
-        self.postproc_backend_dropdown = self.create_dropdown_row(
-            parent, "Provider", ["openai", "anthropic"],
-            self.postproc_backend_var, self.on_postproc_backend_changed,
-            tooltip="OpenAI = GPT-4o-mini, Anthropic = Claude Haiku", width=140,
-        )
-        
-        # Note: Format template removed - now uses Style tab settings (output_tone + smart_formatting)
-        
-        # API Configuration
-        postproc_config_text = self._get_postproc_config_display()
-        self.postproc_config_btn = self.create_setting_row(
-            parent, "API Configuration", postproc_config_text,
-            self.open_postproc_settings,
-            tooltip="Configure API key for cloud post-processing",
-        )
     
     def _build_remote_mode_settings(self, parent) -> None:
         """Build settings panel for Remote mode (full cloud transcription)."""
@@ -5493,6 +5346,55 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         self.api_benchmark_status_label.pack(side="left", padx=(15, 0))
+        
+        # === Post-Processing Section (LLM text cleanup for caricature mode, etc.) ===
+        postproc_header = ctk.CTkFrame(parent, fg_color="transparent")
+        postproc_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(16, 8))
+        ctk.CTkLabel(
+            postproc_header, text="🎨   P O S T - P R O C E S S I N G",
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        
+        # Post-processing toggle
+        postproc_enabled = self.config.get("post_processing_enabled", True)
+        self.postproc_enabled_var = ctk.BooleanVar(value=postproc_enabled)
+        self.create_toggle_row(
+            parent, "Enable Text Cleanup",
+            self.postproc_enabled_var, self.toggle_post_processing,
+            tooltip="Use cloud LLM (GPT-4o-mini or Claude) to clean up transcriptions.\nRequired for Caricature mode, Strong mode, and advanced style options.",
+        )
+        
+        # Post-processing backend options (only show if enabled)
+        if postproc_enabled:
+            postproc_backend = self.config.get("post_processing_backend", "openai")
+            # Ensure we're using a cloud backend for remote mode
+            if postproc_backend not in ["openai", "anthropic"]:
+                postproc_backend = "openai"
+                self.config["post_processing_backend"] = postproc_backend
+                save_config(self.config)
+            self.postproc_backend_var = ctk.StringVar(value=postproc_backend)
+            
+            # Provider dropdown (OpenAI vs Anthropic)
+            self.postproc_backend_dropdown = self.create_dropdown_row(
+                parent, "LLM Provider", ["openai", "anthropic"],
+                self.postproc_backend_var, self.on_postproc_backend_changed,
+                tooltip="openai: GPT-4o-mini - Fast and affordable\nanthropic: Claude Haiku - High quality",
+                width=140,
+            )
+            
+            # API Configuration button
+            if postproc_backend == "openai":
+                api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+            else:
+                api_key = self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+            
+            postproc_api_status = "Configured ✓" if api_key else "Not configured"
+            self.postproc_config_btn = self.create_setting_row(
+                parent, "LLM API Settings", postproc_api_status,
+                self.open_postproc_settings,
+                tooltip="Configure API key and model for LLM post-processing",
+            )
     
     def _create_mode_section_header(self, parent, text: str) -> None:
         """Create a section header within mode settings."""
@@ -6454,33 +6356,24 @@ class WayfinderApp(ctk.CTk):
         # Update related settings based on mode
         if mode == "local":
             # Local mode: use local transcription backend
-            # Post-processing stays as configured - Ollama/llama.cpp are local and private
+            # Post-processing stays as configured - llama.cpp is local and private
             if self.config.get("transcription_backend") in ("openai_whisper", "groq_whisper"):
                 self.config["transcription_backend"] = "whisper_cpp"
-            # Ensure post-processing uses a local backend if enabled
+            # Ensure post-processing uses llama_cpp if enabled
             if self.config.get("post_processing_enabled", True):
-                backend = self.config.get("post_processing_backend", "ollama")
-                if backend not in ["llama_cpp", "ollama"]:
-                    self.config["post_processing_backend"] = "ollama"
+                backend = self.config.get("post_processing_backend", "llama_cpp")
+                if backend != "llama_cpp":
+                    self.config["post_processing_backend"] = "llama_cpp"
             self.log("🔒 Mode: Local (100% private)")
             
-        elif mode == "hybrid":
-            # Hybrid mode: local transcription + cloud post-processing
-            if self.config.get("transcription_backend") in ("openai_whisper", "groq_whisper"):
-                self.config["transcription_backend"] = "whisper_cpp"
-            self.config["post_processing_enabled"] = True
-            # Default to OpenAI for post-processing if currently using local
-            if self.config.get("post_processing_backend") == "llama_cpp":
-                self.config["post_processing_backend"] = "openai"
-            self.log("🔗 Mode: Hybrid (local transcription + cloud cleanup)")
-            
         elif mode == "remote":
-            # Remote mode: full cloud transcription via Groq (fastest) or OpenAI
+            # Remote mode: cloud transcription via Groq (fastest) or OpenAI Whisper
             current_backend = self.config.get("transcription_backend", "")
             # Keep existing cloud backend if already set, otherwise default to Groq (faster)
             if current_backend not in ("groq_whisper", "openai_whisper"):
                 self.config["transcription_backend"] = "groq_whisper"  # Default to Groq for speed
-            self.config["post_processing_enabled"] = False  # Transcription is already cloud
+            # Note: Don't disable post-processing - user may want cloud LLM cleanup (caricature mode, etc.)
+            # Post-processing backend will be switched to cloud (openai/anthropic) by _build_mode_settings
             backend_name = "Groq" if self.config["transcription_backend"] == "groq_whisper" else "OpenAI"
             self.log(f"☁️ Mode: Remote ({backend_name} cloud transcription)")
         
@@ -6962,7 +6855,6 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
         display_map = {
             "llama_cpp": "Local (llama.cpp)",
-            "ollama": "Local (Ollama)",
             "anthropic": "Cloud (Anthropic Claude)",
             "openai": "Cloud (OpenAI GPT)",
         }
@@ -6992,12 +6884,9 @@ class WayfinderApp(ctk.CTk):
         self._inline_model_section = model_section
         self._inline_download_active = False
         self._cancel_download = False
-        self._cancel_ollama_download = False
         
         if backend == "llama_cpp":
             self._build_llamacpp_inline_section(model_section)
-        elif backend == "ollama":
-            self._build_ollama_inline_section(model_section)
     
     def _build_llamacpp_inline_section(self, parent) -> None:
         """Build inline llama.cpp model selection with download."""
@@ -7207,333 +7096,6 @@ class WayfinderApp(ctk.CTk):
         )
         self._llamacpp_status_label.pack(anchor="w")
     
-    def _build_ollama_inline_section(self, parent) -> None:
-        """Build inline Ollama model selection with download."""
-        base_url = self.config.get("ollama_base_url", "http://localhost:11434")
-        current_model = self.config.get("ollama_model", "qwen2.5:1.5b")
-        
-        # Check Ollama availability and get installed models
-        ollama_available = False
-        available_models = []
-        
-        try:
-            import requests
-            response = requests.get(f"{base_url}/api/tags", timeout=5)  # Increased timeout
-            ollama_available = response.status_code == 200
-            if ollama_available:
-                models_data = response.json().get("models", [])
-                available_models = [m.get("name", "") for m in models_data if m.get("name")]
-                self.log(f"📋 Ollama models found: {len(available_models)}")
-        except Exception as e:
-            ollama_available = False
-            self.log(f"⚠️ Could not reach Ollama: {str(e)[:50]}")
-        
-        # Recommended models with full info
-        recommended_models = [
-            {"name": "qwen2.5:1.5b"},
-            {"name": "phi3:mini"},
-            {"name": "llama3.2:1b"},
-            {"name": "smollm2:360m"},
-        ]
-        
-        # Helper to check if a model is installed (handles version tag variations)
-        def is_model_installed(model_name: str, available: list) -> bool:
-            # Exact match first
-            if model_name in available:
-                return True
-            # Check base name match (e.g., "smollm2:360m" matches "smollm2:360m-fp16")
-            base_name = model_name.split(":")[0]
-            for avail in available:
-                if avail.startswith(model_name) or avail.split(":")[0] == base_name:
-                    return True
-            return False
-        
-        # Build model options with install status
-        model_options = []
-        model_data = {}
-        
-        for model_item in recommended_models:
-            model_name = model_item["name"]
-            is_installed = is_model_installed(model_name, available_models)
-            is_selected = model_name == current_model
-            
-            # Get info from OLLAMA_MODEL_INFO
-            info = OLLAMA_MODEL_INFO.get(model_name, {})
-            
-            status_icon = "✓ " if is_installed else ""
-            display_name = f"{status_icon}{model_name}"
-            model_options.append(display_name)
-            model_data[display_name] = {
-                "name": model_name,
-                "info": info,
-                "installed": is_installed,
-                "selected": is_selected,
-            }
-        
-        # Add any other installed models not in recommended list
-        for installed_model in available_models:
-            if installed_model not in [m["name"] for m in recommended_models]:
-                display_name = f"✓ {installed_model}"
-                model_options.append(display_name)
-                model_data[display_name] = {
-                    "name": installed_model,
-                    "info": {"description": "Installed model", "size": "Unknown", "speed": "", "accuracy": ""},
-                    "installed": True,
-                    "selected": installed_model == current_model,
-                }
-        
-        # Determine current selection display
-        current_display = None
-        for display_name, data in model_data.items():
-            if data["selected"]:
-                current_display = display_name
-                break
-        
-        if not current_display and model_options:
-            current_display = model_options[0]
-        
-        # Row 1: Label on left, Dropdown + Download on right
-        row1 = ctk.CTkFrame(parent, fg_color="transparent")
-        row1.pack(fill="x", pady=(0, 4))
-        row1.grid_columnconfigure(0, weight=0)
-        row1.grid_columnconfigure(1, weight=1)
-        row1.grid_columnconfigure(2, weight=0)
-        
-        # Left side: Label + Info icon
-        left_frame = ctk.CTkFrame(row1, fg_color="transparent")
-        left_frame.grid(row=0, column=0, sticky="w")
-        
-        label_widget = ctk.CTkLabel(
-            left_frame,
-            text="Ollama Model",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            text_color=COLORS["text_primary"],
-        )
-        label_widget.pack(side="left")
-        
-        info_icon = ctk.CTkLabel(
-            left_frame,
-            text="ⓘ",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["text_muted"],
-        )
-        info_icon.pack(side="left", padx=(6, 0))
-        ollama_tooltip = "Ollama manages models and provides fast local inference.\nModels stored in ~/.ollama/models/ (configurable).\nGPU acceleration automatic with NVIDIA/AMD drivers."
-        if not ollama_available:
-            ollama_tooltip += "\n\n⚠️ Ollama not running. Start with: ollama serve"
-        ToolTip(label_widget, ollama_tooltip)
-        ToolTip(info_icon, ollama_tooltip)
-        
-        # Right side container
-        right_frame = ctk.CTkFrame(row1, fg_color="transparent")
-        right_frame.grid(row=0, column=2, sticky="e")
-        
-        # Model dropdown
-        self._ollama_model_var = ctk.StringVar(value=current_display or "Select model")
-        self._ollama_model_data = model_data
-        self._ollama_available = ollama_available
-        
-        model_dropdown = ctk.CTkOptionMenu(
-            right_frame,
-            values=model_options if model_options else ["No models available"],
-            variable=self._ollama_model_var,
-            command=self._on_ollama_model_selected,
-            fg_color=COLORS["bg_input"],
-            button_color=COLORS["bg_hover"],
-            button_hover_color=COLORS["accent_dim"],
-            dropdown_fg_color=COLORS["bg_card"],
-            dropdown_hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_primary"],
-            font=(self.font_mono[0], self.font_sizes["small"]),
-            width=180,
-            height=32,
-        )
-        model_dropdown.pack(side="left", padx=(0, 8))
-        self._ollama_model_dropdown = model_dropdown
-        
-        # Add tooltip with model recommendations
-        model_tooltip = "✅ Best: qwen2.5:1.5b (fast + accurate)\n✅ Good: phi3:mini (reliable)\n⚠️ Quirky: llama3.2:1b (safety filters)\n❌ Avoid: smollm2:360m (hallucinates)\n\n💡 Use light/standard intensity"
-        ToolTip(model_dropdown, model_tooltip)
-        
-        # Download button (will show size)
-        self._ollama_download_btn = ctk.CTkButton(
-            right_frame,
-            text="Download",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_hover"],
-            text_color=COLORS["text_bright"],
-            width=120,
-            height=32,
-            command=self._download_selected_ollama_model,
-        )
-        self._ollama_download_btn.pack(side="left")
-        
-        # Row 2: Model info panel
-        self._ollama_info_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_hover"], corner_radius=6)
-        self._ollama_info_frame.pack(fill="x", pady=(4, 6))
-        
-        info_inner = ctk.CTkFrame(self._ollama_info_frame, fg_color="transparent")
-        info_inner.pack(fill="x", padx=10, pady=8)
-        
-        # Description label
-        self._ollama_desc_label = ctk.CTkLabel(
-            info_inner,
-            text="",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_secondary"],
-            anchor="w",
-            justify="left",
-        )
-        self._ollama_desc_label.pack(anchor="w")
-        
-        # Stats row (size, speed, accuracy)
-        stats_frame = ctk.CTkFrame(info_inner, fg_color="transparent")
-        stats_frame.pack(fill="x", pady=(4, 0))
-        
-        self._ollama_size_label = ctk.CTkLabel(
-            stats_frame,
-            text="",
-            font=(self.font_mono[0], self.font_sizes["caption"]),
-            text_color=COLORS["text_muted"],
-        )
-        self._ollama_size_label.pack(side="left")
-        
-        self._ollama_speed_label = ctk.CTkLabel(
-            stats_frame,
-            text="",
-            font=(self.font_mono[0], self.font_sizes["caption"]),
-            text_color=COLORS["text_muted"],
-        )
-        self._ollama_speed_label.pack(side="left", padx=(16, 0))
-        
-        self._ollama_accuracy_label = ctk.CTkLabel(
-            stats_frame,
-            text="",
-            font=(self.font_mono[0], self.font_sizes["caption"]),
-            text_color=COLORS["text_muted"],
-        )
-        self._ollama_accuracy_label.pack(side="left", padx=(16, 0))
-        
-        # Update info panel and button state
-        self._update_ollama_info_panel()
-        self._update_ollama_download_button()
-        
-        # Row 3: Progress bar (hidden by default)
-        self._ollama_progress_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        self._ollama_progress_frame.pack(fill="x", pady=(0, 6))
-        self._ollama_progress_frame.pack_forget()  # Hide initially
-        
-        self._ollama_progress_bar = ctk.CTkProgressBar(
-            self._ollama_progress_frame,
-            progress_color=COLORS["accent"],
-            fg_color=COLORS["bg_hover"],
-            height=8,
-        )
-        self._ollama_progress_bar.pack(fill="x", pady=(0, 4))
-        self._ollama_progress_bar.set(0)
-        
-        self._ollama_status_label = ctk.CTkLabel(
-            self._ollama_progress_frame,
-            text="",
-            font=(self.font_body[0], self.font_sizes["caption"]),
-            text_color=COLORS["text_secondary"],
-        )
-        self._ollama_status_label.pack(anchor="w")
-        
-        # Row 4: Ollama status with install/start buttons
-        status_row = ctk.CTkFrame(parent, fg_color="transparent")
-        status_row.pack(fill="x")
-        
-        # Use OllamaManager for comprehensive status
-        ollama_mgr = get_ollama_manager()
-        ollama_installed = ollama_mgr.is_installed()
-        ollama_running = ollama_available  # Already checked above
-        
-        if ollama_running:
-            status_text = "✓ Ollama is running"
-            status_color = COLORS["accent"]
-        elif ollama_installed:
-            status_text = "⚠️ Ollama installed but not running"
-            status_color = "#FFA726"  # Orange warning
-        else:
-            status_text = "❌ Ollama not installed"
-            status_color = COLORS["text_muted"]
-        
-        self._ollama_status_text = ctk.CTkLabel(
-            status_row,
-            text=status_text,
-            font=(self.font_body[0], self.font_sizes["caption"]),
-            text_color=status_color,
-        )
-        self._ollama_status_text.pack(side="left")
-        
-        # Action buttons container
-        action_frame = ctk.CTkFrame(status_row, fg_color="transparent")
-        action_frame.pack(side="right")
-        
-        # Refresh button (always shown)
-        refresh_btn = ctk.CTkButton(
-            action_frame,
-            text="↻",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_muted"],
-            width=28,
-            height=24,
-            command=lambda: self._rebuild_postproc_section(),
-        )
-        refresh_btn.pack(side="right")
-        ToolTip(refresh_btn, "Refresh Ollama status and installed models")
-        
-        # Install or Start button based on status
-        if not ollama_installed:
-            # Show Install button
-            install_btn = ctk.CTkButton(
-                action_frame,
-                text="Install Ollama",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_hover"],
-                text_color=COLORS["text_bright"],
-                width=110,
-                height=26,
-                command=self._install_ollama,
-            )
-            install_btn.pack(side="right", padx=(0, 8))
-            ToolTip(install_btn, "Download and install Ollama (one-click setup)\nWorks on SteamOS, Bazzite, and most Linux distros")
-        elif not ollama_running:
-            # Show Start button
-            start_btn = ctk.CTkButton(
-                action_frame,
-                text="Start Ollama",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_hover"],
-                text_color=COLORS["text_bright"],
-                width=100,
-                height=26,
-                command=self._start_ollama_service,
-            )
-            start_btn.pack(side="right", padx=(0, 8))
-            ToolTip(start_btn, "Start the Ollama service in the background")
-        else:
-            # Ollama is running - show Test button
-            self._ollama_test_btn = ctk.CTkButton(
-                action_frame,
-                text="Test Model",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                fg_color=COLORS["bg_hover"],
-                hover_color=COLORS["accent_dim"],
-                text_color=COLORS["text_secondary"],
-                width=80,
-                height=24,
-                command=self._test_ollama_model,
-            )
-            self._ollama_test_btn.pack(side="right", padx=(0, 8))
-            ToolTip(self._ollama_test_btn, "Test the selected model with a sample transcription")
-    
     def _on_llamacpp_model_selected(self, selection: str) -> None:
         """Handle llama.cpp model selection from dropdown."""
         if selection not in self._llamacpp_model_data:
@@ -7548,23 +7110,6 @@ class WayfinderApp(ctk.CTk):
         
         self._update_llamacpp_download_button()
         self._update_llamacpp_info_panel()
-        
-        # Update compatibility check when model changes
-        self._update_compatibility_banner()
-    
-    def _on_ollama_model_selected(self, selection: str) -> None:
-        """Handle Ollama model selection from dropdown."""
-        if selection not in self._ollama_model_data:
-            return
-        
-        data = self._ollama_model_data[selection]
-        # Save the model name (stripped of status icon)
-        self.config["ollama_model"] = data["name"]
-        save_config(self.config)
-        self.log(f"⚙ Ollama Model: {data['name']}")
-        
-        self._update_ollama_download_button()
-        self._update_ollama_info_panel()
         
         # Update compatibility check when model changes
         self._update_compatibility_banner()
@@ -7618,76 +7163,6 @@ class WayfinderApp(ctk.CTk):
             self._llamacpp_size_label.configure(text=f"📦 {size}" if size else "")
             self._llamacpp_speed_label.configure(text=f"⚡ {speed}" if speed else "")
             self._llamacpp_accuracy_label.configure(text=f"🎯 {accuracy}" if accuracy else "")
-    
-    def _update_ollama_download_button(self) -> None:
-        """Update download button state based on selected model."""
-        if not hasattr(self, '_ollama_model_var'):
-            return
-        
-        selection = self._ollama_model_var.get()
-        if selection in self._ollama_model_data:
-            data = self._ollama_model_data[selection]
-            info = data.get("info", {})
-            size = info.get("size", "")
-            
-            if data["installed"]:
-                self._ollama_download_btn.configure(
-                    text="✓ Installed",
-                    fg_color=COLORS["bg_hover"],
-                    hover_color=COLORS["bg_hover"],
-                    state="disabled",
-                )
-            else:
-                if self._ollama_available:
-                    btn_text = f"Download ({size})" if size else "Download"
-                    self._ollama_download_btn.configure(
-                        text=btn_text,
-                        fg_color=COLORS["accent"],
-                        hover_color=COLORS["accent_hover"],
-                        state="normal",
-                    )
-                else:
-                    self._ollama_download_btn.configure(
-                        text="Ollama offline",
-                        fg_color=COLORS["bg_hover"],
-                        hover_color=COLORS["bg_hover"],
-                        state="disabled",
-                    )
-    
-    def _update_ollama_info_panel(self) -> None:
-        """Update the model info panel based on selected model."""
-        if not hasattr(self, '_ollama_model_var') or not hasattr(self, '_ollama_desc_label'):
-            return
-        
-        selection = self._ollama_model_var.get()
-        if selection in self._ollama_model_data:
-            data = self._ollama_model_data[selection]
-            info = data.get("info", {})
-            model_name = data.get("name", "").lower()
-            
-            # Update description with recommendation badge
-            desc = info.get("description", "")
-            
-            # Add recommendation indicator based on model
-            if "qwen2.5" in model_name and ("1.5b" in model_name or "3b" in model_name):
-                desc = "✅ Recommended  •  " + desc
-            elif "phi3" in model_name:
-                desc = "✅ Good  •  " + desc
-            elif "llama3.2:1b" in model_name:
-                desc = "⚠️ Has quirks  •  " + desc
-            elif "smollm" in model_name or "360m" in model_name:
-                desc = "❌ Too small  •  " + desc
-            
-            self._ollama_desc_label.configure(text=desc)
-            
-            # Update stats
-            size = info.get("size", "")
-            speed = info.get("speed", "")
-            accuracy = info.get("accuracy", "")
-            
-            self._ollama_size_label.configure(text=f"📦 {size}" if size else "")
-            self._ollama_speed_label.configure(text=f"⚡ {speed}" if speed else "")
-            self._ollama_accuracy_label.configure(text=f"🎯 {accuracy}" if accuracy else "")
     
     def _download_selected_llamacpp_model(self) -> None:
         """Download the currently selected llama.cpp model."""
@@ -7931,44 +7406,6 @@ class WayfinderApp(ctk.CTk):
         self._llamacpp_status_label.configure(text="Cancelling...", text_color=COLORS["text_muted"])
         self._llamacpp_download_btn.configure(state="disabled", text="Cancelling...")
     
-    def _install_ollama(self) -> None:
-        """Install Ollama with one-click setup."""
-        ollama_mgr = get_ollama_manager()
-        
-        # Check if already installed
-        if ollama_mgr.is_installed():
-            self.log("✓ Ollama is already installed")
-            self._rebuild_postproc_section()
-            return
-        
-        # Update UI to show installation progress
-        self._ollama_status_text.configure(text="Installing Ollama...", text_color=COLORS["text_secondary"])
-        self.log("⬇️ Installing Ollama...")
-        
-        def on_progress(status: str, progress: float):
-            def update():
-                try:
-                    self._ollama_status_text.configure(text=status)
-                except:
-                    pass
-            self.after(0, update)
-        
-        def on_complete(success: bool, message: str):
-            def update():
-                if success:
-                    self._ollama_status_text.configure(text="✓ " + message, text_color=COLORS["accent"])
-                    self.log(f"✓ {message}")
-                    # Auto-start the service after installation
-                    self.after(1000, self._start_ollama_service)
-                else:
-                    self._ollama_status_text.configure(text="❌ " + message, text_color="#CF7B7B")
-                    self.log(f"❌ {message}")
-                # Rebuild UI after a delay
-                self.after(2000, self._rebuild_postproc_section)
-            self.after(0, update)
-        
-        ollama_mgr.install(progress_callback=on_progress, complete_callback=on_complete)
-    
     def _check_startup_dependencies(self) -> None:
         """Check critical dependencies on startup and warn/adjust as needed."""
         import shutil
@@ -8005,134 +7442,6 @@ class WayfinderApp(ctk.CTk):
         if not shutil.which("ydotool"):
             self.log("⚠️ ydotool not found - text injection won't work")
             self.log("💡 Install: sudo dnf install ydotool && sudo systemctl enable --now ydotool")
-    
-    def _auto_start_ollama_if_needed(self) -> None:
-        """Auto-start Ollama on app boot if installed.
-        
-        Always starts Ollama in the background so it's ready for use,
-        regardless of which post-processing backend is currently selected.
-        Warns user if Ollama is the selected backend but not installed.
-        
-        Includes retry logic for robustness when systemd service is starting.
-        """
-        ollama_mgr = get_ollama_manager()
-        backend = self.config.get("post_processing_backend", "ollama")
-        postproc_enabled = self.config.get("post_processing_enabled", True)
-        
-        # Check if Ollama is installed
-        if not ollama_mgr.is_installed():
-            # Warn user if Ollama is the selected backend and post-processing is enabled
-            if backend == "ollama" and postproc_enabled:
-                self.log("⚠️ Ollama is not installed - post-processing will not work")
-                self.log("💡 Install Ollama from the Settings panel or use: curl -fsSL https://ollama.com/install.sh | sh")
-            return
-        
-        # Check if already running (with retry for slow systemd startup)
-        def check_and_start_ollama(attempt: int = 1, max_attempts: int = 5):
-            if ollama_mgr.is_service_running():
-                self.log("✓ Ollama is running")
-                if backend == "ollama":
-                    self._rebuild_postproc_section()
-                    # Check if default model is installed, auto-download if not
-                    self.after(1000, self._ensure_default_ollama_model)
-                return
-            
-            if attempt < max_attempts:
-                # Service might be starting up, retry after a delay
-                self.log(f"⏳ Waiting for Ollama service... (attempt {attempt}/{max_attempts})")
-                self.after(2000, lambda: check_and_start_ollama(attempt + 1, max_attempts))
-                return
-            
-            # After max attempts, try to start it ourselves
-            self.log("🚀 Starting Ollama service...")
-            
-            def on_service_status(success: bool, message: str):
-                def update():
-                    if success:
-                        self.log(f"✓ {message}")
-                        # Refresh the post-processing UI to show updated status
-                        if backend == "ollama":
-                            self._rebuild_postproc_section()
-                    else:
-                        self.log(f"⚠️ {message}")
-                        # Try systemctl as fallback
-                        self._try_systemctl_ollama()
-                self.after(0, update)
-            
-            ollama_mgr.start_service(callback=on_service_status)
-        
-        # Start the check/start sequence
-        check_and_start_ollama()
-    
-    def _try_systemctl_ollama(self) -> None:
-        """Try to start Ollama via systemctl as a fallback."""
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["systemctl", "start", "ollama"],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                self.log("✓ Ollama started via systemctl")
-                # Check again after a short delay
-                self.after(3000, self._verify_ollama_running)
-            else:
-                self.log("⚠️ Could not start Ollama - check 'systemctl status ollama'")
-        except Exception as e:
-            self.log(f"⚠️ Failed to start Ollama via systemctl: {e}")
-    
-    def _verify_ollama_running(self) -> None:
-        """Verify Ollama is running and update UI."""
-        ollama_mgr = get_ollama_manager()
-        if ollama_mgr.is_service_running():
-            self.log("✓ Ollama is running")
-            backend = self.config.get("post_processing_backend", "ollama")
-            if backend == "ollama":
-                self._rebuild_postproc_section()
-                # Check if default model is installed, auto-download if not
-                self.after(1000, self._ensure_default_ollama_model)
-        else:
-            self.log("⚠️ Ollama still not responding - post-processing may not work")
-    
-    def _ensure_default_ollama_model(self) -> None:
-        """Ensure the default Ollama model is installed, auto-download if not."""
-        ollama_mgr = get_ollama_manager()
-        
-        if not ollama_mgr.is_service_running():
-            return
-        
-        default_model = self.config.get("ollama_model", "qwen2.5:1.5b")
-        installed_models = ollama_mgr.list_models()
-        
-        # Check if default model (or variant) is installed
-        model_base = default_model.split(":")[0]
-        is_installed = any(model_base in m for m in installed_models)
-        
-        if is_installed:
-            return
-        
-        # No models or default not installed - auto-download
-        if not installed_models:
-            self.log(f"📦 No Ollama models found - downloading {default_model} (230MB)...")
-        else:
-            self.log(f"📦 Default model not found - downloading {default_model}...")
-        
-        def on_progress(status: str, progress: float):
-            if progress >= 0:
-                self.after(0, lambda: self.log(f"   {status}"))
-        
-        def on_complete(success: bool, message: str):
-            def update():
-                if success:
-                    self.log(f"✓ {message}")
-                    self._rebuild_postproc_section()
-                else:
-                    self.log(f"⚠️ {message}")
-            self.after(0, update)
-        
-        ollama_mgr.pull_model(default_model, progress_callback=on_progress, complete_callback=on_complete)
     
     def _start_display_wake_listener(self) -> None:
         """Start D-Bus listener for system wake-up events to refresh the overlay.
@@ -8201,425 +7510,6 @@ class WayfinderApp(ctk.CTk):
                 self.log("✓ Overlay refreshed successfully")
             else:
                 self.log("⚠️ Overlay refresh failed")
-    
-    def _test_ollama_model(self) -> None:
-        """Test the selected Ollama model with a sample transcription."""
-        import time
-        import requests
-        
-        model_name = self.config.get("ollama_model", "qwen2.5:1.5b")
-        base_url = self.config.get("ollama_base_url", "http://localhost:11434")
-        
-        # Prevent multiple simultaneous tests
-        if getattr(self, '_ollama_test_running', False):
-            self.log("⚠️ Test already running")
-            return
-        
-        self._ollama_test_running = True
-        self.log(f"🧪 Testing model: {model_name}")
-        
-        # Update button state
-        try:
-            if hasattr(self, '_ollama_test_btn') and self._ollama_test_btn.winfo_exists():
-                self._ollama_test_btn.configure(state="disabled", text="Testing...")
-        except Exception:
-            pass
-        
-        # Update status
-        try:
-            if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-                self._ollama_status_text.configure(text="🧪 Testing...", text_color=COLORS["text_secondary"])
-        except Exception:
-            pass
-        
-        self.update_idletasks()  # Force UI update
-        
-        start_time = time.time()
-        test_input = "hello how r u doing today"
-        
-        try:
-            # Step 1: Check Ollama
-            self.log("   Connecting to Ollama...")
-            self.update_idletasks()
-            
-            tags_response = requests.get(f"{base_url}/api/tags", timeout=5)
-            if tags_response.status_code != 200:
-                raise Exception(f"HTTP {tags_response.status_code}")
-            
-            self.log("   ✓ Connected")
-            
-            # Step 2: Check model
-            models = [m.get("name", "") for m in tags_response.json().get("models", [])]
-            model_base = model_name.split(":")[0]
-            if not any(model_name == m or m.startswith(model_base) for m in models):
-                raise Exception(f"Model not found. Available: {', '.join(models[:3])}")
-            
-            self.log(f"   ✓ Model found")
-            self.update_idletasks()
-            
-            # Step 3: Quick inference
-            response = requests.post(
-                f"{base_url}/api/generate",
-                json={
-                    "model": model_name,
-                    "prompt": f"Correct: \"{test_input}\"",
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 20}
-                },
-                timeout=30,
-            )
-            
-            if response.status_code != 200:
-                raise Exception(f"Inference failed: HTTP {response.status_code}")
-            
-            data = response.json()
-            result = data.get("response", "").strip()
-            token_count = data.get("eval_count", 0)
-            elapsed = time.time() - start_time
-            
-            if not result:
-                raise Exception("Empty response")
-            
-            # Success
-            self.log(f"✓ Test passed in {elapsed:.2f}s ({token_count} tokens)")
-            self.log(f"   Output: \"{result[:60]}...\"")
-            
-            try:
-                if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-                    self._ollama_status_text.configure(
-                        text=f"✓ Working • {elapsed:.1f}s",
-                        text_color=COLORS["accent"]
-                    )
-            except Exception:
-                pass
-                
-        except Exception as e:
-            elapsed = time.time() - start_time
-            self.log(f"❌ Test failed: {e}")
-            try:
-                if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-                    self._ollama_status_text.configure(
-                        text=f"✗ {str(e)[:40]}",
-                        text_color="#CF7B7B"
-                    )
-            except Exception:
-                pass
-        finally:
-            self._ollama_test_running = False
-            try:
-                if hasattr(self, '_ollama_test_btn') and self._ollama_test_btn.winfo_exists():
-                    self._ollama_test_btn.configure(state="normal", text="Test Model")
-            except Exception:
-                pass
-            self.update_idletasks()
-    
-    def _start_ollama_service(self) -> None:
-        """Start the Ollama service."""
-        ollama_mgr = get_ollama_manager()
-        
-        # Check if already running
-        if ollama_mgr.is_service_running():
-            self.log("✓ Ollama is already running")
-            self._rebuild_postproc_section()
-            return
-        
-        # Check if installed
-        if not ollama_mgr.is_installed():
-            self.log("❌ Ollama is not installed")
-            return
-        
-        # Update UI safely (element may not exist)
-        if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-            self._ollama_status_text.configure(text="Starting Ollama...", text_color=COLORS["text_secondary"])
-        self.log("🚀 Starting Ollama service...")
-        
-        def on_service_status(success: bool, message: str):
-            def update():
-                # Safely update UI - widget may have been destroyed by rebuild
-                try:
-                    if hasattr(self, '_ollama_status_text') and self._ollama_status_text.winfo_exists():
-                        if success:
-                            self._ollama_status_text.configure(text="✓ " + message, text_color=COLORS["accent"])
-                        else:
-                            self._ollama_status_text.configure(text="❌ " + message, text_color="#CF7B7B")
-                except Exception:
-                    pass  # Widget was destroyed, ignore
-                
-                if success:
-                    self.log(f"✓ {message}")
-                else:
-                    self.log(f"❌ {message}")
-                # Rebuild UI to show model selection
-                self.after(500, self._rebuild_postproc_section)
-            self.after(0, update)
-        
-        ollama_mgr.start_service(callback=on_service_status)
-    
-    def _download_selected_ollama_model(self) -> None:
-        """Download the currently selected Ollama model."""
-        import traceback
-        log_file = Path.home() / ".local" / "share" / "wayfinder-aura" / "debug.log"
-        
-        def debug_log(msg):
-            try:
-                with open(log_file, "a") as f:
-                    f.write(f"{msg}\n")
-            except:
-                pass
-        
-        debug_log(f"[{__import__('datetime').datetime.now()}] _download_selected_ollama_model called")
-        
-        try:
-            if self._inline_download_active:
-                debug_log("Already active, returning")
-                return
-            
-            if not self._ollama_available:
-                debug_log("Ollama not available")
-                self.log("⚠️ Ollama is not running. Start with: ollama serve")
-                return
-            
-            selection = self._ollama_model_var.get()
-            debug_log(f"Selection: {selection}")
-            if selection not in self._ollama_model_data:
-                debug_log(f"Selection not in model_data")
-                return
-            
-            data = self._ollama_model_data[selection]
-            if data["installed"]:
-                debug_log("Already installed")
-                return
-            
-            model_name = data["name"]
-            base_url = self.config.get("ollama_base_url", "http://localhost:11434")
-            debug_log(f"Model: {model_name}, URL: {base_url}")
-            
-            self._inline_download_active = True
-            self._cancel_ollama_download = False
-            
-            # Update button to show Cancel option
-            debug_log("Updating button...")
-            self._ollama_download_btn.configure(
-                text="✕ Cancel",
-                fg_color="#CF6679",  # Reddish cancel color
-                hover_color="#B55566",
-                text_color="#FFFFFF",  # White text for readability
-                state="normal",
-                command=self._cancel_ollama_download_action,
-            )
-            
-            # Show progress bar
-            debug_log("Showing progress bar...")
-            self._ollama_progress_frame.pack(fill="x", pady=(0, 6))
-            self._ollama_progress_bar.set(0)
-            self._ollama_status_label.configure(text="Connecting to Ollama...", text_color=COLORS["text_secondary"])
-            debug_log("Progress bar shown, starting thread...")
-        except Exception as e:
-            debug_log(f"CRASH in _download_selected_ollama_model: {e}\n{traceback.format_exc()}")
-            raise
-        
-        def format_size(size_bytes):
-            if size_bytes >= 1024 * 1024 * 1024:
-                return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
-            elif size_bytes >= 1024 * 1024:
-                return f"{size_bytes / (1024 * 1024):.1f} MB"
-            else:
-                return f"{size_bytes / 1024:.0f} KB"
-        
-        def update_progress(progress, status_text):
-            """Update progress UI - must be called via self.after() from threads."""
-            def do_update():
-                try:
-                    if hasattr(self, '_ollama_progress_bar') and self._ollama_progress_bar.winfo_exists():
-                        self._ollama_progress_bar.set(progress)
-                    if hasattr(self, '_ollama_status_label') and self._ollama_status_label.winfo_exists():
-                        self._ollama_status_label.configure(text=status_text)
-                    # Always force UI redraw after updates (moved outside conditionals)
-                    self.update_idletasks()
-                except Exception as e:
-                    debug_log(f"UI update error: {e}")
-            # Schedule on main thread with small delay for better UI responsiveness
-            self.after(10, do_update)
-        
-        def download_thread():
-            debug_log("Thread started!")
-            import time as time_module
-            start_time = time_module.time()
-            last_completed = 0
-            last_time = start_time
-            first_update = True  # Track first update to ensure immediate feedback
-            
-            try:
-                import requests
-                import json
-                debug_log(f"Making request to {base_url}/api/pull")
-                self.log(f"⬇️ Downloading {model_name} via Ollama...")
-                
-                # Immediately show we're connecting
-                update_progress(0.05, "Connecting to Ollama...")
-                
-                # Use Ollama's pull API
-                response = requests.post(
-                    f"{base_url}/api/pull",
-                    json={"name": model_name},
-                    stream=True,
-                    timeout=(30, 1800),  # 30s connect, 30min read for large models
-                )
-                debug_log(f"Got response: status={response.status_code}")
-                
-                if response.status_code != 200:
-                    raise Exception(f"Ollama returned status {response.status_code}")
-                
-                last_status = ""
-                line_count = 0
-                
-                for line in response.iter_lines():
-                    line_count += 1
-                    if line_count <= 3 or line_count % 50 == 0:
-                        debug_log(f"Processing line {line_count}")
-                    # Check for cancel
-                    if self._cancel_ollama_download:
-                        raise Exception("Download cancelled by user")
-                    
-                    if line:
-                        try:
-                            data = json.loads(line)
-                            status = data.get("status", "")
-                            
-                            # Handle different status types
-                            if status == "success":
-                                # Download complete!
-                                update_progress(1.0, "✓ Download complete")
-                                continue
-                            elif status in ("verifying sha256 digest", "writing manifest"):
-                                # Final stages
-                                update_progress(0.95, f"Finalizing: {status}")
-                                continue
-                            elif status == "pulling manifest":
-                                update_progress(0.1, "Fetching model info...")
-                                continue
-                            
-                            if "total" in data and "completed" in data:
-                                total = data["total"]
-                                completed = data["completed"]
-                                current_time = time_module.time()
-                                
-                                if total > 0:
-                                    progress = completed / total
-                                    
-                                    # Check if this layer is already complete (model cached)
-                                    is_cached = completed == total
-                                    
-                                    # Calculate speed (or show "cached" for instant completion)
-                                    time_delta = current_time - last_time
-                                    if first_update or time_delta > 0.3:  # Always update on first, then every 300ms
-                                        first_update = False
-                                        
-                                        if is_cached:
-                                            # Model layer already cached
-                                            progress_text = f"Verifying: {format_size(total)} (cached)"
-                                        else:
-                                            bytes_delta = completed - last_completed
-                                            speed = bytes_delta / time_delta if time_delta > 0 else 0
-                                            last_completed = completed
-                                            last_time = current_time
-                                            
-                                            # Calculate ETA
-                                            remaining = total - completed
-                                            eta = remaining / speed if speed > 0 else 0
-                                            
-                                            speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed > 0 else ""
-                                            eta_str = ""
-                                            if eta > 0 and eta < 86400:
-                                                if eta < 60:
-                                                    eta_str = f"~{int(eta)}s left"
-                                                elif eta < 3600:
-                                                    eta_str = f"~{int(eta//60)}m left"
-                                                else:
-                                                    eta_str = f"~{int(eta//3600)}h left"
-                                            
-                                            progress_text = f"{format_size(completed)} / {format_size(total)} ({progress*100:.0f}%)"
-                                            if speed_str:
-                                                progress_text += f" • {speed_str}"
-                                            if eta_str:
-                                                progress_text += f" • {eta_str}"
-                                        
-                                        update_progress(progress, progress_text)
-                            elif status and status != last_status:
-                                last_status = status
-                                # Show status updates
-                                update_progress(0.3, status)
-                        except json.JSONDecodeError:
-                            pass
-                
-                # Calculate final time
-                total_time = time_module.time() - start_time
-                
-                # Success
-                def on_success():
-                    self._inline_download_active = False
-                    try:
-                        if hasattr(self, '_ollama_progress_bar') and self._ollama_progress_bar.winfo_exists():
-                            self._ollama_progress_bar.set(1.0)
-                            time_str = f"{int(total_time//60)}m {int(total_time%60)}s" if total_time >= 60 else f"{int(total_time)}s"
-                            self._ollama_status_label.configure(
-                                text=f"✓ Downloaded {model_name} in {time_str}",
-                                text_color=COLORS["accent"]
-                            )
-                            self.update_idletasks()
-                    except:
-                        pass
-                    self.log(f"✓ Downloaded: {model_name}")
-                    
-                    # Hide progress after 2 seconds and rebuild
-                    self.after(2000, self._rebuild_postproc_section)
-                
-                self.after(0, on_success)
-                
-            except Exception as e:
-                error_msg = str(e)
-                is_cancelled = "cancelled" in error_msg.lower()
-                
-                def on_error():
-                    self._inline_download_active = False
-                    try:
-                        if is_cancelled:
-                            if hasattr(self, '_ollama_status_label') and self._ollama_status_label.winfo_exists():
-                                self._ollama_status_label.configure(
-                                    text="Download cancelled",
-                                    text_color=COLORS["text_muted"]
-                                )
-                            self.log("⚠️ Download cancelled")
-                            self.after(1000, self._rebuild_postproc_section)
-                        else:
-                            if hasattr(self, '_ollama_status_label') and self._ollama_status_label.winfo_exists():
-                                self._ollama_status_label.configure(
-                                    text=f"✗ Error: {error_msg[:60]}",
-                                    text_color="#CF7B7B"
-                                )
-                            # Reset button for retry
-                            if hasattr(self, '_ollama_download_btn') and self._ollama_download_btn.winfo_exists():
-                                self._ollama_download_btn.configure(
-                                    text="Retry",
-                                    fg_color=COLORS["accent"],
-                                    hover_color=COLORS["accent_hover"],
-                                    text_color=COLORS["text_bright"],
-                                    state="normal",
-                                    command=self._download_selected_ollama_model,
-                                )
-                            self.log(f"⚠️ Download failed: {error_msg}")
-                    except:
-                        pass
-                
-                self.after(0, on_error)
-        
-        threading.Thread(target=download_thread, daemon=True).start()
-    
-    def _cancel_ollama_download_action(self) -> None:
-        """Cancel the current Ollama model download."""
-        self._cancel_ollama_download = True
-        self._ollama_status_label.configure(text="Cancelling...", text_color=COLORS["text_muted"])
-        self._ollama_download_btn.configure(state="disabled", text="Cancelling...")
     
     def _browse_custom_gguf(self) -> None:
         """Browse for a custom GGUF file."""
@@ -9054,524 +7944,10 @@ class WayfinderApp(ctk.CTk):
         
         threading.Thread(target=download_thread, daemon=True).start()
     
-    def open_ollama_model_settings(self):
-        """Open dialog to select or download Ollama models with direct download support."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Ollama Models")
-        dialog.geometry("550x650")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        # Title
-        ctk.CTkLabel(
-            inner,
-            text="Ollama Models",
-            font=(self.font_header[0], 20, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 8))
-        
-        ctk.CTkLabel(
-            inner,
-            text="Select a model or download a recommended one. Downloads happen automatically.",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(0, 16))
-        
-        # Check if Ollama is available
-        base_url = self.config.get("ollama_base_url", "http://localhost:11434")
-        ollama_available = False
-        available_models = []
-        current_model = self.config.get("ollama_model", "qwen2.5:1.5b")
-        
-        try:
-            import requests
-            response = requests.get(f"{base_url}/api/tags", timeout=2)
-            ollama_available = response.status_code == 200
-            
-            if ollama_available:
-                models_data = response.json().get("models", [])
-                available_models = [m.get("name", "") for m in models_data if m.get("name")]
-        except Exception as e:
-            ollama_available = False
-        
-        # Show currently selected model (always visible)
-        if current_model:
-            selected_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_surface"], corner_radius=RADIUS["sm"])
-            selected_frame.pack(fill="x", pady=(0, 12))
-            
-            ctk.CTkLabel(
-                selected_frame,
-                text=f"Selected: {current_model}",
-                font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                text_color=COLORS["accent"],
-            ).pack(padx=12, pady=8)
-        
-        # Status indicator (subtle, not intrusive)
-        status_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        status_frame.pack(fill="x", pady=(0, 12))
-        
-        if ollama_available:
-            status_indicator = ctk.CTkLabel(
-                status_frame,
-                text="✓ Ollama is running",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["accent"],
-            )
-            status_indicator.pack(side="left")
-        else:
-            status_indicator = ctk.CTkLabel(
-                status_frame,
-                text="⚠️ Ollama service not detected (you can still select models)",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_secondary"],
-            )
-            status_indicator.pack(side="left")
-            
-            def check_ollama_status():
-                """Check if Ollama is now running and refresh."""
-                try:
-                    import requests
-                    test_response = requests.get(f"{base_url}/api/tags", timeout=2)
-                    if test_response.status_code == 200:
-                        status_indicator.configure(text="✓ Ollama is running", text_color=COLORS["accent"])
-                        dialog.after(100, lambda: (dialog.destroy(), self.open_ollama_model_settings()))
-                    else:
-                        status_indicator.configure(text="⚠️ Service not detected", text_color=COLORS["text_secondary"])
-                except:
-                    status_indicator.configure(text="⚠️ Service not detected", text_color=COLORS["text_secondary"])
-            
-            check_btn = ctk.CTkButton(
-                status_frame,
-                text="Check Status",
-                font=(self.font_body[0], self.font_sizes["caption"]),
-                fg_color=COLORS["bg_hover"],
-                hover_color=COLORS["bg_elevated"],
-                text_color=COLORS["text_primary"],
-                width=80,
-                height=24,
-                command=check_ollama_status,
-            )
-            check_btn.pack(side="right")
-        
-        # Recommended models section (always visible)
-        recommended_label = ctk.CTkLabel(
-            inner,
-            text="RECOMMENDED MODELS",
-            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
-            text_color=COLORS["text_muted"],
-        )
-        recommended_label.pack(anchor="w", pady=(0, 8))
-        
-        # Help section (only if Ollama not available, collapsed by default)
-        if not ollama_available:
-            help_expanded = {"value": False}
-            help_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_surface"], corner_radius=RADIUS["sm"])
-            
-            def toggle_help():
-                if help_expanded["value"]:
-                    help_frame.pack_forget()
-                    help_expanded["value"] = False
-                    help_toggle.configure(text="Need help?")
-                else:
-                    help_frame.pack(fill="x", pady=(0, 12), after=recommended_label)
-                    help_expanded["value"] = True
-                    help_toggle.configure(text="Hide help")
-            
-            help_toggle = ctk.CTkButton(
-                inner,
-                text="Need help?",
-                font=(self.font_body[0], self.font_sizes["caption"]),
-                fg_color="transparent",
-                hover_color=COLORS["bg_hover"],
-                text_color=COLORS["text_muted"],
-                anchor="w",
-                command=toggle_help,
-            )
-            help_toggle.pack(fill="x", pady=(0, 8), after=status_frame)
-            
-            # Help content (hidden by default)
-            help_inner = ctk.CTkFrame(help_frame, fg_color="transparent")
-            help_inner.pack(fill="x", padx=12, pady=12)
-            
-            ctk.CTkLabel(
-                help_inner,
-                text="To use Ollama models, you need Ollama installed and running:",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_secondary"],
-            ).pack(anchor="w", pady=(0, 8))
-            
-            ctk.CTkLabel(
-                help_inner,
-                text="1. Install: Visit https://ollama.com and download for your system",
-                font=(self.font_body[0], self.font_sizes["caption"]),
-                text_color=COLORS["text_muted"],
-            ).pack(anchor="w", pady=(0, 4))
-            
-            ctk.CTkLabel(
-                help_inner,
-                text="2. Start Ollama: It usually runs automatically, or run 'ollama serve' in terminal",
-                font=(self.font_body[0], self.font_sizes["caption"]),
-                text_color=COLORS["text_muted"],
-            ).pack(anchor="w", pady=(0, 4))
-            
-            ctk.CTkLabel(
-                help_inner,
-                text="3. Click 'Check Status' above once Ollama is running",
-                font=(self.font_body[0], self.font_sizes["caption"]),
-                text_color=COLORS["text_muted"],
-            ).pack(anchor="w")
-        
-        # Scrollable list
-        scroll = SmoothScrollableFrame(
-            inner,
-            fg_color=COLORS["bg_surface"],
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
-            height=350,
-        )
-        scroll.pack(fill="both", expand=True, pady=(0, 16))
-        
-        # Recommended models with download buttons
-        recommended_models = [
-            {"name": "qwen2.5:1.5b", "desc": "Best balance (default)", "recommended": True},
-            {"name": "phi3:mini", "desc": "Fast, small (3.8GB)", "recommended": True},
-            {"name": "llama3.2:1b", "desc": "Meta's latest (1B params)", "recommended": False},
-            {"name": "smollm2:360m", "desc": "Ultra-small, hallucinates", "recommended": False},
-        ]
-        
-        for model_info in recommended_models:
-            model_name = model_info["name"]
-            is_installed = model_name in available_models
-            is_selected = model_name == current_model  # Show as selected even if not installed
-            
-            frame = ctk.CTkFrame(
-                scroll,
-                fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_surface"],
-                corner_radius=RADIUS["sm"],
-                border_width=1 if is_selected else 0,
-                border_color=COLORS["accent"] if is_selected else "transparent",
-            )
-            frame.pack(fill="x", padx=4, pady=4)
-            
-            # Model info
-            info_frame = ctk.CTkFrame(frame, fg_color="transparent")
-            info_frame.pack(fill="x", padx=12, pady=10)
-            
-            name_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
-            name_frame.pack(fill="x")
-            
-            name_label = ctk.CTkLabel(
-                name_frame,
-                text=model_name + (" ⭐" if model_info.get("recommended") else ""),
-                font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                text_color=COLORS["text_bright"],
-            )
-            name_label.pack(side="left")
-            
-            if is_selected:
-                status_text = "✓ Selected"
-                if not is_installed:
-                    status_text += " (not installed)"
-                selected_label = ctk.CTkLabel(
-                    name_frame,
-                    text=status_text,
-                    font=(self.font_body[0], self.font_sizes["caption"]),
-                    text_color=COLORS["accent"],
-                )
-                selected_label.pack(side="right")
-            
-            desc_label = ctk.CTkLabel(
-                info_frame,
-                text=model_info["desc"],
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_secondary"],
-            )
-            desc_label.pack(anchor="w", pady=(4, 0))
-            
-            # Action button
-            actions_frame = ctk.CTkFrame(frame, fg_color="transparent")
-            actions_frame.pack(fill="x", padx=12, pady=(0, 10))
-            
-            # Show action buttons based on state
-            if not is_selected:
-                if is_installed:
-                    # Installed but not selected - show Select button
-                    select_btn = ctk.CTkButton(
-                        actions_frame,
-                        text="Select",
-                        font=(self.font_body[0], self.font_sizes["small"]),
-                        fg_color=COLORS["accent"],
-                        hover_color=COLORS["accent_hover"],
-                        text_color=COLORS["text_bright"],
-                        command=lambda m=model_name: self._select_ollama_model(m, dialog),
-                    )
-                    select_btn.pack(side="left")
-                else:
-                    # Not installed - show Download or Select based on Ollama availability
-                    if ollama_available:
-                        download_btn = ctk.CTkButton(
-                            actions_frame,
-                            text="⬇️ Download",
-                            font=(self.font_body[0], self.font_sizes["small"]),
-                            fg_color=COLORS["accent"],
-                            hover_color=COLORS["accent_hover"],
-                            text_color=COLORS["text_bright"],
-                            command=lambda m=model_name: self._download_ollama_model(m, dialog),
-                        )
-                        download_btn.pack(side="left")
-                    else:
-                        # Ollama not running - allow pre-selection
-                        select_btn = ctk.CTkButton(
-                            actions_frame,
-                            text="Select",
-                            font=(self.font_body[0], self.font_sizes["small"]),
-                            fg_color=COLORS["bg_hover"],
-                            hover_color=COLORS["bg_elevated"],
-                            text_color=COLORS["text_primary"],
-                            command=lambda m=model_name: self._select_ollama_model(m, dialog),
-                        )
-                        select_btn.pack(side="left")
-            elif is_selected and not is_installed and ollama_available:
-                # Selected but not installed and Ollama is running - show download option
-                download_btn = ctk.CTkButton(
-                    actions_frame,
-                    text="⬇️ Download Now",
-                    font=(self.font_body[0], self.font_sizes["small"]),
-                    fg_color=COLORS["accent"],
-                    hover_color=COLORS["accent_hover"],
-                    text_color=COLORS["text_bright"],
-                    command=lambda m=model_name: self._download_ollama_model(m, dialog),
-                )
-                download_btn.pack(side="left")
-        
-        # Installed models section (if any)
-        if available_models and len(available_models) > len([m["name"] for m in recommended_models if m["name"] in available_models]):
-            installed_label = ctk.CTkLabel(
-                inner,
-                text="OTHER INSTALLED MODELS",
-                font=(self.font_body[0], self.font_sizes["caption"], "bold"),
-                text_color=COLORS["text_muted"],
-            )
-            installed_label.pack(anchor="w", pady=(8, 8))
-            
-            other_scroll = SmoothScrollableFrame(
-                inner,
-                fg_color=COLORS["bg_surface"],
-                scrollbar_button_color=COLORS["bg_hover"],
-                scrollbar_button_hover_color=COLORS["accent_dim"],
-                height=150,
-            )
-            other_scroll.pack(fill="both", expand=True, pady=(0, 16))
-            
-            other_models = [m for m in available_models if m not in [rm["name"] for rm in recommended_models]]
-            for model_name in sorted(other_models):
-                is_selected = model_name == current_model
-                frame = ctk.CTkFrame(
-                    other_scroll,
-                    fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_surface"],
-                    corner_radius=RADIUS["sm"],
-                )
-                frame.pack(fill="x", padx=4, pady=2)
-                
-                btn = ctk.CTkButton(
-                    frame,
-                    text=model_name + (" ✓ Selected" if is_selected else ""),
-                    font=(self.font_body[0], self.font_sizes["body"]),
-                    fg_color="transparent" if not is_selected else COLORS["bg_hover"],
-                    hover_color=COLORS["bg_hover"],
-                    text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
-                    anchor="w",
-                    command=lambda m=model_name: self._select_ollama_model(m, dialog),
-                )
-                btn.pack(fill="x", padx=8, pady=6)
-        
-        # Refresh button
-        refresh_btn = ctk.CTkButton(
-            inner,
-            text="🔄 Refresh List",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_primary"],
-            command=lambda: (dialog.destroy(), self.open_ollama_model_settings()),
-        )
-        refresh_btn.pack(fill="x", pady=(0, 8))
-        
-        # Close button
-        close_btn = ctk.CTkButton(
-            inner,
-            text="Close",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            fg_color=COLORS["bg_card"],
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_primary"],
-            command=dialog.destroy,
-        )
-        close_btn.pack(fill="x")
-    
-    def _select_ollama_model(self, model_name: str, dialog):
-        """Select an Ollama model."""
-        self.config["ollama_model"] = model_name
-        save_config(self.config)
-        self.log(f"⚙ Ollama model: {model_name}")
-        dialog.destroy()
-        # Rebuild settings to refresh UI
-        current_mode = self.config.get("processing_mode", "local")
-        self._build_mode_settings(current_mode)
-    
-    def _download_ollama_model(self, model_name: str, parent_dialog):
-        """Download an Ollama model using the API."""
-        base_url = self.config.get("ollama_base_url", "http://localhost:11434")
-        
-        # Create progress dialog
-        progress_dialog = ctk.CTkToplevel(parent_dialog)
-        progress_dialog.title(f"Downloading {model_name}")
-        progress_dialog.geometry("450x250")
-        progress_dialog.configure(fg_color=COLORS["bg_base"])
-        progress_dialog.transient(parent_dialog)
-        progress_dialog.after(100, progress_dialog.lift)
-        
-        inner = ctk.CTkFrame(progress_dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        ctk.CTkLabel(
-            inner,
-            text=f"Downloading {model_name}",
-            font=(self.font_header[0], 18, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(pady=(0, 12))
-        
-        ctk.CTkLabel(
-            inner,
-            text="This may take a few minutes depending on model size...",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_secondary"],
-        ).pack(pady=(0, 16))
-        
-        progress_bar = ctk.CTkProgressBar(inner)
-        progress_bar.pack(fill="x", pady=(0, 12))
-        progress_bar.set(0)
-        
-        status_label = ctk.CTkLabel(
-            inner,
-            text="Connecting to Ollama...",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_secondary"],
-        )
-        status_label.pack()
-        
-        cancel_btn = ctk.CTkButton(
-            inner,
-            text="Cancel",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_primary"],
-            command=lambda: setattr(self, '_cancel_ollama_download', True),
-        )
-        cancel_btn.pack(pady=(16, 0))
-        
-        self._cancel_ollama_download = False
-        
-        def download_thread():
-            try:
-                import requests
-                
-                # Check if Ollama is running
-                try:
-                    test_response = requests.get(f"{base_url}/api/tags", timeout=2)
-                    if test_response.status_code != 200:
-                        raise Exception("Ollama not running")
-                except:
-                    self.after(0, lambda: status_label.configure(
-                        text="Error: Ollama is not running. Start it with: ollama serve",
-                        text_color="#CF7B7B"
-                    ))
-                    self.after(0, lambda: cancel_btn.configure(text="Close"))
-                    return
-                
-                # Start pull request
-                self.after(0, lambda: status_label.configure(text="Starting download..."))
-                
-                pull_response = requests.post(
-                    f"{base_url}/api/pull",
-                    json={"name": model_name},
-                    stream=True,
-                    timeout=300,
-                )
-                
-                if pull_response.status_code != 200:
-                    raise Exception(f"API error: {pull_response.status_code}")
-                
-                # Parse streaming response
-                total_size = None
-                downloaded = 0
-                
-                for line in pull_response.iter_lines():
-                    if getattr(self, '_cancel_ollama_download', False):
-                        self.after(0, progress_dialog.destroy)
-                        return
-                    
-                    if not line:
-                        continue
-                    
-                    try:
-                        import json
-                        data = json.loads(line)
-                        
-                        # Update status
-                        if "status" in data:
-                            status_text = data["status"]
-                            self.after(0, lambda s=status_text: status_label.configure(text=s))
-                        
-                        # Update progress if available
-                        if "completed" in data and "total" in data:
-                            completed = data.get("completed", 0)
-                            total = data.get("total", 1)
-                            if total > 0:
-                                progress = completed / total
-                                self.after(0, lambda p=progress: progress_bar.set(p))
-                        
-                        # Check if done
-                        if data.get("status") == "success" or (data.get("completed") and data.get("total") and data.get("completed") >= data.get("total")):
-                            self.after(0, lambda: progress_bar.set(1.0))
-                            self.after(0, lambda: status_label.configure(text="✓ Download complete!"))
-                            self.after(0, lambda: self.log(f"✓ Downloaded Ollama model: {model_name}"))
-                            self.after(0, lambda: cancel_btn.configure(text="Close"))
-                            # Auto-close after 2 seconds
-                            self.after(2000, progress_dialog.destroy)
-                            # Refresh parent dialog
-                            self.after(2100, lambda: (parent_dialog.destroy(), self.open_ollama_model_settings()))
-                            return
-                            
-                    except json.JSONDecodeError:
-                        continue
-                
-                # If we get here, assume success
-                self.after(0, lambda: progress_bar.set(1.0))
-                self.after(0, lambda: status_label.configure(text="✓ Download complete!"))
-                self.after(0, lambda: cancel_btn.configure(text="Close"))
-                self.after(2000, progress_dialog.destroy)
-                self.after(2100, lambda: (parent_dialog.destroy(), self.open_ollama_model_settings()))
-                
-            except Exception as e:
-                self.after(0, lambda: status_label.configure(
-                    text=f"Error: {str(e)}",
-                    text_color="#CF7B7B"
-                ))
-                self.after(0, lambda: cancel_btn.configure(text="Close"))
-                self.after(0, lambda: self.log(f"⚠️ Failed to download {model_name}: {e}"))
-        
-        threading.Thread(target=download_thread, daemon=True).start()
-    
     def _get_postproc_config_display(self) -> str:
         """Get display text for post-processing configuration button."""
         import os
-        backend = self.config.get("post_processing_backend", "ollama")
+        backend = self.config.get("post_processing_backend", "llama_cpp")
         if backend == "llama_cpp":
             model_path = self.config.get("llama_cpp_model_path", "")
             if model_path:
@@ -9580,9 +7956,6 @@ class WayfinderApp(ctk.CTk):
                 name = Path(model_path).name
                 return name[:25] + "..." if len(name) > 25 else name
             return "No model selected"
-        elif backend == "ollama":
-            model_name = self.config.get("ollama_model", "qwen2.5:1.5b")
-            return model_name[:25] + "..." if len(model_name) > 25 else model_name
         elif backend == "anthropic":
             # API keys are read from environment variables only for security
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -13530,6 +11903,12 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ Model not found: {model_name}")
     
     def setup_tray(self):
+        # Check if tray icon is disabled (useful for Wayland where pystray doesn't work well)
+        if not self.config.get("enable_tray_icon", True):
+            self.tray_icon = None
+            print("[Tray] System tray icon disabled in settings")
+            return
+        
         self.custom_icon = None
         if ICON_PATH.exists():
             try:
