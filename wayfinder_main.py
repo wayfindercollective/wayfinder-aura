@@ -5003,11 +5003,20 @@ class WayfinderApp(ctk.CTk):
                     # Import OpenAI client
                     try:
                         import openai
-                    except ImportError:
-                        return None, "openai package not installed"
+                        import httpx
+                    except ImportError as ie:
+                        missing = "openai" if "openai" not in str(ie) else "httpx"
+                        return None, f"{missing} package not installed"
                     
-                    # Create client with shorter timeout
-                    client = openai.OpenAI(api_key=api_key, timeout=60.0)
+                    # Create client with explicit timeout configuration for file uploads
+                    # Use httpx.Timeout for proper control over connect/read/write timeouts
+                    timeout_config = httpx.Timeout(
+                        connect=10.0,   # Connection timeout
+                        read=60.0,      # Read timeout (waiting for response)
+                        write=30.0,     # Write timeout (uploading file)
+                        pool=10.0,      # Pool timeout
+                    )
+                    client = openai.OpenAI(api_key=api_key, timeout=timeout_config)
                     
                     self.after(0, lambda: self.log("   ☁️ Sending to OpenAI..."))
                     start_time = time.perf_counter()
@@ -5090,7 +5099,21 @@ class WayfinderApp(ctk.CTk):
                 pass
         
         def background_thread():
-            latency, error = run_api_test()
+            # Use a hard timeout failsafe (90 seconds max) in case the API call hangs
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+            
+            hard_timeout = 90  # seconds
+            
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(run_api_test)
+                try:
+                    latency, error = future.result(timeout=hard_timeout)
+                except FuturesTimeoutError:
+                    latency, error = None, f"Timeout: API call exceeded {hard_timeout}s"
+                    self.after(0, lambda: self.log(f"   ⏱️ Hard timeout triggered after {hard_timeout}s"))
+                except Exception as e:
+                    latency, error = None, f"Unexpected error: {e}"
+            
             self.after(0, lambda: on_complete(latency, error))
         
         threading.Thread(target=background_thread, daemon=True).start()
