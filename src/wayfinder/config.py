@@ -113,6 +113,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "faster_whisper_model": "large-v3-turbo",  # tiny, base, small, medium, large-v3, large-v3-turbo
     "faster_whisper_compute_type": "float16",  # float16, int8, int8_float16
     
+    # Groq Whisper API settings (ultra-fast cloud transcription)
+    # Get API key from: https://console.groq.com/keys
+    "groq_whisper_model": "whisper-large-v3",  # whisper-large-v3 (same quality as local, 10x faster)
+    "groq_api_key": "",  # Groq API key (stored encrypted, loaded into GROQ_API_KEY env var)
+    
     # Floating indicator settings
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
@@ -127,22 +132,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Post-processing settings (LLM cleanup)
     "post_processing_enabled": True,  # Enable LLM post-processing
     "post_processing_backend": "llama_cpp",  # llama_cpp | ollama | anthropic | openai (llama_cpp is default for self-contained distribution)
+    "fast_filler_removal": False,  # When True, use instant regex-based filler removal (no LLM) - best for "minimal" style
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
     "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
     
     # llama.cpp post-processing settings
     "llama_cpp_model_path": _default_llm_model_path,  # Path to GGUF model file
+    "llama_cpp_binary": "~/llama.cpp/build/bin/llama-cli",  # Path to llama-cli binary (CLI backend)
     "llama_cpp_n_ctx": 2048,  # Context window size
     "llama_cpp_n_threads": 4,  # CPU threads
     "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
+    "llama_cpp_use_cli": True,  # Use CLI backend (faster, no Python bindings needed)
     
     # Ollama post-processing settings
     "ollama_base_url": "http://localhost:11434",  # Ollama API URL
     "ollama_model": "qwen2.5:1.5b",  # Ollama model name - good balance of speed and quality (~1GB)
     
-    # Cloud post-processing settings (API keys read from environment variables only)
-    # Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment
+    # Cloud API settings (keys stored in config, loaded into environment on startup)
+    "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
     "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
+    "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
     
     # Benchmark results - populated by running benchmark
@@ -215,6 +224,31 @@ def save_config(config: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+
+
+def load_api_keys_to_env(config: dict) -> None:
+    """
+    Load API keys from config into environment variables.
+    
+    This should be called on app startup to make API keys available
+    to the transcription and post-processing backends.
+    
+    Args:
+        config: Configuration dictionary with API key settings.
+    """
+    import os
+    
+    # Map config keys to environment variable names
+    api_key_mappings = {
+        "groq_api_key": "GROQ_API_KEY",
+        "openai_api_key": "OPENAI_API_KEY",
+        "anthropic_api_key": "ANTHROPIC_API_KEY",
+    }
+    
+    for config_key, env_var in api_key_mappings.items():
+        key_value = config.get(config_key, "")
+        if key_value:
+            os.environ[env_var] = key_value
 
 
 # Human-readable names for mouse buttons

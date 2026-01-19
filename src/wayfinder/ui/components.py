@@ -281,13 +281,15 @@ SETTING_TOOLTIPS: dict[str, str] = {
     "beam_size": "Search width for finding best transcription.\n🔴 1 = fastest (-50%) | 5 = balanced | 10 = slowest (+100%)",
     
     # GPU/Backend - Can dramatically change all timings
-    "backend": "Transcription engine selection.\n⚙️ whisper.cpp: CPU-optimized, lower memory\n⚙️ Faster-Whisper: Better GPU utilization (up to 10x faster)",
+    "backend": "Transcription engine selection.\n⚙️ whisper.cpp: Local, Vulkan GPU (default)\n⚙️ Faster-Whisper: Local, ROCm/CUDA GPU\n⚙️ Groq Whisper: Cloud API, ~10x faster!",
+    "groq_whisper": "☁️ Groq Whisper API - Ultra-fast cloud transcription\n\n🚀 ~10x faster than local GPU!\n   ~0.3s for 10s audio (vs ~3s local)\n\n✅ Same Whisper Large-v3 model\n✅ Free tier: 14,400 requests/day\n\n⚠️ Requires internet connection\n⚠️ Audio sent to Groq servers\n\nGet API key: https://console.groq.com/keys",
     "gpu_acceleration": "Use GPU for transcription.\n🚀 Enabled: 3-10x faster than CPU (requires CUDA/ROCm/Vulkan)",
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
     
     # Post-processing tooltips
     "ollama_model": "Ollama model for text cleanup.\n\n✅ Best: qwen2.5:1.5b (fast + accurate)\n✅ Good: phi3:mini (reliable)\n⚠️ Quirky: llama3.2:1b (safety filters)\n❌ Avoid: smollm2:360m (too small)\n\n💡 Use light/standard intensity for best results.",
     "post_processing": "Clean up transcription with an LLM.\nRemoves filler words, fixes grammar, formats output.\n🟡 Latency: +100-500ms depending on model",
+    "fast_filler_removal": "⚡ INSTANT filler removal (~1ms)\n\nUses regex instead of LLM to remove:\num, uh, ah, er, eh, hmm, mm\n\n✅ ~1000x faster than LLM\n✅ No model loading required\n✅ Perfect for 'Minimal' style\n\n🟢 Best when you just want ums/ahs removed\n    and don't need grammar fixes.",
     "output_tone": "Style for processed output:\n• Professional — Polished, business-appropriate\n• AI Prompt — Optimized for talking to LLMs\n• Casual — Relaxed, conversational",
     "intensity": "How aggressively to clean up text:\n• Light — Minimal cleanup, preserves natural speech\n• Standard — Balanced cleanup (recommended)\n• Strong — Heavy cleanup, may alter phrasing",
 }

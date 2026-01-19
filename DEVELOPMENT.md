@@ -259,6 +259,127 @@ python -c "import torch; print(torch.cuda.is_available())"
 - Reduce GPU layers (set specific number instead of Auto)
 - Use int8 compute type for Faster-Whisper
 
+## llama.cpp Post-Processing
+
+Wayfinder Aura uses llama.cpp for local LLM post-processing to clean up transcriptions (remove filler words, fix grammar, apply style).
+
+### Available Models
+
+Run the benchmark to see your available models:
+
+```bash
+python scripts/benchmark_llama_cpp.py --list
+```
+
+#### Model Tiers & Recommendations
+
+| Tier | Params | Speed | Quality | Recommended For |
+|------|--------|-------|---------|-----------------|
+| 🔹 TINY | <500M | ⚡⚡⚡ | ⭐ | Minimal cleanup only |
+| 🔸 SMALL | 500M-2B | ⚡⚡ | ⭐⭐⭐ | **Standard mode (recommended)** |
+| 🟢 STANDARD | 2B-7B | ⚡ | ⭐⭐⭐⭐ | Strong mode, caricature |
+| 🟣 LARGE | 7B+ | 🐢 | ⭐⭐⭐⭐⭐ | Highest quality |
+
+#### Model Descriptions
+
+**Qwen2.5-1.5B-Instruct** ⭐ Recommended
+- Size: ~1GB (Q4_K_M)
+- Params: 1.5B
+- Best for: All modes - follows instructions well
+- Speed: ~300 tokens/sec (Vulkan GPU)
+- Download: `huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct-GGUF`
+
+**Llama-3.2-1B-Instruct**
+- Size: ~770MB (Q4_K_M)  
+- Params: 1B
+- Best for: Fast cleanup
+- Speed: ~750 tokens/sec (Vulkan GPU)
+- Note: May hallucinate on longer inputs
+- Download: `huggingface-cli download meta-llama/Llama-3.2-1B-Instruct-GGUF`
+
+**Phi-3-mini-4k-Instruct**
+- Size: ~2.2GB (Q4)
+- Params: 3.8B
+- Best for: Strong mode, creative transformations
+- Speed: ~270 tokens/sec (Vulkan GPU)
+- Note: Rewrites sentences even in standard mode
+- Download: `huggingface-cli download microsoft/Phi-3-mini-4k-instruct-gguf`
+
+### llama.cpp Benchmark
+
+Run a full benchmark to test all models:
+
+```bash
+# Full benchmark (GPU + CPU)
+python scripts/benchmark_llama_cpp.py
+
+# Quick test (first model only)
+python scripts/benchmark_llama_cpp.py --quick
+
+# GPU-only benchmark
+python scripts/benchmark_llama_cpp.py --gpu
+
+# CPU-only benchmark
+python scripts/benchmark_llama_cpp.py --cpu
+```
+
+Example output:
+```
+══════════════════════════════════════════════════════════════════════
+ 📦 AVAILABLE GGUF MODELS
+══════════════════════════════════════════════════════════════════════
+
+  ┌─ Tier ─────────┬─ Model ────────────────────────────────────┐
+  │ 🔸 SMALL         │ qwen2.5-1.5b-instruct-q4_k_m               │
+  │ (~1.5B)         │   Size: 986MB                              │
+  │                 │ Llama-3.2-1B-Instruct-Q4_K_M               │
+  │                 │ Phi-3-mini-4k-instruct-q4                  │
+  └─────────────────┴────────────────────────────────────────────┘
+```
+
+### Installing llama.cpp with Vulkan
+
+For AMD GPU acceleration (recommended for Bazzite/Fedora):
+
+```bash
+# Install Vulkan SDK
+sudo dnf install vulkan-headers vulkan-loader-devel vulkan-validation-layers
+
+# Clone and build llama.cpp with Vulkan
+git clone https://github.com/ggerganov/llama.cpp ~/llama.cpp
+cd ~/llama.cpp
+cmake -B build -DGGML_VULKAN=ON
+cmake --build build --config Release -j$(nproc)
+
+# Verify GPU support
+./build/bin/llama-cli --help | grep -i gpu
+```
+
+### Downloading GGUF Models
+
+```bash
+# Create model directory
+mkdir -p ~/.local/share/wayfinder-aura/llm-models
+cd ~/.local/share/wayfinder-aura/llm-models
+
+# Download recommended model (Qwen2.5-1.5B)
+wget https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+```
+
+### Configuration
+
+Set in Wayfinder Aura settings or `~/.config/wayfinder-aura/config.json`:
+
+```json
+{
+  "post_processing_backend": "llama_cpp",
+  "llama_cpp_model_path": "~/.local/share/wayfinder-aura/llm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+  "llama_cpp_binary": "~/llama.cpp/build/bin/llama-cli",
+  "llama_cpp_n_gpu_layers": -1,
+  "llama_cpp_use_cli": true
+}
+```
+
 ## Future Improvements
 
 - [ ] Mac/Windows platform support

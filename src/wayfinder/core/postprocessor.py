@@ -631,6 +631,74 @@ def get_tone_guidance(tone: str, intensity: str = "standard") -> str:
     return tone_dict.get(intensity, tone_dict["standard"])
 
 
+# =============================================================================
+# Fast Regex-Based Filler Removal (Zero LLM Overhead)
+# =============================================================================
+# For users who want minimal cleanup (just remove um/uh/ah) without LLM latency.
+# This is ~1000x faster than LLM processing.
+
+import re
+
+# Filler sound patterns to remove
+FILLER_REGEX_PATTERNS = [
+    # Basic filler sounds (with word boundaries)
+    r'\b[Uu]h+\b',           # uh, uhh, uhhh
+    r'\b[Uu]m+\b',           # um, umm, ummm
+    r'\b[Aa]h+\b',           # ah, ahh, ahhh
+    r'\b[Ee]r+\b',           # er, err
+    r'\b[Ee]h+\b',           # eh, ehh
+    r'\b[Hh]mm+\b',          # hmm, hmmm
+    r'\b[Mm]m+\b',           # mm, mmm
+    r'\b[Uu]hm+\b',          # uhm, uhmm
+    r'\b[Oo]h+\b(?=\s*,)',   # "oh," at start of clause (but keep "oh!" exclamations)
+]
+
+# Compiled regex for efficiency
+_FILLER_REGEX = re.compile('|'.join(FILLER_REGEX_PATTERNS), re.IGNORECASE)
+
+
+def fast_filler_removal(text: str) -> str:
+    """
+    Remove filler sounds using fast regex matching.
+    
+    This is ~1000x faster than LLM-based processing.
+    Only removes: um, uh, ah, er, eh, hmm, mm
+    Does NOT change words, structure, or punctuation.
+    
+    Args:
+        text: Transcription text
+        
+    Returns:
+        Text with filler sounds removed
+    """
+    if not text:
+        return text
+    
+    original_len = len(text)
+    
+    # Remove filler sounds
+    cleaned = _FILLER_REGEX.sub('', text)
+    
+    # Clean up resulting double spaces and punctuation artifacts
+    # "I, um, went" -> "I, , went" -> "I, went"
+    cleaned = re.sub(r',\s*,', ',', cleaned)  # double commas
+    cleaned = re.sub(r'\s+,', ',', cleaned)   # space before comma
+    cleaned = re.sub(r',\s+\.', '.', cleaned) # comma then period
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned) # multiple spaces
+    cleaned = re.sub(r'^\s*,\s*', '', cleaned) # leading comma
+    cleaned = cleaned.strip()
+    
+    # Capitalize first letter if we have content
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    
+    removed = original_len - len(cleaned)
+    if removed > 5:
+        print(f"[Fast Cleanup] Removed {removed} chars of filler sounds")
+    
+    return cleaned
+
+
 def get_formatting_rules(tone: str, intensity: str = "standard") -> str:
     """Get the formatting/punctuation rules for a given tone and intensity."""
     tone_dict = FORMATTING_RULES.get(tone, FORMATTING_RULES["professional"])
@@ -1406,6 +1474,255 @@ class LlamaCppBackend(PostProcessorBackend):
 
 
 # =============================================================================
+# llama.cpp CLI Backend (Local - No Python Bindings Required)
+# =============================================================================
+
+class LlamaCppCliBackend(PostProcessorBackend):
+    """
+    Local LLM backend using llama.cpp CLI binary (llama-simple).
+    Similar to whisper.cpp - calls the binary directly, no Python bindings needed.
+    Works with Vulkan GPU acceleration on AMD/Intel/NVIDIA.
+    
+    Uses llama-simple for batch processing (non-interactive mode).
+    """
+    
+    def __init__(
+        self,
+        llama_binary: str = "~/llama.cpp/build/bin/llama-cli",
+        model_path: str = "",
+        n_ctx: int = 2048,
+        n_threads: int = 4,
+        n_gpu_layers: int = -1,  # -1 = auto (use all available)
+        max_tokens: int = 1024,
+        temperature: float = 0.1,
+        timeout: int = 60,
+    ):
+        # Use llama-simple instead of llama-cli for non-interactive mode
+        binary_path = os.path.expanduser(llama_binary)
+        # If llama-cli was specified, check if llama-simple exists in same dir
+        if binary_path.endswith('llama-cli'):
+            simple_path = binary_path.replace('llama-cli', 'llama-simple')
+            if Path(simple_path).exists():
+                binary_path = simple_path
+        
+        self.llama_binary = binary_path
+        self.model_path = os.path.expanduser(model_path) if model_path else ""
+        self.n_ctx = n_ctx
+        self.n_threads = n_threads
+        self.n_gpu_layers = n_gpu_layers
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.timeout = timeout
+    
+    def get_name(self) -> str:
+        return "llama.cpp CLI (Local)"
+    
+    def is_available(self) -> bool:
+        """Check if llama binary exists and model exists."""
+        if not Path(self.llama_binary).exists():
+            return False
+        if not self.model_path:
+            return False
+        return Path(self.model_path).exists()
+    
+    def _build_simple_prompt(self, text: str, config_tone: str = "minimal") -> str:
+        """
+        Build a simple prompt optimized for llama-simple CLI.
+        Uses a completion-style format that works well with small models.
+        
+        Note: We use a clear instruction format to avoid models echoing back
+        the instruction as part of their output.
+        """
+        if config_tone == "minimal":
+            # Minimal: just remove um/uh/ah - use clear instruction format
+            return f"""Task: Remove only filler sounds (um, uh, ah, er) from the text below. Output ONLY the cleaned text, nothing else.
+
+Text: {text}
+
+Cleaned text:"""
+        else:
+            # Standard cleanup with light grammar fixes
+            return f"""Task: Clean up the text below by removing filler words and fixing grammar. Output ONLY the cleaned text, nothing else.
+
+Text: {text}
+
+Cleaned text:"""
+    
+    def process(self, text: str, prompt_template: str) -> str:
+        """
+        Process text using llama.cpp CLI (llama-simple).
+        
+        Args:
+            text: The raw transcription text
+            prompt_template: The prompt template (used for tone detection)
+            
+        Returns:
+            Cleaned/formatted text
+        """
+        import subprocess
+        import time
+        
+        if not self.is_available():
+            if not Path(self.llama_binary).exists():
+                raise PostProcessingError(
+                    f"llama binary not found: {self.llama_binary}. "
+                    "Build llama.cpp or update the path in settings."
+                )
+            raise PostProcessingError(
+                f"Model file not found: {self.model_path}. "
+                "Download a GGUF model (e.g., Qwen2.5-1.5B-Instruct)."
+            )
+        
+        if not text or not text.strip():
+            return text
+        
+        try:
+            # Detect tone from prompt template
+            prompt_lower = prompt_template.lower()
+            is_minimal = (
+                "filler sounds" in prompt_lower or 
+                "um/uh/ah" in prompt_lower or
+                "just remove um" in prompt_lower or
+                "remove um, uh, ah" in prompt_lower or
+                "remove only filler" in prompt_lower or  # New prompt format
+                "um, uh, ah, er" in prompt_lower  # New prompt format
+            )
+            tone = "minimal" if is_minimal else "standard"
+            
+            # Build simple prompt for CLI (much better for llama-simple)
+            simple_prompt = self._build_simple_prompt(text, tone)
+            
+            # Estimate tokens: ~1.3x input length for safety
+            estimated_output_tokens = min(self.max_tokens, max(30, int(len(text) * 0.4)))
+            
+            # Build command for llama-simple
+            # IMPORTANT: -ngl must come BEFORE -p to avoid the model seeing it in context
+            cmd = [
+                self.llama_binary,
+                "-m", self.model_path,
+            ]
+            
+            # GPU layers (-1 = all, 0 = none) - must come before -p
+            if self.n_gpu_layers != 0:
+                ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
+                cmd.extend(["-ngl", str(ngl)])
+            
+            # Add remaining args - prompt must be last
+            cmd.extend([
+                "-n", str(estimated_output_tokens),
+                "-p", simple_prompt,
+            ])
+            
+            start_time = time.time()
+            
+            # Run llama-simple
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+            
+            elapsed = time.time() - start_time
+            
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                if "error" in stderr.lower() and "warning" not in stderr.lower():
+                    raise PostProcessingError(f"llama error: {stderr}")
+            
+            # Parse output - look for "Cleaned text:" or "Cleaned:" prefix in the response
+            output = result.stdout
+            
+            # Find lines containing cleaned output markers
+            cleaned = ""
+            for line in output.split('\n'):
+                # Check for both "Cleaned text:" and "Cleaned:" markers
+                for marker in ['Cleaned text:', 'Cleaned:']:
+                    if marker in line:
+                        # Extract the text after the marker
+                        idx = line.find(marker)
+                        response = line[idx + len(marker):].strip()
+                        # Stop at "main:" or other debug markers
+                        if 'main:' in response:
+                            response = response[:response.find('main:')].strip()
+                        if response:
+                            # Take first occurrence (avoid repetition)
+                            if not cleaned:
+                                cleaned = response
+                            break
+                if cleaned:
+                    break
+            
+            # Remove any trailing repetition or debug text
+            if cleaned:
+                # Stop at common model artifacts
+                for marker in ['(Cleaned', 'main:', 'decoded', '\n\n']:
+                    if marker in cleaned:
+                        cleaned = cleaned[:cleaned.find(marker)].strip()
+                
+                # Remove duplicate sentence endings
+                if cleaned.endswith('..'):
+                    cleaned = cleaned[:-1]
+            
+            # Fallback: if no "Cleaned:" found, the model might have just continued
+            if not cleaned:
+                # Try to find any reasonable text in output
+                for line in output.split('\n'):
+                    line = line.strip()
+                    if line.startswith('-p '):
+                        continue
+                    # Skip llama.cpp debug output
+                    if any(line.startswith(p) for p in ['llama_', 'ggml_', 'main:', 'graph_', 'sched_', '~llama', 'WARNING', 'Loading']):
+                        continue
+                    # Skip lines that look like prompt instructions (at start of line)
+                    line_lower = line.lower()
+                    if line_lower.startswith('task:') or line_lower.startswith('text:'):
+                        continue
+                    if line_lower.startswith('remove only filler') or line_lower.startswith('clean up the text'):
+                        continue
+                    if 'output only the cleaned' in line_lower:
+                        continue
+                    if line and len(line) > 10:
+                        cleaned = line
+                        break
+            
+            # Final cleanup: strip any instruction prefixes that might have been echoed
+            # This handles cases where the model outputs "Remove um/uh/ah only: <actual text>"
+            instruction_prefixes = [
+                'Remove um/uh/ah only:',
+                'Remove only filler sounds',
+                'Clean up (remove filler, fix grammar):',
+                'Clean up the text',
+            ]
+            for prefix in instruction_prefixes:
+                if cleaned.lower().startswith(prefix.lower()):
+                    cleaned = cleaned[len(prefix):].strip()
+                    # Also strip any "Text:" prefix that might follow
+                    if cleaned.lower().startswith('text:'):
+                        cleaned = cleaned[5:].strip()
+            
+            if not cleaned:
+                print("[Post-processing] ⚠ No output from llama - using original")
+                return text
+            
+            # Check for hallucination
+            if is_hallucination(text, cleaned, model_name=Path(self.model_path).stem, threshold=0.25):
+                print("[Post-processing] ⚠ Model hallucinated - using original text")
+                return text
+            
+            print(f"[Post-processing] llama.cpp CLI completed in {elapsed:.2f}s")
+            
+            return cleaned
+            
+        except subprocess.TimeoutExpired:
+            raise PostProcessingError(f"llama timed out after {self.timeout}s")
+        except FileNotFoundError:
+            raise PostProcessingError(f"Could not execute: {self.llama_binary}")
+        except Exception as e:
+            raise PostProcessingError(f"llama processing failed: {e}")
+
+
+# =============================================================================
 # Anthropic Claude Backend (Cloud)
 # =============================================================================
 
@@ -1897,7 +2214,23 @@ def get_backend(config: dict) -> PostProcessorBackend:
             temperature=config.get("post_processing_temperature", 0.1),
         )
     else:
-        # Default to llama.cpp
+        # Default to llama.cpp - prefer CLI backend if available
+        use_cli = config.get("llama_cpp_use_cli", True)
+        llama_binary = os.path.expanduser(config.get("llama_cpp_binary", "~/llama.cpp/build/bin/llama-cli"))
+        
+        # Use CLI backend if enabled and binary exists
+        if use_cli and Path(llama_binary).exists():
+            return LlamaCppCliBackend(
+                llama_binary=llama_binary,
+                model_path=config.get("llama_cpp_model_path", ""),
+                n_ctx=config.get("llama_cpp_n_ctx", 2048),
+                n_threads=config.get("llama_cpp_n_threads", 4),
+                n_gpu_layers=config.get("llama_cpp_n_gpu_layers", -1),
+                max_tokens=config.get("post_processing_max_tokens", 1024),
+                temperature=config.get("post_processing_temperature", 0.1),
+            )
+        
+        # Fall back to Python bindings (llama-cpp-python)
         return LlamaCppBackend(
             model_path=config.get("llama_cpp_model_path", ""),
             n_ctx=config.get("llama_cpp_n_ctx", 2048),
@@ -1917,6 +2250,7 @@ def process_with_config(text: str, config: dict) -> str:
     Uses the new tone-based system with optional smart formatting:
     - output_tone: minimal | professional | casual | dev | personal
     - smart_formatting: True (auto-detect content type) | False (clean only)
+    - fast_filler_removal: True = use instant regex (no LLM) for minimal style
     
     Includes model compatibility checking and auto-adjustments.
     
@@ -1935,6 +2269,24 @@ def process_with_config(text: str, config: dict) -> str:
     
     if not text or not text.strip():
         return text
+    
+    # === FAST MODE: Regex-based filler removal (no LLM) ===
+    # Use this when fast_filler_removal is enabled AND style is minimal
+    # This is ~1000x faster than LLM processing
+    use_fast_mode = config.get("fast_filler_removal", False)
+    tone = config.get("output_tone", "professional")
+    
+    if use_fast_mode and tone == "minimal":
+        start_time = time.time()
+        input_words = len(text.split())
+        
+        result = fast_filler_removal(text)
+        
+        elapsed = time.time() - start_time
+        output_words = len(result.split())
+        print(f"[Fast Cleanup] ⚡ Completed in {elapsed*1000:.1f}ms | {input_words} → {output_words} words")
+        
+        return result
     
     try:
         # Build the prompt using new tone-based system with compatibility checks

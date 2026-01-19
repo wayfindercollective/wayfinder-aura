@@ -8,9 +8,11 @@ Local voice dictation for Linux (Wayland/X11) using whisper.cpp for transcriptio
 
 - **Local & Private**: All processing happens on your machine using whisper.cpp
 - **Hotkey Triggered**: Press F3 (configurable) to start/stop recording
+- **LLM Post-Processing**: Clean up transcriptions with llama.cpp (local) or Ollama
 - **Wayland Support**: Works on modern Linux desktops including KDE Plasma on Wayland
 - **System Tray**: Runs in background with status indicator
 - **Multiple Input Devices**: Supports keyboards, gaming mice, keypads
+- **GPU Acceleration**: Vulkan (AMD/Intel/NVIDIA) for whisper.cpp and llama.cpp
 - **Adjustable Typing Speed**: Instant paste or simulated typing
 - **UI Scaling**: Ctrl+Plus/Minus for high-DPI screens (70%-250%)
 - **Collapsible Activity Log**: Clean interface with expandable log
@@ -163,6 +165,46 @@ For Wayland/KDE, add a custom shortcut that runs:
 ```bash
 ~/.local/opt/wayfinder-aura/trigger_record.py
 ```
+
+## Post-Processing with llama.cpp
+
+Wayfinder Aura can clean up transcriptions using a local LLM (removes filler words, fixes grammar, applies styles).
+
+### Recommended Models
+
+| Model | Size | Speed | Best For |
+|-------|------|-------|----------|
+| **qwen2.5-1.5b-instruct** | ~1GB | ⚡⚡ | All modes (recommended) |
+| llama-3.2-1b-instruct | ~770MB | ⚡⚡⚡ | Fast cleanup |
+| phi-3-mini-4k-instruct | ~2.2GB | ⚡ | Strong mode, creative |
+
+### Quick Setup
+
+```bash
+# 1. Build llama.cpp with Vulkan GPU support
+git clone https://github.com/ggerganov/llama.cpp ~/llama.cpp
+cd ~/llama.cpp
+cmake -B build -DGGML_VULKAN=ON
+cmake --build build -j$(nproc)
+
+# 2. Download a model
+mkdir -p ~/.local/share/wayfinder-aura/llm-models
+wget -P ~/.local/share/wayfinder-aura/llm-models \
+  https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+
+# 3. Test with benchmark
+python scripts/benchmark_llama_cpp.py --quick
+```
+
+### Style Modes
+
+- **Minimal**: Just removes um/uh (fastest, no LLM needed)
+- **Professional**: Clean, business-appropriate tone
+- **Casual**: Relaxed texting style
+- **Dev**: Recognizes git/coding terms
+- **Personal**: Learns your speaking patterns
+
+Toggle with F10 or in Settings → Style.
 
 ## Troubleshooting
 

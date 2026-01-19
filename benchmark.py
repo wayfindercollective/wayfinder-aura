@@ -6,7 +6,7 @@ Tests all aspects of the transcription and post-processing pipeline:
 - Transcription backends (whisper.cpp, Faster-Whisper)
 - Processing modes (CPU, GPU)
 - Accuracy modes (fast, balanced, high)
-- Post-processing backends (Ollama, llama.cpp, cloud APIs)
+- Post-processing backends (Ollama, llama.cpp CLI/Python, cloud APIs)
 - API latency for cloud services
 
 Results are stored in config and used for intelligent recommendations.
@@ -18,6 +18,10 @@ Usage:
     python benchmark.py --transcription  # Transcription only
     python benchmark.py --postprocessing # Post-processing only
     python benchmark.py --api        # API latency only
+    python benchmark.py --llama      # llama.cpp only (quick test)
+
+For detailed llama.cpp benchmarking, use:
+    python scripts/benchmark_llama_cpp.py
 """
 
 import argparse
@@ -778,39 +782,116 @@ def run_postprocessing_benchmarks(suite: BenchmarkSuite) -> None:
     except Exception as e:
         print(f"  ⚠ Error: {e}")
     
-    # Test llama-cpp-python
-    print("\nllama-cpp-python:")
-    try:
-        from llama_cpp import Llama
+    # Test llama.cpp (CLI and Python backends)
+    print("\nllama.cpp:")
+    
+    # Look for GGUF models in common locations
+    model_dirs = [
+        Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models",
+        Path.home() / ".local" / "share" / "wayfinder-voice" / "llm-models",
+        Path.home() / ".local" / "share" / "models",
+        Path.home() / "models",
+        Path.home() / "llama-models",
+    ]
+    
+    gguf_models = []
+    for model_dir in model_dirs:
+        if model_dir.exists():
+            gguf_models.extend(model_dir.glob("*.gguf"))
+    
+    # Deduplicate by path
+    gguf_models = list({str(p): p for p in gguf_models}.values())
+    
+    if not gguf_models:
+        print("  ⚠ No GGUF models found - skipping")
+        print("  Search paths checked:")
+        for d in model_dirs:
+            print(f"    • {d}")
+        suite.postprocessing_results.append(BenchmarkResult(
+            name="llama.cpp",
+            backend="llama_cpp",
+            mode="local",
+            duration_seconds=0,
+            avg_time=0,
+            error="No GGUF models found",
+        ))
+    else:
+        print(f"  Found {len(gguf_models)} GGUF model(s)")
+        for m in gguf_models:
+            size_mb = m.stat().st_size / (1024 * 1024)
+            print(f"    • {m.name} ({size_mb:.0f}MB)")
         
-        # Look for GGUF models
-        model_dirs = [
-            Path.home() / ".local" / "share" / "models",
-            Path.home() / "models",
-            Path.home() / "llama-models",
+        # Test CLI backend first (faster, no Python bindings needed)
+        llama_cli_paths = [
+            Path.home() / "llama.cpp" / "build" / "bin" / "llama-simple",
+            Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli",
+            Path("/usr/bin/llama-simple"),
+            Path("/usr/bin/llama-cli"),
         ]
         
-        gguf_models = []
-        for model_dir in model_dirs:
-            if model_dir.exists():
-                gguf_models.extend(model_dir.glob("*.gguf"))
+        llama_cli = None
+        for p in llama_cli_paths:
+            if p.exists():
+                llama_cli = p
+                break
         
-        if not gguf_models:
-            print("  ⚠ No GGUF models found - skipping")
-            suite.postprocessing_results.append(BenchmarkResult(
-                name="llama.cpp",
-                backend="llama_cpp",
-                mode="local",
-                duration_seconds=0,
-                avg_time=0,
-                error="No GGUF models found",
-            ))
-        else:
-            # Use smallest model
-            test_model = min(gguf_models, key=lambda p: p.stat().st_size)
-            print(f"  Testing with: {test_model.name}")
+        # Use smallest model for benchmark
+        test_model = min(gguf_models, key=lambda p: p.stat().st_size)
+        
+        if llama_cli:
+            print(f"\n  Testing CLI backend with: {test_model.name}")
             
-            # Load model
+            prompt = f"Clean up this transcription:\n{test_text}\n\nCleaned:"
+            
+            # Test GPU mode
+            for mode_name, ngl in [("GPU", "99"), ("CPU", "0")]:
+                try:
+                    cmd = [
+                        str(llama_cli),
+                        "-m", str(test_model),
+                        "-ngl", ngl,
+                        "-n", "100",
+                        "-p", prompt,
+                    ]
+                    
+                    # Warm-up
+                    subprocess.run(cmd, capture_output=True, timeout=60)
+                    
+                    # Timed runs
+                    times = []
+                    for _ in range(3):
+                        start = time.perf_counter()
+                        result = subprocess.run(cmd, capture_output=True, timeout=60)
+                        elapsed = time.perf_counter() - start
+                        if result.returncode == 0:
+                            times.append(elapsed)
+                    
+                    if times:
+                        avg_time = sum(times) / len(times)
+                        print(f"  {mode_name}: {format_time(avg_time)} avg")
+                        
+                        suite.postprocessing_results.append(BenchmarkResult(
+                            name=f"llama.cpp CLI ({test_model.name})",
+                            backend="llama_cpp_cli",
+                            mode=mode_name.lower(),
+                            duration_seconds=0,
+                            avg_time=avg_time,
+                            min_time=min(times),
+                            max_time=max(times),
+                            extra={"model": test_model.name, "binary": str(llama_cli)},
+                        ))
+                except subprocess.TimeoutExpired:
+                    print(f"  {mode_name}: ⚠ Timed out")
+                except Exception as e:
+                    print(f"  {mode_name}: ⚠ Error: {e}")
+        
+        # Also test Python backend if available
+        try:
+            from llama_cpp import Llama
+            
+            print(f"\n  Testing Python backend with: {test_model.name}")
+            
+            # Load model with GPU
             model = Llama(
                 model_path=str(test_model),
                 n_ctx=2048,
@@ -833,12 +914,12 @@ def run_postprocessing_benchmarks(suite: BenchmarkSuite) -> None:
                 times.append(elapsed)
             
             avg_time = sum(times) / len(times)
-            print(f"  Result: {format_time(avg_time)} avg")
+            print(f"  Python: {format_time(avg_time)} avg")
             
             suite.postprocessing_results.append(BenchmarkResult(
-                name=f"llama.cpp ({test_model.name})",
-                backend="llama_cpp",
-                mode="local",
+                name=f"llama.cpp Python ({test_model.name})",
+                backend="llama_cpp_python",
+                mode="gpu",
                 duration_seconds=0,
                 avg_time=avg_time,
                 min_time=min(times),
@@ -846,10 +927,10 @@ def run_postprocessing_benchmarks(suite: BenchmarkSuite) -> None:
                 extra={"model": test_model.name},
             ))
             
-    except ImportError:
-        print("  ⚠ llama-cpp-python not installed - skipping")
-    except Exception as e:
-        print(f"  ⚠ Error: {e}")
+        except ImportError:
+            print("  ⚠ llama-cpp-python not installed")
+        except Exception as e:
+            print(f"  ⚠ Python backend error: {e}")
 
 
 # =============================================================================

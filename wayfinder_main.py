@@ -117,9 +117,11 @@ DEFAULT_CONFIG = {
     "chunk_overlap": 2,  # Overlap seconds to avoid word cuts
     "max_recording_duration": 0,  # 0 = unlimited
     # GPU acceleration settings
-    "transcription_backend": "whisper_cpp",  # whisper_cpp | faster_whisper
+    "transcription_backend": "whisper_cpp",  # whisper_cpp | faster_whisper | groq_whisper | openai_whisper
     "use_gpu": True,  # Enable GPU acceleration
     "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
+    "gpu_device": "auto",  # "auto" = benchmark and pick fastest, or "0", "1", "2" for manual selection
+    "gpu_benchmark_cache": {},  # Cached GPU benchmark results
     # Faster-Whisper specific settings
     "faster_whisper_model": "large-v3-turbo",  # tiny, base, small, medium, large-v3, large-v3-turbo
     "faster_whisper_compute_type": "float16",  # float16, int8, int8_float16
@@ -144,8 +146,13 @@ DEFAULT_CONFIG = {
     # Ollama post-processing settings
     "ollama_base_url": "http://localhost:11434",  # Ollama API URL
     "ollama_model": "qwen2.5:1.5b",  # Ollama model name - good balance of speed and quality (~1GB)
-    # Cloud post-processing settings (API keys read from environment variables only)
-    # Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment
+    # Groq Whisper API settings (ultra-fast cloud transcription)
+    "groq_whisper_model": "whisper-large-v3",  # whisper-large-v3 (same quality as local, 10x faster)
+    # Cloud API settings (keys stored in config, loaded into environment on startup)
+    "groq_api_key": "",  # Groq API key (for ultra-fast cloud transcription)
+    "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
+    "openai_whisper_model": "whisper-1",  # OpenAI Whisper model
+    "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
     "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
     # Benchmark results - populated by running benchmark
@@ -1850,41 +1857,68 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
 
     try:
         while not stop_event.is_set():
-            # Wait for input from any device
-            r, _, _ = select.select(list(fd_to_device.keys()), [], [], 0.5)
+            # Wait for input from any device (skip if no devices left)
+            if not fd_to_device:
+                log("⚠️ No input devices remaining - hotkey listener stopping")
+                break
+            
+            try:
+                r, _, _ = select.select(list(fd_to_device.keys()), [], [], 0.5)
+            except (ValueError, OSError) as e:
+                # Invalid file descriptor - a device was disconnected
+                # Rebuild fd_to_device by checking which devices are still valid
+                log(f"⚠️ Device disconnected, rebuilding device list: {e}")
+                new_fd_to_device = {}
+                for fd, dev in list(fd_to_device.items()):
+                    try:
+                        # Test if device is still accessible
+                        dev.capabilities()
+                        new_fd_to_device[fd] = dev
+                    except (OSError, IOError):
+                        log(f"   Removed: {dev.name}")
+                fd_to_device = new_fd_to_device
+                continue
             
             for fd in r:
-                device = fd_to_device[fd]
-                for event in device.read():
-                    if event.type == ecodes.EV_KEY:
-                        key_event = categorize(event)
-                        keycode = key_event.scancode
-                        
-                        if keycode in all_modifier_codes:
-                            if key_event.keystate == 1:
-                                pressed_modifiers.add(keycode)
-                            elif key_event.keystate == 0:
-                                pressed_modifiers.discard(keycode)
-                        
-                        # Debug: log all key presses (F-keys only to reduce noise)
-                        if key_event.keystate == 1 and 59 <= keycode <= 88:
-                            print(f"[DEBUG] Key pressed: code={keycode} from {device.name[:30]}", flush=True)
-                        
-                        # Check for recording hotkey press
-                        if keycode == hotkey_key and key_event.keystate == 1:
-                            if check_modifiers(required_modifiers, hotkey_modifiers):
-                                event_queue.put((EventType.HOTKEY_PRESSED, None))
-                        
-                        # Check for style toggle hotkey press
-                        if style_toggle_key and key_event.keystate == 1:
-                            # Debug: log when we see the style toggle key
-                            if keycode == style_toggle_key:
-                                print(f"[DEBUG] Style toggle key {keycode} detected!", flush=True)
-                                log(f"🎯 Style toggle key {keycode} pressed!")
-                                if check_modifiers(required_style_modifiers, style_toggle_modifiers):
-                                    event_queue.put((EventType.STYLE_TOGGLE, None))
-                                else:
-                                    log(f"   (modifiers not matched)")
+                device = fd_to_device.get(fd)
+                if device is None:
+                    continue
+                
+                try:
+                    for event in device.read():
+                        if event.type == ecodes.EV_KEY:
+                            key_event = categorize(event)
+                            keycode = key_event.scancode
+                            
+                            if keycode in all_modifier_codes:
+                                if key_event.keystate == 1:
+                                    pressed_modifiers.add(keycode)
+                                elif key_event.keystate == 0:
+                                    pressed_modifiers.discard(keycode)
+                            
+                            # Debug: log all key presses (F-keys only to reduce noise)
+                            if key_event.keystate == 1 and 59 <= keycode <= 88:
+                                print(f"[DEBUG] Key pressed: code={keycode} from {device.name[:30]}", flush=True)
+                            
+                            # Check for recording hotkey press
+                            if keycode == hotkey_key and key_event.keystate == 1:
+                                if check_modifiers(required_modifiers, hotkey_modifiers):
+                                    event_queue.put((EventType.HOTKEY_PRESSED, None))
+                            
+                            # Check for style toggle hotkey press
+                            if style_toggle_key and key_event.keystate == 1:
+                                # Debug: log when we see the style toggle key
+                                if keycode == style_toggle_key:
+                                    print(f"[DEBUG] Style toggle key {keycode} detected!", flush=True)
+                                    log(f"🎯 Style toggle key {keycode} pressed!")
+                                    if check_modifiers(required_style_modifiers, style_toggle_modifiers):
+                                        event_queue.put((EventType.STYLE_TOGGLE, None))
+                                    else:
+                                        log(f"   (modifiers not matched)")
+                except (OSError, IOError) as e:
+                    # Device read failed - remove it from monitoring
+                    log(f"⚠️ Device read failed, removing: {device.name} ({e})")
+                    del fd_to_device[fd]
     except Exception as e:
         log(f"⚠️ Hotkey error: {e}")
 
@@ -2816,19 +2850,38 @@ class OverlayController:
                 return False
     
     def _send_command(self, cmd: dict) -> bool:
-        """Send a command to the overlay subprocess."""
-        with self._lock:
+        """Send a command to the overlay subprocess (non-blocking)."""
+        # Use timeout on lock to prevent deadlock if subprocess is stuck
+        acquired = self._lock.acquire(timeout=0.1)
+        if not acquired:
+            # Lock contention - subprocess may be stuck, skip this command
+            return False
+        
+        try:
             if self._process is None or self._process.poll() is not None:
                 return False
             
             try:
                 line = json.dumps(cmd) + "\n"
+                # Check if stdin is ready for writing (non-blocking)
+                import select
+                _, ready, _ = select.select([], [self._process.stdin], [], 0.05)
+                if not ready:
+                    # Subprocess stdin buffer is full - skip to prevent blocking
+                    return False
                 self._process.stdin.write(line)
                 self._process.stdin.flush()
                 return True
+            except (BrokenPipeError, OSError) as e:
+                # Subprocess died - clean up reference
+                print(f"Overlay subprocess died: {e}")
+                self._process = None
+                return False
             except Exception as e:
                 print(f"Failed to send overlay command: {e}")
                 return False
+        finally:
+            self._lock.release()
     
     def send_command(self, cmd: dict) -> bool:
         """Public method to send a command to the overlay subprocess."""
@@ -2910,7 +2963,14 @@ class OverlayController:
         self._stop_audio_polling()
         self._send_command({"cmd": "quit"})
         
-        with self._lock:
+        # Use timeout on lock to avoid deadlock
+        acquired = self._lock.acquire(timeout=1.0)
+        if not acquired:
+            # Lock stuck - force kill via pkill
+            subprocess.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
+            return
+        
+        try:
             if self._process is not None:
                 try:
                     self._process.wait(timeout=0.5)
@@ -2921,12 +2981,21 @@ class OverlayController:
                     except:
                         pass
                 self._process = None
+        finally:
+            self._lock.release()
     
     def stop(self):
         """Stop and clean up the overlay subprocess forcefully."""
         self._stop_audio_polling()
         
-        with self._lock:
+        # Use timeout on lock to avoid deadlock
+        acquired = self._lock.acquire(timeout=0.5)
+        if not acquired:
+            # Lock stuck - force kill via pkill
+            subprocess.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
+            return
+        
+        try:
             if self._process is not None:
                 pid = self._process.pid
                 # First try graceful quit
@@ -2946,6 +3015,8 @@ class OverlayController:
                         except:
                             pass
                 self._process = None
+        finally:
+            self._lock.release()
     
     def set_audio_level_callback(self, callback):
         """Set the callback function for getting audio levels."""
@@ -2953,10 +3024,18 @@ class OverlayController:
     
     def is_healthy(self) -> bool:
         """Check if the overlay subprocess is running and responsive."""
-        with self._lock:
+        # Use non-blocking lock check to avoid deadlock
+        acquired = self._lock.acquire(timeout=0.1)
+        if not acquired:
+            # Lock held for too long - subprocess may be stuck
+            return False
+        
+        try:
             if self._process is None or self._process.poll() is not None:
                 return False
-        return True
+            return True
+        finally:
+            self._lock.release()
     
     def refresh(self) -> bool:
         """
@@ -2971,15 +3050,22 @@ class OverlayController:
         # Stop audio polling while refreshing
         self._stop_audio_polling()
         
-        # Kill existing process
-        with self._lock:
-            if self._process is not None:
-                try:
-                    self._process.kill()
-                    self._process.wait(timeout=0.5)
-                except:
-                    pass
-                self._process = None
+        # Kill existing process (use timeout on lock to avoid deadlock)
+        acquired = self._lock.acquire(timeout=0.5)
+        if acquired:
+            try:
+                if self._process is not None:
+                    try:
+                        self._process.kill()
+                        self._process.wait(timeout=0.5)
+                    except:
+                        pass
+                    self._process = None
+            finally:
+                self._lock.release()
+        else:
+            # Lock stuck - force kill via pkill
+            subprocess.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
         
         # Give compositor a moment to clean up the old window
         time.sleep(0.2)
@@ -3010,9 +3096,10 @@ class WayfinderApp(ctk.CTk):
         
         self.config = load_config()
         
-        # Note: API keys are read from environment variables only (ANTHROPIC_API_KEY, OPENAI_API_KEY)
-        # This is more secure than storing keys in config files
-        # Keys can be set in ~/.bashrc, systemd service, or Flatpak configuration
+        # Load API keys from config into environment variables
+        # This makes them available to transcription and post-processing backends
+        from wayfinder.config import load_api_keys_to_env
+        load_api_keys_to_env(self.config)
         
         self.app_state = AppState.IDLE
         self.event_queue = queue.Queue()
@@ -4798,22 +4885,31 @@ class WayfinderApp(ctk.CTk):
         threading.Thread(target=run_benchmark_thread, daemon=True).start()
     
     def _run_api_benchmark(self):
-        """Run an API latency benchmark for remote transcription (OpenAI Whisper API)."""
+        """Run an API latency benchmark for remote transcription (Groq or OpenAI Whisper API)."""
         import subprocess
         import tempfile
         import wave
         import numpy as np
         
-        # Check if API key is configured (from environment variable only)
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+        # Determine which provider is selected
+        backend = self.config.get("transcription_backend", "groq_whisper")
+        is_groq = backend == "groq_whisper"
+        provider_name = "Groq" if is_groq else "OpenAI"
+        
+        # Check if API key is configured (from config first, then environment)
+        if is_groq:
+            api_key = self.config.get("groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
+        else:
+            api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+        
         if not api_key:
-            self.api_benchmark_status_label.configure(text="❌ OpenAI API key not configured")
+            self.api_benchmark_status_label.configure(text=f"❌ {provider_name} API key not configured")
             return
         
         # Disable button and show progress
         self.api_benchmark_btn.configure(state="disabled", text="Testing...", fg_color=COLORS["bg_surface"])
         self.api_benchmark_status_label.configure(text="Creating test audio...")
-        self.log("🌐 API BENCHMARK: Testing OpenAI Whisper latency...")
+        self.log(f"🌐 API BENCHMARK: Testing {provider_name} Whisper latency...")
         
         # Timer display
         elapsed = [0]
@@ -4871,26 +4967,47 @@ class WayfinderApp(ctk.CTk):
                 audio_file = create_test_audio(10)
                 self.after(0, lambda: self.log("   📁 Created 10s test audio"))
                 
-                # Import OpenAI client
-                try:
-                    import openai
-                except ImportError:
-                    return None, "openai package not installed"
-                
-                # Create client
-                client = openai.OpenAI(api_key=api_key, timeout=120.0)
-                
-                # Time the API call
-                self.after(0, lambda: self.log("   ☁️ Sending to OpenAI..."))
-                start_time = time.perf_counter()
-                
-                with open(audio_file, "rb") as f:
-                    transcription = client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=f,
-                        response_format="text",
-                        language="en",
-                    )
+                # Time the API call based on provider
+                if is_groq:
+                    # Import Groq client
+                    try:
+                        import groq
+                    except ImportError:
+                        return None, "groq package not installed"
+                    
+                    # Create client
+                    client = groq.Groq(api_key=api_key, timeout=120.0)
+                    
+                    self.after(0, lambda: self.log("   ⚡ Sending to Groq..."))
+                    start_time = time.perf_counter()
+                    
+                    with open(audio_file, "rb") as f:
+                        transcription = client.audio.transcriptions.create(
+                            model="whisper-large-v3",
+                            file=f,
+                            response_format="text",
+                            language="en",
+                        )
+                else:
+                    # Import OpenAI client
+                    try:
+                        import openai
+                    except ImportError:
+                        return None, "openai package not installed"
+                    
+                    # Create client
+                    client = openai.OpenAI(api_key=api_key, timeout=120.0)
+                    
+                    self.after(0, lambda: self.log("   ☁️ Sending to OpenAI..."))
+                    start_time = time.perf_counter()
+                    
+                    with open(audio_file, "rb") as f:
+                        transcription = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=f,
+                            response_format="text",
+                            language="en",
+                        )
                 
                 latency = time.perf_counter() - start_time
                 self.after(0, lambda: self.log(f"   ✓ Response received: {latency:.2f}s"))
@@ -4927,7 +5044,8 @@ class WayfinderApp(ctk.CTk):
             
             # Save results
             api_results = self.config.get("api_benchmark_results", {})
-            api_results["openai"] = {
+            result_key = "groq" if is_groq else "openai"
+            api_results[result_key] = {
                 "latency_10s": round(latency, 2),
                 "timestamp": int(time.time()),
             }
@@ -4957,15 +5075,21 @@ class WayfinderApp(ctk.CTk):
         
         api_results = self.config.get("api_benchmark_results", {})
         
-        if api_results and "openai" in api_results:
-            result = api_results["openai"]
+        # Determine current provider
+        backend = self.config.get("transcription_backend", "groq_whisper")
+        is_groq = backend == "groq_whisper"
+        result_key = "groq" if is_groq else "openai"
+        provider_name = "Groq" if is_groq else "OpenAI"
+        
+        if api_results and result_key in api_results:
+            result = api_results[result_key]
             latency = result.get("latency_10s")
             timestamp = result.get("timestamp", 0)
             
             if latency:
                 ctk.CTkLabel(
                     self.api_benchmark_results_frame,
-                    text=f"OpenAI Whisper: {latency:.1f}s (10s audio)",
+                    text=f"{provider_name} Whisper: {latency:.1f}s (10s audio)",
                     font=(self.font_body[0], 12),
                     text_color=COLORS["text_primary"],
                 ).pack(anchor="w", pady=2)
@@ -5211,13 +5335,27 @@ class WayfinderApp(ctk.CTk):
             text_color="#CF7B7B",
         ).pack(padx=12, pady=8)
         
-        # Provider (currently only OpenAI Whisper for remote transcription)
-        ctk.CTkLabel(
-            parent,
-            text="Provider: OpenAI Whisper",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            text_color=COLORS["text_primary"],
-        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 8))
+        # Provider selector (Groq vs OpenAI Whisper)
+        current_backend = self.config.get("transcription_backend", "groq_whisper")
+        if current_backend not in ("groq_whisper", "openai_whisper"):
+            current_backend = "groq_whisper"  # Default to Groq for speed
+        
+        # Map backend IDs to display names
+        self._remote_provider_map = {
+            "⚡ Groq (Fast)": "groq_whisper",
+            "☁️ OpenAI": "openai_whisper",
+        }
+        self._remote_provider_reverse = {v: k for k, v in self._remote_provider_map.items()}
+        display_value = self._remote_provider_reverse.get(current_backend, "⚡ Groq (Fast)")
+        
+        self.remote_provider_var = ctk.StringVar(value=display_value)
+        self.remote_provider_dropdown = self.create_dropdown_row(
+            parent, "Provider",
+            ["⚡ Groq (Fast)", "☁️ OpenAI"],
+            self.remote_provider_var, self._on_remote_provider_changed,
+            tooltip="⚡ Groq: Ultra-fast (~0.3s for 10s audio), free tier available\n☁️ OpenAI: Reliable, per-minute billing",
+            width=160,
+        )
         
         # Language
         language = self.config.get("language", "en")
@@ -5229,24 +5367,35 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["language"], width=100,
         )
         
-        # API Configuration
-        api_status = "Configured ✓" if os.environ.get("OPENAI_API_KEY") else "Not configured"
+        # API Configuration - dynamic based on provider
+        backend = self.config.get("transcription_backend", "groq_whisper")
+        if backend == "groq_whisper":
+            api_key = self.config.get("groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
+            status = "Configured ✓" if api_key else "Not configured"
+            tooltip = "Configure Groq API key for ultra-fast cloud transcription\nGet free key at: console.groq.com/keys"
+        else:
+            api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+            status = "Configured ✓" if api_key else "Not configured"
+            tooltip = "Configure OpenAI API key for cloud transcription\nGet key at: platform.openai.com/api-keys"
+        
         self.remote_api_btn = self.create_setting_row(
-            parent, "API Configuration", api_status,
+            parent, "API Configuration", status,
             self.open_remote_api_settings,
-            tooltip="Configure OpenAI API key for cloud transcription",
+            tooltip=tooltip,
         )
         
         # Info about no local model needed
-        info_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
-        info_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(12, 0))
+        self.remote_info_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
+        self.remote_info_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(12, 0))
         
-        ctk.CTkLabel(
-            info_frame,
-            text="ℹ️  No local model download required — transcription runs on OpenAI servers",
+        provider_name = "Groq" if current_backend == "groq_whisper" else "OpenAI"
+        self.remote_info_label = ctk.CTkLabel(
+            self.remote_info_frame,
+            text=f"ℹ️  No local model needed — transcription runs on {provider_name} servers",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
-        ).pack(padx=12, pady=8)
+        )
+        self.remote_info_label.pack(padx=12, pady=8)
         
         # === API Benchmark Section ===
         benchmark_header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -5297,10 +5446,172 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(8, 8))
     
+    def _on_remote_provider_changed(self, display_value: str) -> None:
+        """Handle remote provider selection change."""
+        backend_id = self._remote_provider_map.get(display_value, "groq_whisper")
+        self.config["transcription_backend"] = backend_id
+        self.save_settings()
+        
+        # Update the info label
+        provider_name = "Groq" if backend_id == "groq_whisper" else "OpenAI"
+        if hasattr(self, "remote_info_label"):
+            self.remote_info_label.configure(
+                text=f"ℹ️  No local model needed — transcription runs on {provider_name} servers"
+            )
+        
+        # Update API status
+        self._update_remote_api_status()
+        
+        self.log(f"⚙ Remote provider changed to: {provider_name}")
+    
+    def _update_remote_api_status(self) -> None:
+        """Update the API configuration status based on selected provider."""
+        backend = self.config.get("transcription_backend", "groq_whisper")
+        
+        if backend == "groq_whisper":
+            # Check config first, then environment
+            api_key = self.config.get("groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
+            status = "Configured ✓" if api_key else "Not configured"
+        else:
+            api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+            status = "Configured ✓" if api_key else "Not configured"
+        
+        # Update existing button if it exists (button is returned directly from create_setting_row)
+        if hasattr(self, "remote_api_btn") and self.remote_api_btn:
+            self.remote_api_btn.configure(text=status)
+    
     def open_remote_api_settings(self) -> None:
-        """Open dialog to configure remote (OpenAI) API settings."""
-        # Reuse the existing post-processing settings dialog but focused on OpenAI
-        self.open_postproc_settings()
+        """Open dialog to configure remote API settings (Groq or OpenAI)."""
+        self._open_remote_api_dialog()
+    
+    def _open_remote_api_dialog(self) -> None:
+        """Open dialog to configure the selected remote transcription API (Groq or OpenAI)."""
+        backend = self.config.get("transcription_backend", "groq_whisper")
+        is_groq = backend == "groq_whisper"
+        
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Groq API Configuration" if is_groq else "OpenAI API Configuration")
+        dialog.geometry("460x380")
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        # Header
+        ctk.CTkLabel(
+            dialog,
+            text="⚡ Groq API Configuration" if is_groq else "☁️ OpenAI API Configuration",
+            font=(self.font_header[0], self.font_sizes["title"], "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(padx=24, pady=(24, 4))
+        
+        # Description
+        if is_groq:
+            desc = "Ultra-fast cloud transcription using Groq's LPU hardware.\n~10x faster than local GPU • Free tier: 14,400 requests/day"
+        else:
+            desc = "Reliable cloud transcription using OpenAI's Whisper API.\nPer-minute billing • High accuracy"
+        
+        ctk.CTkLabel(
+            dialog,
+            text=desc,
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+            justify="center",
+        ).pack(padx=24, pady=(0, 16))
+        
+        # API Key input
+        form_frame = ctk.CTkFrame(dialog, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
+        form_frame.pack(fill="x", padx=24, pady=8)
+        
+        env_var = "GROQ_API_KEY" if is_groq else "OPENAI_API_KEY"
+        config_key = "groq_api_key" if is_groq else "openai_api_key"
+        # Try config first, then environment
+        current_key = self.config.get(config_key, "") or os.environ.get(env_var, "")
+        
+        ctk.CTkLabel(
+            form_frame,
+            text="API Key",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=16, pady=(16, 4))
+        
+        key_var = ctk.StringVar(value=current_key)
+        key_entry = ctk.CTkEntry(
+            form_frame,
+            textvariable=key_var,
+            font=(self.font_mono[0], self.font_sizes["small"]),
+            fg_color=COLORS["bg_input"],
+            border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+            width=380,
+            height=40,
+            show="•",
+        )
+        key_entry.pack(padx=16, pady=(0, 8))
+        
+        # Show/hide toggle
+        show_var = ctk.BooleanVar(value=False)
+        def toggle_show():
+            key_entry.configure(show="" if show_var.get() else "•")
+        
+        ctk.CTkCheckBox(
+            form_frame,
+            text="Show key",
+            variable=show_var,
+            command=toggle_show,
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_dim"],
+        ).pack(anchor="w", padx=16, pady=(0, 16))
+        
+        # Link to get API key
+        if is_groq:
+            link_text = "Get your free API key at: console.groq.com/keys"
+            link_url = "https://console.groq.com/keys"
+        else:
+            link_text = "Get your API key at: platform.openai.com/api-keys"
+            link_url = "https://platform.openai.com/api-keys"
+        
+        link = ctk.CTkLabel(
+            dialog,
+            text=link_text,
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["accent"],
+            cursor="hand2",
+        )
+        link.pack(pady=(8, 16))
+        link.bind("<Button-1>", lambda e: webbrowser.open(link_url))
+        
+        # Save button
+        def save_and_close():
+            key = key_var.get().strip()
+            if key:
+                # Save to environment (for current session)
+                os.environ[env_var] = key
+                
+                # Save to config (for persistence across restarts)
+                config_key = "groq_api_key" if is_groq else "openai_api_key"
+                self.config[config_key] = key
+                self.save_settings()
+                
+                self.log(f"⚙ {env_var} configured and saved")
+            
+            # Update the status in the main UI
+            self._update_remote_api_status()
+            
+            dialog.destroy()
+        
+        ctk.CTkButton(
+            dialog,
+            text="Save",
+            font=(self.font_body[0], 14, "bold"),
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_glow"],
+            text_color="#000000",
+            width=200,
+            height=44,
+            corner_radius=RADIUS["md"],
+            command=save_and_close,
+        ).pack(pady=(8, 24))
     
     def _create_advanced_section_header(self, parent, text: str) -> None:
         """Create a section header for advanced settings."""
@@ -9333,9 +9644,9 @@ class WayfinderApp(ctk.CTk):
         # Variables to store form data (persist across provider switches)
         # Note: API keys are read from environment variables only for security
         form_data = {
-            "openai_key": ctk.StringVar(value=os.environ.get("OPENAI_API_KEY", "")),
+            "openai_key": ctk.StringVar(value=self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")),
             "openai_model": ctk.StringVar(value=self.config.get("openai_model", "gpt-4o-mini")),
-            "anthropic_key": ctk.StringVar(value=os.environ.get("ANTHROPIC_API_KEY", "")),
+            "anthropic_key": ctk.StringVar(value=self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")),
             "anthropic_model": ctk.StringVar(value=self.config.get("anthropic_model", "claude-3-haiku-20240307")),
         }
         
@@ -9517,18 +9828,18 @@ class WayfinderApp(ctk.CTk):
             # Save the selected provider as the post-processing backend
             self.config["post_processing_backend"] = provider
             
-            # Save OpenAI settings
+            # Save OpenAI settings (to both env and config for persistence)
             openai_key = form_data["openai_key"].get().strip()
             if openai_key:
-                # Set for current session only - not stored in config for security
                 os.environ["OPENAI_API_KEY"] = openai_key
+                self.config["openai_api_key"] = openai_key  # Persist to config
             self.config["openai_model"] = form_data["openai_model"].get()
             
-            # Save Anthropic settings
+            # Save Anthropic settings (to both env and config for persistence)
             anthropic_key = form_data["anthropic_key"].get().strip()
             if anthropic_key:
-                # Set for current session only - not stored in config for security
                 os.environ["ANTHROPIC_API_KEY"] = anthropic_key
+                self.config["anthropic_api_key"] = anthropic_key  # Persist to config
             self.config["anthropic_model"] = form_data["anthropic_model"].get()
             
             save_config(self.config)
@@ -10431,33 +10742,57 @@ class WayfinderApp(ctk.CTk):
         if self._calib_recording:
             # Stop the test
             self._stop_calibration_test()
-        elif self._calib_expanded:
-            # Start a new test
-            self._start_calibration_test()
         else:
-            # Expand and start
-            self._calib_expanded = True
-            self._calib_content.pack(fill="x", pady=(8, 0))
+            # Expand panel if not already
+            if not self._calib_expanded:
+                self._calib_expanded = True
+                self._calib_content.pack(fill="x", pady=(8, 0))
+            
+            # Reset UI state before starting
             self._calib_results.pack_forget()
+            self._calib_instruction.configure(text="Speak normally for 5 seconds to test your microphone.")
+            self._calib_status.configure(text="Starting...", text_color=COLORS["text_primary"])
+            self._calib_meter_bar.place(x=2, y=2, width=0, height=12)
+            
+            # Start the test
             self._start_calibration_test()
     
     def _start_calibration_test(self):
         """Start the calibration recording."""
-        self._calib_recording = True
-        self._calib_toggle_btn.configure(text="Stop", fg_color=COLORS["error"])
-        self._calib_status.configure(text="🎤 Recording... Speak now!", text_color=COLORS["accent"])
         self._calib_results.pack_forget()
-        self._calib_instruction.configure(text="Speak at your normal volume for 5 seconds...")
         
         # Get device
         device_id = self.config.get("audio_device")
         if device_id is None and hasattr(self, '_resolved_audio_device'):
             device_id = self._resolved_audio_device
         
-        # Start calibrator
-        self._calib_calibrator = AudioCalibrator(device=device_id)
-        self._calib_calibrator.start()
+        # Try to start calibrator with error handling
+        try:
+            self._calib_calibrator = AudioCalibrator(device=device_id)
+            self._calib_calibrator.start()
+        except Exception as e:
+            error_msg = str(e)
+            self.log(f"⚠ Audio calibration failed: {error_msg}")
+            self._calib_status.configure(
+                text=f"❌ Audio error", 
+                text_color=COLORS["error"]
+            )
+            self._calib_instruction.configure(
+                text=f"Failed to open microphone. Check your audio device settings.\n({error_msg[:60]}...)" if len(error_msg) > 60 else f"Failed to open microphone: {error_msg}"
+            )
+            self._calib_toggle_btn.configure(text="Retry", fg_color=COLORS["accent"])
+            self._calib_calibrator = None
+            return
+        
+        # Success - update UI to recording state
+        self._calib_recording = True
+        self._calib_toggle_btn.configure(text="Stop", fg_color=COLORS["error"])
+        self._calib_status.configure(text="🎤 Recording... Speak now!", text_color=COLORS["accent"])
+        self._calib_instruction.configure(text="Speak at your normal volume for 5 seconds...")
         self._calib_start_time = time.time()
+        
+        # Reset meter bar
+        self._calib_meter_bar.place(x=2, y=2, width=0, height=12)
         
         # Start update loop
         self._update_calibration()
@@ -10472,7 +10807,13 @@ class WayfinderApp(ctk.CTk):
         
         # Update level meter
         level = self._calib_calibrator.get_current_level()
-        meter_width = int(level * 280)  # Approximate width
+        
+        # Get the actual width of the meter background for accurate scaling
+        self._calib_meter_bg.update_idletasks()
+        bg_width = self._calib_meter_bg.winfo_width()
+        if bg_width < 10:  # Fallback if not yet rendered
+            bg_width = 280
+        meter_width = max(1, int(level * (bg_width - 4)))  # -4 for padding, min 1 to show something
         
         # Color based on level
         if level > 0.95:
@@ -10482,7 +10823,9 @@ class WayfinderApp(ctk.CTk):
         else:
             color = COLORS["accent"]
         
-        self._calib_meter_bar.configure(fg_color=color, width=meter_width)
+        # Use place() to update position and size (configure alone doesn't update placed widgets properly)
+        self._calib_meter_bar.configure(fg_color=color)
+        self._calib_meter_bar.place(x=2, y=2, width=meter_width, height=12)
         
         # Update status
         self._calib_status.configure(text=f"Recording... {remaining:.1f}s")
