@@ -5483,7 +5483,7 @@ class WayfinderApp(ctk.CTk):
         """Handle remote provider selection change."""
         backend_id = self._remote_provider_map.get(display_value, "groq_whisper")
         self.config["transcription_backend"] = backend_id
-        self.save_settings()
+        save_config(self.config)
         
         # Update the info label
         provider_name = "Groq" if backend_id == "groq_whisper" else "OpenAI"
@@ -5624,7 +5624,7 @@ class WayfinderApp(ctk.CTk):
                 # Save to config (for persistence across restarts)
                 config_key = "groq_api_key" if is_groq else "openai_api_key"
                 self.config[config_key] = key
-                self.save_settings()
+                save_config(self.config)
                 
                 self.log(f"⚙ {env_var} configured and saved")
             
