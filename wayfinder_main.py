@@ -10710,7 +10710,7 @@ class WayfinderApp(ctk.CTk):
             btn_frame,
             text="● Record",
             font=(self.font_body[0], 12),
-            fg_color=COLORS["error"],
+            fg_color=COLORS["accent_red"],
             hover_color="#c55",
             text_color=COLORS["text_bright"],
             corner_radius=RADIUS["sm"],
@@ -10776,7 +10776,7 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self._mic_test_status.configure(
                 text=f"❌ Error: {str(e)[:50]}",
-                text_color=COLORS["error"],
+                text_color=COLORS["accent_red"],
             )
     
     def _update_mic_test(self):
@@ -10812,20 +10812,20 @@ class WayfinderApp(ctk.CTk):
                 
                 self._mic_test_status.configure(
                     text=f"✓ Recorded {duration:.1f}s - click Play to listen",
-                    text_color=COLORS["success"],
+                    text_color=COLORS["accent_green"],
                 )
                 self._mic_play_btn.configure(state="normal")
                 
             except Exception as e:
                 self._mic_test_status.configure(
                     text=f"❌ Error: {str(e)[:50]}",
-                    text_color=COLORS["error"],
+                    text_color=COLORS["accent_red"],
                 )
             
             self._mic_test_recorder = None
         
         # Reset button
-        self._mic_test_btn.configure(text="● Record", fg_color=COLORS["error"])
+        self._mic_test_btn.configure(text="● Record", fg_color=COLORS["accent_red"])
     
     def _play_mic_test(self):
         """Play back the recorded mic test."""
@@ -10859,14 +10859,14 @@ class WayfinderApp(ctk.CTk):
                 # Done
                 self.after(0, lambda: self._mic_test_status.configure(
                     text="✓ Playback complete - Record again or adjust settings",
-                    text_color=COLORS["success"],
+                    text_color=COLORS["accent_green"],
                 ))
                 self.after(0, lambda: self._mic_play_btn.configure(state="normal"))
                 
             except Exception as e:
                 self.after(0, lambda: self._mic_test_status.configure(
                     text=f"❌ Playback error: {str(e)[:40]}",
-                    text_color=COLORS["error"],
+                    text_color=COLORS["accent_red"],
                 ))
                 self.after(0, lambda: self._mic_play_btn.configure(state="normal"))
         
@@ -11956,7 +11956,7 @@ class WayfinderApp(ctk.CTk):
             auto_frame,
             text="(Recommended)",
             font=(self.font_body[0], 11),
-            text_color=COLORS["success"],
+            text_color=COLORS["accent_green"],
         ).pack(side="left", padx=(10, 0))
         
         # Separator
