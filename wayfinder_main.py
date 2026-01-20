@@ -5206,6 +5206,14 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["backend"], width=160,
         )
         
+        # Chunked Mode toggle (for unlimited recording length)
+        self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
+        self.create_toggle_row(
+            parent, "Chunked Mode",
+            self.chunked_var, self.toggle_chunked_mode,
+            tooltip="Split long recordings into segments for unlimited duration.\n\n✅ Enables recordings of any length\n✅ Transcribes while you speak\n⚠️ Small overhead at chunk boundaries\n\nRecommended for recordings >30 seconds.",
+        )
+        
         # === Post-Processing Section ===
         self._create_mode_section_header(parent, "Post-Processing (LLM Cleanup)")
         
@@ -12514,9 +12522,17 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"⚠ Indicator error: {e}")
             
             # Check if chunked mode is enabled
-            if self.config.get("chunked_mode", True):
+            # Note: Remote backends (Groq, OpenAI Whisper) handle long audio natively,
+            # so we skip chunked mode for them to avoid prompt length issues
+            backend = self.config.get("transcription_backend", "whisper_cpp")
+            is_remote = backend in ("groq_whisper", "openai_whisper")
+            use_chunked = self.config.get("chunked_mode", True) and not is_remote
+            
+            if use_chunked:
                 self._start_chunked_recording()
             else:
+                if is_remote and self.config.get("chunked_mode", True):
+                    self.log("ℹ️ Chunked mode skipped (cloud API handles long audio)")
                 self.recorder.start()
             
             # Start duration update timer
