@@ -494,6 +494,8 @@ class GroqWhisperBackend(TranscriptionBackend):
     """
     Groq Whisper API backend for ultra-fast cloud transcription.
     Uses Groq's LPU hardware for ~10x faster inference than standard Whisper.
+    
+    Note: Groq has a 896 character limit for the prompt parameter.
     Same Whisper Large-v3 model, dramatically lower latency.
     """
     
@@ -515,20 +517,47 @@ class GroqWhisperBackend(TranscriptionBackend):
         self._client = None
     
     def _build_prompt(self, context: str = "") -> str:
-        """Build the prompt with context and custom vocabulary."""
+        """
+        Build the prompt with context and custom vocabulary.
+        
+        Note: Groq has a strict 896 character limit for prompts.
+        We prioritize: custom vocabulary > context > base prompt
+        """
+        GROQ_PROMPT_LIMIT = 896
         parts = []
         
-        if context:
-            context_snippet = context.strip()[-200:] if len(context) > 200 else context.strip()
-            parts.append(context_snippet)
-        elif self.prompt:
-            parts.append(self.prompt)
-        
+        # Start with custom vocabulary (most important for accuracy)
+        vocab_str = ""
         if self.custom_vocabulary:
             vocab_str = ", ".join(self.custom_vocabulary)
-            parts.append(vocab_str)
+            if len(vocab_str) < GROQ_PROMPT_LIMIT - 100:  # Leave room for context
+                parts.append(vocab_str)
         
-        return " ".join(parts) if parts else ""
+        # Calculate remaining space
+        current_len = len(" ".join(parts)) if parts else 0
+        remaining = GROQ_PROMPT_LIMIT - current_len - 10  # Buffer
+        
+        if context and remaining > 50:
+            # Use context from previous transcription
+            context_snippet = context.strip()
+            if len(context_snippet) > remaining:
+                context_snippet = context_snippet[-(remaining):]
+            parts.insert(0, context_snippet)  # Context first, then vocab
+        elif self.prompt and remaining > 50:
+            # Use base prompt if no context
+            prompt_snippet = self.prompt
+            if len(prompt_snippet) > remaining:
+                prompt_snippet = prompt_snippet[:remaining]
+            parts.insert(0, prompt_snippet)
+        
+        result = " ".join(parts) if parts else ""
+        
+        # Final safety check
+        if len(result) > GROQ_PROMPT_LIMIT:
+            result = result[:GROQ_PROMPT_LIMIT]
+            print(f"[Groq Whisper] ⚠ Prompt truncated to {GROQ_PROMPT_LIMIT} chars")
+        
+        return result
     
     def get_name(self) -> str:
         return "Groq Whisper (Ultra-Fast)"
@@ -861,13 +890,14 @@ def clean_whisper_artifacts(text: str) -> str:
     original = text
     
     # Remove [BLANK_AUDIO] and similar markers (case insensitive)
-    text = re.sub(r'\[BLANK_AUDIO\]', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[SILENCE\]', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[MUSIC\]', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[APPLAUSE\]', '', text, flags=re.IGNORECASE)
+    # Replace with space to preserve word boundaries (will be normalized later)
+    text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[MUSIC\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[APPLAUSE\]', ' ', text, flags=re.IGNORECASE)
     
-    # Remove music note symbols
-    text = re.sub(r'♪+', '', text)
+    # Remove music note symbols (replace with space to preserve word boundaries)
+    text = re.sub(r'♪+', ' ', text)
     
     # Remove repeated dots with spaces: ". . . . ." or ". . ."
     # This pattern captures 2 or more dots separated by spaces
@@ -1033,15 +1063,21 @@ def transcribe_with_config(
     if ensure_punct and text:
         text = ensure_punctuation_postprocess(text)
     
-    # Apply LLM post-processing if enabled (and not skipped for chunked mode)
-    if config.get("post_processing_enabled", True) and text and not skip_post_processing:
+    # Apply post-processing (and not skipped for chunked mode)
+    # Note: For "minimal" style, regex cleanup runs even if LLM post-processing is disabled
+    tone = config.get("output_tone", "professional")
+    post_processing_enabled = config.get("post_processing_enabled", True)
+    
+    if (post_processing_enabled or tone == "minimal") and text and not skip_post_processing:
         try:
             from .postprocessor import process_with_config
             import os
-            backend = config.get("post_processing_backend", "ollama")
+            backend = config.get("post_processing_backend", "llama_cpp")
             
-            # Debug: Check if API key is available for cloud backends
-            if backend == "openai":
+            # Debug: Check backend and log what's being used
+            if tone == "minimal":
+                print(f"[Post-processing] Using Minimal (regex-only, no LLM)")
+            elif backend == "openai":
                 key = os.environ.get("OPENAI_API_KEY", "")
                 if not key:
                     print("[Post-processing] ⚠ OPENAI_API_KEY not set in environment")
@@ -1053,10 +1089,7 @@ def transcribe_with_config(
                     print("[Post-processing] ⚠ ANTHROPIC_API_KEY not set in environment")
                 else:
                     print(f"[Post-processing] Using Anthropic ({config.get('anthropic_model', 'claude-3-haiku')})")
-            elif backend == "ollama":
-                model_name = config.get("ollama_model", "phi3:mini")
-                print(f"[Post-processing] Using Ollama ({model_name})")
-            elif backend == "llama_cpp":
+            else:  # llama_cpp
                 model_path = config.get("llama_cpp_model_path", "")
                 if not model_path:
                     print("[Post-processing] ⚠ No llama.cpp model selected")
