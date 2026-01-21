@@ -59,6 +59,13 @@ from .logging import (
     get_log_file_path,
 )
 
+from .audio_ducker import (
+    AudioDucker,
+    is_pactl_available,
+    get_sink_inputs,
+    set_sink_input_volume,
+)
+
 __all__ = [
     # GPU
     "GPUInfo",
@@ -105,4 +112,9 @@ __all__ = [
     "get_logger",
     "set_level",
     "get_log_file_path",
+    # Audio Ducking
+    "AudioDucker",
+    "is_pactl_available",
+    "get_sink_inputs",
+    "set_sink_input_volume",
 ]

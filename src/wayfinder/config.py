@@ -124,6 +124,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     "overlay_scale": 0.7,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     
+    # Audio ducking settings (reduce other audio while recording)
+    "audio_ducking_enabled": True,  # Enable automatic volume reduction during recording
+    "audio_ducking_percent": 20,  # How much to reduce other audio (0-100, e.g. 20 = reduce to 80%)
+    
     # Style settings (5 presets that cycle via hotkey)
     "output_tone": "professional",  # minimal | professional | casual | dev | personal
     "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.

@@ -43,6 +43,7 @@ from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_in
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
+from wayfinder.utils.audio_ducker import AudioDucker
 
 
 # === Configuration ===
@@ -3077,6 +3078,10 @@ class WayfinderApp(ctk.CTk):
         self.transcription_executor = ThreadPoolExecutor(max_workers=2)
         self.chunk_transcription_lock = threading.Lock()
         
+        # Audio ducker for reducing other audio during recording
+        duck_percent = self.config.get("audio_ducking_percent", 20)
+        self.audio_ducker = AudioDucker(duck_percent=duck_percent)
+        
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.logs = []
         
@@ -4276,6 +4281,9 @@ class WayfinderApp(ctk.CTk):
         
         # Audio Calibration inline section
         self._build_audio_calibration_section(audio_content)
+        
+        # Audio Ducking controls
+        self._build_audio_ducking_section(audio_content)
         
         # === BENTO TILE 2: Processing Mode ===
         mode_tile = ctk.CTkFrame(
@@ -9146,6 +9154,153 @@ class WayfinderApp(ctk.CTk):
         self._mic_test_audio_path = None
         self._mic_test_update_job = None
     
+    def _build_audio_ducking_section(self, parent):
+        """Build audio ducking controls - toggle and percentage slider."""
+        # Separator line
+        separator = ctk.CTkFrame(parent, fg_color=COLORS["border_subtle"], height=1)
+        separator.pack(fill="x", padx=16, pady=(16, 8))
+        
+        # Section label
+        ctk.CTkLabel(
+            parent,
+            text="Audio Ducking",
+            font=(self.font_body[0], 13),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=(24, 0), pady=(0, 4))
+        
+        ctk.CTkLabel(
+            parent,
+            text="Automatically lower other audio while recording",
+            font=(self.font_body[0], 11),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=(24, 0), pady=(0, 8))
+        
+        # Enable toggle
+        ducking_enabled = self.config.get("audio_ducking_enabled", True)
+        self.audio_ducking_var = ctk.BooleanVar(value=ducking_enabled)
+        self.create_toggle_row(
+            parent, "Enable Audio Ducking",
+            self.audio_ducking_var, self._on_audio_ducking_toggled,
+            tooltip="Lower music and other audio while recording for clearer dictation",
+        )
+        
+        # Duck percentage slider
+        self._create_audio_ducking_slider_row(parent)
+    
+    def _create_audio_ducking_slider_row(self, parent):
+        """Create inline audio ducking percentage slider."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=8)
+        
+        row.grid_columnconfigure(0, weight=0)  # Label column
+        row.grid_columnconfigure(1, weight=1)  # Slider column - grows
+        row.grid_columnconfigure(2, weight=0)  # Value display column
+        
+        # Label
+        label_widget = ctk.CTkLabel(
+            row,
+            text="Duck Amount",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_secondary"],
+        )
+        label_widget.grid(row=0, column=0, sticky="w")
+        
+        tooltip_text = "How much to reduce other audio (20% = reduce to 80% volume)"
+        ToolTip(label_widget, tooltip_text)
+        
+        # Get current duck percentage
+        duck_percent = self.config.get("audio_ducking_percent", 20)
+        
+        # Value display (right side, shows percentage)
+        self.duck_percent_value_label = ctk.CTkLabel(
+            row,
+            text=f"{duck_percent}%",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["accent"],
+            width=60,
+        )
+        self.duck_percent_value_label.grid(row=0, column=2, sticky="e", padx=(10, 0))
+        
+        # Slider in the middle
+        self.duck_percent_slider_var = ctk.DoubleVar(value=duck_percent)
+        
+        # Debounce timer for applying changes
+        self._duck_percent_apply_timer = None
+        
+        def on_duck_slider_change(value):
+            """Update display and schedule duck percent application."""
+            value = int(float(value))
+            # Snap to nearest 5%
+            snapped = round(value / 5) * 5
+            self.duck_percent_value_label.configure(text=f"{snapped}%")
+            
+            # Cancel any pending apply
+            if self._duck_percent_apply_timer is not None:
+                try:
+                    self.after_cancel(self._duck_percent_apply_timer)
+                except:
+                    pass
+            
+            # Schedule apply after a short delay (debounce)
+            self._duck_percent_apply_timer = self.after(150, lambda: self._apply_duck_percent(snapped))
+        
+        self.duck_percent_slider = ctk.CTkSlider(
+            row,
+            from_=0,
+            to=50,
+            variable=self.duck_percent_slider_var,
+            command=on_duck_slider_change,
+            height=18,
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+            button_hover_color=COLORS["text_primary"],
+            fg_color=COLORS["bg_input"],
+        )
+        self.duck_percent_slider.grid(row=0, column=1, sticky="ew", padx=(20, 10))
+        
+        ToolTip(self.duck_percent_slider, tooltip_text)
+        
+        # Update slider enabled state based on toggle
+        self._update_ducking_slider_state()
+    
+    def _on_audio_ducking_toggled(self):
+        """Handle audio ducking toggle change."""
+        enabled = self.audio_ducking_var.get()
+        self.config["audio_ducking_enabled"] = enabled
+        save_config(self.config)
+        
+        # Update slider enabled state
+        self._update_ducking_slider_state()
+        
+        status = "enabled" if enabled else "disabled"
+        self.log(f"🔉 Audio ducking {status}")
+    
+    def _update_ducking_slider_state(self):
+        """Enable or disable the ducking slider based on toggle state."""
+        if hasattr(self, 'duck_percent_slider') and hasattr(self, 'audio_ducking_var'):
+            enabled = self.audio_ducking_var.get()
+            if enabled:
+                self.duck_percent_slider.configure(state="normal")
+                self.duck_percent_value_label.configure(text_color=COLORS["accent"])
+            else:
+                self.duck_percent_slider.configure(state="disabled")
+                self.duck_percent_value_label.configure(text_color=COLORS["text_muted"])
+    
+    def _apply_duck_percent(self, new_percent):
+        """Apply duck percentage change."""
+        current = self.config.get("audio_ducking_percent", 20)
+        if new_percent == current:
+            return  # No change
+        
+        self.config["audio_ducking_percent"] = new_percent
+        save_config(self.config)
+        
+        # Update the audio ducker instance
+        if hasattr(self, 'audio_ducker'):
+            self.audio_ducker.set_duck_percent(new_percent)
+        
+        self.log(f"🔉 Duck amount: {new_percent}%")
+    
     def _toggle_mic_test(self):
         """Start or stop mic test recording."""
         if self._mic_test_recording:
@@ -12156,8 +12311,18 @@ class WayfinderApp(ctk.CTk):
     # === State Management ===
     
     def update_state(self, new_state: AppState):
+        old_state = self.app_state
         self.app_state = new_state
         color = STATE_COLORS[new_state]
+        
+        # Audio ducking on state transitions
+        if self.config.get("audio_ducking_enabled", True) and hasattr(self, 'audio_ducker'):
+            if new_state == AppState.RECORDING and old_state != AppState.RECORDING:
+                # Entering recording - duck other audio
+                self.audio_ducker.duck()
+            elif old_state == AppState.RECORDING and new_state != AppState.RECORDING:
+                # Leaving recording - restore audio
+                self.audio_ducker.restore()
         
         # Update tray FIRST - this is critical for user feedback
         self.update_tray(new_state)
