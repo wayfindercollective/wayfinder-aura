@@ -9181,7 +9181,7 @@ class WayfinderApp(ctk.CTk):
         self.create_toggle_row(
             parent, "Enable Audio Ducking",
             self.audio_ducking_var, self._on_audio_ducking_toggled,
-            tooltip="Lower music and other audio while recording for clearer dictation",
+            tooltip="Automatically lower music and other audio while recording",
         )
         
         # Duck percentage slider
@@ -9205,7 +9205,7 @@ class WayfinderApp(ctk.CTk):
         )
         label_widget.grid(row=0, column=0, sticky="w")
         
-        tooltip_text = "How much to reduce other audio (20% = reduce to 80% volume)"
+        tooltip_text = "How much to lower other audio. Higher = quieter music while recording."
         ToolTip(label_widget, tooltip_text)
         
         # Get current duck percentage

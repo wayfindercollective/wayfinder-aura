@@ -126,7 +126,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Audio ducking settings (reduce other audio while recording)
     "audio_ducking_enabled": True,  # Enable automatic volume reduction during recording
-    "audio_ducking_percent": 20,  # How much to reduce other audio (0-100, e.g. 20 = reduce to 80%)
+    "audio_ducking_percent": 20,  # How much to lower other audio (0-50, higher = quieter)
     
     # Style settings (5 presets that cycle via hotkey)
     "output_tone": "professional",  # minimal | professional | casual | dev | personal
