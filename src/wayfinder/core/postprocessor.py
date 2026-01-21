@@ -135,13 +135,18 @@ MODEL_TIERS = {
         "smart_formatting": True,
         "patterns": ["3b", "4b", "7b", "8b", "medium"],
     },
-    "large": {  # 7B+ params
+    "large": {  # 7B+ params AND all cloud API models
         "description": "Large models, best quality",
         "max_intensity": "strong",
         "smart_formatting": True,
-        "patterns": ["13b", "14b", "32b", "70b", "large", "gpt-4", "claude"],
+        # Cloud API models: gpt-4, gpt-4o, o1, o3, claude, grok, gemini, deepseek, mistral (API)
+        "patterns": ["13b", "14b", "32b", "70b", "large", "gpt-4", "gpt-4o", "o1-", "o3-", 
+                     "claude", "grok", "gemini", "deepseek", "mistral-large", "mistral-medium"],
     },
 }
+
+# Cloud backend identifiers - these always use large/capable models
+CLOUD_BACKENDS = {"openai", "anthropic"}
 
 # Known model-specific issues
 MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
@@ -188,12 +193,22 @@ MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def detect_model_tier(model_name: str) -> str:
+def detect_model_tier(model_name: str, backend: str = "") -> str:
     """
     Detect the capability tier of a model based on its name.
     
+    Args:
+        model_name: The model name/identifier
+        backend: The backend type (llama_cpp, openai, anthropic). Cloud backends
+                 are assumed to use large/capable models.
+    
     Returns: "tiny", "small", "standard", or "large"
     """
+    # Cloud backends (OpenAI, Anthropic, xAI Grok, etc.) always use capable models
+    # Even "mini" variants like gpt-4o-mini are highly capable for text cleanup
+    if backend in CLOUD_BACKENDS:
+        return "large"
+    
     model_lower = model_name.lower()
     
     # Check for specific model overrides first
@@ -365,9 +380,16 @@ def analyze_all_models(model_list: list) -> Dict[str, Any]:
     }
 
 
-def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_formatting: bool) -> Dict[str, Any]:
+def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_formatting: bool, backend: str = "") -> Dict[str, Any]:
     """
     Check model compatibility with current settings and return recommendations.
+    
+    Args:
+        model_name: The model name/identifier
+        tone: Output tone (minimal, professional, casual, dev, personal)
+        intensity: Intensity level (standard, strong, caricature)
+        smart_formatting: Whether smart formatting is enabled
+        backend: The backend type (llama_cpp, openai, anthropic)
     
     Returns dict with:
         - compatible: bool - whether settings are fully compatible
@@ -376,7 +398,7 @@ def get_model_compatibility(model_name: str, tone: str, intensity: str, smart_fo
         - auto_adjustments: dict - automatic adjustments to apply
         - upgrade_suggestion: dict - specific model upgrade recommendation
     """
-    tier = detect_model_tier(model_name)
+    tier = detect_model_tier(model_name, backend=backend)
     tier_info = MODEL_TIERS[tier]
     quirks = get_model_quirks(model_name)
     
@@ -557,13 +579,13 @@ def check_settings_compatibility(config: dict) -> Dict[str, Any]:
             "upgrade_message": None,
             "severity": "ok",
             "current_model": model_name,
-            "current_tier": detect_model_tier(model_name),
+            "current_tier": detect_model_tier(model_name, backend=backend),
             "requested_intensity": "standard",
             "effective_intensity": "standard",
         }
     
-    # Run compatibility check
-    compat = get_model_compatibility(model_name, tone, intensity, False)
+    # Run compatibility check (pass backend so cloud APIs are recognized as capable)
+    compat = get_model_compatibility(model_name, tone, intensity, False, backend=backend)
     
     # Build result
     issues = []
@@ -1206,16 +1228,17 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
         model_name = config.get(f"{backend}_model", "")
     
     # Check compatibility and get auto-adjustments
+    # Pass backend so cloud APIs (OpenAI, Anthropic, xAI Grok) are recognized as capable
     compatibility = {"warnings": [], "auto_adjustments": {}, "tier": "standard"}
     if apply_compatibility and model_name:
-        compatibility = get_model_compatibility(model_name, tone, intensity, False)  # smart_formatting removed
+        compatibility = get_model_compatibility(model_name, tone, intensity, False, backend=backend)
         
         # Apply auto-adjustments for intensity
         if "intensity" in compatibility["auto_adjustments"]:
             intensity = compatibility["auto_adjustments"]["intensity"]
     
     # Detect if we should use the simple prompt for tiny models
-    tier = compatibility.get("tier", detect_model_tier(model_name) if model_name else "standard")
+    tier = compatibility.get("tier", detect_model_tier(model_name, backend=backend) if model_name else "standard")
     
     if tier == "tiny":
         # Use simplified prompt for tiny models
@@ -2272,10 +2295,14 @@ def get_tone_options() -> list:
     ]
 
 
-def get_model_tier_info(model_name: str) -> Dict[str, Any]:
+def get_model_tier_info(model_name: str, backend: str = "") -> Dict[str, Any]:
     """
     Get detailed tier information for a model.
     Useful for UI to display recommendations.
+    
+    Args:
+        model_name: The model name/identifier
+        backend: The backend type (llama_cpp, openai, anthropic)
     
     Returns dict with:
         - tier: str (tiny, small, standard, large)
@@ -2285,7 +2312,7 @@ def get_model_tier_info(model_name: str) -> Dict[str, Any]:
         - quirks: list of known issues
         - recommendations: list of suggestions
     """
-    tier = detect_model_tier(model_name)
+    tier = detect_model_tier(model_name, backend=backend)
     tier_info = MODEL_TIERS[tier]
     quirks = get_model_quirks(model_name)
     
