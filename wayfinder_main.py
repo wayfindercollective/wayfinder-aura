@@ -3079,7 +3079,7 @@ class WayfinderApp(ctk.CTk):
         self.chunk_transcription_lock = threading.Lock()
         
         # Audio ducker for reducing other audio during recording
-        duck_percent = self.config.get("audio_ducking_percent", 20)
+        duck_percent = self.config.get("audio_ducking_percent", 30)
         self.audio_ducker = AudioDucker(duck_percent=duck_percent)
         
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -9209,7 +9209,7 @@ class WayfinderApp(ctk.CTk):
         ToolTip(label_widget, tooltip_text)
         
         # Get current duck percentage
-        duck_percent = self.config.get("audio_ducking_percent", 20)
+        duck_percent = self.config.get("audio_ducking_percent", 30)
         
         # Value display (right side, shows percentage)
         self.duck_percent_value_label = ctk.CTkLabel(
@@ -9288,7 +9288,7 @@ class WayfinderApp(ctk.CTk):
     
     def _apply_duck_percent(self, new_percent):
         """Apply duck percentage change."""
-        current = self.config.get("audio_ducking_percent", 20)
+        current = self.config.get("audio_ducking_percent", 30)
         if new_percent == current:
             return  # No change
         
