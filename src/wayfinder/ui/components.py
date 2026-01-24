@@ -116,7 +116,7 @@ class ToolTip:
 class ModeSelector(ctk.CTkFrame):
     """
     Segmented control widget for selecting processing mode.
-    Three mutually exclusive options: Local | Hybrid | Remote
+    Two mutually exclusive options: Local | Remote
     """
     
     def __init__(
@@ -129,7 +129,7 @@ class ModeSelector(ctk.CTkFrame):
     ):
         super().__init__(parent, fg_color="transparent", **kwargs)
         
-        self.values = values or ["local", "hybrid", "remote"]
+        self.values = values or ["local", "remote"]
         self.current_value = current_value
         self.command = command
         self.buttons: dict[str, ctk.CTkButton] = {}
@@ -137,7 +137,6 @@ class ModeSelector(ctk.CTkFrame):
         # Display labels and icons for each mode
         self.display_info = {
             "local": {"label": "Local", "icon": "🔒", "desc": "100% Private"},
-            "hybrid": {"label": "Hybrid", "icon": "🔗", "desc": "Local + Cloud AI"},
             "remote": {"label": "Remote", "icon": "☁️", "desc": "Cloud Processing"},
         }
         
@@ -287,7 +286,6 @@ SETTING_TOOLTIPS: dict[str, str] = {
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
     
     # Post-processing tooltips
-    "ollama_model": "Ollama model for text cleanup.\n\n✅ Best: qwen2.5:1.5b (fast + accurate)\n✅ Good: phi3:mini (reliable)\n⚠️ Quirky: llama3.2:1b (safety filters)\n❌ Avoid: smollm2:360m (too small)\n\n💡 Use light/standard intensity for best results.",
     "post_processing": "Clean up transcription with an LLM.\nRemoves filler words, fixes grammar, formats output.\n🟡 Latency: +100-500ms depending on model",
     "fast_filler_removal": "⚡ INSTANT filler removal (~1ms)\n\nUses regex instead of LLM to remove:\num, uh, ah, er, eh, hmm, mm\n\n✅ ~1000x faster than LLM\n✅ No model loading required\n✅ Perfect for 'Minimal' style\n\n🟢 Best when you just want ums/ahs removed\n    and don't need grammar fixes.",
     "output_tone": "Style for processed output:\n• Professional — Polished, business-appropriate\n• AI Prompt — Optimized for talking to LLMs\n• Casual — Relaxed, conversational",
@@ -552,15 +550,8 @@ class CompatibilityBanner(ctk.CTkFrame):
         # Update model suggestion
         upgrade_message = compatibility.get("upgrade_message")
         if upgrade_message:
-            # Extract the ollama pull command if present
-            if "ollama pull" in upgrade_message:
-                cmd_start = upgrade_message.find("ollama pull")
-                cmd = upgrade_message[cmd_start:].split("\n")[0].strip()
-                self.suggestion_label.configure(text=f"💡 {cmd}")
-                self.suggestion_frame.pack(fill="x", pady=(8, 0))
-            else:
-                self.suggestion_label.configure(text=f"💡 {upgrade_message[:50]}...")
-                self.suggestion_frame.pack(fill="x", pady=(8, 0))
+            self.suggestion_label.configure(text=f"💡 {upgrade_message[:60]}...")
+            self.suggestion_frame.pack(fill="x", pady=(8, 0))
         else:
             self.suggestion_frame.pack_forget()
         

@@ -39,7 +39,7 @@ wayfinder-aura/
 │   │   ├── transcriber.py  # Speech-to-text (whisper.cpp, etc.)
 │   │   ├── injector.py     # Text injection (ydotool)
 │   │   ├── postprocessor.py # LLM post-processing
-│   │   └── ollama_manager.py # Ollama service management
+│   │   └── voice_profile.py  # Personal voice pattern learning
 │   ├── ui/                 # User interface
 │   │   ├── theme.py        # Colors, fonts, styling
 │   │   ├── components.py   # Reusable widgets (ToolTip, etc.)

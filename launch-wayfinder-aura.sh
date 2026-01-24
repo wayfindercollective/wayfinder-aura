@@ -23,8 +23,13 @@ if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     export DISPLAY="${DISPLAY:-:0}"
 fi
 
-# Use system Python explicitly (has tkinter and correct deps)
-PYTHON="/usr/bin/python3"
+# Use the virtual environment Python if available (has all deps including groq)
+# Falls back to system Python if venv not found
+if [ -f "$SCRIPT_DIR/venv-gpu/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/venv-gpu/bin/python"
+else
+    PYTHON="/usr/bin/python3"
+fi
 
 # GPU detection is now handled in main.py via setup_gpu_environment()
 # No need for bash-based detection anymore - simpler and more reliable!

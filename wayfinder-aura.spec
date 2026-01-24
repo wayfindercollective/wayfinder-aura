@@ -44,7 +44,6 @@ a = Analysis(
         'wayfinder.core.transcriber',
         'wayfinder.core.injector',
         'wayfinder.core.postprocessor',
-        'wayfinder.core.ollama_manager',
         'wayfinder.core.voice_profile',
         'wayfinder.ui',
         'wayfinder.ui.theme',

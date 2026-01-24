@@ -17,7 +17,7 @@ now use the `wayfinder.*` package paths directly. The canonical source of truth 
 | `transcriber.py` | **DELETED** | Import from `wayfinder.core.transcriber` |
 | `injector.py` | **DELETED** | Import from `wayfinder.core.injector` |
 | `postprocessor.py` | **DELETED** | Import from `wayfinder.core.postprocessor` |
-| `ollama_manager.py` | **DELETED** | Import from `wayfinder.core.ollama_manager` |
+| `ollama_manager.py` | **REMOVED** | Ollama backend removed, use llama.cpp |
 | `license.py` | **DELETED** | Import from `wayfinder.license` |
 | `status_overlay.py` | Original | `src/wayfinder/ui/overlay.py` |
 | `wayfinder_main.py` | Legacy main | To be broken into modules |
@@ -30,7 +30,6 @@ The following can be extracted to `src/wayfinder/ui/dialogs/`:
 - Settings dialog → `settings.py`
 - Hotkey dialog → `hotkey.py`
 - Model download dialog → `model_download.py`
-- Ollama setup wizard → `ollama_setup.py`
 - Benchmark dialog → `benchmark.py`
 - License dialog → `license.py`
 

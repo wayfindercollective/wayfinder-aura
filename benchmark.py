@@ -6,7 +6,7 @@ Tests all aspects of the transcription and post-processing pipeline:
 - Transcription backends (whisper.cpp, Faster-Whisper)
 - Processing modes (CPU, GPU)
 - Accuracy modes (fast, balanced, high)
-- Post-processing backends (Ollama, llama.cpp CLI/Python, cloud APIs)
+- Post-processing backends (llama.cpp CLI/Python, cloud APIs)
 - API latency for cloud services
 
 Results are stored in config and used for intelligent recommendations.
@@ -702,85 +702,6 @@ def run_postprocessing_benchmarks(suite: BenchmarkSuite) -> None:
     print("=" * 70)
     
     test_text = SAMPLE_TRANSCRIPTION.strip()
-    
-    # Test Ollama
-    print("\nOllama:")
-    try:
-        import requests
-        
-        # Check if Ollama is running
-        try:
-            response = requests.get("http://localhost:11434/api/tags", timeout=2)
-            if response.status_code != 200:
-                raise Exception("Ollama not responding")
-        except:
-            print("  ⚠ Ollama not running - skipping")
-            suite.postprocessing_results.append(BenchmarkResult(
-                name="Ollama",
-                backend="ollama",
-                mode="local",
-                duration_seconds=0,
-                avg_time=0,
-                error="Ollama not running",
-            ))
-        else:
-            # Get available models
-            models = response.json().get("models", [])
-            if not models:
-                print("  ⚠ No Ollama models installed - skipping")
-            else:
-                # Use first small model (phi3, qwen, llama3.2, etc.)
-                small_models = [m for m in models if any(
-                    x in m.get("name", "").lower() 
-                    for x in ["phi3:mini", "phi3.5:mini", "qwen2.5:1.5b", "llama3.2:1b", "smollm"]
-                )]
-                test_model = small_models[0]["name"] if small_models else models[0]["name"]
-                
-                print(f"  Testing with model: {test_model}")
-                
-                # Warm-up
-                requests.post(
-                    "http://localhost:11434/api/generate",
-                    json={"model": test_model, "prompt": "Hello", "stream": False},
-                    timeout=30,
-                )
-                
-                # Timed runs
-                times = []
-                prompt = f"Clean up this transcription, remove filler words:\n{test_text}"
-                
-                for _ in range(3):
-                    start = time.perf_counter()
-                    response = requests.post(
-                        "http://localhost:11434/api/generate",
-                        json={"model": test_model, "prompt": prompt, "stream": False},
-                        timeout=30,
-                    )
-                    elapsed = time.perf_counter() - start
-                    if response.status_code == 200:
-                        times.append(elapsed)
-                
-                if times:
-                    avg_time = sum(times) / len(times)
-                    print(f"  Result: {format_time(avg_time)} avg")
-                    
-                    suite.postprocessing_results.append(BenchmarkResult(
-                        name=f"Ollama ({test_model})",
-                        backend="ollama",
-                        mode="local",
-                        duration_seconds=0,
-                        avg_time=avg_time,
-                        min_time=min(times),
-                        max_time=max(times),
-                        extra={"model": test_model},
-                    ))
-                else:
-                    print("  ⚠ All runs failed")
-                    
-    except ImportError:
-        print("  ⚠ requests not installed - skipping Ollama")
-    except Exception as e:
-        print(f"  ⚠ Error: {e}")
     
     # Test llama.cpp (CLI and Python backends)
     print("\nllama.cpp:")

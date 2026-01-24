@@ -21,6 +21,12 @@ from .gpu import (
 )
 
 from .platform import (
+    # Cross-platform detection
+    get_platform,
+    is_linux,
+    is_macos,
+    is_windows,
+    # Linux-specific detection
     is_flatpak,
     is_wayland,
     is_x11,
@@ -28,13 +34,24 @@ from .platform import (
     is_gnome,
     get_desktop_environment,
     get_session_type,
+    # Cross-platform directories
     get_config_dir,
     get_data_dir,
     get_cache_dir,
     ensure_directories,
+    # Text injection detection
     is_ydotool_available,
     is_xdotool_available,
+    is_pyautogui_available,
     get_text_injector,
+    # Binary detection
+    find_executable,
+    get_default_whisper_binary,
+    get_default_llama_binary,
+    get_default_model_dir,
+    get_default_llm_model_dir,
+    # Platform info
+    get_platform_info,
 )
 
 from .lazy_imports import (
@@ -79,7 +96,12 @@ __all__ = [
     "benchmark_gpu_devices",
     "run_gpu_benchmark_and_cache",
     "detect_vulkan_devices",
-    # Platform
+    # Platform - Cross-platform detection
+    "get_platform",
+    "is_linux",
+    "is_macos",
+    "is_windows",
+    # Platform - Linux-specific
     "is_flatpak",
     "is_wayland",
     "is_x11",
@@ -87,13 +109,24 @@ __all__ = [
     "is_gnome",
     "get_desktop_environment",
     "get_session_type",
+    # Platform - Directories
     "get_config_dir",
     "get_data_dir",
     "get_cache_dir",
     "ensure_directories",
+    # Platform - Text injection
     "is_ydotool_available",
     "is_xdotool_available",
+    "is_pyautogui_available",
     "get_text_injector",
+    # Platform - Binary detection
+    "find_executable",
+    "get_default_whisper_binary",
+    "get_default_llama_binary",
+    "get_default_model_dir",
+    "get_default_llm_model_dir",
+    # Platform - Info
+    "get_platform_info",
     # Lazy Imports
     "LazyModule",
     "get_pyqt6",

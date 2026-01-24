@@ -5,7 +5,7 @@ Core functionality modules for Wayfinder Aura.
 - transcriber: Multi-backend speech-to-text
 - injector: Text injection via ydotool
 - postprocessor: LLM-based text cleanup
-- ollama_manager: Ollama service management
+- voice_profile: Personal voice pattern learning
 """
 
 from .recorder import (
@@ -27,7 +27,6 @@ from .postprocessor import (
     check_settings_compatibility,
     get_upgrade_suggestion_for_intensity,
 )
-from .ollama_manager import get_ollama_manager, OllamaManager
 from .voice_profile import VoiceProfile, get_voice_profile, reset_voice_profile
 
 __all__ = [
@@ -53,9 +52,6 @@ __all__ = [
     "get_template_names",
     "check_settings_compatibility",
     "get_upgrade_suggestion_for_intensity",
-    # Ollama
-    "get_ollama_manager",
-    "OllamaManager",
     # Voice Profile
     "VoiceProfile",
     "get_voice_profile",

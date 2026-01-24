@@ -84,7 +84,6 @@ from .core import (
     inject_text,
     InjectionError,
     process_with_config,
-    get_ollama_manager,
     VoiceProfile,
     get_voice_profile,
 )
@@ -146,7 +145,6 @@ __all__ = [
     "inject_text",
     "InjectionError",
     "process_with_config",
-    "get_ollama_manager",
     # Voice Profile
     "VoiceProfile",
     "get_voice_profile",

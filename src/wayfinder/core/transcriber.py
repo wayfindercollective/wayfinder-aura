@@ -831,7 +831,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
         )
     elif backend_type == "openai_whisper":
         return OpenAIWhisperBackend(
-            api_key="",  # Will be read from OPENAI_API_KEY env var
+            api_key=config.get("openai_api_key", ""),  # From config or OPENAI_API_KEY env var
             model=config.get("openai_whisper_model", "whisper-1"),
             language=config.get("language", "en"),
             prompt=config.get("prompt", ""),
@@ -840,7 +840,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
         )
     elif backend_type == "groq_whisper":
         return GroqWhisperBackend(
-            api_key="",  # Will be read from GROQ_API_KEY env var
+            api_key=config.get("groq_api_key", ""),  # From config or GROQ_API_KEY env var
             model=config.get("groq_whisper_model", "whisper-large-v3"),
             language=config.get("language", "en"),
             prompt=config.get("prompt", ""),

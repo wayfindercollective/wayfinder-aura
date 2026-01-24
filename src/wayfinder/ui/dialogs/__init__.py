@@ -5,7 +5,6 @@ Future extraction targets (currently in wayfinder_main.py):
 - settings: Main settings dialog
 - hotkey: Hotkey configuration
 - model_download: Whisper model downloader
-- ollama_setup: Ollama installation wizard
 - benchmark: Performance benchmarking
 - license: License activation
 
@@ -22,7 +21,6 @@ from .calibration import AudioCalibrationDialog
 # from .settings import SettingsDialog
 # from .hotkey import HotkeyDialog
 # from .model_download import ModelDownloadDialog
-# from .ollama_setup import OllamaSetupWizard
 # from .benchmark import BenchmarkDialog
 # from .license import LicenseDialog
 

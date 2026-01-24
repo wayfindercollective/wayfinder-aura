@@ -19,7 +19,7 @@
 
 1. **Records audio** when user presses a hotkey (F9 default)
 2. **Transcribes speech** using whisper.cpp or Faster-Whisper
-3. **Post-processes text** with an LLM (llama.cpp, Ollama, or cloud APIs)
+3. **Post-processes text** with an LLM (llama.cpp or cloud APIs)
 4. **Injects text** at the cursor position using ydotool
 
 ### Core Technologies
@@ -30,7 +30,7 @@
 | Status Overlay | PyQt6 | Glassmorphic floating indicator |
 | Audio Recording | sounddevice + scipy | 16kHz resampling for Whisper |
 | Transcription | whisper.cpp / Faster-Whisper | GPU acceleration via Vulkan/ROCm |
-| Post-Processing | llama.cpp / Ollama | Local LLM cleanup |
+| Post-Processing | llama.cpp | Local LLM cleanup |
 | Text Injection | ydotool | Works on Wayland and X11 |
 | System Tray | pystray | Background operation |
 | Hotkey Detection | evdev / D-Bus | X11 and Wayland support |
@@ -121,8 +121,7 @@ src/wayfinder/
 │   ├── recorder.py     # Audio recording (AudioRecorder, ChunkedRecorder)
 │   ├── transcriber.py  # Speech-to-text (whisper.cpp, Faster-Whisper, Groq, OpenAI)
 │   ├── injector.py     # Text injection via ydotool
-│   ├── postprocessor.py # LLM text cleanup (llama.cpp, Ollama, Anthropic, OpenAI)
-│   ├── ollama_manager.py # Ollama service management
+│   ├── postprocessor.py # LLM text cleanup (llama.cpp, Anthropic, OpenAI)
 │   └── voice_profile.py # Personal voice pattern learning
 │
 ├── ui/                 # User interface
@@ -238,11 +237,10 @@ Config is stored at `~/.config/wayfinder-aura/config.json`
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `post_processing_enabled` | bool | `true` | Enable LLM cleanup |
-| `post_processing_backend` | string | `llama_cpp` | `llama_cpp`, `ollama`, `anthropic`, `openai` |
+| `post_processing_backend` | string | `llama_cpp` | `llama_cpp`, `anthropic`, `openai` |
 | `output_tone` | string | `professional` | `minimal`, `professional`, `casual`, `dev`, `personal` |
 | `strong_mode` | bool | `false` | Allow sentence restructuring |
 | `llama_cpp_model_path` | string | (see config.py) | Path to GGUF model |
-| `ollama_model` | string | `qwen2.5:1.5b` | Ollama model name |
 
 ### UI Settings
 
@@ -290,7 +288,6 @@ Config is stored at `~/.config/wayfinder-aura/config.json`
 
 **Key Classes**:
 - `LlamaCppBackend` - llama.cpp CLI or Python bindings
-- `OllamaBackend` - Ollama REST API
 - `AnthropicBackend` - Claude API
 - `OpenAIBackend` - GPT API
 

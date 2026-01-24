@@ -67,7 +67,6 @@ def test_root_imports():
         "transcriber", 
         "injector",
         "postprocessor",
-        "ollama_manager",
         "license",
     ]
     

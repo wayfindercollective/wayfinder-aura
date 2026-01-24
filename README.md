@@ -8,7 +8,7 @@ Local voice dictation for Linux (Wayland/X11) using whisper.cpp for transcriptio
 
 - **Local & Private**: All processing happens on your machine using whisper.cpp
 - **Hotkey Triggered**: Press F3 (configurable) to start/stop recording
-- **LLM Post-Processing**: Clean up transcriptions with llama.cpp (local) or Ollama
+- **LLM Post-Processing**: Clean up transcriptions with llama.cpp (local) or cloud APIs
 - **Wayland Support**: Works on modern Linux desktops including KDE Plasma on Wayland
 - **System Tray**: Runs in background with status indicator
 - **Multiple Input Devices**: Supports keyboards, gaming mice, keypads
