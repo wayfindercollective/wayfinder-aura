@@ -16,6 +16,7 @@ To extract a dialog:
 """
 
 from .calibration import AudioCalibrationDialog
+from .setup_wizard import SetupWizard
 
 # Placeholder for future dialog extractions
 # from .settings import SettingsDialog
@@ -26,4 +27,5 @@ from .calibration import AudioCalibrationDialog
 
 __all__ = [
     "AudioCalibrationDialog",
+    "SetupWizard",
 ]

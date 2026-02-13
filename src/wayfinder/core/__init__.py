@@ -28,6 +28,7 @@ from .postprocessor import (
     get_upgrade_suggestion_for_intensity,
 )
 from .voice_profile import VoiceProfile, get_voice_profile, reset_voice_profile
+from .setup import get_dependencies, get_recommended_model, check_whisper_cpp, check_whisper_model
 
 __all__ = [
     # Recorder
@@ -56,6 +57,11 @@ __all__ = [
     "VoiceProfile",
     "get_voice_profile",
     "reset_voice_profile",
+    # Setup
+    "get_dependencies",
+    "get_recommended_model",
+    "check_whisper_cpp",
+    "check_whisper_model",
 ]
 
 

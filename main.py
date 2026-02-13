@@ -123,6 +123,26 @@ def main():
         
         app = WayfinderApp()
         
+        # ─── First-run setup wizard ───
+        # Show the wizard if setup hasn't been completed yet
+        try:
+            if not config.get("setup_completed", False):
+                from wayfinder.ui.dialogs.setup_wizard import SetupWizard
+                # Hide main window during setup
+                app.withdraw()
+                wizard = SetupWizard(app, config)
+                app.wait_window(wizard)
+                # Show main window after wizard closes
+                app.deiconify()
+                
+                if wizard.result:
+                    print("[Setup] Setup wizard completed successfully")
+                else:
+                    print("[Setup] Setup wizard skipped")
+        except Exception as e:
+            print(f"[Setup] Warning: Could not show setup wizard: {e}")
+            app.deiconify()
+        
         # Try to apply scaling directly if the cached value seems wrong
         try:
             current = app.tk.call('tk', 'scaling')
