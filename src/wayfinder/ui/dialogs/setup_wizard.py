@@ -53,10 +53,10 @@ class SetupWizard(ctk.CTkToplevel):
         self._installing = False
         self._dep_rows: dict[str, "_DependencyRow"] = {}
 
-        # Window setup
+        # Window setup - large enough to show all dependencies comfortably
         self.title("Wayfinder Aura — Setup")
-        self.geometry("680x720")
-        self.minsize(580, 600)
+        self.geometry("800x860")
+        self.minsize(680, 720)
         self.configure(fg_color=COLORS["bg_base"])
 
         # Modal behavior
@@ -65,10 +65,12 @@ class SetupWizard(ctk.CTkToplevel):
         self.focus_force()
         self.protocol("WM_DELETE_WINDOW", self._on_skip)
 
-        # Center on parent
+        # Center on screen (more reliable than centering on parent)
         self.update_idletasks()
-        px = parent.winfo_rootx() + (parent.winfo_width() - 680) // 2
-        py = parent.winfo_rooty() + (parent.winfo_height() - 720) // 2
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        px = (screen_w - 800) // 2
+        py = (screen_h - 860) // 2
         self.geometry(f"+{max(0, px)}+{max(0, py)}")
 
         self._build_ui()
@@ -78,23 +80,29 @@ class SetupWizard(ctk.CTkToplevel):
     # ─── UI Construction ─────────────────────────────────────
 
     def _build_ui(self):
+        # Use compact font sizes - high-DPI scaling makes normal sizes too large
+        sz_title = FONT_SIZES["title"]      # 15
+        sz_body = FONT_SIZES["small"]       # 11
+        sz_detail = FONT_SIZES["caption"]   # 10
+        pad = SPACING["lg"]                 # 16
+
         # Header
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=SPACING["xl"], pady=(SPACING["xl"], SPACING["md"]))
+        header.pack(fill="x", padx=pad, pady=(pad, SPACING["sm"]))
 
         ctk.CTkLabel(
             header,
             text="Welcome to Wayfinder Aura",
-            font=(FONTS["display"][0], FONT_SIZES["display"], "bold"),
+            font=(FONTS["display"][0], sz_title, "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w")
 
         ctk.CTkLabel(
             header,
             text="Let's check your system and install what's needed.",
-            font=(FONTS["body"][0], FONT_SIZES["body"]),
+            font=(FONTS["body"][0], sz_detail),
             text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(4, 0))
+        ).pack(anchor="w", pady=(2, 0))
 
         # Dependency list (scrollable)
         self._dep_frame = ctk.CTkScrollableFrame(
@@ -102,7 +110,7 @@ class SetupWizard(ctk.CTkToplevel):
             fg_color="transparent",
             scrollbar_button_color=COLORS["bg_elevated"],
         )
-        self._dep_frame.pack(fill="both", expand=True, padx=SPACING["xl"], pady=(0, SPACING["sm"]))
+        self._dep_frame.pack(fill="both", expand=True, padx=pad, pady=(0, SPACING["xs"]))
 
         # Log area (collapsible, starts hidden)
         self._log_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_surface"], corner_radius=RADIUS["md"])
@@ -110,15 +118,15 @@ class SetupWizard(ctk.CTkToplevel):
 
         self._log_text = ctk.CTkTextbox(
             self._log_frame,
-            height=140,
-            font=(FONTS["mono"][0], FONT_SIZES["caption"]),
+            height=120,
+            font=(FONTS["mono"][0], sz_detail),
             fg_color=COLORS["bg_input"],
             text_color=COLORS["text_secondary"],
             corner_radius=RADIUS["sm"],
             activate_scrollbars=True,
             wrap="word",
         )
-        self._log_text.pack(fill="both", expand=True, padx=8, pady=8)
+        self._log_text.pack(fill="both", expand=True, padx=6, pady=6)
 
         # Model selector (shown when model is missing)
         self._model_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
@@ -127,9 +135,9 @@ class SetupWizard(ctk.CTkToplevel):
         ctk.CTkLabel(
             self._model_frame,
             text="Choose Whisper model:",
-            font=(FONTS["body"][0], FONT_SIZES["small"]),
+            font=(FONTS["body"][0], sz_detail),
             text_color=COLORS["text_secondary"],
-        ).pack(side="left", padx=(12, 8), pady=8)
+        ).pack(side="left", padx=(10, 6), pady=6)
 
         recommended = get_recommended_model()
         model_options = [
@@ -143,31 +151,31 @@ class SetupWizard(ctk.CTkToplevel):
             self._model_frame,
             values=model_options,
             variable=self._model_var,
-            font=(FONTS["body"][0], FONT_SIZES["small"]),
+            font=(FONTS["body"][0], sz_detail),
             fg_color=COLORS["bg_elevated"],
             button_color=COLORS["accent_dim"],
             button_hover_color=COLORS["accent"],
             dropdown_fg_color=COLORS["bg_surface"],
             dropdown_hover_color=COLORS["bg_hover"],
-            width=260,
+            width=220,
         )
-        self._model_menu.pack(side="left", padx=(0, 12), pady=8)
+        self._model_menu.pack(side="left", padx=(0, 10), pady=6)
 
         # Footer buttons
         footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.pack(fill="x", padx=SPACING["xl"], pady=(SPACING["sm"], SPACING["xl"]))
+        footer.pack(fill="x", padx=pad, pady=(SPACING["xs"], pad))
 
         self._skip_btn = ctk.CTkButton(
             footer,
             text="Skip Setup",
-            font=(FONTS["body"][0], FONT_SIZES["body"]),
+            font=(FONTS["body"][0], sz_body),
             fg_color="transparent",
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_secondary"],
             border_width=1,
             border_color=COLORS["border"],
             corner_radius=RADIUS["md"],
-            width=120,
+            width=110,
             command=self._on_skip,
         )
         self._skip_btn.pack(side="left")
@@ -175,12 +183,12 @@ class SetupWizard(ctk.CTkToplevel):
         self._install_btn = ctk.CTkButton(
             footer,
             text="Install All Missing",
-            font=(FONTS["body"][0], FONT_SIZES["body"], "bold"),
+            font=(FONTS["body"][0], sz_body, "bold"),
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_hover"],
             text_color=COLORS["bg_base"],
             corner_radius=RADIUS["md"],
-            width=200,
+            width=180,
             command=self._on_install_all,
         )
         self._install_btn.pack(side="right")
@@ -188,12 +196,12 @@ class SetupWizard(ctk.CTkToplevel):
         self._continue_btn = ctk.CTkButton(
             footer,
             text="Continue",
-            font=(FONTS["body"][0], FONT_SIZES["body"], "bold"),
+            font=(FONTS["body"][0], sz_body, "bold"),
             fg_color=COLORS["state_typing"],
             hover_color="#4DC498",
             text_color=COLORS["bg_base"],
             corner_radius=RADIUS["md"],
-            width=140,
+            width=120,
             command=self._on_continue,
         )
         # Don't pack yet — shown when all required deps are met
@@ -202,7 +210,7 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _add_dep_row(self, dep: Dependency):
         row = _DependencyRow(self._dep_frame, dep, on_install=lambda d=dep: self._install_single(d))
-        row.pack(fill="x", pady=(0, 6))
+        row.pack(fill="x", pady=(0, 4))
         self._dep_rows[dep.id] = row
 
     # ─── Check Dependencies ──────────────────────────────────
@@ -534,6 +542,9 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _on_skip(self):
         """User skipped setup."""
+        # Still mark setup as completed so the wizard doesn't show again
+        self.config["setup_completed"] = True
+        save_config(self.config)
         self.result = False
         self.grab_release()
         self.destroy()
@@ -554,29 +565,34 @@ class _DependencyRow(ctk.CTkFrame):
     }
 
     def __init__(self, parent, dep: Dependency, on_install=None):
-        super().__init__(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
+        super().__init__(parent, fg_color=COLORS["bg_card"], corner_radius=RADIUS["sm"])
         self._dep = dep
         self._on_install = on_install
+
+        # Compact font sizes for high-DPI
+        sz_name = FONT_SIZES["small"]       # 11
+        sz_detail = FONT_SIZES["caption"]   # 10
+        sz_status = FONT_SIZES["small"]     # 11
 
         # Status indicator
         self._status_label = ctk.CTkLabel(
             self,
             text="...",
-            width=36,
-            font=(FONTS["mono"][0], FONT_SIZES["body"], "bold"),
+            width=28,
+            font=(FONTS["mono"][0], sz_status, "bold"),
             text_color=COLORS["text_muted"],
         )
-        self._status_label.pack(side="left", padx=(12, 0), pady=10)
+        self._status_label.pack(side="left", padx=(8, 0), pady=6)
 
         # Text area
         text_frame = ctk.CTkFrame(self, fg_color="transparent")
-        text_frame.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=10)
+        text_frame.pack(side="left", fill="x", expand=True, padx=(6, 0), pady=6)
 
         req_tag = "" if dep.required else "  (optional)"
         self._name_label = ctk.CTkLabel(
             text_frame,
             text=dep.name + req_tag,
-            font=(FONTS["body"][0], FONT_SIZES["body"], "bold"),
+            font=(FONTS["body"][0], sz_name, "bold"),
             text_color=COLORS["text_primary"],
             anchor="w",
         )
@@ -585,7 +601,7 @@ class _DependencyRow(ctk.CTkFrame):
         self._detail_label = ctk.CTkLabel(
             text_frame,
             text=dep.description,
-            font=(FONTS["body"][0], FONT_SIZES["caption"]),
+            font=(FONTS["body"][0], sz_detail),
             text_color=COLORS["text_muted"],
             anchor="w",
         )
@@ -594,7 +610,7 @@ class _DependencyRow(ctk.CTkFrame):
         # Progress bar (hidden by default)
         self._progress = ctk.CTkProgressBar(
             text_frame,
-            height=4,
+            height=3,
             fg_color=COLORS["bg_input"],
             progress_color=COLORS["accent"],
             corner_radius=2,
@@ -604,9 +620,9 @@ class _DependencyRow(ctk.CTkFrame):
         self._action_btn = ctk.CTkButton(
             self,
             text="Install",
-            width=80,
-            height=30,
-            font=(FONTS["body"][0], FONT_SIZES["small"]),
+            width=70,
+            height=26,
+            font=(FONTS["body"][0], sz_detail),
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_hover"],
             text_color=COLORS["bg_base"],
@@ -636,7 +652,7 @@ class _DependencyRow(ctk.CTkFrame):
             if self._dep.can_install or self._dep.id in ("ydotool", "build_tools", "cuda", "whisper_cpp", "whisper_model"):
                 btn_text = "Download" if self._dep.id == "whisper_model" else "Install"
                 self._action_btn.configure(text=btn_text)
-                self._action_btn.pack(side="right", padx=12, pady=10)
+                self._action_btn.pack(side="right", padx=8, pady=6)
 
     def set_installing(self):
         self._set_state("installing")

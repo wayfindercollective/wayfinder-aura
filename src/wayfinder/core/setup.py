@@ -276,17 +276,51 @@ LogCallback = Callable[[str], None]
 DoneCallback = Callable[[bool, str], None]
 
 
+def _detect_package_manager() -> str:
+    """Detect the system package manager. Returns 'dnf', 'apt', or 'unknown'."""
+    if shutil.which("dnf"):
+        return "dnf"
+    if shutil.which("apt"):
+        return "apt"
+    if shutil.which("pacman"):
+        return "pacman"
+    return "unknown"
+
+
+# Package name mapping: generic name -> {pkg_manager: actual_package_name}
+_PACKAGE_MAP = {
+    "ydotool":          {"apt": "ydotool",          "dnf": "ydotool"},
+    "git":              {"apt": "git",              "dnf": "git"},
+    "cmake":            {"apt": "cmake",            "dnf": "cmake"},
+    "build-essential":  {"apt": "build-essential",  "dnf": "gcc-c++ make"},
+    "nvidia-cuda-toolkit": {"apt": "nvidia-cuda-toolkit", "dnf": "cuda-toolkit"},
+    "libfuse2":         {"apt": "libfuse2",         "dnf": "fuse-libs"},
+}
+
+
+def _resolve_packages(generic_names: list[str], pkg_mgr: str) -> list[str]:
+    """Map generic package names to the actual names for the detected package manager."""
+    resolved = []
+    for name in generic_names:
+        mapped = _PACKAGE_MAP.get(name, {}).get(pkg_mgr, name)
+        # Some mappings have multiple packages (e.g., "gcc-c++ make")
+        resolved.extend(mapped.split())
+    return resolved
+
+
 def install_system_packages(
     log: LogCallback,
     done: DoneCallback,
     packages: Optional[list[str]] = None,
 ) -> None:
     """
-    Install system packages via apt with pkexec for authentication.
+    Install system packages using the detected package manager (apt or dnf).
     Runs in a background thread. Calls done(success, message) when finished.
     """
+    pkg_mgr = _detect_package_manager()
+
     if packages is None:
-        # Determine what's needed
+        # Determine what's needed (generic names)
         packages = []
         if not shutil.which("ydotool"):
             packages.append("ydotool")
@@ -298,22 +332,34 @@ def install_system_packages(
             packages.append("build-essential")
         if _detect_gpu_vendor() == "nvidia" and not shutil.which("nvcc"):
             packages.append("nvidia-cuda-toolkit")
-        # libfuse2 needed for AppImage on Ubuntu 22.04+
-        packages.append("libfuse2")
 
     if not packages:
         done(True, "All system packages already installed")
         return
 
+    # Map to actual package names for this distro
+    resolved = _resolve_packages(packages, pkg_mgr)
+
     def _run():
-        log(f"Installing: {', '.join(packages)}")
-        log("(A password dialog may appear)")
+        log(f"Installing: {', '.join(resolved)}")
+        log(f"(Using {pkg_mgr} — a password dialog may appear)")
         log("")
 
+        if pkg_mgr == "unknown":
+            log("Could not detect package manager (apt/dnf).")
+            log("Install these manually:")
+            log(f"  {', '.join(resolved)}")
+            done(False, "Unknown package manager")
+            return
+
         try:
-            # Single pkexec call for all apt packages
-            cmd = ["pkexec", "bash", "-c",
-                   f"apt update -qq && apt install -y {' '.join(packages)}"]
+            # Build the install command for the detected package manager
+            if pkg_mgr == "dnf":
+                install_cmd = f"dnf install -y {' '.join(resolved)}"
+            else:  # apt
+                install_cmd = f"apt update -qq && apt install -y {' '.join(resolved)}"
+
+            cmd = ["pkexec", "bash", "-c", install_cmd]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
             for line in iter(proc.stdout.readline, ""):
@@ -339,15 +385,18 @@ def install_system_packages(
                 log("")
                 log("Authentication cancelled or pkexec not available.")
                 log("Run manually:")
-                log(f"  sudo apt install -y {' '.join(packages)}")
+                log(f"  sudo {install_cmd}")
                 done(False, "Authentication cancelled")
             else:
-                done(False, f"apt exited with code {proc.returncode}")
+                done(False, f"{pkg_mgr} exited with code {proc.returncode}")
 
         except FileNotFoundError:
             log("Error: pkexec not found.")
             log("Install packages manually:")
-            log(f"  sudo apt install -y {' '.join(packages)}")
+            if pkg_mgr == "dnf":
+                log(f"  sudo dnf install -y {' '.join(resolved)}")
+            else:
+                log(f"  sudo apt install -y {' '.join(resolved)}")
             done(False, "pkexec not available")
         except Exception as e:
             log(f"Error: {e}")
@@ -579,7 +628,11 @@ def get_recommended_model() -> str:
 
 
 def get_missing_system_packages() -> list[str]:
-    """Return list of apt package names that need installing."""
+    """Return list of generic package names that need installing.
+    
+    Returns generic names (e.g., 'build-essential') which get mapped
+    to the actual package manager names during installation.
+    """
     packages = []
     if not shutil.which("ydotool"):
         packages.append("ydotool")

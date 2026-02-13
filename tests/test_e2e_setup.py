@@ -880,8 +880,9 @@ class TestFullSetupFlow:
     @patch("subprocess.Popen")
     @patch("wayfinder.core.setup.shutil.which", return_value=None)
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="nvidia")
+    @patch("wayfinder.core.setup._detect_package_manager", return_value="apt")
     def test_complete_nvidia_setup_flow(
-        self, mock_vendor, mock_which, mock_popen, mock_sub_run,
+        self, mock_pkg_mgr, mock_vendor, mock_which, mock_popen, mock_sub_run,
         mock_run_cmd, mock_requests, temp_dir: Path, sample_config: dict,
     ):
         """Simulate full setup on a fresh NVIDIA Ubuntu system."""

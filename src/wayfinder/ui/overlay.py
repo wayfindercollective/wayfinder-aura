@@ -901,25 +901,23 @@ class GlassmorphicOverlay(QWidget):
         self.setFixedHeight(self.widget_height)
         self._update_size()
         
-        # Timer to periodically raise window (Wayland focus protector)
-        # 250ms is a good balance between responsiveness and CPU usage
-        self._raise_timer = QTimer(self)
-        self._raise_timer.timeout.connect(self._ensure_on_top)
-        self._raise_timer.setInterval(250)
-        
         # Set window title for KWin script identification
         self.setWindowTitle("Wayfinder Aura Overlay")
         
-        # Timer to periodically raise window (ensures stay-on-top on all compositors)
-        self._raise_timer = QTimer(self)
-        self._raise_timer.timeout.connect(self._ensure_on_top)
-        self._raise_timer.setInterval(100)  # Every 100ms for more aggressive stay-on-top
+        # Note: Periodic raise timer removed - it caused focus stealing on KDE Wayland.
+        # WindowStaysOnTopHint + KWin keepAbove=true handle stay-on-top.
+        self._raise_timer = QTimer(self)  # Keep attribute for code that references it
     
     def _ensure_on_top(self):
-        """Ensure window stays on top of other windows (Wayland focus protector)."""
-        if self.isVisible():
-            # Only raise, never activate - we must not steal focus from text fields
-            self.raise_()
+        """Ensure window stays on top of other windows.
+        
+        Note: On KDE Wayland, periodic raise_() can steal focus from the
+        active window (even with WindowDoesNotAcceptFocus). We rely on
+        WindowStaysOnTopHint + KWin keepAbove instead.
+        """
+        # Disabled: periodic raise() causes focus stealing on KDE Wayland.
+        # WindowStaysOnTopHint and KWin keepAbove=true handle stay-on-top.
+        pass
     
     def _request_blur(self):
         """Request backdrop blur from compositor."""
@@ -937,23 +935,17 @@ class GlassmorphicOverlay(QWidget):
         self._setup_kde_blur()
         self._apply_squircle_mask()
         
-        # Force position after window is shown (Wayland often ignores pre-show positioning)
+        # Position after window is shown (Wayland often ignores pre-show positioning)
         self._position_at_bottom()
         
-        # Schedule multiple position attempts with increasing delays
-        # This handles post-reboot scenarios where the WM may not be fully ready
-        # Delays: 50ms, 150ms, 500ms, 1s, 2s - gives WM time to fully initialize
-        for delay in [50, 150, 500, 1000, 2000]:
-            QTimer.singleShot(delay, self._position_at_bottom)
+        # One delayed retry to handle WM not being ready yet
+        QTimer.singleShot(500, self._position_at_bottom)
         
-        # Try KDE-specific always-on-top via D-Bus
+        # Try KDE-specific always-on-top via KWin script (once, with delay)
         if os.environ.get("XDG_CURRENT_DESKTOP", "").upper() == "KDE":
             try:
                 if self.windowHandle():
-                    QTimer.singleShot(100, self._try_kde_keep_above)
-                    # Also retry after delays for post-reboot resilience
                     QTimer.singleShot(1000, self._try_kde_keep_above)
-                    QTimer.singleShot(2000, self._try_kde_keep_above)
             except Exception:
                 pass
     
@@ -1026,10 +1018,10 @@ class GlassmorphicOverlay(QWidget):
     
     def _setup_timers(self):
         """Setup animation timers."""
-        # Main render timer (30 FPS - designer spec for CPU optimization)
+        # Main render timer (15 FPS - optimized for CPU usage while keeping smooth feel)
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self._on_frame)
-        self._render_timer.setInterval(33)  # ~30 FPS (capped per designer spec)
+        self._render_timer.setInterval(66)  # ~15 FPS
     
     def _setup_kwin_positioning_rule(self):
         """Setup KWin rule to position overlay before window is created."""
@@ -1329,7 +1321,7 @@ class GlassmorphicOverlay(QWidget):
     
     def _on_frame(self):
         """Called each frame to update animations."""
-        dt = 0.033  # 30 FPS (capped per designer spec for CPU optimization)
+        dt = 0.066  # 15 FPS (optimized for CPU usage)
         
         # Update wave animation
         self.wave_renderer.advance_time(dt)
@@ -1703,7 +1695,7 @@ def run_overlay():
     # Setup command polling timer
     cmd_timer = QTimer()
     cmd_timer.timeout.connect(process_commands)
-    cmd_timer.start(16)  # Check every 16ms
+    cmd_timer.start(50)  # Check every 50ms (20Hz - responsive enough for state changes)
     
     # Send ready signal
     print(json.dumps({"status": "ready"}), flush=True)

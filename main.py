@@ -96,8 +96,73 @@ def schedule_scaling_detection(app, delay_ms: int = 5000) -> None:
     app.after(delay_ms, check_scaling)
 
 
+LOCK_SOCKET_PATH = "/tmp/wayfinder-aura.lock"
+
+
+def _signal_existing_instance() -> bool:
+    """Try to signal an already-running instance to show its window.
+    
+    Uses a Unix socket to communicate with the existing instance.
+    Returns True if we successfully signaled another instance (so we should exit).
+    """
+    import socket
+    
+    try:
+        # Try to connect to existing instance's lock socket
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        sock.connect(LOCK_SOCKET_PATH)
+        sock.sendall(b"SHOW\n")
+        sock.close()
+        print("[Instance] Signaled existing instance to show window")
+        return True
+    except (ConnectionRefusedError, FileNotFoundError, OSError):
+        # No existing instance running
+        return False
+
+
+def _start_instance_listener(app):
+    """Start a background listener that receives signals from new launch attempts."""
+    import socket
+    import threading
+    
+    # Clean up stale socket
+    try:
+        os.unlink(LOCK_SOCKET_PATH)
+    except OSError:
+        pass
+    
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(LOCK_SOCKET_PATH)
+    server.listen(1)
+    server.settimeout(1)
+    
+    def listener():
+        while True:
+            try:
+                conn, _ = server.accept()
+                data = conn.recv(64).decode().strip()
+                conn.close()
+                if data == "SHOW":
+                    # Show the window from the main thread
+                    app.after(0, app.show_from_tray)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+    
+    t = threading.Thread(target=listener, daemon=True, name="InstanceListener")
+    t.start()
+    return server
+
+
 def main():
     """Run Wayfinder Aura."""
+    # === Single-instance check ===
+    # If another instance is already running, signal it to show and exit
+    if _signal_existing_instance():
+        sys.exit(0)
+    
     # === GPU SETUP (do this FIRST, before any imports that might use GPU) ===
     # This sets GGML_VK_VISIBLE_DEVICES once, and all subprocesses inherit it
     try:
@@ -123,17 +188,30 @@ def main():
         
         app = WayfinderApp()
         
+        # Start single-instance listener so future launches signal us
+        _instance_server = _start_instance_listener(app)
+        
         # ─── First-run setup wizard ───
         # Show the wizard if setup hasn't been completed yet
         try:
             if not config.get("setup_completed", False):
                 from wayfinder.ui.dialogs.setup_wizard import SetupWizard
-                # Hide main window during setup
-                app.withdraw()
+                
+                # Pause animations during wizard to keep UI responsive
+                # (animations consume CPU in the shared Tk event loop)
+                app._stop_idle_breath()
+                
+                # Don't withdraw the main window - on KDE Wayland, transient
+                # children of withdrawn windows don't appear. The wizard's
+                # grab_set() prevents interaction with the main window anyway.
                 wizard = SetupWizard(app, config)
                 app.wait_window(wizard)
-                # Show main window after wizard closes
+                
+                # Resume animations and ensure main window is visible + focused
+                app._start_idle_breath()
                 app.deiconify()
+                app.lift()
+                app.focus_force()
                 
                 if wizard.result:
                     print("[Setup] Setup wizard completed successfully")
@@ -141,7 +219,8 @@ def main():
                     print("[Setup] Setup wizard skipped")
         except Exception as e:
             print(f"[Setup] Warning: Could not show setup wizard: {e}")
-            app.deiconify()
+            import traceback
+            traceback.print_exc()
         
         # Try to apply scaling directly if the cached value seems wrong
         try:
@@ -160,6 +239,12 @@ def main():
         schedule_scaling_detection(app)
         
         app.mainloop()
+        
+        # Clean up lock socket on normal exit
+        try:
+            os.unlink(LOCK_SOCKET_PATH)
+        except OSError:
+            pass
         
     except Exception as e:
         error_msg = str(e)
@@ -195,6 +280,18 @@ def main():
             app.mainloop()
         else:
             raise
+
+
+import atexit
+
+def _cleanup_lock_socket():
+    """Remove the lock socket on exit."""
+    try:
+        os.unlink(LOCK_SOCKET_PATH)
+    except OSError:
+        pass
+
+atexit.register(_cleanup_lock_socket)
 
 
 if __name__ == "__main__":

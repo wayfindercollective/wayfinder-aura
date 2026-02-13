@@ -6229,6 +6229,13 @@ class WayfinderApp(ctk.CTk):
     
     def _draw_gradient_bg(self, event=None):
         """Draw ambient gradient - GitHub Dark base with violet warmth."""
+        # Skip when window is not visible
+        try:
+            if self.state() in ("iconic", "withdrawn"):
+                return
+        except Exception:
+            pass
+        
         canvas = self.bg_canvas
         w = canvas.winfo_width()
         h = canvas.winfo_height()
@@ -7454,10 +7461,18 @@ class WayfinderApp(ctk.CTk):
                 save_config(self.config)
                 self.log(f"⚙️ Threads auto-set to {optimal_threads} (based on CPU cores)")
         
-        # Check 3: Verify ydotool is available
+        # Check 3: Verify ydotool is available and daemon is running
         if not shutil.which("ydotool"):
             self.log("⚠️ ydotool not found - text injection won't work")
-            self.log("💡 Install: sudo dnf install ydotool && sudo systemctl enable --now ydotool")
+            self.log("💡 Install: sudo dnf install ydotool && sudo systemctl enable --now ydotoold")
+        else:
+            from wayfinder.core.injector import check_ydotool_ready
+            ready, msg = check_ydotool_ready()
+            if ready:
+                self.log(f"✓ {msg}")
+            else:
+                self.log(f"⚠️ {msg}")
+                self.log("💡 Start daemon: sudo systemctl enable --now ydotoold")
     
     def _start_display_wake_listener(self) -> None:
         """Start D-Bus listener for system wake-up events to refresh the overlay.
@@ -12388,14 +12403,32 @@ class WayfinderApp(ctk.CTk):
             self._idle_breath_job = None
     
     def _animate_idle_breath(self):
-        """Animation frame for idle breathing waveform - STABLE at 15fps."""
+        """Animation frame for idle breathing waveform - runs at 5fps to save CPU."""
         # Guard: Stop if not in IDLE state
         if self.app_state != AppState.IDLE:
             self._idle_breath_job = None
             return
         
-        # STABILITY FIX: 15fps animation
-        idle_fps_scale = 4.0  # 60/15
+        # Skip animation when window is not visible (minimized, hidden to tray, withdrawn)
+        try:
+            win_state = self.state()
+            if win_state in ("iconic", "withdrawn"):
+                # Check again in 1 second (no point animating an invisible window)
+                self._idle_breath_job = self.after(1000, self._animate_idle_breath)
+                return
+        except Exception:
+            pass
+        
+        # Also skip if the hero canvas is not visible (e.g. on a different tab)
+        try:
+            if not self.hero_canvas.winfo_viewable():
+                self._idle_breath_job = self.after(1000, self._animate_idle_breath)
+                return
+        except Exception:
+            pass
+        
+        # 5fps idle animation (gentle breathing doesn't need high FPS)
+        idle_fps_scale = 12.0  # 60/5
         
         # Slow, gentle time progression for calm wave motion
         self._hero_wave_time += 0.04 * idle_fps_scale
@@ -12404,8 +12437,8 @@ class WayfinderApp(ctk.CTk):
         # Redraw waveform (uses stable pre-created items)
         self._draw_hero_waveform()
         
-        # Schedule next frame at fixed 66ms (15fps)
-        self._idle_breath_job = self.after(66, self._animate_idle_breath)
+        # Schedule next frame at 200ms (5fps) - gentle breathing is smooth enough at 5fps
+        self._idle_breath_job = self.after(200, self._animate_idle_breath)
     
     def _animate_hero(self):
         """Animation frame for hero waveform - STABLE at 15fps."""
@@ -12586,7 +12619,7 @@ class WayfinderApp(ctk.CTk):
                 self.handle_event(event_type, data)
         except queue.Empty:
             pass
-        self.after(50, self.poll_events)  # Poll faster for responsiveness
+        self.after(100, self.poll_events)  # 10Hz polling - responsive enough for hotkey events
 
     def handle_event(self, event_type, data):
         if event_type == EventType.HOTKEY_PRESSED:
@@ -13051,6 +13084,16 @@ class WayfinderApp(ctk.CTk):
             import re
             text = text.replace("\n", " ").replace("\r", " ")
             text = re.sub(r'\s+', ' ', text).strip()
+            
+            if not text:
+                self.event_queue.put((EventType.LOG_MESSAGE, "⚠ Empty text after cleanup — nothing to inject"))
+                self.event_queue.put((EventType.INJECTION_DONE, None))
+                return
+            
+            # Small delay to let focus settle back to the user's target window
+            # (overlay/main window state changes may have briefly affected focus)
+            import time as _time
+            _time.sleep(0.15)
             
             inject_text(text, typing_speed=typing_speed)
             self.event_queue.put((EventType.INJECTION_DONE, None))

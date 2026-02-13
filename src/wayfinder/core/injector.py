@@ -61,6 +61,28 @@ TYPING_SPEEDS = {
 }
 
 
+def check_ydotool_ready() -> tuple[bool, str]:
+    """Check if ydotool is installed and the daemon is running.
+    
+    Returns:
+        (ready, message) tuple
+    """
+    ydotool_bin = _get_ydotool_binary()
+    if not shutil.which(ydotool_bin):
+        return False, "ydotool not found. Install with: sudo dnf install ydotool"
+    
+    env = _get_ydotool_env()
+    socket_path = env.get("YDOTOOL_SOCKET")
+    if not socket_path:
+        # No socket found - daemon may not be running
+        return False, (
+            "ydotool daemon socket not found. "
+            "Start the daemon: sudo systemctl enable --now ydotoold"
+        )
+    
+    return True, f"ydotool ready (socket: {socket_path})"
+
+
 def inject_text(text: str, typing_speed: str = "instant") -> None:
     """
     Inject text into the active window using ydotool.
@@ -77,6 +99,11 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
     
     if not text:
         return
+
+    # Pre-flight check
+    ready, msg = check_ydotool_ready()
+    if not ready:
+        raise InjectionError(msg)
 
     # Get delay values from preset
     if typing_speed in TYPING_SPEEDS:
@@ -100,6 +127,10 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
         # Get environment with correct socket path
         env = _get_ydotool_env()
         
+        print(f"[Inject] Running: {' '.join(cmd)}")
+        print(f"[Inject] Socket: {env.get('YDOTOOL_SOCKET', 'default')}")
+        print(f"[Inject] Text length: {len(text)} chars")
+        
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -109,9 +140,18 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
         )
         
         if result.returncode != 0:
-            raise InjectionError(f"ydotool failed: {result.stderr}")
+            stderr = result.stderr.strip()
+            stdout = result.stdout.strip()
+            error_detail = stderr or stdout or "(no output)"
+            raise InjectionError(
+                f"ydotool failed (exit {result.returncode}): {error_detail}"
+            )
+        
+        print(f"[Inject] Success — {len(text)} chars injected")
                 
     except subprocess.TimeoutExpired:
-        raise InjectionError("ydotool timed out")
+        raise InjectionError("ydotool timed out after 120s")
     except FileNotFoundError:
-        raise InjectionError("ydotool not found. Install ydotool package.")
+        raise InjectionError(
+            "ydotool not found. Install with: sudo dnf install ydotool"
+        )
