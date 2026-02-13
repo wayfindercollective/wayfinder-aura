@@ -35,8 +35,16 @@ class TestE2ETranscriptionFlow:
         recorder = AudioRecorder()
         assert recorder is not None
 
-        # Transcribe the sample audio
-        result = transcribe_with_config(str(sample_audio_file), sample_config)
+        # Mock Path.exists() so WhisperCppBackend doesn't fail on binary/model checks
+        original_exists = Path.exists
+        def mock_exists(self):
+            path_str = str(self)
+            if "whisper" in path_str or "ggml" in path_str:
+                return True
+            return original_exists(self)
+
+        with patch.object(Path, "exists", mock_exists):
+            result = transcribe_with_config(str(sample_audio_file), sample_config)
 
         assert "transcription" in result.lower() or "test" in result.lower()
 

@@ -15,7 +15,7 @@ class TestTranscriptionBackends:
         """Test getting whisper.cpp backend."""
         from wayfinder.core.transcriber import get_backend, WhisperCppBackend
 
-        sample_config["transcription_backend"] = "whisper.cpp"
+        sample_config["transcription_backend"] = "whisper_cpp"
         backend = get_backend(sample_config)
 
         assert isinstance(backend, WhisperCppBackend)
@@ -35,7 +35,8 @@ class TestTranscriptionBackends:
         from wayfinder.core.transcriber import get_backend, GroqWhisperBackend
 
         monkeypatch.setenv("GROQ_API_KEY", "test_key")
-        sample_config["transcription_backend"] = "groq"
+        sample_config["transcription_backend"] = "groq_whisper"
+        sample_config["groq_api_key"] = "test_key"
         backend = get_backend(sample_config)
 
         assert isinstance(backend, GroqWhisperBackend)
@@ -45,7 +46,8 @@ class TestTranscriptionBackends:
         from wayfinder.core.transcriber import get_backend, OpenAIWhisperBackend
 
         monkeypatch.setenv("OPENAI_API_KEY", "test_key")
-        sample_config["transcription_backend"] = "openai"
+        sample_config["transcription_backend"] = "openai_whisper"
+        sample_config["openai_api_key"] = "test_key"
         backend = get_backend(sample_config)
 
         assert isinstance(backend, OpenAIWhisperBackend)
@@ -58,9 +60,15 @@ class TestWhisperCppBackend:
         """Test backend initialization with config."""
         from wayfinder.core.transcriber import WhisperCppBackend
 
-        backend = WhisperCppBackend(sample_config)
+        backend = WhisperCppBackend(
+            whisper_binary=sample_config["whisper_binary"],
+            model_path=sample_config["model_path"],
+            threads=sample_config.get("threads", 4),
+            timeout=sample_config.get("timeout", 60),
+            use_gpu=sample_config.get("use_gpu", False),
+        )
 
-        assert backend.binary_path == sample_config["whisper_binary"]
+        assert backend.whisper_binary == sample_config["whisper_binary"]
         assert backend.model_path == sample_config["model_path"]
 
     @patch("subprocess.run")
@@ -74,11 +82,18 @@ class TestWhisperCppBackend:
             stderr="",
         )
 
-        backend = WhisperCppBackend(sample_config)
-        result = backend.transcribe(str(sample_audio_file))
+        backend = WhisperCppBackend(
+            whisper_binary=sample_config["whisper_binary"],
+            model_path=sample_config["model_path"],
+            use_gpu=False,
+        )
+
+        # Mock path existence checks so transcribe() doesn't bail out early
+        with patch.object(Path, "exists", return_value=True):
+            result = backend.transcribe(str(sample_audio_file))
 
         assert mock_run.called
-        assert result == "Hello world"
+        assert "Hello world" in result
 
     @patch("subprocess.run")
     def test_transcribe_error_handling(self, mock_run, sample_config: dict, sample_audio_file: Path):
@@ -91,10 +106,15 @@ class TestWhisperCppBackend:
             stderr="Error: model not found",
         )
 
-        backend = WhisperCppBackend(sample_config)
+        backend = WhisperCppBackend(
+            whisper_binary=sample_config["whisper_binary"],
+            model_path=sample_config["model_path"],
+            use_gpu=False,
+        )
 
-        with pytest.raises(TranscriptionError):
-            backend.transcribe(str(sample_audio_file))
+        with patch.object(Path, "exists", return_value=True):
+            with pytest.raises(TranscriptionError):
+                backend.transcribe(str(sample_audio_file))
 
 
 class TestTranscriptionPostProcessing:

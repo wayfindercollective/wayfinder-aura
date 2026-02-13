@@ -94,10 +94,10 @@ class TestChunkedRecorder:
         """Test ChunkedRecorder can be initialized."""
         from wayfinder.core.recorder import ChunkedRecorder
 
-        recorder = ChunkedRecorder(chunk_duration=5.0, overlap=1.0)
+        recorder = ChunkedRecorder(chunk_duration=5.0, chunk_overlap=1.0)
 
         assert recorder.chunk_duration == 5.0
-        assert recorder.overlap == 1.0
+        assert recorder.chunk_overlap == 1.0
 
 
 class TestAudioProcessing:
@@ -126,39 +126,44 @@ class TestAudioProcessing:
         assert abs(len(result) - 16000) < 100
 
     def test_preprocess_audio_off(self):
-        """Test preprocessing with mode 'off'."""
+        """Test preprocessing with mode 'off' passes through unchanged."""
         import numpy as np
         from wayfinder.core.recorder import preprocess_audio
 
         audio = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-        result = preprocess_audio(audio, "off")
+        result = preprocess_audio(audio, 16000, "off")
 
         np.testing.assert_array_equal(result, audio)
 
     def test_preprocess_audio_light(self):
-        """Test preprocessing with mode 'light'."""
+        """Test preprocessing with mode 'light' applies gain normalization."""
         import numpy as np
         from wayfinder.core.recorder import preprocess_audio
 
         # Create audio with low amplitude
         audio = np.array([0.1, 0.1, 0.1], dtype=np.float32)
-        result = preprocess_audio(audio, "light")
+        result = preprocess_audio(audio, 16000, "light")
 
-        # Light mode applies gain normalization
+        # Light mode applies gain normalization to -3dB (0.707)
         assert result is not None
         assert len(result) == len(audio)
+        # Peak should be close to 0.707 after normalization
+        assert abs(np.max(np.abs(result)) - 0.707) < 0.01
 
     def test_get_audio_level(self):
-        """Test audio level calculation."""
+        """Test audio level calculation via AudioRecorder method."""
         import numpy as np
-        from wayfinder.core.recorder import get_audio_level
+        from wayfinder.core.recorder import AudioRecorder
 
-        # Silence should give 0
-        silence = np.zeros(1000, dtype=np.float32)
-        level = get_audio_level(silence)
+        with patch("wayfinder.core.recorder.sd"):
+            recorder = AudioRecorder()
+
+        # No frames should give 0
+        recorder.frames = []
+        level = recorder.get_audio_level()
         assert level == 0.0
 
-        # Full amplitude should give 1
-        loud = np.ones(1000, dtype=np.float32)
-        level = get_audio_level(loud)
+        # With some data in frames, should return a level
+        recorder.frames = [np.ones(1000, dtype=np.float32)]
+        level = recorder.get_audio_level()
         assert 0.0 <= level <= 1.0
