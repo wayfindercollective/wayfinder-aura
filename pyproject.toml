@@ -45,6 +45,8 @@ dev = [
     "pyinstaller>=6.0.0",
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-mock>=3.12.0",
+    "pytest-timeout>=2.2.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "types-requests>=2.28.0",
@@ -109,7 +111,15 @@ known-first-party = ["wayfinder"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --timeout=60"
+markers = [
+    "unit: Fast unit tests with no I/O",
+    "integration: Cross-module integration tests",
+    "e2e: End-to-end flow tests",
+    "ui: Tests requiring a display/Tk (skip in headless CI)",
+    "slow: Slow tests like GPU benchmarks or model downloads",
+    "network: Tests requiring network access (cloud APIs)",
+]
 
 # Mypy configuration
 [tool.mypy]

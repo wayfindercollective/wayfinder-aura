@@ -715,8 +715,8 @@ class GlassmorphicOverlay(QWidget):
     BASE_GLOW_MARGIN = 6  # Base space around squircle for glow effects
     
     # Layout constants
-    TASKBAR_HEIGHT = 44  # Standard KDE Plasma taskbar height
-    TASKBAR_GAP = 2  # Small gap above taskbar to prevent overlap
+    TASKBAR_GAP = 12  # Gap above taskbar to prevent overlap
+    STARTUP_POSITION_RETRIES = 5  # Number of position checks after startup
     
     def __init__(self, scale: float = 0.7):
         # Scale factor must be set first (before any property access)
@@ -798,7 +798,10 @@ class GlassmorphicOverlay(QWidget):
     
     def _calculate_position(self, widget_width: int, widget_height: int) -> tuple[int, int]:
         """
-        Calculate overlay position: centered horizontally, just above taskbar.
+        Calculate overlay position: centered horizontally, at bottom of available screen area.
+        
+        Uses availableGeometry() which automatically excludes taskbars/panels,
+        making this work correctly regardless of taskbar size or position.
         
         Visual layout:
             +------------------+  <- widget top (y)
@@ -807,9 +810,9 @@ class GlassmorphicOverlay(QWidget):
             |  | squircle   |  |
             |  +------------+  |  <- squircle bottom
             |   glow_margin    |  <- glow fills this space
-            +------------------+  <- widget bottom
-                 TASKBAR_GAP      <- small gap to prevent overlap
-            [     TASKBAR     ]
+            +------------------+  <- widget bottom (at available area bottom - gap)
+                 TASKBAR_GAP      <- gap to prevent overlap
+            [     TASKBAR     ]   <- excluded from availableGeometry
         
         Returns:
             (x, y) position tuple
@@ -818,13 +821,25 @@ class GlassmorphicOverlay(QWidget):
         if not screen:
             return (0, 0)
         
-        geom = screen.geometry()
+        # Get both full geometry and available geometry
+        full = screen.geometry()
+        avail = screen.availableGeometry()
         
-        # Center horizontally
-        x = geom.x() + (geom.width() - widget_width) // 2
+        # Center horizontally within available area
+        x = avail.x() + (avail.width() - widget_width) // 2
         
-        # Position widget bottom above taskbar with a small gap
-        y = geom.y() + geom.height() - self.TASKBAR_HEIGHT - self.TASKBAR_GAP - widget_height
+        # Calculate y position at bottom of available area
+        y = avail.y() + avail.height() - self.TASKBAR_GAP - widget_height
+        
+        # Safety check: if availableGeometry extends to screen bottom (dock/overlay taskbar),
+        # we need to add an explicit offset. Assume minimum 48px for taskbar.
+        MIN_TASKBAR_HEIGHT = 48
+        screen_bottom = full.y() + full.height()
+        avail_bottom = avail.y() + avail.height()
+        
+        if avail_bottom >= screen_bottom - 10:  # availableGeometry includes nearly full screen
+            # Taskbar is likely a dock/overlay - add explicit offset
+            y = screen_bottom - MIN_TASKBAR_HEIGHT - self.TASKBAR_GAP - widget_height
         
         return (x, y)
     
@@ -925,15 +940,20 @@ class GlassmorphicOverlay(QWidget):
         # Force position after window is shown (Wayland often ignores pre-show positioning)
         self._position_at_bottom()
         
-        # Schedule another position attempt after window is fully mapped
-        QTimer.singleShot(50, self._position_at_bottom)
-        QTimer.singleShot(150, self._position_at_bottom)
+        # Schedule multiple position attempts with increasing delays
+        # This handles post-reboot scenarios where the WM may not be fully ready
+        # Delays: 50ms, 150ms, 500ms, 1s, 2s - gives WM time to fully initialize
+        for delay in [50, 150, 500, 1000, 2000]:
+            QTimer.singleShot(delay, self._position_at_bottom)
         
         # Try KDE-specific always-on-top via D-Bus
         if os.environ.get("XDG_CURRENT_DESKTOP", "").upper() == "KDE":
             try:
                 if self.windowHandle():
                     QTimer.singleShot(100, self._try_kde_keep_above)
+                    # Also retry after delays for post-reboot resilience
+                    QTimer.singleShot(1000, self._try_kde_keep_above)
+                    QTimer.singleShot(2000, self._try_kde_keep_above)
             except Exception:
                 pass
     
@@ -1022,7 +1042,9 @@ class GlassmorphicOverlay(QWidget):
             if app:
                 screen = app.primaryScreen()
                 if screen:
-                    geom = screen.geometry()
+                    # Get both full geometry and available geometry
+                    full = screen.geometry()
+                    avail = screen.availableGeometry()
                     
                     # Calculate exact widget size
                     # Initial width for "Listening..." text (approximate)
@@ -1031,17 +1053,34 @@ class GlassmorphicOverlay(QWidget):
                     estimated_height = self.widget_height
                     
                     # Use same positioning formula as _calculate_position
-                    x = geom.x() + (geom.width() - estimated_width) // 2
-                    y = geom.y() + geom.height() - self.TASKBAR_HEIGHT - self.TASKBAR_GAP - estimated_height
+                    x = avail.x() + (avail.width() - estimated_width) // 2
+                    y = avail.y() + avail.height() - self.TASKBAR_GAP - estimated_height
+                    
+                    # Safety check for dock/overlay taskbars
+                    MIN_TASKBAR_HEIGHT = 48
+                    screen_bottom = full.y() + full.height()
+                    avail_bottom = avail.y() + avail.height()
+                    
+                    if avail_bottom >= screen_bottom - 10:
+                        y = screen_bottom - MIN_TASKBAR_HEIGHT - self.TASKBAR_GAP - estimated_height
                     
                     _setup_kwin_window_rule(x, y, estimated_width, estimated_height)
         except Exception as e:
             print(f"KWin positioning rule setup failed: {e}", file=sys.stderr)
     
     def _position_at_bottom(self):
-        """Position overlay at bottom center of screen, visual bottom touching taskbar."""
+        """Position overlay at bottom center of screen, above the taskbar."""
         w, h = self.width(), self.height()
         x, y = self._calculate_position(w, h)
+        
+        # Validate position - if y is negative or unreasonable, use fallback
+        screen = QApplication.primaryScreen()
+        if screen:
+            full = screen.geometry()
+            # Sanity check: y should be positive and widget should be on screen
+            if y < 0 or y > full.y() + full.height() - h:
+                # Position seems wrong, use a safe fallback (60px from bottom)
+                y = full.y() + full.height() - 60 - h
         
         # Try multiple methods to set position (Wayland workarounds)
         # Method 1: setGeometry with explicit size

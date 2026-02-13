@@ -15,6 +15,23 @@ class InjectionError(Exception):
     pass
 
 
+def _get_ydotool_binary() -> str:
+    """
+    Find the ydotool binary, checking AppImage bundle first.
+    
+    Returns:
+        Path to ydotool binary, defaults to "ydotool" (relies on PATH).
+    """
+    # Check AppImage bundle
+    appdir = os.environ.get("APPDIR")
+    if appdir:
+        bundled = Path(appdir) / "usr" / "bin" / "ydotool"
+        if bundled.exists():
+            return str(bundled)
+    
+    return "ydotool"
+
+
 def _get_ydotool_env() -> dict:
     """Get environment with correct ydotool socket path."""
     env = os.environ.copy()
@@ -72,8 +89,9 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
         # --key-delay: milliseconds between key events
         # --key-hold: milliseconds between key down and key up
         # Both must be 0 for truly instant typing
+        ydotool_bin = _get_ydotool_binary()
         cmd = [
-            "ydotool", "type",
+            ydotool_bin, "type",
             "--key-delay", str(key_delay),
             "--key-hold", str(key_hold),
             "--", text

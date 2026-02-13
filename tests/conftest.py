@@ -2,11 +2,15 @@
 Pytest configuration and fixtures for Wayfinder Aura tests.
 """
 
+import json
 import os
+import struct
 import sys
 import tempfile
+import wave
 from pathlib import Path
 from typing import Generator
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -18,6 +22,10 @@ if str(src_dir) not in sys.path:
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+
+# =============================================================================
+# Directory Fixtures
+# =============================================================================
 
 @pytest.fixture
 def temp_dir() -> Generator[Path, None, None]:
@@ -31,12 +39,16 @@ def temp_config_dir(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Provide a temporary config directory and patch HOME."""
     config_dir = temp_dir / ".config" / "wayfinder-aura"
     config_dir.mkdir(parents=True)
-    
+
     # Patch home directory for config tests
     monkeypatch.setenv("HOME", str(temp_dir))
-    
+
     return config_dir
 
+
+# =============================================================================
+# Configuration Fixtures
+# =============================================================================
 
 @pytest.fixture
 def sample_config() -> dict:
@@ -56,29 +68,160 @@ def sample_config() -> dict:
 
 
 @pytest.fixture
+def full_config() -> dict:
+    """Provide a full configuration dictionary matching DEFAULT_CONFIG."""
+    from wayfinder.config import DEFAULT_CONFIG
+    config = DEFAULT_CONFIG.copy()
+    # Override paths for testing
+    config["whisper_binary"] = "/usr/bin/whisper-cli"
+    config["model_path"] = "/tmp/models/ggml-small.bin"
+    config["llama_cpp_model_path"] = "/tmp/models/test-model.gguf"
+    config["llama_cpp_binary"] = "/usr/bin/llama-cli"
+    config["use_gpu"] = False
+    return config
+
+
+# =============================================================================
+# Audio Fixtures
+# =============================================================================
+
+@pytest.fixture
 def sample_audio_file(temp_dir: Path) -> Path:
-    """Create a minimal valid WAV file for testing."""
-    import struct
-    import wave
-    
+    """Create a minimal valid WAV file for testing (1 second silence)."""
     audio_path = temp_dir / "test_audio.wav"
-    
-    # Create a simple 1-second silent WAV file
+
     sample_rate = 16000
     duration = 1.0
     num_samples = int(sample_rate * duration)
-    
+
     with wave.open(str(audio_path), "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)  # 16-bit
         wav.setframerate(sample_rate)
-        
-        # Write silence (all zeros)
         silence = struct.pack("<" + "h" * num_samples, *([0] * num_samples))
         wav.writeframes(silence)
-    
+
     return audio_path
 
+
+@pytest.fixture
+def short_audio_file(temp_dir: Path) -> Path:
+    """Create a very short WAV file (0.1 seconds) for edge case testing."""
+    audio_path = temp_dir / "short_audio.wav"
+
+    sample_rate = 16000
+    num_samples = int(sample_rate * 0.1)
+
+    with wave.open(str(audio_path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        silence = struct.pack("<" + "h" * num_samples, *([0] * num_samples))
+        wav.writeframes(silence)
+
+    return audio_path
+
+
+# =============================================================================
+# Mock Subprocess Fixtures
+# =============================================================================
+
+@pytest.fixture
+def mock_whisper_success():
+    """Mock subprocess.run to simulate successful whisper-cli transcription."""
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "Hello, this is a test transcription."
+    mock_result.stderr = ""
+
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
+        yield mock_run
+
+
+@pytest.fixture
+def mock_whisper_failure():
+    """Mock subprocess.run to simulate failed whisper-cli transcription."""
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    mock_result.stderr = "Error: model file not found"
+
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
+        yield mock_run
+
+
+@pytest.fixture
+def mock_ydotool_success():
+    """Mock subprocess.run to simulate successful ydotool text injection."""
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+    mock_result.stderr = ""
+
+    with patch("wayfinder.core.injector.subprocess.run", return_value=mock_result) as mock_run:
+        yield mock_run
+
+
+@pytest.fixture
+def mock_ydotool_failure():
+    """Mock subprocess.run to simulate failed ydotool text injection."""
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    mock_result.stderr = "Error: ydotool daemon not running"
+
+    with patch("wayfinder.core.injector.subprocess.run", return_value=mock_result) as mock_run:
+        yield mock_run
+
+
+@pytest.fixture
+def mock_llama_success():
+    """Mock subprocess.run to simulate successful llama.cpp post-processing."""
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "Cleaned text: This is the cleaned output."
+    mock_result.stderr = ""
+
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
+        yield mock_run
+
+
+# =============================================================================
+# Voice Profile Fixtures
+# =============================================================================
+
+@pytest.fixture
+def voice_profile_dir(temp_dir: Path) -> Path:
+    """Create a temporary directory for voice profile data."""
+    profile_dir = temp_dir / ".config" / "wayfinder-aura"
+    profile_dir.mkdir(parents=True)
+    return profile_dir
+
+
+@pytest.fixture
+def sample_voice_profile_data() -> dict:
+    """Provide sample voice profile data."""
+    return {
+        "history": [
+            {"text": "I'm working on the frontend code today.", "timestamp": 1700000000, "word_count": 8},
+            {"text": "Let me push this branch to main.", "timestamp": 1700000100, "word_count": 7},
+            {"text": "The API endpoint needs refactoring.", "timestamp": 1700000200, "word_count": 5},
+            {"text": "Can you review my pull request?", "timestamp": 1700000300, "word_count": 6},
+            {"text": "I think we should use TypeScript for this project.", "timestamp": 1700000400, "word_count": 9},
+        ],
+        "profile": {
+            "summary": "Technical speaker who discusses software development, git workflows, and code reviews.",
+            "vocabulary": ["frontend", "branch", "endpoint", "refactoring", "typescript"],
+            "generated_at": 1700000500,
+            "samples_used": 5,
+        },
+        "transcriptions_since_regen": 0,
+    }
+
+
+# =============================================================================
+# Environment Fixtures
+# =============================================================================
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch: pytest.MonkeyPatch):
@@ -86,6 +229,62 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch):
     # Remove any API keys that might affect tests
     for key in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY"]:
         monkeypatch.delenv(key, raising=False)
-    
+
+    # Remove AppImage/Flatpak env vars to ensure clean test state
+    for key in ["APPIMAGE", "APPDIR", "FLATPAK_ID", "WAYFINDER_FLATPAK"]:
+        monkeypatch.delenv(key, raising=False)
+
     # Set a development license secret for tests
     monkeypatch.setenv("WAYFINDER_LICENSE_SECRET", "test_secret_for_unit_tests_only")
+
+
+@pytest.fixture
+def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
+    """Set up environment variables to simulate running from an AppImage."""
+    appdir = temp_dir / "AppDir"
+    appdir.mkdir()
+    (appdir / "usr" / "bin").mkdir(parents=True)
+    (appdir / "usr" / "lib").mkdir(parents=True)
+    (appdir / "usr" / "share" / "whisper-models").mkdir(parents=True)
+    (appdir / "usr" / "share" / "llm-models").mkdir(parents=True)
+
+    monkeypatch.setenv("APPIMAGE", str(temp_dir / "WayfinderAura.AppImage"))
+    monkeypatch.setenv("APPDIR", str(appdir))
+
+    return appdir
+
+
+@pytest.fixture
+def flatpak_env(monkeypatch: pytest.MonkeyPatch):
+    """Set up environment variables to simulate running in Flatpak."""
+    monkeypatch.setenv("FLATPAK_ID", "io.github.user.WayfinderAura")
+    monkeypatch.setenv("WAYFINDER_FLATPAK", "1")
+
+
+@pytest.fixture
+def wayland_env(monkeypatch: pytest.MonkeyPatch):
+    """Set up environment variables to simulate Wayland session."""
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
+
+
+@pytest.fixture
+def x11_env(monkeypatch: pytest.MonkeyPatch):
+    """Set up environment variables to simulate X11 session."""
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
+
+
+# =============================================================================
+# Reset global state between tests
+# =============================================================================
+
+@pytest.fixture(autouse=True)
+def reset_voice_profile():
+    """Reset the global voice profile singleton between tests."""
+    yield
+    try:
+        from wayfinder.core.voice_profile import reset_voice_profile
+        reset_voice_profile()
+    except ImportError:
+        pass

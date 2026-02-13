@@ -57,6 +57,29 @@ def is_flatpak() -> bool:
     return os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
 
 
+def is_appimage() -> bool:
+    """
+    Check if running from an AppImage.
+    
+    The AppImage runtime sets the APPIMAGE and APPDIR environment variables.
+    APPIMAGE points to the AppImage file path, APPDIR points to the mounted directory.
+    """
+    return os.environ.get("APPIMAGE") is not None or os.environ.get("APPDIR") is not None
+
+
+def get_appimage_dir() -> Path | None:
+    """
+    Get the mounted AppImage directory (APPDIR).
+    
+    Returns:
+        Path to the AppDir mount point, or None if not running from an AppImage.
+    """
+    appdir = os.environ.get("APPDIR")
+    if appdir:
+        return Path(appdir)
+    return None
+
+
 def is_wayland() -> bool:
     """Check if running on Wayland (Linux only)."""
     if not is_linux():
@@ -257,13 +280,21 @@ def get_default_whisper_binary() -> str:
     Get the default whisper.cpp binary path for the current platform.
     
     Returns platform-appropriate path:
+    - AppImage: $APPDIR/usr/bin/whisper-cli
+    - Flatpak: /app/bin/whisper-cli
     - Linux/macOS: ~/whisper.cpp/build/bin/whisper-cli
     - Windows: ~/whisper.cpp/build/bin/whisper-cli.exe
     """
+    appdir = get_appimage_dir()
+    if appdir:
+        bundled = appdir / "usr" / "bin" / "whisper-cli"
+        if bundled.exists():
+            return str(bundled)
+    if is_flatpak():
+        return "/app/bin/whisper-cli"
     if is_windows():
         return str(Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli.exe")
-    else:
-        return str(Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli")
+    return str(Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli")
 
 
 def get_default_llama_binary() -> str:
@@ -271,21 +302,37 @@ def get_default_llama_binary() -> str:
     Get the default llama.cpp binary path for the current platform.
     
     Returns platform-appropriate path:
+    - AppImage: $APPDIR/usr/bin/llama-cli
+    - Flatpak: /app/bin/llama-cli
     - Linux/macOS: ~/llama.cpp/build/bin/llama-cli
     - Windows: ~/llama.cpp/build/bin/llama-cli.exe
     """
+    appdir = get_appimage_dir()
+    if appdir:
+        bundled = appdir / "usr" / "bin" / "llama-cli"
+        if bundled.exists():
+            return str(bundled)
+    if is_flatpak():
+        return "/app/bin/llama-cli"
     if is_windows():
         return str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli.exe")
-    else:
-        return str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli")
+    return str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli")
 
 
 def get_default_model_dir() -> Path:
     """
     Get the default directory for Whisper models.
     
-    Returns platform-appropriate path inside the data directory.
+    Returns platform-appropriate path:
+    - AppImage: $APPDIR/usr/share/whisper-models (if bundled), else data dir
+    - Flatpak: /app/share/whisper-models
+    - Other: data_dir/models
     """
+    appdir = get_appimage_dir()
+    if appdir:
+        bundled = appdir / "usr" / "share" / "whisper-models"
+        if bundled.exists():
+            return bundled
     return get_data_dir() / "models"
 
 
@@ -293,9 +340,32 @@ def get_default_llm_model_dir() -> Path:
     """
     Get the default directory for LLM models.
     
-    Returns platform-appropriate path inside the data directory.
+    Returns platform-appropriate path:
+    - AppImage: $APPDIR/usr/share/llm-models (if bundled), else data dir
+    - Flatpak: /app/share/llm-models
+    - Other: data_dir/llm-models
     """
+    appdir = get_appimage_dir()
+    if appdir:
+        bundled = appdir / "usr" / "share" / "llm-models"
+        if bundled.exists():
+            return bundled
     return get_data_dir() / "llm-models"
+
+
+def get_default_ydotool_binary() -> str | None:
+    """
+    Get the ydotool binary path, checking AppImage bundle first.
+    
+    Returns:
+        Path to ydotool binary, or None if not found.
+    """
+    appdir = get_appimage_dir()
+    if appdir:
+        bundled = appdir / "usr" / "bin" / "ydotool"
+        if bundled.exists():
+            return str(bundled)
+    return find_executable("ydotool")
 
 
 # =============================================================================
@@ -325,6 +395,7 @@ def get_platform_info() -> dict:
             "is_wayland": is_wayland(),
             "is_x11": is_x11(),
             "is_flatpak": is_flatpak(),
+            "is_appimage": is_appimage(),
             "desktop_environment": get_desktop_environment(),
             "session_type": get_session_type(),
         })

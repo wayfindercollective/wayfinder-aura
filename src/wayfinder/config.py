@@ -9,8 +9,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-# Detect Flatpak environment
+# Detect runtime environment
 IS_FLATPAK = os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
+IS_APPIMAGE = os.environ.get("APPIMAGE") is not None or os.environ.get("APPDIR") is not None
+APPDIR = os.environ.get("APPDIR", "")
 
 # Configuration paths
 CONFIG_DIR = Path.home() / ".config" / "wayfinder-aura"
@@ -23,21 +25,35 @@ PROJECT_ROOT = PACKAGE_DIR.parent.parent  # src/wayfinder -> project root
 # Socket path for IPC
 SOCKET_PATH = "/tmp/wayfinder-aura.sock"
 
-# Handle icon path for Flatpak vs regular install
+# Handle icon path for Flatpak / AppImage / regular install
 if IS_FLATPAK:
     ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.user.WayfinderAura')}.png"
     if not ICON_PATH.exists():
         ICON_PATH = PROJECT_ROOT / "assets" / "icon.png"
+elif IS_APPIMAGE and APPDIR:
+    _appimage_icon = Path(APPDIR) / "usr" / "share" / "icons" / "hicolor" / "256x256" / "apps" / "wayfinder-aura.png"
+    ICON_PATH = _appimage_icon if _appimage_icon.exists() else PROJECT_ROOT / "assets" / "icon.png"
 else:
     ICON_PATH = PROJECT_ROOT / "assets" / "icon.png"
 
-# Default whisper paths - Flatpak uses bundled binary and models
+# Default whisper paths - varies by runtime environment
 if IS_FLATPAK:
     _default_whisper_binary = "/app/bin/whisper-cli"
     _default_model_dir = os.environ.get("WHISPER_MODELS_DIR", "/app/share/whisper-models")
     _default_model_path = f"{_default_model_dir}/ggml-small.en.bin"
     # LLM model for post-processing (bundled in Flatpak)
     _default_llm_model_path = "/app/share/llm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+elif IS_APPIMAGE and APPDIR:
+    # AppImage uses bundled binaries if they exist, otherwise fall back to system
+    _appimage_whisper = os.path.join(APPDIR, "usr", "bin", "whisper-cli")
+    _default_whisper_binary = _appimage_whisper if os.path.exists(_appimage_whisper) else "~/whisper.cpp/build/bin/whisper-cli"
+    _appimage_model_dir = os.path.join(APPDIR, "usr", "share", "whisper-models")
+    if os.path.isdir(_appimage_model_dir):
+        _default_model_path = os.path.join(_appimage_model_dir, "ggml-small.en.bin")
+    else:
+        _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
+    _appimage_llm = os.path.join(APPDIR, "usr", "share", "llm-models", "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+    _default_llm_model_path = _appimage_llm if os.path.exists(_appimage_llm) else str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models" / "qwen2.5-1.5b-instruct-q4_k_m.gguf")
 else:
     _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
     _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
