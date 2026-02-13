@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+import requests
+
 
 # ─── Model Catalog ───────────────────────────────────────────────
 
@@ -437,8 +439,6 @@ def download_whisper_model(
         done: Called with (success, path_or_error) when finished
         progress: Called with (downloaded_bytes, total_bytes) during download
     """
-    import requests
-
     url = f"{MODEL_DOWNLOAD_BASE}/ggml-{model_name}.bin"
     model_dir = Path.home() / "whisper.cpp" / "models"
     target = model_dir / f"ggml-{model_name}.bin"
