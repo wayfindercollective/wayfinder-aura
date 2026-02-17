@@ -1692,10 +1692,20 @@ def run_overlay():
         elif command == "quit":
             app.quit()
     
-    # Setup command polling timer
+    # Setup adaptive command polling timer
+    # Polls fast (50ms) when overlay is active, slow (250ms) when hidden/ready
     cmd_timer = QTimer()
-    cmd_timer.timeout.connect(process_commands)
-    cmd_timer.start(50)  # Check every 50ms (20Hz - responsive enough for state changes)
+    
+    def adaptive_process_commands():
+        process_commands()
+        # Adjust polling rate based on overlay state
+        if overlay._state in (OverlayState.LISTENING, OverlayState.PROCESSING):
+            cmd_timer.setInterval(50)   # 20Hz when active (responsive audio levels)
+        else:
+            cmd_timer.setInterval(250)  # 4Hz when idle/hidden (saves CPU)
+    
+    cmd_timer.timeout.connect(adaptive_process_commands)
+    cmd_timer.start(250)  # Start slow, speed up when needed
     
     # Send ready signal
     print(json.dumps({"status": "ready"}), flush=True)

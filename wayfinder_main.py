@@ -3999,28 +3999,47 @@ class WayfinderApp(ctk.CTk):
             voice_boost = (audio_level ** 0.4) * 2.0  # More sensitive, bigger boost
             amplitude_factor = min(1.0, base_breath + voice_boost)
             
+            # Pre-compute sin values and color cache to reduce per-bar work
+            _sin = math.sin
+            t = self._hero_wave_time
+            is_idle = (self.app_state == AppState.IDLE)
+            
+            # Pre-compute color palette (5 levels instead of per-bar interpolation)
+            if is_idle:
+                color_cache = []
+                for a_idx in range(5):
+                    alpha = 0.5 + 0.1 * a_idx  # 0.5 to 0.9
+                    cr = int(r * alpha + bg_r * (1 - alpha))
+                    cg = int(g * alpha + bg_g * (1 - alpha))
+                    cb = int(b * alpha + bg_b * (1 - alpha))
+                    color_cache.append(f"#{cr:02x}{cg:02x}{cb:02x}")
+            
             # Update each bar
             for i, bar_id in enumerate(self._hero_wave_bar_ids):
                 x = i * (bar_width + bar_gap) + bar_gap // 2
                 
                 # Calculate bar height - more dramatic wave pattern
-                phase = self._hero_wave_time + i * 0.2
+                phase = t + i * 0.2
                 # Multi-frequency waves for organic, dramatic motion
-                wave_val = (math.sin(phase) * 0.4 + 
-                           math.sin(phase * 1.7 + 0.5) * 0.35 + 
-                           math.sin(phase * 0.6 + 1.0) * 0.25)
+                wave_val = (_sin(phase) * 0.4 + 
+                           _sin(phase * 1.7 + 0.5) * 0.35 + 
+                           _sin(phase * 0.6 + 1.0) * 0.25)
+                abs_wave = abs(wave_val)
                 # Bars always have significant height, scale up dramatically
-                bar_height = max(8, (0.3 + abs(wave_val) * 0.7) * max_amp * amplitude_factor)
+                bar_height = max(8, (0.3 + abs_wave * 0.7) * max_amp * amplitude_factor)
                 
-                # Vary color intensity per bar for wave effect
-                alpha = 0.5 + 0.5 * abs(wave_val)
-                br = int(r * alpha + bg_r * (1 - alpha))
-                bg = int(g * alpha + bg_g * (1 - alpha))
-                bb = int(b * alpha + bg_b * (1 - alpha))
-                bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
-                
-                # Update bar position and color (STABLE - no delete/recreate)
+                # Update bar position (STABLE - no delete/recreate)
                 canvas.coords(bar_id, x, center_y - bar_height, x + bar_width, center_y + bar_height)
+                
+                # Quantized color for idle (5 buckets), per-bar for active
+                if is_idle:
+                    bar_color = color_cache[min(4, int(abs_wave * 5))]
+                else:
+                    alpha = 0.5 + 0.5 * abs_wave
+                    br = int(r * alpha + bg_r * (1 - alpha))
+                    bg = int(g * alpha + bg_g * (1 - alpha))
+                    bb = int(b * alpha + bg_b * (1 - alpha))
+                    bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
                 canvas.itemconfig(bar_id, fill=bar_color)
         except Exception:
             pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
@@ -12403,7 +12422,7 @@ class WayfinderApp(ctk.CTk):
             self._idle_breath_job = None
     
     def _animate_idle_breath(self):
-        """Animation frame for idle breathing waveform - runs at 5fps to save CPU."""
+        """Animation frame for idle breathing waveform - runs at 2fps to save CPU."""
         # Guard: Stop if not in IDLE state
         if self.app_state != AppState.IDLE:
             self._idle_breath_job = None
@@ -12413,8 +12432,8 @@ class WayfinderApp(ctk.CTk):
         try:
             win_state = self.state()
             if win_state in ("iconic", "withdrawn"):
-                # Check again in 1 second (no point animating an invisible window)
-                self._idle_breath_job = self.after(1000, self._animate_idle_breath)
+                # Check again in 2 seconds (no point animating an invisible window)
+                self._idle_breath_job = self.after(2000, self._animate_idle_breath)
                 return
         except Exception:
             pass
@@ -12422,13 +12441,13 @@ class WayfinderApp(ctk.CTk):
         # Also skip if the hero canvas is not visible (e.g. on a different tab)
         try:
             if not self.hero_canvas.winfo_viewable():
-                self._idle_breath_job = self.after(1000, self._animate_idle_breath)
+                self._idle_breath_job = self.after(2000, self._animate_idle_breath)
                 return
         except Exception:
             pass
         
-        # 5fps idle animation (gentle breathing doesn't need high FPS)
-        idle_fps_scale = 12.0  # 60/5
+        # 2fps idle animation (gentle breathing is smooth enough at 2fps)
+        idle_fps_scale = 30.0  # 60/2
         
         # Slow, gentle time progression for calm wave motion
         self._hero_wave_time += 0.04 * idle_fps_scale
@@ -12437,8 +12456,8 @@ class WayfinderApp(ctk.CTk):
         # Redraw waveform (uses stable pre-created items)
         self._draw_hero_waveform()
         
-        # Schedule next frame at 200ms (5fps) - gentle breathing is smooth enough at 5fps
-        self._idle_breath_job = self.after(200, self._animate_idle_breath)
+        # Schedule next frame at 500ms (2fps) - breathing animation is smooth enough
+        self._idle_breath_job = self.after(500, self._animate_idle_breath)
     
     def _animate_hero(self):
         """Animation frame for hero waveform - STABLE at 15fps."""
@@ -12619,7 +12638,10 @@ class WayfinderApp(ctk.CTk):
                 self.handle_event(event_type, data)
         except queue.Empty:
             pass
-        self.after(100, self.poll_events)  # 10Hz polling - responsive enough for hotkey events
+        # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
+        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms
+        interval = 250 if self.app_state == AppState.IDLE else 100
+        self.after(interval, self.poll_events)
 
     def handle_event(self, event_type, data):
         if event_type == EventType.HOTKEY_PRESSED:
