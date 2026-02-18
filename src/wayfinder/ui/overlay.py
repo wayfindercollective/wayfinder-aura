@@ -1199,8 +1199,6 @@ class GlassmorphicOverlay(QWidget):
             
             # Check overlay mode
             mode = getattr(self, '_overlay_mode', 'persistent')
-            # Check overlay mode
-            mode = getattr(self, '_overlay_mode', 'persistent')
             if mode == "persistent":
                 # Move off-screen instead of hiding (prevents focus stealing on show)
                 self.setGeometry(-9999, -9999, self.width(), self.height())
@@ -1234,9 +1232,21 @@ class GlassmorphicOverlay(QWidget):
         # Force immediate repaint to show new text (don't wait for animators)
         self.update()
         
+        # Adaptive render rate: 15fps for active states, 2fps for READY (gentle wave)
+        if state == OverlayState.READY:
+            # Transition at full speed first, then slow down once animation settles
+            if not self._render_timer.isActive():
+                self._render_timer.setInterval(66)  # 15fps for transition
+                self._render_timer.start()
+            slow_delay = max(duration + 50, 100)
+            QTimer.singleShot(slow_delay, self._slow_render_if_ready)
+        else:
+            self._render_timer.setInterval(66)  # 15fps for active states
+            if not self._render_timer.isActive():
+                self._render_timer.start()
+        
         # Show and fade in if hidden
         if old_state == OverlayState.HIDDEN:
-            self._render_timer.start()
             self._raise_timer.start()
             
             # Delay showing entirely - let KWin script prepare first
@@ -1290,6 +1300,11 @@ class GlassmorphicOverlay(QWidget):
         
         self.update()
     
+    def _slow_render_if_ready(self):
+        """Slow the render timer to 2fps if still in READY state (gentle wave, minimal CPU)."""
+        if self._state == OverlayState.READY:
+            self._render_timer.setInterval(500)  # 2fps — enough for gentle wave breathing
+    
     def set_audio_level(self, level: float):
         """Update audio level for wave visualization."""
         self.wave_renderer.update_audio_level(level)
@@ -1321,7 +1336,8 @@ class GlassmorphicOverlay(QWidget):
     
     def _on_frame(self):
         """Called each frame to update animations."""
-        dt = 0.066  # 15 FPS (optimized for CPU usage)
+        # dt matches actual timer interval so wave speed is consistent at any FPS
+        dt = self._render_timer.interval() / 1000.0
         
         # Update wave animation
         self.wave_renderer.advance_time(dt)
