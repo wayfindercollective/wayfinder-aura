@@ -221,6 +221,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QRadialGradient,
 )
 from PyQt6.QtWidgets import (
@@ -740,6 +741,10 @@ class GlassmorphicOverlay(QWidget):
         self.wave_renderer = LiquidWaveRenderer()
         self.border_chaser = BorderChaser()
         
+        # Pre-rendered wave frame cache for READY state (near-zero CPU playback)
+        self._wave_cache: list = []  # list[QPixmap]
+        self._wave_cache_index: int = 0
+        
         # Animated properties
         self._width_animator = AnimatedValue(200.0, self)
         self._width_animator.valueChanged.connect(self._on_width_changed)
@@ -1184,6 +1189,10 @@ class GlassmorphicOverlay(QWidget):
         old_state = self._state
         self._state = state
         
+        # Invalidate wave cache when leaving READY state
+        if old_state == OverlayState.READY and state != OverlayState.READY:
+            self._wave_cache = []
+        
         # Track when we entered PROCESSING state
         if state == OverlayState.PROCESSING:
             import time
@@ -1301,9 +1310,47 @@ class GlassmorphicOverlay(QWidget):
         self.update()
     
     def _slow_render_if_ready(self):
-        """Slow the render timer to 2fps if still in READY state (gentle wave, minimal CPU)."""
+        """Switch READY state to cached wave playback (near-zero CPU)."""
         if self._state == OverlayState.READY:
-            self._render_timer.setInterval(500)  # 2fps — enough for gentle wave breathing
+            self._build_wave_cache()
+            self._render_timer.setInterval(100)  # 10fps with cached pixmaps is nearly free
+    
+    def _build_wave_cache(self):
+        """Pre-render wave animation frames for zero-cost READY state playback."""
+        CACHE_FRAMES = 90  # 9 seconds at 10fps before looping
+        CACHE_FPS = 10.0
+        dt = 1.0 / CACHE_FPS
+        
+        # Calculate wave rect (must match paintEvent layout for READY state)
+        bar_rect = QRectF(
+            self.glow_margin, self.glow_margin,
+            self._current_width, self.scaled_height
+        )
+        style_label_width = self._get_style_label_width() + int(4 * self._scale)
+        wave_width = self.WAVE_WIDTH - 10
+        wave_x = bar_rect.left() + style_label_width + self.PADDING_H * 0.3
+        wave_rect = QRectF(wave_x, bar_rect.top() + 4, wave_width, bar_rect.height() - 8)
+        
+        # Local rect for rendering into pixmap (origin at 0,0)
+        local_rect = QRectF(0, 0, wave_rect.width(), wave_rect.height())
+        w = max(1, int(wave_rect.width()))
+        h = max(1, int(wave_rect.height()))
+        
+        color = self._wave_color.color
+        renderer = LiquidWaveRenderer()
+        
+        self._wave_cache = []
+        for _ in range(CACHE_FRAMES):
+            pixmap = QPixmap(w, h)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pixmap)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            renderer.render(p, local_rect, color)
+            p.end()
+            self._wave_cache.append(pixmap)
+            renderer.advance_time(dt)
+        
+        self._wave_cache_index = 0
     
     def set_audio_level(self, level: float):
         """Update audio level for wave visualization."""
@@ -1336,15 +1383,15 @@ class GlassmorphicOverlay(QWidget):
     
     def _on_frame(self):
         """Called each frame to update animations."""
-        # dt matches actual timer interval so wave speed is consistent at any FPS
-        dt = self._render_timer.interval() / 1000.0
-        
-        # Update wave animation
-        self.wave_renderer.advance_time(dt)
-        
-        # Update border chaser if processing
-        if self._state == OverlayState.PROCESSING:
-            self.border_chaser.advance(dt)
+        if self._state == OverlayState.READY and self._wave_cache:
+            # Cached mode: just advance the frame index (no wave math, no QPainter work)
+            self._wave_cache_index = (self._wave_cache_index + 1) % len(self._wave_cache)
+        else:
+            # Live rendering: advance wave time and animations
+            dt = self._render_timer.interval() / 1000.0
+            self.wave_renderer.advance_time(dt)
+            if self._state == OverlayState.PROCESSING:
+                self.border_chaser.advance(dt)
         
         self.update()
     
@@ -1405,7 +1452,12 @@ class GlassmorphicOverlay(QWidget):
                 wave_width,
                 bar_rect.height() - 8
             )
-        self.wave_renderer.render(painter, wave_rect, self._wave_color.color)
+        # Use pre-rendered cache in READY state (near-zero CPU), live render otherwise
+        if self._state == OverlayState.READY and self._wave_cache:
+            frame = self._wave_cache[self._wave_cache_index % len(self._wave_cache)]
+            painter.drawPixmap(wave_rect.toRect(), frame)
+        else:
+            self.wave_renderer.render(painter, wave_rect, self._wave_color.color)
         
         # Draw text (only if there's text to draw)
         if label:
