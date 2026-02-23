@@ -39,7 +39,7 @@ except ImportError:
     DBUS_AVAILABLE = False
 
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
@@ -1645,8 +1645,12 @@ def resolve_audio_device(config: dict) -> int | None:
         try:
             import sounddevice as sd
             dev_info = sd.query_devices(device_id)
+            dev_name = dev_info.get('name', '')
             if dev_info.get('max_input_channels', 0) > 0:
-                return device_id
+                if is_output_device(dev_name):
+                    print(f"Configured device '{dev_name}' is an output, not a microphone — using auto-selection")
+                else:
+                    return device_id
         except Exception:
             print(f"Configured device {device_id} not available, using auto-selection")
     
@@ -8945,38 +8949,11 @@ class WayfinderApp(ctk.CTk):
         options = ["🎤 Auto-detect (Recommended)"]
         device_map = {}  # Map display name -> device index
         
-        # Keywords indicating this is NOT a microphone input
-        excluded_keywords = [
-            # Output devices
-            "speaker", "headphone", "s/pdif output", "hdmi", "output",
-            "front headphone", "rear headphone",
-            # Virtual/system devices (standalone, not as part of device name)
-            # We'll handle these separately
-        ]
-        
-        # Virtual device names to skip entirely
-        virtual_devices = ["pipewire", "pulse", "default"]
-        
         try:
-            # Use the existing safe device listing
-            from wayfinder.core.recorder import list_input_devices
-            all_devices = list_input_devices()
+            all_devices = list_input_devices(exclude_outputs=True)
             
             for dev in all_devices:
                 name = dev.get('name', f"Device {dev['index']}")
-                name_lower = name.lower()
-                
-                # Skip virtual/system device entries
-                if name_lower.strip() in virtual_devices:
-                    continue
-                
-                # Skip obvious output devices
-                if any(kw in name_lower for kw in excluded_keywords):
-                    continue
-                
-                # Skip devices marked as excluded by recorder module
-                if dev.get('excluded', False):
-                    continue
                 
                 # Create display name - truncate long names
                 short_name = name.split(':')[0].strip() if ':' in name else name.split('(')[0].strip()
@@ -9004,8 +8981,7 @@ class WayfinderApp(ctk.CTk):
         # Also build a reverse map of device name -> display name for name-based lookup
         self._mic_name_to_display = {}
         try:
-            from wayfinder.core.recorder import list_input_devices
-            for dev in list_input_devices():
+            for dev in list_input_devices(exclude_outputs=True):
                 dev_name = dev.get('name', '')
                 for display_name, idx in device_map.items():
                     if idx == dev['index']:

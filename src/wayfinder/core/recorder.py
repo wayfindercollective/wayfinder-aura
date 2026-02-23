@@ -39,13 +39,24 @@ PREFERRED_MIC_KEYWORDS = [
 # Keywords indicating the device is NOT a microphone input
 EXCLUDED_DEVICE_KEYWORDS = [
     # Output devices
-    "monitor", "hdmi", "loopback", "output", "speaker", "playback", 
+    "monitor", "hdmi", "hdmi/dp", "loopback", "output", "speaker", "playback",
     "digital stereo (hdmi", "s/pdif", "headphone", "front headphone",
+    "rear headphone",
+    # GPU audio controllers (these are HDMI/DP audio outputs, not microphones)
+    "navi ", "radeon", "nvidia", "geforce", "intel hda",
+    "dp audio controller", "hdmi audio controller",
+    "display audio", "displayport",
     # Virtual/system devices (when they appear as standalone device names)
     "pipewire", "pulse", "default",
     # ALSA output nodes
     "alsa_output",
 ]
+
+
+def is_output_device(device_name: str) -> bool:
+    """Check if a device name matches known output device patterns."""
+    name_lower = device_name.lower()
+    return any(kw in name_lower for kw in EXCLUDED_DEVICE_KEYWORDS)
 
 
 def find_best_input_device(preferred_name: str | None = None) -> int | None:
@@ -170,12 +181,15 @@ def get_input_device_by_name(name: str) -> int | None:
     return None
 
 
-def list_input_devices() -> list[dict]:
+def list_input_devices(exclude_outputs: bool = False) -> list[dict]:
     """
     List all available input devices with relevant info.
     
+    Args:
+        exclude_outputs: If True, omit devices that look like outputs/monitors.
+    
     Returns:
-        List of dicts with device info (index, name, channels, recommended)
+        List of dicts with device info (index, name, channels, recommended, excluded)
     """
     result = []
     
@@ -188,15 +202,14 @@ def list_input_devices() -> list[dict]:
                 continue
             
             name = dev.get('name', f'Device {i}')
-            name_lower = name.lower()
+            is_excluded = is_output_device(name)
             
-            # Skip excluded types
-            is_excluded = any(excl in name_lower for excl in EXCLUDED_DEVICE_KEYWORDS)
+            if exclude_outputs and is_excluded:
+                continue
             
-            # Check if it's a recommended device
             is_recommended = (
                 not is_excluded and
-                any(kw in name_lower for kw in PREFERRED_MIC_KEYWORDS)
+                any(kw in name.lower() for kw in PREFERRED_MIC_KEYWORDS)
             )
             
             result.append({
