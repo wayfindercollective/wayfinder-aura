@@ -213,6 +213,10 @@ def main():
                 app.lift()
                 app.focus_force()
                 
+                # Sync the flag into WayfinderApp's config so its future
+                # save_config() calls don't overwrite and erase it.
+                app.config["setup_completed"] = True
+                
                 if wizard.result:
                     print("[Setup] Setup wizard completed successfully")
                 else:

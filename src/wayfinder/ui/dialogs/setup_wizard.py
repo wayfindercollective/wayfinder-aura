@@ -20,7 +20,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from ...config import save_config
+from ...config import IS_APPIMAGE, IS_FLATPAK, save_config
 from ...core.setup import (
     WHISPER_MODELS,
     Dependency,
@@ -276,7 +276,9 @@ class SetupWizard(ctk.CTkToplevel):
         self._show_log()
 
         # Determine what needs installing
-        missing_pkgs = get_missing_system_packages()
+        # Bundled environments already ship system deps; skip pkexec installs
+        is_bundled = IS_APPIMAGE or IS_FLATPAK
+        missing_pkgs = [] if is_bundled else get_missing_system_packages()
         whisper_missing = not self._dep_ok("whisper_cpp")
         model_missing = not self._dep_ok("whisper_model")
 
@@ -286,7 +288,7 @@ class SetupWizard(ctk.CTkToplevel):
 
         def _sequence():
             """Run installations in sequence."""
-            # Step 1: System packages (if needed)
+            # Step 1: System packages (if needed, skipped in bundled environments)
             if missing_pkgs:
                 self._run_step_sync(
                     "system_packages",
@@ -391,6 +393,9 @@ class SetupWizard(ctk.CTkToplevel):
         gpu_vendor = self._detect_vendor_from_deps()
 
         if dep_id in ("ydotool", "build_tools", "cuda"):
+            if IS_APPIMAGE or IS_FLATPAK:
+                self._append_log("Dependencies are bundled — no system install needed.")
+                return
             # System package
             pkgs = get_missing_system_packages()
             if pkgs:

@@ -17,6 +17,8 @@ from typing import Callable, Optional
 
 import requests
 
+from ..config import IS_APPIMAGE, IS_FLATPAK, APPDIR
+
 
 # ─── Model Catalog ───────────────────────────────────────────────
 
@@ -120,6 +122,15 @@ def check_audio() -> DependencyStatus:
 
 def check_ydotool() -> DependencyStatus:
     """Check for ydotool binary and running daemon."""
+    # In bundled environments, check for the bundled binary first
+    if IS_APPIMAGE and APPDIR:
+        bundled = os.path.join(APPDIR, "usr", "bin", "ydotool")
+        if os.path.exists(bundled):
+            return DependencyStatus(True, detail="Bundled ydotool")
+    if IS_FLATPAK:
+        if os.path.exists("/app/bin/ydotool"):
+            return DependencyStatus(True, detail="Bundled ydotool")
+
     binary = shutil.which("ydotool")
     if not binary:
         return DependencyStatus(False, error="ydotool not installed")
@@ -223,10 +234,17 @@ def check_build_tools() -> DependencyStatus:
 
 def check_whisper_cpp(config: dict) -> DependencyStatus:
     """Check if whisper.cpp binary exists."""
+    # In bundled environments, check for the bundled binary first
+    if IS_APPIMAGE and APPDIR:
+        bundled = os.path.join(APPDIR, "usr", "bin", "whisper-cli")
+        if os.path.exists(bundled):
+            return DependencyStatus(True, detail=f"Bundled whisper-cli")
+    if IS_FLATPAK and os.path.exists("/app/bin/whisper-cli"):
+        return DependencyStatus(True, detail=f"Bundled whisper-cli")
+
     binary_path = os.path.expanduser(config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli"))
 
     if Path(binary_path).exists():
-        # Check if it has GPU support
         try:
             result = subprocess.run([binary_path, "--help"], capture_output=True, text=True, timeout=5)
             help_text = result.stdout + result.stderr
@@ -367,7 +385,6 @@ def install_system_packages(
             proc.wait()
 
             if proc.returncode == 0:
-                # Enable ydotoold if we installed ydotool
                 if "ydotool" in packages:
                     log("")
                     log("Enabling ydotool daemon...")
@@ -380,24 +397,28 @@ def install_system_packages(
                     log("  ydotoold enabled (re-login needed for input group)")
 
                 done(True, "System packages installed successfully")
-            elif proc.returncode == 126 or proc.returncode == 127:
-                # pkexec cancelled or not found
+            elif proc.returncode in (126, 127):
                 log("")
-                log("Authentication cancelled or pkexec not available.")
-                log("Run manually:")
+                log("No worries — you can install these yourself instead.")
+                log("Open a terminal and run:")
                 log(f"  sudo {install_cmd}")
-                done(False, "Authentication cancelled")
+                log("")
+                log("Then restart Wayfinder Aura.")
+                done(False, "Manual install needed")
             else:
+                log(f"Package manager returned exit code {proc.returncode}.")
+                log("You can install manually:")
+                log(f"  sudo {install_cmd}")
                 done(False, f"{pkg_mgr} exited with code {proc.returncode}")
 
         except FileNotFoundError:
-            log("Error: pkexec not found.")
-            log("Install packages manually:")
+            log("Automatic install is not available on this system.")
+            log("Install packages manually in a terminal:")
             if pkg_mgr == "dnf":
                 log(f"  sudo dnf install -y {' '.join(resolved)}")
             else:
                 log(f"  sudo apt install -y {' '.join(resolved)}")
-            done(False, "pkexec not available")
+            done(False, "Manual install needed")
         except Exception as e:
             log(f"Error: {e}")
             done(False, str(e))
@@ -591,15 +612,18 @@ def get_dependencies(config: dict) -> list[Dependency]:
             # install handled by install_system_packages
         ))
 
-    deps.extend([
-        Dependency(
+    # Build tools are only needed when whisper.cpp must be compiled from source;
+    # bundled environments (AppImage/Flatpak) ship a pre-built binary.
+    if not (IS_APPIMAGE or IS_FLATPAK):
+        deps.append(Dependency(
             id="build_tools",
             name="Build Tools",
             description="git, cmake, C++ compiler for building whisper.cpp",
             required=True,
             _check=check_build_tools,
-            # install handled by install_system_packages
-        ),
+        ))
+
+    deps.extend([
         Dependency(
             id="whisper_cpp",
             name="Speech Engine (whisper.cpp)",

@@ -150,6 +150,8 @@ DEFAULT_CONFIG = {
     "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
     "openai_base_url": "",  # Custom base URL for OpenAI-compatible APIs (xAI Grok: "https://api.x.ai/v1")
+    # Setup wizard
+    "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)
     # Benchmark results - populated by running benchmark
     # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}
     "benchmark_results": {},

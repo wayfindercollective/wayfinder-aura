@@ -108,7 +108,7 @@ Name=Wayfinder Aura
 Comment=Local voice dictation using whisper.cpp
 Exec=wayfinder-aura
 Icon=wayfinder-aura
-Categories=Utility;Accessibility;Audio;
+Categories=AudioVideo;Audio;Utility;Accessibility;
 Keywords=voice;dictation;speech;transcription;whisper;
 Terminal=false
 StartupNotify=true
@@ -118,14 +118,17 @@ cp "$APPDIR/wayfinder-aura.desktop" "$APPDIR/usr/share/applications/"
 
 # ─── AppStream metadata ─────────────────────────────────────────────────────
 
-cat > "$APPDIR/usr/share/metainfo/wayfinder-aura.appdata.xml" << EOF
+cat > "$APPDIR/usr/share/metainfo/io.github.wayfinder.Aura.appdata.xml" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>wayfinder-aura</id>
+  <id>io.github.wayfinder.Aura</id>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
   <name>Wayfinder Aura</name>
   <summary>Local voice dictation using whisper.cpp</summary>
+  <developer id="io.github.wayfinder">
+    <name>Wayfinder</name>
+  </developer>
   <description>
     <p>
       Wayfinder Aura is a privacy-focused voice dictation application for Linux
@@ -133,7 +136,7 @@ cat > "$APPDIR/usr/share/metainfo/wayfinder-aura.appdata.xml" << EOF
     </p>
     <p>Features:</p>
     <ul>
-      <li>100% local transcription - your audio never leaves your computer</li>
+      <li>100% local transcription — your audio never leaves your computer</li>
       <li>Hotkey triggered recording (default: F9)</li>
       <li>Wayland and X11 support</li>
       <li>GPU acceleration with Vulkan</li>
@@ -141,10 +144,10 @@ cat > "$APPDIR/usr/share/metainfo/wayfinder-aura.appdata.xml" << EOF
     </ul>
   </description>
   <launchable type="desktop-id">wayfinder-aura.desktop</launchable>
-  <url type="homepage">https://github.com/user/wayfinder-aura</url>
   <provides>
     <binary>wayfinder-aura</binary>
   </provides>
+  <content_rating type="oars-1.1" />
   <releases>
     <release version="${VERSION}" date="$(date '+%Y-%m-%d')"/>
   </releases>
@@ -297,9 +300,12 @@ chmod +x "$APPDIR/AppRun"
 echo "🎯 Step 4: Building AppImage..."
 OUTPUT_NAME="Wayfinder_Aura-${VERSION}-${ARCH}.AppImage"
 
-"$APPIMAGETOOL" "$APPDIR" "$OUTPUT_NAME" 2>/dev/null || {
-    # If appimagetool fails (needs FUSE), try with --appimage-extract-and-run
-    "$APPIMAGETOOL" --appimage-extract-and-run "$APPDIR" "$OUTPUT_NAME"
+# Use absolute paths so appimagetool works even with --appimage-extract-and-run
+ABS_APPDIR="$(cd "$APPDIR" && pwd)"
+ABS_OUTPUT="$(pwd)/$OUTPUT_NAME"
+
+ARCH="$ARCH" "$APPIMAGETOOL" --no-appstream "$ABS_APPDIR" "$ABS_OUTPUT" || {
+    ARCH="$ARCH" "$APPIMAGETOOL" --appimage-extract-and-run --no-appstream "$ABS_APPDIR" "$ABS_OUTPUT"
 }
 
 # Cleanup

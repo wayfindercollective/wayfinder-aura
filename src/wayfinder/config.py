@@ -11,8 +11,12 @@ from typing import Any
 
 # Detect runtime environment
 IS_FLATPAK = os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
-IS_APPIMAGE = os.environ.get("APPIMAGE") is not None or os.environ.get("APPDIR") is not None
-APPDIR = os.environ.get("APPDIR", "")
+
+# APPIMAGE/APPDIR env vars can leak from parent AppImage processes (e.g. Cursor IDE),
+# so verify the APPDIR actually contains our binary before treating it as our AppImage.
+_appdir = os.environ.get("APPDIR", "")
+IS_APPIMAGE = bool(_appdir) and os.path.exists(os.path.join(_appdir, "usr", "bin", "wayfinder-aura"))
+APPDIR = _appdir if IS_APPIMAGE else ""
 
 # Configuration paths
 CONFIG_DIR = Path.home() / ".config" / "wayfinder-aura"
@@ -170,6 +174,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
     "openai_base_url": "",  # Custom base URL for OpenAI-compatible APIs (xAI Grok: "https://api.x.ai/v1")
+    
+    # Setup wizard
+    "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)
     
     # Benchmark results - populated by running benchmark
     # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}
