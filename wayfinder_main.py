@@ -3105,9 +3105,6 @@ class WayfinderApp(ctk.CTk):
         self.overlay_controller: OverlayController | None = None
         self._use_pyqt_overlay = False  # Will be set based on PyQt6 availability
         
-        # Dialog tracking to prevent multiple instances
-        self._device_settings_dialog: ctk.CTkToplevel | None = None
-        
         self.setup_window()
         
         # Create indicator with voice-reactive callback
@@ -3238,18 +3235,12 @@ class WayfinderApp(ctk.CTk):
                 window_x = (screen_w - window_w) // 2
                 window_y = top_panel + (usable_h - window_h) // 2
         else:
-            # First run: use percentage-based sizing for consistency
-            # Target: ~28% of screen width, ~65% of usable height
-            window_w = int(screen_w * 0.28)
-            window_h = int(usable_h * 0.65)
+            # First run: fill the right half of the screen
+            window_w = screen_w // 2
+            window_h = usable_h
             
-            # Set reasonable minimums
-            window_w = max(window_w, 520)
-            window_h = max(window_h, 700)
-            
-            # Center on screen
-            window_x = (screen_w - window_w) // 2
-            window_y = top_panel + (usable_h - window_h) // 2
+            window_x = screen_w // 2
+            window_y = top_panel
         
         # Clamp to usable area
         window_h = min(window_h, usable_h)
@@ -3351,7 +3342,7 @@ class WayfinderApp(ctk.CTk):
         return recommended
     
     def rescue_window(self):
-        """Emergency rescue: reset window to center of screen at a usable size.
+        """Emergency rescue: reset window to right half of screen at a usable size.
         
         Use this if the window gets lost off-screen or under the taskbar.
         Bound to Ctrl+R as a keyboard shortcut.
@@ -3362,30 +3353,22 @@ class WayfinderApp(ctk.CTk):
         self.config["ui_scale"] = optimal_scale
         save_config(self.config)
         
-        # Use a comfortable fixed window size (not tied to scale)
-        # This gives a good balance of screen real estate and usability
-        new_w = 520
-        new_h = 780
-        
-        # Center on screen, accounting for taskbar
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
         taskbar_height = 56
         top_panel = 32
         usable_h = screen_h - taskbar_height - top_panel
         
-        # Clamp size if needed
-        new_h = min(new_h, usable_h)
-        new_w = min(new_w, screen_w - 40)
-        
-        center_x = (screen_w - new_w) // 2
-        center_y = top_panel + (usable_h - new_h) // 2
+        new_w = screen_w // 2
+        new_h = usable_h
+        new_x = screen_w // 2
+        new_y = top_panel
         
         # Update widget scaling only (not window scaling)
         ctk.set_widget_scaling(optimal_scale)
         
         # Apply geometry
-        self.geometry(f"{new_w}x{new_h}+{center_x}+{center_y}")
+        self.geometry(f"{new_w}x{new_h}+{new_x}+{new_y}")
         self.minsize(360, 500)
         self.update_idletasks()
         
@@ -3397,7 +3380,7 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, 'header_scale_label'):
             self.header_scale_label.configure(text=f"{int(optimal_scale * 100)}%")
         
-        self.log(f"🛟 Window rescued! Centered at {new_w}x{new_h}, scale {int(optimal_scale*100)}%")
+        self.log(f"🛟 Window rescued! Right half at {new_w}x{new_h}, scale {int(optimal_scale*100)}%")
     
     def scale_ui(self, factor: float):
         """Scale the UI by the given factor."""
@@ -4365,19 +4348,46 @@ class WayfinderApp(ctk.CTk):
         system_content = ctk.CTkFrame(system_tile, fg_color="transparent")
         system_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
         
-        # Hotkey setting (moved here from separate tile)
-        self.hotkey_btn = self.create_setting_row(
-            system_content, "Hotkey", self.get_hotkey_display(),
-            self.open_hotkey_settings, tooltip=SETTING_TOOLTIPS["hotkey"],
+        # Hotkey key dropdown (inline, no popup)
+        self._hotkey_key_codes = {
+            "F9": 67, "F10": 68, "F8": 66, "F7": 65, "F6": 64, "F5": 63,
+            "F4": 62, "F3": 61, "F2": 60, "F1": 59, "F11": 87, "F12": 88,
+            "ScrollLock": 70, "Pause": 119,
+            "Mouse Middle": 274, "Mouse Side": 275, "Mouse Extra": 276,
+            "Mouse Forward": 277, "Mouse Back": 278,
+        }
+        self._hotkey_code_to_name = {v: k for k, v in self._hotkey_key_codes.items()}
+        current_key_code = self.config.get("hotkey_key", 67)
+        current_key_name = self._hotkey_code_to_name.get(current_key_code, "F9")
+        self._hotkey_key_var = ctk.StringVar(value=current_key_name)
+        self.hotkey_dropdown = self.create_dropdown_row(
+            system_content, "Hotkey",
+            list(self._hotkey_key_codes.keys()),
+            self._hotkey_key_var, self._on_hotkey_key_changed,
+            tooltip=SETTING_TOOLTIPS["hotkey"], width=160,
         )
         
-        # Typing Speed setting (moved here from separate tile)
-        speed = self.config.get("typing_speed", "instant")
-        speed_display = speed.replace("_", " ").title()
-        self.speed_btn = self.create_setting_row(
-            system_content, "Typing Speed", speed_display,
-            self.open_speed_settings, tooltip=SETTING_TOOLTIPS["typing_speed"],
-        )
+        # Hotkey modifier checkboxes (inline row)
+        mod_row = ctk.CTkFrame(system_content, fg_color="transparent")
+        mod_row.pack(fill="x", padx=16, pady=(0, 10))
+        ctk.CTkLabel(
+            mod_row, text="Modifiers",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        current_mods = self.config.get("hotkey_modifiers", [])
+        self._hotkey_mod_vars = {}
+        for mod in ["ctrl", "alt", "shift"]:
+            var = ctk.BooleanVar(value=mod in current_mods)
+            self._hotkey_mod_vars[mod] = var
+            ctk.CTkCheckBox(
+                mod_row, text=mod.capitalize(), variable=var,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_primary"],
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                checkmark_color="#000000", width=24,
+                command=self._on_hotkey_mod_changed,
+            ).pack(side="right", padx=(8, 0))
         
         # UI Scale slider
         self._create_scale_slider_row(system_content)
@@ -4385,14 +4395,23 @@ class WayfinderApp(ctk.CTk):
         # Note: "Start minimized" toggle removed - app always starts to tray
         # Access UI via tray icon -> "Open Settings"
         
-        # Hotkey devices setting
-        device_count = len(get_all_input_devices())
+        # Hotkey devices dropdown (inline)
+        all_devices = get_all_input_devices()
+        device_names = [d["name"] for d in all_devices]
+        device_options = ["All Devices"] + device_names
         enabled = self.config.get("enabled_input_devices", [])
-        device_text = f"All ({device_count})" if not enabled else f"{len(enabled)} selected"
-        self.devices_btn = self.create_setting_row(
-            system_content, "Hotkey Devices", device_text,
-            self.open_device_settings,
-            tooltip=SETTING_TOOLTIPS["hotkey_devices"],
+        if not enabled or len(enabled) == len(device_names):
+            current_device_selection = "All Devices"
+        elif len(enabled) == 1:
+            current_device_selection = enabled[0] if enabled[0] in device_names else "All Devices"
+        else:
+            current_device_selection = "All Devices"
+        self._device_var = ctk.StringVar(value=current_device_selection)
+        self._all_device_names = device_names
+        self.devices_dropdown = self.create_dropdown_row(
+            system_content, "Hotkey Devices", device_options,
+            self._device_var, self._on_device_selected,
+            tooltip=SETTING_TOOLTIPS["hotkey_devices"], width=200,
         )
         
         # === BENTO TILE: Status Overlay ===
@@ -5491,9 +5510,9 @@ class WayfinderApp(ctk.CTk):
         
         dialog = ctk.CTkToplevel(self)
         dialog.title("Groq API Configuration" if is_groq else "OpenAI API Configuration")
-        dialog.geometry("460x380")
         dialog.transient(self)
         dialog.grab_set()
+        self._setup_dialog(dialog, 520, 440)
         
         # Header
         ctk.CTkLabel(
@@ -5845,40 +5864,47 @@ class WayfinderApp(ctk.CTk):
         ).pack(side="left")
         
         hotkey_content = ctk.CTkFrame(hotkey_tile, fg_color="transparent")
-        hotkey_content.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        hotkey_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
         
-        # Description
         ctk.CTkLabel(
             hotkey_content,
             text="Press this key to cycle: 🎤 → 💼 → 💬 → 🖥️ → ✨",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(anchor="w", padx=16, pady=(0, 4))
         
-        # Hotkey button row
-        hotkey_row = ctk.CTkFrame(hotkey_content, fg_color="transparent")
-        hotkey_row.pack(fill="x")
+        # Style hotkey key dropdown (inline)
+        current_style_key_code = self.config.get("style_toggle_key", 68)
+        current_style_key_name = self._hotkey_code_to_name.get(current_style_key_code, "F10")
+        self._style_hotkey_key_var = ctk.StringVar(value=current_style_key_name)
+        self.style_hotkey_dropdown = self.create_dropdown_row(
+            hotkey_content, "Toggle Style",
+            list(self._hotkey_key_codes.keys()),
+            self._style_hotkey_key_var, self._on_style_hotkey_key_changed,
+            width=160,
+        )
         
+        # Style hotkey modifier checkboxes (inline row)
+        style_mod_row = ctk.CTkFrame(hotkey_content, fg_color="transparent")
+        style_mod_row.pack(fill="x", padx=16, pady=(0, 10))
         ctk.CTkLabel(
-            hotkey_row,
-            text="Toggle Style",
-            font=(self.font_body[0], self.font_sizes["body"]),
+            style_mod_row, text="Modifiers",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         ).pack(side="left")
-        
-        self.style_hotkey_btn = ctk.CTkButton(
-            hotkey_row,
-            text=self.get_style_hotkey_display(),
-            font=(self.font_body[0], self.font_sizes["body"]),
-            width=100,
-            height=32,
-            corner_radius=RADIUS["sm"],
-            fg_color=COLORS["bg_input"],
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_primary"],
-            command=self.open_style_hotkey_settings,
-        )
-        self.style_hotkey_btn.pack(side="right")
+        current_style_mods = self.config.get("style_toggle_modifiers", [])
+        self._style_hotkey_mod_vars = {}
+        for mod in ["ctrl", "alt", "shift"]:
+            var = ctk.BooleanVar(value=mod in current_style_mods)
+            self._style_hotkey_mod_vars[mod] = var
+            ctk.CTkCheckBox(
+                style_mod_row, text=mod.capitalize(), variable=var,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_primary"],
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                checkmark_color="#000000", width=24,
+                command=self._on_style_hotkey_mod_changed,
+            ).pack(side="right", padx=(8, 0))
         
         # === 🎭 SECRET: Caricature Mode Keyboard Detection ===
         # Track keystrokes to detect "lol" or "haha" (easter egg still works!)
@@ -6434,10 +6460,10 @@ class WayfinderApp(ctk.CTk):
         """Show help dialog explaining audio processing levels."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Audio Processing Help")
-        dialog.geometry("420x300")
         dialog.configure(fg_color=COLORS["bg_dark"])
         dialog.transient(self)
         dialog.grab_set()
+        self._setup_dialog(dialog, 480, 360)
         
         ctk.CTkLabel(
             dialog,
@@ -6678,10 +6704,10 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to view and edit voice profile."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Voice Profile")
-        dialog.geometry("550x600")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 600, 680)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -6841,10 +6867,10 @@ class WayfinderApp(ctk.CTk):
         # Simple confirmation via a popup
         confirm_dialog = ctk.CTkToplevel(self)
         confirm_dialog.title("Clear Voice Profile")
-        confirm_dialog.geometry("350x150")
         confirm_dialog.configure(fg_color=COLORS["bg_base"])
         confirm_dialog.transient(self)
         confirm_dialog.after(100, confirm_dialog.lift)
+        self._setup_dialog(confirm_dialog, 400, 200)
         
         ctk.CTkLabel(
             confirm_dialog,
@@ -7599,10 +7625,10 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to select or download llama.cpp GGUF models for post-processing."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("LLM Models for Post-Processing")
-        dialog.geometry("600x700")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 680, 780)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -7809,9 +7835,9 @@ class WayfinderApp(ctk.CTk):
         # Create progress dialog
         progress_dialog = ctk.CTkToplevel(dialog)
         progress_dialog.title(f"Downloading {model_name}")
-        progress_dialog.geometry("450x280")
         progress_dialog.configure(fg_color=COLORS["bg_base"])
         progress_dialog.transient(dialog)
+        self._setup_dialog(progress_dialog, 500, 320)
         
         inner = ctk.CTkFrame(progress_dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=20, pady=20)
@@ -8034,10 +8060,10 @@ class WayfinderApp(ctk.CTk):
         
         dialog = ctk.CTkToplevel(self)
         dialog.title("Cloud API Configuration")
-        dialog.geometry("560x520")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 640, 600)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -8371,6 +8397,22 @@ class WayfinderApp(ctk.CTk):
             corner_radius=8,
             command=save_settings,
         ).pack(side="right")
+
+    def _setup_dialog(self, dialog, base_w, base_h):
+        """Center a dialog on the main window with proper sizing."""
+        dialog.update_idletasks()
+        parent_x = self.winfo_x()
+        parent_y = self.winfo_y()
+        parent_w = self.winfo_width()
+        parent_h = self.winfo_height()
+        x = parent_x + (parent_w - base_w) // 2
+        y = parent_y + (parent_h - base_h) // 2
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        x = max(20, min(x, screen_w - base_w - 20))
+        y = max(20, min(y, screen_h - base_h - 20))
+        dialog.geometry(f"{base_w}x{base_h}+{x}+{y}")
+        dialog.minsize(base_w, base_h)
 
     def create_setting_row(self, parent, label, value, command, tooltip=None, tooltip_key=None):
         """Create a premium setting row with improved typography and spacing.
@@ -8766,7 +8808,6 @@ class WayfinderApp(ctk.CTk):
         self.log("  📋 Opening restart dialog...")
         dialog = ctk.CTkToplevel(self)
         dialog.title("Restart Required")
-        dialog.geometry("400x180")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.grab_set()
@@ -8774,12 +8815,7 @@ class WayfinderApp(ctk.CTk):
         dialog.lift()
         dialog.attributes("-topmost", True)
         dialog.after(200, lambda: dialog.attributes("-topmost", False))
-        
-        # Center the dialog
-        dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - 400) // 2
-        y = self.winfo_y() + (self.winfo_height() - 180) // 2
-        dialog.geometry(f"400x180+{x}+{y}")
+        self._setup_dialog(dialog, 460, 220)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -8901,6 +8937,64 @@ class WayfinderApp(ctk.CTk):
             mods = "+".join(m.capitalize() for m in style_modifiers)
             return f"{mods}+{key_name}"
         return key_name
+
+    def _apply_hotkey_change(self):
+        """Apply hotkey config change and restart the listener."""
+        new_hotkey = self.get_hotkey_display()
+        if hasattr(self, 'hotkey_label'):
+            self.hotkey_label.configure(text=f"Press {new_hotkey} to toggle")
+        self.log(f"⚙ Hotkey: {new_hotkey}")
+        self.stop_event.set()
+        self.stop_event = threading.Event()
+        self.start_hotkey_listener()
+
+    def _on_hotkey_key_changed(self, value):
+        """Handle inline hotkey key dropdown change."""
+        new_code = self._hotkey_key_codes.get(value, 67)
+        self.config["hotkey_key"] = new_code
+        save_config(self.config)
+        self._apply_hotkey_change()
+
+    def _on_hotkey_mod_changed(self):
+        """Handle inline hotkey modifier checkbox change."""
+        new_mods = [m for m, v in self._hotkey_mod_vars.items() if v.get()]
+        self.config["hotkey_modifiers"] = new_mods
+        save_config(self.config)
+        self._apply_hotkey_change()
+
+    def _apply_style_hotkey_change(self):
+        """Apply style hotkey config change and restart the listener."""
+        new_hotkey = self.get_style_hotkey_display()
+        self.log(f"⚙ Style toggle hotkey: {new_hotkey}")
+        self.stop_event.set()
+        self.stop_event = threading.Event()
+        self.start_hotkey_listener()
+
+    def _on_style_hotkey_key_changed(self, value):
+        """Handle inline style hotkey key dropdown change."""
+        new_code = self._hotkey_key_codes.get(value, 68)
+        self.config["style_toggle_key"] = new_code
+        save_config(self.config)
+        self._apply_style_hotkey_change()
+
+    def _on_style_hotkey_mod_changed(self):
+        """Handle inline style hotkey modifier checkbox change."""
+        new_mods = [m for m, v in self._style_hotkey_mod_vars.items() if v.get()]
+        self.config["style_toggle_modifiers"] = new_mods
+        save_config(self.config)
+        self._apply_style_hotkey_change()
+
+    def _on_device_selected(self, value):
+        """Handle inline device dropdown change."""
+        if value == "All Devices":
+            self.config["enabled_input_devices"] = []
+        else:
+            self.config["enabled_input_devices"] = [value]
+        save_config(self.config)
+        self.log(f"⚙ Input device: {value}")
+        self.stop_event.set()
+        self.stop_event = threading.Event()
+        self.start_hotkey_listener()
 
     def get_microphone_display(self) -> str:
         """Get display name for current audio input device."""
@@ -9661,10 +9755,9 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to select or download whisper models."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Whisper Models")
-        dialog.geometry("700x850")
-        dialog.minsize(650, 750)
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
+        self._setup_dialog(dialog, 760, 900)
         
         # Force dialog to update and display before continuing
         dialog.update_idletasks()
@@ -9891,10 +9984,10 @@ class WayfinderApp(ctk.CTk):
             
             progress_win = ctk.CTkToplevel(dialog)
             progress_win.title(f"Downloading {info['name']}")
-            progress_win.geometry("400x180")
             progress_win.configure(fg_color=COLORS["bg_base"])
             progress_win.transient(dialog)
             progress_win.grab_set()
+            self._setup_dialog(progress_win, 500, 240)
             
             ctk.CTkLabel(
                 progress_win, text=f"Downloading {info['name']}",
@@ -9960,10 +10053,10 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to configure transcription prompt and vocabulary."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Transcription Prompt & Vocabulary")
-        dialog.geometry("580x880")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 640, 920)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -10155,388 +10248,14 @@ class WayfinderApp(ctk.CTk):
             command=dialog.destroy,
         ).pack(fill="x")
 
-    def open_hotkey_settings(self):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Hotkey Settings")
-        dialog.geometry("450x550")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        ctk.CTkLabel(
-            inner,
-            text="Configure Hotkey",
-            font=(self.font_header[0], 22, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 10))
-        
-        # Warning about KDE shortcuts
-        warning = ctk.CTkFrame(inner, fg_color="#2A1F00", corner_radius=10)
-        warning.pack(fill="x", pady=(0, 20))
-        ctk.CTkLabel(
-            warning,
-            text="⚠ On Bazzite/KDE, Super and some Ctrl combos are\ncaptured by the system. Use F9 or Scroll Lock for reliability.",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["accent_yellow"],
-            justify="left",
-        ).pack(padx=15, pady=12)
-        
-        # Current hotkey display
-        ctk.CTkLabel(
-            inner,
-            text=f"Current: {self.get_hotkey_display()}",
-            font=(self.font_body[0], 14),
-            text_color=COLORS["accent"],
-        ).pack(anchor="w", pady=(0, 15))
-        
-        # Key selection (put this first and simplified)
-        ctk.CTkLabel(
-            inner,
-            text="Trigger Key (recommended: F9):",
-            font=(self.font_body[0], 13),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(0, 8))
-        
-        key_options = [
-            "F9", "F10", "F8", "F7", "F6", "F5", "F4", "F3", "F2", "F1", "F11", "F12", 
-            "ScrollLock", "Pause",
-            "── Mouse ──",
-            "Mouse Middle", "Mouse Side", "Mouse Extra", "Mouse Forward", "Mouse Back",
-        ]
-        key_codes_map = {
-            "F1": 59, "F2": 60, "F3": 61, "F4": 62, "F5": 63, "F6": 64,
-            "F7": 65, "F8": 66, "F9": 67, "F10": 68, "F11": 87, "F12": 88,
-            "ScrollLock": 70, "Pause": 119,
-            # Mouse buttons
-            "Mouse Middle": 274, "Mouse Side": 275, "Mouse Extra": 276,
-            "Mouse Forward": 277, "Mouse Back": 278,
-        }
-        
-        current_key = self.config.get("hotkey_key", 67)
-        current_name = "F9"
-        for name, code in key_codes_map.items():
-            if code == current_key:
-                current_name = name
-                break
-        
-        key_var = ctk.StringVar(value=current_name)
-        ctk.CTkOptionMenu(
-            inner,
-            values=key_options,
-            variable=key_var,
-            font=(self.font_body[0], 14),
-            width=200,
-            height=40,
-            fg_color=COLORS["bg_hover"],
-            button_color=COLORS["bg_elevated"],
-            button_hover_color=COLORS["border"],
-            dropdown_fg_color=COLORS["bg_hover"],
-            dropdown_hover_color=COLORS["bg_elevated"],
-        ).pack(anchor="w", pady=(0, 20))
-        
-        # Modifiers section
-        ctk.CTkLabel(
-            inner,
-            text="Modifiers (optional - may conflict with system):",
-            font=(self.font_body[0], 13),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(0, 8))
-        
-        mod_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        mod_frame.pack(fill="x", pady=(0, 25))
-        
-        current_mods = self.config.get("hotkey_modifiers", [])
-        mod_vars = {}
-        for mod in ["ctrl", "alt", "shift"]:  # Removed super - too problematic on KDE
-            var = ctk.BooleanVar(value=mod in current_mods)
-            mod_vars[mod] = var
-            ctk.CTkCheckBox(
-                mod_frame,
-                text=mod.capitalize(),
-                variable=var,
-                font=(self.font_body[0], 13),
-                text_color=COLORS["text_primary"],
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_glow"],
-                checkmark_color="#000000",
-            ).pack(side="left", padx=(0, 20))
-        
-        # Save button
-        def save():
-            new_mods = [mod for mod, var in mod_vars.items() if var.get()]
-            key_name = key_var.get()
-            new_key = key_codes_map.get(key_name, 67)
-            
-            self.config["hotkey_modifiers"] = new_mods
-            self.config["hotkey_key"] = new_key
-            save_config(self.config)
-            
-            new_hotkey = self.get_hotkey_display()
-            
-            # Update all UI elements showing the hotkey
-            self.hotkey_label.configure(text=f"Press {new_hotkey} to record")
-            self.hotkey_btn.configure(text=new_hotkey)
-            
-            self.log(f"⚙ Hotkey saved: {new_hotkey} (code: {new_key})")
-            self.log("↻ Restarting hotkey listener...")
-            
-            # Restart hotkey listener with new settings
-            self.stop_event.set()
-            self.stop_event = threading.Event()
-            self.start_hotkey_listener()
-            self.log("✓ Hotkey listener restarted")
-            
-            dialog.destroy()
-        
-        ctk.CTkButton(
-            inner,
-            text="Save & Apply",
-            font=(self.font_body[0], 15, "bold"),
-            height=50,
-            corner_radius=12,
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=save,
-        ).pack(fill="x", pady=(0, 12))
-        
-        ctk.CTkButton(
-            inner,
-            text="Cancel",
-            font=(self.font_body[0], 13),
-            height=40,
-            corner_radius=10,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=dialog.destroy,
-        ).pack(fill="x")
-        
-        # Test section
-        test_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=10)
-        test_frame.pack(fill="x", pady=(20, 0))
-        
-        ctk.CTkLabel(
-            test_frame,
-            text="💡 Test: Press keys to see if they're detected",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["text_muted"],
-        ).pack(padx=15, pady=(10, 5))
-        
-        test_label = ctk.CTkLabel(
-            test_frame,
-            text="Waiting for key press...",
-            font=(self.font_mono[0], 12),
-            text_color=COLORS["text_secondary"],
-        )
-        test_label.pack(padx=15, pady=(0, 10))
-        
-        # Key detection in background (listens to all devices)
-        def detect_keys():
-            import select
-            devices = find_keyboard_devices()
-            if not devices:
-                return
-            fd_to_device = {dev.fd: dev for dev in devices}
-            
-            while True:
-                try:
-                    if not dialog.winfo_exists():
-                        break
-                except:
-                    break
-                    
-                r, _, _ = select.select(list(fd_to_device.keys()), [], [], 0.3)
-                for fd in r:
-                    device = fd_to_device[fd]
-                    for event in device.read():
-                        if event.type == ecodes.EV_KEY:
-                            key_event = categorize(event)
-                            if key_event.keystate == 1:
-                                code = key_event.scancode
-                                name = ecodes.KEY.get(code, f"code_{code}")
-                                if isinstance(name, list):
-                                    name = name[0]
-                                name = str(name).replace("KEY_", "")
-                                try:
-                                    dialog.after(0, lambda n=name, c=code: test_label.configure(
-                                        text=f"Detected: {n} (code: {c})",
-                                        text_color=COLORS["accent"]
-                                    ))
-                                except:
-                                    return
-        
-        threading.Thread(target=detect_keys, daemon=True).start()
-
-    def open_style_hotkey_settings(self):
-        """Open dialog to configure the style toggle hotkey."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Style Toggle Hotkey")
-        dialog.geometry("400x380")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        ctk.CTkLabel(
-            inner,
-            text="Style Toggle Hotkey",
-            font=(self.font_header[0], 22, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 10))
-        
-        ctk.CTkLabel(
-            inner,
-            text="Press this key to cycle through styles:\nProfessional → AI Prompt → Casual → Personal",
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_secondary"],
-            justify="left",
-        ).pack(anchor="w", pady=(0, 15))
-        
-        # Current hotkey display
-        ctk.CTkLabel(
-            inner,
-            text=f"Current: {self.get_style_hotkey_display()}",
-            font=(self.font_body[0], 14),
-            text_color=COLORS["accent"],
-        ).pack(anchor="w", pady=(0, 15))
-        
-        # Key selection
-        ctk.CTkLabel(
-            inner,
-            text="Trigger Key:",
-            font=(self.font_body[0], 13),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(0, 8))
-        
-        key_options = [
-            "F10", "F9", "F8", "F7", "F6", "F5", "F4", "F3", "F2", "F1", "F11", "F12", 
-            "ScrollLock", "Pause",
-            "── Mouse ──",
-            "Mouse Middle", "Mouse Side", "Mouse Extra", "Mouse Forward", "Mouse Back",
-        ]
-        key_codes_map = {
-            "F1": 59, "F2": 60, "F3": 61, "F4": 62, "F5": 63, "F6": 64,
-            "F7": 65, "F8": 66, "F9": 67, "F10": 68, "F11": 87, "F12": 88,
-            "ScrollLock": 70, "Pause": 119,
-            # Mouse buttons
-            "Mouse Middle": 274, "Mouse Side": 275, "Mouse Extra": 276,
-            "Mouse Forward": 277, "Mouse Back": 278,
-        }
-        
-        current_key = self.config.get("style_toggle_key", 68)
-        current_name = "F10"
-        for name, code in key_codes_map.items():
-            if code == current_key:
-                current_name = name
-                break
-        
-        key_var = ctk.StringVar(value=current_name)
-        ctk.CTkOptionMenu(
-            inner,
-            values=key_options,
-            variable=key_var,
-            font=(self.font_body[0], 14),
-            width=200,
-            height=40,
-            fg_color=COLORS["bg_hover"],
-            button_color=COLORS["bg_elevated"],
-            button_hover_color=COLORS["border"],
-            dropdown_fg_color=COLORS["bg_hover"],
-            dropdown_hover_color=COLORS["bg_elevated"],
-        ).pack(anchor="w", pady=(0, 20))
-        
-        # Modifiers section
-        ctk.CTkLabel(
-            inner,
-            text="Modifiers (optional):",
-            font=(self.font_body[0], 13),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(0, 8))
-        
-        mod_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        mod_frame.pack(fill="x", pady=(0, 25))
-        
-        current_mods = self.config.get("style_toggle_modifiers", [])
-        mod_vars = {}
-        for mod in ["ctrl", "alt", "shift"]:
-            var = ctk.BooleanVar(value=mod in current_mods)
-            mod_vars[mod] = var
-            ctk.CTkCheckBox(
-                mod_frame,
-                text=mod.capitalize(),
-                variable=var,
-                font=(self.font_body[0], 13),
-                text_color=COLORS["text_primary"],
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_glow"],
-                checkmark_color="#000000",
-            ).pack(side="left", padx=(0, 20))
-        
-        # Save button
-        def save():
-            new_mods = [mod for mod, var in mod_vars.items() if var.get()]
-            key_name = key_var.get()
-            new_key = key_codes_map.get(key_name, 68)
-            
-            self.config["style_toggle_modifiers"] = new_mods
-            self.config["style_toggle_key"] = new_key
-            save_config(self.config)
-            
-            new_hotkey = self.get_style_hotkey_display()
-            
-            # Update UI button text
-            if hasattr(self, 'style_hotkey_btn'):
-                self.style_hotkey_btn.configure(text=new_hotkey)
-            
-            self.log(f"⚙ Style toggle hotkey saved: {new_hotkey}")
-            self.log("↻ Restarting hotkey listener...")
-            
-            # Restart hotkey listener with new settings
-            self.stop_event.set()
-            self.stop_event = threading.Event()
-            self.start_hotkey_listener()
-            self.log("✓ Hotkey listener restarted")
-            
-            dialog.destroy()
-        
-        ctk.CTkButton(
-            inner,
-            text="Save & Apply",
-            font=(self.font_body[0], 15, "bold"),
-            height=50,
-            corner_radius=12,
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=save,
-        ).pack(fill="x", pady=(0, 12))
-        
-        ctk.CTkButton(
-            inner,
-            text="Cancel",
-            font=(self.font_body[0], 13),
-            height=40,
-            corner_radius=10,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=dialog.destroy,
-        ).pack(fill="x")
-
     def open_microphone_settings(self):
         """Open dialog to select audio input device (microphone)."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Select Microphone")
-        dialog.geometry("500x480")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 560, 540)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -10736,303 +10455,14 @@ class WayfinderApp(ctk.CTk):
         
         # Chunked recorder will be recreated when needed with new device
 
-    def open_device_settings(self):
-        """Open dialog to manage which devices can trigger the hotkey."""
-        # Check if dialog already exists and is still open
-        if self._device_settings_dialog is not None:
-            try:
-                if self._device_settings_dialog.winfo_exists():
-                    # Dialog exists, just focus it
-                    self._device_settings_dialog.lift()
-                    self._device_settings_dialog.focus_force()
-                    return
-            except:
-                pass
-            # Dialog was destroyed, clear reference
-            self._device_settings_dialog = None
-        
-        dialog = ctk.CTkToplevel(self)
-        self._device_settings_dialog = dialog
-        dialog.title("Hotkey Devices")
-        dialog.geometry("500x500")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        
-        # Clear reference when dialog is closed
-        def on_dialog_close():
-            self._device_settings_dialog = None
-            dialog.destroy()
-        
-        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        ctk.CTkLabel(
-            inner,
-            text="⌨️ Hotkey Devices",
-            font=(self.font_header[0], 22, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 5))
-        
-        ctk.CTkLabel(
-            inner,
-            text="Select which keyboards, mice, or keypads can trigger the hotkey.\nUseful for gaming peripherals with extra keys.",
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_secondary"],
-            justify="left",
-        ).pack(anchor="w", pady=(0, 20))
-        
-        # Get all available devices
-        all_devices = get_all_input_devices()
-        enabled = self.config.get("enabled_input_devices", [])
-        
-        # If nothing enabled, everything is enabled by default
-        if not enabled:
-            enabled = [d["name"] for d in all_devices]
-        
-        # Scrollable frame for devices
-        scroll_frame = SmoothScrollableFrame(
-            inner,
-            fg_color=COLORS["bg_card"],
-            corner_radius=12,
-            height=250,
-        )
-        scroll_frame.pack(fill="both", expand=True, pady=(0, 20))
-        
-        device_vars = {}
-        type_icons = {"keyboard": "⌨️", "mouse": "🖱️", "gamepad": "🎮"}
-        
-        for device in all_devices:
-            var = ctk.BooleanVar(value=device["name"] in enabled)
-            device_vars[device["name"]] = var
-            
-            row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
-            row.pack(fill="x", pady=5)
-            
-            ctk.CTkCheckBox(
-                row,
-                text="",
-                variable=var,
-                width=24,
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_glow"],
-                checkmark_color="#000000",
-            ).pack(side="left", padx=(5, 10))
-            
-            icon = type_icons.get(device["type"], "📟")
-            short_name = device["name"][:45] + "..." if len(device["name"]) > 45 else device["name"]
-            
-            ctk.CTkLabel(
-                row,
-                text=f"{icon} {short_name}",
-                font=(self.font_body[0], 12),
-                text_color=COLORS["text_primary"],
-                anchor="w",
-            ).pack(side="left", fill="x", expand=True)
-        
-        if not all_devices:
-            ctk.CTkLabel(
-                scroll_frame,
-                text="No input devices found!\n\nMake sure you're in the 'input' group:\nsudo usermod -aG input $USER",
-                font=(self.font_body[0], 13),
-                text_color=COLORS["accent_red"],
-                justify="center",
-            ).pack(pady=30)
-        
-        # Buttons
-        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        btn_frame.pack(fill="x")
-        
-        def select_all():
-            for var in device_vars.values():
-                var.set(True)
-        
-        def select_none():
-            for var in device_vars.values():
-                var.set(False)
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Select All",
-            font=(self.font_body[0], 12),
-            width=100,
-            height=32,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=select_all,
-        ).pack(side="left", padx=(0, 10))
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Select None",
-            font=(self.font_body[0], 12),
-            width=100,
-            height=32,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=select_none,
-        ).pack(side="left")
-        
-        # Save/Cancel
-        def save():
-            selected = [name for name, var in device_vars.items() if var.get()]
-            
-            # If all selected, store empty list (means "all")
-            if len(selected) == len(all_devices):
-                self.config["enabled_input_devices"] = []
-            else:
-                self.config["enabled_input_devices"] = selected
-            
-            save_config(self.config)
-            
-            # Update button text
-            if not self.config["enabled_input_devices"]:
-                self.devices_btn.configure(text=f"All ({len(all_devices)})  ▼")
-            else:
-                self.devices_btn.configure(text=f"{len(selected)} selected  ▼")
-            
-            self.log(f"⚙ Input devices updated: {len(selected)} enabled")
-            self.log("↻ Restarting hotkey listener...")
-            
-            # Restart listener
-            self.stop_event.set()
-            self.stop_event = threading.Event()
-            self.start_hotkey_listener()
-            
-            self._device_settings_dialog = None
-            dialog.destroy()
-        
-        ctk.CTkButton(
-            inner,
-            text="Save & Apply",
-            font=(self.font_body[0], 15, "bold"),
-            height=50,
-            corner_radius=12,
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=save,
-        ).pack(fill="x", pady=(15, 10))
-        
-        ctk.CTkButton(
-            inner,
-            text="Cancel",
-            font=(self.font_body[0], 13),
-            height=40,
-            corner_radius=10,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=on_dialog_close,
-        ).pack(fill="x")
-
-    def open_speed_settings(self):
-        """Open dialog to configure typing speed."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Typing Speed")
-        dialog.geometry("420x420")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        ctk.CTkLabel(
-            inner,
-            text="Typing Speed",
-            font=(self.font_header[0], 22, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 5))
-        
-        ctk.CTkLabel(
-            inner,
-            text="Control how fast text is typed after transcription.",
-            font=(self.font_body[0], 12),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(0, 20))
-        
-        # Speed options
-        speeds = [
-            ("Instant", "instant", "No delay - appears immediately"),
-            ("Fast", "fast", "1ms delay between characters"),
-            ("Normal", "normal", "Default typing speed"),
-            ("Slow", "slow", "Slower, more natural feel"),
-            ("Very Slow", "very_slow", "Watch it type out"),
-        ]
-        
-        current_speed = self.config.get("typing_speed", "instant")
-        speed_var = ctk.StringVar(value=current_speed)
-        
-        for label, value, desc in speeds:
-            frame = ctk.CTkFrame(inner, fg_color="transparent")
-            frame.pack(fill="x", pady=6)
-            
-            radio = ctk.CTkRadioButton(
-                frame,
-                text=label,
-                variable=speed_var,
-                value=value,
-                font=(self.font_body[0], 14),
-                text_color=COLORS["text_primary"],
-                fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_glow"],
-            )
-            radio.pack(side="left")
-            
-            ctk.CTkLabel(
-                frame,
-                text=f"  - {desc}",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_muted"],
-            ).pack(side="left", padx=(10, 0))
-        
-        # Save button
-        def save():
-            self.config["typing_speed"] = speed_var.get()
-            save_config(self.config)
-            
-            speed_display = speed_var.get().replace("_", " ").title()
-            self.speed_btn.configure(text=speed_display)
-            self.log(f"⚙ Typing speed: {speed_display}")
-            dialog.destroy()
-        
-        ctk.CTkButton(
-            inner,
-            text="Save",
-            font=(self.font_body[0], 15, "bold"),
-            height=50,
-            corner_radius=12,
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=save,
-        ).pack(fill="x", pady=(25, 10))
-        
-        ctk.CTkButton(
-            inner,
-            text="Cancel",
-            font=(self.font_body[0], 13),
-            height=40,
-            corner_radius=10,
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=dialog.destroy,
-        ).pack(fill="x")
-
     def open_accuracy_mode_settings(self):
         """Open dialog to select accuracy mode preset."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Accuracy Mode")
-        dialog.geometry("450x520")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 520, 580)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -11172,10 +10602,10 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to configure beam search size."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Beam Search Size")
-        dialog.geometry("400x380")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 460, 440)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -11283,10 +10713,10 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to configure transcription language."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Language")
-        dialog.geometry("400x400")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 460, 460)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -11374,10 +10804,10 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to configure chunk duration."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Chunk Duration")
-        dialog.geometry("420x400")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 480, 460)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -11494,10 +10924,10 @@ class WayfinderApp(ctk.CTk):
         
         dialog = ctk.CTkToplevel(self)
         dialog.title("Transcription Backend")
-        dialog.geometry("500x680")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 560, 740)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -11833,10 +11263,10 @@ class WayfinderApp(ctk.CTk):
         """Open dialog to configure GPU layers for whisper.cpp."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("GPU Layers")
-        dialog.geometry("420x450")
         dialog.configure(fg_color=COLORS["bg_base"])
         dialog.transient(self)
         dialog.after(100, dialog.lift)
+        self._setup_dialog(dialog, 480, 500)
         
         inner = ctk.CTkFrame(dialog, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=30, pady=30)
@@ -13076,8 +12506,6 @@ class WayfinderApp(ctk.CTk):
 
     def do_inject(self, text):
         try:
-            typing_speed = self.config.get("typing_speed", "instant")
-            
             # Replace newlines with spaces to avoid sending Enter keys via ydotool
             # This prevents unwanted line breaks and accidental form submissions
             # Collapse multiple spaces and strip whitespace
@@ -13095,7 +12523,7 @@ class WayfinderApp(ctk.CTk):
             import time as _time
             _time.sleep(0.15)
             
-            inject_text(text, typing_speed=typing_speed)
+            inject_text(text, typing_speed="instant")
             self.event_queue.put((EventType.INJECTION_DONE, None))
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, str(e)))
