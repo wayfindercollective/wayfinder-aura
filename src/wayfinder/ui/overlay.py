@@ -716,7 +716,7 @@ class GlassmorphicOverlay(QWidget):
     BASE_GLOW_MARGIN = 6  # Base space around squircle for glow effects
     
     # Layout constants
-    TASKBAR_GAP = 12  # Gap above taskbar to prevent overlap
+    TASKBAR_GAP = 4  # Gap above taskbar
     STARTUP_POSITION_RETRIES = 5  # Number of position checks after startup
     
     def __init__(self, scale: float = 0.7):
