@@ -625,7 +625,7 @@ class TestInstallSystemPackages:
         _wait_done(done_event)
 
         assert done_result["success"] is False
-        assert "pkexec" in done_result["detail"].lower()
+        assert "manual install needed" in done_result["detail"].lower()
 
     @patch("subprocess.run")
     @patch("subprocess.Popen")
@@ -809,9 +809,9 @@ class TestDownloadWhisperModel:
 class TestSetupConfigIntegration:
     """Test that setup completion is persisted in config."""
 
-    def test_setup_completed_not_in_defaults(self):
-        """DEFAULT_CONFIG should not have setup_completed (triggers wizard)."""
-        assert "setup_completed" not in DEFAULT_CONFIG
+    def test_setup_completed_defaults_to_false(self):
+        """DEFAULT_CONFIG should have setup_completed set to False."""
+        assert DEFAULT_CONFIG.get("setup_completed") is False
 
     def test_setup_completed_persists(self, temp_config_dir: Path):
         """Setting setup_completed should survive save/load."""
