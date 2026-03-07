@@ -744,6 +744,8 @@ class GlassmorphicOverlay(QWidget):
         # Pre-rendered wave frame cache for READY state (near-zero CPU playback)
         self._wave_cache: list = []  # list[QPixmap]
         self._wave_cache_index: int = 0
+        # Full-frame composite cache: entire overlay pre-rendered (single blit per frame)
+        self._full_frame_cache: list = []  # list[QPixmap]
         
         # Animated properties
         self._width_animator = AnimatedValue(200.0, self)
@@ -853,8 +855,9 @@ class GlassmorphicOverlay(QWidget):
         if abs(scale - self._scale) < 0.01:
             return
         self._scale = max(0.5, min(2.0, scale))
+        self._full_frame_cache = []  # Scale changed, invalidate composite cache
         self._update_font()
-        
+
         # Recalculate target width for current state's text (width depends on scale)
         label = STATE_LABELS.get(self._state, "")
         new_target_width = self._calculate_target_width(label)
@@ -1121,6 +1124,7 @@ class GlassmorphicOverlay(QWidget):
     def _on_width_changed(self, width: float):
         """Handle width animation updates."""
         self._current_width = width
+        self._full_frame_cache = []  # Size changed, invalidate composite cache
         self._update_size()
         self.update()
     
@@ -1189,9 +1193,10 @@ class GlassmorphicOverlay(QWidget):
         old_state = self._state
         self._state = state
         
-        # Invalidate wave cache when leaving READY state
+        # Invalidate caches when leaving READY state
         if old_state == OverlayState.READY and state != OverlayState.READY:
             self._wave_cache = []
+            self._full_frame_cache = []
         
         # Track when we entered PROCESSING state
         if state == OverlayState.PROCESSING:
@@ -1310,15 +1315,16 @@ class GlassmorphicOverlay(QWidget):
         self.update()
     
     def _slow_render_if_ready(self):
-        """Switch READY state to cached wave playback (near-zero CPU)."""
+        """Switch READY state to full-frame cached playback (near-zero CPU)."""
         if self._state == OverlayState.READY:
             self._build_wave_cache()
-            self._render_timer.setInterval(100)  # 10fps with cached pixmaps is nearly free
+            self._build_full_frame_cache()
+            self._render_timer.setInterval(250)  # 4fps with full-frame cache is nearly free
     
     def _build_wave_cache(self):
         """Pre-render wave animation frames for zero-cost READY state playback."""
-        CACHE_FRAMES = 90  # 9 seconds at 10fps before looping
-        CACHE_FPS = 10.0
+        CACHE_FRAMES = 36  # 9 seconds at 4fps before looping
+        CACHE_FPS = 4.0
         dt = 1.0 / CACHE_FPS
         
         # Calculate wave rect (must match paintEvent layout for READY state)
@@ -1351,7 +1357,51 @@ class GlassmorphicOverlay(QWidget):
             renderer.advance_time(dt)
         
         self._wave_cache_index = 0
-    
+
+    def _build_full_frame_cache(self):
+        """Pre-render COMPLETE overlay frames for near-zero CPU READY state.
+
+        Instead of running the full paintEvent pipeline (squircle path, outer glow,
+        glass background, gradient border, clip, wave blit, style badge) every frame,
+        we composite everything into a single QPixmap per frame. The paintEvent then
+        does a single drawPixmap blit instead of 8+ QPainter operations.
+        """
+        if not self._wave_cache:
+            return
+
+        bar_rect = QRectF(
+            self.glow_margin, self.glow_margin,
+            self._current_width, self.scaled_height
+        )
+        squircle = create_squircle_path(bar_rect, n=4.5)
+
+        # Calculate wave rect for READY state (same layout as paintEvent)
+        style_label_width = self._get_style_label_width() + int(4 * self._scale)
+        wave_width = self.WAVE_WIDTH - 10
+        wave_x = bar_rect.left() + style_label_width + self.PADDING_H * 0.3
+        wave_rect = QRectF(wave_x, bar_rect.top() + 4, wave_width, bar_rect.height() - 8)
+
+        self._full_frame_cache = []
+        for wave_frame in self._wave_cache:
+            pixmap = QPixmap(self.size())
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+            # Draw all overlay layers (same order as paintEvent)
+            self._draw_outer_glow(painter, squircle, bar_rect)
+            self._draw_glass_background(painter, squircle)
+            self._draw_gradient_border(painter, squircle, bar_rect)
+
+            # Clip to squircle for content
+            painter.setClipPath(squircle)
+            painter.drawPixmap(wave_rect.toRect(), wave_frame)
+            self._draw_style_badge(painter, bar_rect)
+
+            painter.end()
+            self._full_frame_cache.append(pixmap)
+
     def set_audio_level(self, level: float):
         """Update audio level for wave visualization."""
         self.wave_renderer.update_audio_level(level)
@@ -1371,8 +1421,9 @@ class GlassmorphicOverlay(QWidget):
             return
         
         self._current_style = style
+        self._full_frame_cache = []  # Style changed, invalidate composite cache
         palette = STYLE_PALETTES[style]
-        
+
         duration = 200 if animate else 0
         self._style_badge_color.animate_to(QColor(palette.color), duration)
         self.update()
@@ -1397,10 +1448,18 @@ class GlassmorphicOverlay(QWidget):
     
     def paintEvent(self, event):
         """Custom paint for glassmorphic overlay."""
+        # Fast path: single pixmap blit when full-frame cache is available (READY state)
+        if self._state == OverlayState.READY and self._full_frame_cache:
+            painter = QPainter(self)
+            idx = self._wave_cache_index % len(self._full_frame_cache)
+            painter.drawPixmap(0, 0, self._full_frame_cache[idx])
+            painter.end()
+            return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        
+
         # Calculate centered rect for the squircle
         # Margin provides room for subtle glow
         bar_rect = QRectF(

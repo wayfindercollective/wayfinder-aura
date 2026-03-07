@@ -46,7 +46,10 @@ if IS_FLATPAK:
     _default_model_dir = os.environ.get("WHISPER_MODELS_DIR", "/app/share/whisper-models")
     _default_model_path = f"{_default_model_dir}/ggml-small.en.bin"
     # LLM model for post-processing (bundled in Flatpak)
-    _default_llm_model_path = "/app/share/llm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    # Prefer Qwen 3.5 if available, fall back to Qwen 2.5
+    _flatpak_llm_new = "/app/share/llm-models/Qwen3.5-2B-Q4_K_M.gguf"
+    _flatpak_llm_old = "/app/share/llm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    _default_llm_model_path = _flatpak_llm_new if os.path.exists(_flatpak_llm_new) else _flatpak_llm_old
 elif IS_APPIMAGE and APPDIR:
     # AppImage uses bundled binaries if they exist, otherwise fall back to system
     _appimage_whisper = os.path.join(APPDIR, "usr", "bin", "whisper-cli")
@@ -56,13 +59,26 @@ elif IS_APPIMAGE and APPDIR:
         _default_model_path = os.path.join(_appimage_model_dir, "ggml-small.en.bin")
     else:
         _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
-    _appimage_llm = os.path.join(APPDIR, "usr", "share", "llm-models", "qwen2.5-1.5b-instruct-q4_k_m.gguf")
-    _default_llm_model_path = _appimage_llm if os.path.exists(_appimage_llm) else str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models" / "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+    # Prefer Qwen 3.5 if available, fall back to Qwen 2.5
+    _appimage_llm_new = os.path.join(APPDIR, "usr", "share", "llm-models", "Qwen3.5-2B-Q4_K_M.gguf")
+    _appimage_llm_old = os.path.join(APPDIR, "usr", "share", "llm-models", "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+    _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
+    if os.path.exists(_appimage_llm_new):
+        _default_llm_model_path = _appimage_llm_new
+    elif os.path.exists(_appimage_llm_old):
+        _default_llm_model_path = _appimage_llm_old
+    elif os.path.exists(os.path.join(_user_llm_dir, "Qwen3.5-2B-Q4_K_M.gguf")):
+        _default_llm_model_path = os.path.join(_user_llm_dir, "Qwen3.5-2B-Q4_K_M.gguf")
+    else:
+        _default_llm_model_path = os.path.join(_user_llm_dir, "qwen2.5-1.5b-instruct-q4_k_m.gguf")
 else:
     _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
     _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
-    # LLM model for post-processing (user's downloaded models)
-    _default_llm_model_path = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models" / "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+    # LLM model for post-processing - prefer Qwen 3.5 if available, fall back to Qwen 2.5
+    _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
+    _llm_new = os.path.join(_user_llm_dir, "Qwen3.5-2B-Q4_K_M.gguf")
+    _llm_old = os.path.join(_user_llm_dir, "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+    _default_llm_model_path = _llm_new if os.path.exists(_llm_new) else _llm_old
 
 # Default configuration values
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -175,6 +191,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
     "openai_base_url": "",  # Custom base URL for OpenAI-compatible APIs (xAI Grok: "https://api.x.ai/v1")
     
+    # Model update checking
+    "check_for_model_updates": True,  # Check HuggingFace for newer models on startup (once/day)
+    "dismissed_updates": [],  # List of update keys the user dismissed
+
     # Setup wizard
     "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)
     

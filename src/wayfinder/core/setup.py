@@ -63,6 +63,24 @@ WHISPER_MODELS: dict[str, dict] = {
 
 MODEL_DOWNLOAD_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 
+# LLM models for post-processing (dictation cleanup)
+LLM_MODELS: dict[str, dict] = {
+    "Qwen3.5-2B-Q4_K_M": {
+        "label": "Qwen 3.5 2B (Recommended)",
+        "size": "~1.3 GB",
+        "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+        "filename": "Qwen3.5-2B-Q4_K_M.gguf",
+        "note": "Best balance of speed and quality for dictation cleanup",
+    },
+    "qwen2.5-1.5b-instruct-q4_k_m": {
+        "label": "Qwen 2.5 1.5B (Legacy)",
+        "size": "~1.0 GB",
+        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "note": "Previous default, still works well",
+    },
+}
+
 
 # ─── Status Types ────────────────────────────────────────────────
 
@@ -553,6 +571,73 @@ def download_whisper_model(
             log(f"Download failed: {e}")
             # Clean up partial download
             tmp = target.with_suffix(".bin.part")
+            if tmp.exists():
+                tmp.unlink()
+            done(False, str(e))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def download_llm_model(
+    model_key: str,
+    log: Callable[[str], None],
+    done: Callable[[bool, str], None],
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> None:
+    """
+    Download an LLM model (GGUF) from Hugging Face for post-processing.
+
+    Args:
+        model_key: Key into LLM_MODELS (e.g. "Qwen3.5-2B-Q4_K_M")
+        log: Called with status messages
+        done: Called with (success, path_or_error) when finished
+        progress: Called with (downloaded_bytes, total_bytes) during download
+    """
+    model_info = LLM_MODELS.get(model_key)
+    if not model_info:
+        done(False, f"Unknown LLM model: {model_key}")
+        return
+
+    url = model_info["url"]
+    filename = model_info["filename"]
+    model_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
+    target = model_dir / filename
+
+    def _run():
+        try:
+            model_dir.mkdir(parents=True, exist_ok=True)
+
+            size_label = model_info.get("size", "unknown size")
+            log(f"Downloading {filename} ({size_label})...")
+            log(f"From: {url}")
+            log("")
+
+            response = requests.get(url, stream=True, timeout=30)
+            response.raise_for_status()
+
+            total = int(response.headers.get("content-length", 0))
+            downloaded = 0
+
+            tmp_target = target.with_suffix(".gguf.part")
+            with open(tmp_target, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1_048_576):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress:
+                        progress(downloaded, total)
+                    if total > 0 and downloaded % (50 * 1_048_576) < 1_048_576:
+                        pct = downloaded * 100 // total
+                        log(f"  {pct}% ({downloaded // 1_000_000} / {total // 1_000_000} MB)")
+
+            tmp_target.rename(target)
+
+            log("")
+            log(f"Model saved to: {target}")
+            done(True, str(target))
+
+        except Exception as e:
+            log(f"Download failed: {e}")
+            tmp = target.with_suffix(".gguf.part")
             if tmp.exists():
                 tmp.unlink()
             done(False, str(e))

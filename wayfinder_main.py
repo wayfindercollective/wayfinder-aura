@@ -3178,7 +3178,10 @@ class WayfinderApp(ctk.CTk):
         
         # Run startup dependency checks
         self.after(300, self._check_startup_dependencies)
-        
+
+        # Check for model updates in background (non-blocking, once per day)
+        self.after(2000, self._check_model_updates_background)
+
         # Start display wake-up listener for overlay recovery
         if self._use_pyqt_overlay:
             self._start_display_wake_listener()
@@ -7525,9 +7528,37 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"⚠️ {msg}")
                 self.log("💡 Start daemon: sudo systemctl enable --now ydotoold")
     
+    def _check_model_updates_background(self) -> None:
+        """Check for model updates in a background thread (non-blocking)."""
+        if not self.config.get("check_for_model_updates", True):
+            return
+
+        def _check():
+            try:
+                from wayfinder.core.model_updates import check_for_updates, get_available_upgrades
+
+                # Check for repo updates
+                results = check_for_updates()
+
+                # Also check if user could upgrade their current model
+                model_path = self.config.get("llama_cpp_model_path", "")
+                upgrade = get_available_upgrades(model_path)
+
+                if upgrade:
+                    dismissed = self.config.get("dismissed_updates", [])
+                    if upgrade["download_key"] not in dismissed:
+                        self.event_queue.put((
+                            EventType.LOG_MESSAGE,
+                            f"💡 {upgrade['message']}",
+                        ))
+            except Exception:
+                pass  # Silent failure - don't annoy user
+
+        threading.Thread(target=_check, daemon=True).start()
+
     def _start_display_wake_listener(self) -> None:
         """Start D-Bus listener for system wake-up events to refresh the overlay.
-        
+
         Uses org.freedesktop.login1.Manager.PrepareForSleep signal which fires:
         - With True before sleep
         - With False after wake-up

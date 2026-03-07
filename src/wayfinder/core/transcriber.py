@@ -895,9 +895,23 @@ def clean_whisper_artifacts(text: str) -> str:
     text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'\[MUSIC\]', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'\[APPLAUSE\]', ' ', text, flags=re.IGNORECASE)
-    
+
     # Remove music note symbols (replace with space to preserve word boundaries)
     text = re.sub(r'♪+', ' ', text)
+
+    # Remove Whisper special token leaks: <|...|> patterns (timestamps, end-of-text, etc.)
+    text = re.sub(r'<\|[^|]*\|>', ' ', text)
+
+    # Fix angle brackets that Whisper inserts instead of punctuation
+    # < often replaces commas, > often replaces periods
+    text = re.sub(r'\s*<\s+', ', ', text)   # "word< next" or "word < next" -> "word, next"
+    text = re.sub(r'\s*>\s*\.', '.', text)   # ">." -> "."
+    text = re.sub(r'\s*>\s+', '. ', text)    # "word> next" or "word > next" -> "word. next"
+    text = re.sub(r'<$', '', text)            # trailing <
+    text = re.sub(r'>$', '', text)            # trailing >
+    # Remove any remaining isolated angle brackets
+    text = re.sub(r'<', '', text)
+    text = re.sub(r'>', '', text)
     
     # Remove repeated dots with spaces: ". . . . ." or ". . ."
     # This pattern captures 2 or more dots separated by spaces
@@ -932,6 +946,68 @@ def clean_whisper_artifacts(text: str) -> str:
             print(f"[Transcription] Cleaned {removed_chars} chars of Whisper artifacts")
     
     return text
+
+
+# Acronyms and abbreviations that should stay uppercase
+_PRESERVE_CAPS = {
+    'I', 'OK', 'API', 'HTML', 'CSS', 'JSON', 'XML', 'YAML', 'TOML',
+    'HTTP', 'HTTPS', 'URL', 'SQL', 'CPU', 'GPU', 'RAM', 'ROM', 'USB',
+    'PDF', 'FAQ', 'CEO', 'CTO', 'VP', 'HR', 'PR', 'IT', 'AI', 'ML',
+    'LLM', 'NLP', 'OCR', 'IDE', 'CLI', 'GUI', 'SSH', 'FTP', 'DNS',
+    'TCP', 'UDP', 'IP', 'VPN', 'HDMI', 'AMD', 'NVIDIA',
+    'CUDA', 'GGUF', 'GGML', 'US', 'UK', 'EU', 'UN', 'NASA', 'ASAP',
+    'DIY', 'ETA', 'WiFi', 'BIOS', 'SSD', 'HDD', 'NVMe', 'PCIe',
+    'RGB', 'LED', 'LCD', 'OLED', 'USB', 'JPEG', 'PNG', 'GIF', 'SVG',
+    'AWS', 'GCP', 'REST', 'CRUD', 'DOM', 'CSS', 'NPM',
+}
+
+
+def normalize_whisper_caps(text: str) -> str:
+    """
+    Fix random ALL CAPS words/phrases from Whisper.
+
+    Whisper sometimes outputs words in ALL CAPS when confidence is low
+    or audio quality is marginal. This normalizes them while preserving
+    intentional caps like acronyms (API, HTML, CPU, etc.).
+    """
+    if not text:
+        return text
+
+    import re
+
+    words = text.split()
+    result = []
+
+    for i, word in enumerate(words):
+        # Strip punctuation for checking
+        clean = re.sub(r'[^A-Za-z0-9]', '', word)
+
+        if not clean:
+            result.append(word)
+            continue
+
+        # Skip known acronyms
+        if clean.upper() in _PRESERVE_CAPS or clean in _PRESERVE_CAPS:
+            result.append(word)
+            continue
+
+        # Check if the word is ALL CAPS (and not a known acronym — already checked above)
+        if clean.isupper():
+            is_sentence_start = (i == 0) or (
+                i > 0 and result[-1].rstrip().endswith(('.', '!', '?'))
+            )
+
+            if is_sentence_start:
+                # Title case: preserve punctuation attached to the word
+                new_word = word[0] + word[1:].lower()
+            else:
+                new_word = word.lower()
+
+            result.append(new_word)
+        else:
+            result.append(word)
+
+    return ' '.join(result)
 
 
 def ensure_punctuation_postprocess(text: str) -> str:
@@ -1054,10 +1130,11 @@ def transcribe_with_config(
     backend = get_backend(config)
     text = backend.transcribe(audio_path, context=context)
     
-    # ALWAYS clean up Whisper artifacts (dots, [BLANK_AUDIO], etc.)
+    # ALWAYS clean up Whisper artifacts (dots, [BLANK_AUDIO], <>, caps, etc.)
     # This runs regardless of post-processing settings
     if text:
         text = clean_whisper_artifacts(text)
+        text = normalize_whisper_caps(text)
     
     # Apply basic post-processing if punctuation is enabled
     if ensure_punct and text:
