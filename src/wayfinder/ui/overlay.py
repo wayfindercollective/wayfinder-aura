@@ -906,7 +906,9 @@ class GlassmorphicOverlay(QWidget):
         
         # Note: Periodic raise timer removed - it caused focus stealing on KDE Wayland.
         # WindowStaysOnTopHint + KWin keepAbove=true handle stay-on-top.
-        self._raise_timer = QTimer(self)  # Keep attribute for code that references it
+        # Keep as a stopped no-op timer so existing start()/stop() calls don't crash.
+        self._raise_timer = QTimer(self)
+        self._raise_timer.setInterval(60000)  # 1 minute (effectively never fires)
     
     def _ensure_on_top(self):
         """Ensure window stays on top of other windows.
