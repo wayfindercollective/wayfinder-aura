@@ -221,7 +221,6 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
-    QPixmap,
     QRadialGradient,
 )
 from PyQt6.QtWidgets import (
@@ -716,7 +715,7 @@ class GlassmorphicOverlay(QWidget):
     BASE_GLOW_MARGIN = 6  # Base space around squircle for glow effects
     
     # Layout constants
-    TASKBAR_GAP = 4  # Gap above taskbar
+    TASKBAR_GAP = 12  # Gap above taskbar to prevent overlap
     STARTUP_POSITION_RETRIES = 5  # Number of position checks after startup
     
     def __init__(self, scale: float = 0.7):
@@ -741,34 +740,28 @@ class GlassmorphicOverlay(QWidget):
         self.wave_renderer = LiquidWaveRenderer()
         self.border_chaser = BorderChaser()
         
-        # Pre-rendered wave frame cache for READY state (near-zero CPU playback)
-        self._wave_cache: list = []  # list[QPixmap]
-        self._wave_cache_index: int = 0
-        # Full-frame composite cache: entire overlay pre-rendered (single blit per frame)
-        self._full_frame_cache: list = []  # list[QPixmap]
-        
         # Animated properties
         self._width_animator = AnimatedValue(200.0, self)
         self._width_animator.valueChanged.connect(self._on_width_changed)
         
         self._glow_intensity = AnimatedValue(0.0, self)
-        self._glow_intensity.valueChanged.connect(self._on_animated_property_changed)
-
+        self._glow_intensity.valueChanged.connect(lambda _: self.update())
+        
         self._opacity = AnimatedValue(0.0, self)
         self._opacity.valueChanged.connect(self._on_opacity_changed)
-
+        
         self._border_color_top = ColorAnimator(QColor("#2D333B"), self)
         self._border_color_bottom = ColorAnimator(QColor("#161B22"), self)
         self._glow_color = ColorAnimator(QColor("#21262D"), self)
         self._wave_color = ColorAnimator(QColor("#3D444D"), self)
-
+        
         # Style badge color animator
         initial_style = STYLE_PALETTES.get("professional", STYLE_PALETTES["professional"])
         self._style_badge_color = ColorAnimator(QColor(initial_style.color), self)
-
-        for animator in [self._border_color_top, self._border_color_bottom,
+        
+        for animator in [self._border_color_top, self._border_color_bottom, 
                          self._glow_color, self._wave_color, self._style_badge_color]:
-            animator.colorChanged.connect(self._on_animated_property_changed)
+            animator.colorChanged.connect(lambda _: self.update())
         
         # Setup window
         self._setup_window()
@@ -855,9 +848,8 @@ class GlassmorphicOverlay(QWidget):
         if abs(scale - self._scale) < 0.01:
             return
         self._scale = max(0.5, min(2.0, scale))
-        self._full_frame_cache = []  # Scale changed, invalidate composite cache
         self._update_font()
-
+        
         # Recalculate target width for current state's text (width depends on scale)
         label = STATE_LABELS.get(self._state, "")
         new_target_width = self._calculate_target_width(label)
@@ -1124,16 +1116,9 @@ class GlassmorphicOverlay(QWidget):
     def _on_width_changed(self, width: float):
         """Handle width animation updates."""
         self._current_width = width
-        self._full_frame_cache = []  # Size changed, invalidate composite cache
         self._update_size()
         self.update()
     
-    def _on_animated_property_changed(self, _=None):
-        """Handle color/glow animation changes — skip repaint when full-frame cached."""
-        if self._full_frame_cache:
-            return  # Full-frame cache active, no need to repaint
-        self.update()
-
     def _on_opacity_changed(self, opacity: float):
         """Handle opacity animation updates."""
         self.setWindowOpacity(opacity)
@@ -1199,11 +1184,6 @@ class GlassmorphicOverlay(QWidget):
         old_state = self._state
         self._state = state
         
-        # Invalidate caches when leaving READY state
-        if old_state == OverlayState.READY and state != OverlayState.READY:
-            self._wave_cache = []
-            self._full_frame_cache = []
-        
         # Track when we entered PROCESSING state
         if state == OverlayState.PROCESSING:
             import time
@@ -1217,6 +1197,8 @@ class GlassmorphicOverlay(QWidget):
             self._render_timer.stop()
             self._raise_timer.stop()
             
+            # Check overlay mode
+            mode = getattr(self, '_overlay_mode', 'persistent')
             # Check overlay mode
             mode = getattr(self, '_overlay_mode', 'persistent')
             if mode == "persistent":
@@ -1252,21 +1234,9 @@ class GlassmorphicOverlay(QWidget):
         # Force immediate repaint to show new text (don't wait for animators)
         self.update()
         
-        # Adaptive render rate: 15fps for active states, 2fps for READY (gentle wave)
-        if state == OverlayState.READY:
-            # Transition at full speed first, then slow down once animation settles
-            if not self._render_timer.isActive():
-                self._render_timer.setInterval(66)  # 15fps for transition
-                self._render_timer.start()
-            slow_delay = max(duration + 50, 100)
-            QTimer.singleShot(slow_delay, self._slow_render_if_ready)
-        else:
-            self._render_timer.setInterval(66)  # 15fps for active states
-            if not self._render_timer.isActive():
-                self._render_timer.start()
-        
         # Show and fade in if hidden
         if old_state == OverlayState.HIDDEN:
+            self._render_timer.start()
             self._raise_timer.start()
             
             # Delay showing entirely - let KWin script prepare first
@@ -1320,97 +1290,6 @@ class GlassmorphicOverlay(QWidget):
         
         self.update()
     
-    def _slow_render_if_ready(self):
-        """Switch READY state to full-frame cached playback (near-zero CPU)."""
-        if self._state == OverlayState.READY:
-            self._build_wave_cache()
-            self._build_full_frame_cache()
-            self._render_timer.setInterval(250)  # 4fps with full-frame cache is nearly free
-            print(f"[Overlay] READY cache: {len(self._full_frame_cache)} full frames, "
-                  f"{len(self._wave_cache)} wave frames, timer={self._render_timer.interval()}ms",
-                  file=sys.stderr, flush=True)
-    
-    def _build_wave_cache(self):
-        """Pre-render wave animation frames for zero-cost READY state playback."""
-        CACHE_FRAMES = 36  # 9 seconds at 4fps before looping
-        CACHE_FPS = 4.0
-        dt = 1.0 / CACHE_FPS
-        
-        # Calculate wave rect (must match paintEvent layout for READY state)
-        bar_rect = QRectF(
-            self.glow_margin, self.glow_margin,
-            self._current_width, self.scaled_height
-        )
-        style_label_width = self._get_style_label_width() + int(4 * self._scale)
-        wave_width = self.WAVE_WIDTH - 10
-        wave_x = bar_rect.left() + style_label_width + self.PADDING_H * 0.3
-        wave_rect = QRectF(wave_x, bar_rect.top() + 4, wave_width, bar_rect.height() - 8)
-        
-        # Local rect for rendering into pixmap (origin at 0,0)
-        local_rect = QRectF(0, 0, wave_rect.width(), wave_rect.height())
-        w = max(1, int(wave_rect.width()))
-        h = max(1, int(wave_rect.height()))
-        
-        color = self._wave_color.color
-        renderer = LiquidWaveRenderer()
-        
-        self._wave_cache = []
-        for _ in range(CACHE_FRAMES):
-            pixmap = QPixmap(w, h)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            p = QPainter(pixmap)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            renderer.render(p, local_rect, color)
-            p.end()
-            self._wave_cache.append(pixmap)
-            renderer.advance_time(dt)
-        
-        self._wave_cache_index = 0
-
-    def _build_full_frame_cache(self):
-        """Pre-render COMPLETE overlay frames for near-zero CPU READY state.
-
-        Instead of running the full paintEvent pipeline (squircle path, outer glow,
-        glass background, gradient border, clip, wave blit, style badge) every frame,
-        we composite everything into a single QPixmap per frame. The paintEvent then
-        does a single drawPixmap blit instead of 8+ QPainter operations.
-        """
-        if not self._wave_cache:
-            return
-
-        bar_rect = QRectF(
-            self.glow_margin, self.glow_margin,
-            self._current_width, self.scaled_height
-        )
-        squircle = create_squircle_path(bar_rect, n=4.5)
-
-        # Calculate wave rect for READY state (same layout as paintEvent)
-        style_label_width = self._get_style_label_width() + int(4 * self._scale)
-        wave_width = self.WAVE_WIDTH - 10
-        wave_x = bar_rect.left() + style_label_width + self.PADDING_H * 0.3
-        wave_rect = QRectF(wave_x, bar_rect.top() + 4, wave_width, bar_rect.height() - 8)
-
-        self._full_frame_cache = []
-        for wave_frame in self._wave_cache:
-            pixmap = QPixmap(self.size())
-            pixmap.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-
-            # Draw all overlay layers (same order as paintEvent)
-            self._draw_outer_glow(painter, squircle, bar_rect)
-            self._draw_glass_background(painter, squircle)
-            self._draw_gradient_border(painter, squircle, bar_rect)
-
-            # Clip to squircle for content
-            painter.setClipPath(squircle)
-            painter.drawPixmap(wave_rect.toRect(), wave_frame)
-            self._draw_style_badge(painter, bar_rect)
-
-            painter.end()
-            self._full_frame_cache.append(pixmap)
-
     def set_audio_level(self, level: float):
         """Update audio level for wave visualization."""
         self.wave_renderer.update_audio_level(level)
@@ -1430,9 +1309,8 @@ class GlassmorphicOverlay(QWidget):
             return
         
         self._current_style = style
-        self._full_frame_cache = []  # Style changed, invalidate composite cache
         palette = STYLE_PALETTES[style]
-
+        
         duration = 200 if animate else 0
         self._style_badge_color.animate_to(QColor(palette.color), duration)
         self.update()
@@ -1443,32 +1321,23 @@ class GlassmorphicOverlay(QWidget):
     
     def _on_frame(self):
         """Called each frame to update animations."""
-        if self._state == OverlayState.READY and self._wave_cache:
-            # Cached mode: just advance the frame index (no wave math, no QPainter work)
-            self._wave_cache_index = (self._wave_cache_index + 1) % len(self._wave_cache)
-        else:
-            # Live rendering: advance wave time and animations
-            dt = self._render_timer.interval() / 1000.0
-            self.wave_renderer.advance_time(dt)
-            if self._state == OverlayState.PROCESSING:
-                self.border_chaser.advance(dt)
+        dt = 0.066  # 15 FPS (optimized for CPU usage)
+        
+        # Update wave animation
+        self.wave_renderer.advance_time(dt)
+        
+        # Update border chaser if processing
+        if self._state == OverlayState.PROCESSING:
+            self.border_chaser.advance(dt)
         
         self.update()
     
     def paintEvent(self, event):
         """Custom paint for glassmorphic overlay."""
-        # Fast path: single pixmap blit when full-frame cache is available (READY state)
-        if self._state == OverlayState.READY and self._full_frame_cache:
-            painter = QPainter(self)
-            idx = self._wave_cache_index % len(self._full_frame_cache)
-            painter.drawPixmap(0, 0, self._full_frame_cache[idx])
-            painter.end()
-            return
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-
+        
         # Calculate centered rect for the squircle
         # Margin provides room for subtle glow
         bar_rect = QRectF(
@@ -1520,12 +1389,7 @@ class GlassmorphicOverlay(QWidget):
                 wave_width,
                 bar_rect.height() - 8
             )
-        # Use pre-rendered cache in READY state (near-zero CPU), live render otherwise
-        if self._state == OverlayState.READY and self._wave_cache:
-            frame = self._wave_cache[self._wave_cache_index % len(self._wave_cache)]
-            painter.drawPixmap(wave_rect.toRect(), frame)
-        else:
-            self.wave_renderer.render(painter, wave_rect, self._wave_color.color)
+        self.wave_renderer.render(painter, wave_rect, self._wave_color.color)
         
         # Draw text (only if there's text to draw)
         if label:
@@ -1828,20 +1692,10 @@ def run_overlay():
         elif command == "quit":
             app.quit()
     
-    # Setup adaptive command polling timer
-    # Polls fast (50ms) when overlay is active, slow (250ms) when hidden/ready
+    # Setup command polling timer
     cmd_timer = QTimer()
-    
-    def adaptive_process_commands():
-        process_commands()
-        # Adjust polling rate based on overlay state
-        if overlay._state in (OverlayState.LISTENING, OverlayState.PROCESSING):
-            cmd_timer.setInterval(50)   # 20Hz when active (responsive audio levels)
-        else:
-            cmd_timer.setInterval(250)  # 4Hz when idle/hidden (saves CPU)
-    
-    cmd_timer.timeout.connect(adaptive_process_commands)
-    cmd_timer.start(250)  # Start slow, speed up when needed
+    cmd_timer.timeout.connect(process_commands)
+    cmd_timer.start(50)  # Check every 50ms (20Hz - responsive enough for state changes)
     
     # Send ready signal
     print(json.dumps({"status": "ready"}), flush=True)
