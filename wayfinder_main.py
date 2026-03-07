@@ -11885,18 +11885,18 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
-        # 2fps idle animation (gentle breathing is smooth enough at 2fps)
-        idle_fps_scale = 30.0  # 60/2
-        
+        # 1fps idle animation (gentle breathing is smooth enough at 1fps)
+        idle_fps_scale = 60.0  # 60/1
+
         # Slow, gentle time progression for calm wave motion
         self._hero_wave_time += 0.04 * idle_fps_scale
         self._hero_audio_level = 0.0
-        
+
         # Redraw waveform (uses stable pre-created items)
         self._draw_hero_waveform()
-        
-        # Schedule next frame at 500ms (2fps) - breathing animation is smooth enough
-        self._idle_breath_job = self.after(500, self._animate_idle_breath)
+
+        # Schedule next frame at 1000ms (1fps) - breathing animation is smooth enough
+        self._idle_breath_job = self.after(1000, self._animate_idle_breath)
     
     def _animate_hero(self):
         """Animation frame for hero waveform - STABLE at 15fps."""
@@ -12078,8 +12078,15 @@ class WayfinderApp(ctk.CTk):
         except queue.Empty:
             pass
         # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
-        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms
-        interval = 250 if self.app_state == AppState.IDLE else 100
+        # When window is not visible (minimized/tray), poll even slower to save CPU
+        if self.app_state == AppState.IDLE:
+            try:
+                win_state = self.state()
+                interval = 1000 if win_state in ("iconic", "withdrawn") else 250
+            except Exception:
+                interval = 250
+        else:
+            interval = 100
         self.after(interval, self.poll_events)
 
     def handle_event(self, event_type, data):

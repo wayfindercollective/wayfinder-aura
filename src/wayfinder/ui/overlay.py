@@ -752,23 +752,23 @@ class GlassmorphicOverlay(QWidget):
         self._width_animator.valueChanged.connect(self._on_width_changed)
         
         self._glow_intensity = AnimatedValue(0.0, self)
-        self._glow_intensity.valueChanged.connect(lambda _: self.update())
-        
+        self._glow_intensity.valueChanged.connect(self._on_animated_property_changed)
+
         self._opacity = AnimatedValue(0.0, self)
         self._opacity.valueChanged.connect(self._on_opacity_changed)
-        
+
         self._border_color_top = ColorAnimator(QColor("#2D333B"), self)
         self._border_color_bottom = ColorAnimator(QColor("#161B22"), self)
         self._glow_color = ColorAnimator(QColor("#21262D"), self)
         self._wave_color = ColorAnimator(QColor("#3D444D"), self)
-        
+
         # Style badge color animator
         initial_style = STYLE_PALETTES.get("professional", STYLE_PALETTES["professional"])
         self._style_badge_color = ColorAnimator(QColor(initial_style.color), self)
-        
-        for animator in [self._border_color_top, self._border_color_bottom, 
+
+        for animator in [self._border_color_top, self._border_color_bottom,
                          self._glow_color, self._wave_color, self._style_badge_color]:
-            animator.colorChanged.connect(lambda _: self.update())
+            animator.colorChanged.connect(self._on_animated_property_changed)
         
         # Setup window
         self._setup_window()
@@ -1128,6 +1128,12 @@ class GlassmorphicOverlay(QWidget):
         self._update_size()
         self.update()
     
+    def _on_animated_property_changed(self, _=None):
+        """Handle color/glow animation changes — skip repaint when full-frame cached."""
+        if self._full_frame_cache:
+            return  # Full-frame cache active, no need to repaint
+        self.update()
+
     def _on_opacity_changed(self, opacity: float):
         """Handle opacity animation updates."""
         self.setWindowOpacity(opacity)
@@ -1320,6 +1326,9 @@ class GlassmorphicOverlay(QWidget):
             self._build_wave_cache()
             self._build_full_frame_cache()
             self._render_timer.setInterval(250)  # 4fps with full-frame cache is nearly free
+            print(f"[Overlay] READY cache: {len(self._full_frame_cache)} full frames, "
+                  f"{len(self._wave_cache)} wave frames, timer={self._render_timer.interval()}ms",
+                  file=sys.stderr, flush=True)
     
     def _build_wave_cache(self):
         """Pre-render wave animation frames for zero-cost READY state playback."""
