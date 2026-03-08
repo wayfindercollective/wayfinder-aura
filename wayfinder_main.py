@@ -3693,13 +3693,15 @@ class WayfinderApp(ctk.CTk):
         self._hero_audio_level = 0.0
         self._hero_animation_job = None
         self._idle_breath_job = None
-        
-        # STABILITY FIX: Pre-created canvas item tracking (avoids delete/recreate cycle)
+
+        # PIL-based waveform rendering (single image blit instead of 80+ Tk calls)
         self._hero_wave_items_created = False
-        self._hero_wave_bar_ids = []
-        self._hero_canvas_width = 0  # Track width to detect resize
-        
-        # Bind resize to reinitialize bars when canvas gets proper size
+        self._hero_wave_bar_ids = []  # Legacy compat (unused with PIL path)
+        self._hero_canvas_width = 0
+        self._hero_wave_image_id = None  # Canvas image item ID
+        self._hero_wave_photo = None    # Keep reference to prevent GC
+
+        # Bind resize to reinitialize
         self.hero_canvas.bind("<Configure>", self._on_hero_canvas_resize)
         
         # STABILITY FIX: Fixed 15fps for animations to prevent memory issues
@@ -3892,149 +3894,128 @@ class WayfinderApp(ctk.CTk):
         )
     
     def _on_hero_canvas_resize(self, event=None):
-        """Handle canvas resize - reinitialize bars to fill new width."""
+        """Handle canvas resize - reset image item to fill new width."""
         if not self.hero_canvas:
             return
         new_width = self.hero_canvas.winfo_width()
         if new_width > 100 and abs(new_width - self._hero_canvas_width) > 20:
             self._hero_canvas_width = new_width
-            for bar_id in self._hero_wave_bar_ids:
+            # Delete old image item if any
+            if self._hero_wave_image_id is not None:
                 try:
-                    self.hero_canvas.delete(bar_id)
-                except:
+                    self.hero_canvas.delete(self._hero_wave_image_id)
+                except Exception:
                     pass
-            self._hero_wave_bar_ids = []
+                self._hero_wave_image_id = None
             self._hero_wave_items_created = False
             self._init_hero_wave_items()
-    
+
     def _init_hero_wave_items(self) -> None:
-        """Create hero waveform bar items ONCE."""
+        """Create a single canvas image item for PIL-rendered waveform."""
         if not self.hero_canvas or self._hero_wave_items_created:
             return
-        
+
         canvas = self.hero_canvas
         w = canvas.winfo_width()
         h = canvas.winfo_height()
-        
-        if w <= 1:
-            w = 400
-        if h <= 1:
-            h = 80
-        
-        center_y = h // 2
-        # Thin, elegant bars for refined look
-        bar_width = 3
-        bar_gap = 2
-        num_bars = w // (bar_width + bar_gap)
-        
-        self._hero_wave_bar_ids = []
-        color = STATE_COLORS.get(self.app_state, COLORS["accent"])
-        
-        for i in range(num_bars):
-            x = i * (bar_width + bar_gap) + bar_gap // 2
-            # Create bar centered vertically with initial height
-            bar_id = canvas.create_rectangle(
-                x, center_y - 10, x + bar_width, center_y + 10,
-                fill=color, outline=""
-            )
-            self._hero_wave_bar_ids.append(bar_id)
-        
+
+        if w <= 1 or h <= 1:
+            return  # Canvas not ready yet
+
+        # Create a single image item anchored at top-left
+        from PIL import ImageTk
+        # Create initial blank image
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        self._hero_wave_photo = ImageTk.PhotoImage(img)
+        self._hero_wave_image_id = canvas.create_image(
+            0, 0, anchor="nw", image=self._hero_wave_photo
+        )
         self._hero_wave_items_created = True
     
     def _draw_hero_waveform(self) -> None:
-        """Update hero waveform bars - STABLE version using coords/itemconfig."""
+        """Render waveform to PIL Image and blit as single canvas image (1 Tk call)."""
         if not self.hero_canvas:
             return
-        
-        # Initialize items on first call
+
+        # Initialize on first call
         if not self._hero_wave_items_created:
             self._init_hero_wave_items()
             return
-        
-        # Wrap all canvas operations in try/except - Tk 9.0 can crash on coords
+
         try:
             import math
-            
+            from PIL import ImageTk
+
             canvas = self.hero_canvas
             w = canvas.winfo_width()
             h = canvas.winfo_height()
-            
-            if w <= 1:
-                w = 400
-            if h <= 1:
-                h = 80
-            
+
+            if w <= 1 or h <= 1:
+                return
+
             center_y = h // 2
-            max_amp = (h // 2) - 2  # Use nearly full height
-            # Must match _init_hero_wave_items dimensions
+            max_amp = (h // 2) - 2
             bar_width = 3
             bar_gap = 2
-            
-            # Get current color based on state
+            num_bars = w // (bar_width + bar_gap)
+
+            # Parse colors
             color = STATE_COLORS.get(self.app_state, COLORS["accent"])
             r = int(color[1:3], 16)
             g = int(color[3:5], 16)
             b = int(color[5:7], 16)
-            
-            bg_r = int(COLORS["bg_card"][1:3], 16)
-            bg_g = int(COLORS["bg_card"][3:5], 16)
-            bg_b = int(COLORS["bg_card"][5:7], 16)
-            
-            # Calculate amplitude - DRAMATIC and space-filling!
+
+            bg_hex = COLORS["bg_card"]
+            bg_r = int(bg_hex[1:3], 16)
+            bg_g = int(bg_hex[3:5], 16)
+            bg_b = int(bg_hex[5:7], 16)
+
+            # Amplitude calculation
             audio_level = self._hero_audio_level
-            # Validate audio_level to avoid NaN
             if not isinstance(audio_level, (int, float)) or audio_level != audio_level:
                 audio_level = 0.0
-            # High base amplitude so bars are always visible and moving
             base_breath = 0.6 + 0.3 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.3))
-            # MASSIVE voice boost - fills the space when speaking
-            voice_boost = (audio_level ** 0.4) * 2.0  # More sensitive, bigger boost
+            voice_boost = (audio_level ** 0.4) * 2.0
             amplitude_factor = min(1.0, base_breath + voice_boost)
-            
-            # Pre-compute sin values and color cache to reduce per-bar work
+
             _sin = math.sin
             t = self._hero_wave_time
             is_idle = (self.app_state == AppState.IDLE)
-            
-            # Pre-compute color palette (5 levels instead of per-bar interpolation)
-            if is_idle:
-                color_cache = []
-                for a_idx in range(5):
-                    alpha = 0.5 + 0.1 * a_idx  # 0.5 to 0.9
-                    cr = int(r * alpha + bg_r * (1 - alpha))
-                    cg = int(g * alpha + bg_g * (1 - alpha))
-                    cb = int(b * alpha + bg_b * (1 - alpha))
-                    color_cache.append(f"#{cr:02x}{cg:02x}{cb:02x}")
-            
-            # Update each bar
-            for i, bar_id in enumerate(self._hero_wave_bar_ids):
+
+            # Pre-compute color palette (10 levels for smooth gradients)
+            color_lut = []
+            for a_idx in range(10):
+                alpha = 0.5 + 0.05 * a_idx  # 0.5 to 0.95
+                cr = int(r * alpha + bg_r * (1 - alpha))
+                cg = int(g * alpha + bg_g * (1 - alpha))
+                cb = int(b * alpha + bg_b * (1 - alpha))
+                color_lut.append((cr, cg, cb))
+
+            # Render to PIL Image (pure C, no Tk bridge calls)
+            img = Image.new("RGB", (w, h), (bg_r, bg_g, bg_b))
+            draw = ImageDraw.Draw(img)
+
+            for i in range(num_bars):
                 x = i * (bar_width + bar_gap) + bar_gap // 2
-                
-                # Calculate bar height - more dramatic wave pattern
+
                 phase = t + i * 0.2
-                # Multi-frequency waves for organic, dramatic motion
-                wave_val = (_sin(phase) * 0.4 + 
-                           _sin(phase * 1.7 + 0.5) * 0.35 + 
-                           _sin(phase * 0.6 + 1.0) * 0.25)
+                wave_val = (_sin(phase) * 0.4 +
+                            _sin(phase * 1.7 + 0.5) * 0.35 +
+                            _sin(phase * 0.6 + 1.0) * 0.25)
                 abs_wave = abs(wave_val)
-                # Bars always have significant height, scale up dramatically
                 bar_height = max(8, (0.3 + abs_wave * 0.7) * max_amp * amplitude_factor)
-                
-                # Update bar position (STABLE - no delete/recreate)
-                canvas.coords(bar_id, x, center_y - bar_height, x + bar_width, center_y + bar_height)
-                
-                # Quantized color for idle (5 buckets), per-bar for active
-                if is_idle:
-                    bar_color = color_cache[min(4, int(abs_wave * 5))]
-                else:
-                    alpha = 0.5 + 0.5 * abs_wave
-                    br = int(r * alpha + bg_r * (1 - alpha))
-                    bg = int(g * alpha + bg_g * (1 - alpha))
-                    bb = int(b * alpha + bg_b * (1 - alpha))
-                    bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
-                canvas.itemconfig(bar_id, fill=bar_color)
+
+                bar_color = color_lut[min(9, int(abs_wave * 10))]
+
+                y1 = int(center_y - bar_height)
+                y2 = int(center_y + bar_height)
+                draw.rectangle([x, y1, x + bar_width, y2], fill=bar_color)
+
+            # Single Tk call: update the canvas image
+            self._hero_wave_photo = ImageTk.PhotoImage(img)
+            canvas.itemconfig(self._hero_wave_image_id, image=self._hero_wave_photo)
         except Exception:
-            pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
+            pass
     
     def _create_sidebar(self, parent) -> None:
         """Create the vertical sidebar navigation."""
@@ -11885,18 +11866,18 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
-        # 5fps idle animation (gentle breathing doesn't need high FPS)
-        idle_fps_scale = 12.0  # 60/5
+        # 30fps idle animation (PIL rendering is cheap — single image blit per frame)
+        idle_fps_scale = 2.0  # 60/30
 
         # Slow, gentle time progression for calm wave motion
         self._hero_wave_time += 0.04 * idle_fps_scale
         self._hero_audio_level = 0.0
 
-        # Redraw waveform (uses stable pre-created items)
+        # Redraw waveform (PIL render + single canvas image update)
         self._draw_hero_waveform()
 
-        # Schedule next frame at 200ms (5fps) - gentle breathing is smooth enough at 5fps
-        self._idle_breath_job = self.after(200, self._animate_idle_breath)
+        # Schedule next frame at 33ms (30fps) — smooth silk ribbon animation
+        self._idle_breath_job = self.after(33, self._animate_idle_breath)
     
     def _animate_hero(self):
         """Animation frame for hero waveform - STABLE at 15fps."""
