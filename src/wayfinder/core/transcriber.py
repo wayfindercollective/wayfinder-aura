@@ -964,11 +964,11 @@ _PRESERVE_CAPS = {
 
 def normalize_whisper_caps(text: str) -> str:
     """
-    Fix random ALL CAPS words/phrases from Whisper.
+    Fix random ALL CAPS and chaotic mixed-case words from Whisper.
 
-    Whisper sometimes outputs words in ALL CAPS when confidence is low
-    or audio quality is marginal. This normalizes them while preserving
-    intentional caps like acronyms (API, HTML, CPU, etc.).
+    Whisper sometimes outputs words in ALL CAPS or with random uppercase
+    letters scattered throughout (e.g., "WeLL", "cAn't", "MaiNE'S").
+    This normalizes them while preserving intentional caps like acronyms.
     """
     if not text:
         return text
@@ -980,32 +980,55 @@ def normalize_whisper_caps(text: str) -> str:
 
     for i, word in enumerate(words):
         # Strip punctuation for checking
-        clean = re.sub(r'[^A-Za-z0-9]', '', word)
+        clean = re.sub(r'[^A-Za-z]', '', word)
 
         if not clean:
             result.append(word)
             continue
 
-        # Skip known acronyms
+        # Enforce known acronyms/words (e.g., lowercase "i" → "I")
         if clean.upper() in _PRESERVE_CAPS or clean in _PRESERVE_CAPS:
-            result.append(word)
+            canonical = clean.upper() if clean.upper() in _PRESERVE_CAPS else clean
+            # Replace the alpha portion with canonical form, keep punctuation
+            new_word = ""
+            ci = 0
+            for ch in word:
+                if ch.isalpha() and ci < len(canonical):
+                    new_word += canonical[ci]
+                    ci += 1
+                else:
+                    new_word += ch
+            result.append(new_word)
             continue
 
-        # Check if the word is ALL CAPS (and not a known acronym — already checked above)
-        if clean.isupper():
-            is_sentence_start = (i == 0) or (
-                i > 0 and result[-1].rstrip().endswith(('.', '!', '?'))
-            )
+        is_sentence_start = (i == 0) or (
+            i > 0 and result[-1].rstrip().endswith(('.', '!', '?'))
+        )
 
+        # Check if the word is ALL CAPS
+        if clean.isupper():
             if is_sentence_start:
-                # Title case: preserve punctuation attached to the word
                 new_word = word[0] + word[1:].lower()
             else:
                 new_word = word.lower()
-
             result.append(new_word)
-        else:
-            result.append(word)
+            continue
+
+        # Check for chaotic mixed-case: uppercase letters after position 0
+        # alongside lowercase letters (e.g., "WeLL", "cAn't", "MaiNE'S")
+        # Normal patterns: "Hello" (title), "hello" (lower), "HTML" (acronym)
+        # Chaotic patterns: "WeLL", "cAn't", "MaiNE'S" — have uppercase AFTER first char AND lowercase
+        alpha_after_first = clean[1:] if len(clean) > 1 else ""
+        if alpha_after_first and not alpha_after_first.islower() and not alpha_after_first.isupper():
+            # Mixed case after first char — this is chaotic Whisper output
+            if is_sentence_start:
+                new_word = word[0].upper() + word[1:].lower()
+            else:
+                new_word = word.lower()
+            result.append(new_word)
+            continue
+
+        result.append(word)
 
     return ' '.join(result)
 
