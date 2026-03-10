@@ -952,7 +952,7 @@ def clean_whisper_artifacts(text: str) -> str:
 _PRESERVE_CAPS = {
     'I', 'OK', 'API', 'HTML', 'CSS', 'JSON', 'XML', 'YAML', 'TOML',
     'HTTP', 'HTTPS', 'URL', 'SQL', 'CPU', 'GPU', 'RAM', 'ROM', 'USB',
-    'PDF', 'FAQ', 'CEO', 'CTO', 'VP', 'HR', 'PR', 'IT', 'AI', 'ML',
+    'PDF', 'FAQ', 'CEO', 'CTO', 'VP', 'HR', 'PR', 'AI', 'ML',
     'LLM', 'NLP', 'OCR', 'IDE', 'CLI', 'GUI', 'SSH', 'FTP', 'DNS',
     'TCP', 'UDP', 'IP', 'VPN', 'HDMI', 'AMD', 'NVIDIA',
     'CUDA', 'GGUF', 'GGML', 'US', 'UK', 'EU', 'UN', 'NASA', 'ASAP',
@@ -1014,13 +1014,9 @@ def normalize_whisper_caps(text: str) -> str:
             result.append(new_word)
             continue
 
-        # Check for chaotic mixed-case: uppercase letters after position 0
-        # alongside lowercase letters (e.g., "WeLL", "cAn't", "MaiNE'S")
-        # Normal patterns: "Hello" (title), "hello" (lower), "HTML" (acronym)
-        # Chaotic patterns: "WeLL", "cAn't", "MaiNE'S" — have uppercase AFTER first char AND lowercase
-        alpha_after_first = clean[1:] if len(clean) > 1 else ""
-        if alpha_after_first and not alpha_after_first.islower() and not alpha_after_first.isupper():
-            # Mixed case after first char — this is chaotic Whisper output
+        # Catch any remaining chaotic case (e.g., "mE", "WeLL", "cAn't", "MaiNE'S")
+        # Normal patterns: "hello" (lower), "Hello" (title) — anything else is Whisper noise
+        if not clean.islower() and not clean.istitle():
             if is_sentence_start:
                 new_word = word[0].upper() + word[1:].lower()
             else:

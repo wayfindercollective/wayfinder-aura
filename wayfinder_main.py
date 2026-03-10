@@ -12496,11 +12496,17 @@ class WayfinderApp(ctk.CTk):
         if not text.strip():
             self.on_error("No speech detected")
             return
-        
+
+        # Final safety net: clean any caps/artifacts that survived LLM post-processing
+        # (LLM output replaces the pre-cleaned text, so artifacts can leak through)
+        from wayfinder.core.transcriber import clean_whisper_artifacts, normalize_whisper_caps
+        text = clean_whisper_artifacts(text)
+        text = normalize_whisper_caps(text)
+
         # Add to voice learning history when "Personal" style is active
         if self.config.get("output_tone") == "personal":
             self._add_to_voice_learning(text.strip())
-        
+
         # Note: Post-processing is already applied in transcribe_with_config()
         # The text received here is already fully processed
         processed_text = text.strip()
