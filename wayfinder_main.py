@@ -3517,7 +3517,7 @@ class WayfinderApp(ctk.CTk):
         self._switch_tab("settings")
         
         # Initial log entries
-        self.log("✓ Wayfinder Aura started (cleanup v2)")
+        self.log("✓ Wayfinder Aura started")
         self.log(f"⌨ Hotkey: {self.get_hotkey_display()}")
         
         # Log detected hardware
@@ -12497,17 +12497,6 @@ class WayfinderApp(ctk.CTk):
             self.on_error("No speech detected")
             return
 
-        # Final safety net: clean any caps/artifacts that survived LLM post-processing
-        # (LLM output replaces the pre-cleaned text, so artifacts can leak through)
-        from wayfinder.core.transcriber import clean_whisper_artifacts, normalize_whisper_caps
-        before = text
-        text = clean_whisper_artifacts(text)
-        text = normalize_whisper_caps(text)
-        if text != before:
-            self.log(f"🔧 Cleanup fixed: '{before[:50]}' → '{text[:50]}'")
-        else:
-            self.log(f"🔧 Cleanup: no changes needed")
-
         # Add to voice learning history when "Personal" style is active
         if self.config.get("output_tone") == "personal":
             self._add_to_voice_learning(text.strip())
@@ -12540,14 +12529,6 @@ class WayfinderApp(ctk.CTk):
                 self.event_queue.put((EventType.LOG_MESSAGE, "⚠ Empty text after cleanup — nothing to inject"))
                 self.event_queue.put((EventType.INJECTION_DONE, None))
                 return
-
-            # Last-resort cleanup right before injection — catches anything that slipped through
-            from wayfinder.core.transcriber import clean_whisper_artifacts, normalize_whisper_caps
-            before_inject = text
-            text = clean_whisper_artifacts(text)
-            text = normalize_whisper_caps(text)
-            if text != before_inject:
-                self.event_queue.put((EventType.LOG_MESSAGE, f"🔧 Inject cleanup: '{before_inject[:40]}' → '{text[:40]}'"))
 
             # Small delay to let focus settle back to the user's target window
             # (overlay/main window state changes may have briefly affected focus)

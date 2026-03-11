@@ -1158,13 +1158,9 @@ def transcribe_with_config(
     # ALWAYS clean up Whisper artifacts (dots, [BLANK_AUDIO], <>, caps, etc.)
     # This runs regardless of post-processing settings
     if text:
-        raw_text = text
         text = clean_whisper_artifacts(text)
         text = normalize_whisper_caps(text)
-        if text != raw_text:
-            print(f"[Transcription] Cleaned: '{raw_text[:80]}' → '{text[:80]}'")
 
-    
     # Apply basic post-processing if punctuation is enabled
     if ensure_punct and text:
         text = ensure_punctuation_postprocess(text)
