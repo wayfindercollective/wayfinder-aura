@@ -52,11 +52,11 @@ def _get_ydotool_env() -> dict:
 
 
 # Typing speed presets: (key_delay_ms, key_hold_ms)
-# Minimum 2ms delays to prevent ydotool Shift key race conditions
+# Minimum 1ms delays to prevent ydotool Shift key race conditions
 # (0ms causes Shift to bleed into adjacent keys: a→A, comma→<, period→>)
 TYPING_SPEEDS = {
-    "instant": (2, 2),       # 2ms delays — prevents Shift bleed, still effectively instant
-    "fast": (2, 2),          # Same as instant (safe minimum)
+    "instant": (1, 1),       # 1ms delays — prevents Shift bleed, effectively instant
+    "fast": (1, 1),          # Same as instant (safe minimum)
     "normal": (12, 12),      # Comfortable speed
     "slow": (50, 20),        # Slower, more natural
     "very_slow": (100, 50),  # Very slow, like watching someone type
