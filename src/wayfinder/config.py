@@ -99,7 +99,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sample_rate": 16000,
     
     # Transcription settings
-    "prompt": "Hello, this is a dictation with proper punctuation and grammar.",
+    "prompt": "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next.",
     "threads": 4,  # Default to 4, auto-adjusted on first run based on CPU cores
     "timeout": 120,
     "min_recording_duration": 0.5,
@@ -249,6 +249,12 @@ def load_config() -> dict:
             # Merge with defaults (user config overrides defaults)
             config = DEFAULT_CONFIG.copy()
             config.update(user_config)
+
+            # Migrate: upgrade weak default prompt to stronger one
+            _old_prompt = "Hello, this is a dictation with proper punctuation and grammar."
+            if config.get("prompt") == _old_prompt:
+                config["prompt"] = DEFAULT_CONFIG["prompt"]
+
             return config
         except (json.JSONDecodeError, IOError):
             return DEFAULT_CONFIG.copy()

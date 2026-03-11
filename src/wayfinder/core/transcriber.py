@@ -95,7 +95,7 @@ class WhisperCppBackend(TranscriptionBackend):
         self,
         whisper_binary: str = "~/whisper.cpp/build/bin/whisper-cli",
         model_path: str = "~/whisper.cpp/models/ggml-small.bin",
-        prompt: str = "Hello, this is a dictation with proper punctuation and grammar.",
+        prompt: str = "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next.",
         threads: int = 6,
         timeout: int = 120,
         use_gpu: bool = False,
@@ -110,7 +110,7 @@ class WhisperCppBackend(TranscriptionBackend):
         temperature_fallback: float = 0.0,  # Increment if decoding fails (0 = disabled)
         # Vocabulary and suppression
         custom_vocabulary: list = None,
-        suppress_nst: bool = False,  # Suppress non-speech tokens (can drop words)
+        suppress_nst: bool = False,  # Suppress non-speech tokens (can drop words if True)
     ):
         self.whisper_binary = os.path.expanduser(whisper_binary)
         self.model_path = os.path.expanduser(model_path)
@@ -329,7 +329,7 @@ class FasterWhisperBackend(TranscriptionBackend):
         model_size: str = "small",
         use_gpu: bool = False,
         compute_type: str = "float16",
-        prompt: str = "Hello, this is a dictation with proper punctuation and grammar.",
+        prompt: str = "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next.",
         language: str = "en",
         beam_size: int = 5,
         best_of: int = 3,
@@ -822,7 +822,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             model_size=config.get("faster_whisper_model", "small"),
             use_gpu=config.get("use_gpu", True),
             compute_type=config.get("faster_whisper_compute_type", "float16"),
-            prompt=config.get("prompt", "Hello, this is a dictation with proper punctuation and grammar."),
+            prompt=config.get("prompt", "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next."),
             language=config.get("language", "en"),
             beam_size=config.get("beam_size", 5),
             best_of=config.get("best_of", 3),
@@ -852,7 +852,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
         return WhisperCppBackend(
             whisper_binary=config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli"),
             model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),
-            prompt=config.get("prompt", "Hello, this is a dictation with proper punctuation and grammar."),
+            prompt=config.get("prompt", "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next."),
             threads=config.get("threads", 6),
             timeout=config.get("timeout", 120),
             use_gpu=config.get("use_gpu", True),
@@ -889,6 +889,12 @@ def clean_whisper_artifacts(text: str) -> str:
     
     original = text
     
+    # Fix double-quote used as apostrophe in contractions (Whisper artifact)
+    # e.g., Let"S → Let's, don"t → don't, I"m → I'm, we"ll → we'll
+    text = re.sub(r'(\w)"([stmdlrv]\b)', r"\1'\2", text, flags=re.IGNORECASE)
+    # Also handle "ll, "re, "ve (two-letter suffixes)
+    text = re.sub(r'(\w)"(ll|re|ve)\b', r"\1'\2", text, flags=re.IGNORECASE)
+
     # Remove [BLANK_AUDIO] and similar markers (case insensitive)
     # Replace with space to preserve word boundaries (will be normalized later)
     text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
@@ -1152,8 +1158,12 @@ def transcribe_with_config(
     # ALWAYS clean up Whisper artifacts (dots, [BLANK_AUDIO], <>, caps, etc.)
     # This runs regardless of post-processing settings
     if text:
+        raw_text = text
         text = clean_whisper_artifacts(text)
         text = normalize_whisper_caps(text)
+        if text != raw_text:
+            print(f"[Transcription] Cleaned: '{raw_text[:80]}' → '{text[:80]}'")
+
     
     # Apply basic post-processing if punctuation is enabled
     if ensure_punct and text:
