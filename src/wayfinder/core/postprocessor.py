@@ -2209,12 +2209,17 @@ def process_with_config(text: str, config: dict) -> str:
         start_time = time.time()
         result = backend.process(text, prompt)
         elapsed = time.time() - start_time
-        
+
+        # Strip trailing LLM self-annotations in parentheses
+        # Small models add commentary like "(no filler words, correct grammar)"
+        import re
+        result = re.sub(r'\s*\([^)]*(?:filler|grammar|clean|correct|change|edit|modif|remov|format|punctuat|capitaliz|no changes)[^)]*\)\s*$', '', result, flags=re.IGNORECASE)
+
         output_words = len(result.split())
         words_per_sec = input_words / elapsed if elapsed > 0 else 0
-        
+
         print(f"[Post-processing] ⏱ Completed in {elapsed:.2f}s ({words_per_sec:.1f} words/sec) | Output: {output_words} words")
-        
+
         return result
         
     except PostProcessingError as e:
