@@ -159,6 +159,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
     "overlay_scale": 0.7,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
+    "overlay_vertical_offset": 0,  # Vertical offset in pixels (negative = higher, positive = lower)
     
     # Audio ducking settings (reduce other audio while recording)
     "audio_ducking_enabled": True,  # Enable automatic volume reduction during recording

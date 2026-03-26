@@ -870,6 +870,72 @@ def get_backend(config: dict) -> TranscriptionBackend:
         )
 
 
+def _collapse_whisper_repetitions(text: str) -> str:
+    """
+    Detect and collapse Whisper repetition loops.
+
+    Whisper sometimes gets stuck repeating a phrase with slight variations:
+    "Loud noise Lud noise Lou noise Brd usic Bir muic Bird usi"
+
+    This uses a sliding window to detect when consecutive word groups
+    are similar to each other, keeping only the best version.
+    """
+    import re
+    from difflib import SequenceMatcher
+
+    words = text.split()
+    if len(words) < 6:
+        return text
+
+    # Try window sizes of 2-4 words to detect repeating patterns
+    for window_size in (2, 3, 4):
+        if len(words) < window_size * 2:
+            continue
+
+        # Slide through words looking for consecutive similar groups
+        i = 0
+        result_words = []
+        while i < len(words):
+            # Get current window
+            if i + window_size > len(words):
+                result_words.extend(words[i:])
+                break
+
+            current = " ".join(words[i:i + window_size]).lower()
+
+            # Look ahead for similar windows
+            repeat_end = i + window_size
+            best_version = " ".join(words[i:i + window_size])
+            best_char_count = sum(len(w) for w in words[i:i + window_size])
+
+            while repeat_end + window_size <= len(words):
+                candidate = " ".join(words[repeat_end:repeat_end + window_size]).lower()
+                ratio = SequenceMatcher(None, current, candidate).ratio()
+
+                if ratio >= 0.55:
+                    # This window is a repetition — keep the version with most total chars
+                    # (longer words = more complete transcription)
+                    candidate_chars = sum(len(w) for w in words[repeat_end:repeat_end + window_size])
+                    if candidate_chars > best_char_count:
+                        best_version = " ".join(words[repeat_end:repeat_end + window_size])
+                        best_char_count = candidate_chars
+                    repeat_end += window_size
+                else:
+                    break
+
+            if repeat_end > i + window_size * 2:
+                # Found 3+ occurrences (a real repetition loop) — keep only the best
+                result_words.extend(best_version.split())
+                i = repeat_end
+            else:
+                result_words.append(words[i])
+                i += 1
+
+        words = result_words
+
+    return " ".join(words)
+
+
 def clean_whisper_artifacts(text: str) -> str:
     """
     Clean up common Whisper transcription artifacts.
@@ -894,6 +960,12 @@ def clean_whisper_artifacts(text: str) -> str:
     text = re.sub(r'(\w)"([stmdlrv]\b)', r"\1'\2", text, flags=re.IGNORECASE)
     # Also handle "ll, "re, "ve (two-letter suffixes)
     text = re.sub(r'(\w)"(ll|re|ve)\b', r"\1'\2", text, flags=re.IGNORECASE)
+
+    # Remove asterisk-wrapped non-speech markers (Whisper uses *text* for sounds/music)
+    # e.g., *loud noise*, *bird music*, *laughing* → removed
+    text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
+    # Clean orphaned/stray asterisks
+    text = re.sub(r'\*+', '', text)
 
     # Remove [BLANK_AUDIO] and similar markers (case insensitive)
     # Replace with space to preserve word boundaries (will be normalized later)
@@ -940,11 +1012,17 @@ def clean_whisper_artifacts(text: str) -> str:
     # e.g., ". . ." at the end becomes nothing
     text = re.sub(r'\s+\.\s*$', '.', text)
     
+    # Detect and remove Whisper repetition loops
+    # Whisper sometimes gets stuck repeating a phrase with slight variations:
+    # "Loud noise Lud noise Lou noise Brd usic Bir muic Bird usi Bird muic"
+    # Strategy: find repeated 2-3 word phrases and keep only the first occurrence
+    text = _collapse_whisper_repetitions(text)
+
     # Clean up multiple spaces
     text = re.sub(r'\s+', ' ', text)
-    
+
     text = text.strip()
-    
+
     # Log if we cleaned something
     if text != original.strip():
         removed_chars = len(original.strip()) - len(text)

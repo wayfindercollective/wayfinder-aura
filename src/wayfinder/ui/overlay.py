@@ -718,9 +718,10 @@ class GlassmorphicOverlay(QWidget):
     TASKBAR_GAP = 12  # Gap above taskbar to prevent overlap
     STARTUP_POSITION_RETRIES = 5  # Number of position checks after startup
     
-    def __init__(self, scale: float = 0.7):
+    def __init__(self, scale: float = 0.7, vertical_offset: int = 0):
         # Scale factor must be set first (before any property access)
         self._scale = max(0.5, min(2.0, scale))
+        self._vertical_offset = vertical_offset  # pixels: negative = higher, positive = lower
         
         # Setup KWin positioning rule BEFORE creating window
         # This ensures the window is positioned correctly from the first frame
@@ -840,9 +841,19 @@ class GlassmorphicOverlay(QWidget):
         if avail_bottom >= screen_bottom - 10:  # availableGeometry includes nearly full screen
             # Taskbar is likely a dock/overlay - add explicit offset
             y = screen_bottom - MIN_TASKBAR_HEIGHT - self.TASKBAR_GAP - widget_height
-        
+
+        # Apply user vertical offset (negative = higher, positive = lower)
+        y += self._vertical_offset
+
         return (x, y)
     
+    def set_vertical_offset(self, offset: int):
+        """Update the vertical position offset and reposition."""
+        if offset == self._vertical_offset:
+            return
+        self._vertical_offset = offset
+        self._position_at_bottom()
+
     def set_scale(self, scale: float):
         """Update the overlay scale and resize."""
         if abs(scale - self._scale) < 0.01:
@@ -1571,16 +1582,28 @@ def run_overlay():
     # Parse command line arguments
     mode = "persistent"  # default
     initial_style = "professional"  # default
+    initial_scale = 0.7
+    initial_offset = 0
     for arg in sys.argv:
         if arg.startswith("--mode="):
             mode = arg.split("=", 1)[1]
         elif arg.startswith("--style="):
             initial_style = arg.split("=", 1)[1]
-    
+        elif arg.startswith("--scale="):
+            try:
+                initial_scale = float(arg.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif arg.startswith("--offset="):
+            try:
+                initial_offset = int(arg.split("=", 1)[1])
+            except ValueError:
+                pass
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    
-    overlay = GlassmorphicOverlay()
+
+    overlay = GlassmorphicOverlay(scale=initial_scale, vertical_offset=initial_offset)
     overlay._overlay_mode = mode  # Store mode for later use
     overlay.set_style_indicator(initial_style, animate=False)  # Set initial style
     
@@ -1613,37 +1636,69 @@ def run_overlay():
     # Command processing timer
     import select
     
+    import time as _time_mod
+    _last_command_time = [_time_mod.time()]  # mutable ref for closure
+    _stdin_eof = [False]
+    # Auto-return to READY if no commands received for this long (seconds)
+    # Prevents overlay staying stuck in LISTENING/PROCESSING if stdin pipe breaks
+    _COMMAND_TIMEOUT = 30.0
+
     def process_commands():
         """Check for and process stdin commands."""
         try:
+            if _stdin_eof[0]:
+                # Stdin pipe broke — auto-hide to READY after timeout
+                if overlay._state in (OverlayState.LISTENING, OverlayState.PROCESSING):
+                    elapsed = _time_mod.time() - _last_command_time[0]
+                    if elapsed > _COMMAND_TIMEOUT:
+                        _debug_log(f"TIMEOUT: no commands for {elapsed:.0f}s, returning to READY")
+                        overlay.set_state(OverlayState.READY)
+                return
+
             # Read ALL available commands in one poll cycle
             # This prevents state change commands from getting stuck behind level updates
             commands = []
             while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
-                line = sys.stdin.readline().strip()
+                line = sys.stdin.readline()
                 if not line:
-                    break  # EOF or empty line
+                    # EOF — stdin pipe broke (main process died or pipe closed)
+                    _stdin_eof[0] = True
+                    _debug_log("STDIN EOF detected — pipe broken")
+                    break
+                line = line.strip()
+                if not line:
+                    continue
                 try:
                     cmd = json.loads(line)
                     commands.append(cmd)
                 except json.JSONDecodeError:
                     pass
-            
+
+            if commands:
+                _last_command_time[0] = _time_mod.time()
+
             # Process commands, prioritizing state changes over level updates
             # Sort: state-changing commands first, level updates last
             state_commands = [c for c in commands if c.get("cmd") != "level"]
             level_commands = [c for c in commands if c.get("cmd") == "level"]
-            
+
             # Process state commands immediately
             for cmd in state_commands:
                 handle_command(overlay, cmd)
-            
+
             # Only process the LAST level command (skip intermediate ones)
             if level_commands:
                 handle_command(overlay, level_commands[-1])
-                
-        except Exception:
-            pass
+
+            # Watchdog: if stuck in active state with no commands, auto-return to READY
+            if not _stdin_eof[0] and overlay._state in (OverlayState.LISTENING, OverlayState.PROCESSING):
+                elapsed = _time_mod.time() - _last_command_time[0]
+                if elapsed > _COMMAND_TIMEOUT:
+                    _debug_log(f"WATCHDOG: no commands for {elapsed:.0f}s, returning to READY")
+                    overlay.set_state(OverlayState.READY)
+
+        except Exception as e:
+            _debug_log(f"process_commands error: {e}")
     
     # Debug log file for tracing overlay commands
     _debug_log_file = "/tmp/wayfinder-overlay-debug.log"
@@ -1686,7 +1741,11 @@ def run_overlay():
         elif command == "scale":
             scale = cmd.get("value", 1.0)
             overlay.set_scale(scale)
-        
+
+        elif command == "offset":
+            offset = int(cmd.get("value", 0))
+            overlay.set_vertical_offset(offset)
+
         elif command == "style":
             style = cmd.get("value", "professional")
             overlay.set_style_indicator(style)

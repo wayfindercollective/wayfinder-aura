@@ -932,6 +932,7 @@ SETTING_TOOLTIPS = {
     "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
     "overlay_type": "Choose the status indicator style:\n• Always On: Stays visible, never steals focus (PyQt6)\n• Disappearing: Shows only during recording (CTk)\n⚠️ Requires restart to take effect.",
     "overlay_scale": "Adjust the size of the status overlay.\nSeparate from the main UI scale.\n⚡ Latency: None",
+    "overlay_position": "Slide the overlay up or down on screen.\nNegative = higher, Positive = lower.\n⚡ Latency: None",
     "prompt": "Initial text that guides transcription style.\n⚡ Latency: None (processed at model load)",
     "language": "The language for transcription. English is most optimized.\n⚡ Latency: None",
     
@@ -2733,7 +2734,7 @@ class OverlayController:
     messages over stdin/stdout.
     """
     
-    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional"):
+    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional", config: dict | None = None):
         self._process: subprocess.Popen | None = None
         self._audio_level_callback = audio_level_callback
         self._audio_poll_thread: threading.Thread | None = None
@@ -2742,6 +2743,7 @@ class OverlayController:
         self._lock = threading.Lock()
         self._mode = mode  # "persistent" or "standard"
         self._initial_style = initial_style  # "professional", "dev", "casual", or "personal"
+        self._config_ref = config  # Reference to app config for refresh
     
     def _start_process(self) -> bool:
         """Start the overlay subprocess if not already running."""
@@ -2770,9 +2772,19 @@ class OverlayController:
                 import sys
                 python_exe = sys.executable
                 
-                # Start subprocess with mode and style arguments
+                # Start subprocess with mode, style, scale, and offset arguments
+                cmd_args = [
+                    python_exe, str(script_path),
+                    f"--mode={self._mode}",
+                    f"--style={self._initial_style}",
+                ]
+                if self._config_ref:
+                    scale = self._config_ref.get("overlay_scale", 0.7)
+                    offset = self._config_ref.get("overlay_vertical_offset", 0)
+                    cmd_args.append(f"--scale={scale}")
+                    cmd_args.append(f"--offset={offset}")
                 self._process = subprocess.Popen(
-                    [python_exe, str(script_path), f"--mode={self._mode}", f"--style={self._initial_style}"],
+                    cmd_args,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,  # Capture errors for debugging
@@ -2906,7 +2918,11 @@ class OverlayController:
     def set_scale(self, scale: float):
         """Set the overlay scale factor."""
         self._send_command({"cmd": "scale", "value": scale})
-    
+
+    def set_vertical_offset(self, offset: int):
+        """Set the overlay vertical position offset."""
+        self._send_command({"cmd": "offset", "value": offset})
+
     def quit(self):
         """Shut down the overlay subprocess."""
         self._stop_audio_polling()
@@ -3022,14 +3038,23 @@ class OverlayController:
         # Restart the process
         if not self._start_process():
             return False
-        
+
+        # Re-apply saved scale and position (new process has defaults)
+        if self._config_ref:
+            scale = self._config_ref.get("overlay_scale", 1.0)
+            if scale != 1.0:
+                self._send_command({"cmd": "scale", "value": scale})
+            offset = self._config_ref.get("overlay_vertical_offset", 0)
+            if offset != 0:
+                self._send_command({"cmd": "offset", "value": offset})
+
         # Restore previous state (if not hidden)
         if previous_state != "hidden":
             self._send_command({"cmd": "show", "state": previous_state})
             self._current_state = previous_state
             if previous_state == "listening":
                 self._start_audio_polling()
-        
+
         return True
 
 
@@ -3130,16 +3155,20 @@ class WayfinderApp(ctk.CTk):
                 self.overlay_controller = OverlayController(
                     audio_level_callback=get_audio_level,
                     mode="persistent",  # Always use persistent mode for always_on
-                    initial_style=initial_style
+                    initial_style=initial_style,
+                    config=self.config,
                 )
                 self._use_pyqt_overlay = True
                 self.log(f"✨ Using Always On indicator (PyQt6)")
                 # Pre-start the subprocess to avoid focus steal
                 self.overlay_controller._start_process()
-                # Apply saved overlay scale
+                # Apply saved overlay scale and position
                 overlay_scale = self.config.get("overlay_scale", 1.0)
                 if overlay_scale != 1.0:
                     self.overlay_controller.set_scale(overlay_scale)
+                overlay_offset = self.config.get("overlay_vertical_offset", 0)
+                if overlay_offset != 0:
+                    self.overlay_controller.set_vertical_offset(overlay_offset)
             except ImportError:
                 self._use_pyqt_overlay = False
                 self.log("⚠ PyQt6 not available, using Disappearing indicator")
@@ -4436,7 +4465,10 @@ class WayfinderApp(ctk.CTk):
         
         # Overlay Scale slider
         self._create_overlay_scale_slider_row(overlay_content)
-        
+
+        # Overlay Position slider
+        self._create_overlay_position_slider_row(overlay_content)
+
         # === BENTO TILE 4: Benchmark (inline, no popup) ===
         # This tile is for local mode only - hidden in remote mode
         self.local_benchmark_tile = ctk.CTkFrame(
@@ -8659,6 +8691,88 @@ class WayfinderApp(ctk.CTk):
             self.overlay_controller.set_scale(new_scale)
         
         self.log(f"⚙ Overlay Scale: {int(new_scale * 100)}%")
+
+    def _create_overlay_position_slider_row(self, parent):
+        """Create overlay vertical position slider."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=8)
+
+        row.grid_columnconfigure(0, weight=0)
+        row.grid_columnconfigure(1, weight=1)
+        row.grid_columnconfigure(2, weight=0)
+
+        label_widget = ctk.CTkLabel(
+            row,
+            text="Overlay Position",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_secondary"],
+        )
+        label_widget.grid(row=0, column=0, sticky="w")
+
+        tooltip_text = SETTING_TOOLTIPS.get("overlay_position", "")
+        if tooltip_text:
+            ToolTip(label_widget, tooltip_text)
+
+        current_offset = self.config.get("overlay_vertical_offset", 0)
+
+        # Value display
+        self.overlay_position_value_label = ctk.CTkLabel(
+            row,
+            text=f"{current_offset}px",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["accent"],
+            width=60,
+        )
+        self.overlay_position_value_label.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
+        self.overlay_position_slider_var = ctk.DoubleVar(value=current_offset)
+        self._overlay_position_apply_timer = None
+
+        def on_position_slider_change(value):
+            value = int(round(float(value)))
+            self.overlay_position_value_label.configure(text=f"{value}px")
+
+            if self._overlay_position_apply_timer is not None:
+                try:
+                    self.after_cancel(self._overlay_position_apply_timer)
+                except:
+                    pass
+
+            self._overlay_position_apply_timer = self.after(
+                150, lambda: self._apply_overlay_position(value)
+            )
+
+        self.overlay_position_slider = ctk.CTkSlider(
+            row,
+            from_=-200,
+            to=200,
+            variable=self.overlay_position_slider_var,
+            command=on_position_slider_change,
+            height=18,
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+            button_hover_color=COLORS["text_primary"],
+            fg_color=COLORS["bg_input"],
+        )
+        self.overlay_position_slider.grid(row=0, column=1, sticky="ew", padx=(20, 10))
+
+        if tooltip_text:
+            ToolTip(self.overlay_position_slider, tooltip_text)
+
+    def _apply_overlay_position(self, new_offset):
+        """Apply overlay vertical position change."""
+        new_offset = int(new_offset)
+        current = self.config.get("overlay_vertical_offset", 0)
+        if new_offset == current:
+            return
+
+        self.config["overlay_vertical_offset"] = new_offset
+        save_config(self.config)
+
+        if self.overlay_controller and self._use_pyqt_overlay:
+            self.overlay_controller.set_vertical_offset(new_offset)
+
+        self.log(f"⚙ Overlay Position: {new_offset}px")
 
     def create_toggle_row(self, parent, label, variable, command, tooltip=None, tooltip_key=None):
         """Create a premium toggle row with improved typography.
