@@ -2810,39 +2810,50 @@ class OverlayController:
                 print(f"Failed to start overlay: {e}")
                 return False
     
-    def _send_command(self, cmd: dict) -> bool:
-        """Send a command to the overlay subprocess (non-blocking)."""
-        # Use timeout on lock to prevent deadlock if subprocess is stuck
-        acquired = self._lock.acquire(timeout=0.1)
-        if not acquired:
-            # Lock contention - subprocess may be stuck, skip this command
-            return False
-        
-        try:
-            if self._process is None or self._process.poll() is not None:
-                return False
-            
+    def _send_command(self, cmd: dict, critical: bool = False) -> bool:
+        """Send a command to the overlay subprocess.
+
+        Args:
+            cmd: JSON-serializable command dict.
+            critical: If True, use longer timeout and retry (for state changes).
+                      If False, best-effort with short timeout (for audio levels).
+        """
+        attempts = 3 if critical else 1
+        lock_timeout = 0.5 if critical else 0.05
+
+        for attempt in range(attempts):
+            acquired = self._lock.acquire(timeout=lock_timeout)
+            if not acquired:
+                continue
+
             try:
-                line = json.dumps(cmd) + "\n"
-                # Check if stdin is ready for writing (non-blocking)
-                import select
-                _, ready, _ = select.select([], [self._process.stdin], [], 0.05)
-                if not ready:
-                    # Subprocess stdin buffer is full - skip to prevent blocking
+                if self._process is None or self._process.poll() is not None:
                     return False
-                self._process.stdin.write(line)
-                self._process.stdin.flush()
-                return True
-            except (BrokenPipeError, OSError) as e:
-                # Subprocess died - clean up reference
-                print(f"Overlay subprocess died: {e}")
-                self._process = None
-                return False
-            except Exception as e:
-                print(f"Failed to send overlay command: {e}")
-                return False
-        finally:
-            self._lock.release()
+
+                try:
+                    line = json.dumps(cmd) + "\n"
+                    import select
+                    _, ready, _ = select.select([], [self._process.stdin], [], 0.05)
+                    if not ready:
+                        if critical:
+                            continue  # Retry critical commands
+                        return False
+                    self._process.stdin.write(line)
+                    self._process.stdin.flush()
+                    return True
+                except (BrokenPipeError, OSError) as e:
+                    print(f"Overlay subprocess died: {e}")
+                    self._process = None
+                    return False
+                except Exception as e:
+                    print(f"Failed to send overlay command: {e}")
+                    return False
+            finally:
+                self._lock.release()
+
+        if critical:
+            print(f"WARNING: Failed to send critical overlay command after {attempts} attempts: {cmd}")
+        return False
     
     def send_command(self, cmd: dict) -> bool:
         """Public method to send a command to the overlay subprocess."""
@@ -2858,11 +2869,14 @@ class OverlayController:
         self._audio_poll_thread.start()
     
     def _stop_audio_polling(self):
-        """Stop audio level polling."""
+        """Stop audio level polling and wait for thread to release the lock."""
         self._stop_event.set()
-        # Don't block waiting for thread - let it exit naturally
-        # This prevents UI lag when transitioning states
+        thread = self._audio_poll_thread
         self._audio_poll_thread = None
+        # Brief wait for audio thread to finish its current _send_command cycle
+        # so it releases the lock before we try to send a state change
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.2)
     
     def _audio_poll_loop(self):
         """Background loop to send audio levels to overlay."""
@@ -2886,10 +2900,10 @@ class OverlayController:
         """
         if not self._start_process():
             return
-        
+
         self._current_state = state
-        self._send_command({"cmd": "show", "state": state})
-        
+        self._send_command({"cmd": "show", "state": state}, critical=True)
+
         if state == "listening":
             self._start_audio_polling()
     
@@ -2898,22 +2912,24 @@ class OverlayController:
         if self._process is None or self._process.poll() is not None:
             self.show(state)
             return
-        
+
         old_state = self._current_state
         self._current_state = state
-        cmd = {"cmd": "show", "state": state}
-        self._send_command(cmd)
-        
+
+        # Stop audio polling BEFORE sending state command to free the lock
+        if state != "listening" and old_state == "listening":
+            self._stop_audio_polling()
+
+        self._send_command({"cmd": "show", "state": state}, critical=True)
+
         if state == "listening" and old_state != "listening":
             self._start_audio_polling()
-        elif state != "listening" and old_state == "listening":
-            self._stop_audio_polling()
     
     def hide(self):
         """Hide the overlay."""
         self._stop_audio_polling()
         self._current_state = "hidden"
-        self._send_command({"cmd": "hide"})
+        self._send_command({"cmd": "hide"}, critical=True)
     
     def set_scale(self, scale: float):
         """Set the overlay scale factor."""
