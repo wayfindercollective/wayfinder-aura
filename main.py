@@ -156,8 +156,54 @@ def _start_instance_listener(app):
     return server
 
 
+def _check_venv_health():
+    """Check that the virtual environment matches the running Python version.
+
+    System updates (e.g. Fedora/Bazzite) can change the system Python version,
+    leaving the venv pointing at a version that no longer exists. This causes
+    cryptic ModuleNotFoundError crashes on launch.
+    """
+    venv_dir = Path(__file__).parent / "venv-gpu"
+    pyvenv_cfg = venv_dir / "pyvenv.cfg"
+    if not pyvenv_cfg.exists():
+        return  # No venv to check
+
+    try:
+        cfg = {}
+        for line in pyvenv_cfg.read_text().splitlines():
+            if "=" in line:
+                key, val = line.split("=", 1)
+                cfg[key.strip()] = val.strip()
+
+        venv_version = cfg.get("version", "")
+        running_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+
+        # Compare major.minor — micro mismatches are usually fine
+        venv_major_minor = ".".join(venv_version.split(".")[:2])
+        running_major_minor = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+        if venv_major_minor and venv_major_minor != running_major_minor:
+            print(f"\n{'='*60}")
+            print(f"  VENV MISMATCH: venv was built with Python {venv_version}")
+            print(f"  but the system is now running Python {running_version}.")
+            print(f"  This usually happens after a system update + reboot.")
+            print(f"")
+            print(f"  Fix: rebuild the venv:")
+            print(f"    rm -rf venv-gpu")
+            print(f"    python3 -m venv venv-gpu")
+            print(f"    source venv-gpu/bin/activate")
+            print(f"    pip install -r requirements.txt")
+            print(f"{'='*60}\n")
+            sys.exit(1)
+    except Exception:
+        pass  # Don't block launch if we can't read the config
+
+
 def main():
     """Run Wayfinder Aura."""
+    # === Venv health check ===
+    _check_venv_health()
+
     # === Single-instance check ===
     # If another instance is already running, signal it to show and exit
     if _signal_existing_instance():
