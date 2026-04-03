@@ -88,6 +88,16 @@ mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 cp "dist/wayfinder-aura" "$APPDIR/usr/bin/wayfinder-aura"
 chmod +x "$APPDIR/usr/bin/wayfinder-aura"
 
+# Bundle ydotool if available (for Wayland text injection)
+YDOTOOL_BIN="$(command -v ydotool 2>/dev/null || true)"
+if [ -n "$YDOTOOL_BIN" ]; then
+    cp "$YDOTOOL_BIN" "$APPDIR/usr/bin/ydotool"
+    chmod +x "$APPDIR/usr/bin/ydotool"
+    echo "   ✅ Bundled ydotool from $YDOTOOL_BIN"
+else
+    echo "   ⚠  ydotool not found on system — not bundled (users will need to install it)"
+fi
+
 # Create icon (use existing if available, otherwise generate a simple one)
 ICON_PATH="$APPDIR/usr/share/icons/hicolor/256x256/apps/wayfinder-aura.png"
 if [ -f "assets/icon.png" ]; then
@@ -163,6 +173,38 @@ APPDIR="${SELF%/*}"
 # Set up library paths (in case of bundled libs)
 export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${APPDIR}/usr/lib64:${LD_LIBRARY_PATH}"
 export PATH="${APPDIR}/usr/bin:${PATH}"
+
+# --- Display server detection ---
+# Set Qt platform for the PyQt6 overlay subprocess
+if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
+elif [ "$XDG_SESSION_TYPE" = "x11" ]; then
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+fi
+
+# --- Vulkan ICD discovery ---
+# Ensure Vulkan can find GPU drivers (NVIDIA, AMD, Intel)
+if [ -z "$VK_ICD_FILENAMES" ]; then
+    VK_ICDS=""
+    for icd in \
+        /usr/share/vulkan/icd.d/nvidia_icd.json \
+        /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json \
+        /usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+        /usr/share/vulkan/icd.d/intel_icd.x86_64.json \
+        /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
+        /etc/vulkan/icd.d/*.json; do
+        [ -f "$icd" ] && VK_ICDS="${VK_ICDS:+$VK_ICDS:}$icd"
+    done
+    [ -n "$VK_ICDS" ] && export VK_ICD_FILENAMES="$VK_ICDS"
+fi
+
+# --- Text injection dependency check ---
+if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
+    if ! command -v ydotool >/dev/null 2>&1 && [ ! -x "${APPDIR}/usr/bin/ydotool" ]; then
+        echo "[Wayfinder Aura] Warning: ydotool not found. Text injection requires ydotool on Wayland." >&2
+        echo "  Install: sudo dnf install ydotool  (Fedora) or  sudo apt install ydotool  (Ubuntu)" >&2
+    fi
+fi
 
 # Launch the application
 exec "${APPDIR}/usr/bin/wayfinder-aura" "$@"

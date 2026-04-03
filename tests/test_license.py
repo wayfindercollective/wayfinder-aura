@@ -208,7 +208,63 @@ class TestFeatureGate:
         from wayfinder.license import FeatureGate
 
         gate = FeatureGate()
-        message = gate.get_upgrade_message("gpu_acceleration")
+        message = gate.get_upgrade_message("faster_whisper")
 
         assert "Premium" in message
-        assert "GPU" in message or "Acceleration" in message
+        assert "Faster" in message or "Whisper" in message
+
+    def test_new_premium_features_exist(self, temp_config_dir: Path):
+        """Test that new premium features are defined."""
+        from wayfinder.license import PREMIUM_FEATURES
+
+        expected = ["faster_whisper", "large_models", "cloud_backends",
+                    "chunked_recording", "voice_profiles", "tone_system",
+                    "custom_vocabulary", "high_beam_search", "typing_speeds"]
+        for feat in expected:
+            assert feat in PREMIUM_FEATURES, f"Missing premium feature: {feat}"
+
+    def test_gpu_is_free(self, temp_config_dir: Path):
+        """Test that GPU acceleration is a free feature."""
+        from wayfinder.license import FREE_FEATURES
+
+        assert "gpu_acceleration" in FREE_FEATURES
+
+    def test_premium_user_has_all_features(self, temp_config_dir: Path):
+        """Test that premium user can access all premium features."""
+        from wayfinder.license import FeatureGate, PREMIUM_FEATURES, generate_license_key
+
+        gate = FeatureGate()
+        key = generate_license_key()
+        gate.activate(key)
+
+        for feat_id in PREMIUM_FEATURES:
+            assert gate.has_feature(feat_id), f"Premium user should have {feat_id}"
+
+    def test_free_user_blocked_from_premium(self, temp_config_dir: Path):
+        """Test that free user cannot access premium features."""
+        from wayfinder.license import FeatureGate, PREMIUM_FEATURES
+
+        gate = FeatureGate()
+        assert not gate.is_premium
+
+        for feat_id in PREMIUM_FEATURES:
+            assert not gate.has_feature(feat_id), f"Free user should not have {feat_id}"
+
+    def test_force_refresh_feature_gate(self, temp_config_dir: Path):
+        """Test that force_refresh creates a new FeatureGate instance."""
+        from wayfinder.license import get_feature_gate, generate_license_key, store_license
+
+        gate1 = get_feature_gate()
+        assert not gate1.is_premium
+
+        key = generate_license_key()
+        store_license(key)
+
+        # Without force_refresh, should return cached instance
+        gate2 = get_feature_gate()
+        assert gate2 is gate1
+
+        # With force_refresh, should return new instance
+        gate3 = get_feature_gate(force_refresh=True)
+        assert gate3 is not gate1
+        assert gate3.is_premium

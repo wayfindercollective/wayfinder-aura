@@ -4557,7 +4557,84 @@ class WayfinderApp(ctk.CTk):
         current_mode = self.config.get("processing_mode", "local")
         if current_mode == "remote":
             self.local_benchmark_tile.pack_forget()
-        
+
+        # === BENTO TILE: License ===
+        license_tile = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
+        license_tile.pack(fill="x", padx=SPACING["section_pad"], pady=(SPACING["tile_gap"], 0))
+
+        ctk.CTkLabel(
+            license_tile, text="License",
+            font=(self.font_header[0], self.font_sizes["tile_header"], "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 4))
+
+        license_info = self.feature_gate.license_info
+        is_premium = license_info.is_premium
+
+        # Status badge
+        status_text = "Premium" if is_premium else "Free"
+        status_color = COLORS["accent"] if is_premium else COLORS["text_muted"]
+        self._license_status_label = ctk.CTkLabel(
+            license_tile, text=status_text,
+            font=(self.font_body[0], 14, "bold"),
+            text_color=status_color,
+        )
+        self._license_status_label.pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 8))
+
+        # License key input row
+        key_row = ctk.CTkFrame(license_tile, fg_color="transparent")
+        key_row.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, 4))
+
+        self._license_key_entry = ctk.CTkEntry(
+            key_row, placeholder_text="WV-XXXX-XXXX-XXXX-XXXX",
+            font=(self.font_body[0], 12), height=34, corner_radius=8,
+            fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
+            border_color=COLORS["border_subtle"],
+        )
+        self._license_key_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        if license_info.license_key:
+            self._license_key_entry.insert(0, license_info.license_key)
+
+        ctk.CTkButton(
+            key_row, text="Activate", font=(self.font_body[0], 12, "bold"),
+            width=90, height=34, corner_radius=8,
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color="#FFFFFF",
+            command=self._activate_license,
+        ).pack(side="left")
+
+        # Feedback label
+        self._license_feedback = ctk.CTkLabel(
+            license_tile, text="",
+            font=(self.font_body[0], 11), text_color=COLORS["text_muted"],
+        )
+        self._license_feedback.pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 4))
+
+        # Get Premium / Deactivate buttons
+        action_row = ctk.CTkFrame(license_tile, fg_color="transparent")
+        action_row.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+
+        if not is_premium:
+            import webbrowser
+            ctk.CTkButton(
+                action_row, text="Get Premium — $20",
+                font=(self.font_body[0], 12, "bold"),
+                height=32, corner_radius=8,
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+                text_color="#FFFFFF",
+                command=lambda: webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")),
+            ).pack(side="left")
+        else:
+            ctk.CTkButton(
+                action_row, text="Deactivate",
+                font=(self.font_body[0], 11),
+                height=28, corner_radius=6,
+                fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_muted"],
+                command=self._deactivate_license,
+            ).pack(side="left")
+
         self._settings_scroll = scroll
     
     def _update_benchmark_results_display(self):
@@ -6075,10 +6152,15 @@ class WayfinderApp(ctk.CTk):
     
     def _on_tone_selected(self, tone_id: str) -> None:
         """Handle tone selection from Style tab."""
+        # Gate non-minimal tones behind premium
+        if tone_id != "minimal" and not self.feature_gate.has_feature("tone_system"):
+            self._show_premium_prompt("tone_system")
+            return
+
         current_tone = self.config.get("output_tone", "professional")
         if tone_id == current_tone:
             return
-        
+
         self.config["output_tone"] = tone_id
         
         # Also update the whisper prompt to match the tone
@@ -6430,6 +6512,11 @@ class WayfinderApp(ctk.CTk):
     
     def on_backend_changed(self, value: str):
         """Handle transcription backend change from dropdown."""
+        # Gate Faster-Whisper behind premium
+        if value == "faster_whisper" and not self.feature_gate.has_feature("faster_whisper"):
+            self._show_premium_prompt("faster_whisper")
+            self.backend_var.set(self.config.get("transcription_backend", "whisper_cpp"))
+            return
         self.config["transcription_backend"] = value
         save_config(self.config)
         display_names = {
@@ -6455,7 +6542,15 @@ class WayfinderApp(ctk.CTk):
         old_mode = self.config.get("processing_mode", "local")
         if mode == old_mode:
             return
-        
+
+        # Gate cloud backends behind premium
+        if mode == "remote" and not self.feature_gate.has_feature("cloud_backends"):
+            self._show_premium_prompt("cloud_backends")
+            # Reset the selector back to local
+            if hasattr(self, 'mode_selector'):
+                self.mode_selector.set("local")
+            return
+
         # Save mode to config
         self.config["processing_mode"] = mode
         
@@ -6550,6 +6645,10 @@ class WayfinderApp(ctk.CTk):
     
     def toggle_chunked_mode(self):
         """Toggle chunked recording mode."""
+        if self.chunked_var.get() and not self.feature_gate.has_feature("chunked_recording"):
+            self.chunked_var.set(False)
+            self._show_premium_prompt("chunked_recording")
+            return
         self.config["chunked_mode"] = self.chunked_var.get()
         save_config(self.config)
         mode = "chunked (unlimited)" if self.chunked_var.get() else "simple"
@@ -6587,9 +6686,25 @@ class WayfinderApp(ctk.CTk):
     
     def _build_voice_profile_section(self, parent):
         """Build voice profile section for the Style tab when Personal is selected."""
+        # Gate voice profiles behind premium
+        if not self.feature_gate.has_feature("voice_profiles"):
+            locked_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"])
+            locked_frame.pack(fill="x", pady=(8, 0))
+            ctk.CTkLabel(
+                locked_frame, text="Voice Profiles require Wayfinder Aura Premium",
+                font=(self.font_body[0], 12), text_color=COLORS["text_muted"],
+            ).pack(padx=12, pady=8)
+            ctk.CTkButton(
+                locked_frame, text="Upgrade", font=(self.font_body[0], 11),
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+                text_color="#FFFFFF", height=28, corner_radius=6,
+                command=lambda: self._show_premium_prompt("voice_profiles"),
+            ).pack(padx=12, pady=(0, 8))
+            return
+
         profile_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"])
         profile_frame.pack(fill="x", pady=(8, 0))
-        
+
         try:
             from wayfinder.core.voice_profile import get_voice_profile
             voice_profile = get_voice_profile(
@@ -9045,6 +9160,75 @@ class WayfinderApp(ctk.CTk):
         except:
             pass
 
+    def _show_premium_prompt(self, feature_id: str) -> None:
+        """Show a dialog prompting the user to upgrade for a premium feature."""
+        import webbrowser
+        msg = self.feature_gate.get_upgrade_message(feature_id)
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Premium Feature")
+        dialog.geometry("420x280")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color=COLORS["bg_main"])
+        dialog.transient(self)
+        dialog.grab_set()
+
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ctk.CTkLabel(
+            inner, text=msg, font=(self.font_body[0], 13),
+            text_color=COLORS["text_primary"], wraplength=380, justify="left",
+        ).pack(fill="x", pady=(0, 20))
+
+        btn_row = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_row.pack(fill="x")
+
+        ctk.CTkButton(
+            btn_row, text="Get Premium — $20", font=(self.font_body[0], 13, "bold"),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color="#FFFFFF", height=36, corner_radius=8,
+            command=lambda: [webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")), dialog.destroy()],
+        ).pack(side="left", expand=True, fill="x", padx=(0, 5))
+
+        ctk.CTkButton(
+            btn_row, text="Maybe Later", font=(self.font_body[0], 12),
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_muted"], height=36, corner_radius=8,
+            command=dialog.destroy,
+        ).pack(side="left", expand=True, fill="x", padx=(5, 0))
+
+        dialog.lift()
+        dialog.focus_force()
+
+    def _activate_license(self) -> None:
+        """Activate a license key from the Settings UI."""
+        key = self._license_key_entry.get().strip().upper()
+        if not key:
+            self._license_feedback.configure(text="Please enter a license key", text_color="#CF7B7B")
+            return
+
+        from wayfinder.license import validate_license_key, store_license, get_feature_gate
+        result = validate_license_key(key)
+        if result.is_valid:
+            store_license(key)
+            # Refresh the feature gate singleton
+            self.feature_gate = get_feature_gate(force_refresh=True)
+            self._license_status_label.configure(text="Premium", text_color=COLORS["accent"])
+            self._license_feedback.configure(text="License activated! Restart for full effect.", text_color=COLORS["accent"])
+            self.log("License activated — premium features unlocked")
+        else:
+            self._license_feedback.configure(text=result.error_message or "Invalid license key", text_color="#CF7B7B")
+
+    def _deactivate_license(self) -> None:
+        """Deactivate the current license."""
+        from wayfinder.license import remove_license, get_feature_gate
+        remove_license()
+        self.feature_gate = get_feature_gate(force_refresh=True)
+        self._license_status_label.configure(text="Free", text_color=COLORS["text_muted"])
+        self._license_feedback.configure(text="License deactivated", text_color=COLORS["text_muted"])
+        self._license_key_entry.delete(0, "end")
+        self.log("License deactivated")
+
     def get_hotkey_display(self) -> str:
         hotkey_key = self.config.get("hotkey_key", 67)
         hotkey_modifiers = self.config.get("hotkey_modifiers", [])
@@ -10033,6 +10217,11 @@ class WayfinderApp(ctk.CTk):
             # Save button at bottom
             def save_selection():
                 selected = model_var.get()
+                # Gate large models behind premium
+                large_keywords = ("medium", "large", "turbo")
+                if any(kw in selected.lower() for kw in large_keywords) and not self.feature_gate.has_feature("large_models"):
+                    self._show_premium_prompt("large_models")
+                    return
                 if selected.startswith(str(Path.home())):
                     selected = "~" + selected[len(str(Path.home())):]
                 self.config["model_path"] = selected
@@ -10318,21 +10507,26 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
         ).pack(anchor="w", pady=(0, 8))
         
+        vocab_locked = not self.feature_gate.has_feature("custom_vocabulary")
         vocab_text = ctk.CTkTextbox(
             inner,
             font=(self.font_body[0], 12),
             fg_color=COLORS["bg_card"],
-            text_color=COLORS["accent"],
+            text_color=COLORS["text_muted"] if vocab_locked else COLORS["accent"],
             corner_radius=10,
             height=60,
             wrap="word",
         )
         vocab_text.pack(fill="x", pady=(0, 10))
-        
-        # Load existing vocabulary
-        current_vocab = self.config.get("custom_vocabulary", [])
-        if current_vocab:
-            vocab_text.insert("1.0", ", ".join(current_vocab))
+
+        if vocab_locked:
+            vocab_text.insert("1.0", "Custom vocabulary requires Premium")
+            vocab_text.configure(state="disabled")
+        else:
+            # Load existing vocabulary
+            current_vocab = self.config.get("custom_vocabulary", [])
+            if current_vocab:
+                vocab_text.insert("1.0", ", ".join(current_vocab))
         
         # Tip
         tip_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_hover"], corner_radius=8)
@@ -10820,13 +11014,24 @@ class WayfinderApp(ctk.CTk):
                 command=lambda v=value: (beam_var.set(v), on_change(v)),
             ).pack(side="left", padx=5)
         
+        # Clamp slider max to 3 for free users
+        max_beam = 10 if self.feature_gate.has_feature("high_beam_search") else 3
+        slider.configure(to=max_beam)
+        if current > max_beam:
+            beam_var.set(max_beam)
+            on_change(max_beam)
+
         def save():
-            self.config["beam_size"] = beam_var.get()
+            val = beam_var.get()
+            if val > 3 and not self.feature_gate.has_feature("high_beam_search"):
+                self._show_premium_prompt("high_beam_search")
+                return
+            self.config["beam_size"] = val
             save_config(self.config)
-            self.beam_btn.configure(text=str(beam_var.get()))
-            self.log(f"⚙ Beam size: {beam_var.get()}")
+            self.beam_btn.configure(text=str(val))
+            self.log(f"⚙ Beam size: {val}")
             dialog.destroy()
-        
+
         ctk.CTkButton(
             inner,
             text="Save",
@@ -11291,10 +11496,18 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=15, pady=(0, 5))
         
-        fw_model_var = ctk.StringVar(value=self.config.get("faster_whisper_model", "small"))
+        all_fw_models = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"]
+        if not self.feature_gate.has_feature("large_models"):
+            fw_models = [m for m in all_fw_models if m in ("tiny", "base", "small")]
+        else:
+            fw_models = all_fw_models
+        current_fw = self.config.get("faster_whisper_model", "small")
+        if current_fw not in fw_models:
+            current_fw = "small"
+        fw_model_var = ctk.StringVar(value=current_fw)
         fw_model_menu = ctk.CTkOptionMenu(
             fw_frame,
-            values=["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"],
+            values=fw_models,
             variable=fw_model_var,
             fg_color=COLORS["bg_hover"],
             button_color=COLORS["bg_elevated"],

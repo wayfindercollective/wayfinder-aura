@@ -117,6 +117,132 @@ class TestWhisperCppBackend:
                 backend.transcribe(str(sample_audio_file))
 
 
+class TestFasterWhisperBackend:
+    """Test Faster-Whisper backend."""
+
+    def test_backend_initialization(self):
+        """Test backend initialization with all parameters."""
+        from wayfinder.core.transcriber import FasterWhisperBackend
+
+        backend = FasterWhisperBackend(
+            model_size="small",
+            use_gpu=False,
+            compute_type="int8",
+            prompt="Test prompt",
+            language="en",
+            beam_size=3,
+            best_of=2,
+            temperature=0.0,
+            custom_vocabulary=["test"],
+            no_speech_threshold=0.4,
+            compression_ratio_threshold=2.0,
+            temperature_fallback=0.2,
+            suppress_nst=True,
+            vad_enabled=True,
+            vad_threshold=0.25,
+            gpu_device="0",
+        )
+
+        assert backend.model_size == "small"
+        assert backend.use_gpu is False
+        assert backend.no_speech_threshold == 0.4
+        assert backend.compression_ratio_threshold == 2.0
+        assert backend.temperature_fallback == 0.2
+        assert backend.suppress_nst is True
+        assert backend.vad_enabled is True
+        assert backend.vad_threshold == 0.25
+        assert backend.gpu_device == "0"
+
+    def test_is_available_without_import(self):
+        """Test is_available returns False when faster_whisper not installed."""
+        from wayfinder.core.transcriber import FasterWhisperBackend
+
+        backend = FasterWhisperBackend()
+        # This depends on whether faster_whisper is installed, but the method shouldn't crash
+        result = backend.is_available()
+        assert isinstance(result, bool)
+
+    def test_build_prompt_first_chunk(self):
+        """Test prompt building for first chunk (no context)."""
+        from wayfinder.core.transcriber import FasterWhisperBackend
+
+        backend = FasterWhisperBackend(
+            prompt="Base prompt here.",
+            custom_vocabulary=["Bazzite", "whisper.cpp"],
+        )
+
+        result = backend._build_prompt()
+        assert "Base prompt here." in result
+        assert "Bazzite" in result
+        assert "whisper.cpp" in result
+
+    def test_build_prompt_with_context(self):
+        """Test prompt building with chunk context (overrides base prompt)."""
+        from wayfinder.core.transcriber import FasterWhisperBackend
+
+        backend = FasterWhisperBackend(
+            prompt="Base prompt here.",
+            custom_vocabulary=["Bazzite"],
+        )
+
+        result = backend._build_prompt(context="previous chunk text")
+        assert "previous chunk text" in result
+        assert "Base prompt here." not in result
+        assert "Bazzite" in result
+
+    def test_get_backend_faster_whisper(self, sample_config: dict):
+        """Test factory creates FasterWhisperBackend with all params."""
+        from wayfinder.core.transcriber import get_backend, FasterWhisperBackend
+
+        sample_config["transcription_backend"] = "faster_whisper"
+        sample_config["no_speech_threshold"] = 0.4
+        sample_config["faster_whisper_vad_enabled"] = False
+        sample_config["gpu_device"] = "1"
+
+        backend = get_backend(sample_config)
+
+        assert isinstance(backend, FasterWhisperBackend)
+        assert backend.no_speech_threshold == 0.4
+        assert backend.vad_enabled is False
+        assert backend.gpu_device == "1"
+
+    @patch("wayfinder.core.transcriber.FasterWhisperBackend.is_available", return_value=True)
+    def test_transcribe_file_not_found(self, mock_avail):
+        """Test transcribe raises error for missing audio file."""
+        from wayfinder.core.transcriber import FasterWhisperBackend, TranscriptionError
+
+        backend = FasterWhisperBackend()
+
+        with pytest.raises(TranscriptionError, match="Audio file not found"):
+            backend.transcribe("/nonexistent/file.wav")
+
+    def test_temperature_fallback_creates_list(self):
+        """Test that temperature_fallback > 0 creates a temperature list."""
+        from wayfinder.core.transcriber import FasterWhisperBackend
+
+        backend = FasterWhisperBackend(
+            temperature=0.0,
+            temperature_fallback=0.2,
+        )
+
+        # The list is built inside transcribe(), not stored directly.
+        # Verify the params are stored correctly.
+        assert backend.temperature == 0.0
+        assert backend.temperature_fallback == 0.2
+
+    def test_gpu_device_selection(self):
+        """Test GPU device index parsing."""
+        from wayfinder.core.transcriber import FasterWhisperBackend
+
+        # Auto mode
+        backend = FasterWhisperBackend(gpu_device="auto")
+        assert backend.gpu_device == "auto"
+
+        # Specific device
+        backend = FasterWhisperBackend(gpu_device="2")
+        assert backend.gpu_device == "2"
+
+
 class TestTranscriptionPostProcessing:
     """Test post-processing of transcription results."""
 

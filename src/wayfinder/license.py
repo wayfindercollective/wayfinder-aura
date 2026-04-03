@@ -81,22 +81,27 @@ class LicenseInfo:
 
 PREMIUM_FEATURES = {
     # Feature ID: (display name, description)
-    "gpu_acceleration": ("GPU Acceleration", "Use Vulkan/CUDA/ROCm for 3-10x faster transcription"),
     "faster_whisper": ("Faster-Whisper Backend", "CTranslate2 optimized inference engine"),
     "large_models": ("Large Models", "Access to Medium.en and Large v3 Turbo models"),
+    "cloud_backends": ("Cloud Transcription", "Groq and OpenAI Whisper API backends"),
     "chunked_recording": ("Chunked Recording", "Unlimited duration with real-time feedback"),
     "advanced_preprocessing": ("Advanced Audio", "Medium and Heavy preprocessing modes"),
     "high_beam_search": ("High Accuracy Mode", "Beam search 4-10 for better accuracy"),
     "typing_speeds": ("Typing Speed Options", "Fast, Normal, Slow, Very Slow modes"),
     "custom_vocabulary": ("Custom Vocabulary", "Add your own terms and names"),
+    "voice_profiles": ("Voice Profiles", "Learns your speech patterns for better accuracy"),
+    "tone_system": ("Tone Presets", "Professional, Casual, Dev, and Personal writing styles"),
 }
 
 FREE_FEATURES = {
-    "basic_transcription": ("Basic Transcription", "whisper.cpp CPU transcription"),
+    "basic_transcription": ("Basic Transcription", "whisper.cpp transcription with GPU support"),
     "small_models": ("Standard Models", "Tiny.en, Base.en, Small.en"),
     "standard_recording": ("Standard Recording", "Single-session recording"),
     "light_preprocessing": ("Light Audio Processing", "Gain normalization"),
     "instant_typing": ("Instant Paste", "Clipboard-based text injection"),
+    "gpu_acceleration": ("GPU Acceleration", "Vulkan GPU support for fast transcription"),
+    "basic_overlay": ("Status Overlay", "Real-time recording status display"),
+    "basic_postprocessing": ("LLM Cleanup", "Local llama.cpp text post-processing"),
 }
 
 
@@ -421,10 +426,10 @@ class FeatureGate:
 
 _feature_gate: Optional[FeatureGate] = None
 
-def get_feature_gate() -> FeatureGate:
+def get_feature_gate(force_refresh: bool = False) -> FeatureGate:
     """Get the global feature gate instance."""
     global _feature_gate
-    if _feature_gate is None:
+    if _feature_gate is None or force_refresh:
         _feature_gate = FeatureGate()
     return _feature_gate
 

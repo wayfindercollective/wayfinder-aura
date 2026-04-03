@@ -335,6 +335,13 @@ class FasterWhisperBackend(TranscriptionBackend):
         best_of: int = 3,
         temperature: float = 0.0,
         custom_vocabulary: list = None,
+        no_speech_threshold: float = 0.5,
+        compression_ratio_threshold: float = 2.4,
+        temperature_fallback: float = 0.0,
+        suppress_nst: bool = False,
+        vad_enabled: bool = True,
+        vad_threshold: float = 0.3,
+        gpu_device: str = "auto",
     ):
         self.model_size = model_size
         self.use_gpu = use_gpu
@@ -345,7 +352,14 @@ class FasterWhisperBackend(TranscriptionBackend):
         self.best_of = best_of
         self.temperature = temperature
         self.custom_vocabulary = custom_vocabulary or []
-        
+        self.no_speech_threshold = no_speech_threshold
+        self.compression_ratio_threshold = compression_ratio_threshold
+        self.temperature_fallback = temperature_fallback
+        self.suppress_nst = suppress_nst
+        self.vad_enabled = vad_enabled
+        self.vad_threshold = vad_threshold
+        self.gpu_device = gpu_device
+
         self._model = None
         self._gpu_supported: Optional[bool] = None
     
@@ -404,32 +418,52 @@ class FasterWhisperBackend(TranscriptionBackend):
             return False
     
     def _get_model(self):
-        """Get or create the Whisper model (cached)."""
+        """Get or create the Whisper model (cached). Falls back to CPU on GPU OOM."""
         if self._model is not None:
             return self._model
-        
+
         cache_key = (self.model_size, self.use_gpu, self.compute_type)
         if cache_key in FasterWhisperBackend._model_cache:
             self._model = FasterWhisperBackend._model_cache[cache_key]
             return self._model
-        
+
+        from faster_whisper import WhisperModel
+
+        device = "cuda" if self.use_gpu and self.supports_gpu() else "cpu"
+        compute_type = self.compute_type if device == "cuda" else "int8"
+
+        # GPU device selection for multi-GPU systems
+        device_index = 0
+        if device == "cuda" and self.gpu_device != "auto":
+            try:
+                device_index = int(self.gpu_device)
+            except (ValueError, TypeError):
+                device_index = 0
+
         try:
-            from faster_whisper import WhisperModel
-            
-            device = "cuda" if self.use_gpu and self.supports_gpu() else "cpu"
-            compute_type = self.compute_type if device == "cuda" else "int8"
-            
             self._model = WhisperModel(
                 self.model_size,
                 device=device,
+                device_index=device_index,
                 compute_type=compute_type,
             )
-            
-            FasterWhisperBackend._model_cache[cache_key] = self._model
-            return self._model
-            
         except Exception as e:
-            raise TranscriptionError(f"Failed to load Faster-Whisper model: {e}")
+            # Fall back to CPU on GPU memory errors or other GPU failures
+            if device == "cuda":
+                print(f"[Faster-Whisper] GPU failed ({e}), falling back to CPU with int8...")
+                try:
+                    self._model = WhisperModel(
+                        self.model_size,
+                        device="cpu",
+                        compute_type="int8",
+                    )
+                except Exception as cpu_e:
+                    raise TranscriptionError(f"Failed to load Faster-Whisper model on both GPU and CPU: {cpu_e}")
+            else:
+                raise TranscriptionError(f"Failed to load Faster-Whisper model: {e}")
+
+        FasterWhisperBackend._model_cache[cache_key] = self._model
+        return self._model
     
     def transcribe(self, audio_path: str, context: str = "") -> str:
         """
@@ -463,19 +497,36 @@ class FasterWhisperBackend(TranscriptionBackend):
             # Build prompt with custom vocabulary and context
             final_prompt = self._build_prompt(context)
             
+            # Build temperature: use fallback list if temperature_fallback > 0
+            temp = self.temperature
+            if self.temperature_fallback > 0:
+                temp = [self.temperature, self.temperature + self.temperature_fallback,
+                        self.temperature + self.temperature_fallback * 2]
+
+            # Build VAD parameters when enabled
+            vad_params = None
+            if self.vad_enabled:
+                vad_params = dict(
+                    threshold=self.vad_threshold,
+                    min_speech_duration_ms=100,
+                    min_silence_duration_ms=700,
+                    speech_pad_ms=200,
+                )
+
             segments, info = model.transcribe(
                 audio_path,
                 language=language,
                 initial_prompt=final_prompt,
                 beam_size=self.beam_size,
                 best_of=self.best_of,
-                temperature=self.temperature,
-                vad_filter=False,  # Disabled - was cutting off words
-                # Performance optimizations
-                condition_on_previous_text=True,  # Use previous output as context
-                no_speech_threshold=0.5,  # Skip silence faster
-                compression_ratio_threshold=2.4,  # Reject bad outputs faster
-                word_timestamps=False,  # Disable if not needed (saves ~10%)
+                temperature=temp,
+                vad_filter=self.vad_enabled,
+                vad_parameters=vad_params,
+                condition_on_previous_text=True,
+                no_speech_threshold=self.no_speech_threshold,
+                compression_ratio_threshold=self.compression_ratio_threshold,
+                suppress_blank=self.suppress_nst,
+                word_timestamps=False,
             )
             
             # Collect all segments into text
@@ -828,6 +879,13 @@ def get_backend(config: dict) -> TranscriptionBackend:
             best_of=config.get("best_of", 3),
             temperature=config.get("temperature", 0.0),
             custom_vocabulary=config.get("custom_vocabulary", []),
+            no_speech_threshold=config.get("no_speech_threshold", 0.5),
+            compression_ratio_threshold=config.get("compression_ratio_threshold", 2.4),
+            temperature_fallback=config.get("temperature_fallback", 0.0),
+            suppress_nst=config.get("suppress_nst", False),
+            vad_enabled=config.get("faster_whisper_vad_enabled", True),
+            vad_threshold=config.get("faster_whisper_vad_threshold", 0.3),
+            gpu_device=config.get("gpu_device", "auto"),
         )
     elif backend_type == "openai_whisper":
         return OpenAIWhisperBackend(

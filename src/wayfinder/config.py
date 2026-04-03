@@ -148,6 +148,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Faster-Whisper specific settings
     "faster_whisper_model": "large-v3-turbo",  # tiny, base, small, medium, large-v3, large-v3-turbo
     "faster_whisper_compute_type": "float16",  # float16, int8, int8_float16
+    "faster_whisper_vad_enabled": True,  # Silero VAD for filtering silence (tuned for dictation)
+    "faster_whisper_vad_threshold": 0.3,  # VAD sensitivity (lower = more sensitive, less cutting)
     
     # Groq Whisper API settings (ultra-fast cloud transcription)
     # Get API key from: https://console.groq.com/keys
@@ -195,6 +197,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Model update checking
     "check_for_model_updates": True,  # Check HuggingFace for newer models on startup (once/day)
     "dismissed_updates": [],  # List of update keys the user dismissed
+
+    # License / Premium
+    "premium_url": "https://wayfinder.dev/premium",  # URL for premium purchase page
 
     # Setup wizard
     "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)
