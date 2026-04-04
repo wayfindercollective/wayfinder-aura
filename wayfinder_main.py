@@ -24,8 +24,13 @@ from pathlib import Path
 SOCKET_PATH = "/tmp/wayfinder-aura.sock"
 
 import customtkinter as ctk
-import evdev
-from evdev import InputDevice, categorize, ecodes
+try:
+    import evdev
+    from evdev import InputDevice, categorize, ecodes
+    HAS_EVDEV = True
+except ImportError:
+    evdev = None
+    HAS_EVDEV = False
 from PIL import Image, ImageDraw, ImageFilter
 import pystray
 
@@ -1705,6 +1710,8 @@ def create_status_icon(color: str, size: int = 64) -> Image.Image:
 
 def get_all_input_devices() -> list[dict]:
     """Get all input devices that could potentially send hotkeys."""
+    if not HAS_EVDEV:
+        return []
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
     result = []
     
@@ -4560,11 +4567,11 @@ class WayfinderApp(ctk.CTk):
 
         # === BENTO TILE: License ===
         license_tile = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
-        license_tile.pack(fill="x", padx=SPACING["section_pad"], pady=(SPACING["tile_gap"], 0))
+        license_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
 
         ctk.CTkLabel(
             license_tile, text="License",
-            font=(self.font_header[0], self.font_sizes["tile_header"], "bold"),
+            font=(self.font_header[0], self.font_sizes["caption"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 4))
 
@@ -11894,7 +11901,7 @@ class WayfinderApp(ctk.CTk):
             pystray.MenuItem("Quit", self.quit_app),
         )
         
-        icon_image = self.get_tray_icon(AppState.IDLE)
+        icon_image = self.custom_icon if self.custom_icon else self.get_tray_icon(AppState.IDLE)
         self.tray_icon = pystray.Icon("wayfinder-aura", icon_image, "Wayfinder Aura", menu)
         
         def _tray_thread_wrapper():
@@ -12387,12 +12394,15 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⌨️ Record hotkey: {hotkey_name} | Style toggle: {style_key_name}")
         
         # Use evdev on both X11 and Wayland (works if user is in 'input' group)
-        threading.Thread(
-            target=hotkey_listener,
-            args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log,
-                  style_toggle_key, style_toggle_modifiers),
-            daemon=True,
-        ).start()
+        if HAS_EVDEV:
+            threading.Thread(
+                target=hotkey_listener,
+                args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log,
+                      style_toggle_key, style_toggle_modifiers),
+                daemon=True,
+            ).start()
+        else:
+            self.log("⚠️ evdev not installed — hotkeys limited to socket/D-Bus methods")
 
     def poll_events(self):
         try:
