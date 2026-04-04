@@ -23,6 +23,7 @@ from pathlib import Path
 
 SOCKET_PATH = "/tmp/wayfinder-aura.sock"
 
+import tkinter as tk
 import customtkinter as ctk
 try:
     import evdev
@@ -2433,28 +2434,31 @@ class FloatingIndicator:
         
         canvas_size = 28  # Bigger for visibility
         cx, cy = canvas_size // 2, canvas_size // 2
-        
-        # Create ring (initially hidden) - larger for dramatic effect
-        self._dot_ring_id = self.dot_canvas.create_oval(
-            cx - 6, cy - 6, cx + 6, cy + 6,
-            outline=color, width=2, fill="", state="hidden"
-        )
-        
-        # Create 3 glow layers - larger radii for bigger dot
-        glow_radii = [10, 7, 4]
-        self._dot_glow_ids = []
-        for radius in glow_radii:
-            item_id = self.dot_canvas.create_oval(
-                cx - radius, cy - radius, cx + radius, cy + radius,
+
+        try:
+            # Create ring (initially hidden) - larger for dramatic effect
+            self._dot_ring_id = self.dot_canvas.create_oval(
+                cx - 6, cy - 6, cx + 6, cy + 6,
+                outline=color, width=2, fill="", state="hidden"
+            )
+
+            # Create 3 glow layers - larger radii for bigger dot
+            glow_radii = [10, 7, 4]
+            self._dot_glow_ids = []
+            for radius in glow_radii:
+                item_id = self.dot_canvas.create_oval(
+                    cx - radius, cy - radius, cx + radius, cy + radius,
+                    fill=color, outline=""
+                )
+                self._dot_glow_ids.append(item_id)
+
+            # Create core dot - bigger
+            self._dot_core_id = self.dot_canvas.create_oval(
+                cx - 4, cy - 4, cx + 4, cy + 4,
                 fill=color, outline=""
             )
-            self._dot_glow_ids.append(item_id)
-        
-        # Create core dot - bigger
-        self._dot_core_id = self.dot_canvas.create_oval(
-            cx - 4, cy - 4, cx + 4, cy + 4,
-            fill=color, outline=""
-        )
+        except tk.TclError:
+            pass
         
         self._dot_items_created = True
     
@@ -2535,14 +2539,17 @@ class FloatingIndicator:
         num_bars = width // (bar_width + bar_gap)
         
         self._wave_bar_ids = []
-        for i in range(num_bars):
-            x = i * (bar_width + bar_gap) + bar_gap // 2
-            # Create bar centered vertically (will be updated in _draw_waveform)
-            bar_id = self.wave_canvas.create_rectangle(
-                x, center_y - 1, x + bar_width, center_y + 1,
-                fill=color, outline=""
-            )
-            self._wave_bar_ids.append(bar_id)
+        try:
+            for i in range(num_bars):
+                x = i * (bar_width + bar_gap) + bar_gap // 2
+                # Create bar centered vertically (will be updated in _draw_waveform)
+                bar_id = self.wave_canvas.create_rectangle(
+                    x, center_y - 1, x + bar_width, center_y + 1,
+                    fill=color, outline=""
+                )
+                self._wave_bar_ids.append(bar_id)
+        except tk.TclError:
+            pass
         
         self._wave_items_created = True
     
@@ -3810,140 +3817,144 @@ class WayfinderApp(ctk.CTk):
     def _draw_mic_button(self, color: str, pressed: bool = False) -> None:
         """Draw premium tactile mic button with depth and glow."""
         canvas = self.mic_button_canvas
-        canvas.delete("all")
-        
+
         # Reset item tracking since we're recreating
         self._mic_items_created = False
         self._mic_glow_ids = []
         self._mic_button_id = None
-        
+
         size = 80
         cx, cy = size // 2, size // 2
-        
+
         # Parse color for glow
         r = int(color[1:3], 16)
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
-        
+
         # Background color for blending
         bg_r = int(COLORS["bg_card"][1:3], 16)
         bg_g = int(COLORS["bg_card"][3:5], 16)
         bg_b = int(COLORS["bg_card"][5:7], 16)
-        
+
         # Check if this is an active state (recording or processing)
         is_active = self.app_state in [AppState.RECORDING, AppState.PROCESSING, AppState.PASTING]
-        
-        if is_active:
-            # Active state: outer glow effect (soft ambient light)
-            glow_layers = [
-                (38, 0.06),  # Outermost - barely visible
-                (34, 0.12),  
-                (30, 0.20),
-                (27, 0.30),  # Inner glow
-            ]
-            
-            for radius, intensity in glow_layers:
-                gr = int(bg_r + (r - bg_r) * intensity)
-                gg = int(bg_g + (g - bg_g) * intensity)
-                gb = int(bg_b + (b - bg_b) * intensity)
-                glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
-                canvas.create_oval(
-                    cx - radius, cy - radius,
-                    cx + radius, cy + radius,
-                    fill=glow_color, outline="",
-                )
-        
-        # Button bezel - creates tactile depth
-        bezel_radius = 26
-        
-        # Outer shadow (button sits in a depression)
-        shadow_color = "#050506"
-        canvas.create_oval(
-            cx - bezel_radius - 2, cy - bezel_radius - 1,
-            cx + bezel_radius + 2, cy + bezel_radius + 3,
-            fill=shadow_color, outline="",
-        )
-        
-        # Button face with subtle gradient simulation
-        # Darker bottom edge (3D effect)
-        dr = max(0, int(r * 0.7))
-        dg = max(0, int(g * 0.7))
-        db = max(0, int(b * 0.7))
-        dark_color = f"#{dr:02x}{dg:02x}{db:02x}"
-        
-        canvas.create_oval(
-            cx - bezel_radius, cy - bezel_radius + 2,
-            cx + bezel_radius, cy + bezel_radius + 2,
-            fill=dark_color, outline="",
-        )
-        
-        # Main button face
-        main_radius = 24
-        canvas.create_oval(
-            cx - main_radius, cy - main_radius,
-            cx + main_radius, cy + main_radius,
-            fill=color, outline="",
-        )
-        
-        # Top highlight (gives convex/tactile feel)
-        hr = min(255, int(r * 1.2 + 40))
-        hg = min(255, int(g * 1.2 + 40))
-        hb = min(255, int(b * 1.2 + 40))
-        highlight_color = f"#{hr:02x}{hg:02x}{hb:02x}"
-        
-        # Small arc highlight at top
-        canvas.create_arc(
-            cx - 18, cy - 22,
-            cx + 18, cy - 6,
-            start=30, extent=120,
-            style="arc", outline=highlight_color,
-            width=2,
-        )
-        
-        # Inner shadow when pressed (concave effect)
-        if pressed or is_active:
-            # Subtle inner shadow ring
-            inner_shadow = f"#{max(0,r-60):02x}{max(0,g-60):02x}{max(0,b-60):02x}"
+
+        try:
+            canvas.delete("all")
+
+            if is_active:
+                # Active state: outer glow effect (soft ambient light)
+                glow_layers = [
+                    (38, 0.06),  # Outermost - barely visible
+                    (34, 0.12),
+                    (30, 0.20),
+                    (27, 0.30),  # Inner glow
+                ]
+
+                for radius, intensity in glow_layers:
+                    gr = int(bg_r + (r - bg_r) * intensity)
+                    gg = int(bg_g + (g - bg_g) * intensity)
+                    gb = int(bg_b + (b - bg_b) * intensity)
+                    glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
+                    canvas.create_oval(
+                        cx - radius, cy - radius,
+                        cx + radius, cy + radius,
+                        fill=glow_color, outline="",
+                    )
+
+            # Button bezel - creates tactile depth
+            bezel_radius = 26
+
+            # Outer shadow (button sits in a depression)
+            shadow_color = "#050506"
             canvas.create_oval(
-                cx - main_radius + 3, cy - main_radius + 3,
-                cx + main_radius - 3, cy + main_radius - 3,
-                fill="", outline=inner_shadow, width=2,
+                cx - bezel_radius - 2, cy - bezel_radius - 1,
+                cx + bezel_radius + 2, cy + bezel_radius + 3,
+                fill=shadow_color, outline="",
             )
-        
-        # Microphone icon - refined, minimal
-        icon_color = COLORS["bg_base"]
-        
-        # Mic body (rounded rectangle simulated with oval + rect)
-        mic_w, mic_h = 5, 10
-        canvas.create_oval(
-            cx - mic_w, cy - 14,
-            cx + mic_w, cy - 6,
-            fill=icon_color, outline="",
-        )
-        canvas.create_rectangle(
-            cx - mic_w, cy - 10,
-            cx + mic_w, cy + 2,
-            fill=icon_color, outline="",
-        )
-        canvas.create_oval(
-            cx - mic_w, cy - 2,
-            cx + mic_w, cy + 6,
-            fill=icon_color, outline="",
-        )
-        
-        # Mic cradle arc
-        canvas.create_arc(
-            cx - 10, cy - 2,
-            cx + 10, cy + 14,
-            start=180, extent=180,
-            style="arc", outline=icon_color, width=2,
-        )
-        
-        # Mic stand
-        canvas.create_line(
-            cx, cy + 13, cx, cy + 18,
-            fill=icon_color, width=2, capstyle="round",
-        )
+
+            # Button face with subtle gradient simulation
+            # Darker bottom edge (3D effect)
+            dr = max(0, int(r * 0.7))
+            dg = max(0, int(g * 0.7))
+            db = max(0, int(b * 0.7))
+            dark_color = f"#{dr:02x}{dg:02x}{db:02x}"
+
+            canvas.create_oval(
+                cx - bezel_radius, cy - bezel_radius + 2,
+                cx + bezel_radius, cy + bezel_radius + 2,
+                fill=dark_color, outline="",
+            )
+
+            # Main button face
+            main_radius = 24
+            canvas.create_oval(
+                cx - main_radius, cy - main_radius,
+                cx + main_radius, cy + main_radius,
+                fill=color, outline="",
+            )
+
+            # Top highlight (gives convex/tactile feel)
+            hr = min(255, int(r * 1.2 + 40))
+            hg = min(255, int(g * 1.2 + 40))
+            hb = min(255, int(b * 1.2 + 40))
+            highlight_color = f"#{hr:02x}{hg:02x}{hb:02x}"
+
+            # Small arc highlight at top
+            canvas.create_arc(
+                cx - 18, cy - 22,
+                cx + 18, cy - 6,
+                start=30, extent=120,
+                style="arc", outline=highlight_color,
+                width=2,
+            )
+
+            # Inner shadow when pressed (concave effect)
+            if pressed or is_active:
+                # Subtle inner shadow ring
+                inner_shadow = f"#{max(0,r-60):02x}{max(0,g-60):02x}{max(0,b-60):02x}"
+                canvas.create_oval(
+                    cx - main_radius + 3, cy - main_radius + 3,
+                    cx + main_radius - 3, cy + main_radius - 3,
+                    fill="", outline=inner_shadow, width=2,
+                )
+
+            # Microphone icon - refined, minimal
+            icon_color = COLORS["bg_base"]
+
+            # Mic body (rounded rectangle simulated with oval + rect)
+            mic_w = 5
+            canvas.create_oval(
+                cx - mic_w, cy - 14,
+                cx + mic_w, cy - 6,
+                fill=icon_color, outline="",
+            )
+            canvas.create_rectangle(
+                cx - mic_w, cy - 10,
+                cx + mic_w, cy + 2,
+                fill=icon_color, outline="",
+            )
+            canvas.create_oval(
+                cx - mic_w, cy - 2,
+                cx + mic_w, cy + 6,
+                fill=icon_color, outline="",
+            )
+
+            # Mic cradle arc
+            canvas.create_arc(
+                cx - 10, cy - 2,
+                cx + 10, cy + 14,
+                start=180, extent=180,
+                style="arc", outline=icon_color, width=2,
+            )
+
+            # Mic stand
+            canvas.create_line(
+                cx, cy + 13, cx, cy + 18,
+                fill=icon_color, width=2, capstyle="round",
+            )
+        except tk.TclError:
+            pass
     
     def _on_hero_canvas_resize(self, event=None):
         """Handle canvas resize - reset image item to fill new width."""
@@ -6415,41 +6426,44 @@ class WayfinderApp(ctk.CTk):
         if w <= 1 or h <= 1:
             return
         
-        canvas.delete("gradient")
-        
-        # Base color - GitHub Dark (#0D1117)
-        base_r, base_g, base_b = 13, 17, 23
-        
-        # Subtle violet glow - 10% accent blend for depth
-        glow_r, glow_g, glow_b = 25, 22, 35
-        
-        # Create ultra-subtle radial gradient (ambient light, not spotlight)
-        cx, cy = w // 2, h // 3  # Upper third for hero section
-        max_radius = int(max(w, h) * 0.9)
-        
-        steps = 20
-        for i in range(steps, 0, -1):
-            ratio = i / steps
-            radius = int(max_radius * ratio)
-            
-            # Very gentle blend - almost imperceptible depth
-            blend = (1 - ratio) ** 3.0  # Smooth falloff
-            intensity = blend * 0.10  # Very subtle
-            r = int(base_r + (glow_r - base_r) * intensity)
-            g = int(base_g + (glow_g - base_g) * intensity)
-            b = int(base_b + (glow_b - base_b) * intensity)
-            
-            color = f"#{r:02x}{g:02x}{b:02x}"
-            canvas.create_oval(
-                cx - radius, cy - radius,
-                cx + radius, cy + radius,
-                fill=color,
-                outline="",
-                tags="gradient",
-            )
-        
-        # Make sure gradient is behind everything
-        canvas.tag_lower("gradient")
+        try:
+            canvas.delete("gradient")
+
+            # Base color - GitHub Dark (#0D1117)
+            base_r, base_g, base_b = 13, 17, 23
+
+            # Subtle violet glow - 10% accent blend for depth
+            glow_r, glow_g, glow_b = 25, 22, 35
+
+            # Create ultra-subtle radial gradient (ambient light, not spotlight)
+            cx, cy = w // 2, h // 3  # Upper third for hero section
+            max_radius = int(max(w, h) * 0.9)
+
+            steps = 20
+            for i in range(steps, 0, -1):
+                ratio = i / steps
+                radius = int(max_radius * ratio)
+
+                # Very gentle blend - almost imperceptible depth
+                blend = (1 - ratio) ** 3.0  # Smooth falloff
+                intensity = blend * 0.10  # Very subtle
+                r = int(base_r + (glow_r - base_r) * intensity)
+                g = int(base_g + (glow_g - base_g) * intensity)
+                b = int(base_b + (glow_b - base_b) * intensity)
+
+                color = f"#{r:02x}{g:02x}{b:02x}"
+                canvas.create_oval(
+                    cx - radius, cy - radius,
+                    cx + radius, cy + radius,
+                    fill=color,
+                    outline="",
+                    tags="gradient",
+                )
+
+            # Make sure gradient is behind everything
+            canvas.tag_lower("gradient")
+        except tk.TclError:
+            pass
     
     
     def toggle_activity_log(self):

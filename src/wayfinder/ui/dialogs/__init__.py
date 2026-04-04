@@ -15,7 +15,6 @@ To extract a dialog:
 4. Add exports to this __init__.py
 """
 
-from .calibration import AudioCalibrationDialog
 from .setup_wizard import SetupWizard
 
 # Placeholder for future dialog extractions
@@ -26,6 +25,5 @@ from .setup_wizard import SetupWizard
 # from .license import LicenseDialog
 
 __all__ = [
-    "AudioCalibrationDialog",
     "SetupWizard",
 ]

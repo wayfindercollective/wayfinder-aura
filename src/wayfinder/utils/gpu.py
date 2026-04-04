@@ -352,12 +352,13 @@ def detect_ggml_devices() -> List[GgmlDevice]:
                 # 0.1 second of silence (1600 samples)
                 wav.writeframes(struct.pack("<" + "h" * 1600, *([0] * 1600)))
         
-        # Run whisper with the probe audio - GPU detection happens during init
-        # We use --no-prints to minimize output but GPU info still appears
-        cmd = [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"]
         if model_path is None:
             # No model available, can't probe ggml devices
             return devices
+
+        # Run whisper with the probe audio - GPU detection happens during init
+        # We use --no-prints to minimize output but GPU info still appears
+        cmd = [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"]
         
         result = subprocess.run(
             cmd,

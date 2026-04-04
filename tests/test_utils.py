@@ -347,3 +347,42 @@ class TestAudioDucker:
         # Should be clamped to 150%
         args = mock_run.call_args[0][0]
         assert "150%" in args
+
+
+# =============================================================================
+# Lazy Imports Availability Check Tests
+# =============================================================================
+
+
+class TestLazyImportsAvailabilityChecks:
+    """Tests that is_*_available() functions don't crash (importlib.util fix)."""
+
+    def test_is_pyqt6_available_no_crash(self):
+        """is_pyqt6_available should return a bool without crashing."""
+        from wayfinder.utils.lazy_imports import is_pyqt6_available
+        result = is_pyqt6_available()
+        assert isinstance(result, bool)
+
+    def test_is_faster_whisper_available_no_crash(self):
+        """is_faster_whisper_available should return a bool without crashing."""
+        from wayfinder.utils.lazy_imports import is_faster_whisper_available
+        result = is_faster_whisper_available()
+        assert isinstance(result, bool)
+
+    def test_is_scipy_available_no_crash(self):
+        """is_scipy_available should return a bool without crashing."""
+        from wayfinder.utils.lazy_imports import is_scipy_available
+        result = is_scipy_available()
+        assert isinstance(result, bool)
+
+    def test_is_anthropic_available_no_crash(self):
+        """is_anthropic_available should return a bool without crashing."""
+        from wayfinder.utils.lazy_imports import is_anthropic_available
+        result = is_anthropic_available()
+        assert isinstance(result, bool)
+
+    def test_is_llama_cpp_available_no_crash(self):
+        """is_llama_cpp_available should return a bool without crashing."""
+        from wayfinder.utils.lazy_imports import is_llama_cpp_available
+        result = is_llama_cpp_available()
+        assert isinstance(result, bool)

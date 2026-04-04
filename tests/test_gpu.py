@@ -456,6 +456,17 @@ class TestOptimalThreadCount:
             assert count == max(2, min(16, int(4 * 0.75)))
 
 
+class TestDetectGgmlDevicesNoModel:
+    """Regression test: detect_ggml_devices should not crash when no model is available."""
+
+    @patch("wayfinder.utils.gpu.Path.exists", return_value=False)
+    def test_returns_empty_list_when_no_model(self, mock_exists):
+        """detect_ggml_devices should return [] gracefully when no whisper model is found."""
+        result = detect_ggml_devices()
+        assert isinstance(result, list)
+        assert len(result) == 0
+
+
 class TestGetGpuInfoSimple:
     """Tests for get_gpu_info() in gpu_simple module."""
 

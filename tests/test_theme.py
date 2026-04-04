@@ -179,6 +179,32 @@ class TestScaledFontSize:
 # =============================================================================
 
 
+class TestThemeKeysCompleteness:
+    """Verify that all COLORS/RADIUS keys used in active (exported) UI code exist."""
+
+    def test_active_code_color_keys_exist(self):
+        """All COLORS keys referenced in non-dead-code UI modules must exist in theme."""
+        # These are the keys used across active UI code (wayfinder_main.py, components, etc.)
+        active_color_keys = [
+            "bg_base", "bg_dark", "bg_surface", "bg_card", "bg_hover",
+            "bg_elevated", "bg_input",
+            "accent", "accent_cyan", "accent_glow", "accent_hover",
+            "accent_dim", "accent_bright",
+            "border_rim", "border", "border_subtle", "border_light", "border_glow",
+            "state_ready", "state_recording", "state_processing", "state_typing",
+            "accent_green", "accent_red", "accent_yellow", "accent_blue",
+            "text_bright", "text_primary", "text_secondary", "text_muted",
+        ]
+        for key in active_color_keys:
+            assert key in COLORS, f"Missing active COLORS key: {key}"
+
+    def test_active_code_radius_keys_exist(self):
+        """All RADIUS keys referenced in active UI code must exist in theme."""
+        active_radius_keys = ["sm", "md", "lg", "xl"]
+        for key in active_radius_keys:
+            assert key in RADIUS, f"Missing active RADIUS key: {key}"
+
+
 class TestRadius:
     """Tests for RADIUS design tokens."""
 

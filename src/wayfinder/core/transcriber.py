@@ -1326,7 +1326,7 @@ def transcribe_with_config(
                 if not key:
                     print("[Post-processing] ⚠ ANTHROPIC_API_KEY not set in environment")
                 else:
-                    print(f"[Post-processing] Using Anthropic ({config.get('anthropic_model', 'claude-3-haiku')})")
+                    print(f"[Post-processing] Using Anthropic ({config.get('anthropic_model', 'claude-3-haiku-20240307')})")
             else:  # llama_cpp
                 model_path = config.get("llama_cpp_model_path", "")
                 if not model_path:

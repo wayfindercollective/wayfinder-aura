@@ -1,3 +1,4 @@
+# NOTE: Not wired in. Needs CTkFrame panel conversion (CLAUDE.md Rule #2) before use.
 """
 Audio Calibration Dialog for Wayfinder Aura.
 

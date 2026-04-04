@@ -13,7 +13,7 @@ Usage:
         app = QtWidgets.QApplication([])
 """
 
-import importlib
+import importlib.util
 import sys
 from functools import lru_cache
 from typing import Any, Optional

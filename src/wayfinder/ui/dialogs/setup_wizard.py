@@ -355,8 +355,7 @@ class SetupWizard(ctk.CTkToplevel):
             if self.winfo_exists():
                 self.after(100, _extended_poll)
 
-        # Replace poll temporarily and start sequence
-        self.after_cancel_all_pending = True  # Flag
+        # Start install sequence
         threading.Thread(target=_sequence, daemon=True).start()
 
     def _run_step_sync(self, dep_id: str, install_fn):
