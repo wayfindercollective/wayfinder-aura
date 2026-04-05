@@ -29,3 +29,7 @@ dist/
 *.log
 recordings/
 
+# Large binaries
+*.AppImage
+
+
