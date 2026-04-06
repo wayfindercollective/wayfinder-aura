@@ -13073,6 +13073,7 @@ class WayfinderApp(ctk.CTk):
             import time as _time
             _time.sleep(0.15)
 
+            print(f"[Inject] Pasting text: {repr(text[:80])}", flush=True)
             inject_text(text, typing_speed="instant")
             self.event_queue.put((EventType.INJECTION_DONE, None))
         except Exception as e:
