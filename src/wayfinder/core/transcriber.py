@@ -315,12 +315,286 @@ class WhisperCppBackend(TranscriptionBackend):
             raise TranscriptionError(f"Could not execute whisper.cpp: {self.whisper_binary}")
 
 
+class WhisperServerBackend(TranscriptionBackend):
+    """
+    Whisper.cpp server backend — keeps model loaded in memory for fast inference.
+
+    Instead of spawning whisper-cli per transcription (which reloads the ~1.5GB model
+    each time), this uses whisper-server as a persistent HTTP service. The server loads
+    the model once and handles requests via POST /inference.
+
+    The backend owns the full server lifecycle: lazy start on first use, health checks,
+    restart on failure, and clean shutdown via atexit.
+    """
+
+    # Class-level server process shared across instances with same config
+    _server_process: Optional[subprocess.Popen] = None
+    _server_port: int = 0
+    _server_lock = None  # Initialized lazily
+    _server_model_path: str = ""
+
+    def __init__(
+        self,
+        whisper_server_binary: str = "~/whisper.cpp/build/bin/whisper-server",
+        model_path: str = "~/whisper.cpp/models/ggml-large-v3-turbo.bin",
+        port: int = 8178,
+        threads: int = 4,
+        timeout: int = 120,
+        use_gpu: bool = True,
+        beam_size: int = 3,
+        best_of: int = 2,
+        language: str = "en",
+        entropy_threshold: float = 2.6,
+        no_speech_threshold: float = 0.5,
+        suppress_nst: bool = False,
+        prompt: str = "",
+        custom_vocabulary: list = None,
+        # Ignored params (kept for interface compatibility)
+        temperature: float = 0.0,
+        temperature_fallback: float = 0.0,
+        gpu_layers: int = 0,
+    ):
+        self.whisper_server_binary = os.path.expanduser(whisper_server_binary)
+        self.model_path = os.path.expanduser(model_path)
+        self.port = port
+        self.threads = threads
+        self.timeout = timeout
+        self.use_gpu = use_gpu
+        self.beam_size = beam_size
+        self.best_of = best_of
+        self.language = language
+        self.entropy_threshold = entropy_threshold
+        self.no_speech_threshold = no_speech_threshold
+        self.suppress_nst = suppress_nst
+        self.prompt = prompt
+        self.custom_vocabulary = custom_vocabulary or []
+
+        # Lazy-init the class-level lock
+        if WhisperServerBackend._server_lock is None:
+            import threading
+            WhisperServerBackend._server_lock = threading.Lock()
+
+    def _build_prompt(self, context: str = "") -> str:
+        """Build the prompt string (same logic as WhisperCppBackend)."""
+        parts = []
+        if self.prompt:
+            parts.append(self.prompt)
+        if context:
+            parts.append(context)
+        if self.custom_vocabulary:
+            vocab_str = ", ".join(self.custom_vocabulary[:50])
+            parts.append(f"Vocabulary: {vocab_str}")
+        return " ".join(parts) if parts else ""
+
+    def _is_our_server(self, port: int) -> bool:
+        """Check if a whisper-server is running on the given port."""
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/")
+            resp = urllib.request.urlopen(req, timeout=2)
+            # whisper-server returns an HTML page at root
+            content = resp.read().decode("utf-8", errors="ignore")
+            return "whisper" in content.lower()
+        except Exception:
+            return False
+
+    def _find_available_port(self) -> int:
+        """Find the configured port or the next available one."""
+        import socket
+        port = self.port
+        for attempt in range(5):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                if sock.connect_ex(("127.0.0.1", port)) != 0:
+                    return port  # Port is free
+                # Port in use — check if it's our server
+                if self._is_our_server(port):
+                    return port  # Reuse existing server
+                port += 1  # Try next port
+            finally:
+                sock.close()
+        return self.port  # Fall back to configured port
+
+    def _start_server(self) -> None:
+        """Start the whisper-server process if not already running."""
+        with WhisperServerBackend._server_lock:
+            # Check if already running with matching model
+            if (WhisperServerBackend._server_process is not None
+                    and WhisperServerBackend._server_process.poll() is None
+                    and WhisperServerBackend._server_model_path == self.model_path):
+                return
+
+            # Kill any existing server with different config
+            self._stop_server_internal()
+
+            port = self._find_available_port()
+
+            # Check if an existing compatible server is already on this port
+            if self._is_our_server(port):
+                WhisperServerBackend._server_port = port
+                WhisperServerBackend._server_model_path = self.model_path
+                print(f"[Whisper Server] Reusing existing server on port {port}")
+                return
+
+            cmd = [
+                self.whisper_server_binary,
+                "-m", self.model_path,
+                "-t", str(self.threads),
+                "--port", str(port),
+                "-l", self.language if self.language and self.language.lower() != "auto" else "en",
+                "-bs", str(self.beam_size),
+                "-bo", str(self.best_of),
+                "-et", str(self.entropy_threshold),
+                "-nth", str(self.no_speech_threshold),
+                "-nf",  # No fallback (faster)
+            ]
+
+            if not self.use_gpu:
+                cmd.append("-ng")
+
+            if self.suppress_nst:
+                cmd.append("-sns")
+
+            print(f"[Whisper Server] Starting on port {port}...")
+            WhisperServerBackend._server_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            WhisperServerBackend._server_port = port
+            WhisperServerBackend._server_model_path = self.model_path
+
+            # Register atexit handler for cleanup
+            import atexit
+            atexit.register(WhisperServerBackend.shutdown)
+
+            # Wait for server to be ready (model loading takes a few seconds)
+            import time
+            for i in range(60):  # Wait up to 30 seconds
+                time.sleep(0.5)
+                if self._is_our_server(port):
+                    print(f"[Whisper Server] Ready on port {port} (took {(i+1)*0.5:.1f}s)")
+                    return
+                # Check if process died
+                if WhisperServerBackend._server_process.poll() is not None:
+                    stdout = WhisperServerBackend._server_process.stdout.read().decode("utf-8", errors="ignore")
+                    raise TranscriptionError(f"whisper-server failed to start: {stdout[-500:]}")
+
+            raise TranscriptionError("whisper-server timed out during startup (30s)")
+
+    @classmethod
+    def _stop_server_internal(cls) -> None:
+        """Internal: stop the server process without acquiring the lock."""
+        if cls._server_process is not None:
+            import signal, time
+            try:
+                cls._server_process.send_signal(signal.SIGTERM)
+                try:
+                    cls._server_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    cls._server_process.kill()
+                    cls._server_process.wait(timeout=2)
+            except Exception:
+                pass
+            cls._server_process = None
+            cls._server_model_path = ""
+
+    @classmethod
+    def shutdown(cls) -> None:
+        """Stop the whisper-server process. Safe to call multiple times."""
+        if cls._server_lock is not None:
+            with cls._server_lock:
+                cls._stop_server_internal()
+        else:
+            cls._stop_server_internal()
+
+    def is_available(self) -> bool:
+        """Check if the whisper-server binary exists."""
+        return Path(self.whisper_server_binary).exists() and Path(self.model_path).exists()
+
+    def transcribe(self, audio_path: str, context: str = "") -> str:
+        """Transcribe audio via the whisper-server HTTP API."""
+        if not Path(audio_path).exists():
+            raise TranscriptionError(f"Audio file not found: {audio_path}")
+
+        # Ensure server is running
+        self._start_server()
+        port = WhisperServerBackend._server_port
+
+        # Build prompt
+        final_prompt = self._build_prompt(context)
+
+        try:
+            import urllib.request
+            import urllib.parse
+
+            # Build multipart form data
+            boundary = "----WayfinderBoundary"
+            body = b""
+
+            # Add the audio file
+            with open(audio_path, "rb") as f:
+                audio_data = f.read()
+
+            body += f"--{boundary}\r\n".encode()
+            body += f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(audio_path)}"\r\n'.encode()
+            body += b"Content-Type: audio/wav\r\n\r\n"
+            body += audio_data
+            body += b"\r\n"
+
+            # Add response_format
+            body += f"--{boundary}\r\n".encode()
+            body += b'Content-Disposition: form-data; name="response_format"\r\n\r\n'
+            body += b"json\r\n"
+
+            # Add prompt if provided
+            if final_prompt:
+                body += f"--{boundary}\r\n".encode()
+                body += b'Content-Disposition: form-data; name="prompt"\r\n\r\n'
+                body += final_prompt.encode("utf-8")
+                body += b"\r\n"
+
+            body += f"--{boundary}--\r\n".encode()
+
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/inference",
+                data=body,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                },
+                method="POST",
+            )
+
+            resp = urllib.request.urlopen(req, timeout=self.timeout)
+            result = json.loads(resp.read().decode("utf-8"))
+            text = result.get("text", "").strip()
+            return text
+
+        except urllib.error.URLError as e:
+            # Server may have died — try to restart and retry once
+            print(f"[Whisper Server] Connection error: {e}. Restarting server...")
+            with WhisperServerBackend._server_lock:
+                self._stop_server_internal()
+            self._start_server()
+
+            # Retry once
+            try:
+                resp = urllib.request.urlopen(req, timeout=self.timeout)
+                result = json.loads(resp.read().decode("utf-8"))
+                return result.get("text", "").strip()
+            except Exception as retry_err:
+                raise TranscriptionError(f"whisper-server failed after restart: {retry_err}")
+
+        except Exception as e:
+            raise TranscriptionError(f"whisper-server transcription failed: {e}")
+
+
 class FasterWhisperBackend(TranscriptionBackend):
     """
     Faster-Whisper backend for transcription.
     Uses CTranslate2 for optimized inference with GPU (ROCm/CUDA) support.
     """
-    
+
     # Class-level model cache to avoid reloading
     _model_cache: dict = {}
     
@@ -867,7 +1141,20 @@ def get_backend(config: dict) -> TranscriptionBackend:
         A TranscriptionBackend instance
     """
     backend_type = config.get("transcription_backend", "whisper_cpp")
-    
+
+    # Map accuracy_mode to beam_size/best_of overrides
+    accuracy_mode = config.get("accuracy_mode", "balanced")
+    accuracy_presets = {
+        "fast": {"beam_size": 1, "best_of": 1},
+        "balanced": {"beam_size": 3, "best_of": 2},
+        "high": {"beam_size": 5, "best_of": 3},
+    }
+    if accuracy_mode in accuracy_presets:
+        preset = accuracy_presets[accuracy_mode]
+        config = dict(config)  # Don't mutate the original
+        config["beam_size"] = preset["beam_size"]
+        config["best_of"] = preset["best_of"]
+
     if backend_type == "faster_whisper":
         return FasterWhisperBackend(
             model_size=config.get("faster_whisper_model", "small"),
@@ -906,7 +1193,27 @@ def get_backend(config: dict) -> TranscriptionBackend:
             custom_vocabulary=config.get("custom_vocabulary", []),
         )
     else:
-        # Default to whisper.cpp
+        # Default to whisper.cpp — use server mode if enabled (keeps model in memory)
+        if config.get("whisper_server_mode", False):
+            server_binary = config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
+            # Derive server binary path from CLI binary path
+            server_binary = server_binary.replace("whisper-cli", "whisper-server")
+            return WhisperServerBackend(
+                whisper_server_binary=server_binary,
+                model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),
+                port=config.get("whisper_server_port", 8178),
+                threads=config.get("threads", 4),
+                timeout=config.get("timeout", 120),
+                use_gpu=config.get("use_gpu", True),
+                beam_size=config.get("beam_size", 5),
+                best_of=config.get("best_of", 3),
+                language=config.get("language", "en"),
+                entropy_threshold=config.get("entropy_threshold", 2.6),
+                no_speech_threshold=config.get("no_speech_threshold", 0.5),
+                suppress_nst=config.get("suppress_nst", False),
+                prompt=config.get("prompt", ""),
+                custom_vocabulary=config.get("custom_vocabulary", []),
+            )
         return WhisperCppBackend(
             whisper_binary=config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli"),
             model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),

@@ -218,7 +218,14 @@ def main():
         setup_gpu_environment(config)
     except Exception as e:
         print(f"[GPU] Warning: Could not setup GPU environment: {e}")
-    
+
+    # Pre-warm clipboard daemon on macOS (best-effort, non-blocking)
+    try:
+        from wayfinder.core.injector import warmup_clipboard
+        warmup_clipboard()
+    except Exception:
+        pass
+
     # Apply scaling fix immediately using cached value (no waiting!)
     cached_scaling = apply_scaling_fix()
     print(f"[Scaling] Using cached scaling: {cached_scaling}")

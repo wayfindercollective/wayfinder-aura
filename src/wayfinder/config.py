@@ -108,6 +108,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "threads": 4,  # Default to 4, auto-adjusted on first run based on CPU cores
     "timeout": 120,
     "min_recording_duration": 0.5,
+
+    # Whisper server mode: keep model loaded in memory for fast inference
+    "whisper_server_mode": sys.platform == "darwin",  # Enabled by default on macOS
+    "whisper_server_port": 8178,
     
     # UI settings
     "start_minimized": False,
