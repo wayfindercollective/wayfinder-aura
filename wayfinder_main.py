@@ -9415,21 +9415,19 @@ class WayfinderApp(ctk.CTk):
         return key_name
 
     def _apply_hotkey_change(self):
-        """Apply hotkey config change and restart the listener."""
+        """Apply hotkey config change and update the listener."""
         new_hotkey = self.get_hotkey_display()
         if hasattr(self, 'hotkey_label'):
             self.hotkey_label.configure(text=f"Press {new_hotkey} to toggle")
         self.log(f"⚙ Hotkey: {new_hotkey}")
-        # Signal old listener to stop and wait for it to finish
-        self.stop_event.set()
-        # Give the old pynput listener time to fully stop
-        # (pynput.keyboard.Listener needs time to release macOS event tap)
-        self.after(300, self._restart_hotkey_listener)
-
-    def _restart_hotkey_listener(self):
-        """Restart hotkey listener after old one has stopped."""
-        self.stop_event = threading.Event()
-        self.start_hotkey_listener()
+        if sys.platform == "darwin":
+            # macOS: pynput listener reads config live, no restart needed
+            self.start_hotkey_listener()  # Just logs "Hotkey updated (live)"
+        else:
+            # Linux: restart evdev listener
+            self.stop_event.set()
+            self.stop_event = threading.Event()
+            self.start_hotkey_listener()
 
     def _on_hotkey_key_changed(self, value):
         """Handle inline hotkey key dropdown change."""
@@ -9446,11 +9444,15 @@ class WayfinderApp(ctk.CTk):
         self._apply_hotkey_change()
 
     def _apply_style_hotkey_change(self):
-        """Apply style hotkey config change and restart the listener."""
+        """Apply style hotkey config change and update the listener."""
         new_hotkey = self.get_style_hotkey_display()
         self.log(f"⚙ Style toggle hotkey: {new_hotkey}")
-        self.stop_event.set()
-        self.after(300, self._restart_hotkey_listener)
+        if sys.platform == "darwin":
+            self.start_hotkey_listener()
+        else:
+            self.stop_event.set()
+            self.stop_event = threading.Event()
+            self.start_hotkey_listener()
 
     def _on_style_hotkey_key_changed(self, value):
         """Handle inline style hotkey key dropdown change."""
@@ -12542,28 +12544,35 @@ class WayfinderApp(ctk.CTk):
 
         if sys.platform == "darwin":
             # macOS: use pynput for global hotkey listening
-            # pynput captures all keyboard input including remapped mouse buttons
-            from wayfinder.hotkeys import pynput_hotkey_listener, is_pynput_available
-            if is_pynput_available():
-                print("[Hotkey] macOS — starting pynput listener", flush=True)
-                self.log("🖥️ macOS — using pynput (global keyboard listener)")
+            # pynput reads hotkey config live from self.config — no restart needed
+            if not getattr(self, '_pynput_listener_started', False):
+                from wayfinder.hotkeys import pynput_hotkey_listener, is_pynput_available
+                if is_pynput_available():
+                    print("[Hotkey] macOS — starting pynput listener", flush=True)
+                    self.log("🖥️ macOS — using pynput (global keyboard listener)")
+                    self._pynput_listener_started = True
 
-                def _pynput_wrapper():
-                    try:
-                        pynput_hotkey_listener(
-                            self.event_queue, hotkey_key, hotkey_modifiers,
-                            self.stop_event, self.log,
-                            style_toggle_key, style_toggle_modifiers,
-                        )
-                    except Exception as e:
-                        print(f"[Hotkey] pynput listener crashed: {e}", flush=True)
-                        import traceback
-                        traceback.print_exc()
+                    def _pynput_wrapper():
+                        try:
+                            pynput_hotkey_listener(
+                                self.event_queue, hotkey_key, hotkey_modifiers,
+                                self.stop_event, self.log,
+                                style_toggle_key, style_toggle_modifiers,
+                                config_ref=self.config,
+                            )
+                        except Exception as e:
+                            print(f"[Hotkey] pynput listener crashed: {e}", flush=True)
+                            import traceback
+                            traceback.print_exc()
+                            self._pynput_listener_started = False
 
-                threading.Thread(target=_pynput_wrapper, daemon=True).start()
+                    threading.Thread(target=_pynput_wrapper, daemon=True).start()
+                else:
+                    print("[Hotkey] pynput not available!", flush=True)
+                    self.log("⚠️ pynput not installed — hotkeys unavailable")
             else:
-                print("[Hotkey] pynput not available!", flush=True)
-                self.log("⚠️ pynput not installed — hotkeys unavailable")
+                # Already running — config changes are picked up automatically
+                self.log(f"⚙ Hotkey updated (live)")
         elif HAS_EVDEV:
             # Linux: use evdev for direct input device monitoring
             is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
