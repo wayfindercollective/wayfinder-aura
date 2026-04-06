@@ -241,6 +241,7 @@ def main():
         # Show the wizard if setup hasn't been completed yet
         try:
             if not config.get("setup_completed", False):
+                print(f"[Setup] Showing wizard (setup_completed={config.get('setup_completed')})", flush=True)
                 from wayfinder.ui.dialogs.setup_wizard import SetupWizard
                 
                 # Pause animations during wizard to keep UI responsive
