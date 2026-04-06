@@ -12514,17 +12514,19 @@ class WayfinderApp(ctk.CTk):
         hotkey_modifiers = self.config.get("hotkey_modifiers", [])
         enabled_devices = self.config.get("enabled_input_devices", [])
         hotkey_display = self.get_hotkey_display()
-        
+
         # Style toggle hotkey settings
         style_toggle_key = self.config.get("style_toggle_key", 68)  # F10 default
         style_toggle_modifiers = self.config.get("style_toggle_modifiers", [])
-        
-        # Always start socket listener (most reliable for Wayland)
-        threading.Thread(
-            target=socket_listener,
-            args=(self.event_queue, self.stop_event, self.log),
-            daemon=True,
-        ).start()
+
+        # Start socket listener only once (not on restarts)
+        if not getattr(self, '_socket_listener_started', False):
+            self._socket_listener_started = True
+            threading.Thread(
+                target=socket_listener,
+                args=(self.event_queue, self.stop_event, self.log),
+                daemon=True,
+            ).start()
         
         # Log the hotkey configuration
         hotkey_name = self.get_hotkey_display()
