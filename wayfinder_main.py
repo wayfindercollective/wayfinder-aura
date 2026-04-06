@@ -9290,44 +9290,65 @@ class WayfinderApp(ctk.CTk):
             pass
 
     def _show_premium_prompt(self, feature_id: str) -> None:
-        """Show a dialog prompting the user to upgrade for a premium feature."""
+        """Show an inline premium upgrade banner within the main window."""
         import webbrowser
-        msg = self.feature_gate.get_upgrade_message(feature_id)
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Premium Feature")
-        dialog.geometry("420x280")
-        dialog.resizable(False, False)
-        dialog.configure(fg_color=COLORS["bg_main"])
-        dialog.transient(self)
-        dialog.grab_set()
 
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=20, pady=20)
+        # Remove any existing premium banner first
+        if hasattr(self, '_premium_banner') and self._premium_banner is not None:
+            try:
+                self._premium_banner.destroy()
+            except Exception:
+                pass
+
+        msg = self.feature_gate.get_upgrade_message(feature_id)
+
+        # Create inline banner at top of window
+        banner = ctk.CTkFrame(
+            self, fg_color=COLORS["bg_elevated"],
+            corner_radius=RADIUS["lg"], border_width=1,
+            border_color=COLORS["accent_dim"],
+        )
+        banner.place(relx=0.5, rely=0.0, anchor="n", relwidth=0.9, y=10)
+        self._premium_banner = banner
+
+        inner = ctk.CTkFrame(banner, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=16, pady=12)
 
         ctk.CTkLabel(
-            inner, text=msg, font=(self.font_body[0], 13),
+            inner, text="✨ Premium Feature",
+            font=(self.font_body[0], 14, "bold"),
+            text_color=COLORS["accent"],
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            inner, text=msg, font=(self.font_body[0], 12),
             text_color=COLORS["text_primary"], wraplength=380, justify="left",
-        ).pack(fill="x", pady=(0, 20))
+        ).pack(fill="x", pady=(4, 12))
 
         btn_row = ctk.CTkFrame(inner, fg_color="transparent")
         btn_row.pack(fill="x")
 
+        def _dismiss():
+            banner.place_forget()
+            banner.destroy()
+            self._premium_banner = None
+
         ctk.CTkButton(
             btn_row, text="Get Premium — $20", font=(self.font_body[0], 13, "bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
-            text_color="#FFFFFF", height=36, corner_radius=8,
-            command=lambda: [webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")), dialog.destroy()],
-        ).pack(side="left", expand=True, fill="x", padx=(0, 5))
+            text_color="#FFFFFF", height=34, corner_radius=8,
+            command=lambda: [webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")), _dismiss()],
+        ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
-            btn_row, text="Maybe Later", font=(self.font_body[0], 12),
-            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_muted"], height=36, corner_radius=8,
-            command=dialog.destroy,
-        ).pack(side="left", expand=True, fill="x", padx=(5, 0))
+            btn_row, text="Dismiss", font=(self.font_body[0], 12),
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_card"],
+            text_color=COLORS["text_muted"], height=34, corner_radius=8,
+            command=_dismiss,
+        ).pack(side="left")
 
-        dialog.lift()
-        dialog.focus_force()
+        # Auto-dismiss after 8 seconds
+        banner.after(8000, lambda: _dismiss() if self._premium_banner is banner else None)
 
     def _activate_license(self) -> None:
         """Activate a license key from the Settings UI."""
