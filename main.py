@@ -15,7 +15,12 @@ import json
 from pathlib import Path
 
 # Ensure the src directory is in the path for package imports
-src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+if getattr(sys, 'frozen', False):
+    # Running as bundled .app — modules are in the bundle
+    _base_dir = os.path.dirname(sys.executable)
+else:
+    _base_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.join(_base_dir, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 

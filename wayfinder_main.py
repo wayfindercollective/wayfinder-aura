@@ -2878,17 +2878,24 @@ class OverlayController:
                 pass
             
             try:
-                # Find the overlay script (prefer new location in src/)
-                script_path = Path(__file__).parent / "src" / "wayfinder" / "ui" / "overlay.py"
-                if not script_path.exists():
-                    # Fallback to old location
-                    script_path = Path(__file__).parent / "status_overlay.py"
+                # Find the overlay script
+                if getattr(sys, 'frozen', False):
+                    # Running as bundled .app — overlay is in Contents/Resources
+                    # sys.executable = .app/Contents/MacOS/Wayfinder Aura
+                    # parents[1] = .app/Contents/
+                    bundle_dir = Path(sys.executable).parent.parent / "Resources"
+                    script_path = bundle_dir / "overlay.py"
+                else:
+                    # Running from source — prefer new location in src/
+                    script_path = Path(__file__).parent / "src" / "wayfinder" / "ui" / "overlay.py"
+                    if not script_path.exists():
+                        # Fallback to old location
+                        script_path = Path(__file__).parent / "status_overlay.py"
                 if not script_path.exists():
                     print(f"Overlay script not found: {script_path}")
                     return False
                 
                 # Use the same Python interpreter that's running this script
-                import sys
                 python_exe = sys.executable
                 
                 # Start subprocess with mode, style, scale, and offset arguments
