@@ -158,21 +158,43 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
         proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
         proc.communicate(text.encode("utf-8"))
 
-        # Small delay to ensure clipboard is ready
-        import time
-        time.sleep(0.05)
-
-        # Paste with Cmd+V
+        # Paste with Cmd+V (no sleep needed — proc.communicate() is synchronous)
         pyautogui.hotkey("command", "v")
 
-        # Restore original clipboard after a short delay
+        # Restore original clipboard after paste completes
         if old_clipboard is not None:
-            time.sleep(0.2)
-            proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
-            proc.communicate(old_clipboard.encode("utf-8"))
+            import time
+            time.sleep(0.1)
+            # Smart restore: only restore if clipboard still contains our injected text
+            # (user may have copied something new during the delay)
+            try:
+                current = subprocess.run(
+                    ["pbpaste"], capture_output=True, text=True, timeout=2
+                ).stdout
+                if current == text:
+                    proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+                    proc.communicate(old_clipboard.encode("utf-8"))
+            except Exception:
+                pass  # Best-effort restore
 
     except Exception as e:
         raise InjectionError(f"macOS text injection failed: {e}")
+
+
+def warmup_clipboard() -> None:
+    """Pre-warm the macOS pasteboard daemon (best-effort, non-blocking).
+
+    The first pbcopy/pbpaste call can be slow (~100ms) due to pasteboard daemon
+    startup. Calling this during app initialization eliminates the delay from
+    the hot path.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import subprocess
+        subprocess.run(["pbpaste"], capture_output=True, timeout=2)
+    except Exception:
+        pass  # Best-effort — never block startup
 
 
 # =============================================================================

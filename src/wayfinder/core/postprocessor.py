@@ -2152,7 +2152,20 @@ def process_with_config(text: str, config: dict) -> str:
     # For non-minimal styles, check if LLM post-processing is enabled
     if not config.get("post_processing_enabled", True):
         return text
-    
+
+    # === SHORT INPUT BYPASS: Skip LLM for very short text ===
+    # Small models (2B) hallucinate badly on short inputs — they generate
+    # 100x+ fabricated text that gets caught by is_hallucination() and falls
+    # back to original anyway, wasting ~6 seconds for nothing.
+    input_words = len(text.split())
+    backend_type = config.get("post_processing_backend", "llama_cpp")
+    if input_words <= 10 and backend_type == "llama_cpp":
+        start_time = time.time()
+        result = fast_filler_removal(text)
+        elapsed = time.time() - start_time
+        print(f"[Post-processing] ⚡ Short input ({input_words} words) — regex cleanup in {elapsed*1000:.1f}ms")
+        return result
+
     try:
         # Build the prompt using new tone-based system with compatibility checks
         prompt, compatibility = build_prompt(text, config)

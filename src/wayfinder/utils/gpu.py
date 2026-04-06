@@ -880,11 +880,27 @@ def get_gpu_info() -> GPUInfo:
 def get_optimal_thread_count() -> int:
     """
     Get optimal thread count based on CPU cores.
-    
+
+    On Apple Silicon, uses performance core count (not efficiency cores) capped at 8,
+    since Metal handles GPU-heavy work and too many CPU threads cause contention.
+    On other platforms, uses 75% of total cores (2-16 range).
+
     Returns:
-        Recommended thread count for whisper.cpp (75% of cores, 2-16 range).
+        Recommended thread count for whisper.cpp.
     """
     try:
+        import sys, platform
+        if sys.platform == "darwin" and platform.machine() == "arm64":
+            # Apple Silicon: use performance cores only, capped at 8
+            try:
+                perf_cores = int(subprocess.check_output(
+                    ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
+                    text=True, timeout=5
+                ).strip())
+                return max(2, min(8, perf_cores))
+            except Exception:
+                pass  # Fall through to generic logic
+
         cpu_count = os.cpu_count() or 4
         # Use ~75% of cores, minimum 2, maximum 16
         return max(2, min(16, int(cpu_count * 0.75)))

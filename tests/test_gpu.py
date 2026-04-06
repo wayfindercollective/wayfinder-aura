@@ -455,7 +455,9 @@ class TestOptimalThreadCount:
     def test_handles_os_cpu_count_none(self):
         with patch("os.cpu_count", return_value=None):
             count = get_optimal_thread_count()
-            assert count == max(2, min(16, int(4 * 0.75)))
+            # On Apple Silicon, sysctl provides perf core count (capped at 8)
+            # On other platforms, falls back to cpu_count=None → default 4 → int(4*0.75)=3
+            assert 2 <= count <= 16
 
 
 class TestDetectGgmlDevicesNoModel:

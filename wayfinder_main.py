@@ -308,10 +308,23 @@ def detect_gpu() -> GPUInfo:
 
 
 def get_optimal_thread_count() -> int:
-    """Get optimal thread count based on CPU cores."""
+    """Get optimal thread count based on CPU cores.
+
+    On Apple Silicon, uses performance core count capped at 8 (Metal handles GPU work).
+    On other platforms, uses 75% of total cores (2-16 range).
+    """
     try:
+        import platform as _platform
+        if sys.platform == "darwin" and _platform.machine() == "arm64":
+            try:
+                perf_cores = int(subprocess.check_output(
+                    ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
+                    text=True, timeout=5
+                ).strip())
+                return max(2, min(8, perf_cores))
+            except Exception:
+                pass
         cpu_count = os.cpu_count() or 4
-        # Use ~75% of cores, minimum 2, maximum 16
         return max(2, min(16, int(cpu_count * 0.75)))
     except Exception:
         return 4
@@ -12236,6 +12249,13 @@ class WayfinderApp(ctk.CTk):
         except:
             pass
         
+        # Clean up whisper-server if running
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+            WhisperServerBackend.shutdown()
+        except:
+            pass
+
         # Clean up overlay
         self._cleanup_overlay()
         
@@ -13068,10 +13088,11 @@ class WayfinderApp(ctk.CTk):
                 self.event_queue.put((EventType.INJECTION_DONE, None))
                 return
 
-            # Small delay to let focus settle back to the user's target window
-            # (overlay/main window state changes may have briefly affected focus)
+            # Brief delay to let focus settle back to the user's target window
+            # On macOS the overlay uses WindowDoesNotAcceptFocus so focus rarely shifts,
+            # but 30ms provides a safety margin for OS-level focus handling
             import time as _time
-            _time.sleep(0.15)
+            _time.sleep(0.03)
 
             print(f"[Inject] Pasting text: {repr(text[:80])}", flush=True)
             inject_text(text, typing_speed="instant")
