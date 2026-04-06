@@ -238,10 +238,10 @@ def main():
         _instance_server = _start_instance_listener(app)
         
         # ─── First-run setup wizard ───
-        # Show the wizard if setup hasn't been completed yet
+        # Use the app's config (which is the most up-to-date after constructor)
         try:
-            if not config.get("setup_completed", False):
-                print(f"[Setup] Showing wizard (setup_completed={config.get('setup_completed')})", flush=True)
+            if not app.config.get("setup_completed", False):
+                print(f"[Setup] Showing wizard (setup_completed={app.config.get('setup_completed')})", flush=True)
                 from wayfinder.ui.dialogs.setup_wizard import SetupWizard
                 
                 # Pause animations during wizard to keep UI responsive
@@ -251,7 +251,7 @@ def main():
                 # Don't withdraw the main window - on KDE Wayland, transient
                 # children of withdrawn windows don't appear. The wizard's
                 # grab_set() prevents interaction with the main window anyway.
-                wizard = SetupWizard(app, config)
+                wizard = SetupWizard(app, app.config)
                 app.wait_window(wizard)
                 
                 # Resume animations and ensure main window is visible + focused
