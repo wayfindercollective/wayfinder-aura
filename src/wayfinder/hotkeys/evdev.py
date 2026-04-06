@@ -6,7 +6,6 @@ Works on X11 and can work on Wayland with proper permissions.
 """
 
 import select
-from enum import Enum, auto
 from queue import Queue
 from threading import Event
 from typing import Callable, Optional
@@ -17,16 +16,7 @@ from evdev import InputDevice, categorize, ecodes
 from ..config import MODIFIER_CODES
 
 
-class EventType(Enum):
-    """Event types for the application event queue."""
-    HOTKEY_PRESSED = auto()
-    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/AI Prompt/Casual)
-    TRANSCRIPTION_DONE = auto()
-    TRANSCRIPTION_ERROR = auto()
-    INJECTION_DONE = auto()
-    INJECTION_ERROR = auto()
-    CHUNK_TRANSCRIBED = auto()  # A chunk was transcribed during recording
-    CHUNKED_TRANSCRIPTION_DONE = auto()  # All chunks transcribed
+from .types import EventType  # noqa: F401 — re-exported for backwards compatibility
 
 
 # Mouse button codes (matching config.py KEY_CODES)

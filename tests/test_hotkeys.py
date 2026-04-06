@@ -185,7 +185,7 @@ class TestSocketListener:
     def test_socket_handles_toggle_command(self, mock_socket_cls, mock_unlink):
         """Receiving 'toggle' puts HOTKEY_PRESSED into the event queue."""
         from wayfinder.hotkeys.socket import socket_listener
-        from wayfinder.hotkeys.evdev import EventType
+        from wayfinder.hotkeys import EventType
 
         event_queue = Queue()
         stop_event = Event()
@@ -221,7 +221,7 @@ class TestSocketListener:
     def test_socket_handles_style_command(self, mock_socket_cls, mock_unlink):
         """Receiving 'style' puts STYLE_TOGGLE into the event queue."""
         from wayfinder.hotkeys.socket import socket_listener
-        from wayfinder.hotkeys.evdev import EventType
+        from wayfinder.hotkeys import EventType
 
         event_queue = Queue()
         stop_event = Event()
@@ -255,7 +255,7 @@ class TestSocketListener:
     def test_socket_handles_style_with_name(self, mock_socket_cls, mock_unlink):
         """Receiving 'style:dev' puts STYLE_TOGGLE with the style name."""
         from wayfinder.hotkeys.socket import socket_listener
-        from wayfinder.hotkeys.evdev import EventType
+        from wayfinder.hotkeys import EventType
 
         event_queue = Queue()
         stop_event = Event()

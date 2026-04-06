@@ -252,7 +252,11 @@ class TestFeatureGate:
 
     def test_force_refresh_feature_gate(self, temp_config_dir: Path):
         """Test that force_refresh creates a new FeatureGate instance."""
+        import wayfinder.license as lic
         from wayfinder.license import get_feature_gate, generate_license_key, store_license
+
+        # Reset the global singleton to ensure test isolation
+        lic._feature_gate = None
 
         gate1 = get_feature_gate()
         assert not gate1.is_premium

@@ -11,6 +11,7 @@ import queue
 import signal
 import socket
 import subprocess
+import sys
 import webbrowser
 import threading
 import time
@@ -31,6 +32,7 @@ try:
     HAS_EVDEV = True
 except ImportError:
     evdev = None
+    InputDevice = None
     HAS_EVDEV = False
 from PIL import Image, ImageDraw, ImageFilter
 import pystray
@@ -180,6 +182,13 @@ KEY_CODES = {
 MODIFIER_CODES = {
     "ctrl": [29, 97], "alt": [56, 100], "shift": [42, 54], "super": [125, 126],
 }
+
+
+def _get_llm_models_dir() -> Path:
+    """Get the LLM models directory (platform-aware)."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
+    return Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
 
 
 def load_config() -> dict:
@@ -1068,46 +1077,107 @@ class BenchmarkRunner:
     def get_system_info() -> dict:
         """Detect system hardware: CPU, GPU, RAM."""
         info = {"cpu": "Unknown", "gpu": "Unknown", "ram": "Unknown"}
-        
-        # CPU detection
-        try:
-            with open("/proc/cpuinfo") as f:
-                for line in f:
-                    if "model name" in line:
-                        info["cpu"] = line.split(":")[1].strip()
-                        break
-        except:
-            pass
-        
-        # GPU detection (AMD/NVIDIA/Intel)
-        try:
+
+        if sys.platform == "darwin":
+            # macOS: use sysctl and system_profiler
             import subprocess
-            result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
-            for line in result.stdout.split("\n"):
-                if "VGA" in line or "3D controller" in line:
-                    # Extract GPU name - it's after the last colon
-                    if ":" in line:
-                        gpu_part = line.split(":")[-1].strip()
-                        # Clean up common prefixes
-                        for prefix in ["Advanced Micro Devices, Inc. ", "NVIDIA Corporation ", "Intel Corporation "]:
-                            gpu_part = gpu_part.replace(prefix, "")
-                        info["gpu"] = gpu_part[:60]  # Truncate long names
-                    break
-        except:
-            pass
-        
-        # RAM detection
-        try:
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    if "MemTotal" in line:
-                        mem_kb = int(line.split()[1])
-                        mem_gb = mem_kb / 1024 / 1024
-                        info["ram"] = f"{mem_gb:.0f} GB"
+            try:
+                # CPU name + core count
+                result = subprocess.run(
+                    ["sysctl", "-n", "machdep.cpu.brand_string"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                cpu_name = result.stdout.strip() if result.returncode == 0 else ""
+                cpu_cores = ""
+                try:
+                    r = subprocess.run(["sysctl", "-n", "hw.ncpu"], capture_output=True, text=True, timeout=5)
+                    total = r.stdout.strip()
+                    # Get P/E core breakdown on Apple Silicon
+                    rp = subprocess.run(["sysctl", "-n", "hw.perflevel0.logicalcpu"], capture_output=True, text=True, timeout=5)
+                    re = subprocess.run(["sysctl", "-n", "hw.perflevel1.logicalcpu"], capture_output=True, text=True, timeout=5)
+                    if rp.returncode == 0 and re.returncode == 0:
+                        cpu_cores = f" ({rp.stdout.strip()}P+{re.stdout.strip()}E cores)"
+                    elif total:
+                        cpu_cores = f" ({total} cores)"
+                except Exception:
+                    pass
+                if cpu_name:
+                    info["cpu"] = f"{cpu_name}{cpu_cores}"
+            except Exception:
+                pass
+
+            try:
+                # GPU: Apple Silicon has unified GPU — get core count from system_profiler
+                result = subprocess.run(
+                    ["system_profiler", "SPDisplaysDataType"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                gpu_chip = ""
+                gpu_cores = ""
+                metal_ver = ""
+                for line in result.stdout.split("\n"):
+                    stripped = line.strip()
+                    if "Chipset Model" in stripped or "Chip Model" in stripped:
+                        gpu_chip = stripped.split(":")[-1].strip()
+                    elif "Total Number of Cores" in stripped:
+                        gpu_cores = stripped.split(":")[-1].strip()
+                    elif "Metal Support" in stripped:
+                        metal_ver = stripped.split(":")[-1].strip()
+                if gpu_chip:
+                    parts = [gpu_chip]
+                    if gpu_cores:
+                        parts.append(f"{gpu_cores} cores")
+                    if metal_ver:
+                        parts.append(metal_ver)
+                    info["gpu"] = " · ".join(parts)
+            except Exception:
+                pass
+
+            try:
+                result = subprocess.run(
+                    ["sysctl", "-n", "hw.memsize"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    mem_bytes = int(result.stdout.strip())
+                    info["ram"] = f"{mem_bytes / (1024**3):.0f} GB"
+            except Exception:
+                pass
+        else:
+            # Linux: /proc filesystem
+            try:
+                with open("/proc/cpuinfo") as f:
+                    for line in f:
+                        if "model name" in line:
+                            info["cpu"] = line.split(":")[1].strip()
+                            break
+            except Exception:
+                pass
+
+            try:
+                import subprocess
+                result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+                for line in result.stdout.split("\n"):
+                    if "VGA" in line or "3D controller" in line:
+                        if ":" in line:
+                            gpu_part = line.split(":")[-1].strip()
+                            for prefix in ["Advanced Micro Devices, Inc. ", "NVIDIA Corporation ", "Intel Corporation "]:
+                                gpu_part = gpu_part.replace(prefix, "")
+                            info["gpu"] = gpu_part[:60]
                         break
-        except:
-            pass
-        
+            except Exception:
+                pass
+
+            try:
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        if "MemTotal" in line:
+                            mem_kb = int(line.split()[1])
+                            info["ram"] = f"{mem_kb / 1024 / 1024:.0f} GB"
+                            break
+            except Exception:
+                pass
+
         return info
     
     def _find_models_dir(self) -> Path:
@@ -1424,6 +1494,17 @@ WHISPER_CPP_MODELS = {
 
 # Recommended GGUF models for post-processing (llama.cpp)
 LLM_GGUF_MODELS = {
+    "qwen3.5-2b": {
+        "name": "Qwen 3.5 2B ⭐",
+        "size": "1.3 GB",
+        "size_bytes": 1_390_000_000,
+        "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+        "filename": "Qwen3.5-2B-Q4_K_M.gguf",
+        "description": "Top recommendation. Best balance of speed and quality for dictation.",
+        "speed": "Very Fast",
+        "accuracy": "Excellent",
+        "recommended": True,
+    },
     "phi-3-mini": {
         "name": "Phi-3 Mini (3.8B)",
         "size": "2.3 GB",
@@ -1433,7 +1514,6 @@ LLM_GGUF_MODELS = {
         "description": "Microsoft's compact powerhouse. Excellent at text cleanup and formatting.",
         "speed": "Fast",
         "accuracy": "High",
-        "recommended": True,
     },
     "qwen2.5-1.5b": {
         "name": "Qwen2.5 1.5B",
@@ -1441,10 +1521,9 @@ LLM_GGUF_MODELS = {
         "size_bytes": 1_117_320_736,
         "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
         "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        "description": "Alibaba's efficient model. Great balance of speed and quality.",
+        "description": "Previous default, still works well.",
         "speed": "Very Fast",
         "accuracy": "Good",
-        "recommended": True,
     },
     "smollm2-360m": {
         "name": "SmolLM2 360M",
@@ -7132,7 +7211,7 @@ class WayfinderApp(ctk.CTk):
     
     def _build_llamacpp_inline_section(self, parent) -> None:
         """Build inline llama.cpp model selection with download."""
-        models_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
+        models_dir = _get_llm_models_dir()
         models_dir.mkdir(parents=True, exist_ok=True)
         
         current_model_path = self.config.get("llama_cpp_model_path", "")
@@ -7207,7 +7286,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         info_icon.pack(side="left", padx=(6, 0))
-        llamacpp_tooltip = "GGUF models run locally via llama.cpp.\nModels are downloaded to ~/.local/share/wayfinder-aura/llm-models/\nGPU acceleration is automatic on Linux with CUDA/ROCm."
+        llamacpp_tooltip = f"GGUF models run locally via llama.cpp.\nModels are downloaded to {_get_llm_models_dir()}/\nGPU acceleration is automatic (Metal on macOS, CUDA/ROCm on Linux)."
         ToolTip(label_widget, llamacpp_tooltip)
         ToolTip(info_icon, llamacpp_tooltip)
         
@@ -7421,7 +7500,7 @@ class WayfinderApp(ctk.CTk):
         
         model_id = data["id"]
         model_info = data["info"]
-        models_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
+        models_dir = _get_llm_models_dir()
         models_dir.mkdir(parents=True, exist_ok=True)
         
         self._inline_download_active = True
@@ -7845,7 +7924,7 @@ class WayfinderApp(ctk.CTk):
         ).pack(anchor="w", pady=(0, 16))
         
         # Models directory
-        models_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
+        models_dir = _get_llm_models_dir()
         models_dir.mkdir(parents=True, exist_ok=True)
         
         # Content container
@@ -11917,13 +11996,17 @@ class WayfinderApp(ctk.CTk):
         
         icon_image = self.custom_icon if self.custom_icon else self.get_tray_icon(AppState.IDLE)
         self.tray_icon = pystray.Icon("wayfinder-aura", icon_image, "Wayfinder Aura", menu)
-        
-        def _tray_thread_wrapper():
-            try:
-                self.tray_icon.run()
-            except Exception as e:
-                raise
-        threading.Thread(target=_tray_thread_wrapper, daemon=True).start()
+
+        if sys.platform == "darwin":
+            # macOS: use run_detached to avoid NSApplication conflict with Tk mainloop
+            self.tray_icon.run_detached()
+        else:
+            def _tray_thread_wrapper():
+                try:
+                    self.tray_icon.run()
+                except Exception as e:
+                    raise
+            threading.Thread(target=_tray_thread_wrapper, daemon=True).start()
 
     def get_tray_icon(self, state: AppState, pulse_scale: float = 1.0) -> Image.Image:
         """Create a navigation arrow tray icon.

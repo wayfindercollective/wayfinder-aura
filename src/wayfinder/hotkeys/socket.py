@@ -12,7 +12,7 @@ from threading import Event
 from typing import Callable, Optional
 
 from ..config import SOCKET_PATH
-from .evdev import EventType
+from .types import EventType
 
 
 def socket_listener(

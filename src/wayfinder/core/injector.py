@@ -1,11 +1,15 @@
 """
 Text injection module for Wayfinder Aura.
-Handles text injection on Wayland using ydotool.
+
+Platform dispatch:
+- Linux: ydotool (works on both X11 and Wayland)
+- macOS: pyautogui
 """
 
 import os
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -87,7 +91,11 @@ def check_ydotool_ready() -> tuple[bool, str]:
 
 def inject_text(text: str, typing_speed: str = "instant") -> None:
     """
-    Inject text into the active window using ydotool.
+    Inject text into the active window.
+
+    Dispatches to platform-specific backend:
+    - Linux: ydotool
+    - macOS: pyautogui
 
     Args:
         text: Text to inject
@@ -102,6 +110,50 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
     if not text:
         return
 
+    if sys.platform == "darwin":
+        _inject_text_pyautogui(text, typing_speed)
+    else:
+        _inject_text_ydotool(text, typing_speed)
+
+
+# =============================================================================
+# macOS backend: pyautogui
+# =============================================================================
+
+# Typing speed → pyautogui interval (seconds between keystrokes)
+PYAUTOGUI_INTERVALS = {
+    "instant": 0.0,
+    "fast": 0.0,
+    "normal": 0.012,
+    "slow": 0.05,
+    "very_slow": 0.1,
+}
+
+
+def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
+    """Inject text on macOS using pyautogui."""
+    try:
+        import pyautogui
+    except ImportError:
+        raise InjectionError(
+            "pyautogui not installed. Install with: pip install pyautogui"
+        )
+
+    interval = PYAUTOGUI_INTERVALS.get(typing_speed, 0.0)
+
+    try:
+        pyautogui.typewrite(text, interval=interval)
+    except Exception as e:
+        raise InjectionError(f"pyautogui injection failed: {e}")
+
+
+# =============================================================================
+# Linux backend: ydotool
+# =============================================================================
+
+
+def _inject_text_ydotool(text: str, typing_speed: str = "instant") -> None:
+    """Inject text on Linux using ydotool."""
     # Pre-flight check
     ready, msg = check_ydotool_ready()
     if not ready:

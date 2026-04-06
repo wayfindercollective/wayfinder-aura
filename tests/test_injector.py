@@ -30,7 +30,7 @@ class TestTypingSpeeds:
     """Tests for the TYPING_SPEEDS dictionary."""
 
     def test_instant_speed(self):
-        assert TYPING_SPEEDS["instant"] == (0, 0)
+        assert TYPING_SPEEDS["instant"] == (1, 1)
 
     def test_fast_speed(self):
         assert TYPING_SPEEDS["fast"] == (1, 1)
@@ -101,7 +101,7 @@ class TestInjectTextSubprocess:
     @pytest.mark.parametrize(
         "speed,expected_delay,expected_hold",
         [
-            ("instant", "0", "0"),
+            ("instant", "1", "1"),
             ("fast", "1", "1"),
             ("normal", "12", "12"),
             ("slow", "50", "20"),
@@ -123,8 +123,8 @@ class TestInjectTextSubprocess:
         cmd = mock_ydotool_success.call_args[0][0]
         delay_idx = cmd.index("--key-delay") + 1
         hold_idx = cmd.index("--key-hold") + 1
-        assert cmd[delay_idx] == "0"
-        assert cmd[hold_idx] == "0"
+        assert cmd[delay_idx] == "2"
+        assert cmd[hold_idx] == "2"
 
     def test_passes_timeout_120(self, mock_ydotool_success):
         inject_text("test", "instant")
@@ -160,18 +160,20 @@ class TestInjectTextErrors:
             inject_text("hello", "instant")
 
     def test_timeout_raises_injection_error(self):
-        with patch(
-            "wayfinder.core.injector.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="ydotool", timeout=120),
-        ):
+        with patch("wayfinder.core.injector.sys") as mock_sys, \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(cmd="ydotool", timeout=120)):
+            mock_sys.platform = "linux"
             with pytest.raises(InjectionError, match="timed out"):
                 inject_text("hello", "instant")
 
     def test_file_not_found_raises_injection_error(self):
-        with patch(
-            "wayfinder.core.injector.subprocess.run",
-            side_effect=FileNotFoundError("ydotool"),
-        ):
+        with patch("wayfinder.core.injector.sys") as mock_sys, \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=FileNotFoundError("ydotool")):
+            mock_sys.platform = "linux"
             with pytest.raises(InjectionError, match="ydotool not found"):
                 inject_text("hello", "instant")
 

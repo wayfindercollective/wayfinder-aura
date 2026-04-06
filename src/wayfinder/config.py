@@ -6,6 +6,7 @@ Handles loading, saving, and defaults for all application settings.
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +76,11 @@ else:
     _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
     _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
     # LLM model for post-processing - prefer Qwen 3.5 if available, fall back to Qwen 2.5
-    _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
+    # Use platform-appropriate data dir (macOS: ~/Library/Application Support/, Linux: ~/.local/share/)
+    if sys.platform == "darwin":
+        _user_llm_dir = str(Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models")
+    else:
+        _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
     _llm_new = os.path.join(_user_llm_dir, "Qwen3.5-2B-Q4_K_M.gguf")
     _llm_old = os.path.join(_user_llm_dir, "qwen2.5-1.5b-instruct-q4_k_m.gguf")
     _default_llm_model_path = _llm_new if os.path.exists(_llm_new) else _llm_old

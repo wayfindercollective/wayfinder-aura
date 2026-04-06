@@ -9,6 +9,7 @@ and config updates that happen during onboarding. All system calls
 import io
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -182,8 +183,9 @@ class TestCheckAudio:
 # =============================================================================
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="ydotool is Linux-only")
 class TestCheckYdotool:
-    """Test ydotool detection."""
+    """Test ydotool detection (Linux-only)."""
 
     @patch("subprocess.run")
     @patch("wayfinder.core.setup.shutil.which", return_value="/usr/bin/ydotool")
@@ -416,14 +418,18 @@ class TestCheckWhisperModel:
 class TestDetectGpuVendor:
     """Test GPU vendor auto-detection."""
 
+    @patch("wayfinder.core.setup.sys")
     @patch("wayfinder.core.setup.shutil.which", return_value="/usr/bin/nvidia-smi")
-    def test_nvidia_detected_via_smi(self, mock_which):
+    def test_nvidia_detected_via_smi(self, mock_which, mock_sys):
+        mock_sys.platform = "linux"
         vendor = _detect_gpu_vendor()
         assert vendor == "nvidia"
 
+    @patch("wayfinder.core.setup.sys")
     @patch("wayfinder.core.setup.shutil.which", return_value=None)
     @patch("subprocess.run")
-    def test_amd_detected_via_lspci(self, mock_run, mock_which):
+    def test_amd_detected_via_lspci(self, mock_run, mock_which, mock_sys):
+        mock_sys.platform = "linux"
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="06:00.0 VGA compatible controller: Advanced Micro Devices [AMD/ATI] Navi 31\n",
@@ -432,12 +438,22 @@ class TestDetectGpuVendor:
             vendor = _detect_gpu_vendor()
         assert vendor == "amd"
 
+    @patch("wayfinder.core.setup.sys")
     @patch("wayfinder.core.setup.shutil.which", return_value=None)
     @patch("subprocess.run", side_effect=FileNotFoundError)
-    def test_unknown_when_no_tools(self, mock_run, mock_which):
+    def test_unknown_when_no_tools(self, mock_run, mock_which, mock_sys):
+        mock_sys.platform = "linux"
         with patch.object(Path, "exists", return_value=False):
             vendor = _detect_gpu_vendor()
         assert vendor == "unknown"
+
+    def test_macos_apple_silicon(self):
+        """On macOS ARM, returns 'apple'."""
+        with patch("wayfinder.core.setup.sys") as mock_sys, \
+             patch("platform.machine", return_value="arm64"):
+            mock_sys.platform = "darwin"
+            vendor = _detect_gpu_vendor()
+            assert vendor == "apple"
 
 
 # =============================================================================
@@ -534,11 +550,13 @@ class TestModelCatalog:
 
 
 class TestGetMissingSystemPackages:
-    """Test detection of missing apt packages."""
+    """Test detection of missing system packages."""
 
+    @patch("wayfinder.core.setup.sys")
     @patch("wayfinder.core.setup.shutil.which")
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="nvidia")
-    def test_all_missing(self, mock_vendor, mock_which):
+    def test_all_missing(self, mock_vendor, mock_which, mock_sys):
+        mock_sys.platform = "linux"
         mock_which.return_value = None
         pkgs = get_missing_system_packages()
         assert "ydotool" in pkgs
@@ -554,9 +572,11 @@ class TestGetMissingSystemPackages:
         pkgs = get_missing_system_packages()
         assert "nvidia-cuda-toolkit" not in pkgs
 
+    @patch("wayfinder.core.setup.sys")
     @patch("wayfinder.core.setup.shutil.which")
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="unknown")
-    def test_only_ydotool_missing(self, mock_vendor, mock_which):
+    def test_only_ydotool_missing(self, mock_vendor, mock_which, mock_sys):
+        mock_sys.platform = "linux"
         def which_side_effect(name):
             if name == "ydotool":
                 return None
@@ -572,6 +592,7 @@ class TestGetMissingSystemPackages:
 # =============================================================================
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux package manager tests")
 class TestInstallSystemPackages:
     """Test the system package installation flow (all mocked)."""
 
@@ -874,6 +895,7 @@ class TestFullSetupFlow:
     detect -> install packages -> build whisper -> download model -> config saved.
     """
 
+    @patch("wayfinder.core.setup.sys")
     @patch("requests.get")
     @patch("wayfinder.core.setup._run_cmd")
     @patch("subprocess.run")
@@ -883,8 +905,10 @@ class TestFullSetupFlow:
     @patch("wayfinder.core.setup._detect_package_manager", return_value="apt")
     def test_complete_nvidia_setup_flow(
         self, mock_pkg_mgr, mock_vendor, mock_which, mock_popen, mock_sub_run,
-        mock_run_cmd, mock_requests, temp_dir: Path, sample_config: dict,
+        mock_run_cmd, mock_requests, mock_sys, temp_dir: Path, sample_config: dict,
     ):
+        mock_sys.platform = "linux"
+        mock_sys.executable = sys.executable
         """Simulate full setup on a fresh NVIDIA Ubuntu system."""
 
         # Step 1: Check — everything missing

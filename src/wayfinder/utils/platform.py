@@ -278,11 +278,12 @@ def find_executable(name: str) -> str | None:
 def get_default_whisper_binary() -> str:
     """
     Get the default whisper.cpp binary path for the current platform.
-    
+
     Returns platform-appropriate path:
     - AppImage: $APPDIR/usr/bin/whisper-cli
     - Flatpak: /app/bin/whisper-cli
-    - Linux/macOS: ~/whisper.cpp/build/bin/whisper-cli
+    - macOS: Homebrew paths (/opt/homebrew/bin or /usr/local/bin)
+    - Linux: ~/whisper.cpp/build/bin/whisper-cli
     - Windows: ~/whisper.cpp/build/bin/whisper-cli.exe
     """
     appdir = get_appimage_dir()
@@ -292,6 +293,16 @@ def get_default_whisper_binary() -> str:
             return str(bundled)
     if is_flatpak():
         return "/app/bin/whisper-cli"
+    if is_macos():
+        # Check Homebrew paths (ARM then Intel)
+        for brew_path in [Path("/opt/homebrew/bin/whisper-cli"),
+                          Path("/usr/local/bin/whisper-cli")]:
+            if brew_path.exists():
+                return str(brew_path)
+        # Also check PATH
+        found = find_executable("whisper-cli")
+        if found:
+            return found
     if is_windows():
         return str(Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli.exe")
     return str(Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli")
@@ -300,11 +311,12 @@ def get_default_whisper_binary() -> str:
 def get_default_llama_binary() -> str:
     """
     Get the default llama.cpp binary path for the current platform.
-    
+
     Returns platform-appropriate path:
     - AppImage: $APPDIR/usr/bin/llama-cli
     - Flatpak: /app/bin/llama-cli
-    - Linux/macOS: ~/llama.cpp/build/bin/llama-cli
+    - macOS: Homebrew paths (/opt/homebrew/bin or /usr/local/bin)
+    - Linux: ~/llama.cpp/build/bin/llama-cli
     - Windows: ~/llama.cpp/build/bin/llama-cli.exe
     """
     appdir = get_appimage_dir()
@@ -314,6 +326,15 @@ def get_default_llama_binary() -> str:
             return str(bundled)
     if is_flatpak():
         return "/app/bin/llama-cli"
+    if is_macos():
+        # Check Homebrew paths (ARM then Intel)
+        for brew_path in [Path("/opt/homebrew/bin/llama-cli"),
+                          Path("/usr/local/bin/llama-cli")]:
+            if brew_path.exists():
+                return str(brew_path)
+        found = find_executable("llama-cli")
+        if found:
+            return found
     if is_windows():
         return str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli.exe")
     return str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli")

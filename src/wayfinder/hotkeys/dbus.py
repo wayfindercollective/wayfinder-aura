@@ -10,7 +10,7 @@ from queue import Queue
 from threading import Event
 from typing import Callable, Optional
 
-from .evdev import EventType
+from .types import EventType
 
 # Check if D-Bus is available
 try:

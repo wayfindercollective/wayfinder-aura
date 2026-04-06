@@ -107,8 +107,9 @@ class TestGetModelQuirks:
         assert "safety_filter_email" in quirks["issues"]
         assert "hallucination_prone" in quirks["issues"]
 
-    def test_qwen_1_5b_recommended(self):
-        quirks = get_model_quirks("qwen2.5:1.5b")
+    def test_qwen_3_5_2b_recommended(self):
+        """qwen3.5:2b is the current top recommendation (replaced qwen2.5:1.5b)."""
+        quirks = get_model_quirks("qwen3.5:2b")
         assert quirks.get("recommended") is True
 
     def test_qwen_1_5b_has_no_issues(self):

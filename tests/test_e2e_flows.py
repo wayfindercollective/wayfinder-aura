@@ -80,10 +80,13 @@ class TestFullDictationPipeline:
         state = get_next_state(state, "pasted")
         assert state == AppState.IDLE
 
+    @patch("wayfinder.core.injector.sys")
+    @patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked"))
     @patch("subprocess.run")
-    def test_transcribe_then_inject(self, mock_run,
+    def test_transcribe_then_inject(self, mock_run, _mock_ready, mock_injector_sys,
                                      temp_dir: Path, sample_audio_file: Path, sample_config: dict):
         """Full flow: transcribe audio, then inject the result text."""
+        mock_injector_sys.platform = "linux"
         from wayfinder.core.transcriber import transcribe_with_config
         from wayfinder.core.injector import inject_text
 
@@ -279,9 +282,12 @@ class TestErrorRecovery:
         state = get_next_state(state, "error")
         assert state == AppState.IDLE
 
+    @patch("wayfinder.core.injector.sys")
+    @patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked"))
     @patch("wayfinder.core.injector.subprocess.run")
-    def test_injection_failure_raises(self, mock_run):
+    def test_injection_failure_raises(self, mock_run, _mock_ready, mock_sys):
         """A failed ydotool should raise InjectionError."""
+        mock_sys.platform = "linux"
         from wayfinder.core.injector import inject_text, InjectionError
 
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="daemon not running")

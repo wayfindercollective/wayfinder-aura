@@ -11,7 +11,7 @@ from threading import Event
 from typing import Callable, Optional
 
 # Import EventType from evdev module for consistency
-from .evdev import EventType
+from .types import EventType
 
 
 # Check if pynput is available
@@ -32,7 +32,9 @@ def is_pynput_available() -> bool:
 
 
 # Mapping from evdev key codes to pynput Key objects
-# This allows the same key codes to work across platforms
+# This allows the same key codes to work across platforms.
+# Some keys (e.g., insert, alt_l) don't exist on macOS pynput,
+# so we use getattr with fallbacks.
 EVDEV_TO_PYNPUT = {
     # Function keys
     59: Key.f1,
@@ -47,12 +49,12 @@ EVDEV_TO_PYNPUT = {
     68: Key.f10,
     87: Key.f11,
     88: Key.f12,
-    # Modifier keys
-    29: Key.ctrl_l,
+    # Modifier keys (macOS uses ctrl/shift/alt; Linux uses ctrl_l/shift_l/alt_l)
+    29: getattr(Key, 'ctrl_l', Key.ctrl),
     97: Key.ctrl_r,
-    42: Key.shift_l,
+    42: getattr(Key, 'shift_l', Key.shift),
     54: Key.shift_r,
-    56: Key.alt_l,
+    56: getattr(Key, 'alt_l', Key.alt),
     100: Key.alt_r,
     125: Key.cmd,  # Super/Windows/Command key
     126: Key.cmd_r,
@@ -64,7 +66,6 @@ EVDEV_TO_PYNPUT = {
     57: Key.space,
     58: Key.caps_lock,
     111: Key.delete,
-    110: Key.insert,
     102: Key.home,
     107: Key.end,
     104: Key.page_up,
@@ -82,29 +83,37 @@ EVDEV_TO_PYNPUT = {
     115: Key.media_volume_up,
 }
 
+# Insert key only exists on Linux/Windows
+if hasattr(Key, 'insert'):
+    EVDEV_TO_PYNPUT[110] = Key.insert
+
 # Reverse mapping for display purposes
+# Uses getattr for keys that don't exist on all platforms (e.g., macOS lacks insert, ctrl_l)
 PYNPUT_TO_NAME = {
     Key.f1: "F1", Key.f2: "F2", Key.f3: "F3", Key.f4: "F4",
     Key.f5: "F5", Key.f6: "F6", Key.f7: "F7", Key.f8: "F8",
     Key.f9: "F9", Key.f10: "F10", Key.f11: "F11", Key.f12: "F12",
-    Key.ctrl_l: "Ctrl", Key.ctrl_r: "Ctrl",
-    Key.shift_l: "Shift", Key.shift_r: "Shift",
-    Key.alt_l: "Alt", Key.alt_r: "Alt",
+    getattr(Key, 'ctrl_l', Key.ctrl): "Ctrl", Key.ctrl_r: "Ctrl",
+    getattr(Key, 'shift_l', Key.shift): "Shift", Key.shift_r: "Shift",
+    getattr(Key, 'alt_l', Key.alt): "Alt", Key.alt_r: "Alt",
     Key.cmd: "Super", Key.cmd_r: "Super",
     Key.esc: "Escape", Key.space: "Space",
     Key.enter: "Enter", Key.backspace: "Backspace",
     Key.tab: "Tab", Key.caps_lock: "CapsLock",
-    Key.delete: "Delete", Key.insert: "Insert",
+    Key.delete: "Delete",
     Key.home: "Home", Key.end: "End",
     Key.page_up: "PageUp", Key.page_down: "PageDown",
     Key.up: "Up", Key.down: "Down", Key.left: "Left", Key.right: "Right",
 }
 
+if hasattr(Key, 'insert'):
+    PYNPUT_TO_NAME[Key.insert] = "Insert"
+
 # Modifier key sets for checking combinations
 MODIFIER_KEYS = {
-    'ctrl': {Key.ctrl_l, Key.ctrl_r},
-    'shift': {Key.shift_l, Key.shift_r},
-    'alt': {Key.alt_l, Key.alt_r},
+    'ctrl': {getattr(Key, 'ctrl_l', Key.ctrl), Key.ctrl_r},
+    'shift': {getattr(Key, 'shift_l', Key.shift), Key.shift_r},
+    'alt': {getattr(Key, 'alt_l', Key.alt), Key.alt_r},
     'super': {Key.cmd, Key.cmd_r},
 }
 

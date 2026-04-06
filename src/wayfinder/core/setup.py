@@ -10,6 +10,7 @@ Supports Ubuntu/Debian (apt), with graceful fallback to manual instructions.
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -138,8 +139,20 @@ def check_audio() -> DependencyStatus:
         return DependencyStatus(False, error=f"Audio system error: {e}")
 
 
-def check_ydotool() -> DependencyStatus:
-    """Check for ydotool binary and running daemon."""
+def check_text_injection() -> DependencyStatus:
+    """Check for text injection tool (platform-specific).
+
+    - macOS: pyautogui
+    - Linux: ydotool + daemon
+    """
+    if sys.platform == "darwin":
+        try:
+            import pyautogui
+            return DependencyStatus(True, detail="pyautogui (macOS)")
+        except ImportError:
+            return DependencyStatus(False, error="pyautogui not installed. Run: pip install pyautogui")
+
+    # Linux: check ydotool
     # In bundled environments, check for the bundled binary first
     if IS_APPIMAGE and APPDIR:
         bundled = os.path.join(APPDIR, "usr", "bin", "ydotool")
@@ -170,6 +183,32 @@ def check_ydotool() -> DependencyStatus:
     return DependencyStatus(True, detail="ydotool installed", warning="ydotoold daemon not running")
 
 
+# Keep old name for backwards compat (tests, etc.)
+check_ydotool = check_text_injection
+
+
+def install_pyautogui(log: 'LogCallback', done: 'DoneCallback') -> None:
+    """Install pyautogui via pip (macOS text injection dependency)."""
+    def _run():
+        try:
+            log("Installing pyautogui via pip...")
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "pip", "install", "pyautogui"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            for line in iter(proc.stdout.readline, ""):
+                log(line.rstrip())
+            proc.wait()
+            if proc.returncode == 0:
+                done(True, "pyautogui installed successfully")
+            else:
+                done(False, f"pip install failed (exit {proc.returncode})")
+        except Exception as e:
+            log(f"Error: {e}")
+            done(False, str(e))
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def check_gpu_driver() -> DependencyStatus:
     """Detect GPU and check if drivers are working."""
     gpu_vendor = _detect_gpu_vendor()
@@ -198,6 +237,9 @@ def check_gpu_driver() -> DependencyStatus:
 
     elif gpu_vendor == "intel":
         return DependencyStatus(True, detail="Intel GPU (integrated)", warning="CPU transcription recommended")
+
+    elif gpu_vendor == "apple":
+        return DependencyStatus(True, detail="Apple Silicon (Metal GPU acceleration)")
 
     return DependencyStatus(False, error="No GPU detected (CPU mode will be used)")
 
@@ -272,10 +314,11 @@ def check_whisper_cpp(config: dict) -> DependencyStatus:
         except Exception:
             return DependencyStatus(True, detail=binary_path)
 
-    # Check common paths
+    # Check common paths (including Homebrew ARM on macOS)
     alt_paths = [
         Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli",
-        Path("/usr/local/bin/whisper-cli"),
+        Path("/opt/homebrew/bin/whisper-cli"),  # macOS ARM Homebrew
+        Path("/usr/local/bin/whisper-cli"),     # macOS Intel Homebrew / Linux
         Path("/usr/bin/whisper-cli"),
     ]
     for alt in alt_paths:
@@ -313,7 +356,9 @@ DoneCallback = Callable[[bool, str], None]
 
 
 def _detect_package_manager() -> str:
-    """Detect the system package manager. Returns 'dnf', 'apt', or 'unknown'."""
+    """Detect the system package manager. Returns 'brew', 'dnf', 'apt', or 'unknown'."""
+    if sys.platform == "darwin" and shutil.which("brew"):
+        return "brew"
     if shutil.which("dnf"):
         return "dnf"
     if shutil.which("apt"):
@@ -326,11 +371,12 @@ def _detect_package_manager() -> str:
 # Package name mapping: generic name -> {pkg_manager: actual_package_name}
 _PACKAGE_MAP = {
     "ydotool":          {"apt": "ydotool",          "dnf": "ydotool"},
-    "git":              {"apt": "git",              "dnf": "git"},
-    "cmake":            {"apt": "cmake",            "dnf": "cmake"},
-    "build-essential":  {"apt": "build-essential",  "dnf": "gcc-c++ make"},
+    "git":              {"apt": "git",              "dnf": "git",              "brew": "git"},
+    "cmake":            {"apt": "cmake",            "dnf": "cmake",            "brew": "cmake"},
+    "build-essential":  {"apt": "build-essential",  "dnf": "gcc-c++ make",     "brew": "gcc"},
     "nvidia-cuda-toolkit": {"apt": "nvidia-cuda-toolkit", "dnf": "cuda-toolkit"},
     "libfuse2":         {"apt": "libfuse2",         "dnf": "fuse-libs"},
+    "whisper-cpp":      {"brew": "whisper-cpp"},
 }
 
 
@@ -382,20 +428,24 @@ def install_system_packages(
         log("")
 
         if pkg_mgr == "unknown":
-            log("Could not detect package manager (apt/dnf).")
+            log("Could not detect package manager.")
             log("Install these manually:")
             log(f"  {', '.join(resolved)}")
             done(False, "Unknown package manager")
             return
 
         try:
-            # Build the install command for the detected package manager
-            if pkg_mgr == "dnf":
+            if pkg_mgr == "brew":
+                # macOS: Homebrew doesn't need sudo
+                install_cmd = f"brew install {' '.join(resolved)}"
+                cmd = ["bash", "-c", install_cmd]
+            elif pkg_mgr == "dnf":
                 install_cmd = f"dnf install -y {' '.join(resolved)}"
+                cmd = ["pkexec", "bash", "-c", install_cmd]
             else:  # apt
                 install_cmd = f"apt update -qq && apt install -y {' '.join(resolved)}"
+                cmd = ["pkexec", "bash", "-c", install_cmd]
 
-            cmd = ["pkexec", "bash", "-c", install_cmd]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
             for line in iter(proc.stdout.readline, ""):
@@ -403,7 +453,8 @@ def install_system_packages(
             proc.wait()
 
             if proc.returncode == 0:
-                if "ydotool" in packages:
+                # Linux-only: enable ydotool daemon after install
+                if "ydotool" in packages and sys.platform != "darwin":
                     log("")
                     log("Enabling ydotool daemon...")
                     subprocess.run(
@@ -419,20 +470,28 @@ def install_system_packages(
                 log("")
                 log("No worries — you can install these yourself instead.")
                 log("Open a terminal and run:")
-                log(f"  sudo {install_cmd}")
+                if pkg_mgr == "brew":
+                    log(f"  {install_cmd}")
+                else:
+                    log(f"  sudo {install_cmd}")
                 log("")
                 log("Then restart Wayfinder Aura.")
                 done(False, "Manual install needed")
             else:
                 log(f"Package manager returned exit code {proc.returncode}.")
                 log("You can install manually:")
-                log(f"  sudo {install_cmd}")
+                if pkg_mgr == "brew":
+                    log(f"  {install_cmd}")
+                else:
+                    log(f"  sudo {install_cmd}")
                 done(False, f"{pkg_mgr} exited with code {proc.returncode}")
 
         except FileNotFoundError:
             log("Automatic install is not available on this system.")
             log("Install packages manually in a terminal:")
-            if pkg_mgr == "dnf":
+            if pkg_mgr == "brew":
+                log(f"  brew install {' '.join(resolved)}")
+            elif pkg_mgr == "dnf":
                 log(f"  sudo dnf install -y {' '.join(resolved)}")
             else:
                 log(f"  sudo apt install -y {' '.join(resolved)}")
@@ -672,11 +731,11 @@ def get_dependencies(config: dict) -> list[Dependency]:
         ),
         Dependency(
             id="ydotool",
-            name="Text Injection (ydotool)",
+            name="Text Injection (pyautogui)" if sys.platform == "darwin" else "Text Injection (ydotool)",
             description="Types transcribed text at your cursor",
             required=True,
-            _check=check_ydotool,
-            # install handled by install_system_packages
+            _check=check_text_injection,
+            _install=install_pyautogui if sys.platform == "darwin" else None,
         ),
         Dependency(
             id="gpu_driver",
@@ -731,7 +790,7 @@ def get_dependencies(config: dict) -> list[Dependency]:
 def get_recommended_model() -> str:
     """Return the best model name for this system's GPU."""
     vendor = _detect_gpu_vendor()
-    if vendor in ("nvidia", "amd"):
+    if vendor in ("nvidia", "amd", "apple"):
         return "large-v3-turbo"
     return "small.en"
 
@@ -743,7 +802,8 @@ def get_missing_system_packages() -> list[str]:
     to the actual package manager names during installation.
     """
     packages = []
-    if not shutil.which("ydotool"):
+    # ydotool is Linux-only; macOS uses pyautogui (pip package, not system)
+    if sys.platform != "darwin" and not shutil.which("ydotool"):
         packages.append("ydotool")
     if not shutil.which("git"):
         packages.append("git")
@@ -759,8 +819,20 @@ def get_missing_system_packages() -> list[str]:
 # ─── Helpers ─────────────────────────────────────────────────────
 
 def _detect_gpu_vendor() -> str:
-    """Quick GPU vendor detection. Returns 'nvidia', 'amd', 'intel', or 'unknown'."""
-    # Fast check: nvidia-smi exists = NVIDIA
+    """Quick GPU vendor detection.
+
+    Returns 'nvidia', 'amd', 'intel', 'apple' (Metal), or 'unknown'.
+    """
+    import platform as plat
+
+    # macOS: Apple Silicon has Metal GPU, Intel Macs also support Metal
+    if sys.platform == "darwin":
+        machine = plat.machine().lower()
+        if machine in ("arm64", "aarch64"):
+            return "apple"  # Apple Silicon — Metal GPU
+        return "intel"  # Intel Mac — still supports Metal
+
+    # Linux: Fast check: nvidia-smi exists = NVIDIA
     if shutil.which("nvidia-smi"):
         return "nvidia"
 

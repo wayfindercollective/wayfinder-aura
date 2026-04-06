@@ -288,6 +288,12 @@ class SetupWizard(ctk.CTkToplevel):
 
         def _sequence():
             """Run installations in sequence."""
+            # Step 0: Dependencies with their own install function (e.g., pyautogui on macOS)
+            for dep in self._deps:
+                if dep._install is not None and not self._dep_ok(dep.id):
+                    self._run_step_sync(dep.id, dep._install)
+                    self._recheck(dep.id)
+
             # Step 1: System packages (if needed, skipped in bundled environments)
             if missing_pkgs:
                 self._run_step_sync(
@@ -395,7 +401,25 @@ class SetupWizard(ctk.CTkToplevel):
             if IS_APPIMAGE or IS_FLATPAK:
                 self._append_log("Dependencies are bundled — no system install needed.")
                 return
-            # System package
+
+            # If the dependency has its own install function, use it (e.g., pyautogui on macOS)
+            if dep._install is not None:
+                self._installing = True
+                if dep_id in self._dep_rows:
+                    self._dep_rows[dep_id].set_installing()
+
+                def log_cb(msg):
+                    self._msg_queue.put(("log", msg))
+
+                def done_cb(success, detail):
+                    self._msg_queue.put(("install_done", (dep_id, success, detail)))
+                    self._installing = False
+                    self._recheck(dep_id)
+
+                dep._install(log_cb, done_cb)
+                return
+
+            # System package install (Linux: apt/dnf, macOS: brew)
             pkgs = get_missing_system_packages()
             if pkgs:
                 self._installing = True

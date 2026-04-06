@@ -152,25 +152,39 @@ def mock_whisper_failure():
 
 @pytest.fixture
 def mock_ydotool_success():
-    """Mock subprocess.run to simulate successful ydotool text injection."""
+    """Mock subprocess.run to simulate successful ydotool text injection.
+
+    Forces Linux platform so inject_text dispatches to the ydotool backend,
+    and mocks check_ydotool_ready so the pre-flight check passes on any OS.
+    """
     mock_result = MagicMock()
     mock_result.returncode = 0
     mock_result.stdout = ""
     mock_result.stderr = ""
 
-    with patch("wayfinder.core.injector.subprocess.run", return_value=mock_result) as mock_run:
+    with patch("wayfinder.core.injector.sys") as mock_sys, \
+         patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
+         patch("wayfinder.core.injector.subprocess.run", return_value=mock_result) as mock_run:
+        mock_sys.platform = "linux"
         yield mock_run
 
 
 @pytest.fixture
 def mock_ydotool_failure():
-    """Mock subprocess.run to simulate failed ydotool text injection."""
+    """Mock subprocess.run to simulate failed ydotool text injection.
+
+    Forces Linux platform so inject_text dispatches to the ydotool backend,
+    and mocks check_ydotool_ready so the pre-flight check passes.
+    """
     mock_result = MagicMock()
     mock_result.returncode = 1
     mock_result.stdout = ""
     mock_result.stderr = "Error: ydotool daemon not running"
 
-    with patch("wayfinder.core.injector.subprocess.run", return_value=mock_result) as mock_run:
+    with patch("wayfinder.core.injector.sys") as mock_sys, \
+         patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
+         patch("wayfinder.core.injector.subprocess.run", return_value=mock_result) as mock_run:
+        mock_sys.platform = "linux"
         yield mock_run
 
 
@@ -257,6 +271,7 @@ def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
 @pytest.fixture
 def flatpak_env(monkeypatch: pytest.MonkeyPatch):
     """Set up environment variables to simulate running in Flatpak."""
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("FLATPAK_ID", "io.github.user.WayfinderAura")
     monkeypatch.setenv("WAYFINDER_FLATPAK", "1")
 
@@ -264,6 +279,7 @@ def flatpak_env(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def wayland_env(monkeypatch: pytest.MonkeyPatch):
     """Set up environment variables to simulate Wayland session."""
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
     monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
 
@@ -271,6 +287,7 @@ def wayland_env(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def x11_env(monkeypatch: pytest.MonkeyPatch):
     """Set up environment variables to simulate X11 session."""
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
     monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
 

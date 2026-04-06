@@ -23,7 +23,7 @@ from .pynput_listener import (
 )
 
 # EventType is always needed (defined in evdev but used everywhere)
-from .evdev import EventType
+from .types import EventType
 
 # Linux-only: evdev for direct input device monitoring
 # On non-Linux platforms, provide stub implementations
