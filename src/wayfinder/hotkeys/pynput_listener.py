@@ -176,21 +176,13 @@ def pynput_hotkey_listener(
     log_callback: Optional[Callable[[str], None]] = None,
     style_toggle_key: Optional[int] = None,
     style_toggle_modifiers: Optional[list[str]] = None,
+    config_ref: Optional[dict] = None,
 ):
     """
     Cross-platform hotkey listener using pynput.
-    
-    This function runs in a background thread and monitors for the configured
-    hotkey combinations.
-    
-    Args:
-        event_queue: Queue to put events into
-        hotkey_key: The main key code (evdev format, e.g., F9 = 67)
-        hotkey_modifiers: List of modifier names (e.g., ["ctrl", "shift"])
-        stop_event: Threading event to signal shutdown
-        log_callback: Optional function to call with log messages
-        style_toggle_key: Key code for style toggle (e.g., F10 = 68)
-        style_toggle_modifiers: List of modifier names for style toggle
+
+    If config_ref is provided, the listener reads hotkey settings from it
+    on each keypress, allowing live hotkey changes without restarting.
     """
     def log(msg: str):
         if log_callback:
@@ -198,57 +190,62 @@ def pynput_hotkey_listener(
                 log_callback(msg)
             except Exception:
                 pass
-    
+
     if not PYNPUT_AVAILABLE:
         log("⚠️ pynput not available. Install with: pip install pynput")
         return
-    
-    # Convert evdev key codes to pynput keys
+
+    # Initial key setup
     target_key = evdev_code_to_pynput(hotkey_key)
     if target_key is None:
         log(f"⚠️ Unknown hotkey code: {hotkey_key}")
         return
-    
-    style_target_key = None
-    if style_toggle_key:
-        style_target_key = evdev_code_to_pynput(style_toggle_key)
-    
-    # Build required modifier sets
-    required_modifiers = set()
-    for mod_name in hotkey_modifiers:
-        if mod_name.lower() in MODIFIER_KEYS:
-            required_modifiers.add(mod_name.lower())
-    
-    style_required_modifiers = set()
-    if style_toggle_modifiers:
-        for mod_name in style_toggle_modifiers:
-            if mod_name.lower() in MODIFIER_KEYS:
-                style_required_modifiers.add(mod_name.lower())
-    
+
+    style_target_key = evdev_code_to_pynput(style_toggle_key) if style_toggle_key else None
+
+    def _build_mod_set(mod_list):
+        return {m.lower() for m in (mod_list or []) if m.lower() in MODIFIER_KEYS}
+
+    required_modifiers = _build_mod_set(hotkey_modifiers)
+    style_required_modifiers = _build_mod_set(style_toggle_modifiers)
+
     # Track currently pressed modifiers
-    pressed_modifiers = set()  # Set of modifier names ('ctrl', 'shift', etc.)
-    
+    pressed_modifiers = set()
+
     # Display hotkey info
     hotkey_display = get_key_name(target_key)
     if required_modifiers:
         mod_str = "+".join(mod.capitalize() for mod in sorted(required_modifiers))
         hotkey_display = f"{mod_str}+{hotkey_display}"
     log(f"🎹 Listening for hotkey: {hotkey_display}")
-    
+
     if style_target_key:
         style_display = get_key_name(style_target_key)
         if style_required_modifiers:
             mod_str = "+".join(mod.capitalize() for mod in sorted(style_required_modifiers))
             style_display = f"{mod_str}+{style_display}"
         log(f"✎ Style toggle hotkey: {style_display}")
-    
+
+    def _get_current_keys():
+        """Read live hotkey config if available, otherwise use initial values."""
+        nonlocal target_key, style_target_key, required_modifiers, style_required_modifiers
+        if config_ref is not None:
+            new_key = evdev_code_to_pynput(config_ref.get("hotkey_key", hotkey_key))
+            new_style = evdev_code_to_pynput(config_ref.get("style_toggle_key", style_toggle_key or 0))
+            if new_key and new_key != target_key:
+                target_key = new_key
+                required_modifiers = _build_mod_set(config_ref.get("hotkey_modifiers", []))
+                log(f"🎹 Hotkey changed to: {get_key_name(target_key)}")
+            if new_style and new_style != style_target_key:
+                style_target_key = new_style
+                style_required_modifiers = _build_mod_set(config_ref.get("style_toggle_modifiers", []))
+
     def check_modifiers(required: set[str]) -> bool:
-        """Check if all required modifiers are currently pressed."""
         if not required:
             return True
         return required <= pressed_modifiers
-    
-    # Debounce: ignore repeated presses within this window (seconds)
+
+    # Debounce
     _last_hotkey_time = 0.0
     _last_style_time = 0.0
     DEBOUNCE_SECONDS = 0.5
@@ -260,6 +257,9 @@ def pynput_hotkey_listener(
         for mod_name, mod_keys in MODIFIER_KEYS.items():
             if key in mod_keys:
                 pressed_modifiers.add(mod_name)
+
+        # Read live config for hotkey changes
+        _get_current_keys()
 
         now = time.time()
 
