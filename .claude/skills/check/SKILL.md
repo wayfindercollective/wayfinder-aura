@@ -1,11 +1,12 @@
 ---
 name: check
-description: Multi-model plan review with codebase tool access. Local Qwen R1 (free) finds issues, GPT 5.4 R2 (~$0.80) validates, Qwen R3 (free) verifies. 3 rounds max.
+description: Hybrid plan review using local Qwen 3.5 397B and GPT 5.4. Models get file-reading tools to explore the codebase themselves. Qwen R1 (free) finds issues, GPT 5.4 R2 (~$0.80) validates, Qwen R3 (free) verifies. 3 rounds max.
 ---
 
 ## Scope
 
-Reviews PLANS only. Cost: ~$0.80 per full 3-round review (1 GPT round + 2 local Qwen rounds).
+Reviews PLANS only. For post-implementation code review, use `/ship`.
+Cost: ~$0.80 per full 3-round review (1 GPT round + 2 local Qwen rounds).
 
 ## When to use
 
@@ -48,7 +49,7 @@ output = content if content.strip() else reasoning
 
 Both models get tools to explore the codebase. Claude executes tool calls locally and returns results.
 
-### Tools (Chat Completions format -- for Qwen)
+### Tools (Chat Completions format — for Qwen)
 
 ```python
 tools_chat_completions = [
@@ -60,7 +61,7 @@ tools_chat_completions = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path relative to project root (e.g. 'src/wayfinder/core/transcriber.py')"},
+                    "path": {"type": "string", "description": "Path relative to project root (e.g. 'src/app/api/analytics/crm/agent-performance/route.ts')"},
                     "start_line": {"type": "integer", "description": "First line to read (1-indexed). Omit for start of file."},
                     "end_line": {"type": "integer", "description": "Last line to read (1-indexed). Omit for end of file."}
                 },
@@ -76,7 +77,7 @@ tools_chat_completions = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Directory path relative to project root (e.g. 'src/wayfinder/core')"}
+                    "path": {"type": "string", "description": "Directory path relative to project root (e.g. 'src/app/api/analytics')"}
                 },
                 "required": ["path"]
             }
@@ -100,7 +101,7 @@ tools_chat_completions = [
 ]
 ```
 
-### Tools (Responses API format -- for GPT 5.4)
+### Tools (Responses API format — for GPT 5.4)
 
 ```python
 tools_responses_api = [
@@ -111,7 +112,7 @@ tools_responses_api = [
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path relative to project root (e.g. 'src/wayfinder/core/transcriber.py')"},
+                "path": {"type": "string", "description": "Path relative to project root (e.g. 'src/app/api/analytics/crm/agent-performance/route.ts')"},
                 "start_line": {"type": "integer", "description": "First line to read (1-indexed). Omit for start of file."},
                 "end_line": {"type": "integer", "description": "Last line to read (1-indexed). Omit for end of file."}
             },
@@ -125,7 +126,7 @@ tools_responses_api = [
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Directory path relative to project root (e.g. 'src/wayfinder/core')"}
+                "path": {"type": "string", "description": "Directory path relative to project root (e.g. 'src/app/api/analytics')"}
             },
             "required": ["path"]
         }
@@ -196,7 +197,7 @@ def execute_tool(name, arguments):
             return 'Error: path outside project root'
         # Escape single quotes in pattern
         safe_pattern = pattern.replace("'", "'\\''")
-        cmd = f"grep -rn --include='*.py' --include='*.md' --include='*.toml' --include='*.cfg' --include='*.yaml' --include='*.yml' '{safe_pattern}' '{real}' | head -50"
+        cmd = f"grep -rn --include='*.ts' --include='*.tsx' --include='*.js' --include='*.md' '{safe_pattern}' '{real}' | head -50"
     else:
         return f'Error: unknown tool {name}'
 
@@ -234,18 +235,18 @@ import json, urllib.request, time
 plan = open(f'/tmp/check-plan-{REVIEW_ID}.md').read()
 
 messages = [
-    {'role': 'system', 'content': '''You are a senior code reviewer for a Linux voice dictation app (Python, CustomTkinter, PyQt6, whisper.cpp, llama.cpp).
+    {'role': 'system', 'content': '''You are a senior code reviewer for a multi-tenant SaaS codebase (Next.js 14, Convex, TypeScript).
 
-You have tools to explore the actual codebase. USE THEM. Do not guess about code structure -- read the real files.
+You have tools to explore the actual codebase. USE THEM. Do not guess about code structure — read the real files.
 
 Strategy:
 1. Read CLAUDE.md from the project root to understand project rules
 2. Read the critical files mentioned in the plan (the actual source code being modified)
 3. Verify every claim in the plan against the real code
-4. Check for timer/polling issues, config duplication, UI pattern violations
+4. Check for multi-tenancy violations, auth issues, bounded queries
 
-Be strategic -- you have max 5 tool rounds. Read targeted sections (use start_line/end_line for large files).'''},
-    {'role': 'user', 'content': f'Review this implementation plan:\n\n{plan}\n\n=== CRITICAL CHECKS ===\n- Timers: no polling/timers under 100ms (QTimer(0) caused 100% CPU)\n- Config: single source of truth in src/wayfinder/config.py only\n- UI: no popup dialogs (CTkToplevel) -- use inline CTkFrame panels\n- Widgets: standard CustomTkinter only, no custom wrappers\n- Code placement: new code in src/wayfinder/, not root-level legacy files\n- Canvas safety: all Tk canvas ops wrapped in try/except\n- Overlay: state changes need forced repaint + minimum display time\n- Cleanup: whisper artifact cleanup goes through clean_whisper_artifacts() only\n- Performance: optimizations must not degrade visual quality (30fps waveform, 15fps overlay)\n- Tones: LLM prompt changes must be tested across all 5 tones at both intensities\n=== END ===\n\nUse your tools to read the actual source files referenced in the plan. Verify everything against the real code.\n\nEnd with VERDICT: APPROVED or VERDICT: REVISE'}
+Be strategic — you have max 5 tool rounds. Read targeted sections (use start_line/end_line for large files).'''},
+    {'role': 'user', 'content': f'Review this implementation plan:\n\n{plan}\n\n=== CRITICAL CHECKS ===\n- Multi-tenancy: every DB op needs organizationId\n- Deploy safety: never npx convex deploy\n- Secrets: never log/output values\n- Bounded queries: no unbounded .collect()\n- Auth: getQueryOrgContext for queries, getOrgContext for mutations\n=== END ===\n\nUse your tools to read the actual source files referenced in the plan. Verify everything against the real code.\n\nEnd with VERDICT: APPROVED or VERDICT: REVISE'}
 ]
 
 MAX_TOOL_ROUNDS = 5
@@ -292,7 +293,7 @@ for tool_round in range(MAX_TOOL_ROUNDS):
             })
         continue  # Next round
     else:
-        # Model returned final text -- extract output
+        # Model returned final text — extract output
         content = msg.get('content', '') or ''
         reasoning = msg.get('reasoning_content', '') or ''
         output = content if content.strip() else reasoning
@@ -307,7 +308,7 @@ if not got_final and not output:
         'messages': messages + [{'role': 'user', 'content': 'You have gathered enough context. Now provide your final review with VERDICT: APPROVED or VERDICT: REVISE. Do not make any more tool calls.'}],
         'temperature': 0.3,
         'max_tokens': 16384
-        # Note: no 'tools' key -- forces text response
+        # Note: no 'tools' key — forces text response
     }).encode()
     req = urllib.request.Request(
         'http://localhost:8080/v1/chat/completions',
@@ -360,22 +361,22 @@ import json, urllib.request, os, time
 plan = open(f'/tmp/check-plan-{REVIEW_ID}.md').read()
 
 input_messages = [
-    {'role': 'system', 'content': '''You are a senior staff engineer reviewing a revised implementation plan for a Linux voice dictation app (Python, CustomTkinter, PyQt6, whisper.cpp, llama.cpp).
+    {'role': 'system', 'content': '''You are a senior staff engineer reviewing a revised implementation plan for a multi-tenant SaaS codebase (Next.js 14, Convex, TypeScript).
 
-You have tools to explore the actual codebase. USE THEM. Do not guess about code structure -- read the real files.
+You have tools to explore the actual codebase. USE THEM. Do not guess about code structure — read the real files.
 
 This plan has been through one round of review already. Catch anything the first reviewer missed.
 
 Strategy:
 1. Read CLAUDE.md to understand project rules
-2. Read the critical files from the plan -- verify claims against real code
-3. Focus on: timer safety, config duplication, UI patterns, performance regressions
-4. Be strategic -- max 5 tool rounds.'''},
-    {'role': 'user', 'content': f'Review this revised plan:\n\n{plan}\n\n=== CRITICAL CHECKS ===\n- Timers: no polling/timers under 100ms (QTimer(0) caused 100% CPU)\n- Config: single source of truth in src/wayfinder/config.py only\n- UI: no popup dialogs (CTkToplevel) -- use inline CTkFrame panels\n- Widgets: standard CustomTkinter only, no custom wrappers\n- Code placement: new code in src/wayfinder/, not root-level legacy files\n- Canvas safety: all Tk canvas ops wrapped in try/except\n- Overlay: state changes need forced repaint + minimum display time\n- Cleanup: whisper artifact cleanup goes through clean_whisper_artifacts() only\n- Performance: optimizations must not degrade visual quality (30fps waveform, 15fps overlay)\n- Tones: LLM prompt changes must be tested across all 5 tones at both intensities\n=== END ===\n\nUse your tools to read the actual source files. Verify everything.\n\nEnd with VERDICT: APPROVED or VERDICT: REVISE'}
+2. Read the critical files from the plan — verify claims against real code
+3. Focus on: multi-tenancy violations, auth bypass, SQL correctness, architecture concerns
+4. Be strategic — max 5 tool rounds.'''},
+    {'role': 'user', 'content': f'Review this revised plan:\n\n{plan}\n\n=== CRITICAL CHECKS ===\n- Multi-tenancy: every DB op needs organizationId\n- Deploy safety: never npx convex deploy\n- Secrets: never log/output values\n- Bounded queries: no unbounded .collect()\n- Auth: getQueryOrgContext for queries, getOrgContext for mutations\n=== END ===\n\nUse your tools to read the actual source files. Verify everything.\n\nEnd with VERDICT: APPROVED or VERDICT: REVISE'}
 ]
 
 MAX_TOOL_ROUNDS = 5
-ROUND_TIMEOUT = 300  # 5 minutes for GPT
+ROUND_TIMEOUT = 300  # 5 minutes for GPT (generous for tool rounds)
 round_start = time.time()
 previous_response_id = None
 tool_results_input = None
@@ -395,7 +396,7 @@ for tool_round in range(MAX_TOOL_ROUNDS):
     }
 
     if previous_response_id and tool_results_input:
-        # Continue from previous response -- send only new tool results
+        # Continue from previous response — send only new tool results
         body['previous_response_id'] = previous_response_id
         body['input'] = tool_results_input
     else:
@@ -446,7 +447,7 @@ if not got_final and not output and previous_response_id:
         'input': [{'role': 'user', 'content': 'You have gathered enough context. Now provide your final review with VERDICT: APPROVED or VERDICT: REVISE. Do not make any more tool calls.'}],
         'temperature': 0.3,
         'max_output_tokens': 8192
-        # Note: no 'tools' key -- forces text response
+        # Note: no 'tools' key — forces text response
     }
     payload = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -522,7 +523,7 @@ Key improvement: Models can now explore the codebase themselves via read_file, l
 
 ## Post-approval: test coverage gate
 
-After approval, Claude MUST verify the plan includes tests. If not, add them. Tests in `tests/` using pytest. Run: `python3 -m pytest tests/ -v --tb=short`.
+After approval, Claude MUST verify the plan includes tests. If not, add them. Tests in `tests-convex/` using vitest + convex-test. Use `setupFullOrg()` and `createMultiOrgTestScenario()` from `convex/lib/testUtils.ts`.
 
 ## Fallback: snippet mode
 

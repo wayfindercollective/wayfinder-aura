@@ -35,7 +35,7 @@ Download from [lmstudio.ai](https://lmstudio.ai). Any version 0.4.9+ supports to
 **Verify it works:**
 ```bash
 curl http://localhost:8080/v1/models \
-  -H "Authorization: Bearer YOUR_LITELLM_API_KEY"
+  -H "Authorization: Bearer YOUR_LM_STUDIO_API_KEY"
 ```
 
 ### 2. OpenAI API Key (for GPT 5.4)
@@ -75,8 +75,8 @@ Edit `SKILL.md` and update these values for your setup:
 ### LM Studio settings (lines 27-31)
 
 ```yaml
-Endpoint: http://localhost:8080/v1/chat/completions    # LiteLLM proxy (queues to LM Studio :1234)
-API Key: YOUR_LITELLM_API_KEY                          # From LiteLLM (see ~/litellm-proxy/config.yaml)
+Endpoint: http://localhost:8080/v1/chat/completions    # Change if different port
+API Key: YOUR_LM_STUDIO_API_KEY                        # From LM Studio settings
 Model: qwen3.5-397b-a17b                               # Change to your loaded model
 ```
 
@@ -137,13 +137,13 @@ cmd = f"grep -rn --include='*.py' --include='*.html' --include='*.md' ..."
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────┐     ┌──────────────────┐     ┌─────────────┐
-│ Claude Code  │────>│ LiteLLM  │────>│ LM Studio (local)│     │ OpenAI API  │
-│ (orchestrator)│<───│ :8080    │<───│ Qwen 3.5 397B   │     │ GPT 5.4     │
-│              │     │ (queue)  │     └──────────────────┘     └─────────────┘
-│  Executes    │     └──────────┘           │                       │
-│  tool calls  │<──────────────────────────┘  tool_calls           │
-│  locally     │<───────────────────────────────────────────────────┘
+┌─────────────┐     ┌──────────────────┐     ┌─────────────┐
+│ Claude Code  │────>│ LM Studio (local)│     │ OpenAI API  │
+│ (orchestrator)│<───│ Qwen 3.5 397B   │     │ GPT 5.4     │
+│              │     └──────────────────┘     └─────────────┘
+│  Executes    │            │                       │
+│  tool calls  │<───────────┘  tool_calls           │
+│  locally     │<───────────────────────────────────┘
 │              │
 │  read_file() │──> reads from your project filesystem
 │  search_code()──> greps your codebase
