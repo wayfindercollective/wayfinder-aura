@@ -9420,7 +9420,14 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, 'hotkey_label'):
             self.hotkey_label.configure(text=f"Press {new_hotkey} to toggle")
         self.log(f"⚙ Hotkey: {new_hotkey}")
+        # Signal old listener to stop and wait for it to finish
         self.stop_event.set()
+        # Give the old pynput listener time to fully stop
+        # (pynput.keyboard.Listener needs time to release macOS event tap)
+        self.after(300, self._restart_hotkey_listener)
+
+    def _restart_hotkey_listener(self):
+        """Restart hotkey listener after old one has stopped."""
         self.stop_event = threading.Event()
         self.start_hotkey_listener()
 
@@ -9443,8 +9450,7 @@ class WayfinderApp(ctk.CTk):
         new_hotkey = self.get_style_hotkey_display()
         self.log(f"⚙ Style toggle hotkey: {new_hotkey}")
         self.stop_event.set()
-        self.stop_event = threading.Event()
-        self.start_hotkey_listener()
+        self.after(300, self._restart_hotkey_listener)
 
     def _on_style_hotkey_key_changed(self, value):
         """Handle inline style hotkey key dropdown change."""
