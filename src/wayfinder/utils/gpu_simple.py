@@ -10,6 +10,7 @@ This replaces the complex multi-layer detection with a simple, reliable approach
 
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
@@ -195,16 +196,21 @@ def setup_gpu_environment(config: Optional[dict] = None) -> dict:
             except (ValueError, TypeError):
                 pass
     
-    # 2. Auto-detect discrete GPU
+    # 2. macOS: Metal is used automatically, no Vulkan device selection needed
+    if sys.platform == "darwin":
+        print("[GPU] macOS — using Metal acceleration (automatic)")
+        return env_set
+
+    # 3. Linux: Auto-detect discrete Vulkan GPU
     discrete = get_discrete_gpu()
-    
+
     if discrete is not None:
         os.environ["GGML_VK_VISIBLE_DEVICES"] = str(discrete)
         env_set["GGML_VK_VISIBLE_DEVICES"] = str(discrete)
         print(f"[GPU] Auto-detected discrete GPU: device {discrete}")
     else:
         print("[GPU] No discrete GPU detected, using default device 0")
-    
+
     return env_set
 
 

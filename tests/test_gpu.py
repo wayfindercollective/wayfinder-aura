@@ -377,6 +377,7 @@ class TestSetupGpuEnvironment:
     def test_auto_detect_discrete(self, monkeypatch):
         """Sets GGML_VK_VISIBLE_DEVICES to detected discrete GPU."""
         monkeypatch.delenv("GGML_VK_VISIBLE_DEVICES", raising=False)
+        monkeypatch.setattr("wayfinder.utils.gpu_simple.sys.platform", "linux")
 
         with patch("wayfinder.utils.gpu_simple.get_discrete_gpu", return_value=1):
             env_set = setup_gpu_environment({"gpu_device": "auto"})
@@ -396,6 +397,7 @@ class TestSetupGpuEnvironment:
     def test_invalid_manual_override_falls_through(self, monkeypatch):
         """Invalid gpu_device value falls through to auto-detect."""
         monkeypatch.delenv("GGML_VK_VISIBLE_DEVICES", raising=False)
+        monkeypatch.setattr("wayfinder.utils.gpu_simple.sys.platform", "linux")
 
         with patch("wayfinder.utils.gpu_simple.get_discrete_gpu", return_value=0):
             env_set = setup_gpu_environment({"gpu_device": "notanumber"})
