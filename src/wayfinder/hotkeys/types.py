@@ -19,3 +19,4 @@ class EventType(Enum):
     INJECTION_ERROR = auto()
     CHUNK_TRANSCRIBED = auto()  # A chunk was transcribed during recording
     CHUNKED_TRANSCRIPTION_DONE = auto()  # All chunks transcribed
+    LOG_MESSAGE = auto()  # Thread-safe log message (avoids Tk threading crash)

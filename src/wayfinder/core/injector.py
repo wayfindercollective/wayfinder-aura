@@ -131,20 +131,48 @@ PYAUTOGUI_INTERVALS = {
 
 
 def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
-    """Inject text on macOS using pyautogui."""
+    """Inject text on macOS using clipboard paste (Cmd+V).
+
+    pyautogui.typewrite() only handles ASCII and is slow. Instead, we copy
+    the text to clipboard and simulate Cmd+V for instant, reliable paste
+    that supports all Unicode characters.
+    """
     try:
         import pyautogui
+        import subprocess
     except ImportError:
         raise InjectionError(
             "pyautogui not installed. Install with: pip install pyautogui"
         )
 
-    interval = PYAUTOGUI_INTERVALS.get(typing_speed, 0.0)
-
     try:
-        pyautogui.typewrite(text, interval=interval)
+        # Save current clipboard contents
+        try:
+            old_clipboard = subprocess.run(
+                ["pbpaste"], capture_output=True, text=True, timeout=5
+            ).stdout
+        except Exception:
+            old_clipboard = None
+
+        # Copy text to clipboard via pbcopy
+        proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+        proc.communicate(text.encode("utf-8"))
+
+        # Small delay to ensure clipboard is ready
+        import time
+        time.sleep(0.05)
+
+        # Paste with Cmd+V
+        pyautogui.hotkey("command", "v")
+
+        # Restore original clipboard after a short delay
+        if old_clipboard is not None:
+            time.sleep(0.2)
+            proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+            proc.communicate(old_clipboard.encode("utf-8"))
+
     except Exception as e:
-        raise InjectionError(f"pyautogui injection failed: {e}")
+        raise InjectionError(f"macOS text injection failed: {e}")
 
 
 # =============================================================================

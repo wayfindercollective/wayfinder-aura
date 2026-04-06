@@ -889,12 +889,13 @@ class GlassmorphicOverlay(QWidget):
             Qt.WindowType.WindowDoesNotAcceptFocus  # Never steal focus from text fields
         )
         
-        # Critical for ARGB channel on Wayland - must be set for transparency
+        # Critical for ARGB transparency on all platforms
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        
-        # Ensure no background is painted by Qt
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAutoFillBackground(False)
+        # Transparent stylesheet ensures no Qt-default background leaks through
+        self.setStyleSheet("background: transparent;")
         
         # Absolutely refuse to accept focus
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -915,22 +916,56 @@ class GlassmorphicOverlay(QWidget):
         # Set window title for KWin script identification
         self.setWindowTitle("Wayfinder Aura Overlay")
         
-        # Note: Periodic raise timer removed - it caused focus stealing on KDE Wayland.
-        # WindowStaysOnTopHint + KWin keepAbove=true handle stay-on-top.
-        # Keep as a stopped no-op timer so existing start()/stop() calls don't crash.
+        # Periodic raise timer: kept as stopped no-op so existing start()/stop() calls don't crash.
+        # On Linux/KDE Wayland: disabled (focus stealing). On macOS: not needed (native level set below).
         self._raise_timer = QTimer(self)
-        self._raise_timer.setInterval(60000)  # 1 minute (effectively never fires)
+        self._raise_timer.setInterval(60000)  # Effectively never fires
+
+        # macOS: set native window level to "floating panel" — stays above normal windows
+        # without stealing focus or needing periodic raise()
+        import sys as _sys
+        if _sys.platform == "darwin":
+            self._set_macos_floating_level()
     
     def _ensure_on_top(self):
         """Ensure window stays on top of other windows.
-        
+
         Note: On KDE Wayland, periodic raise_() can steal focus from the
         active window (even with WindowDoesNotAcceptFocus). We rely on
         WindowStaysOnTopHint + KWin keepAbove instead.
         """
-        # Disabled: periodic raise() causes focus stealing on KDE Wayland.
-        # WindowStaysOnTopHint and KWin keepAbove=true handle stay-on-top.
+        # Disabled on Linux: periodic raise() causes focus stealing on KDE Wayland.
         pass
+
+    def _set_macos_floating_level(self):
+        """macOS: set native NSWindow level to floating panel.
+
+        Uses PyObjC to set the window to NSFloatingWindowLevel (3), which keeps
+        it above all normal windows without stealing focus. Deferred until the
+        native window handle is ready.
+        """
+        QTimer.singleShot(200, self._apply_macos_level)
+
+    def _apply_macos_level(self):
+        """Apply NSFloatingWindowLevel after the native window is created."""
+        try:
+            from AppKit import NSApp
+            for nswin in NSApp.windows():
+                title = str(nswin.title()) if nswin.title() else ""
+                if "Wayfinder" in title or "overlay" in title.lower():
+                    # NSFloatingWindowLevel = 3 — above normal, below modal/alerts
+                    nswin.setLevel_(3)
+                    # canJoinAllSpaces (1<<0) + stationary (1<<4) = visible on all desktops
+                    nswin.setCollectionBehavior_((1 << 0) | (1 << 4))
+                    nswin.setHidesOnDeactivate_(False)  # Don't hide when app loses focus
+                    break
+            else:
+                # Window not found yet, retry
+                QTimer.singleShot(500, self._apply_macos_level)
+        except ImportError:
+            pass
+        except Exception:
+            pass
     
     def _request_blur(self):
         """Request backdrop blur from compositor."""
@@ -1350,6 +1385,11 @@ class GlassmorphicOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        # Explicitly clear to fully transparent (required on macOS)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         
         # Calculate centered rect for the squircle
         # Margin provides room for subtle glow
