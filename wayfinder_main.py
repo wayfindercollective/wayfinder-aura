@@ -218,43 +218,64 @@ def save_config(config: dict) -> None:
 class GPUInfo:
     """Detected GPU information."""
     def __init__(self, vendor: str, name: str, driver: str = ""):
-        self.vendor = vendor  # "nvidia", "amd", "intel", "unknown"
+        self.vendor = vendor  # "nvidia", "amd", "intel", "apple", "unknown"
         self.name = name
         self.driver = driver
-    
+
     @property
     def is_nvidia(self) -> bool:
         return self.vendor == "nvidia"
-    
+
     @property
     def is_amd(self) -> bool:
         return self.vendor == "amd"
-    
+
     @property
     def is_intel(self) -> bool:
         return self.vendor == "intel"
+
+    @property
+    def is_apple(self) -> bool:
+        return self.vendor == "apple"
+
+    @property
+    def has_gpu(self) -> bool:
+        return self.vendor != "unknown"
 
 
 def detect_gpu() -> GPUInfo:
     """
     Detect the primary GPU on the system.
-    
+
     Returns:
         GPUInfo with vendor, name, and driver information.
     """
+    # macOS: detect Apple Silicon or Intel GPU
+    if sys.platform == "darwin":
+        try:
+            import platform as plat
+            result = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True, text=True, timeout=5,
+            )
+            chip = result.stdout.strip() if result.returncode == 0 else ""
+            if "Apple" in chip:
+                return GPUInfo("apple", f"{chip} (Metal)", "metal")
+            else:
+                return GPUInfo("intel", f"{chip} (Metal)", "metal")
+        except Exception:
+            return GPUInfo("apple", "Apple GPU (Metal)", "metal")
+
+    # Linux: lspci and /sys detection
     try:
-        # Try lspci first (most reliable on Linux)
         result = subprocess.run(
             ["lspci", "-nn"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        
+
         if result.returncode == 0:
-            lines = result.stdout.lower()
-            
-            # Check for discrete GPUs first (VGA/3D controllers)
             for line in result.stdout.split("\n"):
                 line_lower = line.lower()
                 if "vga" in line_lower or "3d" in line_lower or "display" in line_lower:
@@ -264,7 +285,7 @@ def detect_gpu() -> GPUInfo:
                         return GPUInfo("amd", line.split(":")[-1].strip(), "amdgpu")
                     elif "intel" in line_lower:
                         return GPUInfo("intel", line.split(":")[-1].strip(), "i915")
-        
+
         # Fallback: Check /sys for GPU info
         gpu_path = Path("/sys/class/drm")
         if gpu_path.exists():
@@ -273,16 +294,16 @@ def detect_gpu() -> GPUInfo:
                     vendor_file = card / "device" / "vendor"
                     if vendor_file.exists():
                         vendor_id = vendor_file.read_text().strip()
-                        if vendor_id == "0x10de":  # NVIDIA
+                        if vendor_id == "0x10de":
                             return GPUInfo("nvidia", "NVIDIA GPU", "nvidia")
-                        elif vendor_id == "0x1002":  # AMD
+                        elif vendor_id == "0x1002":
                             return GPUInfo("amd", "AMD GPU", "amdgpu")
-                        elif vendor_id == "0x8086":  # Intel
+                        elif vendor_id == "0x8086":
                             return GPUInfo("intel", "Intel GPU", "i915")
-        
+
     except Exception:
         pass
-    
+
     return GPUInfo("unknown", "Unknown GPU", "")
 
 
@@ -1746,16 +1767,8 @@ def resolve_audio_device(config: dict) -> int | None:
     return find_best_input_device(preferred_name=device_name)
 
 
-class EventType(Enum):
-    HOTKEY_PRESSED = auto()
-    STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/AI Prompt/Casual/Personal)
-    TRANSCRIPTION_DONE = auto()
-    TRANSCRIPTION_ERROR = auto()
-    INJECTION_DONE = auto()
-    INJECTION_ERROR = auto()
-    CHUNK_TRANSCRIBED = auto()  # A chunk was transcribed during recording
-    CHUNKED_TRANSCRIPTION_DONE = auto()  # All chunks transcribed
-    LOG_MESSAGE = auto()  # Thread-safe log message (avoids Tk threading crash)
+# Single source of truth for EventType — shared with hotkey listeners
+from wayfinder.hotkeys.types import EventType
 
 
 # === Tray Icon ===
@@ -3665,6 +3678,8 @@ class WayfinderApp(ctk.CTk):
             self.log(f"🟢 GPU: NVIDIA detected (use Faster-Whisper + CUDA)")
         elif gpu_info.is_amd:
             self.log(f"🔴 GPU: AMD detected (Vulkan ready)")
+        elif gpu_info.is_apple:
+            self.log(f"🍎 GPU: {gpu_info.name}")
         elif gpu_info.is_intel:
             self.log(f"🔵 GPU: Intel detected (CPU mode recommended)")
         else:
@@ -4522,9 +4537,15 @@ class WayfinderApp(ctk.CTk):
         # Access UI via tray icon -> "Open Settings"
         
         # Hotkey devices dropdown (inline)
-        all_devices = get_all_input_devices()
-        device_names = [d["name"] for d in all_devices]
-        device_options = ["All Devices"] + device_names
+        # On macOS, pynput listens globally — no per-device filtering
+        if sys.platform == "darwin":
+            all_devices = []
+            device_names = []
+            device_options = ["All Devices (Global)"]
+        else:
+            all_devices = get_all_input_devices()
+            device_names = [d["name"] for d in all_devices]
+            device_options = ["All Devices"] + device_names
         enabled = self.config.get("enabled_input_devices", [])
         if not enabled or len(enabled) == len(device_names):
             current_device_selection = "All Devices"
@@ -7759,18 +7780,26 @@ class WayfinderApp(ctk.CTk):
                 save_config(self.config)
                 self.log(f"⚙️ Threads auto-set to {optimal_threads} (based on CPU cores)")
         
-        # Check 3: Verify ydotool is available and daemon is running
-        if not shutil.which("ydotool"):
-            self.log("⚠️ ydotool not found - text injection won't work")
-            self.log("💡 Install: sudo dnf install ydotool && sudo systemctl enable --now ydotoold")
+        # Check 3: Verify text injection is available
+        if sys.platform == "darwin":
+            try:
+                import pyautogui
+                self.log("✓ Text injection: pyautogui (macOS)")
+            except ImportError:
+                self.log("⚠️ pyautogui not installed - text injection won't work")
+                self.log("💡 Install: pip install pyautogui")
         else:
-            from wayfinder.core.injector import check_ydotool_ready
-            ready, msg = check_ydotool_ready()
-            if ready:
-                self.log(f"✓ {msg}")
+            if not shutil.which("ydotool"):
+                self.log("⚠️ ydotool not found - text injection won't work")
+                self.log("💡 Install: sudo dnf install ydotool && sudo systemctl enable --now ydotoold")
             else:
-                self.log(f"⚠️ {msg}")
-                self.log("💡 Start daemon: sudo systemctl enable --now ydotoold")
+                from wayfinder.core.injector import check_ydotool_ready
+                ready, msg = check_ydotool_ready()
+                if ready:
+                    self.log(f"✓ {msg}")
+                else:
+                    self.log(f"⚠️ {msg}")
+                    self.log("💡 Start daemon: sudo systemctl enable --now ydotoold")
     
     def _check_model_updates_background(self) -> None:
         """Check for model updates in a background thread (non-blocking)."""
@@ -12476,22 +12505,43 @@ class WayfinderApp(ctk.CTk):
             daemon=True,
         ).start()
         
-        # Check if we're on Wayland
-        is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
-        
-        if is_wayland:
-            self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
-        else:
-            self.log("🖥️ X11 detected - using evdev")
-        
         # Log the hotkey configuration
         hotkey_name = self.get_hotkey_display()
-        style_key_name = {59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6", 
+        style_key_name = {59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
                          65: "F7", 66: "F8", 67: "F9", 68: "F10"}.get(style_toggle_key, f"Key{style_toggle_key}")
         self.log(f"⌨️ Record hotkey: {hotkey_name} | Style toggle: {style_key_name}")
-        
-        # Use evdev on both X11 and Wayland (works if user is in 'input' group)
-        if HAS_EVDEV:
+
+        if sys.platform == "darwin":
+            # macOS: use pynput for global hotkey listening
+            # pynput captures all keyboard input including remapped mouse buttons
+            from wayfinder.hotkeys import pynput_hotkey_listener, is_pynput_available
+            if is_pynput_available():
+                print("[Hotkey] macOS — starting pynput listener", flush=True)
+                self.log("🖥️ macOS — using pynput (global keyboard listener)")
+
+                def _pynput_wrapper():
+                    try:
+                        pynput_hotkey_listener(
+                            self.event_queue, hotkey_key, hotkey_modifiers,
+                            self.stop_event, self.log,
+                            style_toggle_key, style_toggle_modifiers,
+                        )
+                    except Exception as e:
+                        print(f"[Hotkey] pynput listener crashed: {e}", flush=True)
+                        import traceback
+                        traceback.print_exc()
+
+                threading.Thread(target=_pynput_wrapper, daemon=True).start()
+            else:
+                print("[Hotkey] pynput not available!", flush=True)
+                self.log("⚠️ pynput not installed — hotkeys unavailable")
+        elif HAS_EVDEV:
+            # Linux: use evdev for direct input device monitoring
+            is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
+            if is_wayland:
+                self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
+            else:
+                self.log("🖥️ X11 detected - using evdev")
             threading.Thread(
                 target=hotkey_listener,
                 args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log,

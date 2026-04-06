@@ -248,23 +248,35 @@ def pynput_hotkey_listener(
             return True
         return required <= pressed_modifiers
     
+    # Debounce: ignore repeated presses within this window (seconds)
+    _last_hotkey_time = 0.0
+    _last_style_time = 0.0
+    DEBOUNCE_SECONDS = 0.5
+
     def on_press(key):
-        nonlocal pressed_modifiers
-        
+        nonlocal pressed_modifiers, _last_hotkey_time, _last_style_time
+
         # Track modifier state
         for mod_name, mod_keys in MODIFIER_KEYS.items():
             if key in mod_keys:
                 pressed_modifiers.add(mod_name)
-        
-        # Check for main hotkey
+
+        now = time.time()
+
+        # Check for main hotkey (with debounce)
         if key == target_key and check_modifiers(required_modifiers):
-            log("🎯 Hotkey activated!")
-            event_queue.put((EventType.HOTKEY_PRESSED, None))
-        
-        # Check for style toggle hotkey
+            if now - _last_hotkey_time >= DEBOUNCE_SECONDS:
+                _last_hotkey_time = now
+                print(f"[Hotkey] {get_key_name(target_key)} — activating!", flush=True)
+                log("🎯 Hotkey activated!")
+                event_queue.put((EventType.HOTKEY_PRESSED, None))
+
+        # Check for style toggle hotkey (with debounce)
         if style_target_key and key == style_target_key and check_modifiers(style_required_modifiers):
-            log("✎ Style toggle activated!")
-            event_queue.put((EventType.STYLE_TOGGLE, None))
+            if now - _last_style_time >= DEBOUNCE_SECONDS:
+                _last_style_time = now
+                log("✎ Style toggle activated!")
+                event_queue.put((EventType.STYLE_TOGGLE, None))
     
     def on_release(key):
         nonlocal pressed_modifiers
@@ -277,7 +289,8 @@ def pynput_hotkey_listener(
     # Start the listener
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
-    
+
+    print(f"[Hotkey] pynput listener started, waiting for: {get_key_name(target_key)}", flush=True)
     log("🎧 Cross-platform hotkey listener active (pynput)")
     
     try:
