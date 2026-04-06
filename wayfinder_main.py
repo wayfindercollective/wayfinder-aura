@@ -83,7 +83,7 @@ else:
 DEFAULT_CONFIG = {
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
-    "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
+    "hotkey_key": 61,  # F3 - default (F9=67 on Linux)
     "hotkey_modifiers": [],
     # Style toggle hotkey (cycles Minimal → Professional → Casual → AI Prompt → Personal)
     "style_toggle_key": 68,  # F10 default

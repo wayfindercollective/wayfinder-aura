@@ -92,7 +92,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model_path": _default_model_path,
     
     # Hotkey settings
-    "hotkey_key": 67,  # F9 - works reliably on Bazzite/KDE
+    "hotkey_key": 61,  # F3 - default (F9=67 on Linux)
     "hotkey_modifiers": [],
     
     # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal)
