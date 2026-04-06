@@ -239,10 +239,8 @@ def main():
         
         # ─── First-run setup wizard ───
         # Use the app's config (which is the most up-to-date after constructor)
-        print(f"[Setup] setup_completed={app.config.get('setup_completed')} (type={type(app.config.get('setup_completed')).__name__})", flush=True)
         try:
             if not app.config.get("setup_completed", False):
-                print(f"[Setup] Showing wizard!", flush=True)
                 from wayfinder.ui.dialogs.setup_wizard import SetupWizard
                 
                 # Pause animations during wizard to keep UI responsive
