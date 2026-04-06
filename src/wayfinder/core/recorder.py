@@ -30,11 +30,20 @@ WHISPER_SAMPLE_RATE = 16000
 
 # Known microphone brands/keywords to prioritize
 PREFERRED_MIC_KEYWORDS = [
+    # Dedicated USB microphones (high priority — these are what users want for dictation)
     "shure", "mv7", "sm7", "blue", "yeti", "snowball", "rode", "nt-usb", "ntusb",
     "audio-technica", "at2020", "at2035", "hyperx", "quadcast", "elgato", "wave",
     "focusrite", "scarlett", "behringer", "samson", "fifine", "maono", "tonor",
     "microphone", "mic input", "headset",
 ]
+
+# Dedicated USB mic brands get a higher score than generic "microphone" keyword
+_USB_MIC_BRANDS = {
+    "shure", "mv7", "sm7", "blue", "yeti", "snowball", "rode", "nt-usb", "ntusb",
+    "audio-technica", "at2020", "at2035", "hyperx", "quadcast", "elgato", "wave",
+    "focusrite", "scarlett", "behringer", "samson", "fifine", "maono", "tonor",
+    "obsbot",
+}
 
 # Keywords indicating the device is NOT a microphone input
 EXCLUDED_DEVICE_KEYWORDS = [
@@ -114,11 +123,16 @@ def find_best_input_device(preferred_name: str | None = None) -> int | None:
         except Exception:
             pass
         
-        # Prefer known microphone brands/keywords
-        for keyword in PREFERRED_MIC_KEYWORDS:
-            if keyword in name:
-                score += 50
-                break
+        # Prefer known USB microphone brands (high confidence these are real mics)
+        is_usb_brand = any(kw in name for kw in _USB_MIC_BRANDS)
+        if is_usb_brand:
+            score += 200  # Strong preference for dedicated USB mics
+        elif any(kw in name for kw in PREFERRED_MIC_KEYWORDS):
+            score += 50  # Generic "microphone" keyword match
+
+        # Penalize phone/mobile/bluetooth mics (unreliable for dictation)
+        if any(kw in name for kw in ("iphone", "ipad", "android", "phone", "airpod", "bluetooth")):
+            score -= 100
         
         # Prefer "mono" for voice (cleaner for speech recognition)
         if 'mono' in name:

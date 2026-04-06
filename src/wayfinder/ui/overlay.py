@@ -894,8 +894,6 @@ class GlassmorphicOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAutoFillBackground(False)
-        # Transparent stylesheet ensures no Qt-default background leaks through
-        self.setStyleSheet("background: transparent;")
         
         # Absolutely refuse to accept focus
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
