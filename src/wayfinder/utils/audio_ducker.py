@@ -3,8 +3,10 @@ Audio ducking utility for Wayfinder Aura.
 
 Automatically reduces system audio when recording, then restores it afterwards.
 Uses pactl (PulseAudio CLI) which works on both PipeWire and PulseAudio systems.
+Falls back to osascript on macOS when pactl is not available.
 """
 
+import platform
 import re
 import subprocess
 from typing import Optional
@@ -17,6 +19,41 @@ def is_pactl_available() -> bool:
             ["which", "pactl"],
             capture_output=True,
             timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def is_macos() -> bool:
+    """Check if running on macOS."""
+    return platform.system() == "Darwin"
+
+
+def _get_macos_volume() -> Optional[int]:
+    """Get current macOS output volume (0-100). Returns None on failure."""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", "output volume of (get volume settings)"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def _set_macos_volume(volume: int) -> bool:
+    """Set macOS output volume (0-100). Returns True on success."""
+    try:
+        volume = max(0, min(100, volume))
+        result = subprocess.run(
+            ["osascript", "-e", f"set volume output volume {volume}"],
+            capture_output=True,
+            timeout=5,
         )
         return result.returncode == 0
     except Exception:
@@ -137,20 +174,24 @@ class AudioDucker:
     def __init__(self, duck_percent: float = 20.0, exclude_apps: Optional[list[str]] = None):
         """
         Initialize the audio ducker.
-        
+
         Args:
-            duck_percent: Percentage to reduce audio by (0-100). 
+            duck_percent: Percentage to reduce audio by (0-100).
                          20 means reduce to 80% of original.
             exclude_apps: List of application names to exclude from ducking
         """
         self._duck_percent = duck_percent
         self._exclude_apps = exclude_apps or []
         self._original_volumes: dict[int, int] = {}  # {sink_input_id: original_volume_percent}
+        self._macos_original_volume: Optional[int] = None  # macOS system volume before ducking
         self._is_ducked = False
-        self._available = is_pactl_available()
-        
+        self._use_macos = is_macos() and not is_pactl_available()
+        self._available = is_pactl_available() or self._use_macos
+
         if not self._available:
             print("⚠ pactl not available - audio ducking disabled")
+        elif self._use_macos:
+            print("ℹ Using macOS osascript for audio ducking")
     
     @property
     def is_available(self) -> bool:
@@ -169,80 +210,107 @@ class AudioDucker:
     def duck(self) -> bool:
         """
         Reduce all audio sources by the configured duck percentage.
-        
+
         Returns:
             True if ducking was applied, False if unavailable or already ducked
         """
         if not self._available:
             return False
-        
+
         if self._is_ducked:
             # Already ducked - don't double-duck
             return False
-        
+
+        # macOS branch — duck system output volume via osascript
+        if self._use_macos:
+            current_vol = _get_macos_volume()
+            if current_vol is None:
+                return False
+            self._macos_original_volume = current_vol
+            reduction_factor = (100 - self._duck_percent) / 100
+            ducked_vol = int(current_vol * reduction_factor)
+            if _set_macos_volume(ducked_vol):
+                self._is_ducked = True
+                print(f"🔉 Ducked macOS volume {current_vol}% → {ducked_vol}%")
+                return True
+            return False
+
+        # Linux / PulseAudio / PipeWire branch
         # Get all current sink inputs
         sink_inputs = get_sink_inputs()
-        
+
         if not sink_inputs:
             return False
-        
+
         self._original_volumes.clear()
         ducked_count = 0
-        
+
         for sink in sink_inputs:
             sink_id = sink['id']
             original_vol = sink['volume_percent']
             app_name = sink['app_name']
-            
+
             # Skip excluded apps (case-insensitive)
             if any(exc.lower() in app_name.lower() for exc in self._exclude_apps):
                 continue
-            
+
             # Store original volume
             self._original_volumes[sink_id] = original_vol
-            
+
             # Calculate ducked volume
             # If duck_percent is 20, we reduce to 80% of original
             reduction_factor = (100 - self._duck_percent) / 100
             ducked_vol = int(original_vol * reduction_factor)
-            
+
             # Apply ducked volume
             if set_sink_input_volume(sink_id, ducked_vol):
                 ducked_count += 1
-        
+
         self._is_ducked = True
-        
+
         if ducked_count > 0:
             print(f"🔉 Ducked {ducked_count} audio source(s) by {self._duck_percent}%")
-        
+
         return True
     
     def restore(self) -> bool:
         """
         Restore all audio sources to their original volumes.
-        
+
         Returns:
             True if restoration was applied, False if unavailable or not ducked
         """
         if not self._available:
             return False
-        
+
         if not self._is_ducked:
             # Not ducked - nothing to restore
             return False
-        
+
+        # macOS branch — restore system output volume via osascript
+        if self._use_macos:
+            if self._macos_original_volume is not None:
+                if _set_macos_volume(self._macos_original_volume):
+                    print(f"🔊 Restored macOS volume to {self._macos_original_volume}%")
+                    self._macos_original_volume = None
+                    self._is_ducked = False
+                    return True
+            self._is_ducked = False
+            return False
+
+        # Linux / PulseAudio / PipeWire branch
         restored_count = 0
-        
+
         for sink_id, original_vol in self._original_volumes.items():
             if set_sink_input_volume(sink_id, original_vol):
                 restored_count += 1
-        
+
         self._original_volumes.clear()
         self._is_ducked = False
-        
+
         if restored_count > 0:
             print(f"🔊 Restored {restored_count} audio source(s)")
-        
+
         return True
     
     def __del__(self):

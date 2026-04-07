@@ -3,7 +3,7 @@ Text injection module for Wayfinder Aura.
 
 Platform dispatch:
 - Linux: ydotool (works on both X11 and Wayland)
-- macOS: pyautogui
+- macOS: clipboard paste via pbcopy + Cmd-V
 """
 
 import os
@@ -11,6 +11,8 @@ import subprocess
 import shutil
 import sys
 from pathlib import Path
+
+IS_MACOS = sys.platform == 'darwin'
 
 
 class InjectionError(Exception):
@@ -89,36 +91,37 @@ def check_ydotool_ready() -> tuple[bool, str]:
     return True, f"ydotool ready (socket: {socket_path})"
 
 
-def inject_text(text: str, typing_speed: str = "instant") -> None:
+def _inject_text_macos(text: str) -> None:
     """
-    Inject text into the active window.
-
-    Dispatches to platform-specific backend:
-    - Linux: ydotool
-    - macOS: pyautogui
-
-    Args:
-        text: Text to inject
-        typing_speed: Speed preset - "instant", "fast", "normal", "slow", "very_slow"
+    Inject text on macOS by writing to clipboard then simulating Cmd+V.
+    This is the most reliable method on macOS — works in any app.
     """
-    if not text:
-        return
+    import subprocess
+    import time
 
-    # Clean up the text - remove leading/trailing whitespace
-    text = text.strip()
+    # Write text to clipboard using pbcopy
+    proc = subprocess.run(
+        ["pbcopy"],
+        input=text.encode("utf-8"),
+        capture_output=True,
+        timeout=5,
+    )
+    if proc.returncode != 0:
+        raise InjectionError(f"pbcopy failed: {proc.stderr.decode()}")
 
-    if not text:
-        return
+    # Small delay to ensure clipboard is ready
+    time.sleep(0.05)
 
-    if sys.platform == "darwin":
-        _inject_text_pyautogui(text, typing_speed)
-    else:
-        _inject_text_ydotool(text, typing_speed)
+    # Simulate Cmd+V using osascript
+    script = 'tell application "System Events" to keystroke "v" using command down'
+    proc = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        timeout=5,
+    )
+    if proc.returncode != 0:
+        raise InjectionError(f"osascript paste failed: {proc.stderr.decode()}")
 
-
-# =============================================================================
-# macOS backend: pyautogui
-# =============================================================================
 
 # Typing speed → pyautogui interval (seconds between keystrokes)
 PYAUTOGUI_INTERVALS = {
@@ -197,14 +200,32 @@ def warmup_clipboard() -> None:
         pass  # Best-effort — never block startup
 
 
-# =============================================================================
-# Linux backend: ydotool
-# =============================================================================
+def inject_text(text: str, typing_speed: str = "instant") -> None:
+    """
+    Inject text into the active window.
 
+    Dispatches to platform-specific backend:
+    - Linux: ydotool
+    - macOS: clipboard paste (pbcopy + Cmd-V)
 
-def _inject_text_ydotool(text: str, typing_speed: str = "instant") -> None:
-    """Inject text on Linux using ydotool."""
-    # Pre-flight check
+    Args:
+        text: Text to inject
+        typing_speed: Speed preset (Linux only) - "instant", "fast", "normal", "slow", "very_slow"
+    """
+    if not text:
+        return
+
+    # Clean up the text - remove leading/trailing whitespace
+    text = text.strip()
+
+    if not text:
+        return
+
+    if sys.platform == "darwin":
+        _inject_text_pyautogui(text, typing_speed)
+        return
+
+    # Linux/ydotool path — pre-flight check
     ready, msg = check_ydotool_ready()
     if not ready:
         raise InjectionError(msg)

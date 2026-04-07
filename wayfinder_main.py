@@ -46,6 +46,16 @@ try:
 except ImportError:
     DBUS_AVAILABLE = False
 
+# pynput for cross-platform hotkeys (macOS/Windows)
+try:
+    from wayfinder.hotkeys.pynput_listener import pynput_hotkey_listener
+    HAS_PYNPUT = True
+except ImportError:
+    HAS_PYNPUT = False
+
+import sys as _sys
+IS_MACOS = _sys.platform == 'darwin'
+
 from wayfinder.core.injector import inject_text, InjectionError
 from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
@@ -1848,7 +1858,7 @@ def get_all_input_devices() -> list[dict]:
     return result
 
 
-def find_keyboard_devices(enabled_devices: list[str] = None) -> list[InputDevice]:
+def find_keyboard_devices(enabled_devices: list[str] = None) -> list:
     """Find input devices to listen to based on config."""
     all_devices = get_all_input_devices()
     
@@ -2878,19 +2888,17 @@ class OverlayController:
                 pass
             
             try:
-                # Find the overlay script
+                # In frozen builds, sys.executable is the app binary — not Python.
+                # Launching it would relaunch the entire app, causing a fork bomb.
                 if getattr(sys, 'frozen', False):
-                    # Running as bundled .app — overlay is in Contents/Resources
-                    # sys.executable = .app/Contents/MacOS/Wayfinder Aura
-                    # parents[1] = .app/Contents/
-                    bundle_dir = Path(sys.executable).parent.parent / "Resources"
-                    script_path = bundle_dir / "overlay.py"
-                else:
-                    # Running from source — prefer new location in src/
-                    script_path = Path(__file__).parent / "src" / "wayfinder" / "ui" / "overlay.py"
-                    if not script_path.exists():
-                        # Fallback to old location
-                        script_path = Path(__file__).parent / "status_overlay.py"
+                    print("[Overlay] Subprocess disabled in frozen builds")
+                    return False
+
+                # Find the overlay script (prefer new location in src/)
+                script_path = Path(__file__).parent / "src" / "wayfinder" / "ui" / "overlay.py"
+                if not script_path.exists():
+                    # Fallback to old location
+                    script_path = Path(__file__).parent / "status_overlay.py"
                 if not script_path.exists():
                     print(f"Overlay script not found: {script_path}")
                     return False
@@ -3288,7 +3296,13 @@ class WayfinderApp(ctk.CTk):
         
         # Check which overlay type to use
         overlay_type = self.config.get("overlay_type", "always_on")
-        
+
+        # In frozen builds, sys.executable is the app binary, not Python —
+        # launching overlay.py this way would relaunch the entire app.
+        # Use CTk indicator fallback instead.
+        if getattr(sys, 'frozen', False):
+            overlay_type = "disappearing"
+
         if overlay_type == "always_on":
             # Use PyQt6 overlay (always on, no focus steal)
             try:
@@ -12076,7 +12090,9 @@ class WayfinderApp(ctk.CTk):
         self.tray_icon = pystray.Icon("wayfinder-aura", icon_image, "Wayfinder Aura", menu)
 
         if sys.platform == "darwin":
-            # macOS: use run_detached to avoid NSApplication conflict with Tk mainloop
+            # On macOS, pystray's run() calls NSApplication.run() from a background
+            # thread, which crashes with NSUpdateCycleInitialize. Use run_detached()
+            # instead — tray icon events are handled by Tkinter's own NSApp run loop.
             self.tray_icon.run_detached()
         else:
             def _tray_thread_wrapper():
@@ -12575,7 +12591,6 @@ class WayfinderApp(ctk.CTk):
             if not getattr(self, '_pynput_listener_started', False):
                 from wayfinder.hotkeys import pynput_hotkey_listener, is_pynput_available
                 if is_pynput_available():
-                    print("[Hotkey] macOS — starting pynput listener", flush=True)
                     self.log("🖥️ macOS — using pynput (global keyboard listener)")
                     self._pynput_listener_started = True
 
@@ -12595,18 +12610,11 @@ class WayfinderApp(ctk.CTk):
 
                     threading.Thread(target=_pynput_wrapper, daemon=True).start()
                 else:
-                    print("[Hotkey] pynput not available!", flush=True)
                     self.log("⚠️ pynput not installed — hotkeys unavailable")
             else:
                 # Already running — config changes are picked up automatically
                 self.log(f"⚙ Hotkey updated (live)")
         elif HAS_EVDEV:
-            # Linux: use evdev for direct input device monitoring
-            is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
-            if is_wayland:
-                self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
-            else:
-                self.log("🖥️ X11 detected - using evdev")
             threading.Thread(
                 target=hotkey_listener,
                 args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log,

@@ -31,91 +31,94 @@ def is_pynput_available() -> bool:
     return PYNPUT_AVAILABLE
 
 
+def _k(*names):
+    """Safely get the first matching pynput Key attribute, or None."""
+    for name in names:
+        v = getattr(Key, name, None)
+        if v is not None:
+            return v
+    return None
+
+
 # Mapping from evdev key codes to pynput Key objects
-# This allows the same key codes to work across platforms.
-# Some keys (e.g., insert, alt_l) don't exist on macOS pynput,
-# so we use getattr with fallbacks.
-EVDEV_TO_PYNPUT = {
+# Uses _k() so missing keys (e.g. Key.insert on macOS) are skipped safely.
+_raw_evdev_map = {
     # Function keys
-    59: Key.f1,
-    60: Key.f2,
-    61: Key.f3,
-    62: Key.f4,
-    63: Key.f5,
-    64: Key.f6,
-    65: Key.f7,
-    66: Key.f8,
-    67: Key.f9,
-    68: Key.f10,
-    87: Key.f11,
-    88: Key.f12,
-    # Modifier keys (macOS uses ctrl/shift/alt; Linux uses ctrl_l/shift_l/alt_l)
-    29: getattr(Key, 'ctrl_l', Key.ctrl),
-    97: Key.ctrl_r,
-    42: getattr(Key, 'shift_l', Key.shift),
-    54: Key.shift_r,
-    56: getattr(Key, 'alt_l', Key.alt),
-    100: Key.alt_r,
-    125: Key.cmd,  # Super/Windows/Command key
-    126: Key.cmd_r,
+    59: _k("f1"), 60: _k("f2"), 61: _k("f3"), 62: _k("f4"),
+    63: _k("f5"), 64: _k("f6"), 65: _k("f7"), 66: _k("f8"),
+    67: _k("f9"), 68: _k("f10"), 87: _k("f11"), 88: _k("f12"),
+    # Modifier keys — macOS uses ctrl/alt/shift, Linux uses ctrl_l/alt_l/shift_l
+    29: _k("ctrl_l", "ctrl"),
+    97: _k("ctrl_r"),
+    42: _k("shift_l", "shift"),
+    54: _k("shift_r"),
+    56: _k("alt_l", "alt"),
+    100: _k("alt_r"),
+    125: _k("cmd"),   # Super/Windows/Command key
+    126: _k("cmd_r"),
     # Special keys
-    1: Key.esc,
-    14: Key.backspace,
-    15: Key.tab,
-    28: Key.enter,
-    57: Key.space,
-    58: Key.caps_lock,
-    111: Key.delete,
-    102: Key.home,
-    107: Key.end,
-    104: Key.page_up,
-    109: Key.page_down,
-    103: Key.up,
-    108: Key.down,
-    105: Key.left,
-    106: Key.right,
-    # Media keys (if supported)
-    164: Key.media_play_pause,
-    163: Key.media_next,
-    165: Key.media_previous,
-    113: Key.media_volume_mute,
-    114: Key.media_volume_down,
-    115: Key.media_volume_up,
+    1:   _k("esc"),
+    14:  _k("backspace"),
+    15:  _k("tab"),
+    28:  _k("enter"),
+    57:  _k("space"),
+    58:  _k("caps_lock"),
+    111: _k("delete"),
+    110: _k("insert"),   # Not on macOS — will be None, skipped
+    102: _k("home"),
+    107: _k("end"),
+    104: _k("page_up"),
+    109: _k("page_down"),
+    103: _k("up"),
+    108: _k("down"),
+    105: _k("left"),
+    106: _k("right"),
+    # Media keys
+    164: _k("media_play_pause"),
+    163: _k("media_next"),
+    165: _k("media_previous"),
+    113: _k("media_volume_mute"),
+    114: _k("media_volume_down"),
+    115: _k("media_volume_up"),
 }
+EVDEV_TO_PYNPUT = {k: v for k, v in _raw_evdev_map.items() if v is not None}
 
-# Insert key only exists on Linux/Windows
-if hasattr(Key, 'insert'):
-    EVDEV_TO_PYNPUT[110] = Key.insert
-
-# Reverse mapping for display purposes
-# Uses getattr for keys that don't exist on all platforms (e.g., macOS lacks insert, ctrl_l)
-PYNPUT_TO_NAME = {
-    Key.f1: "F1", Key.f2: "F2", Key.f3: "F3", Key.f4: "F4",
-    Key.f5: "F5", Key.f6: "F6", Key.f7: "F7", Key.f8: "F8",
-    Key.f9: "F9", Key.f10: "F10", Key.f11: "F11", Key.f12: "F12",
-    getattr(Key, 'ctrl_l', Key.ctrl): "Ctrl", Key.ctrl_r: "Ctrl",
-    getattr(Key, 'shift_l', Key.shift): "Shift", Key.shift_r: "Shift",
-    getattr(Key, 'alt_l', Key.alt): "Alt", Key.alt_r: "Alt",
-    Key.cmd: "Super", Key.cmd_r: "Super",
-    Key.esc: "Escape", Key.space: "Space",
-    Key.enter: "Enter", Key.backspace: "Backspace",
-    Key.tab: "Tab", Key.caps_lock: "CapsLock",
-    Key.delete: "Delete",
-    Key.home: "Home", Key.end: "End",
-    Key.page_up: "PageUp", Key.page_down: "PageDown",
-    Key.up: "Up", Key.down: "Down", Key.left: "Left", Key.right: "Right",
-}
+# Reverse mapping for display purposes — built dynamically to avoid missing keys
+PYNPUT_TO_NAME = {}
+for _names, _label in [
+    (("f1",), "F1"), (("f2",), "F2"), (("f3",), "F3"), (("f4",), "F4"),
+    (("f5",), "F5"), (("f6",), "F6"), (("f7",), "F7"), (("f8",), "F8"),
+    (("f9",), "F9"), (("f10",), "F10"), (("f11",), "F11"), (("f12",), "F12"),
+    (("ctrl_l", "ctrl"), "Ctrl"), (("ctrl_r",), "Ctrl"),
+    (("shift_l", "shift"), "Shift"), (("shift_r",), "Shift"),
+    (("alt_l", "alt"), "Alt"), (("alt_r",), "Alt"),
+    (("cmd",), "Super"), (("cmd_r",), "Super"),
+    (("esc",), "Escape"), (("space",), "Space"),
+    (("enter",), "Enter"), (("backspace",), "Backspace"),
+    (("tab",), "Tab"), (("caps_lock",), "CapsLock"),
+    (("delete",), "Delete"), (("insert",), "Insert"),
+    (("home",), "Home"), (("end",), "End"),
+    (("page_up",), "PageUp"), (("page_down",), "PageDown"),
+    (("up",), "Up"), (("down",), "Down"), (("left",), "Left"), (("right",), "Right"),
+]:
+    _key = _k(*_names)
+    if _key is not None:
+        PYNPUT_TO_NAME[_key] = _label
 
 if hasattr(Key, 'insert'):
     PYNPUT_TO_NAME[Key.insert] = "Insert"
 
 # Modifier key sets for checking combinations
-MODIFIER_KEYS = {
-    'ctrl': {getattr(Key, 'ctrl_l', Key.ctrl), Key.ctrl_r},
-    'shift': {getattr(Key, 'shift_l', Key.shift), Key.shift_r},
-    'alt': {getattr(Key, 'alt_l', Key.alt), Key.alt_r},
-    'super': {Key.cmd, Key.cmd_r},
-}
+MODIFIER_KEYS = {}
+for _mod, _key_names in [
+    ('ctrl', ("ctrl_l", "ctrl")), ('ctrl', ("ctrl_r",)),
+    ('shift', ("shift_l", "shift")), ('shift', ("shift_r",)),
+    ('alt', ("alt_l", "alt")), ('alt', ("alt_r",)),
+    ('super', ("cmd",)), ('super', ("cmd_r",)),
+]:
+    _key = _k(*_key_names)
+    if _key is not None:
+        MODIFIER_KEYS.setdefault(_mod, set()).add(_key)
 
 
 def evdev_code_to_pynput(evdev_code: int) -> Optional[Key | KeyCode]:

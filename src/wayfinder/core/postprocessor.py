@@ -2019,8 +2019,33 @@ class OpenAIBackend(PostProcessorBackend):
                 ],
             )
             
-            result = response.choices[0].message.content.strip()
-            
+            msg = response.choices[0].message
+            result = (msg.content or "").strip()
+
+            # Handle thinking models (e.g. Qwen3 via LM Studio) where content is empty
+            # and the answer lives inside reasoning_content after the thinking phase.
+            if not result:
+                finish_reason = response.choices[0].finish_reason
+                reasoning = getattr(msg, "reasoning_content", None) or ""
+                if finish_reason == "length":
+                    print("[Post-processing] ⚠ Token limit hit during thinking phase — increase post_processing_max_tokens")
+                elif reasoning:
+                    # Try to find the final answer after the last reasoning separator
+                    # Qwen3 ends thinking with a line like "Final Answer:" or "**Final Answer**:"
+                    import re as _re
+                    _final_patterns = [
+                        r'(?:Final Answer|Output|Result|Cleaned [Tt]ext)\s*[:\-–]\s*["\*]*\s*(.+)',
+                        r'\*{2}Option \d[^\*]*\*{2}[:\s]+["\*]*(.+)',
+                    ]
+                    for _pat in _final_patterns:
+                        _m = _re.search(_pat, reasoning, _re.IGNORECASE | _re.DOTALL)
+                        if _m:
+                            result = _m.group(1).strip().strip('"').strip("*")
+                            # Take only first paragraph if multi-line
+                            result = result.split("\n")[0].strip()
+                            print(f"[Post-processing] ℹ Extracted answer from reasoning_content")
+                            break
+
             # Check for refusal (rare with OpenAI but possible)
             if is_refusal_response(result):
                 print("[Post-processing] ⚠ Model refused to process - using original text")
@@ -2070,14 +2095,19 @@ def get_backend(config: dict) -> PostProcessorBackend:
             temperature=config.get("post_processing_temperature", 0.1),
         )
     elif backend_type == "openai":
-        # API key is read from environment variable only (secure)
-        # base_url allows using xAI Grok, Azure OpenAI, or other compatible APIs
+        # API key: prefer config value, then env var, then "lm-studio" for local servers
+        _base_url = config.get("openai_base_url", "")
+        _api_key = (
+            config.get("openai_api_key", "")
+            or os.environ.get("OPENAI_API_KEY", "")
+            or ("lm-studio" if _base_url else "")  # local servers don't need a real key
+        )
         return OpenAIBackend(
-            api_key="",  # Will be read from OPENAI_API_KEY env var
+            api_key=_api_key,
             model=config.get("openai_model", "gpt-4o-mini"),
             max_tokens=config.get("post_processing_max_tokens", 1024),
             temperature=config.get("post_processing_temperature", 0.1),
-            base_url=config.get("openai_base_url", ""),  # For xAI Grok: "https://api.x.ai/v1"
+            base_url=_base_url,  # For xAI Grok: "https://api.x.ai/v1"
         )
     else:
         # Default to llama.cpp - prefer CLI backend if available

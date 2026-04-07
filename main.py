@@ -12,7 +12,20 @@ For package-style execution, use: python -m wayfinder (from project root with PY
 import sys
 import os
 import json
+import signal
 from pathlib import Path
+
+# macOS: Suppress SIGTRAP before any imports that touch pynput/CGEventTap.
+# When the process is not yet in the Accessibility clients list, macOS sends
+# SIGTRAP from CGEventTapCreate. This is a non-fatal warning — hotkeys still
+# work once accessibility is granted, and the socket-based trigger always
+# works regardless. Ignoring the signal prevents an immediate crash.
+if sys.platform == "darwin":
+    try:
+        signal.signal(signal.SIGTRAP, signal.SIG_IGN)
+    except (OSError, ValueError):
+        pass  # Already in a signal handler context or SIGTRAP not available
+
 
 # Ensure the src directory is in the path for package imports
 if getattr(sys, 'frozen', False):
@@ -250,8 +263,12 @@ def main():
         _instance_server = _start_instance_listener(app)
         
         # ─── First-run setup wizard ───
-        # Use the app's config (which is the most up-to-date after constructor)
+        # Skip in frozen builds — the .app bundle already has all dependencies.
+        # The wizard tries to detect Linux package managers (apt/dnf/pacman)
+        # and crashes on macOS.
         try:
+            if getattr(sys, 'frozen', False):
+                app.config["setup_completed"] = True
             if not app.config.get("setup_completed", False):
                 from wayfinder.ui.dialogs.setup_wizard import SetupWizard
                 
