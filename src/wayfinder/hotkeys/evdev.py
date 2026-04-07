@@ -10,8 +10,16 @@ from queue import Queue
 from threading import Event
 from typing import Callable, Optional
 
-import evdev
-from evdev import InputDevice, categorize, ecodes
+try:
+    import evdev
+    from evdev import InputDevice, categorize, ecodes
+    HAS_EVDEV = True
+except ImportError:
+    evdev = None
+    InputDevice = None
+    categorize = None
+    ecodes = None
+    HAS_EVDEV = False
 
 from ..config import MODIFIER_CODES
 
