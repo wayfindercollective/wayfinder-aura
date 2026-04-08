@@ -163,6 +163,10 @@ def _check_venv_health():
     leaving the venv pointing at a version that no longer exists. This causes
     cryptic ModuleNotFoundError crashes on launch.
     """
+    from wayfinder.config import IS_APPIMAGE
+    if IS_APPIMAGE:
+        return  # AppImage bundles its own Python — no venv to check
+
     venv_dir = Path(__file__).parent / "venv-gpu"
     pyvenv_cfg = venv_dir / "pyvenv.cfg"
     if not pyvenv_cfg.exists():

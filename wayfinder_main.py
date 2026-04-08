@@ -12018,7 +12018,12 @@ class WayfinderApp(ctk.CTk):
     
     def _start_tray_pulse(self):
         """Start the tray icon pulsing animation."""
-        if not hasattr(self, '_tray_pulse_job'):
+        # Cancel any existing pulse to prevent duplicate timer loops
+        if hasattr(self, '_tray_pulse_job') and self._tray_pulse_job:
+            try:
+                self.after_cancel(self._tray_pulse_job)
+            except Exception:
+                pass
             self._tray_pulse_job = None
         if not hasattr(self, '_tray_pulse_frame'):
             self._tray_pulse_frame = 0

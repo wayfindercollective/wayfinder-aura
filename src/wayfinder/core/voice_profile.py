@@ -250,9 +250,12 @@ class VoiceProfile:
         """
         def regenerate():
             try:
-                self._regen_in_progress = True
+                with self._lock:
+                    if self._regen_in_progress:
+                        return  # Another thread already regenerating
+                    self._regen_in_progress = True
                 print("[Voice Profile] Regenerating profile summary...")
-                
+
                 # Get samples for the prompt
                 with self._lock:
                     samples = self._data["history"][-50:]  # Use last 50 for context
@@ -284,7 +287,8 @@ class VoiceProfile:
             except Exception as e:
                 print(f"[Voice Profile] ✗ Profile generation failed: {e}")
             finally:
-                self._regen_in_progress = False
+                with self._lock:
+                    self._regen_in_progress = False
         
         thread = threading.Thread(target=regenerate, daemon=True)
         thread.start()
@@ -299,9 +303,10 @@ class VoiceProfile:
         Returns:
             True if regeneration was started, False if already in progress
         """
-        if self._regen_in_progress:
-            return False
-        
+        with self._lock:
+            if self._regen_in_progress:
+                return False
+
         if len(self._data["history"]) < self.min_samples_for_profile:
             print(f"[Voice Profile] Need at least {self.min_samples_for_profile} samples")
             return False

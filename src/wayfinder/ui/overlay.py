@@ -1166,7 +1166,9 @@ class GlassmorphicOverlay(QWidget):
         import time
         def _log(msg):
             try:
-                with open("/tmp/wayfinder-overlay-debug.log", "a") as f:
+                _xdg_cache = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+                _log_path = os.path.join(_xdg_cache, "wayfinder-aura", "overlay-debug.log")
+                with open(_log_path, "a") as f:
                     f.write(f"{time.time():.3f}: {msg}\n")
             except:
                 pass
@@ -1700,8 +1702,11 @@ def run_overlay():
         except Exception as e:
             _debug_log(f"process_commands error: {e}")
     
-    # Debug log file for tracing overlay commands
-    _debug_log_file = "/tmp/wayfinder-overlay-debug.log"
+    # Debug log file for tracing overlay commands (XDG-compliant, not world-readable /tmp)
+    _cache_dir = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+    _debug_log_dir = os.path.join(_cache_dir, "wayfinder-aura")
+    os.makedirs(_debug_log_dir, exist_ok=True)
+    _debug_log_file = os.path.join(_debug_log_dir, "overlay-debug.log")
     
     def _debug_log(msg):
         """Write debug message to file for tracing."""
