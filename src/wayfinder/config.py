@@ -261,6 +261,17 @@ def load_config() -> dict:
             if config.get("prompt") == _old_prompt:
                 config["prompt"] = DEFAULT_CONFIG["prompt"]
 
+            # Validate critical paths — if saved path doesn't exist, fall back
+            # to auto-detected default. Prevents stale paths from a previous
+            # environment (e.g. Flatpak /app/bin path after switching to venv).
+            _path_keys = ("whisper_binary", "model_path", "llm_model_path")
+            for key in _path_keys:
+                saved = config.get(key, "")
+                if saved and not os.path.exists(os.path.expanduser(saved)):
+                    default = DEFAULT_CONFIG.get(key, "")
+                    if default and os.path.exists(os.path.expanduser(default)):
+                        config[key] = default
+
             return config
         except (json.JSONDecodeError, IOError):
             return DEFAULT_CONFIG.copy()
