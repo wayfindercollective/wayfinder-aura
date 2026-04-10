@@ -8658,6 +8658,45 @@ class WayfinderApp(ctk.CTk):
 
         build_fn(content, close)
 
+    @staticmethod
+    def _trap_scroll(scrollable_frame):
+        """Prevent mouse wheel events from bubbling to parent scroll containers.
+
+        Uses bind_all with a tag so that any widget inside the scrollable frame
+        has its scroll events handled locally and stopped from propagating.
+        """
+        try:
+            canvas = scrollable_frame._parent_canvas
+        except AttributeError:
+            return
+
+        def _on_enter(event):
+            # When mouse enters, bind scroll to this canvas
+            canvas.bind_all("<Button-4>", _scroll_up)
+            canvas.bind_all("<Button-5>", _scroll_down)
+            canvas.bind_all("<MouseWheel>", _scroll_wheel)
+
+        def _on_leave(event):
+            # When mouse leaves, unbind
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+            canvas.unbind_all("<MouseWheel>")
+
+        def _scroll_up(event):
+            canvas.yview_scroll(-3, "units")
+            return "break"
+
+        def _scroll_down(event):
+            canvas.yview_scroll(3, "units")
+            return "break"
+
+        def _scroll_wheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        scrollable_frame.bind("<Enter>", _on_enter)
+        scrollable_frame.bind("<Leave>", _on_leave)
+
     def _close_inline_panel(self, container, panel):
         """Close an inline panel and restore the container's original children."""
         hidden = getattr(panel, '_inline_hidden', [])
@@ -10228,6 +10267,7 @@ class WayfinderApp(ctk.CTk):
 
                 scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
                 scroll.pack(fill="both", expand=True, padx=5, pady=5)
+                self._trap_scroll(scroll)
 
                 for model in models:
                     is_current = os.path.expanduser(model["path"]) == current_path
@@ -10284,6 +10324,7 @@ class WayfinderApp(ctk.CTk):
 
                 scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
                 scroll.pack(fill="both", expand=True, padx=5, pady=5)
+                self._trap_scroll(scroll)
 
                 categories = [
                     ("RECOMMENDED", ["large-v3-turbo", "large-v3-turbo-q5_0"]),
