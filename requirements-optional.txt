@@ -1,0 +1,29 @@
+# Wayfinder Aura - Optional Dependencies (source-build / platform-restricted)
+#
+# These are pulled out of requirements.txt because they cannot be installed on
+# every supported platform with a plain `pip install`:
+#   - evdev: Linux only; needs linux/input.h kernel headers at build time, which
+#     SteamOS strips from its rootfs (STEAMDECK-INSTALL-LOG.md Issue 5).
+#   - llama-cpp-python: no prebuilt wheels on PyPI; needs gcc + cmake to build
+#     from source, which SteamOS also lacks (Issue 7). On the Deck dev-path,
+#     whisper.cpp handles transcription and LLM post-processing is disabled.
+#
+# Install on a system with a working C toolchain:
+#     pip install -r requirements.txt -r requirements-optional.txt
+#
+# Or install only the parts you can:
+#     pip install evdev               # Linux with kernel headers
+#     pip install llama-cpp-python    # systems with gcc + cmake
+#
+# On SteamOS specifically: skip this file entirely and use the pacman package
+# `python-evdev` via --system-site-packages (covers the evdev import surface);
+# leave llama-cpp-python uninstalled and use a cloud backend (groq/openai) or
+# whisper.cpp directly.
+
+# Input Device Monitoring (Linux only — skipped on macOS/Windows)
+evdev>=1.6.0; sys_platform == 'linux'
+
+# LLM Post-Processing — local inference with llama.cpp (fast, private, no cost)
+# Recommended models: Qwen2.5-1.5B-Instruct, Phi-3-mini, SmolLM2-1.7B
+# Download GGUF models from: https://huggingface.co/models?sort=trending&search=gguf
+llama-cpp-python>=0.3.0
