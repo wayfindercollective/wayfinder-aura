@@ -2,7 +2,9 @@
 Text injection module for Wayfinder Aura.
 
 Platform dispatch:
-- Linux: ydotool (works on both X11 and Wayland)
+- Linux/X11: xdotool (preferred — no daemon, no uinput, present in stock SteamOS image)
+- Linux/Wayland: ydotool (xdotool can't inject into Wayland clients)
+- Linux/X11 fallback: ydotool if xdotool unavailable
 - macOS: clipboard paste via pbcopy + Cmd-V
 """
 
@@ -200,12 +202,46 @@ def warmup_clipboard() -> None:
         pass  # Best-effort — never block startup
 
 
+def _inject_text_xdotool(text: str, typing_speed: str = "instant") -> None:
+    """Inject text on Linux/X11 using xdotool type.
+
+    xdotool synthesizes keystrokes via X11 XTEST — no daemon, no uinput, no input-group
+    membership required. Works in stock SteamOS where ydotool packages get wiped by updates.
+    """
+    if typing_speed in TYPING_SPEEDS:
+        key_delay, _ = TYPING_SPEEDS[typing_speed]
+    else:
+        key_delay = 2
+
+    cmd = [
+        "xdotool", "type",
+        "--clearmodifiers",
+        "--delay", str(key_delay),
+        "--", text,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+            raise InjectionError(f"xdotool failed (exit {result.returncode}): {error_detail}")
+    except subprocess.TimeoutExpired:
+        raise InjectionError("xdotool timed out after 120s")
+    except FileNotFoundError:
+        raise InjectionError("xdotool not found in PATH")
+
+
 def inject_text(text: str, typing_speed: str = "instant") -> None:
     """
     Inject text into the active window.
 
     Dispatches to platform-specific backend:
-    - Linux: ydotool
+    - Linux/X11: xdotool (preferred); ydotool as fallback
+    - Linux/Wayland: ydotool
     - macOS: clipboard paste (pbcopy + Cmd-V)
 
     Args:
@@ -224,6 +260,19 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
     if sys.platform == "darwin":
         _inject_text_pyautogui(text, typing_speed)
         return
+
+    # Linux: prefer xdotool on X11 (no daemon, survives SteamOS pacman wipes);
+    # fall back to ydotool on Wayland or when xdotool missing.
+    from ..utils.platform import get_text_injector
+    tool = get_text_injector()
+    if tool == "xdotool":
+        _inject_text_xdotool(text, typing_speed)
+        return
+    if tool == "none":
+        raise InjectionError(
+            "No text injection tool available on Linux. "
+            "Install xdotool (X11) or ydotool (Wayland)."
+        )
 
     # Linux/ydotool path — pre-flight check
     ready, msg = check_ydotool_ready()
