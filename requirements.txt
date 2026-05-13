@@ -1,5 +1,14 @@
 # Wayfinder Aura - Python Dependencies
 # Install with: pip install -r requirements.txt
+#
+# This file lists only deps that ship as prebuilt wheels for the supported
+# platforms (manylinux x86_64, macOS arm64, Windows). It is safe to install on
+# environments without a C toolchain — notably SteamOS, whose rootfs ships no
+# gcc/cmake/kernel-headers (see STEAMDECK-INSTALL-LOG.md issues 5–7).
+#
+# Source-build-only and platform-restricted deps live in requirements-optional.txt.
+# Install both together on a system with a working C toolchain:
+#     pip install -r requirements.txt -r requirements-optional.txt
 
 # UI Framework
 customtkinter>=5.2.0
@@ -18,8 +27,10 @@ numpy>=1.24.0
 # Audio Preprocessing (optional but recommended for better accuracy)
 scipy>=1.10.0
 
-# Input Device Monitoring (Linux only — skipped on macOS/Windows)
-evdev>=1.6.0; sys_platform == 'linux'
+# Input Device Monitoring on Linux is provided by `evdev`, but pip-installing it
+# requires linux/input.h kernel headers — stripped on SteamOS (Issue 5). It is
+# moved to requirements-optional.txt; on SteamOS, install `python-evdev` via
+# pacman instead and run the venv with --system-site-packages.
 
 # Cross-platform hotkey listener
 pynput>=1.7.6
@@ -41,11 +52,10 @@ Pillow>=10.0.0
 # Then install faster-whisper:
 # faster-whisper>=1.0.0
 
-# LLM Post-Processing (cleanup filler words, smart formatting)
-# Local inference with llama.cpp (fast, private, no cost) - DEFAULT
-# Recommended models: Qwen2.5-1.5B-Instruct, Phi-3-mini, SmolLM2-1.7B
-# Download GGUF models from: https://huggingface.co/models?sort=trending&search=gguf
-llama-cpp-python>=0.3.0
+# LLM Post-Processing (cleanup filler words, smart formatting) — local inference
+# with llama.cpp lives in requirements-optional.txt because llama-cpp-python has
+# no prebuilt wheel on PyPI and needs gcc + cmake to build from source, which
+# SteamOS lacks (Issue 7). Cloud-only and whisper.cpp-only setups don't need it.
 
 # Optional: Cloud inference with Anthropic Claude (high quality, requires API key)
 # Get API key from: https://console.anthropic.com/
