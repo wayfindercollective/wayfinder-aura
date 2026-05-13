@@ -1045,9 +1045,9 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
         for model_id in model_order:
             if model_id in benchmark_results:
                 result = benchmark_results[model_id]
-                if fastest == "gpu" and "gpu_10s" in result:
+                if fastest == "gpu" and result.get("gpu_10s") is not None:
                     time_str = f"{result['gpu_10s']:.1f}s"
-                elif "cpu_10s" in result:
+                elif result.get("cpu_10s") is not None:
                     time_str = f"{result['cpu_10s']:.1f}s"
                 else:
                     time_str = "TBD"
