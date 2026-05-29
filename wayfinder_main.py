@@ -1774,14 +1774,14 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
     for d in devices:
         print(f"[DEBUG]   - {d.name} ({d.path})", flush=True)
     if not devices:
-        log("⚠️ No input devices found!")
-        log("   Check: sudo usermod -aG input $USER")
-        return
-
-    log(f"🎮 Monitoring {len(devices)} input device(s):")
-    for dev in devices:
-        short_name = dev.name[:40] + "..." if len(dev.name) > 40 else dev.name
-        log(f"   • {short_name}")
+        # Don't give up: the loop below keeps rescanning, so a keyboard that is asleep
+        # or disconnected at startup recovers automatically instead of killing hotkeys.
+        log("⚠️ No input devices found yet — will keep scanning (check: sudo usermod -aG input $USER)")
+    else:
+        log(f"🎮 Monitoring {len(devices)} input device(s):")
+        for dev in devices:
+            short_name = dev.name[:40] + "..." if len(dev.name) > 40 else dev.name
+            log(f"   • {short_name}")
     
     # Build set of required modifier key codes for recording hotkey
     required_modifiers = set()
@@ -1813,12 +1813,21 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
             for mod in modifier_names
         )
 
-    try:
-        while not stop_event.is_set():
-            # Wait for input from any device (skip if no devices left)
+    RESCAN_BACKOFF = 2.0  # seconds between device rescans when none available (Rule #1: >=1s)
+
+    while not stop_event.is_set():
+        try:
+            # No devices: wait (honoring shutdown) and rescan instead of dying — a slept
+            # wireless keyboard or USB re-enumeration then recovers automatically.
             if not fd_to_device:
-                log("⚠️ No input devices remaining - hotkey listener stopping")
-                break
+                if stop_event.wait(RESCAN_BACKOFF):
+                    break
+                pressed_modifiers.clear()  # avoid a stuck-modifier state across device loss
+                rescanned = find_keyboard_devices(enabled_devices)
+                fd_to_device = {dev.fd: dev for dev in rescanned}
+                if fd_to_device:
+                    log(f"🔌 Input device(s) available ({len(fd_to_device)}) — resuming hotkey monitoring")
+                continue
             
             try:
                 r, _, _ = select.select(list(fd_to_device.keys()), [], [], 0.5)
@@ -1877,8 +1886,14 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                     # Device read failed - remove it from monitoring
                     log(f"⚠️ Device read failed, removing: {device.name} ({e})")
                     del fd_to_device[fd]
-    except Exception as e:
-        log(f"⚠️ Hotkey error: {e}")
+        except Exception as e:
+            # Last-resort guard: never let one unexpected error permanently kill the hotkey
+            # listener (that strands the app in RECORDING). Log, brief backoff, and continue.
+            log(f"⚠️ Hotkey loop error (recovering): {e}")
+            if stop_event.wait(0.2):
+                break
+
+    log("🛑 Hotkey listener stopped")
 
 
 def socket_listener(event_queue, stop_event, log_callback=None):
@@ -2748,7 +2763,7 @@ class OverlayController:
     messages over stdin/stdout.
     """
     
-    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional", config: dict | None = None):
+    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional", config: dict | None = None, log_callback=None):
         self._process: subprocess.Popen | None = None
         self._audio_level_callback = audio_level_callback
         self._audio_poll_thread: threading.Thread | None = None
@@ -2758,6 +2773,17 @@ class OverlayController:
         self._mode = mode  # "persistent" or "standard"
         self._initial_style = initial_style  # "professional", "dev", "casual", or "personal"
         self._config_ref = config  # Reference to app config for refresh
+        self._log_callback = log_callback  # route rare failures to the app/UI log (diagnostics)
+
+    def _log(self, msg: str):
+        """Surface a diagnostic message to the app/UI log if available, else stderr."""
+        if self._log_callback:
+            try:
+                self._log_callback(msg)
+                return
+            except Exception:
+                pass
+        print(msg, flush=True)
     
     def _start_process(self) -> bool:
         """Start the overlay subprocess if not already running."""
@@ -2856,7 +2882,7 @@ class OverlayController:
                     self._process.stdin.flush()
                     return True
                 except (BrokenPipeError, OSError) as e:
-                    print(f"Overlay subprocess died: {e}")
+                    self._log(f"⚠ Overlay subprocess died: {e}")
                     self._process = None
                     return False
                 except Exception as e:
@@ -2866,7 +2892,7 @@ class OverlayController:
                 self._lock.release()
 
         if critical:
-            print(f"WARNING: Failed to send critical overlay command after {attempts} attempts: {cmd}")
+            self._log(f"⚠ Overlay command not delivered after {attempts} attempts: {cmd.get('cmd')} {cmd.get('state', '')}")
         return False
     
     def send_command(self, cmd: dict) -> bool:
@@ -2913,19 +2939,19 @@ class OverlayController:
             state: One of "listening", "processing", "ready"
         """
         if not self._start_process():
-            return
+            return False
 
         self._current_state = state
-        self._send_command({"cmd": "show", "state": state}, critical=True)
+        ok = self._send_command({"cmd": "show", "state": state}, critical=True)
 
         if state == "listening":
             self._start_audio_polling()
-    
+        return ok
+
     def update(self, state: str):
-        """Update the overlay to a new state."""
+        """Update the overlay to a new state. Returns the send result (True/False)."""
         if self._process is None or self._process.poll() is not None:
-            self.show(state)
-            return
+            return self.show(state)
 
         old_state = self._current_state
         self._current_state = state
@@ -2934,10 +2960,11 @@ class OverlayController:
         if state != "listening" and old_state == "listening":
             self._stop_audio_polling()
 
-        self._send_command({"cmd": "show", "state": state}, critical=True)
+        ok = self._send_command({"cmd": "show", "state": state}, critical=True)
 
         if state == "listening" and old_state != "listening":
             self._start_audio_polling()
+        return ok
     
     def hide(self):
         """Hide the overlay."""
@@ -3107,8 +3134,14 @@ class WayfinderApp(ctk.CTk):
         
         self.app_state = AppState.IDLE
         self.event_queue = queue.Queue()
-        self.stop_event = threading.Event()
-        
+        self.stop_event = threading.Event()            # long-lived: socket listener + global shutdown
+        self._evdev_stop_event = threading.Event()     # dedicated: evdev listener (restartable on its own)
+        self._hotkey_thread = None                     # live evdev listener thread (for supervision)
+        self._socket_thread = None                     # socket listener thread (supervised for liveness)
+        self._hotkey_restart_lock = threading.Lock()   # serialize evdev restarts (config change + supervisor)
+        self.session_generation = 0                    # bumped per recording / force_reset; discards stale work
+        self._finish_injection_job = None              # pending after() id for the delayed overlay reset
+
         # Store tooltips that need dynamic updates (keyed by tooltip type)
         self.dynamic_tooltips: dict[str, list[ToolTip]] = {}
         
@@ -3187,6 +3220,7 @@ class WayfinderApp(ctk.CTk):
                     mode="persistent",  # Always use persistent mode for always_on
                     initial_style=initial_style,
                     config=self.config,
+                    log_callback=self.log,
                 )
                 self._use_pyqt_overlay = True
                 self.log(f"✨ Using Always On indicator (PyQt6)")
@@ -3220,6 +3254,7 @@ class WayfinderApp(ctk.CTk):
         self.setup_ui()
         self.setup_scaling_shortcuts()
         self.start_hotkey_listener()
+        self._start_hotkey_supervisor()
         self.poll_events()
         
         # Log animation refresh rate info
@@ -7776,7 +7811,32 @@ class WayfinderApp(ctk.CTk):
         
         # Start checking after 30 seconds (give app time to fully initialize)
         self.after(30000, check_health)
-    
+
+    def _start_hotkey_supervisor(self) -> None:
+        """Periodically ensure the evdev hotkey listener is alive; restart it if it died.
+
+        Runs regardless of overlay mode (the overlay health check above is PyQt-only). With the
+        self-healing listener (device rescan + per-iteration guard) the thread should rarely die,
+        so this is a backstop that prevents the app from being stranded in RECORDING when a
+        dropped stop-press can no longer be delivered.
+        """
+        def check_hotkey():
+            try:
+                if HAS_EVDEV and (self._hotkey_thread is None or not self._hotkey_thread.is_alive()):
+                    self.log("🔄 Hotkey listener not running - restarting...")
+                    self.restart_evdev_listener("supervisor: listener was not alive")
+                # The socket listener can die on a transient bind failure; bring it back if so.
+                if self._socket_thread is None or not self._socket_thread.is_alive():
+                    self.log("🔄 Socket listener not running - restarting...")
+                    self._ensure_socket_listener()
+            except Exception as e:
+                self.log(f"⚠️ Hotkey supervisor error: {e}")
+            # Re-check every 10 seconds (Rule #1: >=100ms, no busy polling)
+            self.after(10000, check_hotkey)
+
+        # Start checking after 30 seconds (give app time to bind input devices first)
+        self.after(30000, check_hotkey)
+
     def _on_display_wake(self) -> None:
         """Called when the display wakes up from sleep.
         
@@ -9389,9 +9449,7 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, 'hotkey_label'):
             self.hotkey_label.configure(text=f"Press {new_hotkey} to toggle")
         self.log(f"⚙ Hotkey: {new_hotkey}")
-        self.stop_event.set()
-        self.stop_event = threading.Event()
-        self.start_hotkey_listener()
+        self.restart_evdev_listener("config change")
 
     def _on_hotkey_key_changed(self, value):
         """Handle inline hotkey key dropdown change."""
@@ -9411,9 +9469,7 @@ class WayfinderApp(ctk.CTk):
         """Apply style hotkey config change and restart the listener."""
         new_hotkey = self.get_style_hotkey_display()
         self.log(f"⚙ Style toggle hotkey: {new_hotkey}")
-        self.stop_event.set()
-        self.stop_event = threading.Event()
-        self.start_hotkey_listener()
+        self.restart_evdev_listener("config change")
 
     def _on_style_hotkey_key_changed(self, value):
         """Handle inline style hotkey key dropdown change."""
@@ -9437,9 +9493,7 @@ class WayfinderApp(ctk.CTk):
             self.config["enabled_input_devices"] = [value]
         save_config(self.config)
         self.log(f"⚙ Input device: {value}")
-        self.stop_event.set()
-        self.stop_event = threading.Event()
-        self.start_hotkey_listener()
+        self.restart_evdev_listener("config change")
 
     def get_microphone_display(self) -> str:
         """Get display name for current audio input device."""
@@ -11946,6 +12000,7 @@ class WayfinderApp(ctk.CTk):
         # UI is only accessible via "Open Settings" - app always starts minimized to tray
         menu = pystray.Menu(
             pystray.MenuItem("Toggle Recording", self.tray_record, default=True),
+            pystray.MenuItem("Reset (unstick overlay)", self.tray_reset),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open Settings", self.show_from_tray),
             pystray.MenuItem(
@@ -12122,11 +12177,17 @@ class WayfinderApp(ctk.CTk):
     def tray_record(self):
         self.after(0, self.on_record_button)
 
+    def tray_reset(self, icon=None, item=None):
+        """Tray 'Reset' action — abandon any stuck/in-flight dictation and return to idle."""
+        self.force_reset()
+
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
         # Signal all background threads to stop
         self.stop_event.set()
-        
+        if hasattr(self, '_evdev_stop_event'):
+            self._evdev_stop_event.set()
+
         # Shutdown thread pool executors gracefully
         try:
             if hasattr(self, 'executor'):
@@ -12182,7 +12243,12 @@ class WayfinderApp(ctk.CTk):
         old_state = self.app_state
         self.app_state = new_state
         color = STATE_COLORS[new_state]
-        
+
+        # Diagnostics: trace state transitions (goes to journal/stderr, not the UI log) so a
+        # stuck-overlay report can be correlated against the overlay-debug.log timeline.
+        if old_state != new_state:
+            print(f"[STATE] {old_state.name} -> {new_state.name}", flush=True)
+
         # Audio ducking on state transitions
         if self.config.get("audio_ducking_enabled", True) and hasattr(self, 'audio_ducker'):
             if new_state == AppState.RECORDING and old_state != AppState.RECORDING:
@@ -12427,46 +12493,82 @@ class WayfinderApp(ctk.CTk):
     # === Hotkey & Events ===
     
     def start_hotkey_listener(self):
-        hotkey_key = self.config.get("hotkey_key", 67)
-        hotkey_modifiers = self.config.get("hotkey_modifiers", [])
-        enabled_devices = self.config.get("enabled_input_devices", [])
-        hotkey_display = self.get_hotkey_display()
-        
-        # Style toggle hotkey settings
-        style_toggle_key = self.config.get("style_toggle_key", 68)  # F10 default
-        style_toggle_modifiers = self.config.get("style_toggle_modifiers", [])
-        
-        # Always start socket listener (most reliable for Wayland)
-        threading.Thread(
-            target=socket_listener,
-            args=(self.event_queue, self.stop_event, self.log),
-            daemon=True,
-        ).start()
-        
+        # The socket listener does NOT depend on the hotkey key/device, so it stays up for the
+        # app's lifetime (config changes restart only evdev — see restart_evdev_listener).
+        self._ensure_socket_listener()
+
         # Check if we're on Wayland
         is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
-        
         if is_wayland:
             self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
         else:
             self.log("🖥️ X11 detected - using evdev")
-        
-        # Log the hotkey configuration
+
+        self._start_evdev_listener()
+
+    def _ensure_socket_listener(self):
+        """Start the socket listener if it isn't already running. Idempotent.
+
+        Liveness-based (not a one-shot flag): if the listener ever dies — e.g. a transient
+        SOCKET_PATH bind failure — the supervisor calls this again to bring it back, instead of
+        the socket trigger being dead until an app restart.
+        """
+        existing = self._socket_thread
+        if existing is not None and existing.is_alive():
+            return
+        self._socket_thread = threading.Thread(
+            target=socket_listener,
+            args=(self.event_queue, self.stop_event, self.log),
+            daemon=True,
+        )
+        self._socket_thread.start()
+
+    def _start_evdev_listener(self):
+        """Start (or restart) the evdev hotkey listener thread, cleanly stopping any prior one."""
+        if not HAS_EVDEV:
+            self.log("⚠️ evdev not installed — hotkeys limited to socket/D-Bus methods")
+            return
+
+        hotkey_key = self.config.get("hotkey_key", 67)
+        hotkey_modifiers = self.config.get("hotkey_modifiers", [])
+        enabled_devices = self.config.get("enabled_input_devices", [])
+        style_toggle_key = self.config.get("style_toggle_key", 68)  # F10 default
+        style_toggle_modifiers = self.config.get("style_toggle_modifiers", [])
+
+        # Cleanly stop a previous evdev thread (config change / supervisor restart) using its
+        # dedicated stop event — the shared self.stop_event (and the socket listener) is untouched.
+        old_thread = self._hotkey_thread
+        if old_thread is not None and old_thread.is_alive():
+            self._evdev_stop_event.set()
+            # Join longer than the listener's rescan backoff (2s) so the old thread is gone
+            # before the new one starts — otherwise two listeners briefly double-fire hotkeys.
+            old_thread.join(timeout=2.5)
+            if old_thread.is_alive():
+                self.log("⚠️ Old hotkey listener still winding down; starting new one anyway")
+        self._evdev_stop_event = threading.Event()
+
         hotkey_name = self.get_hotkey_display()
-        style_key_name = {59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6", 
+        style_key_name = {59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
                          65: "F7", 66: "F8", 67: "F9", 68: "F10"}.get(style_toggle_key, f"Key{style_toggle_key}")
         self.log(f"⌨️ Record hotkey: {hotkey_name} | Style toggle: {style_key_name}")
-        
-        # Use evdev on both X11 and Wayland (works if user is in 'input' group)
-        if HAS_EVDEV:
-            threading.Thread(
-                target=hotkey_listener,
-                args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log,
-                      style_toggle_key, style_toggle_modifiers),
-                daemon=True,
-            ).start()
-        else:
-            self.log("⚠️ evdev not installed — hotkeys limited to socket/D-Bus methods")
+
+        self._hotkey_thread = threading.Thread(
+            target=hotkey_listener,
+            args=(self.event_queue, hotkey_key, hotkey_modifiers, self._evdev_stop_event,
+                  enabled_devices, self.log, style_toggle_key, style_toggle_modifiers),
+            daemon=True,
+        )
+        self._hotkey_thread.start()
+
+    def restart_evdev_listener(self, reason: str = ""):
+        """Cleanly restart only the evdev listener (config changes + the health supervisor).
+
+        The socket listener keeps running — it doesn't depend on the hotkey key/device.
+        """
+        with self._hotkey_restart_lock:
+            if reason:
+                self.log(f"🔁 Hotkey listener restart ({reason})")
+            self._start_evdev_listener()
 
     def poll_events(self):
         try:
@@ -12480,26 +12582,42 @@ class WayfinderApp(ctk.CTk):
         interval = 250 if self.app_state == AppState.IDLE else 100
         self.after(interval, self.poll_events)
 
+    @staticmethod
+    def _split_gen(data):
+        """Split a terminal event payload into (payload, generation).
+
+        Workers tag terminal events as (payload, gen). Untagged/legacy payloads return
+        (data, None), which disables the staleness check for that event (fail-open).
+        """
+        if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], (int, type(None))):
+            return data[0], data[1]
+        return data, None
+
     def handle_event(self, event_type, data):
         if event_type == EventType.HOTKEY_PRESSED:
             self.on_hotkey()
         elif event_type == EventType.STYLE_TOGGLE:
             self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
         elif event_type == EventType.TRANSCRIPTION_DONE:
-            self.on_transcription_done(data)
+            text, gen = self._split_gen(data)
+            self.on_transcription_done(text, gen)
         elif event_type == EventType.TRANSCRIPTION_ERROR:
-            self.on_error(f"Transcription: {data}")
+            msg, gen = self._split_gen(data)
+            self.on_error(f"Transcription: {msg}", gen)
         elif event_type == EventType.INJECTION_DONE:
-            self.on_injection_done()
+            _payload, gen = self._split_gen(data)
+            self.on_injection_done(gen)
         elif event_type == EventType.INJECTION_ERROR:
-            self.on_error(f"Injection: {data}")
+            msg, gen = self._split_gen(data)
+            self.on_error(f"Injection: {msg}", gen)
         elif event_type == EventType.CHUNK_TRANSCRIBED:
             chunk_index, text, had_context = data if len(data) == 3 else (*data, False)
             preview = text[:30] + "..." if len(text) > 30 else text
             context_indicator = " →" if had_context else ""
             self.log(f"✓ Chunk {chunk_index + 1}{context_indicator}: \"{preview}\"")
         elif event_type == EventType.CHUNKED_TRANSCRIPTION_DONE:
-            self.on_transcription_done(data)
+            text, gen = self._split_gen(data)
+            self.on_transcription_done(text, gen)
         elif event_type == EventType.LOG_MESSAGE:
             self._do_log(data)
 
@@ -12565,7 +12683,18 @@ class WayfinderApp(ctk.CTk):
     def start_recording(self):
         try:
             self.log("🎤 Listening...")
-            
+
+            # New recording session: bump the generation so any still-in-flight work or
+            # scheduled callbacks from a previous session are recognised as stale and ignored.
+            self.session_generation += 1
+            gen = self.session_generation
+            if self._finish_injection_job is not None:
+                try:
+                    self.after_cancel(self._finish_injection_job)
+                except Exception:
+                    pass
+                self._finish_injection_job = None
+
             # Update state FIRST for immediate feedback
             self.update_state(AppState.RECORDING)
             
@@ -12586,7 +12715,7 @@ class WayfinderApp(ctk.CTk):
             use_chunked = self.config.get("chunked_mode", True) and not is_remote
             
             if use_chunked:
-                self._start_chunked_recording()
+                self._start_chunked_recording(gen)
             else:
                 if is_remote and self.config.get("chunked_mode", True):
                     self.log("ℹ️ Chunked mode skipped (cloud API handles long audio)")
@@ -12600,16 +12729,19 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self.on_error(f"Microphone: {e}")
     
-    def _start_chunked_recording(self):
+    def _start_chunked_recording(self, gen=None):
         """Start recording with chunked processing for indefinite duration."""
         self.chunk_transcriptions = []
-        
+        # Per-session chunk store: workers hold THIS list reference, so a stale worker can never
+        # read/write a newer session's chunk state even if start_recording rebinds the attribute.
+        store = self.chunk_transcriptions
+
         def on_chunk_ready(chunk_path: str, chunk_index: int):
             """Called when a chunk is ready for transcription."""
             self.log(f"📦 Chunk {chunk_index + 1} ready")
-            # Submit chunk for transcription in background
+            # Submit chunk for transcription in background (tagged with this session's gen + store)
             self.transcription_executor.submit(
-                self._transcribe_chunk, chunk_path, chunk_index
+                self._transcribe_chunk, chunk_path, chunk_index, gen, store
             )
         
         self.chunked_recorder = ChunkedRecorder(
@@ -12622,30 +12754,36 @@ class WayfinderApp(ctk.CTk):
         )
         self.chunked_recorder.start()
     
-    def _transcribe_chunk(self, chunk_path: str, chunk_index: int):
+    def _transcribe_chunk(self, chunk_path: str, chunk_index: int, gen=None, store=None):
         """Transcribe a single chunk in the background."""
+        if store is None:
+            store = self.chunk_transcriptions
         try:
+            # Skip if this chunk belongs to a superseded session (optimisation — the per-session
+            # `store` already isolates writes, so this only avoids wasted transcription work).
+            if gen is not None and gen != self.session_generation:
+                return
             # Get context from previous chunk for continuity
             context = ""
             if chunk_index > 0:
                 with self.chunk_transcription_lock:
-                    if len(self.chunk_transcriptions) >= chunk_index:
-                        prev_text = self.chunk_transcriptions[chunk_index - 1]
+                    if len(store) >= chunk_index:
+                        prev_text = store[chunk_index - 1]
                         if prev_text and prev_text != "[error]":
                             context = prev_text
-            
+
             # Skip post-processing per-chunk - will be applied to final combined text
             text = transcribe_with_config(
-                chunk_path, 
-                self.config, 
+                chunk_path,
+                self.config,
                 context=context,
                 skip_post_processing=True,
             )
+            # Write into this session's private store — never touches a newer session's list.
             with self.chunk_transcription_lock:
-                # Ensure list is large enough
-                while len(self.chunk_transcriptions) <= chunk_index:
-                    self.chunk_transcriptions.append("")
-                self.chunk_transcriptions[chunk_index] = text.strip() if text.strip() else "[empty]"
+                while len(store) <= chunk_index:
+                    store.append("")
+                store[chunk_index] = text.strip() if text.strip() else "[empty]"
             
             # Log with context indicator for chunks after the first
             if chunk_index > 0 and context:
@@ -12654,11 +12792,12 @@ class WayfinderApp(ctk.CTk):
                 self.event_queue.put((EventType.CHUNK_TRANSCRIBED, (chunk_index, text, False)))
         except Exception as e:
             self.log(f"⚠ Chunk {chunk_index + 1} error: {e}")
-            # Mark chunk as failed so finalization doesn't wait forever
+            # Mark chunk as failed so this session's finalizer doesn't wait forever. Writes go to
+            # the per-session store, so this can't poison a newer session's chunk count.
             with self.chunk_transcription_lock:
-                while len(self.chunk_transcriptions) <= chunk_index:
-                    self.chunk_transcriptions.append("")
-                self.chunk_transcriptions[chunk_index] = "[error]"
+                while len(store) <= chunk_index:
+                    store.append("")
+                store[chunk_index] = "[error]"
     
     def _update_recording_duration(self):
         """Update the status label with recording duration."""
@@ -12697,104 +12836,150 @@ class WayfinderApp(ctk.CTk):
             self.indicator.update("Processing...", COLORS["accent_yellow"])
         
         self.update_state(AppState.PROCESSING)
-        
+
+        gen = self.session_generation  # this recording's session id (set in start_recording)
         try:
             # Check which recorder was used
             if self.chunked_recorder is not None and self.chunked_recorder.is_recording():
-                self._stop_chunked_recording()
+                self._stop_chunked_recording(gen)
             else:
-                self._stop_simple_recording()
+                self._stop_simple_recording(gen)
         except Exception as e:
-            self.on_error(f"Processing: {e}")
+            self.on_error(f"Processing: {e}", gen)
     
-    def _stop_simple_recording(self):
+    def _stop_simple_recording(self, gen=None):
         """Stop simple (non-chunked) recording and process."""
         duration = self.recorder.get_duration()
         self.log(f"⏱ Duration: {duration:.1f}s")
-        
+
         if duration < self.config["min_recording_duration"]:
             self.recorder.stop()
             self.recorder.cleanup()
-            self.on_error("Too short - speak longer")
+            self.on_error("Too short - speak longer", gen)
             return
-        
+
         audio_path = self.recorder.stop()
-        self.executor.submit(self.transcribe_and_inject, audio_path)
+        self.executor.submit(self.transcribe_and_inject, audio_path, gen)
     
-    def _stop_chunked_recording(self):
+    def _stop_chunked_recording(self, gen=None):
         """Stop chunked recording and process all chunks."""
-        duration = self.chunked_recorder.get_duration()
-        chunk_count = self.chunked_recorder.get_chunk_count()
+        # Capture the recorder + chunk store HERE (Tk thread, at stop time) so they unambiguously
+        # belong to this session — the finalizer runs later on a (possibly delayed) worker, by
+        # which time self.chunked_recorder / self.chunk_transcriptions may belong to a new session.
+        recorder = self.chunked_recorder
+        store = self.chunk_transcriptions
+
+        # Stop FIRST so the chunk-monitor thread is joined and the chunk count is stable. Reading
+        # get_chunk_count() before stop() can race a final on_chunk_ready (duplicate chunk index
+        # / undercounted expected_chunks).
+        final_path, all_paths = recorder.stop()
+        duration = recorder.get_duration()
+        chunk_count = recorder.get_chunk_count()
         self.log(f"⏱ Duration: {duration:.1f}s ({chunk_count} chunks)")
-        
+
         if duration < self.config["min_recording_duration"]:
-            self.chunked_recorder.stop()
-            self.chunked_recorder.cleanup()
-            self.chunked_recorder = None
-            self.on_error("Too short - speak longer")
+            recorder.cleanup()
+            if self.chunked_recorder is recorder:
+                self.chunked_recorder = None
+            self.on_error("Too short - speak longer", gen)
             return
-        
-        # Stop and get final chunk
-        final_path, all_paths = self.chunked_recorder.stop()
-        
+
         # Submit final chunk for transcription if exists
         if final_path:
             final_index = chunk_count
             self.log(f"📦 Final chunk ready")
             self.transcription_executor.submit(
-                self._transcribe_chunk, final_path, final_index
+                self._transcribe_chunk, final_path, final_index, gen, store
             )
-        
+
         # Wait for all transcriptions to complete and combine
-        self.executor.submit(self._finalize_chunked_transcription, chunk_count + (1 if final_path else 0))
+        self.executor.submit(
+            self._finalize_chunked_transcription,
+            chunk_count + (1 if final_path else 0), gen, store, recorder,
+        )
     
-    def _finalize_chunked_transcription(self, expected_chunks: int):
-        """Wait for all chunks to be transcribed and combine them."""
-        # Wait for all chunks to be transcribed (with timeout)
-        timeout = 120  # 2 minutes max wait
-        start_time = time.time()
-        
-        while True:
+    def _finalize_chunked_transcription(self, expected_chunks: int, gen=None, store=None, recorder_instance=None):
+        """Wait for all chunks to be transcribed and combine them.
+
+        `store` and `recorder_instance` are captured at stop time (Tk thread) and belong
+        unambiguously to this session, so a delayed finalizer never touches a newer session's
+        chunk list or recorder.
+        """
+        emitted = False
+        if store is None:
+            store = self.chunk_transcriptions
+        try:
+            # Wait for all chunks to be transcribed (with timeout)
+            timeout = 120  # 2 minutes max wait
+            start_time = time.time()
+
+            while True:
+                # Bail early if this session was superseded (new recording / force_reset) — saves
+                # waiting/work; the per-session store/recorder make it safe regardless.
+                if gen is not None and gen != self.session_generation:
+                    return
+                with self.chunk_transcription_lock:
+                    completed = len([t for t in store if t])
+
+                if completed >= expected_chunks:
+                    break
+
+                if time.time() - start_time > timeout:
+                    self.log(f"⚠ Timeout: only {completed}/{expected_chunks} chunks transcribed")
+                    break
+
+                time.sleep(0.5)
+
+            if gen is not None and gen != self.session_generation:
+                return
+
+            # Combine all transcriptions with overlap deduplication
             with self.chunk_transcription_lock:
-                completed = len([t for t in self.chunk_transcriptions if t])
-            
-            if completed >= expected_chunks:
-                break
-            
-            if time.time() - start_time > timeout:
-                self.log(f"⚠ Timeout: only {completed}/{expected_chunks} chunks transcribed")
-                break
-            
-            time.sleep(0.5)
-        
-        # Combine all transcriptions with overlap deduplication
-        with self.chunk_transcription_lock:
-            combined_text = self._deduplicate_overlap_text(self.chunk_transcriptions)
-        
-        # Apply post-processing to the final combined text (not per-chunk)
-        # This gives the LLM full context and avoids per-chunk prompt leakage issues
-        if combined_text.strip() and self.config.get("post_processing_enabled", True):
-            try:
-                from wayfinder.core.postprocessor import process_with_config
-                self.log("🔧 Post-processing combined text...")
-                original_text = combined_text
-                combined_text = process_with_config(combined_text, self.config)
-                if combined_text != original_text:
-                    self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
-            except Exception as e:
-                self.log(f"⚠ Post-processing error: {e}")
-                # Continue with original combined text
-        
-        # Cleanup
-        if self.chunked_recorder:
-            self.chunked_recorder.cleanup()
-            self.chunked_recorder = None
-        
-        if combined_text.strip():
-            self.log(f"📝 \"{combined_text[:50]}{'...' if len(combined_text) > 50 else ''}\"")
-            self.event_queue.put((EventType.CHUNKED_TRANSCRIPTION_DONE, combined_text))
-        else:
-            self.event_queue.put((EventType.TRANSCRIPTION_ERROR, "No speech detected"))
+                combined_text = self._deduplicate_overlap_text(store)
+
+            # Apply post-processing to the final combined text (not per-chunk)
+            # This gives the LLM full context and avoids per-chunk prompt leakage issues
+            if combined_text.strip() and self.config.get("post_processing_enabled", True):
+                try:
+                    from wayfinder.core.postprocessor import process_with_config
+                    self.log("🔧 Post-processing combined text...")
+                    original_text = combined_text
+                    combined_text = process_with_config(combined_text, self.config)
+                    if combined_text != original_text:
+                        self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
+                except Exception as e:
+                    self.log(f"⚠ Post-processing error: {e}")
+                    # Continue with original combined text
+
+            # Re-check AFTER the (potentially slow) post-processing: a new chunked recording may
+            # have started during the LLM call. If so, bail — the finally cleans up our own
+            # recorder without touching the newer session's recorder/state.
+            if gen is not None and gen != self.session_generation:
+                return
+
+            if combined_text.strip():
+                self.log(f"📝 \"{combined_text[:50]}{'...' if len(combined_text) > 50 else ''}\"")
+                self.event_queue.put((EventType.CHUNKED_TRANSCRIPTION_DONE, (combined_text, gen)))
+            else:
+                self.event_queue.put((EventType.TRANSCRIPTION_ERROR, ("No speech detected", gen)))
+            emitted = True
+        except Exception as e:
+            self.event_queue.put((EventType.TRANSCRIPTION_ERROR, (f"Finalize failed: {e}", gen)))
+            emitted = True
+        finally:
+            # Clean up THIS session's recorder instance (idempotent), and only detach the shared
+            # handle if it still points at our instance — a newer session may have replaced it.
+            if recorder_instance is not None:
+                try:
+                    recorder_instance.cleanup()
+                except Exception:
+                    pass
+            if self.chunked_recorder is recorder_instance:
+                self.chunked_recorder = None
+            # Guarantee the overlay/app is never left stuck in PROCESSING: if no terminal event
+            # was emitted and this session is still current, emit one now.
+            if not emitted and (gen is None or gen == self.session_generation):
+                self.event_queue.put((EventType.TRANSCRIPTION_ERROR, ("Transcription did not complete", gen)))
     
     def _deduplicate_overlap_text(self, transcriptions: list[str]) -> str:
         """
@@ -12895,7 +13080,7 @@ class WayfinderApp(ctk.CTk):
         
         return ""
 
-    def transcribe_and_inject(self, audio_path):
+    def transcribe_and_inject(self, audio_path, gen=None):
         import time as time_module
         try:
             self.log("🔄 Transcribing...")
@@ -12903,15 +13088,25 @@ class WayfinderApp(ctk.CTk):
             text = transcribe_with_config(audio_path, self.config)
             trans_elapsed = time_module.perf_counter() - trans_start
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
-            self.event_queue.put((EventType.TRANSCRIPTION_DONE, text))
+            self.event_queue.put((EventType.TRANSCRIPTION_DONE, (text, gen)))
         except Exception as e:
-            self.event_queue.put((EventType.TRANSCRIPTION_ERROR, str(e)))
+            self.event_queue.put((EventType.TRANSCRIPTION_ERROR, (str(e), gen)))
         finally:
-            self.recorder.cleanup()
+            # Delete THIS session's audio file specifically — not self.recorder.cleanup(), which
+            # wipes the recorder's *current* temp files and could delete a newer session's audio
+            # (the recorder instance is reused across sessions).
+            try:
+                Path(audio_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
-    def on_transcription_done(self, text):
+    def on_transcription_done(self, text, gen=None):
+        # Ignore results from a superseded session (force_reset / a newer recording).
+        if gen is not None and gen != self.session_generation:
+            self.log("⏭ Ignoring stale transcription (session changed)")
+            return
         if not text.strip():
-            self.on_error("No speech detected")
+            self.on_error("No speech detected", gen)
             return
 
         # Add to voice learning history when "Personal" style is active
@@ -12931,9 +13126,13 @@ class WayfinderApp(ctk.CTk):
             )
         
         self.update_state(AppState.PASTING)
-        self.executor.submit(self.do_inject, processed_text)
+        g = gen if gen is not None else self.session_generation
+        self.executor.submit(self.do_inject, processed_text, g)
 
-    def do_inject(self, text):
+    def do_inject(self, text, gen=None):
+        # Don't inject for a superseded session (force_reset / a newer recording took over).
+        if gen is not None and gen != self.session_generation:
+            return
         try:
             # Replace newlines with spaces to avoid sending Enter keys via ydotool
             # This prevents unwanted line breaks and accidental form submissions
@@ -12944,7 +13143,7 @@ class WayfinderApp(ctk.CTk):
 
             if not text:
                 self.event_queue.put((EventType.LOG_MESSAGE, "⚠ Empty text after cleanup — nothing to inject"))
-                self.event_queue.put((EventType.INJECTION_DONE, None))
+                self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
                 return
 
             # Small delay to let focus settle back to the user's target window
@@ -12952,14 +13151,22 @@ class WayfinderApp(ctk.CTk):
             import time as _time
             _time.sleep(0.15)
 
-            inject_text(text, typing_speed="instant")
-            self.event_queue.put((EventType.INJECTION_DONE, None))
-        except Exception as e:
-            self.event_queue.put((EventType.INJECTION_ERROR, str(e)))
+            # Re-check after the delay: a reset / new recording during the sleep must NOT result
+            # in stale text being typed into whatever window the user has now focused.
+            if gen is not None and gen != self.session_generation:
+                return
 
-    def on_injection_done(self):
+            inject_text(text, typing_speed="instant")
+            self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
+        except Exception as e:
+            self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
+
+    def on_injection_done(self, gen=None):
+        # Ignore completion of a superseded session (force_reset / newer recording).
+        if gen is not None and gen != self.session_generation:
+            return
         self.log("✓ Text inserted")
-        
+
         # Ensure processing state was visible for at least 800ms
         # This prevents the overlay from flashing too quickly
         import time as time_module
@@ -12968,25 +13175,41 @@ class WayfinderApp(ctk.CTk):
             min_display_ms = 800
             if elapsed_ms < min_display_ms:
                 remaining_ms = int(min_display_ms - elapsed_ms)
-                # Schedule the ready state after remaining time
-                self.after(remaining_ms, self._finish_injection)
+                # Schedule the ready state after remaining time. Capture gen so a stale delayed
+                # reset can't clobber a newer recording; track the job id so it can be cancelled.
+                self._finish_injection_job = self.after(remaining_ms, lambda: self._finish_injection(gen))
                 return
-        
-        self._finish_injection()
-    
-    def _finish_injection(self):
+
+        self._finish_injection(gen)
+
+    def _finish_injection(self, gen=None, _retries=0):
         """Complete the injection and return overlay to ready state."""
+        self._finish_injection_job = None
+        # A newer session already took over — don't reset it back to idle.
+        if gen is not None and gen != self.session_generation:
+            return
         self._processing_start_time = None
-        # Return overlay to ready state
+        # Return overlay to ready state, and verify the command actually reached the overlay
+        # (a dropped critical command would otherwise leave the overlay stuck visually).
         if self._use_pyqt_overlay and self.overlay_controller:
-            self.overlay_controller.show("ready")  # Return to grey ready state
+            ok = self.overlay_controller.show("ready")  # Return to grey ready state
+            if ok is False and _retries < 3:
+                self.log("⚠ Overlay reset command failed to send — retrying")
+                self._finish_injection_job = self.after(150, lambda: self._finish_injection(gen, _retries + 1))
+                return
+            # After a few failed retries, fall through and reset app state anyway — the overlay's
+            # own watchdog / the health-check supervisor will recover the overlay separately.
         elif self.indicator:
             self.indicator.hide()
         self.update_state(AppState.IDLE)
 
-    def on_error(self, message):
+    def on_error(self, message, gen=None):
+        # Ignore errors from a superseded session.
+        if gen is not None and gen != self.session_generation:
+            self.log(f"⏭ Ignoring stale error (session changed): {message}")
+            return
         self.log(f"⚠ {message}")
-        
+
         # Ensure processing state was visible for at least 800ms
         import time as time_module
         if hasattr(self, '_processing_start_time') and self._processing_start_time:
@@ -12994,10 +13217,74 @@ class WayfinderApp(ctk.CTk):
             min_display_ms = 800
             if elapsed_ms < min_display_ms:
                 remaining_ms = int(min_display_ms - elapsed_ms)
-                self.after(remaining_ms, self._finish_injection)
+                self._finish_injection_job = self.after(remaining_ms, lambda: self._finish_injection(gen))
                 return
-        
-        self._finish_injection()
+
+        self._finish_injection(gen)
+
+    def force_reset(self):
+        """Explicit recovery: abandon any in-flight dictation and return to a clean IDLE state.
+
+        Safe to call from any thread (tray callbacks run off the Tk thread); the work is
+        marshalled onto the Tk thread. This is a deliberate user-initiated escape hatch — it is
+        NOT wired into the mic button (which keeps its normal stop-and-process toggle) and is NOT
+        auto-invoked by the supervisor.
+        """
+        self.after(0, self._do_force_reset)
+
+    def _do_force_reset(self):
+        # Bump the generation so every in-flight worker + scheduled callback becomes stale.
+        self.session_generation += 1
+        self.log("🧹 Reset — returning to idle")
+
+        # Cancel any pending delayed overlay reset / recording duration timer.
+        for attr in ("_finish_injection_job", "_duration_update_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        self._recording_start_time = None
+        self._processing_start_time = None
+
+        # Stop any active recorder.
+        try:
+            if getattr(self, "chunked_recorder", None) is not None:
+                try:
+                    self.chunked_recorder.stop()
+                except Exception:
+                    pass
+                try:
+                    self.chunked_recorder.cleanup()
+                except Exception:
+                    pass
+                self.chunked_recorder = None
+            elif getattr(self, "recorder", None) is not None:
+                try:
+                    self.recorder.stop()
+                except Exception:
+                    pass
+                try:
+                    self.recorder.cleanup()
+                except Exception:
+                    pass
+        except Exception as e:
+            self.log(f"⚠ Reset recorder cleanup: {e}")
+
+        # Stop the audio-level flood and return the overlay to ready. update() (unlike show())
+        # stops audio polling when leaving the listening state — this is what unsticks a frozen
+        # "Listening…" overlay.
+        try:
+            if self._use_pyqt_overlay and self.overlay_controller:
+                self.overlay_controller.update("ready")
+            elif self.indicator:
+                self.indicator.hide()
+        except Exception as e:
+            self.log(f"⚠ Reset overlay: {e}")
+
+        self.update_state(AppState.IDLE)
 
     def _add_to_voice_learning(self, text: str):
         """Add transcription to voice learning history."""

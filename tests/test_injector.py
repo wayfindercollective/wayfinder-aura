@@ -30,7 +30,8 @@ class TestTypingSpeeds:
     """Tests for the TYPING_SPEEDS dictionary."""
 
     def test_instant_speed(self):
-        assert TYPING_SPEEDS["instant"] == (0, 0)
+        # "instant" uses 1ms (not 0) delays to prevent ydotool Shift bleed (commit 8bcedd4).
+        assert TYPING_SPEEDS["instant"] == (1, 1)
 
     def test_fast_speed(self):
         assert TYPING_SPEEDS["fast"] == (1, 1)
@@ -101,7 +102,7 @@ class TestInjectTextSubprocess:
     @pytest.mark.parametrize(
         "speed,expected_delay,expected_hold",
         [
-            ("instant", "0", "0"),
+            ("instant", "1", "1"),
             ("fast", "1", "1"),
             ("normal", "12", "12"),
             ("slow", "50", "20"),
@@ -118,13 +119,14 @@ class TestInjectTextSubprocess:
         assert cmd[delay_idx] == expected_delay
         assert cmd[hold_idx] == expected_hold
 
-    def test_unknown_speed_defaults_to_instant(self, mock_ydotool_success):
+    def test_unknown_speed_uses_safe_default(self, mock_ydotool_success):
+        # Unknown speeds fall back to inject_text's (2, 2) "safe default", not instant.
         inject_text("test", "warp_speed")
         cmd = mock_ydotool_success.call_args[0][0]
         delay_idx = cmd.index("--key-delay") + 1
         hold_idx = cmd.index("--key-hold") + 1
-        assert cmd[delay_idx] == "0"
-        assert cmd[hold_idx] == "0"
+        assert cmd[delay_idx] == "2"
+        assert cmd[hold_idx] == "2"
 
     def test_passes_timeout_120(self, mock_ydotool_success):
         inject_text("test", "instant")

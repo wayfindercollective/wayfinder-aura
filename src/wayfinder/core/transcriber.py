@@ -342,9 +342,11 @@ class FasterWhisperBackend(TranscriptionBackend):
         vad_enabled: bool = True,
         vad_threshold: float = 0.3,
         gpu_device: str = "auto",
+        timeout: float = 300.0,
     ):
         self.model_size = model_size
         self.use_gpu = use_gpu
+        self.timeout = timeout  # wall-clock bound for the in-process transcribe+iteration
         self.compute_type = compute_type
         self.prompt = prompt
         self.language = language
@@ -513,30 +515,38 @@ class FasterWhisperBackend(TranscriptionBackend):
                     speech_pad_ms=200,
                 )
 
-            segments, info = model.transcribe(
-                audio_path,
-                language=language,
-                initial_prompt=final_prompt,
-                beam_size=self.beam_size,
-                best_of=self.best_of,
-                temperature=temp,
-                vad_filter=self.vad_enabled,
-                vad_parameters=vad_params,
-                condition_on_previous_text=True,
-                no_speech_threshold=self.no_speech_threshold,
-                compression_ratio_threshold=self.compression_ratio_threshold,
-                suppress_blank=self.suppress_nst,
-                word_timestamps=False,
-            )
-            
-            # Collect all segments into text
-            text_parts = []
-            for segment in segments:
-                text_parts.append(segment.text.strip())
-            
-            transcription = " ".join(text_parts).strip()
-            return transcription
-            
+            # faster-whisper returns a lazy generator; the actual work happens during segment
+            # iteration, so the timed function must include the iteration. The in-process call
+            # blocks in C and can't be killed by a thread timeout — on timeout we raise so the
+            # pipeline emits TRANSCRIPTION_ERROR and resets rather than hanging forever.
+            def _do_transcribe():
+                segments, _info = model.transcribe(
+                    audio_path,
+                    language=language,
+                    initial_prompt=final_prompt,
+                    beam_size=self.beam_size,
+                    best_of=self.best_of,
+                    temperature=temp,
+                    vad_filter=self.vad_enabled,
+                    vad_parameters=vad_params,
+                    condition_on_previous_text=True,
+                    no_speech_threshold=self.no_speech_threshold,
+                    compression_ratio_threshold=self.compression_ratio_threshold,
+                    suppress_blank=self.suppress_nst,
+                    word_timestamps=False,
+                )
+                return " ".join(seg.text.strip() for seg in segments).strip()
+
+            from wayfinder.utils.timeout import run_with_timeout, CallTimeout
+            try:
+                return run_with_timeout(_do_transcribe, self.timeout)
+            except CallTimeout:
+                raise TranscriptionError(
+                    f"Faster-Whisper transcription timed out after {self.timeout:.0f}s"
+                )
+
+        except TranscriptionError:
+            raise
         except Exception as e:
             raise TranscriptionError(f"Faster-Whisper transcription failed: {e}")
 
@@ -886,6 +896,9 @@ def get_backend(config: dict) -> TranscriptionBackend:
             vad_enabled=config.get("faster_whisper_vad_enabled", True),
             vad_threshold=config.get("faster_whisper_vad_threshold", 0.3),
             gpu_device=config.get("gpu_device", "auto"),
+            # Wall-clock recovery bound for the in-process call. Generous default (CPU transcribe
+            # can be slow) — honored from config if the user sets it.
+            timeout=config.get("faster_whisper_timeout", 300.0),
         )
     elif backend_type == "openai_whisper":
         return OpenAIWhisperBackend(

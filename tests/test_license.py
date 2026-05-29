@@ -254,7 +254,10 @@ class TestFeatureGate:
         """Test that force_refresh creates a new FeatureGate instance."""
         from wayfinder.license import get_feature_gate, generate_license_key, store_license
 
-        gate1 = get_feature_gate()
+        # Establish a clean non-premium baseline against the (empty) temp config dir. The module
+        # -level _feature_gate singleton persists across tests, so without force_refresh here a
+        # prior test that stored a license could leave gate1 premium (test-ordering flake).
+        gate1 = get_feature_gate(force_refresh=True)
         assert not gate1.is_premium
 
         key = generate_license_key()

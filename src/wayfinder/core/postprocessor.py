@@ -1405,6 +1405,7 @@ class LlamaCppBackend(PostProcessorBackend):
         max_tokens: int = 1024,
         temperature: float = 0.1,
         use_gpu: bool = True,
+        timeout: float = 60.0,
     ):
         self.model_path = os.path.expanduser(model_path) if model_path else ""
         self.n_ctx = n_ctx
@@ -1412,6 +1413,7 @@ class LlamaCppBackend(PostProcessorBackend):
         self.n_gpu_layers = n_gpu_layers if use_gpu else 0
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.timeout = timeout  # wall-clock bound for the in-process model() call
         self._model = None
     
     def get_name(self) -> str:
@@ -1483,19 +1485,29 @@ class LlamaCppBackend(PostProcessorBackend):
         
         try:
             model = self._get_model()
-            
+
             # Format the full prompt
             full_prompt = format_prompt(prompt_template, text)
-            
-            # Generate response
-            response = model(
-                full_prompt,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                stop=["Transcription:", "Spoken text:", "\n\n\n"],  # Stop tokens
-                echo=False,
-            )
-            
+
+            # Generate response. The in-process model() call blocks in a C call that a plain
+            # thread timeout cannot kill, so bound it with a watchdog: on timeout we raise and
+            # process_with_config() falls back to the raw text (post-processing is non-fatal).
+            from wayfinder.utils.timeout import run_with_timeout, CallTimeout
+            try:
+                response = run_with_timeout(
+                    model,
+                    self.timeout,
+                    full_prompt,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    stop=["Transcription:", "Spoken text:", "\n\n\n"],  # Stop tokens
+                    echo=False,
+                )
+            except CallTimeout:
+                raise PostProcessingError(
+                    f"llama.cpp post-processing timed out after {self.timeout:.0f}s"
+                )
+
             result = response["choices"][0]["text"].strip()
             
             # Clean up any artifacts and check for refusals
@@ -1901,8 +1913,9 @@ class AnthropicBackend(PostProcessorBackend):
                         "content": full_prompt,
                     }
                 ],
+                timeout=30,  # bound the network call so a stall can't pin the worker
             )
-            
+
             result = message.content[0].text.strip()
             
             # Check for refusal (rare with Claude but possible)
@@ -2038,8 +2051,9 @@ class OpenAIBackend(PostProcessorBackend):
                         "content": full_prompt,
                     }
                 ],
+                timeout=30,  # bound the network call so a stall can't pin the worker
             )
-            
+
             result = response.choices[0].message.content.strip()
             
             # Check for refusal (rare with OpenAI but possible)
