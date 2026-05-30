@@ -35,7 +35,17 @@ except ImportError:
     InputDevice = None
     HAS_EVDEV = False
 from PIL import Image, ImageDraw, ImageFilter
-import pystray
+try:
+    # pystray probes a GUI tray backend at import time and can raise ValueError (not just
+    # ImportError) when no AppIndicator/Ayatana typelib is present — e.g. a Flatpak or
+    # SteamOS session without the GTK appindicator chain (STEAMDECK-INSTALL-LOG Issue 3).
+    # Guard it so the app still runs (without a tray icon) instead of crashing at startup.
+    import pystray
+    HAS_PYSTRAY = True
+except Exception as _pystray_err:  # backend probe can raise non-ImportError
+    pystray = None
+    HAS_PYSTRAY = False
+    print(f"[Tray] pystray unavailable ({_pystray_err}); running without a tray icon", flush=True)
 
 # D-Bus for Wayland GlobalShortcuts
 try:
@@ -7864,9 +7874,17 @@ class WayfinderApp(ctk.CTk):
                 self.log("⚠️ pyautogui not installed - text injection won't work")
                 self.log("💡 Install: pip install pyautogui")
         else:
+            # Package-manager-aware hints — the old hardcoded `dnf`/`ydotoold` strings were
+            # Fedora-only and broke on Arch/SteamOS, where the unit is the USER-level
+            # ydotool.service (STEAMDECK-INSTALL-LOG Issue 4 + 2026-05-08 post-mortem).
+            from wayfinder.core.setup import _detect_package_manager, _get_install_hint
+            _svc = ("systemctl --user enable --now ydotool.service"
+                    if _detect_package_manager() == "pacman"
+                    else "sudo systemctl enable --now ydotoold")
             if not shutil.which("ydotool"):
                 self.log("⚠️ ydotool not found - text injection won't work")
-                self.log("💡 Install: sudo dnf install ydotool && sudo systemctl enable --now ydotoold")
+                self.log(f"💡 Install: {_get_install_hint('ydotool')}")
+                self.log(f"💡 Then enable the daemon: {_svc}")
             else:
                 from wayfinder.core.injector import check_ydotool_ready
                 ready, msg = check_ydotool_ready()
@@ -7874,7 +7892,7 @@ class WayfinderApp(ctk.CTk):
                     self.log(f"✓ {msg}")
                 else:
                     self.log(f"⚠️ {msg}")
-                    self.log("💡 Start daemon: sudo systemctl enable --now ydotoold")
+                    self.log(f"💡 Start daemon: {_svc}")
     
     def _check_model_updates_background(self) -> None:
         """Check for model updates in a background thread (non-blocking)."""
@@ -12160,6 +12178,10 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ Model not found: {model_name}")
     
     def setup_tray(self):
+        # Skip entirely if pystray couldn't import its tray backend (sandbox / no AppIndicator).
+        if not HAS_PYSTRAY:
+            self.tray_icon = None
+            return
         # Check if tray icon is disabled (useful for Wayland where pystray doesn't work well)
         if not self.config.get("enable_tray_icon", True):
             self.tray_icon = None

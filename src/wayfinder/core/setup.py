@@ -370,14 +370,36 @@ def _detect_package_manager() -> str:
 
 # Package name mapping: generic name -> {pkg_manager: actual_package_name}
 _PACKAGE_MAP = {
-    "ydotool":          {"apt": "ydotool",          "dnf": "ydotool"},
-    "git":              {"apt": "git",              "dnf": "git",              "brew": "git"},
-    "cmake":            {"apt": "cmake",            "dnf": "cmake",            "brew": "cmake"},
-    "build-essential":  {"apt": "build-essential",  "dnf": "gcc-c++ make",     "brew": "gcc"},
-    "nvidia-cuda-toolkit": {"apt": "nvidia-cuda-toolkit", "dnf": "cuda-toolkit"},
-    "libfuse2":         {"apt": "libfuse2",         "dnf": "fuse-libs"},
+    "ydotool":          {"apt": "ydotool",          "dnf": "ydotool",          "pacman": "ydotool"},
+    "git":              {"apt": "git",              "dnf": "git",              "brew": "git",       "pacman": "git"},
+    "cmake":            {"apt": "cmake",            "dnf": "cmake",            "brew": "cmake",     "pacman": "cmake"},
+    "build-essential":  {"apt": "build-essential",  "dnf": "gcc-c++ make",     "brew": "gcc",       "pacman": "base-devel"},
+    "nvidia-cuda-toolkit": {"apt": "nvidia-cuda-toolkit", "dnf": "cuda-toolkit", "pacman": "cuda"},
+    "libfuse2":         {"apt": "libfuse2",         "dnf": "fuse-libs",        "pacman": "fuse2"},
     "whisper-cpp":      {"brew": "whisper-cpp"},
 }
+
+
+def _get_install_hint(generic_name: str) -> str:
+    """One-line, package-manager-appropriate install hint for a single dependency.
+
+    The hardcoded 'sudo dnf install …' strings were Fedora-only — wrong on Arch/SteamOS
+    (the larger Deck user base) and actively caused failed installs because users ran the
+    printed command and got 'dnf: command not found' (STEAMDECK-INSTALL-LOG Issue 4 +
+    the 2026-05-08 post-mortem). Detect the manager and emit the right command.
+    """
+    pkg_mgr = _detect_package_manager()
+    resolved = _resolve_packages([generic_name], pkg_mgr)
+    pkg_str = " ".join(resolved) if resolved else generic_name
+    if pkg_mgr == "brew":
+        return f"brew install {pkg_str}"
+    if pkg_mgr == "pacman":
+        return f"sudo pacman -S {pkg_str}   (on SteamOS run 'sudo steamos-readonly disable' first)"
+    if pkg_mgr == "dnf":
+        return f"sudo dnf install {pkg_str}"
+    if pkg_mgr == "apt":
+        return f"sudo apt install {pkg_str}"
+    return f"install '{pkg_str}' with your system package manager"
 
 
 def _resolve_packages(generic_names: list[str], pkg_mgr: str) -> list[str]:
@@ -442,6 +464,11 @@ def install_system_packages(
             elif pkg_mgr == "dnf":
                 install_cmd = f"dnf install -y {' '.join(resolved)}"
                 cmd = ["pkexec", "bash", "-c", install_cmd]
+            elif pkg_mgr == "pacman":
+                # SteamOS/Arch. NB: SteamOS also needs `steamos-readonly disable` + an
+                # initialized keyring first — most Deck users should use the Flatpak.
+                install_cmd = f"pacman -S --needed --noconfirm {' '.join(resolved)}"
+                cmd = ["pkexec", "bash", "-c", install_cmd]
             else:  # apt
                 install_cmd = f"apt update -qq && apt install -y {' '.join(resolved)}"
                 cmd = ["pkexec", "bash", "-c", install_cmd]
@@ -457,13 +484,24 @@ def install_system_packages(
                 if "ydotool" in packages and sys.platform != "darwin":
                     log("")
                     log("Enabling ydotool daemon...")
-                    subprocess.run(
-                        ["pkexec", "bash", "-c",
-                         "systemctl enable --now ydotoold && "
-                         f"usermod -aG input {os.environ.get('USER', 'user')}"],
-                        capture_output=True, timeout=30,
-                    )
-                    log("  ydotoold enabled (re-login needed for input group)")
+                    user = os.environ.get('USER', 'user')
+                    if pkg_mgr == "pacman":
+                        # Arch/SteamOS ship a USER-level unit named ydotool.service (no sudo),
+                        # NOT the system 'ydotoold' (STEAMDECK-INSTALL-LOG Issue 4). The input
+                        # group needs a full logout to take effect — Issue 10.
+                        subprocess.run(["systemctl", "--user", "enable", "--now", "ydotool.service"],
+                                       capture_output=True, timeout=30)
+                        subprocess.run(["pkexec", "bash", "-c", f"usermod -aG input {user}"],
+                                       capture_output=True, timeout=30)
+                        log("  ydotool.service (user) enabled; FULL logout needed for input group")
+                    else:
+                        subprocess.run(
+                            ["pkexec", "bash", "-c",
+                             "systemctl enable --now ydotoold && "
+                             f"usermod -aG input {user}"],
+                            capture_output=True, timeout=30,
+                        )
+                        log("  ydotoold enabled (re-login needed for input group)")
 
                 done(True, "System packages installed successfully")
             elif proc.returncode in (126, 127):
