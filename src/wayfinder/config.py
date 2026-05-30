@@ -45,7 +45,8 @@ else:
 if IS_FLATPAK:
     _default_whisper_binary = "/app/bin/whisper-cli"
     _default_model_dir = os.environ.get("WHISPER_MODELS_DIR", "/app/share/whisper-models")
-    _default_model_path = f"{_default_model_dir}/ggml-small.en.bin"
+    # base.en is the bundled model and the right Deck-class default (Issues 11/17).
+    _default_model_path = f"{_default_model_dir}/ggml-base.en.bin"
     # LLM model for post-processing (bundled in Flatpak)
     # Prefer Qwen 3.5 if available, fall back to Qwen 2.5
     _flatpak_llm_new = "/app/share/llm-models/Qwen3.5-2B-Q4_K_M.gguf"

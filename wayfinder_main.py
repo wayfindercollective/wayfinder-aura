@@ -95,7 +95,8 @@ else:
 if IS_FLATPAK:
     _default_whisper_binary = "/app/bin/whisper-cli"
     _default_model_dir = os.environ.get("WHISPER_MODELS_DIR", "/app/share/whisper-models")
-    _default_model_path = f"{_default_model_dir}/ggml-small.en.bin"
+    # base.en is the bundled model and the right Deck-class default (Issues 11/17).
+    _default_model_path = f"{_default_model_dir}/ggml-base.en.bin"
 else:
     _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
     _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"

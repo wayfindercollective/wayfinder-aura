@@ -825,8 +825,25 @@ def get_dependencies(config: dict) -> list[Dependency]:
     return deps
 
 
+def is_steam_deck() -> bool:
+    """True on Steam Deck hardware (LCD 'Jupiter' or OLED 'Galileo').
+
+    Kept separate from _detect_gpu_vendor() so its callers that branch on vendor values
+    ('amd', etc.) are unaffected (Codex review). Used only to pick a default model.
+    """
+    try:
+        product = Path("/sys/class/dmi/id/product_name").read_text().strip().lower()
+        return "jupiter" in product or "galileo" in product
+    except Exception:
+        return False
+
+
 def get_recommended_model() -> str:
-    """Return the best model name for this system's GPU."""
+    """Return the best whisper model name for this system's hardware class."""
+    # Steam Deck (Zen 2 APU): large-v3-turbo runs ~10x slower than real-time and is unusable
+    # for live dictation — default to base.en (STEAMDECK-INSTALL-LOG Issues 11/17).
+    if is_steam_deck():
+        return "base.en"
     vendor = _detect_gpu_vendor()
     if vendor in ("nvidia", "amd", "apple"):
         return "large-v3-turbo"
