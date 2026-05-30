@@ -496,13 +496,18 @@ class SetupWizard(ctk.CTkToplevel):
         if dep:
             dep.check()
             self._msg_queue.put(("status", dep_id))
-        self.after(200, self._update_footer_state)
+        # _recheck runs on the install background thread (via _sequence), so calling
+        # self.after() here raises "main thread is not in main loop" — Tk is single-threaded
+        # (STEAMDECK-INSTALL-LOG Issue 2). Marshal the footer refresh through the queue, which
+        # _poll_queue drains on the main thread (reuses the existing "checks_done" handler).
+        self._msg_queue.put(("checks_done", None))
 
     def _recheck_all(self):
         for dep in self._deps:
             dep.check()
             self._msg_queue.put(("status", dep.id))
-        self.after(300, self._update_footer_state)
+        # Never call self.after() here — _recheck_all can run off the main thread. (Issue 2)
+        self._msg_queue.put(("checks_done", None))
 
     def _detect_vendor_from_deps(self) -> str:
         """Get GPU vendor from the driver dep status."""

@@ -7,6 +7,7 @@ Supports chunked recording for indefinite duration sessions.
 """
 
 import queue
+import sys
 import tempfile
 import threading
 import wave
@@ -111,13 +112,17 @@ def find_best_input_device(preferred_name: str | None = None) -> int | None:
         if preferred_name and preferred_name.lower() in name:
             score += 1000
         
-        # Prefer JACK/PipeWire virtual devices (they handle routing properly)
+        # Host-API preference. JACK-backed devices are NOT preferred: on PipeWire/SteamOS
+        # the libjack shim won't autostart from a user-service context and the stream open
+        # fails with PaErrorCode -9999 on every recording (STEAMDECK-INSTALL-LOG Issue 20).
+        # Skip them on Linux so auto-selection never lands on an unusable clone.
         hostapi = dev.get('hostapi', -1)
         try:
             hostapi_info = sd.query_hostapis(hostapi)
             hostapi_name = hostapi_info.get('name', '').lower()
             if 'jack' in hostapi_name:
-                score += 100  # JACK devices are well-routed
+                if sys.platform.startswith('linux'):
+                    continue  # unusable on PipeWire/SteamOS
             elif 'pulse' in hostapi_name or 'pipewire' in hostapi_name:
                 score += 80
         except Exception:
@@ -209,15 +214,28 @@ def list_input_devices(exclude_outputs: bool = False) -> list[dict]:
     
     try:
         devices = sd.query_devices()
-        
+        hostapis = sd.query_hostapis()
+        is_linux = sys.platform.startswith('linux')
+
         for i, dev in enumerate(devices):
             max_inputs = dev.get('max_input_channels', 0)
             if max_inputs < 1:
                 continue
-            
+
             name = dev.get('name', f'Device {i}')
+
+            # Hide JACK-backed clones on Linux: same name as the ALSA device, but opening a
+            # stream on one fails with PaErrorCode -9999 on PipeWire/SteamOS (Issue 20).
+            # Users can't tell them apart in the picker, so don't show the broken one.
+            if is_linux:
+                try:
+                    if 'JACK' in hostapis[dev.get('hostapi', -1)].get('name', ''):
+                        continue
+                except (IndexError, KeyError, TypeError):
+                    pass
+
             is_excluded = is_output_device(name)
-            
+
             if exclude_outputs and is_excluded:
                 continue
             

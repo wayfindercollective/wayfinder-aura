@@ -79,7 +79,8 @@ def check_ydotool_ready() -> tuple[bool, str]:
     """
     ydotool_bin = _get_ydotool_binary()
     if not shutil.which(ydotool_bin):
-        return False, "ydotool not found. Install with: sudo dnf install ydotool"
+        from wayfinder.core.setup import _get_install_hint
+        return False, f"ydotool not found. Install with: {_get_install_hint('ydotool')}"
 
     env = _get_ydotool_env()
     socket_path = env.get("YDOTOOL_SOCKET")
@@ -315,6 +316,7 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
     except subprocess.TimeoutExpired:
         raise InjectionError("ydotool timed out after 120s")
     except FileNotFoundError:
+        from wayfinder.core.setup import _get_install_hint
         raise InjectionError(
-            "ydotool not found. Install with: sudo dnf install ydotool"
+            f"ydotool not found. Install with: {_get_install_hint('ydotool')}"
         )
