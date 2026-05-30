@@ -2082,121 +2082,126 @@ def socket_listener(event_queue, stop_event, log_callback=None):
 
 
 def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callback=None):
-    """
-    Wayland-compatible hotkey listener using XDG GlobalShortcuts portal.
-    This is the proper way to do global hotkeys on Wayland/KDE.
+    """Global hotkey listener via the XDG GlobalShortcuts portal (Wayland / Flatpak).
+
+    This is the sandbox-correct path: in a Flatpak, evdev can't read /dev/input and pynput
+    can't see Wayland global keys, so the portal is the only option in the bundle.
+
+    Implements the proper portal request/response lifecycle. The previous version called
+    CreateSession then slept 0.5s and *guessed* the session path, which is unreliable
+    (Codex review). The portal returns results asynchronously via a Response signal on a
+    per-call Request object whose path is derived from the caller's unique bus name +
+    handle_token — so we subscribe BEFORE issuing the call and avoid the race:
+        CreateSession -> Request.Response (real session_handle)
+                      -> BindShortcuts -> Request.Response
+                      -> Activated signals -> HOTKEY_PRESSED
+
+    NOTE: needs validation against the live KDE portal on the Steam Deck — portal presence and
+    the bind UX vary by compositor. Falls through cleanly (returns False) when unavailable.
     """
     def log(msg):
         if log_callback:
             try:
                 log_callback(msg)
-            except:
+            except Exception:
                 pass
-    
+
     if not DBUS_AVAILABLE:
-        log("⚠️ D-Bus not available for Wayland shortcuts")
+        log("⚠️ D-Bus/GLib not available — portal hotkeys disabled")
         return False
-    
-    # Application ID for portal registration (matches desktop file name)
+
     app_id = os.environ.get("FLATPAK_ID", "wayfinder-aura")
-    
+
     try:
         DBusGMainLoop(set_as_default=True)
         bus = dbus.SessionBus()
-        
-        portal = bus.get_object(
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop"
-        )
-        
-        shortcuts_iface = dbus.Interface(
-            portal,
-            "org.freedesktop.portal.GlobalShortcuts"
-        )
-        
-        # Create session with proper app identification
-        log(f"🔗 Connecting to GlobalShortcuts portal as '{app_id}'...")
-        
-        # Use app_id-based tokens for proper KDE Global Shortcuts integration
-        session_token = app_id.replace(".", "_").replace("-", "_")
-        
-        session_options = dbus.Dictionary({
-            "handle_token": dbus.String(f"{session_token}_session"),
-            "session_handle_token": dbus.String(session_token),
-        }, signature="sv")
-        
-        request_path = shortcuts_iface.CreateSession(session_options)
-        log(f"✓ Session created")
-        
-        # Wait for session to be ready
-        import time
-        time.sleep(0.5)
-        
-        # Try to get the session
-        user = os.environ.get('USER', 'user')
-        session_path = f"/org/freedesktop/portal/desktop/session/{user}/{session_token}"
-        
-        # Bind shortcuts
-        shortcuts = dbus.Array([
-            dbus.Struct([
-                dbus.String("record-toggle"),
-                dbus.Dictionary({
-                    "description": dbus.String("Toggle voice recording"),
-                    "preferred_trigger": dbus.String(hotkey_display),
-                }, signature="sv")
+        portal = bus.get_object("org.freedesktop.portal.Desktop",
+                                "/org/freedesktop/portal/desktop")
+        shortcuts_iface = dbus.Interface(portal, "org.freedesktop.portal.GlobalShortcuts")
+
+        # Request object paths are /request/<sender>/<token>, where <sender> is our unique
+        # bus name without the leading ':' and with '.'->'_'. Subscribe before the call.
+        unique = bus.get_unique_name().lstrip(":").replace(".", "_")
+        token = app_id.replace(".", "_").replace("-", "_")
+        sess_token = f"{token}_sess"
+        create_req = f"/org/freedesktop/portal/desktop/request/{unique}/{sess_token}"
+
+        def _on_create_response(response, results):
+            if response != 0:
+                log(f"⚠️ Portal CreateSession denied (code {response})")
+                return
+            session_handle = results.get("session_handle")
+            if not session_handle:
+                log("⚠️ Portal returned no session_handle")
+                return
+            log("✓ Portal session established")
+
+            shortcuts = dbus.Array([
+                dbus.Struct([
+                    dbus.String("record-toggle"),
+                    dbus.Dictionary({
+                        "description": dbus.String("Toggle voice recording"),
+                        "preferred_trigger": dbus.String(hotkey_display or ""),
+                    }, signature="sv"),
+                ], signature="(sa{sv})"),
             ], signature="(sa{sv})")
-        ], signature="(sa{sv})")
-        
-        bind_options = dbus.Dictionary({
-            "handle_token": dbus.String(f"{session_token}_bind"),
-        }, signature="sv")
-        
-        try:
-            shortcuts_iface.BindShortcuts(
-                dbus.ObjectPath(session_path),
-                shortcuts,
-                "",  # parent_window
-                bind_options
+            bind_token = f"{token}_bind"
+            bind_req = f"/org/freedesktop/portal/desktop/request/{unique}/{bind_token}"
+
+            def _on_bind_response(bresp, bresults):
+                if bresp == 0:
+                    log(f"✓ Shortcut registered (default trigger: {hotkey_display or 'unset'})")
+                else:
+                    log("⚠️ Shortcut bind cancelled — set it in System Settings → Shortcuts")
+
+            bus.add_signal_receiver(
+                _on_bind_response, signal_name="Response",
+                dbus_interface="org.freedesktop.portal.Request", path=bind_req,
             )
-            log(f"✓ Shortcut registered: {hotkey_display}")
-        except dbus.exceptions.DBusException as e:
-            log(f"⚠️ Could not bind shortcut: {e}")
-            log("   You may need to set it manually in System Settings")
-        
-        # Listen for activation signals
-        def on_activated(session, shortcut_id, timestamp, options):
-            if shortcut_id == "record-toggle":
-                log(f"🎯 Hotkey activated!")
-                event_queue.put((EventType.HOTKEY_PRESSED, None))
-        
-        def on_deactivated(session, shortcut_id, timestamp, options):
-            pass
-        
+            try:
+                shortcuts_iface.BindShortcuts(
+                    dbus.ObjectPath(session_handle), shortcuts, "",
+                    dbus.Dictionary({"handle_token": dbus.String(bind_token)}, signature="sv"),
+                )
+            except dbus.exceptions.DBusException as e:
+                log(f"⚠️ BindShortcuts failed: {e}")
+
         bus.add_signal_receiver(
-            on_activated,
-            signal_name="Activated",
-            dbus_interface="org.freedesktop.portal.GlobalShortcuts",
-            path="/org/freedesktop/portal/desktop"
+            _on_create_response, signal_name="Response",
+            dbus_interface="org.freedesktop.portal.Request", path=create_req,
         )
-        
-        log("🎧 Listening for Wayland global shortcuts...")
-        
-        # Run GLib main loop
+
+        def _on_activated(session_handle, shortcut_id, timestamp, options):
+            if shortcut_id == "record-toggle":
+                event_queue.put((EventType.HOTKEY_PRESSED, None))
+
+        bus.add_signal_receiver(
+            _on_activated, signal_name="Activated",
+            dbus_interface="org.freedesktop.portal.GlobalShortcuts",
+            path="/org/freedesktop/portal/desktop",
+        )
+
+        log(f"\U0001f517 Requesting GlobalShortcuts portal session as '{app_id}'...")
+        shortcuts_iface.CreateSession(dbus.Dictionary({
+            "handle_token": dbus.String(sess_token),
+            "session_handle_token": dbus.String(sess_token),
+        }, signature="sv"))
+
         loop = GLib.MainLoop()
-        
+
         def check_stop():
             if stop_event.is_set():
                 loop.quit()
                 return False
             return True
-        
+
         GLib.timeout_add(500, check_stop)
+        log("\U0001f3a7 Listening for Wayland global shortcuts (portal)...")
         loop.run()
-        
         return True
-        
+
     except Exception as e:
-        log(f"⚠️ Wayland hotkey setup failed: {e}")
+        log(f"⚠️ Wayland portal hotkey setup failed: {e}")
         return False
 
 
@@ -12715,8 +12720,14 @@ class WayfinderApp(ctk.CTk):
             self._start_pynput_listener()
             return
 
-        # Linux: evdev (X11 + Wayland-with-input-group). Portal path is wired separately.
+        # Wayland inside a Flatpak: evdev can't read /dev/input and pynput can't see Wayland
+        # global keys, so use the GlobalShortcuts portal (Codex review). Non-sandboxed Wayland
+        # keeps using evdev + the 'input' group (the validated Steam Deck dev-path).
         is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
+        if is_wayland and IS_FLATPAK:
+            self.log("🖥️ Wayland + Flatpak — using the GlobalShortcuts portal for hotkeys")
+            self._start_portal_listener()
+            return
         if is_wayland:
             self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
         else:
@@ -12772,6 +12783,26 @@ class WayfinderApp(ctk.CTk):
                 self._pynput_listener_started = False
 
         threading.Thread(target=_pynput_wrapper, daemon=True).start()
+
+    def _start_portal_listener(self):
+        """Start the XDG GlobalShortcuts portal listener (Wayland/Flatpak) in a daemon thread.
+
+        The portal is the only sandbox-viable global-hotkey mechanism. The user binds/rebinds
+        the trigger in System Settings → Shortcuts; wayfinder requests a sensible default.
+        """
+        if getattr(self, '_portal_listener_started', False):
+            return
+        self._portal_listener_started = True
+        hotkey_display = self.get_hotkey_display()
+
+        def _portal_wrapper():
+            try:
+                wayland_hotkey_listener(self.event_queue, hotkey_display, self.stop_event, self.log)
+            except Exception as e:
+                print(f"[Hotkey] portal listener crashed: {e}", flush=True)
+                self._portal_listener_started = False
+
+        threading.Thread(target=_portal_wrapper, daemon=True).start()
 
     def _start_evdev_listener(self):
         """Start (or restart) the evdev hotkey listener thread, cleanly stopping any prior one."""
