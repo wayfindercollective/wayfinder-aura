@@ -108,9 +108,14 @@ class TestGetModelQuirks:
         assert "hallucination_prone" in quirks["issues"]
 
     def test_qwen_3_5_2b_recommended(self):
-        """qwen3.5:2b is the current top recommendation (replaced qwen2.5:1.5b)."""
+        # Qwen 3.5 2B is the top recommendation (replaced Qwen 2.5 1.5B, March 2026).
         quirks = get_model_quirks("qwen3.5:2b")
         assert quirks.get("recommended") is True
+
+    def test_qwen_2_5_1_5b_not_recommended(self):
+        # The superseded 2.5 1.5B is no longer flagged as the recommendation.
+        quirks = get_model_quirks("qwen2.5:1.5b")
+        assert quirks.get("recommended") is not True
 
     def test_qwen_1_5b_has_no_issues(self):
         quirks = get_model_quirks("qwen2.5:1.5b")
@@ -208,21 +213,36 @@ class TestGetFillerRules:
         """Minimal tone ignores intensity and always uses its own rule."""
         result_std = get_filler_rules("minimal", "standard")
         result_strong = get_filler_rules("minimal", "strong")
-        assert result_std == FILLER_RULES["minimal"]
-        assert result_strong == FILLER_RULES["minimal"]
+        assert result_std == FILLER_RULES["minimal"]["standard"]
+        assert result_strong == FILLER_RULES["minimal"]["standard"]
 
     def test_standard_intensity_returns_standard_rules(self):
         result = get_filler_rules("professional", "standard")
-        assert result == FILLER_RULES["standard"]
+        assert result == FILLER_RULES["professional"]["standard"]
 
     def test_strong_intensity_returns_strong_rules(self):
         result = get_filler_rules("casual", "strong")
-        assert result == FILLER_RULES["strong"]
+        assert result == FILLER_RULES["casual"]["strong"]
 
     def test_minimal_rules_mention_only_filler_sounds(self):
         rules = get_filler_rules("minimal")
         assert "um" in rules.lower()
         assert "uh" in rules.lower()
+
+    def test_dev_standard_preserves_discourse_markers(self):
+        """Dev standard should not remove 'basically', 'actually', 'so'."""
+        rules = get_filler_rules("dev", "standard")
+        assert "basically" in rules.lower()
+        assert "actually" in rules.lower()
+        # Should only remove filler sounds, not discourse markers
+        assert "um" in rules.lower()
+
+    def test_dev_strong_keeps_discourse_markers(self):
+        """Dev strong removes true filler but keeps technical discourse markers."""
+        rules = get_filler_rules("dev", "strong")
+        assert "keep" in rules.lower()
+        assert "basically" in rules.lower()
+        assert "actually" in rules.lower()
 
 
 # =============================================================================

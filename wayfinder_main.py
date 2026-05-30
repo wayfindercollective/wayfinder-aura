@@ -1889,14 +1889,14 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
     for d in devices:
         print(f"[DEBUG]   - {d.name} ({d.path})", flush=True)
     if not devices:
-        log("⚠️ No input devices found!")
-        log("   Check: sudo usermod -aG input $USER")
-        return
-
-    log(f"🎮 Monitoring {len(devices)} input device(s):")
-    for dev in devices:
-        short_name = dev.name[:40] + "..." if len(dev.name) > 40 else dev.name
-        log(f"   • {short_name}")
+        # Don't give up: the loop below keeps rescanning, so a keyboard that is asleep
+        # or disconnected at startup recovers automatically instead of killing hotkeys.
+        log("⚠️ No input devices found yet — will keep scanning (check: sudo usermod -aG input $USER)")
+    else:
+        log(f"🎮 Monitoring {len(devices)} input device(s):")
+        for dev in devices:
+            short_name = dev.name[:40] + "..." if len(dev.name) > 40 else dev.name
+            log(f"   • {short_name}")
     
     # Build set of required modifier key codes for recording hotkey
     required_modifiers = set()
@@ -1928,12 +1928,21 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
             for mod in modifier_names
         )
 
-    try:
-        while not stop_event.is_set():
-            # Wait for input from any device (skip if no devices left)
+    RESCAN_BACKOFF = 2.0  # seconds between device rescans when none available (Rule #1: >=1s)
+
+    while not stop_event.is_set():
+        try:
+            # No devices: wait (honoring shutdown) and rescan instead of dying — a slept
+            # wireless keyboard or USB re-enumeration then recovers automatically.
             if not fd_to_device:
-                log("⚠️ No input devices remaining - hotkey listener stopping")
-                break
+                if stop_event.wait(RESCAN_BACKOFF):
+                    break
+                pressed_modifiers.clear()  # avoid a stuck-modifier state across device loss
+                rescanned = find_keyboard_devices(enabled_devices)
+                fd_to_device = {dev.fd: dev for dev in rescanned}
+                if fd_to_device:
+                    log(f"🔌 Input device(s) available ({len(fd_to_device)}) — resuming hotkey monitoring")
+                continue
             
             try:
                 r, _, _ = select.select(list(fd_to_device.keys()), [], [], 0.5)
@@ -1992,8 +2001,14 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                     # Device read failed - remove it from monitoring
                     log(f"⚠️ Device read failed, removing: {device.name} ({e})")
                     del fd_to_device[fd]
-    except Exception as e:
-        log(f"⚠️ Hotkey error: {e}")
+        except Exception as e:
+            # Last-resort guard: never let one unexpected error permanently kill the hotkey
+            # listener (that strands the app in RECORDING). Log, brief backoff, and continue.
+            log(f"⚠️ Hotkey loop error (recovering): {e}")
+            if stop_event.wait(0.2):
+                break
+
+    log("🛑 Hotkey listener stopped")
 
 
 def socket_listener(event_queue, stop_event, log_callback=None):
@@ -2863,7 +2878,7 @@ class OverlayController:
     messages over stdin/stdout.
     """
     
-    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional", config: dict | None = None):
+    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional", config: dict | None = None, log_callback=None):
         self._process: subprocess.Popen | None = None
         self._audio_level_callback = audio_level_callback
         self._audio_poll_thread: threading.Thread | None = None
@@ -2873,6 +2888,17 @@ class OverlayController:
         self._mode = mode  # "persistent" or "standard"
         self._initial_style = initial_style  # "professional", "dev", "casual", or "personal"
         self._config_ref = config  # Reference to app config for refresh
+        self._log_callback = log_callback  # route rare failures to the app/UI log (diagnostics)
+
+    def _log(self, msg: str):
+        """Surface a diagnostic message to the app/UI log if available, else stderr."""
+        if self._log_callback:
+            try:
+                self._log_callback(msg)
+                return
+            except Exception:
+                pass
+        print(msg, flush=True)
     
     def _start_process(self) -> bool:
         """Start the overlay subprocess if not already running."""
@@ -2976,7 +3002,7 @@ class OverlayController:
                     self._process.stdin.flush()
                     return True
                 except (BrokenPipeError, OSError) as e:
-                    print(f"Overlay subprocess died: {e}")
+                    self._log(f"⚠ Overlay subprocess died: {e}")
                     self._process = None
                     return False
                 except Exception as e:
@@ -2986,7 +3012,7 @@ class OverlayController:
                 self._lock.release()
 
         if critical:
-            print(f"WARNING: Failed to send critical overlay command after {attempts} attempts: {cmd}")
+            self._log(f"⚠ Overlay command not delivered after {attempts} attempts: {cmd.get('cmd')} {cmd.get('state', '')}")
         return False
     
     def send_command(self, cmd: dict) -> bool:
@@ -3033,19 +3059,19 @@ class OverlayController:
             state: One of "listening", "processing", "ready"
         """
         if not self._start_process():
-            return
+            return False
 
         self._current_state = state
-        self._send_command({"cmd": "show", "state": state}, critical=True)
+        ok = self._send_command({"cmd": "show", "state": state}, critical=True)
 
         if state == "listening":
             self._start_audio_polling()
-    
+        return ok
+
     def update(self, state: str):
-        """Update the overlay to a new state."""
+        """Update the overlay to a new state. Returns the send result (True/False)."""
         if self._process is None or self._process.poll() is not None:
-            self.show(state)
-            return
+            return self.show(state)
 
         old_state = self._current_state
         self._current_state = state
@@ -3054,10 +3080,11 @@ class OverlayController:
         if state != "listening" and old_state == "listening":
             self._stop_audio_polling()
 
-        self._send_command({"cmd": "show", "state": state}, critical=True)
+        ok = self._send_command({"cmd": "show", "state": state}, critical=True)
 
         if state == "listening" and old_state != "listening":
             self._start_audio_polling()
+        return ok
     
     def hide(self):
         """Hide the overlay."""
@@ -3227,8 +3254,20 @@ class WayfinderApp(ctk.CTk):
         
         self.app_state = AppState.IDLE
         self.event_queue = queue.Queue()
-        self.stop_event = threading.Event()
-        
+        self.stop_event = threading.Event()            # long-lived: socket listener + global shutdown
+        self._evdev_stop_event = threading.Event()     # dedicated: evdev listener (restartable on its own)
+        self._hotkey_thread = None                     # live evdev listener thread (for supervision)
+        self._socket_thread = None                     # socket listener thread (supervised for liveness)
+        self._hotkey_restart_lock = threading.Lock()   # serialize evdev restarts (config change + supervisor)
+        self.session_generation = 0                    # bumped per recording / force_reset; discards stale work
+        self._finish_injection_job = None              # pending after() id for the delayed overlay reset
+
+        # Start the hotkey listeners NOW, before the heavy UI build, so the evdev thread opens the
+        # input devices during setup_window/tray/ui rather than after it. A press made while the
+        # app is still loading then lands in the thread-safe event_queue (instead of being lost to
+        # a not-yet-listening thread) and is handled once poll_events() runs at the end of __init__.
+        self.start_hotkey_listener()
+
         # Store tooltips that need dynamic updates (keyed by tooltip type)
         self.dynamic_tooltips: dict[str, list[ToolTip]] = {}
         
@@ -3313,6 +3352,7 @@ class WayfinderApp(ctk.CTk):
                     mode="persistent",  # Always use persistent mode for always_on
                     initial_style=initial_style,
                     config=self.config,
+                    log_callback=self.log,
                 )
                 self._use_pyqt_overlay = True
                 self.log(f"✨ Using Always On indicator (PyQt6)")
@@ -3345,7 +3385,8 @@ class WayfinderApp(ctk.CTk):
         self.setup_tray()
         self.setup_ui()
         self.setup_scaling_shortcuts()
-        self.start_hotkey_listener()
+        # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
+        self._start_hotkey_supervisor()
         self.poll_events()
         
         # Log animation refresh rate info
@@ -7918,7 +7959,32 @@ class WayfinderApp(ctk.CTk):
         
         # Start checking after 30 seconds (give app time to fully initialize)
         self.after(30000, check_health)
-    
+
+    def _start_hotkey_supervisor(self) -> None:
+        """Periodically ensure the evdev hotkey listener is alive; restart it if it died.
+
+        Runs regardless of overlay mode (the overlay health check above is PyQt-only). With the
+        self-healing listener (device rescan + per-iteration guard) the thread should rarely die,
+        so this is a backstop that prevents the app from being stranded in RECORDING when a
+        dropped stop-press can no longer be delivered.
+        """
+        def check_hotkey():
+            try:
+                if HAS_EVDEV and (self._hotkey_thread is None or not self._hotkey_thread.is_alive()):
+                    self.log("🔄 Hotkey listener not running - restarting...")
+                    self.restart_evdev_listener("supervisor: listener was not alive")
+                # The socket listener can die on a transient bind failure; bring it back if so.
+                if self._socket_thread is None or not self._socket_thread.is_alive():
+                    self.log("🔄 Socket listener not running - restarting...")
+                    self._ensure_socket_listener()
+            except Exception as e:
+                self.log(f"⚠️ Hotkey supervisor error: {e}")
+            # Re-check every 10 seconds (Rule #1: >=100ms, no busy polling)
+            self.after(10000, check_hotkey)
+
+        # Start checking after 30 seconds (give app time to bind input devices first)
+        self.after(30000, check_hotkey)
+
     def _on_display_wake(self) -> None:
         """Called when the display wakes up from sleep.
         
@@ -8752,6 +8818,104 @@ class WayfinderApp(ctk.CTk):
         dialog.geometry(f"{base_w}x{base_h}+{x}+{y}")
         dialog.minsize(base_w, base_h)
 
+    def _show_inline_panel(self, container, title: str, build_fn):
+        """Show an inline settings panel, hiding the container's current children.
+
+        Args:
+            container: The parent frame whose children will be hidden
+            title: Panel title shown in the header
+            build_fn: Callable(content_frame) that builds the panel content
+        """
+        # Store hidden children so we can restore them
+        hidden = []
+        for child in container.winfo_children():
+            info = child.pack_info() if child.winfo_manager() == "pack" else None
+            child.pack_forget()
+            hidden.append((child, info))
+
+        # Panel wrapper
+        panel = ctk.CTkFrame(container, fg_color="transparent")
+        panel.pack(fill="both", expand=True)
+        panel._inline_hidden = hidden  # stash for restore
+
+        # Header with back button
+        header = ctk.CTkFrame(panel, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(8, 4))
+
+        def close():
+            self._close_inline_panel(container, panel)
+
+        back_btn = ctk.CTkButton(
+            header, text="←", width=32, height=32,
+            font=(self.font_body[0], 16),
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_primary"], corner_radius=RADIUS["sm"],
+            command=close,
+        )
+        back_btn.pack(side="left")
+
+        ctk.CTkLabel(
+            header, text=title,
+            font=(self.font_header[0], 16, "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left", padx=(10, 0))
+
+        # Content area
+        content = ctk.CTkFrame(panel, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        build_fn(content, close)
+
+    @staticmethod
+    def _trap_scroll(scrollable_frame):
+        """Prevent mouse wheel events from bubbling to parent scroll containers.
+
+        Uses bind_all with a tag so that any widget inside the scrollable frame
+        has its scroll events handled locally and stopped from propagating.
+        """
+        try:
+            canvas = scrollable_frame._parent_canvas
+        except AttributeError:
+            return
+
+        def _on_enter(event):
+            # When mouse enters, bind scroll to this canvas
+            canvas.bind_all("<Button-4>", _scroll_up)
+            canvas.bind_all("<Button-5>", _scroll_down)
+            canvas.bind_all("<MouseWheel>", _scroll_wheel)
+
+        def _on_leave(event):
+            # When mouse leaves, unbind
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+            canvas.unbind_all("<MouseWheel>")
+
+        def _scroll_up(event):
+            canvas.yview_scroll(-3, "units")
+            return "break"
+
+        def _scroll_down(event):
+            canvas.yview_scroll(3, "units")
+            return "break"
+
+        def _scroll_wheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        scrollable_frame.bind("<Enter>", _on_enter)
+        scrollable_frame.bind("<Leave>", _on_leave)
+
+    def _close_inline_panel(self, container, panel):
+        """Close an inline panel and restore the container's original children."""
+        hidden = getattr(panel, '_inline_hidden', [])
+        panel.destroy()
+
+        for child, pack_info in hidden:
+            if pack_info:
+                child.pack(**pack_info)
+            else:
+                child.pack()
+
     def create_setting_row(self, parent, label, value, command, tooltip=None, tooltip_key=None):
         """Create a premium setting row with improved typography and spacing.
         
@@ -9455,13 +9619,10 @@ class WayfinderApp(ctk.CTk):
             self.hotkey_label.configure(text=f"Press {new_hotkey} to toggle")
         self.log(f"⚙ Hotkey: {new_hotkey}")
         if sys.platform == "darwin":
-            # macOS: pynput listener reads config live, no restart needed
-            self.start_hotkey_listener()  # Just logs "Hotkey updated (live)"
+            # macOS: pynput reads config live — nothing to restart.
+            self.log("⚙ Hotkey updated (live)")
         else:
-            # Linux: restart evdev listener
-            self.stop_event.set()
-            self.stop_event = threading.Event()
-            self.start_hotkey_listener()
+            self.restart_evdev_listener("config change")
 
     def _on_hotkey_key_changed(self, value):
         """Handle inline hotkey key dropdown change."""
@@ -9482,11 +9643,10 @@ class WayfinderApp(ctk.CTk):
         new_hotkey = self.get_style_hotkey_display()
         self.log(f"⚙ Style toggle hotkey: {new_hotkey}")
         if sys.platform == "darwin":
-            self.start_hotkey_listener()
+            # macOS: pynput reads config live — nothing to restart.
+            self.log("⚙ Hotkey updated (live)")
         else:
-            self.stop_event.set()
-            self.stop_event = threading.Event()
-            self.start_hotkey_listener()
+            self.restart_evdev_listener("config change")
 
     def _on_style_hotkey_key_changed(self, value):
         """Handle inline style hotkey key dropdown change."""
@@ -9510,9 +9670,7 @@ class WayfinderApp(ctk.CTk):
             self.config["enabled_input_devices"] = [value]
         save_config(self.config)
         self.log(f"⚙ Input device: {value}")
-        self.stop_event.set()
-        self.stop_event = threading.Event()
-        self.start_hotkey_listener()
+        self.restart_evdev_listener("config change")
 
     def get_microphone_display(self) -> str:
         """Get display name for current audio input device."""
@@ -10270,307 +10428,254 @@ class WayfinderApp(ctk.CTk):
         return models
 
     def open_model_settings(self):
-        """Open dialog to select or download whisper models."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Whisper Models")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        self._setup_dialog(dialog, 760, 900)
-        
-        # Force dialog to update and display before continuing
-        dialog.update_idletasks()
-        
-        # Initialize model downloader
-        downloader = ModelDownloader()
-        
-        # ===== BUILD STATIC UI ELEMENTS FIRST =====
-        
-        # Main container
-        main_frame = ctk.CTkFrame(dialog, fg_color=COLORS["bg_base"])
-        main_frame.pack(fill="both", expand=True, padx=16, pady=16)
-        
-        # Header section - compact
-        header_label = ctk.CTkLabel(
-            main_frame,
-            text="Whisper Models",
-            font=(self.font_header[0], 18, "bold"),
-            text_color=COLORS["text_bright"],
-        )
-        header_label.pack(anchor="w", pady=(0, 2))
-        
-        subtitle_label = ctk.CTkLabel(
-            main_frame,
-            text="Select an installed model or download new ones.",
-            font=(self.font_body[0], 10),
-            text_color=COLORS["text_secondary"],
-        )
-        subtitle_label.pack(anchor="w", pady=(0, 10))
-        
-        # Tab button container
-        tab_container = ctk.CTkFrame(main_frame, fg_color="transparent")
-        tab_container.pack(fill="x", pady=(0, 8))
-        
-        # Compact tab buttons
-        installed_btn = ctk.CTkButton(
-            tab_container, text="Installed",
-            font=(self.font_body[0], 12), height=30,
-            corner_radius=6, fg_color=COLORS["accent"], text_color="#000000",
-            hover_color=COLORS["accent_glow"],
-        )
-        installed_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
-        
-        download_btn = ctk.CTkButton(
-            tab_container, text="Download",
-            font=(self.font_body[0], 12), height=30,
-            corner_radius=6, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
-            hover_color=COLORS["bg_elevated"],
-        )
-        download_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
-        
-        # Content area - this gets refreshed when tabs change
-        content_area = ctk.CTkFrame(main_frame, fg_color=COLORS["bg_card"], corner_radius=12)
-        content_area.pack(fill="both", expand=True)
-        
-        # Track current state
-        current_path = os.path.expanduser(self.config.get("model_path", ""))
-        model_var = ctk.StringVar(value=current_path)
-        
-        # ===== TAB CONTENT FUNCTIONS =====
-        
-        def clear_content():
-            for widget in content_area.winfo_children():
-                widget.destroy()
-        
-        def show_installed():
-            clear_content()
-            installed_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
-            download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
-            
-            models = self.get_available_models()
-            
-            if not models:
-                # No models message
-                ctk.CTkLabel(
-                    content_area,
-                    text="📦 No models installed yet",
-                    font=(self.font_body[0], 16, "bold"),
-                    text_color=COLORS["text_primary"],
-                ).pack(pady=(60, 10))
-                
-                ctk.CTkLabel(
-                    content_area,
-                    text="Click 'Download' to get started!",
-                    font=(self.font_body[0], 12),
-                    text_color=COLORS["text_muted"],
-                ).pack(pady=(0, 20))
-                
-                ctk.CTkButton(
-                    content_area,
-                    text="⬇️ Download Models",
-                    font=(self.font_body[0], 14, "bold"),
-                    height=40, corner_radius=10,
-                    fg_color=COLORS["accent"],
-                    hover_color=COLORS["accent_glow"],
-                    text_color="#000000",
-                    command=show_download,
-                ).pack(pady=(0, 40))
-                return
-            
-            # Scrollable list of models
-            scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
-            scroll.pack(fill="both", expand=True, padx=5, pady=5)
-            
-            for model in models:
-                is_current = os.path.expanduser(model["path"]) == current_path
-                
-                row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=6)
-                row.pack(fill="x", pady=1, padx=2)
-                
-                radio = ctk.CTkRadioButton(
-                    row, text="", variable=model_var, value=model["path"],
-                    width=18, fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
-                )
-                radio.pack(side="left", padx=(8, 4), pady=6)
-                
-                info_frame = ctk.CTkFrame(row, fg_color="transparent")
-                info_frame.pack(side="left", fill="x", expand=True, pady=5)
-                
-                ctk.CTkLabel(
-                    info_frame, text=model["name"],
-                    font=(self.font_body[0], 12, "bold" if is_current else "normal"),
-                    text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
-                ).pack(anchor="w")
-                
-                ctk.CTkLabel(
-                    info_frame, text=f"{model['speed']} • {model['size']}",
-                    font=(self.font_body[0], 9), text_color=COLORS["text_muted"],
-                ).pack(anchor="w")
-            
-            # Save button at bottom
-            def save_selection():
-                selected = model_var.get()
-                # Gate large models behind premium
-                large_keywords = ("medium", "large", "turbo")
-                if any(kw in selected.lower() for kw in large_keywords) and not self.feature_gate.has_feature("large_models"):
-                    self._show_premium_prompt("large_models")
-                    return
-                if selected.startswith(str(Path.home())):
-                    selected = "~" + selected[len(str(Path.home())):]
-                self.config["model_path"] = selected
-                save_config(self.config)
-                if hasattr(self, 'model_btn'):
-                    self.model_btn.configure(text=self.get_model_display())
-                self.log(f"⚙ Model: {self.get_model_display()}")
-                dialog.destroy()
-            
-            save_btn = ctk.CTkButton(
-                content_area, text="Save & Apply",
-                font=(self.font_body[0], 13, "bold"), height=38, corner_radius=8,
-                fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
-                command=save_selection,
+        """Show inline panel to select or download whisper models."""
+        container = self.mode_settings_container
+
+        def build_panel(content, close_panel):
+            # Initialize model downloader
+            downloader = ModelDownloader()
+
+            # Subtitle
+            ctk.CTkLabel(
+                content,
+                text="Select an installed model or download new ones.",
+                font=(self.font_body[0], 10),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", padx=8, pady=(0, 8))
+
+            # Tab button container
+            tab_container = ctk.CTkFrame(content, fg_color="transparent")
+            tab_container.pack(fill="x", padx=8, pady=(0, 8))
+
+            installed_btn = ctk.CTkButton(
+                tab_container, text="Installed",
+                font=(self.font_body[0], 12), height=30,
+                corner_radius=6, fg_color=COLORS["accent"], text_color="#000000",
+                hover_color=COLORS["accent_glow"],
             )
-            save_btn.pack(fill="x", padx=8, pady=8)
-        
-        def show_download():
-            clear_content()
-            installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
-            download_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
-            
-            scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
-            scroll.pack(fill="both", expand=True, padx=5, pady=5)
-            
-            # Model categories
-            categories = [
-                ("⭐ RECOMMENDED", ["large-v3-turbo", "large-v3-turbo-q5_0"]),
-                ("🇺🇸 ENGLISH ONLY", ["tiny.en", "base.en", "small.en", "medium.en"]),
-                ("🌍 MULTI-LANGUAGE", ["tiny", "base", "small", "medium", "large-v3"]),
-            ]
-            
-            for section_title, model_ids in categories:
-                ctk.CTkLabel(
-                    scroll, text=section_title,
-                    font=(self.font_body[0], 10, "bold"),
-                    text_color=COLORS["text_muted"],
-                ).pack(anchor="w", padx=8, pady=(8, 3))
-                
-                for model_id in model_ids:
-                    if model_id not in WHISPER_CPP_MODELS:
-                        continue
-                    
-                    info = WHISPER_CPP_MODELS[model_id]
-                    is_installed = downloader.is_installed(model_id)
-                    
-                    row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=6)
+            installed_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
+
+            download_btn = ctk.CTkButton(
+                tab_container, text="Download",
+                font=(self.font_body[0], 12), height=30,
+                corner_radius=6, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
+                hover_color=COLORS["bg_elevated"],
+            )
+            download_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
+
+            # Content area
+            content_area = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=12)
+            content_area.pack(fill="both", expand=True, padx=8)
+
+            current_path = os.path.expanduser(self.config.get("model_path", ""))
+            model_var = ctk.StringVar(value=current_path)
+
+            def clear_content():
+                for widget in content_area.winfo_children():
+                    widget.destroy()
+
+            def show_installed():
+                clear_content()
+                installed_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
+                download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
+
+                models = self.get_available_models()
+
+                if not models:
+                    ctk.CTkLabel(
+                        content_area,
+                        text="No models installed yet",
+                        font=(self.font_body[0], 14, "bold"),
+                        text_color=COLORS["text_primary"],
+                    ).pack(pady=(40, 8))
+                    ctk.CTkButton(
+                        content_area, text="Download Models",
+                        font=(self.font_body[0], 12, "bold"), height=36, corner_radius=8,
+                        fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                        text_color="#000000", command=show_download,
+                    ).pack(pady=(0, 30))
+                    return
+
+                scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
+                scroll.pack(fill="both", expand=True, padx=5, pady=5)
+                self._trap_scroll(scroll)
+
+                for model in models:
+                    is_current = os.path.expanduser(model["path"]) == current_path
+
+                    row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=6)
                     row.pack(fill="x", pady=1, padx=2)
-                    
-                    # Model info
+
+                    radio = ctk.CTkRadioButton(
+                        row, text="", variable=model_var, value=model["path"],
+                        width=18, fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                    )
+                    radio.pack(side="left", padx=(8, 4), pady=6)
+
                     info_frame = ctk.CTkFrame(row, fg_color="transparent")
-                    info_frame.pack(side="left", fill="x", expand=True, padx=8, pady=5)
-                    
-                    name_text = info["name"]
-                    if info.get("recommended"):
-                        name_text += " ⭐"
-                    
+                    info_frame.pack(side="left", fill="x", expand=True, pady=5)
+
                     ctk.CTkLabel(
-                        info_frame, text=name_text,
-                        font=(self.font_body[0], 11, "bold"),
-                        text_color=COLORS["accent"] if is_installed else COLORS["text_primary"],
+                        info_frame, text=model["name"],
+                        font=(self.font_body[0], 12, "bold" if is_current else "normal"),
+                        text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
                     ).pack(anchor="w")
-                    
+
                     ctk.CTkLabel(
-                        info_frame, text=f"{info['size']} • {info['speed']}",
+                        info_frame, text=f"{model['speed']} • {model['size']}",
                         font=(self.font_body[0], 9), text_color=COLORS["text_muted"],
                     ).pack(anchor="w")
-                    
-                    # Status/button
-                    if is_installed:
+
+                def save_selection():
+                    selected = model_var.get()
+                    large_keywords = ("medium", "large", "turbo")
+                    if any(kw in selected.lower() for kw in large_keywords) and not self.feature_gate.has_feature("large_models"):
+                        self._show_premium_prompt("large_models")
+                        return
+                    if selected.startswith(str(Path.home())):
+                        selected = "~" + selected[len(str(Path.home())):]
+                    self.config["model_path"] = selected
+                    save_config(self.config)
+                    if hasattr(self, 'model_btn'):
+                        self.model_btn.configure(text=self.get_model_display())
+                    self.log(f"⚙ Model: {self.get_model_display()}")
+                    close_panel()
+
+                ctk.CTkButton(
+                    content_area, text="Save & Apply",
+                    font=(self.font_body[0], 13, "bold"), height=38, corner_radius=8,
+                    fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
+                    command=save_selection,
+                ).pack(fill="x", padx=8, pady=8)
+
+            def show_download():
+                clear_content()
+                installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
+                download_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
+
+                scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
+                scroll.pack(fill="both", expand=True, padx=5, pady=5)
+                self._trap_scroll(scroll)
+
+                categories = [
+                    ("RECOMMENDED", ["large-v3-turbo", "large-v3-turbo-q5_0"]),
+                    ("ENGLISH ONLY", ["tiny.en", "base.en", "small.en", "medium.en"]),
+                    ("MULTI-LANGUAGE", ["tiny", "base", "small", "medium", "large-v3"]),
+                ]
+
+                for section_title, model_ids in categories:
+                    ctk.CTkLabel(
+                        scroll, text=section_title,
+                        font=(self.font_body[0], 10, "bold"),
+                        text_color=COLORS["text_muted"],
+                    ).pack(anchor="w", padx=8, pady=(8, 3))
+
+                    for model_id in model_ids:
+                        if model_id not in WHISPER_CPP_MODELS:
+                            continue
+
+                        info = WHISPER_CPP_MODELS[model_id]
+                        is_installed = downloader.is_installed(model_id)
+
+                        row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=6)
+                        row.pack(fill="x", pady=1, padx=2)
+
+                        info_frame = ctk.CTkFrame(row, fg_color="transparent")
+                        info_frame.pack(side="left", fill="x", expand=True, padx=8, pady=5)
+
+                        name_text = info["name"]
+                        if info.get("recommended"):
+                            name_text += " *"
+
                         ctk.CTkLabel(
-                            row, text="✓",
-                            font=(self.font_body[0], 11),
-                            text_color=COLORS["accent_green"],
-                        ).pack(side="right", padx=12, pady=6)
-                    else:
-                        def make_handler(mid=model_id):
-                            return lambda: do_download(mid)
-                        
-                        ctk.CTkButton(
-                            row, text="Get",
-                            font=(self.font_body[0], 10), width=50, height=24,
-                            corner_radius=5, fg_color=COLORS["bg_elevated"],
-                            hover_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
-                            command=make_handler(),
-                        ).pack(side="right", padx=8, pady=5)
-        
-        def do_download(model_id: str):
-            """Download a model with progress dialog."""
-            info = WHISPER_CPP_MODELS[model_id]
-            
-            progress_win = ctk.CTkToplevel(dialog)
-            progress_win.title(f"Downloading {info['name']}")
-            progress_win.configure(fg_color=COLORS["bg_base"])
-            progress_win.transient(dialog)
-            progress_win.grab_set()
-            self._setup_dialog(progress_win, 500, 240)
-            
-            ctk.CTkLabel(
-                progress_win, text=f"Downloading {info['name']}",
-                font=(self.font_body[0], 16, "bold"),
-                text_color=COLORS["text_bright"],
-            ).pack(pady=(30, 5))
-            
-            ctk.CTkLabel(
-                progress_win, text=f"Size: {info['size']}",
-                font=(self.font_body[0], 12),
-                text_color=COLORS["text_secondary"],
-            ).pack(pady=(0, 15))
-            
-            progress_bar = ctk.CTkProgressBar(progress_win, width=340, height=18, corner_radius=9)
-            progress_bar.pack(pady=(0, 8))
-            progress_bar.set(0)
-            
-            status_lbl = ctk.CTkLabel(
-                progress_win, text="Starting...",
-                font=(self.font_body[0], 11),
-                text_color=COLORS["text_muted"],
-            )
-            status_lbl.pack()
-            
-            def on_progress(pct, done, total):
-                def update():
-                    progress_bar.set(pct)
-                    mb_done = done / (1024 * 1024)
-                    mb_total = total / (1024 * 1024)
-                    status_lbl.configure(text=f"{mb_done:.1f} / {mb_total:.1f} MB ({pct*100:.0f}%)")
-                progress_win.after(0, update)
-            
-            def on_complete(path):
-                def update():
-                    progress_win.destroy()
-                    self.log(f"✓ Downloaded: {info['name']}")
-                    show_download()
-                progress_win.after(0, update)
-            
-            def on_error(error):
-                def update():
-                    status_lbl.configure(text=f"Error: {error}", text_color=COLORS["accent_red"])
-                progress_win.after(0, update)
-            
-            downloader.download_model(model_id, on_progress, on_complete, on_error)
-        
-        # ===== WIRE UP BUTTON COMMANDS =====
-        installed_btn.configure(command=show_installed)
-        download_btn.configure(command=show_download)
-        
-        # Force update before showing content
-        dialog.update_idletasks()
-        
-        # Show initial tab
-        show_installed()
-        
-        # Make modal and lift
-        dialog.grab_set()
-        dialog.lift()
-        dialog.focus_force()
+                            info_frame, text=name_text,
+                            font=(self.font_body[0], 11, "bold"),
+                            text_color=COLORS["accent"] if is_installed else COLORS["text_primary"],
+                        ).pack(anchor="w")
+
+                        ctk.CTkLabel(
+                            info_frame, text=f"{info['size']} • {info['speed']}",
+                            font=(self.font_body[0], 9), text_color=COLORS["text_muted"],
+                        ).pack(anchor="w")
+
+                        if is_installed:
+                            ctk.CTkLabel(
+                                row, text="Installed",
+                                font=(self.font_body[0], 10),
+                                text_color=COLORS["accent_green"],
+                            ).pack(side="right", padx=12, pady=6)
+                        else:
+                            def make_handler(mid=model_id):
+                                return lambda: do_download(mid)
+
+                            ctk.CTkButton(
+                                row, text="Get",
+                                font=(self.font_body[0], 10), width=50, height=24,
+                                corner_radius=5, fg_color=COLORS["bg_elevated"],
+                                hover_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
+                                command=make_handler(),
+                            ).pack(side="right", padx=8, pady=5)
+
+            def do_download(model_id: str):
+                """Download a model with inline progress."""
+                info = WHISPER_CPP_MODELS[model_id]
+                clear_content()
+
+                ctk.CTkLabel(
+                    content_area, text=f"Downloading {info['name']}",
+                    font=(self.font_body[0], 14, "bold"),
+                    text_color=COLORS["text_bright"],
+                ).pack(pady=(20, 4))
+
+                ctk.CTkLabel(
+                    content_area, text=f"Size: {info['size']}",
+                    font=(self.font_body[0], 11),
+                    text_color=COLORS["text_secondary"],
+                ).pack(pady=(0, 12))
+
+                progress_bar = ctk.CTkProgressBar(content_area, height=16, corner_radius=8)
+                progress_bar.pack(fill="x", padx=16, pady=(0, 6))
+                progress_bar.set(0)
+
+                status_lbl = ctk.CTkLabel(
+                    content_area, text="Starting...",
+                    font=(self.font_body[0], 10),
+                    text_color=COLORS["text_muted"],
+                )
+                status_lbl.pack()
+
+                def on_progress(pct, done, total):
+                    def update():
+                        try:
+                            progress_bar.set(pct)
+                            mb_done = done / (1024 * 1024)
+                            mb_total = total / (1024 * 1024)
+                            status_lbl.configure(text=f"{mb_done:.1f} / {mb_total:.1f} MB ({pct*100:.0f}%)")
+                        except Exception:
+                            pass
+                    self.after(0, update)
+
+                def on_complete(path):
+                    def update():
+                        self.log(f"Downloaded: {info['name']}")
+                        show_download()
+                    self.after(0, update)
+
+                def on_error(error):
+                    def update():
+                        try:
+                            status_lbl.configure(text=f"Error: {error}", text_color=COLORS["accent_red"])
+                        except Exception:
+                            pass
+                    self.after(0, update)
+
+                downloader.download_model(model_id, on_progress, on_complete, on_error)
+
+            installed_btn.configure(command=show_installed)
+            download_btn.configure(command=show_download)
+            show_installed()
+
+        self._show_inline_panel(container, "Whisper Models", build_panel)
 
     def open_prompt_settings(self):
         """Open dialog to configure transcription prompt and vocabulary."""
@@ -12072,6 +12177,7 @@ class WayfinderApp(ctk.CTk):
         # UI is only accessible via "Open Settings" - app always starts minimized to tray
         menu = pystray.Menu(
             pystray.MenuItem("Toggle Recording", self.tray_record, default=True),
+            pystray.MenuItem("Reset (unstick overlay)", self.tray_reset),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open Settings", self.show_from_tray),
             pystray.MenuItem(
@@ -12195,7 +12301,12 @@ class WayfinderApp(ctk.CTk):
     
     def _start_tray_pulse(self):
         """Start the tray icon pulsing animation."""
-        if not hasattr(self, '_tray_pulse_job'):
+        # Cancel any existing pulse to prevent duplicate timer loops
+        if hasattr(self, '_tray_pulse_job') and self._tray_pulse_job:
+            try:
+                self.after_cancel(self._tray_pulse_job)
+            except Exception:
+                pass
             self._tray_pulse_job = None
         if not hasattr(self, '_tray_pulse_frame'):
             self._tray_pulse_frame = 0
@@ -12249,11 +12360,17 @@ class WayfinderApp(ctk.CTk):
     def tray_record(self):
         self.after(0, self.on_record_button)
 
+    def tray_reset(self, icon=None, item=None):
+        """Tray 'Reset' action — abandon any stuck/in-flight dictation and return to idle."""
+        self.force_reset()
+
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
         # Signal all background threads to stop
         self.stop_event.set()
-        
+        if hasattr(self, '_evdev_stop_event'):
+            self._evdev_stop_event.set()
+
         # Shutdown thread pool executors gracefully
         try:
             if hasattr(self, 'executor'):
@@ -12316,7 +12433,12 @@ class WayfinderApp(ctk.CTk):
         old_state = self.app_state
         self.app_state = new_state
         color = STATE_COLORS[new_state]
-        
+
+        # Diagnostics: trace state transitions (goes to journal/stderr, not the UI log) so a
+        # stuck-overlay report can be correlated against the overlay-debug.log timeline.
+        if old_state != new_state:
+            print(f"[STATE] {old_state.name} -> {new_state.name}", flush=True)
+
         # Audio ducking on state transitions
         if self.config.get("audio_ducking_enabled", True) and hasattr(self, 'audio_ducker'):
             if new_state == AppState.RECORDING and old_state != AppState.RECORDING:
@@ -12561,68 +12683,119 @@ class WayfinderApp(ctk.CTk):
     # === Hotkey & Events ===
     
     def start_hotkey_listener(self):
+        # Socket listener stays up for the app's lifetime (config changes restart only the
+        # keyboard listener — see restart_evdev_listener). Liveness-based so it self-heals.
+        self._ensure_socket_listener()
+
+        if sys.platform == "darwin":
+            # macOS: pynput global listener reads config live — no evdev, no restart.
+            self._start_pynput_listener()
+            return
+
+        # Linux: evdev (X11 + Wayland-with-input-group). Portal path is wired separately.
+        is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
+        if is_wayland:
+            self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
+        else:
+            self.log("🖥️ X11 detected - using evdev")
+        self._start_evdev_listener()
+
+    def _ensure_socket_listener(self):
+        """Start the socket listener if it isn't already running. Idempotent.
+
+        Liveness-based (not a one-shot flag): if the listener ever dies — e.g. a transient
+        SOCKET_PATH bind failure — the supervisor calls this again to bring it back, instead of
+        the socket trigger being dead until an app restart.
+        """
+        existing = self._socket_thread
+        if existing is not None and existing.is_alive():
+            return
+        self._socket_thread = threading.Thread(
+            target=socket_listener,
+            args=(self.event_queue, self.stop_event, self.log),
+            daemon=True,
+        )
+        self._socket_thread.start()
+
+    def _start_pynput_listener(self):
+        """macOS global hotkey listener (pynput). Reads config live; started once."""
+        if getattr(self, '_pynput_listener_started', False):
+            # Already running — config changes are picked up automatically.
+            self.log("⚙ Hotkey updated (live)")
+            return
+        from wayfinder.hotkeys import pynput_hotkey_listener, is_pynput_available
+        if not is_pynput_available():
+            self.log("⚠️ pynput not installed — hotkeys unavailable")
+            return
+        hotkey_key = self.config.get("hotkey_key", 67)
+        hotkey_modifiers = self.config.get("hotkey_modifiers", [])
+        style_toggle_key = self.config.get("style_toggle_key", 68)
+        style_toggle_modifiers = self.config.get("style_toggle_modifiers", [])
+        self.log("🖥️ macOS — using pynput (global keyboard listener)")
+        self._pynput_listener_started = True
+
+        def _pynput_wrapper():
+            try:
+                pynput_hotkey_listener(
+                    self.event_queue, hotkey_key, hotkey_modifiers,
+                    self.stop_event, self.log,
+                    style_toggle_key, style_toggle_modifiers,
+                    config_ref=self.config,
+                )
+            except Exception as e:
+                print(f"[Hotkey] pynput listener crashed: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                self._pynput_listener_started = False
+
+        threading.Thread(target=_pynput_wrapper, daemon=True).start()
+
+    def _start_evdev_listener(self):
+        """Start (or restart) the evdev hotkey listener thread, cleanly stopping any prior one."""
+        if not HAS_EVDEV:
+            self.log("⚠️ evdev not installed — hotkeys limited to socket/D-Bus methods")
+            return
+
         hotkey_key = self.config.get("hotkey_key", 67)
         hotkey_modifiers = self.config.get("hotkey_modifiers", [])
         enabled_devices = self.config.get("enabled_input_devices", [])
-        hotkey_display = self.get_hotkey_display()
-
-        # Style toggle hotkey settings
         style_toggle_key = self.config.get("style_toggle_key", 68)  # F10 default
         style_toggle_modifiers = self.config.get("style_toggle_modifiers", [])
 
-        # Start socket listener only once (not on restarts)
-        if not getattr(self, '_socket_listener_started', False):
-            self._socket_listener_started = True
-            threading.Thread(
-                target=socket_listener,
-                args=(self.event_queue, self.stop_event, self.log),
-                daemon=True,
-            ).start()
-        
-        # Log the hotkey configuration
+        # Cleanly stop a previous evdev thread (config change / supervisor restart) using its
+        # dedicated stop event — the shared self.stop_event (and the socket listener) is untouched.
+        old_thread = self._hotkey_thread
+        if old_thread is not None and old_thread.is_alive():
+            self._evdev_stop_event.set()
+            # Join longer than the listener's rescan backoff (2s) so the old thread is gone
+            # before the new one starts — otherwise two listeners briefly double-fire hotkeys.
+            old_thread.join(timeout=2.5)
+            if old_thread.is_alive():
+                self.log("⚠️ Old hotkey listener still winding down; starting new one anyway")
+        self._evdev_stop_event = threading.Event()
+
         hotkey_name = self.get_hotkey_display()
         style_key_name = {59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
                          65: "F7", 66: "F8", 67: "F9", 68: "F10"}.get(style_toggle_key, f"Key{style_toggle_key}")
         self.log(f"⌨️ Record hotkey: {hotkey_name} | Style toggle: {style_key_name}")
 
-        if sys.platform == "darwin":
-            # macOS: use pynput for global hotkey listening
-            # pynput reads hotkey config live from self.config — no restart needed
-            if not getattr(self, '_pynput_listener_started', False):
-                from wayfinder.hotkeys import pynput_hotkey_listener, is_pynput_available
-                if is_pynput_available():
-                    self.log("🖥️ macOS — using pynput (global keyboard listener)")
-                    self._pynput_listener_started = True
+        self._hotkey_thread = threading.Thread(
+            target=hotkey_listener,
+            args=(self.event_queue, hotkey_key, hotkey_modifiers, self._evdev_stop_event,
+                  enabled_devices, self.log, style_toggle_key, style_toggle_modifiers),
+            daemon=True,
+        )
+        self._hotkey_thread.start()
 
-                    def _pynput_wrapper():
-                        try:
-                            pynput_hotkey_listener(
-                                self.event_queue, hotkey_key, hotkey_modifiers,
-                                self.stop_event, self.log,
-                                style_toggle_key, style_toggle_modifiers,
-                                config_ref=self.config,
-                            )
-                        except Exception as e:
-                            print(f"[Hotkey] pynput listener crashed: {e}", flush=True)
-                            import traceback
-                            traceback.print_exc()
-                            self._pynput_listener_started = False
+    def restart_evdev_listener(self, reason: str = ""):
+        """Cleanly restart only the evdev listener (config changes + the health supervisor).
 
-                    threading.Thread(target=_pynput_wrapper, daemon=True).start()
-                else:
-                    self.log("⚠️ pynput not installed — hotkeys unavailable")
-            else:
-                # Already running — config changes are picked up automatically
-                self.log(f"⚙ Hotkey updated (live)")
-        elif HAS_EVDEV:
-            threading.Thread(
-                target=hotkey_listener,
-                args=(self.event_queue, hotkey_key, hotkey_modifiers, self.stop_event, enabled_devices, self.log,
-                      style_toggle_key, style_toggle_modifiers),
-                daemon=True,
-            ).start()
-        else:
-            self.log("⚠️ evdev not installed — hotkeys limited to socket/D-Bus methods")
+        The socket listener keeps running — it doesn't depend on the hotkey key/device.
+        """
+        with self._hotkey_restart_lock:
+            if reason:
+                self.log(f"🔁 Hotkey listener restart ({reason})")
+            self._start_evdev_listener()
 
     def poll_events(self):
         try:
@@ -12636,26 +12809,42 @@ class WayfinderApp(ctk.CTk):
         interval = 250 if self.app_state == AppState.IDLE else 100
         self.after(interval, self.poll_events)
 
+    @staticmethod
+    def _split_gen(data):
+        """Split a terminal event payload into (payload, generation).
+
+        Workers tag terminal events as (payload, gen). Untagged/legacy payloads return
+        (data, None), which disables the staleness check for that event (fail-open).
+        """
+        if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], (int, type(None))):
+            return data[0], data[1]
+        return data, None
+
     def handle_event(self, event_type, data):
         if event_type == EventType.HOTKEY_PRESSED:
             self.on_hotkey()
         elif event_type == EventType.STYLE_TOGGLE:
             self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
         elif event_type == EventType.TRANSCRIPTION_DONE:
-            self.on_transcription_done(data)
+            text, gen = self._split_gen(data)
+            self.on_transcription_done(text, gen)
         elif event_type == EventType.TRANSCRIPTION_ERROR:
-            self.on_error(f"Transcription: {data}")
+            msg, gen = self._split_gen(data)
+            self.on_error(f"Transcription: {msg}", gen)
         elif event_type == EventType.INJECTION_DONE:
-            self.on_injection_done()
+            _payload, gen = self._split_gen(data)
+            self.on_injection_done(gen)
         elif event_type == EventType.INJECTION_ERROR:
-            self.on_error(f"Injection: {data}")
+            msg, gen = self._split_gen(data)
+            self.on_error(f"Injection: {msg}", gen)
         elif event_type == EventType.CHUNK_TRANSCRIBED:
             chunk_index, text, had_context = data if len(data) == 3 else (*data, False)
             preview = text[:30] + "..." if len(text) > 30 else text
             context_indicator = " →" if had_context else ""
             self.log(f"✓ Chunk {chunk_index + 1}{context_indicator}: \"{preview}\"")
         elif event_type == EventType.CHUNKED_TRANSCRIPTION_DONE:
-            self.on_transcription_done(data)
+            text, gen = self._split_gen(data)
+            self.on_transcription_done(text, gen)
         elif event_type == EventType.LOG_MESSAGE:
             self._do_log(data)
 
@@ -12721,7 +12910,18 @@ class WayfinderApp(ctk.CTk):
     def start_recording(self):
         try:
             self.log("🎤 Listening...")
-            
+
+            # New recording session: bump the generation so any still-in-flight work or
+            # scheduled callbacks from a previous session are recognised as stale and ignored.
+            self.session_generation += 1
+            gen = self.session_generation
+            if self._finish_injection_job is not None:
+                try:
+                    self.after_cancel(self._finish_injection_job)
+                except Exception:
+                    pass
+                self._finish_injection_job = None
+
             # Update state FIRST for immediate feedback
             self.update_state(AppState.RECORDING)
             
@@ -12742,7 +12942,7 @@ class WayfinderApp(ctk.CTk):
             use_chunked = self.config.get("chunked_mode", True) and not is_remote
             
             if use_chunked:
-                self._start_chunked_recording()
+                self._start_chunked_recording(gen)
             else:
                 if is_remote and self.config.get("chunked_mode", True):
                     self.log("ℹ️ Chunked mode skipped (cloud API handles long audio)")
@@ -12756,16 +12956,19 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self.on_error(f"Microphone: {e}")
     
-    def _start_chunked_recording(self):
+    def _start_chunked_recording(self, gen=None):
         """Start recording with chunked processing for indefinite duration."""
         self.chunk_transcriptions = []
-        
+        # Per-session chunk store: workers hold THIS list reference, so a stale worker can never
+        # read/write a newer session's chunk state even if start_recording rebinds the attribute.
+        store = self.chunk_transcriptions
+
         def on_chunk_ready(chunk_path: str, chunk_index: int):
             """Called when a chunk is ready for transcription."""
             self.log(f"📦 Chunk {chunk_index + 1} ready")
-            # Submit chunk for transcription in background
+            # Submit chunk for transcription in background (tagged with this session's gen + store)
             self.transcription_executor.submit(
-                self._transcribe_chunk, chunk_path, chunk_index
+                self._transcribe_chunk, chunk_path, chunk_index, gen, store
             )
         
         self.chunked_recorder = ChunkedRecorder(
@@ -12778,30 +12981,36 @@ class WayfinderApp(ctk.CTk):
         )
         self.chunked_recorder.start()
     
-    def _transcribe_chunk(self, chunk_path: str, chunk_index: int):
+    def _transcribe_chunk(self, chunk_path: str, chunk_index: int, gen=None, store=None):
         """Transcribe a single chunk in the background."""
+        if store is None:
+            store = self.chunk_transcriptions
         try:
+            # Skip if this chunk belongs to a superseded session (optimisation — the per-session
+            # `store` already isolates writes, so this only avoids wasted transcription work).
+            if gen is not None and gen != self.session_generation:
+                return
             # Get context from previous chunk for continuity
             context = ""
             if chunk_index > 0:
                 with self.chunk_transcription_lock:
-                    if len(self.chunk_transcriptions) >= chunk_index:
-                        prev_text = self.chunk_transcriptions[chunk_index - 1]
+                    if len(store) >= chunk_index:
+                        prev_text = store[chunk_index - 1]
                         if prev_text and prev_text != "[error]":
                             context = prev_text
-            
+
             # Skip post-processing per-chunk - will be applied to final combined text
             text = transcribe_with_config(
-                chunk_path, 
-                self.config, 
+                chunk_path,
+                self.config,
                 context=context,
                 skip_post_processing=True,
             )
+            # Write into this session's private store — never touches a newer session's list.
             with self.chunk_transcription_lock:
-                # Ensure list is large enough
-                while len(self.chunk_transcriptions) <= chunk_index:
-                    self.chunk_transcriptions.append("")
-                self.chunk_transcriptions[chunk_index] = text.strip() if text.strip() else "[empty]"
+                while len(store) <= chunk_index:
+                    store.append("")
+                store[chunk_index] = text.strip() if text.strip() else "[empty]"
             
             # Log with context indicator for chunks after the first
             if chunk_index > 0 and context:
@@ -12810,11 +13019,12 @@ class WayfinderApp(ctk.CTk):
                 self.event_queue.put((EventType.CHUNK_TRANSCRIBED, (chunk_index, text, False)))
         except Exception as e:
             self.log(f"⚠ Chunk {chunk_index + 1} error: {e}")
-            # Mark chunk as failed so finalization doesn't wait forever
+            # Mark chunk as failed so this session's finalizer doesn't wait forever. Writes go to
+            # the per-session store, so this can't poison a newer session's chunk count.
             with self.chunk_transcription_lock:
-                while len(self.chunk_transcriptions) <= chunk_index:
-                    self.chunk_transcriptions.append("")
-                self.chunk_transcriptions[chunk_index] = "[error]"
+                while len(store) <= chunk_index:
+                    store.append("")
+                store[chunk_index] = "[error]"
     
     def _update_recording_duration(self):
         """Update the status label with recording duration."""
@@ -12853,104 +13063,150 @@ class WayfinderApp(ctk.CTk):
             self.indicator.update("Processing...", COLORS["accent_yellow"])
         
         self.update_state(AppState.PROCESSING)
-        
+
+        gen = self.session_generation  # this recording's session id (set in start_recording)
         try:
             # Check which recorder was used
             if self.chunked_recorder is not None and self.chunked_recorder.is_recording():
-                self._stop_chunked_recording()
+                self._stop_chunked_recording(gen)
             else:
-                self._stop_simple_recording()
+                self._stop_simple_recording(gen)
         except Exception as e:
-            self.on_error(f"Processing: {e}")
+            self.on_error(f"Processing: {e}", gen)
     
-    def _stop_simple_recording(self):
+    def _stop_simple_recording(self, gen=None):
         """Stop simple (non-chunked) recording and process."""
         duration = self.recorder.get_duration()
         self.log(f"⏱ Duration: {duration:.1f}s")
-        
+
         if duration < self.config["min_recording_duration"]:
             self.recorder.stop()
             self.recorder.cleanup()
-            self.on_error("Too short - speak longer")
+            self.on_error("Too short - speak longer", gen)
             return
-        
+
         audio_path = self.recorder.stop()
-        self.executor.submit(self.transcribe_and_inject, audio_path)
+        self.executor.submit(self.transcribe_and_inject, audio_path, gen)
     
-    def _stop_chunked_recording(self):
+    def _stop_chunked_recording(self, gen=None):
         """Stop chunked recording and process all chunks."""
-        duration = self.chunked_recorder.get_duration()
-        chunk_count = self.chunked_recorder.get_chunk_count()
+        # Capture the recorder + chunk store HERE (Tk thread, at stop time) so they unambiguously
+        # belong to this session — the finalizer runs later on a (possibly delayed) worker, by
+        # which time self.chunked_recorder / self.chunk_transcriptions may belong to a new session.
+        recorder = self.chunked_recorder
+        store = self.chunk_transcriptions
+
+        # Stop FIRST so the chunk-monitor thread is joined and the chunk count is stable. Reading
+        # get_chunk_count() before stop() can race a final on_chunk_ready (duplicate chunk index
+        # / undercounted expected_chunks).
+        final_path, all_paths = recorder.stop()
+        duration = recorder.get_duration()
+        chunk_count = recorder.get_chunk_count()
         self.log(f"⏱ Duration: {duration:.1f}s ({chunk_count} chunks)")
-        
+
         if duration < self.config["min_recording_duration"]:
-            self.chunked_recorder.stop()
-            self.chunked_recorder.cleanup()
-            self.chunked_recorder = None
-            self.on_error("Too short - speak longer")
+            recorder.cleanup()
+            if self.chunked_recorder is recorder:
+                self.chunked_recorder = None
+            self.on_error("Too short - speak longer", gen)
             return
-        
-        # Stop and get final chunk
-        final_path, all_paths = self.chunked_recorder.stop()
-        
+
         # Submit final chunk for transcription if exists
         if final_path:
             final_index = chunk_count
             self.log(f"📦 Final chunk ready")
             self.transcription_executor.submit(
-                self._transcribe_chunk, final_path, final_index
+                self._transcribe_chunk, final_path, final_index, gen, store
             )
-        
+
         # Wait for all transcriptions to complete and combine
-        self.executor.submit(self._finalize_chunked_transcription, chunk_count + (1 if final_path else 0))
+        self.executor.submit(
+            self._finalize_chunked_transcription,
+            chunk_count + (1 if final_path else 0), gen, store, recorder,
+        )
     
-    def _finalize_chunked_transcription(self, expected_chunks: int):
-        """Wait for all chunks to be transcribed and combine them."""
-        # Wait for all chunks to be transcribed (with timeout)
-        timeout = 120  # 2 minutes max wait
-        start_time = time.time()
-        
-        while True:
+    def _finalize_chunked_transcription(self, expected_chunks: int, gen=None, store=None, recorder_instance=None):
+        """Wait for all chunks to be transcribed and combine them.
+
+        `store` and `recorder_instance` are captured at stop time (Tk thread) and belong
+        unambiguously to this session, so a delayed finalizer never touches a newer session's
+        chunk list or recorder.
+        """
+        emitted = False
+        if store is None:
+            store = self.chunk_transcriptions
+        try:
+            # Wait for all chunks to be transcribed (with timeout)
+            timeout = 120  # 2 minutes max wait
+            start_time = time.time()
+
+            while True:
+                # Bail early if this session was superseded (new recording / force_reset) — saves
+                # waiting/work; the per-session store/recorder make it safe regardless.
+                if gen is not None and gen != self.session_generation:
+                    return
+                with self.chunk_transcription_lock:
+                    completed = len([t for t in store if t])
+
+                if completed >= expected_chunks:
+                    break
+
+                if time.time() - start_time > timeout:
+                    self.log(f"⚠ Timeout: only {completed}/{expected_chunks} chunks transcribed")
+                    break
+
+                time.sleep(0.5)
+
+            if gen is not None and gen != self.session_generation:
+                return
+
+            # Combine all transcriptions with overlap deduplication
             with self.chunk_transcription_lock:
-                completed = len([t for t in self.chunk_transcriptions if t])
-            
-            if completed >= expected_chunks:
-                break
-            
-            if time.time() - start_time > timeout:
-                self.log(f"⚠ Timeout: only {completed}/{expected_chunks} chunks transcribed")
-                break
-            
-            time.sleep(0.5)
-        
-        # Combine all transcriptions with overlap deduplication
-        with self.chunk_transcription_lock:
-            combined_text = self._deduplicate_overlap_text(self.chunk_transcriptions)
-        
-        # Apply post-processing to the final combined text (not per-chunk)
-        # This gives the LLM full context and avoids per-chunk prompt leakage issues
-        if combined_text.strip() and self.config.get("post_processing_enabled", True):
-            try:
-                from wayfinder.core.postprocessor import process_with_config
-                self.log("🔧 Post-processing combined text...")
-                original_text = combined_text
-                combined_text = process_with_config(combined_text, self.config)
-                if combined_text != original_text:
-                    self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
-            except Exception as e:
-                self.log(f"⚠ Post-processing error: {e}")
-                # Continue with original combined text
-        
-        # Cleanup
-        if self.chunked_recorder:
-            self.chunked_recorder.cleanup()
-            self.chunked_recorder = None
-        
-        if combined_text.strip():
-            self.log(f"📝 \"{combined_text[:50]}{'...' if len(combined_text) > 50 else ''}\"")
-            self.event_queue.put((EventType.CHUNKED_TRANSCRIPTION_DONE, combined_text))
-        else:
-            self.event_queue.put((EventType.TRANSCRIPTION_ERROR, "No speech detected"))
+                combined_text = self._deduplicate_overlap_text(store)
+
+            # Apply post-processing to the final combined text (not per-chunk)
+            # This gives the LLM full context and avoids per-chunk prompt leakage issues
+            if combined_text.strip() and self.config.get("post_processing_enabled", True):
+                try:
+                    from wayfinder.core.postprocessor import process_with_config
+                    self.log("🔧 Post-processing combined text...")
+                    original_text = combined_text
+                    combined_text = process_with_config(combined_text, self.config)
+                    if combined_text != original_text:
+                        self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
+                except Exception as e:
+                    self.log(f"⚠ Post-processing error: {e}")
+                    # Continue with original combined text
+
+            # Re-check AFTER the (potentially slow) post-processing: a new chunked recording may
+            # have started during the LLM call. If so, bail — the finally cleans up our own
+            # recorder without touching the newer session's recorder/state.
+            if gen is not None and gen != self.session_generation:
+                return
+
+            if combined_text.strip():
+                self.log(f"📝 \"{combined_text[:50]}{'...' if len(combined_text) > 50 else ''}\"")
+                self.event_queue.put((EventType.CHUNKED_TRANSCRIPTION_DONE, (combined_text, gen)))
+            else:
+                self.event_queue.put((EventType.TRANSCRIPTION_ERROR, ("No speech detected", gen)))
+            emitted = True
+        except Exception as e:
+            self.event_queue.put((EventType.TRANSCRIPTION_ERROR, (f"Finalize failed: {e}", gen)))
+            emitted = True
+        finally:
+            # Clean up THIS session's recorder instance (idempotent), and only detach the shared
+            # handle if it still points at our instance — a newer session may have replaced it.
+            if recorder_instance is not None:
+                try:
+                    recorder_instance.cleanup()
+                except Exception:
+                    pass
+            if self.chunked_recorder is recorder_instance:
+                self.chunked_recorder = None
+            # Guarantee the overlay/app is never left stuck in PROCESSING: if no terminal event
+            # was emitted and this session is still current, emit one now.
+            if not emitted and (gen is None or gen == self.session_generation):
+                self.event_queue.put((EventType.TRANSCRIPTION_ERROR, ("Transcription did not complete", gen)))
     
     def _deduplicate_overlap_text(self, transcriptions: list[str]) -> str:
         """
@@ -13051,7 +13307,7 @@ class WayfinderApp(ctk.CTk):
         
         return ""
 
-    def transcribe_and_inject(self, audio_path):
+    def transcribe_and_inject(self, audio_path, gen=None):
         import time as time_module
         try:
             self.log("🔄 Transcribing...")
@@ -13059,15 +13315,25 @@ class WayfinderApp(ctk.CTk):
             text = transcribe_with_config(audio_path, self.config)
             trans_elapsed = time_module.perf_counter() - trans_start
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
-            self.event_queue.put((EventType.TRANSCRIPTION_DONE, text))
+            self.event_queue.put((EventType.TRANSCRIPTION_DONE, (text, gen)))
         except Exception as e:
-            self.event_queue.put((EventType.TRANSCRIPTION_ERROR, str(e)))
+            self.event_queue.put((EventType.TRANSCRIPTION_ERROR, (str(e), gen)))
         finally:
-            self.recorder.cleanup()
+            # Delete THIS session's audio file specifically — not self.recorder.cleanup(), which
+            # wipes the recorder's *current* temp files and could delete a newer session's audio
+            # (the recorder instance is reused across sessions).
+            try:
+                Path(audio_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
-    def on_transcription_done(self, text):
+    def on_transcription_done(self, text, gen=None):
+        # Ignore results from a superseded session (force_reset / a newer recording).
+        if gen is not None and gen != self.session_generation:
+            self.log("⏭ Ignoring stale transcription (session changed)")
+            return
         if not text.strip():
-            self.on_error("No speech detected")
+            self.on_error("No speech detected", gen)
             return
 
         # Add to voice learning history when "Personal" style is active
@@ -13087,9 +13353,13 @@ class WayfinderApp(ctk.CTk):
             )
         
         self.update_state(AppState.PASTING)
-        self.executor.submit(self.do_inject, processed_text)
+        g = gen if gen is not None else self.session_generation
+        self.executor.submit(self.do_inject, processed_text, g)
 
-    def do_inject(self, text):
+    def do_inject(self, text, gen=None):
+        # Don't inject for a superseded session (force_reset / a newer recording took over).
+        if gen is not None and gen != self.session_generation:
+            return
         try:
             # Replace newlines with spaces to avoid sending Enter keys via ydotool
             # This prevents unwanted line breaks and accidental form submissions
@@ -13100,7 +13370,7 @@ class WayfinderApp(ctk.CTk):
 
             if not text:
                 self.event_queue.put((EventType.LOG_MESSAGE, "⚠ Empty text after cleanup — nothing to inject"))
-                self.event_queue.put((EventType.INJECTION_DONE, None))
+                self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
                 return
 
             # Brief delay to let focus settle back to the user's target window
@@ -13109,15 +13379,22 @@ class WayfinderApp(ctk.CTk):
             import time as _time
             _time.sleep(0.03)
 
-            print(f"[Inject] Pasting text: {repr(text[:80])}", flush=True)
-            inject_text(text, typing_speed="instant")
-            self.event_queue.put((EventType.INJECTION_DONE, None))
-        except Exception as e:
-            self.event_queue.put((EventType.INJECTION_ERROR, str(e)))
+            # Re-check after the delay: a reset / new recording during the sleep must NOT result
+            # in stale text being typed into whatever window the user has now focused.
+            if gen is not None and gen != self.session_generation:
+                return
 
-    def on_injection_done(self):
+            inject_text(text, typing_speed="instant")
+            self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
+        except Exception as e:
+            self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
+
+    def on_injection_done(self, gen=None):
+        # Ignore completion of a superseded session (force_reset / newer recording).
+        if gen is not None and gen != self.session_generation:
+            return
         self.log("✓ Text inserted")
-        
+
         # Ensure processing state was visible for at least 800ms
         # This prevents the overlay from flashing too quickly
         import time as time_module
@@ -13126,25 +13403,41 @@ class WayfinderApp(ctk.CTk):
             min_display_ms = 800
             if elapsed_ms < min_display_ms:
                 remaining_ms = int(min_display_ms - elapsed_ms)
-                # Schedule the ready state after remaining time
-                self.after(remaining_ms, self._finish_injection)
+                # Schedule the ready state after remaining time. Capture gen so a stale delayed
+                # reset can't clobber a newer recording; track the job id so it can be cancelled.
+                self._finish_injection_job = self.after(remaining_ms, lambda: self._finish_injection(gen))
                 return
-        
-        self._finish_injection()
-    
-    def _finish_injection(self):
+
+        self._finish_injection(gen)
+
+    def _finish_injection(self, gen=None, _retries=0):
         """Complete the injection and return overlay to ready state."""
+        self._finish_injection_job = None
+        # A newer session already took over — don't reset it back to idle.
+        if gen is not None and gen != self.session_generation:
+            return
         self._processing_start_time = None
-        # Return overlay to ready state
+        # Return overlay to ready state, and verify the command actually reached the overlay
+        # (a dropped critical command would otherwise leave the overlay stuck visually).
         if self._use_pyqt_overlay and self.overlay_controller:
-            self.overlay_controller.show("ready")  # Return to grey ready state
+            ok = self.overlay_controller.show("ready")  # Return to grey ready state
+            if ok is False and _retries < 3:
+                self.log("⚠ Overlay reset command failed to send — retrying")
+                self._finish_injection_job = self.after(150, lambda: self._finish_injection(gen, _retries + 1))
+                return
+            # After a few failed retries, fall through and reset app state anyway — the overlay's
+            # own watchdog / the health-check supervisor will recover the overlay separately.
         elif self.indicator:
             self.indicator.hide()
         self.update_state(AppState.IDLE)
 
-    def on_error(self, message):
+    def on_error(self, message, gen=None):
+        # Ignore errors from a superseded session.
+        if gen is not None and gen != self.session_generation:
+            self.log(f"⏭ Ignoring stale error (session changed): {message}")
+            return
         self.log(f"⚠ {message}")
-        
+
         # Ensure processing state was visible for at least 800ms
         import time as time_module
         if hasattr(self, '_processing_start_time') and self._processing_start_time:
@@ -13152,10 +13445,74 @@ class WayfinderApp(ctk.CTk):
             min_display_ms = 800
             if elapsed_ms < min_display_ms:
                 remaining_ms = int(min_display_ms - elapsed_ms)
-                self.after(remaining_ms, self._finish_injection)
+                self._finish_injection_job = self.after(remaining_ms, lambda: self._finish_injection(gen))
                 return
-        
-        self._finish_injection()
+
+        self._finish_injection(gen)
+
+    def force_reset(self):
+        """Explicit recovery: abandon any in-flight dictation and return to a clean IDLE state.
+
+        Safe to call from any thread (tray callbacks run off the Tk thread); the work is
+        marshalled onto the Tk thread. This is a deliberate user-initiated escape hatch — it is
+        NOT wired into the mic button (which keeps its normal stop-and-process toggle) and is NOT
+        auto-invoked by the supervisor.
+        """
+        self.after(0, self._do_force_reset)
+
+    def _do_force_reset(self):
+        # Bump the generation so every in-flight worker + scheduled callback becomes stale.
+        self.session_generation += 1
+        self.log("🧹 Reset — returning to idle")
+
+        # Cancel any pending delayed overlay reset / recording duration timer.
+        for attr in ("_finish_injection_job", "_duration_update_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        self._recording_start_time = None
+        self._processing_start_time = None
+
+        # Stop any active recorder.
+        try:
+            if getattr(self, "chunked_recorder", None) is not None:
+                try:
+                    self.chunked_recorder.stop()
+                except Exception:
+                    pass
+                try:
+                    self.chunked_recorder.cleanup()
+                except Exception:
+                    pass
+                self.chunked_recorder = None
+            elif getattr(self, "recorder", None) is not None:
+                try:
+                    self.recorder.stop()
+                except Exception:
+                    pass
+                try:
+                    self.recorder.cleanup()
+                except Exception:
+                    pass
+        except Exception as e:
+            self.log(f"⚠ Reset recorder cleanup: {e}")
+
+        # Stop the audio-level flood and return the overlay to ready. update() (unlike show())
+        # stops audio polling when leaving the listening state — this is what unsticks a frozen
+        # "Listening…" overlay.
+        try:
+            if self._use_pyqt_overlay and self.overlay_controller:
+                self.overlay_controller.update("ready")
+            elif self.indicator:
+                self.indicator.hide()
+        except Exception as e:
+            self.log(f"⚠ Reset overlay: {e}")
+
+        self.update_state(AppState.IDLE)
 
     def _add_to_voice_learning(self, text: str):
         """Add transcription to voice learning history."""

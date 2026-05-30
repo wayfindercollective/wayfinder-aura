@@ -54,8 +54,8 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
         "caricature": "Extreme Gen-Z slang. Use: fr fr, no cap, lowkey, slay, 💀😭. All lowercase. Be dramatic and funny.",
     },
     "dev": {
-        "standard": "Developer context. Recognize: git, main, dev, branch, commit, merge, push, pull.",
-        "strong": "Clear and technical. Good for Slack messages or code comments. Recognize git and programming terms.",
+        "standard": "Developer context. Recognize technical terms (git commands, file paths, function names). Preserve the user's natural phrasing.",
+        "strong": "Clean up for Slack or code comments. Recognize git and programming terms. Keep the user's voice — tighten, don't rewrite.",
         "caricature": "Over-engineered AI prompt style. Add CRITICAL:, IMPORTANT:, use CAPS for emphasis. End with 'my career depends on this 🙏'",
     },
     "personal": {
@@ -87,8 +87,8 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
         "caricature": "all lowercase always. no periods ever. excessive question marks??? multiple exclamation marks!!! add emojis constantly 💀😭🔥✨ break up sentences for dramatic. effect. like. this.",
     },
     "dev": {
-        "standard": "Use clear punctuation. Preserve technical terms exactly (git commands, file paths, function names).",
-        "strong": "Use clear punctuation. Add structure (bullets, code blocks) if it helps clarity. Preserve all technical terminology.",
+        "standard": "Use clear punctuation. Preserve technical terms exactly. Do not restructure sentences.",
+        "strong": "Use clear punctuation. Preserve all technical terminology. Only add structure (bullets, code blocks) if the user clearly listed items.",
         "caricature": "Use XML tags: <context>, <objective>, <constraints>, <expected_output>. Add numbered steps. Include [CRITICAL], [IMPORTANT], [WARNING], [NOTE] prefixes. Use ```code blocks``` for emphasis. Add a ## Prerequisites section.",
     },
     "personal": {
@@ -102,11 +102,32 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
 # Filler Word Rules (What to remove)
 # =============================================================================
 
-FILLER_RULES: Dict[str, str] = {
-    "minimal": "Remove ONLY filler sounds: um, uh, ah, er. Keep everything else including 'like', 'you know', 'basically'.",
-    "standard": "Remove filler words: um, uh, ah, like, you know. Keep the user's sentence structure.",
-    "strong": "Remove all filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well.",
-    "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
+FILLER_RULES: Dict[str, Dict[str, str]] = {
+    "minimal": {
+        "standard": "Remove ONLY filler sounds: um, uh, ah, er. Keep everything else including 'like', 'you know', 'basically'.",
+        "strong": "Remove ONLY filler sounds: um, uh, ah, er. Keep everything else including 'like', 'you know', 'basically'.",
+        "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
+    },
+    "professional": {
+        "standard": "Remove filler words: um, uh, ah, like, you know. Keep the user's sentence structure.",
+        "strong": "Remove all filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well.",
+        "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
+    },
+    "casual": {
+        "standard": "Remove filler sounds: um, uh, ah. Keep casual filler like 'like' and 'you know' — they sound natural.",
+        "strong": "Remove filler words: um, uh, ah, like, you know. Keep the user's sentence structure.",
+        "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
+    },
+    "dev": {
+        "standard": "Remove ONLY filler sounds: um, uh, ah, er. Keep discourse markers like 'so', 'basically', 'actually' — they're normal in technical speech.",
+        "strong": "Remove filler sounds: um, uh, ah. Remove 'like' and 'you know' if used as filler, but keep 'so', 'basically', 'actually'.",
+        "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
+    },
+    "personal": {
+        "standard": "Remove filler words: um, uh, ah, like, you know. Keep the user's sentence structure.",
+        "strong": "Remove all filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well.",
+        "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
+    },
 }
 
 
@@ -764,10 +785,10 @@ def get_formatting_rules(tone: str, intensity: str = "standard") -> str:
 
 def get_filler_rules(tone: str, intensity: str = "standard") -> str:
     """Get the filler word removal rules for a given tone and intensity."""
-    # Minimal always uses minimal filler rules regardless of intensity
     if tone == "minimal":
-        return FILLER_RULES["minimal"]
-    return FILLER_RULES.get(intensity, FILLER_RULES["standard"])
+        return FILLER_RULES["minimal"]["standard"]
+    tone_dict = FILLER_RULES.get(tone, FILLER_RULES["professional"])
+    return tone_dict.get(intensity, tone_dict["standard"])
 
 # Refusal detection patterns - phrases that indicate model is refusing to process
 REFUSAL_PATTERNS = [
@@ -1384,6 +1405,7 @@ class LlamaCppBackend(PostProcessorBackend):
         max_tokens: int = 1024,
         temperature: float = 0.1,
         use_gpu: bool = True,
+        timeout: float = 60.0,
     ):
         self.model_path = os.path.expanduser(model_path) if model_path else ""
         self.n_ctx = n_ctx
@@ -1391,6 +1413,7 @@ class LlamaCppBackend(PostProcessorBackend):
         self.n_gpu_layers = n_gpu_layers if use_gpu else 0
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.timeout = timeout  # wall-clock bound for the in-process model() call
         self._model = None
     
     def get_name(self) -> str:
@@ -1462,19 +1485,29 @@ class LlamaCppBackend(PostProcessorBackend):
         
         try:
             model = self._get_model()
-            
+
             # Format the full prompt
             full_prompt = format_prompt(prompt_template, text)
-            
-            # Generate response
-            response = model(
-                full_prompt,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                stop=["Transcription:", "Spoken text:", "\n\n\n"],  # Stop tokens
-                echo=False,
-            )
-            
+
+            # Generate response. The in-process model() call blocks in a C call that a plain
+            # thread timeout cannot kill, so bound it with a watchdog: on timeout we raise and
+            # process_with_config() falls back to the raw text (post-processing is non-fatal).
+            from wayfinder.utils.timeout import run_with_timeout, CallTimeout
+            try:
+                response = run_with_timeout(
+                    model,
+                    self.timeout,
+                    full_prompt,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    stop=["Transcription:", "Spoken text:", "\n\n\n"],  # Stop tokens
+                    echo=False,
+                )
+            except CallTimeout:
+                raise PostProcessingError(
+                    f"llama.cpp post-processing timed out after {self.timeout:.0f}s"
+                )
+
             result = response["choices"][0]["text"].strip()
             
             # Clean up any artifacts and check for refusals
@@ -1880,8 +1913,9 @@ class AnthropicBackend(PostProcessorBackend):
                         "content": full_prompt,
                     }
                 ],
+                timeout=30,  # bound the network call so a stall can't pin the worker
             )
-            
+
             result = message.content[0].text.strip()
             
             # Check for refusal (rare with Claude but possible)
@@ -2017,8 +2051,9 @@ class OpenAIBackend(PostProcessorBackend):
                         "content": full_prompt,
                     }
                 ],
+                timeout=30,  # bound the network call so a stall can't pin the worker
             )
-            
+
             msg = response.choices[0].message
             result = (msg.content or "").strip()
 

@@ -431,6 +431,10 @@ class LiquidWaveRenderer:
     
     def advance_time(self, dt: float = 0.016):
         """Advance animation time."""
+        # Guard against NaN/inf: a single bad dt would poison self.time forever and make every
+        # subsequent frame compute NaN geometry (silently blank/frozen wave).
+        if dt != dt or dt in (float('inf'), float('-inf')):
+            dt = 0.016
         self.time += dt * 3.0  # Wave scrolling speed
         self.breath += dt * 0.5  # Breathing cycle speed
     
@@ -1199,17 +1203,31 @@ class GlassmorphicOverlay(QWidget):
         import time
         def _log(msg):
             try:
-                with open("/tmp/wayfinder-overlay-debug.log", "a") as f:
+                _xdg_cache = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+                _log_path = os.path.join(_xdg_cache, "wayfinder-aura", "overlay-debug.log")
+                with open(_log_path, "a") as f:
                     f.write(f"{time.time():.3f}: {msg}\n")
             except:
                 pass
         
         _log(f"set_state: current={self._state} -> new={state}")
         
+        # Cancel any pending delayed (min-display) transition — a newer state change supersedes
+        # it. Done BEFORE the same-state early-return so even a repeated PROCESSING command
+        # clears a queued PROCESSING->READY that would otherwise show "ready" while recording.
+        # (The delayed callback below also re-checks the state.)
+        existing_delayed = getattr(self, '_delayed_state_timer', None)
+        if existing_delayed is not None:
+            try:
+                existing_delayed.stop()
+            except Exception:
+                pass
+            self._delayed_state_timer = None
+
         if state == self._state:
             _log(f"set_state: EARLY RETURN (state unchanged)")
             return
-        
+
         # Enforce minimum display time for PROCESSING state
         # Otherwise it flashes by too fast to see (< 20ms sometimes)
         if self._state == OverlayState.PROCESSING and state == OverlayState.READY:
@@ -1220,10 +1238,21 @@ class GlassmorphicOverlay(QWidget):
                 if elapsed_ms < min_display_ms:
                     remaining = int(min_display_ms - elapsed_ms)
                     _log(f"set_state: DELAYING transition by {remaining}ms (min display time)")
-                    # Use module-level QTimer, don't import locally (causes shadowing issues)
-                    self._delayed_state_timer = QTimer()
+                    # Parent the timer to the widget so it can't be garbage-collected before it
+                    # fires (which would drop the Processing->Ready transition). The callback is
+                    # guarded and only applies if we're STILL in PROCESSING — a newer transition
+                    # (which also cancels this timer at the top of set_state) must win.
+                    self._delayed_state_timer = QTimer(self)
                     self._delayed_state_timer.setSingleShot(True)
-                    self._delayed_state_timer.timeout.connect(lambda: self.set_state(state, animate))
+
+                    def _do_delayed_transition():
+                        try:
+                            if self._state == OverlayState.PROCESSING:
+                                self.set_state(state, animate)
+                        except Exception as exc:
+                            _log(f"set_state: delayed transition error: {exc}")
+
+                    self._delayed_state_timer.timeout.connect(_do_delayed_transition)
                     self._delayed_state_timer.start(remaining)
                     return
         
@@ -1245,8 +1274,6 @@ class GlassmorphicOverlay(QWidget):
             
             # Check overlay mode
             mode = getattr(self, '_overlay_mode', 'persistent')
-            # Check overlay mode
-            mode = getattr(self, '_overlay_mode', 'persistent')
             if mode == "persistent":
                 # Move off-screen instead of hiding (prevents focus stealing on show)
                 self.setGeometry(-9999, -9999, self.width(), self.height())
@@ -1262,21 +1289,25 @@ class GlassmorphicOverlay(QWidget):
         # Calculate new width
         target_width = self._calculate_target_width(label)
         
-        # Animate properties
-        self._width_animator.animate_to(float(target_width), duration)
-        self._border_color_top.animate_to(QColor(palette.border_top), duration)
-        self._border_color_bottom.animate_to(QColor(palette.border_bottom), duration)
-        self._glow_color.animate_to(QColor(palette.glow), duration)
-        self._wave_color.animate_to(QColor(palette.wave), duration)
-        
-        # Set glow intensity based on state
-        if state == OverlayState.LISTENING:
-            self._glow_intensity.animate_to(1.0, duration)
-        elif state == OverlayState.PROCESSING:
-            self._glow_intensity.animate_to(0.8, duration)
-        else:
-            self._glow_intensity.animate_to(0.3, duration)
-        
+        # Animate properties (guarded: a bad color/NaN must not abort the transition or stop
+        # future repaints — the new state has already been committed above).
+        try:
+            self._width_animator.animate_to(float(target_width), duration)
+            self._border_color_top.animate_to(QColor(palette.border_top), duration)
+            self._border_color_bottom.animate_to(QColor(palette.border_bottom), duration)
+            self._glow_color.animate_to(QColor(palette.glow), duration)
+            self._wave_color.animate_to(QColor(palette.wave), duration)
+
+            # Set glow intensity based on state
+            if state == OverlayState.LISTENING:
+                self._glow_intensity.animate_to(1.0, duration)
+            elif state == OverlayState.PROCESSING:
+                self._glow_intensity.animate_to(0.8, duration)
+            else:
+                self._glow_intensity.animate_to(0.3, duration)
+        except Exception as exc:
+            _log(f"set_state: animator error: {exc}")
+
         # Force immediate repaint to show new text (don't wait for animators)
         self.update()
         
@@ -1338,6 +1369,14 @@ class GlassmorphicOverlay(QWidget):
     
     def set_audio_level(self, level: float):
         """Update audio level for wave visualization."""
+        # Guard against NaN/inf/garbage: a corrupted level would poison every subsequent frame.
+        try:
+            level = float(level)
+        except (TypeError, ValueError):
+            return
+        if level != level or level in (float('inf'), float('-inf')):  # NaN or inf
+            return
+        level = max(0.0, min(1.0, level))  # clamp to the expected range
         self.wave_renderer.update_audio_level(level)
     
     def set_style_indicator(self, style: str, animate: bool = True):
@@ -1367,89 +1406,101 @@ class GlassmorphicOverlay(QWidget):
     
     def _on_frame(self):
         """Called each frame to update animations."""
-        dt = 0.066  # 15 FPS (optimized for CPU usage)
-        
-        # Update wave animation
-        self.wave_renderer.advance_time(dt)
-        
-        # Update border chaser if processing
-        if self._state == OverlayState.PROCESSING:
-            self.border_chaser.advance(dt)
-        
-        self.update()
+        try:
+            dt = 0.066  # 15 FPS (optimized for CPU usage)
+
+            # Update wave animation
+            self.wave_renderer.advance_time(dt)
+
+            # Update border chaser if processing
+            if self._state == OverlayState.PROCESSING:
+                self.border_chaser.advance(dt)
+
+            self.update()
+        except Exception:
+            # Never let a frame update raise out of the render timer and stop it. (Rule #10)
+            pass
     
     def paintEvent(self, event):
         """Custom paint for glassmorphic overlay."""
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Explicitly clear to fully transparent (required on macOS)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-        
-        # Calculate centered rect for the squircle
-        # Margin provides room for subtle glow
-        bar_rect = QRectF(
-            self.glow_margin,
-            self.glow_margin,
-            self._current_width,
-            self.scaled_height
-        )
-        
-        # Create squircle path for main shape
-        squircle = create_squircle_path(bar_rect, n=4.5)
-        
-        # Draw outer glow (fades into transparency)
-        self._draw_outer_glow(painter, squircle, bar_rect)
-        
-        # Draw glass background
-        self._draw_glass_background(painter, squircle)
-        
-        # Draw gradient border
-        self._draw_gradient_border(painter, squircle, bar_rect)
-        
-        # Draw border chaser if processing
-        if self._state == OverlayState.PROCESSING:
-            self.border_chaser.render(painter, squircle, self._glow_color.color)
-        
-        # Clip to squircle for content (text, wave)
-        painter.setClipPath(squircle)
-        
-        # Draw wave visualization
-        label = STATE_LABELS.get(self._state, "")
-        style_label_width = self._get_style_label_width() + int(4 * self._scale)
-        
-        if label:
-            # LISTENING/PROCESSING: wave on right side, text on left
-            wave_rect = QRectF(
-                bar_rect.right() - self.WAVE_WIDTH - self.PADDING_H + 10,
-                bar_rect.top() + 4,
-                self.WAVE_WIDTH - 10,
-                bar_rect.height() - 8
+            # Explicitly clear to fully transparent (required on macOS)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+            # Calculate centered rect for the squircle
+            # Margin provides room for subtle glow
+            bar_rect = QRectF(
+                self.glow_margin,
+                self.glow_margin,
+                self._current_width,
+                self.scaled_height
             )
-        else:
-            # READY state: wave to the right of the style label
-            wave_width = self.WAVE_WIDTH - 10
-            # Position wave after the style label area
-            wave_x = bar_rect.left() + style_label_width + self.PADDING_H * 0.3
-            wave_rect = QRectF(
-                wave_x,
-                bar_rect.top() + 4,
-                wave_width,
-                bar_rect.height() - 8
-            )
-        self.wave_renderer.render(painter, wave_rect, self._wave_color.color)
-        
-        # Draw text (only if there's text to draw)
-        if label:
-            self._draw_text(painter, bar_rect)
-        
-        # Draw style badge (always visible in READY state, left side when text is shown)
-        self._draw_style_badge(painter, bar_rect)
-        
-        painter.end()
+
+            # Create squircle path for main shape
+            squircle = create_squircle_path(bar_rect, n=4.5)
+
+            # Draw outer glow (fades into transparency)
+            self._draw_outer_glow(painter, squircle, bar_rect)
+
+            # Draw glass background
+            self._draw_glass_background(painter, squircle)
+
+            # Draw gradient border
+            self._draw_gradient_border(painter, squircle, bar_rect)
+
+            # Draw border chaser if processing
+            if self._state == OverlayState.PROCESSING:
+                self.border_chaser.render(painter, squircle, self._glow_color.color)
+
+            # Clip to squircle for content (text, wave)
+            painter.setClipPath(squircle)
+
+            # Draw wave visualization
+            label = STATE_LABELS.get(self._state, "")
+            style_label_width = self._get_style_label_width() + int(4 * self._scale)
+
+            if label:
+                # LISTENING/PROCESSING: wave on right side, text on left
+                wave_rect = QRectF(
+                    bar_rect.right() - self.WAVE_WIDTH - self.PADDING_H + 10,
+                    bar_rect.top() + 4,
+                    self.WAVE_WIDTH - 10,
+                    bar_rect.height() - 8
+                )
+            else:
+                # READY state: wave to the right of the style label
+                wave_width = self.WAVE_WIDTH - 10
+                # Position wave after the style label area
+                wave_x = bar_rect.left() + style_label_width + self.PADDING_H * 0.3
+                wave_rect = QRectF(
+                    wave_x,
+                    bar_rect.top() + 4,
+                    wave_width,
+                    bar_rect.height() - 8
+                )
+            self.wave_renderer.render(painter, wave_rect, self._wave_color.color)
+
+            # Draw text (only if there's text to draw)
+            if label:
+                self._draw_text(painter, bar_rect)
+
+            # Draw style badge (always visible in READY state, left side when text is shown)
+            self._draw_style_badge(painter, bar_rect)
+        except Exception:
+            # Qt can throw during rapid redraws / window destruction; never let one bad frame
+            # stop all future repaints (which would freeze the overlay visually). (Rule #10)
+            pass
+        finally:
+            try:
+                painter.end()
+            except Exception:
+                pass
     
     def _draw_outer_glow(self, painter: QPainter, path: QPainterPath, rect: QRectF):
         """Draw the outer glow effect."""
@@ -1738,8 +1789,11 @@ def run_overlay():
         except Exception as e:
             _debug_log(f"process_commands error: {e}")
     
-    # Debug log file for tracing overlay commands
-    _debug_log_file = "/tmp/wayfinder-overlay-debug.log"
+    # Debug log file for tracing overlay commands (XDG-compliant, not world-readable /tmp)
+    _cache_dir = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+    _debug_log_dir = os.path.join(_cache_dir, "wayfinder-aura")
+    os.makedirs(_debug_log_dir, exist_ok=True)
+    _debug_log_file = os.path.join(_debug_log_dir, "overlay-debug.log")
     
     def _debug_log(msg):
         """Write debug message to file for tracing."""

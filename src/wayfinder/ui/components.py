@@ -347,7 +347,7 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     # GPU acceleration tooltip with measured speedup
     if key == "gpu_acceleration":
         base_text = "Use GPU for transcription."
-        if benchmark_results:
+        if benchmark_results and isinstance(benchmark_results, dict):
             # Calculate actual speedup from benchmark data
             speedups = []
             for model_id, result in benchmark_results.items():
