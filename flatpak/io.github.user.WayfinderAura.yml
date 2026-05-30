@@ -83,6 +83,10 @@ modules:
       - -DWHISPER_BUILD_EXAMPLES=ON
       - -DWHISPER_BUILD_TESTS=OFF
       - -DBUILD_SHARED_LIBS=OFF
+      # Generic CPU baseline: Steam Deck APU (Zen 2) lacks AVX-512; a -march=native
+      # build SIGILLs on it (STEAMDECK-INSTALL-LOG.md Crit-Finding 2 / Issue 13).
+      - -DGGML_NATIVE=OFF
+      - -DGGML_AVX512=OFF
       # Vulkan GPU support
       - -DGGML_VULKAN=ON
     sources:
@@ -92,26 +96,32 @@ modules:
     post-install:
       - install -Dm755 bin/whisper-cli ${FLATPAK_DEST}/bin/whisper-cli
 
-  # Bundled whisper model (small.en for free tier)
-  - name: whisper-model-small
+  # Bundled whisper model: base.en — the right default for Steam-Deck-class CPU
+  # (~141 MB, ~2x real-time on the Zen 2 APU; large-v3-turbo is unusable there —
+  # STEAMDECK-INSTALL-LOG.md Issues 11/17). Users can download larger models in-app.
+  - name: whisper-model-base
     buildsystem: simple
     build-commands:
-      - install -Dm644 ggml-small.en.bin ${FLATPAK_DEST}/share/whisper-models/ggml-small.en.bin
+      - install -Dm644 ggml-base.en.bin ${FLATPAK_DEST}/share/whisper-models/ggml-base.en.bin
     sources:
       - type: file
-        url: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
-        sha256: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1c71f7f2c8
-        dest-filename: ggml-small.en.bin
+        url: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+        sha256: a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002
+        dest-filename: ggml-base.en.bin
 
   # llama.cpp - LLM inference engine for post-processing
   - name: llama-cpp
     buildsystem: cmake-ninja
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
-      - -DLLAMA_BUILD_EXAMPLES=OFF
+      # EXAMPLES=ON so llama-cli is built — postprocessor.py prefers the CLI backend.
+      - -DLLAMA_BUILD_EXAMPLES=ON
       - -DLLAMA_BUILD_TESTS=OFF
       - -DLLAMA_BUILD_SERVER=OFF
       - -DBUILD_SHARED_LIBS=ON
+      # Generic CPU baseline (Zen 2 / Steam Deck has no AVX-512 — avoid SIGILL).
+      - -DGGML_NATIVE=OFF
+      - -DGGML_AVX512=OFF
       # Vulkan GPU support (works on AMD + NVIDIA + Intel)
       - -DGGML_VULKAN=ON
     sources:
@@ -119,20 +129,24 @@ modules:
         url: https://github.com/ggerganov/llama.cpp.git
         tag: b4568
     post-install:
-      # Install the shared library for llama-cpp-python
-      - install -Dm755 libllama.so ${FLATPAK_DEST}/lib/libllama.so
-      - install -Dm755 libggml*.so ${FLATPAK_DEST}/lib/ || true
+      # cmake install handles most of this; these are defensive copies in case the pinned
+      # tag's install rules miss the prefix. Verify exact paths during the on-Deck build.
+      - install -Dm755 bin/llama-cli ${FLATPAK_DEST}/bin/llama-cli || find . -name llama-cli -type f -perm -u+x -exec install -Dm755 {} ${FLATPAK_DEST}/bin/llama-cli \; || true
+      - find . -name 'libllama.so*' -exec install -Dm755 {} ${FLATPAK_DEST}/lib/ \; || true
+      - find . -name 'libggml*.so*' -exec install -Dm755 {} ${FLATPAK_DEST}/lib/ \; || true
 
-  # Bundled LLM model for post-processing (Qwen2.5-1.5B - good balance of speed/quality)
+  # Bundled LLM model for post-processing: Qwen3.5-2B Q4_K_M (upgraded from
+  # Qwen2.5-1.5B, Mar 2026). ~1.28 GB. Post-processing is optional/off by default
+  # on Steam Deck; this lets it work out-of-the-box on capable hardware.
   - name: llm-model-qwen
     buildsystem: simple
     build-commands:
-      - install -Dm644 qwen2.5-1.5b-instruct-q4_k_m.gguf ${FLATPAK_DEST}/share/llm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+      - install -Dm644 Qwen3.5-2B-Q4_K_M.gguf ${FLATPAK_DEST}/share/llm-models/Qwen3.5-2B-Q4_K_M.gguf
     sources:
       - type: file
-        url: https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
-        sha256: 6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e
-        dest-filename: qwen2.5-1.5b-instruct-q4_k_m.gguf
+        url: https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf
+        sha256: aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223
+        dest-filename: Qwen3.5-2B-Q4_K_M.gguf
 
   # wtype for Wayland text injection
   - name: wtype
@@ -142,7 +156,8 @@ modules:
         url: https://github.com/atx/wtype.git
         tag: v0.4
 
-  # ydotool for X11/Wayland text injection
+  # ydotool for Wayland/X11 text injection (uinput-based fallback; needs /dev/uinput
+  # or a ydotoold socket at runtime — see injector readiness handling).
   - name: ydotool
     buildsystem: cmake-ninja
     config-opts:
@@ -152,100 +167,23 @@ modules:
         url: https://github.com/ReimuNotMoe/ydotool.git
         tag: v1.0.4
 
-  # Python dependencies
-  # Note: For Flathub, regenerate these with flatpak-pip-generator
-  # pip install flatpak-pip-generator
-  # flatpak-pip-generator -r requirements.txt
-  
-  - name: python3-numpy
+  # xdotool — injector's preferred X11 backend. The host binary is invisible inside the
+  # sandbox, so build it here. X11 dev libs (Xtst/Xext/xkbcommon) come from the SDK.
+  - name: xdotool
     buildsystem: simple
     build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} numpy
+      - make PREFIX=${FLATPAK_DEST} WITHOUT_RPATH_FIX=1
+      - make install PREFIX=${FLATPAK_DEST} WITHOUT_RPATH_FIX=1
     sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/b9/14/78635daab4b07c0f84afb6c0f5d4e3de2ddca68c88669f79018557e38069/numpy-2.2.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-        sha256: 7ef2e1253ee87a185a92b55eb5e4e0cdc4e36854fe6d0d5d1d2cd96e1a1f6b6a
+      - type: git
+        url: https://github.com/jordansissel/xdotool.git
+        tag: v3.20211022.1
 
-  - name: python3-scipy
-    buildsystem: simple
-    build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} scipy
-    sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/56/46/2449e6e646f0b10a6e87d8464ae27061583310f0d9830c1c1e5f7e0746f4/scipy-1.14.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-        sha256: 631f07b3734d34aced009aaf6fedfd0eb3498a97e581c3b1e5f14a04164a456d
-
-  - name: python3-pillow
-    buildsystem: simple
-    build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} Pillow
-    sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/38/0d/84200ed6a871ce386ddc82904bfadc0c6b28b0c0ec78176871a4679e40b3/pillow-11.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
-        sha256: 00177a63030d612148e659b55ba99527803288cea7c75fb05766ab7981a8c1b7
-
-  - name: python3-pystray
-    buildsystem: simple
-    build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} pystray
-    sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/83/7e/dc8b0ad4b7fbb57e2e9dcce5b4ee0b6ae1e7c42907250b6774637499c93e/pystray-0.19.5-py3-none-any.whl
-        sha256: c69a1fadc3a14ab47f1e69680779cf546739e3624a8ada00eb9ada0bd76f3ec5
-
-  - name: python3-sounddevice
-    buildsystem: simple
-    build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} sounddevice
-    sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/80/2d/b04ae180312b81e861d6eb3d682e7e04d8c8fb557c5009648da68e7cae0d/sounddevice-0.5.1-py3-none-any.whl
-        sha256: e2017f182888c25e496db66a522831d3a2d1bb7e4086e6b124a76541e4b5618c
-
-  - name: python3-customtkinter
-    buildsystem: simple
-    build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} customtkinter
-    sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/41/99/2e03457dc6bb45c058e2f9b15aac86c498f8e20e74a0aa3fc9ff197aa6c6/customtkinter-5.2.2-py3-none-any.whl
-        sha256: 28896b95abe8a0e67a55fb6f74ce54815e3a85aae5dd890e1f7026cb56dfded2
-
-  - name: python3-evdev
-    buildsystem: simple
-    build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} evdev
-    sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/24/c7/8dd31b57b665f3f284a246f5c9aca9f2e2db0ee0ef2f1d1f5e6e8a5d9b9e/evdev-1.7.1.tar.gz
-        sha256: 0c72c370bda29d56c1c5c8f2e19c3f9e9b94cf03e5f0e2e4fba7c3b8a5b7f8b0
-
-  - name: python3-requests
-    buildsystem: simple
-    build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} requests
-    sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/f9/9b/335f9764261e915ed497fcdeb11df5dfd6f7bf257d4a6a2a686d80da4d54/requests-2.32.3-py3-none-any.whl
-        sha256: 70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6
-
-  - name: python3-openai
-    buildsystem: simple
-    build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} openai
-    sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/py3/o/openai/openai-2.15.0-py3-none-any.whl
-        sha256: 6ae23b932cd7230f7244e52954daa6602716d6b9bf235401a107af731baea6c3
-
-  - name: python3-groq
-    buildsystem: simple
-    build-commands:
-      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} groq
-    sources:
-      - type: file
-        url: https://files.pythonhosted.org/packages/py3/g/groq/groq-1.0.0-py3-none-any.whl
-        sha256: 6e22bf92ffad988f01d2d4df7729add66b8fd5dbfb2154b5bbf3af245b72c731
+  # Python dependencies — generated from requirements.txt by flatpak-pip-generator
+  # (flatpak/generate-pip-sources.sh). Regenerate when requirements.txt changes. This
+  # replaced the hand-written wheel list, which had invalid URLs and was missing PyQt6
+  # and pynput. evdev is intentionally absent (Linux source-build-only — Issue 5).
+  - python-deps.json
 
   # llama-cpp-python - Python bindings for llama.cpp (post-processing)
   # Built from source to use our Vulkan-enabled llama.cpp
@@ -254,7 +192,7 @@ modules:
     build-options:
       env:
         # Use system llama.cpp library we built earlier
-        CMAKE_ARGS: "-DGGML_VULKAN=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF"
+        CMAKE_ARGS: "-DGGML_VULKAN=ON -DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF"
         LLAMA_CPP_LIB: "/app/lib/libllama.so"
     build-commands:
       - pip3 install --verbose --no-build-isolation --prefix=${FLATPAK_DEST} .
@@ -271,15 +209,15 @@ modules:
       - install -Dm755 main.py ${FLATPAK_DEST}/lib/wayfinder-aura/main.py
       - install -Dm644 wayfinder_main.py ${FLATPAK_DEST}/lib/wayfinder-aura/wayfinder_main.py
       
-      # Compatibility shims
-      - install -Dm644 recorder.py ${FLATPAK_DEST}/lib/wayfinder-aura/recorder.py
-      - install -Dm644 transcriber.py ${FLATPAK_DEST}/lib/wayfinder-aura/transcriber.py
-      - install -Dm644 injector.py ${FLATPAK_DEST}/lib/wayfinder-aura/injector.py
-      - install -Dm644 postprocessor.py ${FLATPAK_DEST}/lib/wayfinder-aura/postprocessor.py
-      - install -Dm644 license.py ${FLATPAK_DEST}/lib/wayfinder-aura/license.py
+      # trigger_record.py is the only root-level module still present — the recorder/
+      # transcriber/injector/postprocessor/license root shims were deleted (code now lives
+      # under src/wayfinder/; CLAUDE.md Rule #4). Installing them would fail the build.
       - install -Dm644 trigger_record.py ${FLATPAK_DEST}/lib/wayfinder-aura/trigger_record.py
-      
-      # Package structure
+
+      # Package structure: mkdir the dest first so `cp -r src/wayfinder .../src/` lands at
+      # .../src/wayfinder/ (the launcher puts .../src on PYTHONPATH and imports `wayfinder`).
+      # Without the mkdir, cp creates .../src AS the package contents and the import breaks.
+      - mkdir -p ${FLATPAK_DEST}/lib/wayfinder-aura/src
       - cp -r src/wayfinder ${FLATPAK_DEST}/lib/wayfinder-aura/src/
       
       # Assets
