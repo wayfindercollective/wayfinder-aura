@@ -3,7 +3,8 @@ Text injection module for Wayfinder Aura.
 
 Platform dispatch:
 - Linux/X11: xdotool (preferred — no daemon, no uinput, present in stock SteamOS image)
-- Linux/Wayland: ydotool (xdotool can't inject into Wayland clients)
+- Linux/Wayland: wtype (virtual-keyboard protocol — no daemon/uinput, so it works inside a
+  Flatpak sandbox), falling back to ydotool, then the RemoteDesktop portal
 - Linux/X11 fallback: ydotool if xdotool unavailable
 - macOS: clipboard paste via pbcopy + Cmd-V
 """
@@ -236,13 +237,34 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant") -> None:
         raise InjectionError("xdotool not found in PATH")
 
 
+def _inject_text_wtype(text: str) -> None:
+    """Inject text on Linux/Wayland using wtype (virtual-keyboard protocol).
+
+    Needs no uinput device and no daemon, so it works inside a Flatpak sandbox (unlike
+    ydotool). No per-key delay control. The compositor must implement the virtual-keyboard
+    protocol (KDE Plasma 6 does); if it doesn't, wtype errors and the caller can fall back.
+    """
+    try:
+        result = subprocess.run(
+            ["wtype", text],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+            raise InjectionError(f"wtype failed (exit {result.returncode}): {error_detail}")
+    except subprocess.TimeoutExpired:
+        raise InjectionError("wtype timed out after 120s")
+    except FileNotFoundError:
+        raise InjectionError("wtype not found in PATH")
+
+
 def inject_text(text: str, typing_speed: str = "instant") -> None:
     """
     Inject text into the active window.
 
     Dispatches to platform-specific backend:
     - Linux/X11: xdotool (preferred); ydotool as fallback
-    - Linux/Wayland: ydotool
+    - Linux/Wayland: wtype (preferred — sandbox-safe); ydotool as fallback
     - macOS: clipboard paste (pbcopy + Cmd-V)
 
     Args:
@@ -268,6 +290,9 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
     tool = get_text_injector()
     if tool == "xdotool":
         _inject_text_xdotool(text, typing_speed)
+        return
+    if tool == "wtype":
+        _inject_text_wtype(text)
         return
     if tool == "none":
         raise InjectionError(

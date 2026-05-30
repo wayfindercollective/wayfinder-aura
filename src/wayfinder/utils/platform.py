@@ -219,6 +219,17 @@ def is_xdotool_available() -> bool:
         return False
 
 
+def is_wtype_available() -> bool:
+    """Check if wtype is available (Wayland virtual-keyboard injection, Linux only)."""
+    if not is_linux():
+        return False
+    try:
+        result = subprocess.run(["which", "wtype"], capture_output=True, timeout=5)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def is_pyautogui_available() -> bool:
     """Check if pyautogui is available for text injection (macOS/Windows)."""
     try:
@@ -233,7 +244,7 @@ def get_text_injector() -> str:
     Determine the best text injection method for the current platform.
     
     Returns:
-        - Linux/Wayland: "ydotool"
+        - Linux/Wayland: "wtype" (preferred) or "ydotool"
         - Linux/X11: "xdotool" or "ydotool"
         - macOS: "pyautogui"
         - Windows: "pyautogui"
@@ -241,6 +252,13 @@ def get_text_injector() -> str:
     """
     if is_linux():
         if is_wayland():
+            # Prefer wtype: injects via the Wayland virtual-keyboard protocol with no uinput
+            # device and no daemon, so it works inside a Flatpak sandbox where ydotool's
+            # /dev/uinput path does not (Codex review). On compositors that don't implement
+            # the protocol (some KDE versions) wtype fails at runtime and we fall back to
+            # ydotool — and ultimately the RemoteDesktop portal (the sandbox-safe last resort).
+            if is_wtype_available():
+                return "wtype"
             if is_ydotool_available():
                 return "ydotool"
         else:

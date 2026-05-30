@@ -140,10 +140,13 @@ def check_audio() -> DependencyStatus:
 
 
 def check_text_injection() -> DependencyStatus:
-    """Check for text injection tool (platform-specific).
+    """Check for an available text-injection backend (platform/session aware).
 
-    - macOS: pyautogui
-    - Linux: ydotool + daemon
+    Mirrors the injector's dispatch (wayfinder.utils.platform.get_text_injector) so the setup
+    UI doesn't report injection broken when a working backend exists — or OK when it doesn't.
+    Linux/Wayland prefers wtype (sandbox-safe, no uinput); X11 prefers xdotool; ydotool is the
+    fallback and additionally needs its daemon + /dev/uinput (the old code wrongly treated a
+    bundled ydotool binary as sufficient — Codex review / STEAMDECK-INSTALL-LOG Issue 4).
     """
     if sys.platform == "darwin":
         try:
@@ -152,35 +155,31 @@ def check_text_injection() -> DependencyStatus:
         except ImportError:
             return DependencyStatus(False, error="pyautogui not installed. Run: pip install pyautogui")
 
-    # Linux: check ydotool
-    # In bundled environments, check for the bundled binary first
-    if IS_APPIMAGE and APPDIR:
-        bundled = os.path.join(APPDIR, "usr", "bin", "ydotool")
-        if os.path.exists(bundled):
-            return DependencyStatus(True, detail="Bundled ydotool")
-    if IS_FLATPAK:
-        if os.path.exists("/app/bin/ydotool"):
-            return DependencyStatus(True, detail="Bundled ydotool")
+    # AppImage bundles ydotool at a fixed path that may not be on PATH.
+    if IS_APPIMAGE and APPDIR and os.path.exists(os.path.join(APPDIR, "usr", "bin", "ydotool")):
+        return DependencyStatus(True, detail="Bundled ydotool")
 
-    binary = shutil.which("ydotool")
-    if not binary:
-        return DependencyStatus(False, error="ydotool not installed")
-
-    # Check if daemon is running (socket exists)
-    socket_paths = ["/run/ydotool/ydotool.sock", "/tmp/.ydotool_socket"]
-    daemon_running = any(Path(p).exists() for p in socket_paths)
-
-    if not daemon_running:
-        # Check if ydotoold process is running
-        try:
-            result = subprocess.run(["pgrep", "-x", "ydotoold"], capture_output=True, timeout=5)
-            daemon_running = result.returncode == 0
-        except Exception:
-            pass
-
-    if daemon_running:
-        return DependencyStatus(True, detail="ydotool + daemon running")
-    return DependencyStatus(True, detail="ydotool installed", warning="ydotoold daemon not running")
+    from wayfinder.utils.platform import get_text_injector
+    tool = get_text_injector()
+    if tool == "xdotool":
+        return DependencyStatus(True, detail="xdotool (X11)")
+    if tool == "wtype":
+        return DependencyStatus(True, detail="wtype (Wayland)")
+    if tool == "ydotool":
+        # ydotool needs its daemon + /dev/uinput — having the binary is not enough.
+        socket_paths = ["/run/ydotool/ydotool.sock", "/tmp/.ydotool_socket",
+                        f"/run/user/{os.getuid()}/.ydotool_socket"]
+        daemon_running = any(Path(p).exists() for p in socket_paths)
+        if not daemon_running:
+            try:
+                result = subprocess.run(["pgrep", "-x", "ydotoold"], capture_output=True, timeout=5)
+                daemon_running = result.returncode == 0
+            except Exception:
+                pass
+        if daemon_running:
+            return DependencyStatus(True, detail="ydotool + daemon running")
+        return DependencyStatus(True, detail="ydotool installed", warning="ydotoold daemon not running")
+    return DependencyStatus(False, error="No text injection backend (install wtype or xdotool)")
 
 
 # Keep old name for backwards compat (tests, etc.)
@@ -769,7 +768,7 @@ def get_dependencies(config: dict) -> list[Dependency]:
         ),
         Dependency(
             id="ydotool",
-            name="Text Injection (pyautogui)" if sys.platform == "darwin" else "Text Injection (ydotool)",
+            name="Text Injection (pyautogui)" if sys.platform == "darwin" else "Text Injection (wtype/xdotool/ydotool)",
             description="Types transcribed text at your cursor",
             required=True,
             _check=check_text_injection,
