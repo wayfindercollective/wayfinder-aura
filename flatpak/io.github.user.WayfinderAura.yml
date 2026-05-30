@@ -109,45 +109,6 @@ modules:
         sha256: a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002
         dest-filename: ggml-base.en.bin
 
-  # llama.cpp - LLM inference engine for post-processing
-  - name: llama-cpp
-    buildsystem: cmake-ninja
-    config-opts:
-      - -DCMAKE_BUILD_TYPE=Release
-      # EXAMPLES=ON so llama-cli is built — postprocessor.py prefers the CLI backend.
-      - -DLLAMA_BUILD_EXAMPLES=ON
-      - -DLLAMA_BUILD_TESTS=OFF
-      - -DLLAMA_BUILD_SERVER=OFF
-      - -DBUILD_SHARED_LIBS=ON
-      # Generic CPU baseline (Zen 2 / Steam Deck has no AVX-512 — avoid SIGILL).
-      - -DGGML_NATIVE=OFF
-      - -DGGML_AVX512=OFF
-      # Vulkan GPU support (works on AMD + NVIDIA + Intel)
-      - -DGGML_VULKAN=ON
-    sources:
-      - type: git
-        url: https://github.com/ggerganov/llama.cpp.git
-        tag: b4568
-    post-install:
-      # cmake install handles most of this; these are defensive copies in case the pinned
-      # tag's install rules miss the prefix. Verify exact paths during the on-Deck build.
-      - install -Dm755 bin/llama-cli ${FLATPAK_DEST}/bin/llama-cli || find . -name llama-cli -type f -perm -u+x -exec install -Dm755 {} ${FLATPAK_DEST}/bin/llama-cli \; || true
-      - find . -name 'libllama.so*' -exec install -Dm755 {} ${FLATPAK_DEST}/lib/ \; || true
-      - find . -name 'libggml*.so*' -exec install -Dm755 {} ${FLATPAK_DEST}/lib/ \; || true
-
-  # Bundled LLM model for post-processing: Qwen3.5-2B Q4_K_M (upgraded from
-  # Qwen2.5-1.5B, Mar 2026). ~1.28 GB. Post-processing is optional/off by default
-  # on Steam Deck; this lets it work out-of-the-box on capable hardware.
-  - name: llm-model-qwen
-    buildsystem: simple
-    build-commands:
-      - install -Dm644 Qwen3.5-2B-Q4_K_M.gguf ${FLATPAK_DEST}/share/llm-models/Qwen3.5-2B-Q4_K_M.gguf
-    sources:
-      - type: file
-        url: https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf
-        sha256: aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223
-        dest-filename: Qwen3.5-2B-Q4_K_M.gguf
-
   # wtype for Wayland text injection
   - name: wtype
     buildsystem: meson
@@ -179,27 +140,22 @@ modules:
         url: https://github.com/jordansissel/xdotool.git
         tag: v3.20211022.1
 
-  # Python dependencies — generated from requirements.txt by flatpak-pip-generator
-  # (flatpak/generate-pip-sources.sh). Regenerate when requirements.txt changes. This
-  # replaced the hand-written wheel list, which had invalid URLs and was missing PyQt6
-  # and pynput. evdev is intentionally absent (Linux source-build-only — Issue 5).
-  - python-deps.json
-
-  # llama-cpp-python - Python bindings for llama.cpp (post-processing)
-  # Built from source to use our Vulkan-enabled llama.cpp
-  - name: python3-llama-cpp-python
+  # Python dependencies — installed from PyPI at build time (local build uses --share=network).
+  # Reads the repo's requirements.txt (PyQt6, pynput, numpy, scipy, customtkinter, sounddevice,
+  # requests, openai, groq). evdev + llama-cpp-python live in requirements-optional and are
+  # excluded here. For a reproducible Flathub submission, regenerate hashed sources with
+  # flatpak-pip-generator instead.
+  - name: python-deps
     buildsystem: simple
     build-options:
-      env:
-        # Use system llama.cpp library we built earlier
-        CMAKE_ARGS: "-DGGML_VULKAN=ON -DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF"
-        LLAMA_CPP_LIB: "/app/lib/libllama.so"
+      build-args:
+        - --share=network
     build-commands:
-      - pip3 install --verbose --no-build-isolation --prefix=${FLATPAK_DEST} .
+      - pip3 install --prefix=${FLATPAK_DEST} -r requirements.txt
     sources:
-      - type: git
-        url: https://github.com/abetlen/llama-cpp-python.git
-        tag: v0.3.4
+      - type: file
+        path: ../requirements.txt
+
 
   # Main application
   - name: wayfinder-aura
