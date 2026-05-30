@@ -3142,6 +3142,12 @@ class WayfinderApp(ctk.CTk):
         self.session_generation = 0                    # bumped per recording / force_reset; discards stale work
         self._finish_injection_job = None              # pending after() id for the delayed overlay reset
 
+        # Start the hotkey listeners NOW, before the heavy UI build, so the evdev thread opens the
+        # input devices during setup_window/tray/ui rather than after it. A press made while the
+        # app is still loading then lands in the thread-safe event_queue (instead of being lost to
+        # a not-yet-listening thread) and is handled once poll_events() runs at the end of __init__.
+        self.start_hotkey_listener()
+
         # Store tooltips that need dynamic updates (keyed by tooltip type)
         self.dynamic_tooltips: dict[str, list[ToolTip]] = {}
         
@@ -3253,7 +3259,7 @@ class WayfinderApp(ctk.CTk):
         self.setup_tray()
         self.setup_ui()
         self.setup_scaling_shortcuts()
-        self.start_hotkey_listener()
+        # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
         self._start_hotkey_supervisor()
         self.poll_events()
         
