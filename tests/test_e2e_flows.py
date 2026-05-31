@@ -119,7 +119,11 @@ class TestFullDictationPipeline:
         state = get_next_state(state, "transcribed")  # -> PASTING
         assert state == AppState.PASTING
 
-        inject_text(result, typing_speed="instant")
+        # Pin the injector to the ydotool backend this test is set up for (check_ydotool_ready
+        # is mocked above); otherwise get_text_injector() runs real host detection and consumes
+        # a mocked subprocess result, exhausting the side_effect list.
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"):
+            inject_text(result, typing_speed="instant")
 
         state = get_next_state(state, "pasted")  # -> IDLE
         assert state == AppState.IDLE

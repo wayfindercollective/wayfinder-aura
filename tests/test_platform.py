@@ -257,9 +257,15 @@ class TestBinaryDetection:
 class TestTextInjector:
     """Tests for get_text_injector() tool selection."""
 
-    def test_get_text_injector_wayland_with_ydotool(self, wayland_env):
-        """Returns 'ydotool' on Wayland when ydotool is available."""
-        with patch("wayfinder.utils.platform.is_ydotool_available", return_value=True):
+    def test_get_text_injector_wayland_prefers_wtype(self, wayland_env):
+        """Wayland prefers wtype (sandbox-safe, no uinput) when available."""
+        with patch("wayfinder.utils.platform.is_wtype_available", return_value=True):
+            assert get_text_injector() == "wtype"
+
+    def test_get_text_injector_wayland_falls_back_to_ydotool(self, wayland_env):
+        """Wayland falls back to ydotool when wtype is unavailable."""
+        with patch("wayfinder.utils.platform.is_wtype_available", return_value=False), \
+             patch("wayfinder.utils.platform.is_ydotool_available", return_value=True):
             assert get_text_injector() == "ydotool"
 
     def test_get_text_injector_x11_prefers_xdotool(self, x11_env):

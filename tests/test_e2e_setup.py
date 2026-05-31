@@ -187,37 +187,33 @@ class TestCheckAudio:
 class TestCheckYdotool:
     """Test ydotool detection (Linux-only)."""
 
-    @patch("subprocess.run")
-    @patch("wayfinder.core.setup.shutil.which", return_value="/usr/bin/ydotool")
-    def test_ydotool_with_daemon_via_pgrep(self, mock_which, mock_run):
-        """ydotool installed + daemon running (detected via pgrep)."""
-        # pgrep finds ydotoold
-        mock_run.return_value = MagicMock(returncode=0)
+    # check_ydotool is an alias for check_text_injection, which now dispatches via
+    # get_text_injector() (wtype on Wayland / xdotool on X11 / ydotool fallback). Mock that
+    # to pin the backend under test, rather than the old ydotool-only shutil.which mocks.
 
-        # Mock Path.exists to return False for sockets (force pgrep fallback)
-        with patch.object(Path, "exists", return_value=False):
+    def test_ydotool_backend_with_daemon_running(self):
+        """ydotool backend + a daemon socket present -> installed, no warning."""
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch.object(Path, "exists", return_value=True):
             status = check_ydotool()
-
         assert status.installed is True
-        assert "daemon" in status.detail.lower() or status.warning == ""
+        assert "daemon" in status.detail.lower()
 
-    @patch("subprocess.run")
-    @patch("wayfinder.core.setup.shutil.which", return_value="/usr/bin/ydotool")
-    def test_ydotool_without_daemon(self, mock_which, mock_run):
-        # pgrep returns non-zero (not running)
-        mock_run.return_value = MagicMock(returncode=1)
-
-        with patch.object(Path, "exists", return_value=False):
+    def test_ydotool_backend_without_daemon(self):
+        """ydotool backend but no socket and ydotoold not running -> installed + warning."""
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch.object(Path, "exists", return_value=False), \
+             patch("wayfinder.core.setup.subprocess.run", return_value=MagicMock(returncode=1)):
             status = check_ydotool()
-
         assert status.installed is True
-        assert status.warning != ""  # Should warn about daemon
+        assert status.warning != ""  # Should warn about the missing daemon
 
-    @patch("wayfinder.core.setup.shutil.which", return_value=None)
-    def test_ydotool_not_installed(self, mock_which):
-        status = check_ydotool()
+    def test_no_injection_backend_available(self):
+        """No wtype/xdotool/ydotool -> not installed, error tells the user to install one."""
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="none"):
+            status = check_ydotool()
         assert status.installed is False
-        assert "not installed" in status.error.lower()
+        assert "install" in status.error.lower()
 
 
 # =============================================================================
