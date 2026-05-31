@@ -163,6 +163,7 @@ class TestInjectTextErrors:
 
     def test_timeout_raises_injection_error(self):
         with patch("wayfinder.core.injector.sys") as mock_sys, \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
              patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
              patch("wayfinder.core.injector.subprocess.run",
                    side_effect=subprocess.TimeoutExpired(cmd="ydotool", timeout=120)):
@@ -172,6 +173,7 @@ class TestInjectTextErrors:
 
     def test_file_not_found_raises_injection_error(self):
         with patch("wayfinder.core.injector.sys") as mock_sys, \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
              patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
              patch("wayfinder.core.injector.subprocess.run",
                    side_effect=FileNotFoundError("ydotool")):

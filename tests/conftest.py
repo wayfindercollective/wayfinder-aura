@@ -163,6 +163,7 @@ def mock_ydotool_success():
     mock_result.stderr = ""
 
     with patch("wayfinder.core.injector.sys") as mock_sys, \
+         patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
          patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
          patch("wayfinder.core.injector.subprocess.run", return_value=mock_result) as mock_run:
         mock_sys.platform = "linux"
@@ -182,6 +183,7 @@ def mock_ydotool_failure():
     mock_result.stderr = "Error: ydotool daemon not running"
 
     with patch("wayfinder.core.injector.sys") as mock_sys, \
+         patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
          patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
          patch("wayfinder.core.injector.subprocess.run", return_value=mock_result) as mock_run:
         mock_sys.platform = "linux"
