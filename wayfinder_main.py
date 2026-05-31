@@ -12720,14 +12720,16 @@ class WayfinderApp(ctk.CTk):
             self._start_pynput_listener()
             return
 
-        # Wayland inside a Flatpak: evdev can't read /dev/input and pynput can't see Wayland
-        # global keys, so use the GlobalShortcuts portal (Codex review). Non-sandboxed Wayland
-        # keeps using evdev + the 'input' group (the validated Steam Deck dev-path).
-        is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
-        if is_wayland and IS_FLATPAK:
-            self.log("🖥️ Wayland + Flatpak — using the GlobalShortcuts portal for hotkeys")
+        # Inside a Flatpak sandbox (X11 OR Wayland): evdev can't read /dev/input and pynput
+        # can't do Wayland global keys, so the GlobalShortcuts portal is the only viable path.
+        # KDE's portal serves X11 sessions too, so gate on IS_FLATPAK, not the session type
+        # (the Deck Desktop session is X11). Non-sandboxed installs keep using evdev + the
+        # 'input' group (the validated Steam Deck dev-path).
+        if IS_FLATPAK:
+            self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
             self._start_portal_listener()
             return
+        is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
         if is_wayland:
             self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
         else:
