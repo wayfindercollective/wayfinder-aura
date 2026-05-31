@@ -40,6 +40,13 @@ finish-args:
   # App config and cache storage
   - --filesystem=xdg-config/wayfinder-aura:create
   - --filesystem=xdg-cache/wayfinder-aura:create
+
+  # IPC socket shared with the host-side trigger (KDE shortcut / Steam-Deck R4 button).
+  # xdg-run ($XDG_RUNTIME_DIR) is bind-mounted host<->sandbox, so a non-Flatpak host
+  # process can reach the AF_UNIX socket the sandboxed app binds at
+  # $XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock. Sandbox /tmp is private, so the
+  # old /tmp socket was unreachable from the host — this is the R4-dictation fix.
+  - --filesystem=xdg-run/wayfinder-aura:create
   
   # Whisper model access (user's existing models)
   - --filesystem=~/.local/share/whisper.cpp:ro
@@ -158,6 +165,39 @@ modules:
     sources:
       - type: file
         path: ../requirements.txt
+
+  # Tcl/Tk 8.6.14 built WITH Xft. The freedesktop runtime's own Tk 8.6 is compiled WITHOUT
+  # Xft (ldd libtk8.6.so shows no libXft/libfontconfig), so it can't use any of the system's
+  # fontconfig fonts and falls back to the X core "fixed" bitmap font — rendering every
+  # symbol/emoji glyph in the UI (sidebar ∿ ⚓ ✎ ◷, section headers) as a literal \uXXXX
+  # escape. We build the EXACT same version (8.6.14 — ABI-compatible with the runtime's
+  # _tkinter.so) with Xft enabled, and the launcher puts /app/lib first on LD_LIBRARY_PATH so
+  # tkinter loads this libtcl/libtk instead. Then Tk renders real fonts + all glyphs.
+  - name: tcl
+    buildsystem: simple
+    # Tcl/Tk install their .so as mode 555 (read-only), which makes flatpak-builder's
+    # post-install eu-strip fail with "Permission denied". We don't need Tcl/Tk debuginfo,
+    # so skip debuginfo extraction for these two modules.
+    build-options:
+      no-debuginfo: true
+    build-commands:
+      - cd unix && ./configure --prefix=/app --enable-threads && make -j$(nproc) && make install
+    sources:
+      - type: archive
+        url: https://prdownloads.sourceforge.net/tcl/tcl8.6.14-src.tar.gz
+        sha256: 5880225babf7954c58d4fb0f5cf6279104ce1cd6aa9b71e9a6322540e1c4de66
+
+  - name: tk
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+    build-commands:
+      # --enable-xft is the whole point (SDK ships Xft 2.3.9 / fontconfig 2.15.0 / Xrender).
+      - cd unix && ./configure --prefix=/app --with-tcl=/app/lib --enable-threads --enable-xft && make -j$(nproc) && make install
+    sources:
+      - type: archive
+        url: https://prdownloads.sourceforge.net/tcl/tk8.6.14-src.tar.gz
+        sha256: 8ffdb720f47a6ca6107eac2dd877e30b0ef7fac14f3a84ebbd0b3612cee41a94
 
 
   # Main application

@@ -133,10 +133,16 @@ class TestSocketConstants:
         assert len(SOCKET_PATH) > 0
 
     def test_socket_path_value(self):
-        """SOCKET_PATH points to the expected location."""
+        """SOCKET_PATH is an absolute path to the wayfinder-aura socket.
+
+        The exact directory is environment-dependent: under $XDG_RUNTIME_DIR when it
+        is set (Linux/Flatpak — that dir is bind-mounted host<->sandbox), else /tmp
+        (e.g. macOS). So assert the shape, not a hardcoded /tmp path.
+        """
         from wayfinder.config import SOCKET_PATH
 
-        assert SOCKET_PATH == "/tmp/wayfinder-aura.sock"
+        assert SOCKET_PATH.startswith("/")
+        assert SOCKET_PATH.endswith("wayfinder-aura.sock")
 
 
 @pytest.mark.skipif(not HAS_SOCKET_MODULE, reason="socket module not importable")

@@ -673,3 +673,32 @@ The repo already has `flatpak/io.github.user.WayfinderAura.yml`, `flatpak/BUILDI
 9. **Issue 19** — controller-via-Steam-Input hotkey silently broken on X11. One-block edit in `hotkeys/__init__.py` to prefer pynput over evdev on Linux. ★★
 10. **Issue 20** — JACK-backed mic devices in the settings picker fail on stream open. Filter `JACK Audio Connection Kit` host API entries when listing input devices on Linux. ★★★ (this one bites every Deck user who picks the obvious "Shure MV7 Mono" entry)
 11. **Issue 21** — ship gamepad-trigger setup as default for Steam Deck. GlobalShortcuts portal (already coded) + Steam Workshop controller layout + first-run wizard gated on Deck detection. ★★
+
+---
+
+## Update — 2026-05-31: Flatpak v2 built + Steam-Deck-Optimized polish pass (all validated on the Deck)
+
+The `integration/flatpak-v2` branch now **builds, installs, transcribes, and runs end-to-end** on the Deck (SteamOS 3.7.25, KDE/X11). The first build closed the structural blockers (#1 glibc, #5/#6/#7 headers, #13/Crit-2 SIGILL, #16 no-Linux-binaries) — `whisper-cli base.en` runs **EXIT 0** on the Zen 2 APU (re-confirmed this build: 261 ms on 1 s audio, no SIGILL). This pass then closed the three remaining sandbox-integration regressions plus reliability hardening. Plan was Codex-reviewed (gpt-5.5, 3 rounds).
+
+### What was fixed (all proven on-device)
+
+1. **R4 dictation ("service not running") — the IPC socket was unreachable across the sandbox.** The proven chain (`R4 → Steam Input → Insert → KDE shortcut → trigger_record.py → Unix socket`, Issue 21) broke because the socket lived at `/tmp/wayfinder-aura.sock` and a Flatpak's `/tmp` is private. **Fix:** moved `SOCKET_PATH` to `$XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock` (single source in `config.py`; `/tmp` fallback for macOS), granted `--filesystem=xdg-run/wayfinder-aura:create` (that dir is bind-mounted host↔sandbox), `os.makedirs` before bind in both socket listeners, and made `trigger_record.py`/`trigger_style.py` try the runtime-dir path then `/tmp` so one trigger works for both the Flatpak and the from-source build. Repointed the Deck's `net.local.toggle-recording.sh.desktop` Exec at the v2 trigger (daily driver untouched; backed up). **Validated:** trigger → `IDLE→RECORDING→PROCESSING→IDLE`.
+
+2. **No tray icon (Issue 3) — runtime ships no AppIndicator/Ayatana, so `pystray` no-ops.** **Fix:** a `QSystemTrayIcon` hosted in the **already-running PyQt6 overlay subprocess** (no new process, no new dep) — KDE renders it via `org.kde.StatusNotifierWatcher` (already a `--talk-name`). Menu actions (Show/Toggle/Reset/Quit) are sent back to the app over the same Unix socket; icon availability is reported in the overlay's ready-handshake and read live so the window-close guard can't strand the UI; the overlay quits on stdin-EOF in tray mode so no orphan tray. Gated to "pystray unavailable" to avoid a double tray on desktop Linux. **Validated:** `tray: QSystemTrayIcon created and shown`; `show` verb raised the window.
+
+3. **"Odd UI" — was NOT a Python-version difference. Two distinct causes:**
+   - **Double-scaling:** the app set its own `ui_scale` but never disabled CustomTkinter's *automatic* DPI tracker, which multiplied on top. **Fix:** `ctk.deactivate_automatic_dpi_awareness()` before the CTk root is created. Layout now fits 1280×800 cleanly.
+   - **★★★ Missing glyphs (the deep one): the freedesktop runtime's `libtk8.6.so` is built WITHOUT Xft.** `ldd` shows no `libXft`/`libfontconfig`; Tk falls back to the X core "fixed" bitmap font (`tkinter.font.families()` returns **1** family; every family request resolves to `fixed`). Latin renders plainly but every symbol/emoji icon (sidebar `∿ ⚓ ✎ ◷`, headers) shows as a literal `\uXXXX` escape. No font grant or font-family change can fix this — Tk ignores fontconfig's 845 fonts entirely. **Fix:** **bundle an Xft-enabled Tcl + Tk 8.6.14** (exact version match → ABI-compatible with the runtime's `_tkinter.so`) built with `--enable-xft` in the manifest, and put `/app/lib` first on `LD_LIBRARY_PATH` (+ `TCL_LIBRARY`/`TK_LIBRARY`) in the launcher so `_tkinter` loads it. **Validated:** Tk now sees **597** families, resolves real fonts (DejaVu Sans / fontconfig substitution), and renders all glyphs. (`no-debuginfo: true` on both modules — Tcl/Tk install `.so` as mode 555, which makes flatpak-builder's `eu-strip` fail with "Permission denied".)
+
+4. **Reliability hardening (Steam-Deck-Optimized correctness):** window-close now iconifies instead of withdrawing when no tray surface is live (never orphan the UI); the hotkey supervisor re-arms the GlobalShortcuts portal listener on its existing 10 s tick (portal wrapper clears its started-flag on any exit, incl. a normal `False` return), with **no new sub-100 ms timer**.
+
+### Resource notes (Deck Zen 2 APU)
+- **Main process idle (window minimized): ~1.7 % CPU** ✓ (hero waveform pauses when hidden).
+- **Persistent overlay: ~11.7 % CPU at 15 fps** on the APU (≈2 % on a desktop Ryzen). Pre-existing 15 fps design; the tray addition is event-driven and adds none. **Recommendation:** consider a Deck-specific lower idle frame-rate (or pause-when-static) for the always-on overlay — a real battery win, but it trades against the deliberate 15 fps quality target, so it's left as a follow-up decision.
+
+### Build/deploy mechanics that work
+- Scratch tree `~/dev/wayfinder-aura-v2`; sync via `tar … | ssh deck 'tar -x -C …'` (rsync absent). Build via `flatpak run org.flatpak.Builder --user --install --force-clean --ccache` (reaches `EXIT:0`). The Flatpak's `/tmp` is sandboxed — to run a probe script inside, pipe to `flatpak run --command=python3 <app-id> -`. After an app restart, poll the socket for *accept* (not just file existence) before sending verbs.
+
+### Still pre-existing / follow-ups
+- 16 unit-test failures in `test_injector`/`test_platform`/`test_e2e_*` are stale assertions from the earlier ydotool→wtype injection refactor (they assert `ydotool`, code now returns `wtype`) — not touched by this pass; should be updated to the wtype/xdotool reality.
+- Portal (in-app keyboard) hotkey still unproven on the Deck KDE — R4 rides the proven socket path, so this isn't on the critical path.

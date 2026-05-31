@@ -27,8 +27,16 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 PACKAGE_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = PACKAGE_DIR.parent.parent  # src/wayfinder -> project root
 
-# Socket path for IPC
-SOCKET_PATH = "/tmp/wayfinder-aura.sock"
+# Socket path for IPC. In a Flatpak the sandbox has a private /tmp, so the host-side
+# trigger (KDE shortcut / Steam-Deck R4 button) can't reach a socket bound there.
+# $XDG_RUNTIME_DIR is bind-mounted host<->sandbox (the manifest grants
+# --filesystem=xdg-run/wayfinder-aura:create), so bind the socket under it instead.
+# Falls back to /tmp where no runtime dir exists (e.g. macOS) — unchanged behavior there.
+_runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+if _runtime_dir and os.path.isdir(_runtime_dir):
+    SOCKET_PATH = os.path.join(_runtime_dir, "wayfinder-aura", "wayfinder-aura.sock")
+else:
+    SOCKET_PATH = "/tmp/wayfinder-aura.sock"
 
 # Handle icon path for Flatpak / AppImage / regular install
 if IS_FLATPAK:
