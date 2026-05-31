@@ -10,6 +10,14 @@ export WAYFINDER_FLATPAK=1
 # Set up Python path for package imports
 export PYTHONPATH="/app/lib/wayfinder-aura:/app/lib/wayfinder-aura/src:${PYTHONPATH}"
 
+# Use the bundled Xft-enabled Tcl/Tk 8.6.14 instead of the runtime's Tk (which is built
+# WITHOUT Xft and can only render the X core "fixed" bitmap font — symbols show as \uXXXX).
+# /app/lib must precede the runtime libs so python's _tkinter loads our libtcl8.6/libtk8.6,
+# and TCL/TK_LIBRARY point Tcl/Tk at the matching bundled script libraries.
+export LD_LIBRARY_PATH="/app/lib:${LD_LIBRARY_PATH}"
+export TCL_LIBRARY="/app/lib/tcl8.6"
+export TK_LIBRARY="/app/lib/tk8.6"
+
 # Whisper models - prefer user's models, fallback to bundled
 if [ -d "${HOME}/.local/share/whisper.cpp" ]; then
     export WHISPER_MODELS_DIR="${HOME}/.local/share/whisper.cpp"

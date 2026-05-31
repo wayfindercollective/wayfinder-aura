@@ -1673,6 +1673,7 @@ def run_overlay():
     initial_style = "professional"  # default
     initial_scale = 0.7
     initial_offset = 0
+    enable_tray = False  # --tray: host a QSystemTrayIcon in this subprocess (Flatpak/KDE)
     for arg in sys.argv:
         if arg.startswith("--mode="):
             mode = arg.split("=", 1)[1]
@@ -1688,6 +1689,8 @@ def run_overlay():
                 initial_offset = int(arg.split("=", 1)[1])
             except ValueError:
                 pass
+        elif arg == "--tray":
+            enable_tray = True
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -1736,6 +1739,12 @@ def run_overlay():
         """Check for and process stdin commands."""
         try:
             if _stdin_eof[0]:
+                if enable_tray:
+                    # Parent process is gone — don't leave an orphan tray whose menu actions
+                    # would hit a dead socket. Quit so the tray dies with the app. (Codex #3)
+                    _debug_log("STDIN EOF in tray mode — quitting overlay")
+                    app.quit()
+                    return
                 # Stdin pipe broke — auto-hide to READY after timeout
                 if overlay._state in (OverlayState.LISTENING, OverlayState.PROCESSING):
                     elapsed = _time_mod.time() - _last_command_time[0]
@@ -1845,13 +1854,68 @@ def run_overlay():
         elif command == "quit":
             app.quit()
     
+    # Optional QSystemTrayIcon, created only when the main process has no in-process pystray
+    # tray (the Flatpak case — passed via --tray). It lives in this already-running subprocess
+    # and QApplication loop, so it costs no extra process. Menu actions are sent back to the
+    # app over its Unix socket — the same channel the R4 shortcut uses. KDE surfaces it via
+    # StatusNotifierItem (org.kde.StatusNotifierWatcher).
+    tray_icon = None
+    tray_available = False
+    if enable_tray:
+        try:
+            from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
+            from PyQt6.QtGui import QIcon
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                import socket as _tray_socket
+                try:
+                    from wayfinder.config import SOCKET_PATH as _tray_sock_path
+                    from wayfinder.config import ICON_PATH as _tray_icon_cfg
+                    _tray_icon_path = str(_tray_icon_cfg) if _tray_icon_cfg else None
+                except Exception:
+                    _tray_sock_path = os.path.join(
+                        os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}",
+                        "wayfinder-aura", "wayfinder-aura.sock")
+                    _tray_icon_path = None
+
+                def _tray_send(verb):
+                    try:
+                        _s = _tray_socket.socket(_tray_socket.AF_UNIX, _tray_socket.SOCK_STREAM)
+                        _s.connect(_tray_sock_path)
+                        _s.send(verb.encode("utf-8"))
+                        _s.close()
+                    except Exception as _e:
+                        _debug_log(f"tray: send '{verb}' failed: {_e}")
+
+                tray_icon = QSystemTrayIcon(QIcon(_tray_icon_path) if _tray_icon_path else QIcon())
+                tray_icon.setToolTip("Wayfinder Aura")
+                _tray_menu = QMenu()
+                _tray_menu.addAction("Open Wayfinder Aura").triggered.connect(lambda: _tray_send("show"))
+                _tray_menu.addAction("Toggle Recording").triggered.connect(lambda: _tray_send("toggle"))
+                _tray_menu.addAction("Reset (unstick overlay)").triggered.connect(lambda: _tray_send("reset"))
+                _tray_menu.addSeparator()
+                _tray_menu.addAction("Quit").triggered.connect(lambda: _tray_send("quit"))
+                tray_icon.setContextMenu(_tray_menu)
+                tray_icon._wfa_menu = _tray_menu  # keep a Python ref so the menu isn't GC'd
+                tray_icon.activated.connect(
+                    lambda reason: _tray_send("show")
+                    if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
+                tray_icon.show()
+                tray_available = True
+                _debug_log("tray: QSystemTrayIcon created and shown")
+            else:
+                _debug_log("tray: system tray not available (no StatusNotifierWatcher)")
+        except Exception as _e:
+            _debug_log(f"tray: setup failed: {_e}")
+            tray_icon, tray_available = None, False
+
     # Setup command polling timer
     cmd_timer = QTimer()
     cmd_timer.timeout.connect(process_commands)
     cmd_timer.start(50)  # Check every 50ms (20Hz - responsive enough for state changes)
-    
-    # Send ready signal
-    print(json.dumps({"status": "ready"}), flush=True)
+
+    # Send ready signal. Report tray availability so the main app's hide-to-tray guard
+    # never withdraws the window when there is no tray to restore it from.
+    print(json.dumps({"status": "ready", "tray_available": tray_available}), flush=True)
     
     sys.exit(app.exec())
 

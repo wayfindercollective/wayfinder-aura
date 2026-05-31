@@ -22,8 +22,6 @@ from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 
-SOCKET_PATH = "/tmp/wayfinder-aura.sock"
-
 import tkinter as tk
 import customtkinter as ctk
 try:
@@ -66,6 +64,9 @@ except ImportError:
 import sys as _sys
 IS_MACOS = _sys.platform == 'darwin'
 
+# SOCKET_PATH is the single source of truth in wayfinder.config (Rule #3) — it resolves
+# to $XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock (host<->sandbox shared) or /tmp.
+from wayfinder.config import SOCKET_PATH
 from wayfinder.core.injector import inject_text, InjectionError
 from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
@@ -2036,6 +2037,14 @@ def socket_listener(event_queue, stop_event, log_callback=None):
     
     print("[DEBUG] Socket listener thread starting...", flush=True)
     
+    # Ensure the socket's parent dir exists (e.g. $XDG_RUNTIME_DIR/wayfinder-aura). The
+    # Flatpak manifest also creates it via --filesystem=xdg-run/...:create, but do it here
+    # too so a freshly-booted runtime dir and the non-Flatpak path both work.
+    try:
+        os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+    except Exception:
+        pass
+
     # Remove old socket if exists
     try:
         os.unlink(SOCKET_PATH)
@@ -2068,6 +2077,18 @@ def socket_listener(event_queue, stop_event, log_callback=None):
                     style = data_str.split(":", 1)[1]
                     log(f"✎ Style set to '{style}' via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, style))
+                elif data_str == "show":
+                    # Tray "Open" — raise/restore the main window
+                    log("🪟 Show window received via socket")
+                    event_queue.put((EventType.SHOW_WINDOW, None))
+                elif data_str == "reset":
+                    # Tray "Reset" — abort any stuck/in-flight dictation, return to idle
+                    log("🔄 Reset received via socket")
+                    event_queue.put((EventType.FORCE_RESET, None))
+                elif data_str == "quit":
+                    # Tray "Quit" — clean full shutdown
+                    log("👋 Quit received via socket")
+                    event_queue.put((EventType.QUIT_APP, None))
                 conn.close()
             except socket.timeout:
                 continue
@@ -2894,8 +2915,13 @@ class OverlayController:
     messages over stdin/stdout.
     """
     
-    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional", config: dict | None = None, log_callback=None):
+    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional", config: dict | None = None, log_callback=None, want_tray: bool = False):
         self._process: subprocess.Popen | None = None
+        # When True, the overlay subprocess hosts a QSystemTrayIcon (used when the main
+        # process has no in-process pystray tray — the Flatpak). tray_available is re-set
+        # live from the overlay's ready handshake on each (re)start, so it never goes stale.
+        self.want_tray = want_tray
+        self.tray_available = False
         self._audio_level_callback = audio_level_callback
         self._audio_poll_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -2922,6 +2948,10 @@ class OverlayController:
             if self._process is not None and self._process.poll() is None:
                 return True  # Already running
             
+            # Fresh start: clear stale tray availability — it's re-set from the ready
+            # handshake below, so it can't go stale across a refresh()/health-check restart.
+            self.tray_available = False
+
             # Clean up any stale overlay processes before starting a new one
             try:
                 subprocess.run(["pkill", "-9", "-f", "overlay.py"], 
@@ -2954,6 +2984,8 @@ class OverlayController:
                     f"--mode={self._mode}",
                     f"--style={self._initial_style}",
                 ]
+                if self.want_tray:
+                    cmd_args.append("--tray")
                 if self._config_ref:
                     scale = self._config_ref.get("overlay_scale", 0.7)
                     offset = self._config_ref.get("overlay_vertical_offset", 0)
@@ -2977,6 +3009,9 @@ class OverlayController:
                         try:
                             data = json.loads(response)
                             if data.get("status") == "ready":
+                                # The overlay reports whether it created a QSystemTrayIcon
+                                # (tray mode + SNI available). hide_to_tray reads this live.
+                                self.tray_available = bool(data.get("tray_available", False))
                                 return True
                         except json.JSONDecodeError:
                             pass
@@ -3255,8 +3290,17 @@ class OverlayController:
 
 class WayfinderApp(ctk.CTk):
     def __init__(self):
+        # Disable CustomTkinter's automatic DPI scaling BEFORE the Tk root is created (CTk's
+        # DPI tracker hooks in at root construction). Otherwise CTk's auto-detected scale
+        # multiplies with our explicit ui_scale and the UI double-scales — notably in the
+        # Flatpak sandbox on the Steam Deck's 1280x800 panel. _get_recommended_scale() +
+        # set_widget_scaling(ui_scale) then governs scaling alone. (CustomTkinter >=5.2 API.)
+        try:
+            ctk.deactivate_automatic_dpi_awareness()
+        except Exception:
+            pass  # older CustomTkinter without the API — harmless
         super().__init__()
-        
+
         # Set WM_CLASS so Linux desktop environments show the correct icon
         # This must match the .desktop file's StartupWMClass
         self.tk.call('tk', 'appname', 'wayfinder-aura')
@@ -3369,6 +3413,10 @@ class WayfinderApp(ctk.CTk):
                     initial_style=initial_style,
                     config=self.config,
                     log_callback=self.log,
+                    # Host the tray in the overlay subprocess only when there's no in-process
+                    # pystray tray (the Flatpak case) and the user hasn't disabled it — avoids
+                    # a double tray on desktop Linux where pystray works.
+                    want_tray=(not HAS_PYSTRAY and self.config.get("enable_tray_icon", True)),
                 )
                 self._use_pyqt_overlay = True
                 self.log(f"✨ Using Always On indicator (PyQt6)")
@@ -3683,6 +3731,18 @@ class WayfinderApp(ctk.CTk):
         self.font_header = ("Inter", "Segoe UI Variable", "SF Pro Display", "Ubuntu")
         self.font_body = ("Inter", "Segoe UI Variable", "SF Pro Text", "system-ui")
         self.font_mono = ("JetBrains Mono", "Cascadia Code", "SF Mono", "monospace")
+
+        # The UI references these as font_*[0]. In the Flatpak the design fonts (Inter /
+        # JetBrains Mono) aren't installed, so Tk 8.6 substitutes a font lacking the UI's
+        # symbol glyphs (sidebar ∿ ⚓ ✎ ◷, etc.) and — unlike the host's Tk — does NOT fall
+        # back, rendering them as literal \uXXXX. DejaVu Sans / DejaVu Sans Mono ship in the
+        # runtime and cover both Latin and those symbols, so make them the primary family.
+        # Gated to IS_FLATPAK — the from-source build resolves the design fonts on the host.
+        if IS_FLATPAK:
+            self.font_display = ("DejaVu Sans",) + self.font_display
+            self.font_header = ("DejaVu Sans",) + self.font_header
+            self.font_body = ("DejaVu Sans",) + self.font_body
+            self.font_mono = ("DejaVu Sans Mono",) + self.font_mono
         
         # Font size tokens - optimized for dark mode readability
         self.font_sizes = {
@@ -7994,13 +8054,23 @@ class WayfinderApp(ctk.CTk):
         """
         def check_hotkey():
             try:
-                if HAS_EVDEV and (self._hotkey_thread is None or not self._hotkey_thread.is_alive()):
+                # Don't spawn evdev inside a Flatpak: evdev imports there (HAS_EVDEV is True)
+                # but /dev/input is inaccessible (0 devices), so a "restart" only creates a
+                # useless thread. The portal (below) is the Flatpak hotkey path; evdev
+                # supervision is for non-sandboxed installs that actually use it.
+                if HAS_EVDEV and not IS_FLATPAK and (self._hotkey_thread is None or not self._hotkey_thread.is_alive()):
                     self.log("🔄 Hotkey listener not running - restarting...")
                     self.restart_evdev_listener("supervisor: listener was not alive")
                 # The socket listener can die on a transient bind failure; bring it back if so.
                 if self._socket_thread is None or not self._socket_thread.is_alive():
                     self.log("🔄 Socket listener not running - restarting...")
                     self._ensure_socket_listener()
+                # In a Flatpak the GlobalShortcuts portal is the only in-app global-hotkey
+                # path; if its listener exited (D-Bus briefly unavailable, or setup returned
+                # False), bring it back. Rides this same 10s tick — no new timer (Rule #1).
+                if IS_FLATPAK and not getattr(self, '_portal_listener_started', False):
+                    self.log("🔄 Portal hotkey listener not running - restarting...")
+                    self._start_portal_listener()
             except Exception as e:
                 self.log(f"⚠️ Hotkey supervisor error: {e}")
             # Re-check every 10 seconds (Rule #1: >=100ms, no busy polling)
@@ -12383,7 +12453,20 @@ class WayfinderApp(ctk.CTk):
         self.focus_force()
 
     def hide_to_tray(self):
-        self.withdraw()
+        # Only withdraw (fully hide) if there's a tray surface to restore the window from —
+        # otherwise the window vanishes with no way back (the Flatpak had no tray). Check
+        # ACTUAL availability, not HAS_PYSTRAY: self.tray_icon is None when the tray is
+        # disabled in settings even though pystray imported, and the overlay's
+        # QSystemTrayIcon availability is reported live on the controller (so it stays correct
+        # across an overlay restart). With no tray, minimize to the taskbar — always restorable.
+        tray_present = (getattr(self, 'tray_icon', None) is not None) or (
+            getattr(self, 'overlay_controller', None) is not None
+            and getattr(self.overlay_controller, 'tray_available', False)
+        )
+        if tray_present:
+            self.withdraw()
+        else:
+            self.iconify()
 
     def tray_record(self):
         self.after(0, self.on_record_button)
@@ -12802,7 +12885,12 @@ class WayfinderApp(ctk.CTk):
                 wayland_hotkey_listener(self.event_queue, hotkey_display, self.stop_event, self.log)
             except Exception as e:
                 print(f"[Hotkey] portal listener crashed: {e}", flush=True)
-                self._portal_listener_started = False
+            finally:
+                # Clear the flag on ANY exit — a normal False return (D-Bus unavailable /
+                # setup failed) as well as an exception — UNLESS we're shutting down, so the
+                # hotkey supervisor can re-arm the portal listener. (Codex #4)
+                if not self.stop_event.is_set():
+                    self._portal_listener_started = False
 
         threading.Thread(target=_portal_wrapper, daemon=True).start()
 
@@ -12881,6 +12969,12 @@ class WayfinderApp(ctk.CTk):
             self.on_hotkey()
         elif event_type == EventType.STYLE_TOGGLE:
             self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
+        elif event_type == EventType.SHOW_WINDOW:
+            self.show_from_tray()
+        elif event_type == EventType.FORCE_RESET:
+            self.force_reset()
+        elif event_type == EventType.QUIT_APP:
+            self.quit_app()
         elif event_type == EventType.TRANSCRIPTION_DONE:
             text, gen = self._split_gen(data)
             self.on_transcription_done(text, gen)

@@ -23,11 +23,13 @@ def socket_listener(
     """
     Listen for toggle commands on a Unix socket.
     
-    This allows KDE shortcuts to trigger recording via a simple script:
+    This allows KDE shortcuts to trigger recording via a simple script. The socket path
+    is SOCKET_PATH from wayfinder.config (under $XDG_RUNTIME_DIR in a Flatpak, else /tmp),
+    e.g. with SOCK set to that path:
     ```
-    echo "toggle" | nc -U /tmp/wayfinder-aura.sock
-    echo "style" | nc -U /tmp/wayfinder-aura.sock        # Cycle styles
-    echo "style:dev" | nc -U /tmp/wayfinder-aura.sock  # Set specific style
+    echo "toggle"    | nc -U "$SOCK"   # Toggle recording
+    echo "style"     | nc -U "$SOCK"   # Cycle styles
+    echo "style:dev" | nc -U "$SOCK"   # Set a specific style
     ```
     
     Args:
@@ -42,12 +44,20 @@ def socket_listener(
             except Exception:
                 pass
     
+    # Ensure the socket's parent dir exists (e.g. $XDG_RUNTIME_DIR/wayfinder-aura). The
+    # Flatpak manifest also creates it via --filesystem=xdg-run/...:create, but do it here
+    # too so a freshly-booted runtime dir and the non-Flatpak path both work.
+    try:
+        os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+    except Exception:
+        pass
+
     # Remove old socket if exists
     try:
         os.unlink(SOCKET_PATH)
     except FileNotFoundError:
         pass
-    
+
     try:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(SOCKET_PATH)

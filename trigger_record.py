@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 """
 Simple script to trigger Wayfinder Aura recording toggle.
-Can be bound to a KDE Global Shortcut.
+Can be bound to a KDE Global Shortcut (e.g. the Steam Deck R4 button → Insert).
 
-Fires a desktop notification on failure so silent breakage (service down,
-socket missing, etc.) is visible to the user — important when invoked from
-a global shortcut or controller button binding where stdout goes nowhere.
+Tries the $XDG_RUNTIME_DIR socket first — that is where the Flatpak binds it, and
+that directory is bind-mounted host<->sandbox so a host process can reach it — then
+falls back to /tmp, where the from-source build binds it. One trigger therefore works
+for whichever build is the live instance.
+
+Fires a desktop notification on failure so silent breakage (service down, socket
+missing, etc.) is visible to the user — important when invoked from a global shortcut
+or controller button binding where stdout goes nowhere.
 """
+import os
 import socket
 import subprocess
 import sys
 
-SOCKET_PATH = "/tmp/wayfinder-aura.sock"
+
+def candidate_sockets():
+    """Socket paths to try, in priority order (Flatpak runtime dir, then legacy /tmp)."""
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return [
+        os.path.join(runtime_dir, "wayfinder-aura", "wayfinder-aura.sock"),
+        "/tmp/wayfinder-aura.sock",
+    ]
 
 
 def notify(message: str, urgency: str = "critical") -> None:
@@ -26,24 +39,32 @@ def notify(message: str, urgency: str = "critical") -> None:
         pass  # best-effort — never let notification failure mask the real error
 
 
-try:
+def send_toggle(path: str) -> None:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(SOCKET_PATH)
-    sock.send(b"toggle")
-    sock.close()
-    print("Toggle sent!")
-except FileNotFoundError:
-    msg = "Service not running. Start with: systemctl --user start wayfinder-aura.service"
-    notify(msg)
-    print(f"Wayfinder Aura not running ({SOCKET_PATH} missing)")
-    sys.exit(1)
-except ConnectionRefusedError:
-    msg = "Service running but socket dead. Restart: systemctl --user restart wayfinder-aura.service"
-    notify(msg)
-    print(f"Socket connection refused at {SOCKET_PATH}")
-    sys.exit(1)
-except Exception as e:
-    notify(f"Trigger failed: {e}")
-    print(f"Error: {e}")
-    sys.exit(1)
+    try:
+        sock.connect(path)
+        sock.send(b"toggle")
+    finally:
+        sock.close()
 
+
+paths = candidate_sockets()
+last_error = None
+for sock_path in paths:
+    try:
+        send_toggle(sock_path)
+        print(f"Toggle sent! ({sock_path})")
+        sys.exit(0)
+    except (FileNotFoundError, ConnectionRefusedError) as e:
+        # Not this one — socket missing, or present but no live listener. Try the next.
+        last_error = e
+        continue
+    except Exception as e:
+        last_error = e
+        continue
+
+# Every candidate failed — the service is not running (or its socket is dead).
+msg = "Service not running. Start with: systemctl --user start wayfinder-aura.service"
+notify(msg)
+print(f"Wayfinder Aura not reachable (tried: {', '.join(paths)}; last error: {last_error})")
+sys.exit(1)

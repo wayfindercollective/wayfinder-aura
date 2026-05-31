@@ -13,6 +13,9 @@ class EventType(Enum):
     """Event types for the application event queue."""
     HOTKEY_PRESSED = auto()
     STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/AI Prompt/Casual)
+    SHOW_WINDOW = auto()   # Tray "Open" — raise/restore the main window
+    FORCE_RESET = auto()   # Tray "Reset" — unstick overlay / abort in-flight dictation
+    QUIT_APP = auto()      # Tray "Quit" — clean full shutdown
     TRANSCRIPTION_DONE = auto()
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()
