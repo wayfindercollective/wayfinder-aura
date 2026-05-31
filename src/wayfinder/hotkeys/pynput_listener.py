@@ -4,6 +4,10 @@ Cross-platform hotkey listener using pynput.
 Works on Linux, macOS, and Windows.
 Uses pynput for global keyboard monitoring.
 """
+# Defer annotation evaluation (PEP 563). Without this, the `Optional[Key | KeyCode]`
+# annotation below is evaluated at import time and crashes the WHOLE app when pynput is
+# unavailable — the import guard sets Key=KeyCode=None, and `None | None` is a TypeError.
+from __future__ import annotations
 
 import time
 from queue import Queue
