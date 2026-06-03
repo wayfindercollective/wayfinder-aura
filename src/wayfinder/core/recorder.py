@@ -69,6 +69,27 @@ def is_output_device(device_name: str) -> bool:
     return any(kw in name_lower for kw in EXCLUDED_DEVICE_KEYWORDS)
 
 
+_IS_STEAM_DECK: bool | None = None
+
+
+def _is_steam_deck() -> bool:
+    """True on Steam Deck hardware (DMI product 'Jupiter'/'Galileo'), cached.
+
+    Decides whether to hide JACK-backed devices: on the Deck the libjack shim fails to open
+    streams (PaErrorCode -9999 in a user-service context — Issue 20), but off-Deck the JACK
+    host API is PipeWire and exposes the user's real, friendly-named mics. Local DMI check to
+    avoid importing wayfinder.core.setup from the recorder.
+    """
+    global _IS_STEAM_DECK
+    if _IS_STEAM_DECK is None:
+        try:
+            with open("/sys/class/dmi/id/product_name") as f:
+                _IS_STEAM_DECK = f.read().strip() in ("Jupiter", "Galileo")
+        except Exception:
+            _IS_STEAM_DECK = False
+    return _IS_STEAM_DECK
+
+
 def find_best_input_device(preferred_name: str | None = None) -> int | None:
     """
     Intelligently find the best audio input device for voice recording.
@@ -224,10 +245,13 @@ def list_input_devices(exclude_outputs: bool = False) -> list[dict]:
 
             name = dev.get('name', f'Device {i}')
 
-            # Hide JACK-backed clones on Linux: same name as the ALSA device, but opening a
-            # stream on one fails with PaErrorCode -9999 on PipeWire/SteamOS (Issue 20).
-            # Users can't tell them apart in the picker, so don't show the broken one.
-            if is_linux:
+            # On the Steam Deck, hide JACK-backed clones — the libjack shim can't open a
+            # stream there (PaErrorCode -9999 in a user-service context, Issue 20). But OFF
+            # the Deck the JACK host API IS PipeWire, and these entries are the user's real,
+            # friendly-named mics (Shure/OBSBOT/Wireless …). Filtering them everywhere left
+            # only cryptic ALSA "hw:" names and broke mic selection on desktops — so only
+            # filter on the Deck.
+            if is_linux and _is_steam_deck():
                 try:
                     if 'JACK' in hostapis[dev.get('hostapi', -1)].get('name', ''):
                         continue
@@ -441,22 +465,36 @@ class AudioRecorder:
         self.frames.append(indata.copy())
 
     def start(self) -> None:
-        """Start recording audio."""
+        """Start recording audio.
+
+        If the configured device fails to open (a renumbered/disconnected index, or a JACK
+        clone that errors with PaErrorCode -9999), fall back to the system default device so
+        dictation still works instead of failing.
+        """
         self.frames = []
-        
+        try:
+            self._open_stream(self.device)
+        except Exception as e:
+            if self.device is None:
+                raise
+            print(f"Audio device {self.device} failed to open ({e}); falling back to system default")
+            self.device = None
+            self._open_stream(None)
+
+    def _open_stream(self, device: int | None) -> None:
         # Find a supported sample rate for this device
         self.recording_sample_rate = get_supported_sample_rate(
-            device=self.device, 
+            device=device,
             target_rate=self.target_sample_rate
         )
-        
+
         if self.recording_sample_rate != self.target_sample_rate:
             print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
-        
+
         self.stream = sd.InputStream(
             samplerate=self.recording_sample_rate,
             channels=self.channels,
-            device=self.device,
+            device=device,
             dtype=np.float32,
             callback=self._audio_callback,
         )
@@ -763,28 +801,38 @@ class ChunkedRecorder:
             except queue.Empty:
                 break
         
-        # Find a supported sample rate for this device
-        self.recording_sample_rate = get_supported_sample_rate(
-            device=self.device, 
-            target_rate=self.target_sample_rate
-        )
-        
-        if self.recording_sample_rate != self.target_sample_rate:
-            print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
-        
-        # Recalculate chunk samples based on actual recording rate
-        self._chunk_samples = int(self.chunk_duration * self.recording_sample_rate)
-        self._overlap_samples = int(self.chunk_overlap * self.recording_sample_rate)
-        
-        # Start audio stream
-        self._stream = sd.InputStream(
-            samplerate=self.recording_sample_rate,
-            channels=self.channels,
-            device=self.device,
-            dtype=np.float32,
-            callback=self._audio_callback,
-        )
-        self._stream.start()
+        # Open the audio stream. If the configured device fails (renumbered index, or a JACK
+        # clone with PaErrorCode -9999), fall back to the system default so recording still
+        # works instead of failing.
+        _devices = [self.device, None] if self.device is not None else [None]
+        _last_err = None
+        for _dev in _devices:
+            try:
+                self.recording_sample_rate = get_supported_sample_rate(
+                    device=_dev,
+                    target_rate=self.target_sample_rate
+                )
+                if self.recording_sample_rate != self.target_sample_rate:
+                    print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
+                # Recalculate chunk samples based on actual recording rate
+                self._chunk_samples = int(self.chunk_duration * self.recording_sample_rate)
+                self._overlap_samples = int(self.chunk_overlap * self.recording_sample_rate)
+                self._stream = sd.InputStream(
+                    samplerate=self.recording_sample_rate,
+                    channels=self.channels,
+                    device=_dev,
+                    dtype=np.float32,
+                    callback=self._audio_callback,
+                )
+                self._stream.start()
+                self.device = _dev
+                break
+            except Exception as e:
+                _last_err = e
+                if _dev is not None:
+                    print(f"Audio device {_dev} failed to open ({e}); falling back to system default")
+        else:
+            raise _last_err if _last_err else RuntimeError("Failed to open any audio input device")
         
         # Start chunk monitoring thread
         self._chunk_thread = threading.Thread(target=self._chunk_monitor_thread, daemon=True)

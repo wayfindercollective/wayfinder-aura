@@ -290,6 +290,14 @@ def load_config() -> dict:
                     if default and os.path.exists(os.path.expanduser(default)):
                         config[key] = default
 
+            # Audio device: a saved bare INDEX with no matching device name is unreliable.
+            # PortAudio/PipeWire renumber devices between sessions (and on PipeWire restart),
+            # so an old index can silently point at a different/silent mic — the "no
+            # transcription" regression. Treat index-without-name as auto-select; explicit
+            # picks always store audio_device_name too, so this only drops stale bare indices.
+            if config.get("audio_device") is not None and not config.get("audio_device_name"):
+                config["audio_device"] = None
+
             return config
         except (json.JSONDecodeError, IOError):
             return DEFAULT_CONFIG.copy()

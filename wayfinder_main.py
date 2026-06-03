@@ -1773,33 +1773,23 @@ def resolve_audio_device(config: dict) -> int | None:
     Returns:
         Device index to use, or None for system default
     """
-    device_id = config.get("audio_device")
     device_name = config.get("audio_device_name")
-    
-    # If we have a saved device name, try to find it by name first
-    # (device IDs can change when USB devices are reconnected)
+
+    # The saved NAME is the source of truth. Device indices are NOT stable across sessions
+    # (PortAudio/PipeWire renumber on device/USB/PipeWire changes), so a bare saved index is
+    # never trusted across launches — that was the cause of recording the wrong/silent mic
+    # after a renumber. Resolve the saved name to the current index instead.
     if device_name:
         found_id = get_input_device_by_name(device_name)
         if found_id is not None:
             return found_id
-        print(f"Saved device '{device_name}' not found, using auto-selection")
-    
-    # If explicit device ID is set and valid, use it
-    if device_id is not None:
-        try:
-            import sounddevice as sd
-            dev_info = sd.query_devices(device_id)
-            dev_name = dev_info.get('name', '')
-            if dev_info.get('max_input_channels', 0) > 0:
-                if is_output_device(dev_name):
-                    print(f"Configured device '{dev_name}' is an output, not a microphone — using auto-selection")
-                else:
-                    return device_id
-        except Exception:
-            print(f"Configured device {device_id} not available, using auto-selection")
-    
-    # Auto-select the best device
-    return find_best_input_device(preferred_name=device_name)
+        # Saved mic is gone (unplugged / renamed) — auto-select, preferring a similar name.
+        print(f"Saved mic '{device_name}' not found — auto-selecting")
+        return find_best_input_device(preferred_name=device_name)
+
+    # No saved name → auto-select the best available device (config.audio_device, if any, is
+    # a stale bare index from a prior session and is intentionally ignored).
+    return find_best_input_device()
 
 
 # Single source of truth for EventType — shared with hotkey listeners
@@ -3334,17 +3324,14 @@ class WayfinderApp(ctk.CTk):
         # License/feature gate for premium features
         self.feature_gate = get_feature_gate()
         
-        # Resolve audio device (intelligent selection if not explicitly set)
+        # Resolve audio device (intelligent selection if not explicitly set). This is a
+        # RUNTIME value only — do NOT write it back into config["audio_device"]. Persisting
+        # the resolved index would turn an "Auto-detect" choice into a brittle fixed index
+        # with no name, which breaks on the next device renumber (the "no transcription"
+        # regression). The user's explicit choice lives in audio_device_name; auto stays None.
         self._resolved_audio_device = resolve_audio_device(self.config)
-        
-        # Sync the config's audio_device index with the resolved device
-        # This handles cases where the device was found by name but indices shifted
-        if self._resolved_audio_device is not None:
-            if self.config.get("audio_device") != self._resolved_audio_device:
-                self.config["audio_device"] = self._resolved_audio_device
-                save_config(self.config)
-        
-        
+
+
         # Standard recorder for short recordings
         self.recorder = AudioRecorder(
             sample_rate=self.config["sample_rate"],
