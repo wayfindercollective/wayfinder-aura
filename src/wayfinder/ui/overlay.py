@@ -1813,6 +1813,23 @@ def run_overlay():
         except:
             pass
     
+    def _update_tray(active: bool):
+        """Reflect record state on the tray icon (red while active, idle otherwise).
+
+        Reads ``tray_icon`` from the enclosing scope at call time -- it is created further below,
+        before any command is processed by the timer. All Qt calls are guarded: the tray may be
+        absent (non-Flatpak) or mid-teardown.
+        """
+        try:
+            if tray_icon is None:
+                return
+            icon = getattr(tray_icon, '_wfa_rec_icon', None) if active else getattr(tray_icon, '_wfa_idle_icon', None)
+            if icon is not None:
+                tray_icon.setIcon(icon)
+            tray_icon.setToolTip("Wayfinder Aura - Recording" if active else "Wayfinder Aura")
+        except Exception as _e:
+            _debug_log(f"tray: state update failed: {_e}")
+
     def handle_command(overlay: GlassmorphicOverlay, cmd: dict):
         """Handle a command from the main process."""
         command = cmd.get("cmd", "")
@@ -1831,9 +1848,11 @@ def run_overlay():
             state = state_map.get(state_name, OverlayState.LISTENING)
             _debug_log(f"SHOW state_name={state_name} -> enum={state} current={overlay._state}")
             overlay.set_state(state)
-        
+            _update_tray(state in (OverlayState.LISTENING, OverlayState.PROCESSING))
+
         elif command == "hide":
             overlay.set_state(OverlayState.HIDDEN)
+            _update_tray(False)
         
         elif command == "level":
             level = cmd.get("value", 0.0)
@@ -1864,7 +1883,7 @@ def run_overlay():
     if enable_tray:
         try:
             from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
-            from PyQt6.QtGui import QIcon
+            from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
             if QSystemTrayIcon.isSystemTrayAvailable():
                 import socket as _tray_socket
                 try:
@@ -1886,7 +1905,26 @@ def run_overlay():
                     except Exception as _e:
                         _debug_log(f"tray: send '{verb}' failed: {_e}")
 
-                tray_icon = QSystemTrayIcon(QIcon(_tray_icon_path) if _tray_icon_path else QIcon())
+                _idle_icon = QIcon(_tray_icon_path) if _tray_icon_path else QIcon()
+                # Red-tinted "recording" variant so the tray reflects state (idle -> red while
+                # listening/processing). Drawn from the base icon, so no extra bundled asset.
+                _rec_icon = _idle_icon
+                try:
+                    _base_px = QPixmap(_tray_icon_path) if _tray_icon_path else QPixmap()
+                    if not _base_px.isNull():
+                        _red_px = QPixmap(_base_px.size())
+                        _red_px.fill(QColor(0, 0, 0, 0))
+                        _qp = QPainter(_red_px)
+                        _qp.drawPixmap(0, 0, _base_px)
+                        _qp.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+                        _qp.fillRect(_red_px.rect(), QColor(220, 40, 40))
+                        _qp.end()
+                        _rec_icon = QIcon(_red_px)
+                except Exception as _e:
+                    _debug_log(f"tray: rec-icon build failed: {_e}")
+                tray_icon = QSystemTrayIcon(_idle_icon)
+                tray_icon._wfa_idle_icon = _idle_icon
+                tray_icon._wfa_rec_icon = _rec_icon
                 tray_icon.setToolTip("Wayfinder Aura")
                 _tray_menu = QMenu()
                 _tray_menu.addAction("Open Wayfinder Aura").triggered.connect(lambda: _tray_send("show"))
