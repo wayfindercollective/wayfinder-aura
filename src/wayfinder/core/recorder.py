@@ -90,6 +90,27 @@ def _is_steam_deck() -> bool:
     return _IS_STEAM_DECK
 
 
+def _system_default_input_index() -> int | None:
+    """Index of the ALSA ``pulse``/``default`` PCM that routes to the user's system-default source.
+
+    In a Flatpak/sandbox PortAudio is built ALSA-only: the raw ``hw:`` devices expose no capture
+    and the only working mic is the ``pulse`` PCM -- the PipeWire/Pulse proxy, which follows
+    whatever KDE/PipeWire has chosen as the default source. Prefer ``pulse``; on SteamOS the bare
+    ``default`` PCM can route to a silent sink while ``pulse`` carries the live signal. Returns
+    None when neither is capturable (a normal desktop with real hardware mics, where this
+    fallback is never reached).
+    """
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return None
+    for target in ("pulse", "default"):
+        for i, dev in enumerate(devices):
+            if dev.get("name", "").lower() == target and dev.get("max_input_channels", 0) > 0:
+                return i
+    return None
+
+
 def find_best_input_device(preferred_name: str | None = None) -> int | None:
     """
     Intelligently find the best audio input device for voice recording.
@@ -177,7 +198,10 @@ def find_best_input_device(preferred_name: str | None = None) -> int | None:
         candidates.append((score, i, dev['name']))
     
     if not candidates:
-        return None
+        # No dedicated hardware mic was found. In a Flatpak/sandbox the raw hw: devices expose
+        # no capture, and the only usable input is the 'pulse' PCM (PipeWire proxy -> the user's
+        # system-default source) -- fall back to it. Off-sandbox this returns None (unchanged).
+        return _system_default_input_index()
     
     # Sort by score (highest first)
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -278,6 +302,21 @@ def list_input_devices(exclude_outputs: bool = False) -> list[dict]:
     except Exception:
         pass
     
+    # Sandbox/Flatpak: PortAudio is ALSA-only and every entry above is an output/monitor or a
+    # 0-input hw: device -- the only capture path is the 'pulse' PCM (PipeWire proxy). If nothing
+    # usable surfaced, present that single PCM as one friendly "System Default" mic so the picker
+    # isn't empty and dictation works out of the box. (Desktops with real mics never hit this.)
+    if not any(not r['excluded'] for r in result):
+        sysidx = _system_default_input_index()
+        if sysidx is not None:
+            return [{
+                'index': sysidx,
+                'name': 'System Default (PipeWire)',
+                'channels': 1,
+                'recommended': True,
+                'excluded': False,
+            }]
+
     return result
 
 
@@ -472,14 +511,24 @@ class AudioRecorder:
         dictation still works instead of failing.
         """
         self.frames = []
-        try:
-            self._open_stream(self.device)
-        except Exception as e:
-            if self.device is None:
-                raise
-            print(f"Audio device {self.device} failed to open ({e}); falling back to system default")
-            self.device = None
-            self._open_stream(None)
+        fallbacks = []
+        if self.device is not None:
+            fallbacks.append(self.device)
+        sys_default = _system_default_input_index()
+        if sys_default is not None and sys_default not in fallbacks:
+            fallbacks.append(sys_default)
+        fallbacks.append(None)
+        last_err = None
+        for dev in fallbacks:
+            try:
+                self._open_stream(dev)
+                self.device = dev
+                return
+            except Exception as e:
+                last_err = e
+                if dev is not None:
+                    print(f"Audio device {dev} failed to open ({e}); trying next input")
+        raise last_err if last_err else RuntimeError("No audio input device could be opened")
 
     def _open_stream(self, device: int | None) -> None:
         # Find a supported sample rate for this device
@@ -804,7 +853,11 @@ class ChunkedRecorder:
         # Open the audio stream. If the configured device fails (renumbered index, or a JACK
         # clone with PaErrorCode -9999), fall back to the system default so recording still
         # works instead of failing.
-        _devices = [self.device, None] if self.device is not None else [None]
+        _sys_default = _system_default_input_index()
+        _devices = [self.device] if self.device is not None else []
+        if _sys_default is not None and _sys_default not in _devices:
+            _devices.append(_sys_default)
+        _devices.append(None)
         _last_err = None
         for _dev in _devices:
             try:
