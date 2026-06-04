@@ -113,7 +113,11 @@ class TestFullDictationPipeline:
         state = get_next_state(state, "hotkey")  # -> RECORDING
         state = get_next_state(state, "hotkey")  # -> PROCESSING
 
-        result = transcribe_with_config(str(sample_audio_file), config)
+        # _supported_flags probes `whisper-cli --help` (a subprocess.run); stub it so it doesn't
+        # consume a slot from this test's ordered side_effect list. Empty set => fail-open (the
+        # built command is unchanged).
+        with patch("wayfinder.core.transcriber.WhisperCppBackend._supported_flags", return_value=set()):
+            result = transcribe_with_config(str(sample_audio_file), config)
         assert len(result) > 0
 
         state = get_next_state(state, "transcribed")  # -> PASTING
@@ -172,10 +176,12 @@ class TestChunkedRecordingPipeline:
         # Each call to subprocess.run returns next chunk transcription
         mock_run.side_effect = [_mock_subprocess_whisper(t) for t in chunk_texts]
 
+        # Stub the --help probe (a subprocess.run) so it doesn't consume side_effect slots.
         results = []
-        for chunk_path in chunks:
-            result = transcribe_with_config(str(chunk_path), config)
-            results.append(result)
+        with patch("wayfinder.core.transcriber.WhisperCppBackend._supported_flags", return_value=set()):
+            for chunk_path in chunks:
+                result = transcribe_with_config(str(chunk_path), config)
+                results.append(result)
 
         combined = " ".join(results)
         # Case-insensitive check since clean_whisper_artifacts may adjust capitalization
