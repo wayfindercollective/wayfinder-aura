@@ -201,6 +201,32 @@ class WhisperCppBackend(TranscriptionBackend):
             self._gpu_supported = False
             return False
     
+    def _supported_flags(self) -> set:
+        """Long options the actual whisper-cli accepts (parsed from --help, cached).
+
+        The Flatpak bundles whisper.cpp v1.7.2, which lacks --no-speech-thold and --suppress-nst
+        that newer host builds expose. Passing an unknown flag makes whisper-cli print usage and
+        transcribe NOTHING (a silent '' result -> "no dictation output"). Filtering the command
+        to supported flags keeps it working across the bundled binary and a newer host one. Fails
+        OPEN (empty set => no filtering) so flags are never stripped on a binary we couldn't
+        introspect.
+        """
+        cached = getattr(self, "_supported_flags_cache", None)
+        if cached is not None:
+            return cached
+        flags = set()
+        try:
+            import re
+            h = subprocess.run(
+                [self.whisper_binary, "--help"],
+                capture_output=True, text=True, timeout=5,
+            )
+            flags = set(re.findall(r"--[a-z][a-z0-9-]+", (h.stdout or "") + (h.stderr or "")))
+        except Exception:
+            pass
+        self._supported_flags_cache = flags
+        return flags
+
     def transcribe(self, audio_path: str, context: str = "") -> str:
         """
         Transcribe an audio file using whisper.cpp.
@@ -226,6 +252,14 @@ class WhisperCppBackend(TranscriptionBackend):
         # Build the final prompt with custom vocabulary and context
         final_prompt = self._build_prompt(context)
         
+        # Some accuracy/suppression flags exist only in newer whisper.cpp; the bundled v1.7.2
+        # lacks --no-speech-thold / --suppress-nst, and whisper-cli aborts (transcribing nothing)
+        # on the first unknown flag. Emit version-fragile flags only when --help advertises them;
+        # _flag_ok fails OPEN (empty set => no filtering) so an un-introspectable binary is safe.
+        _sup = self._supported_flags()
+        def _flag_ok(flag):
+            return (not _sup) or (flag in _sup)
+
         cmd = [
             self.whisper_binary,
             "-m", self.model_path,
@@ -236,8 +270,6 @@ class WhisperCppBackend(TranscriptionBackend):
             # Accuracy enhancement flags
             "--beam-size", str(self.beam_size),
             "--best-of", str(self.best_of),
-            "--entropy-thold", str(self.entropy_threshold),
-            "--no-speech-thold", str(self.no_speech_threshold),
             "--temperature", str(self.temperature),
             # Temperature fallback: if decoding fails, increment temperature and retry
             "--temperature-inc", str(self.temperature_fallback),
@@ -245,6 +277,10 @@ class WhisperCppBackend(TranscriptionBackend):
             "--no-prints",  # Suppress progress output (faster)
             "--no-fallback",  # Don't retry with temperature (faster, slight accuracy tradeoff)
         ]
+        if _flag_ok("--entropy-thold"):
+            cmd += ["--entropy-thold", str(self.entropy_threshold)]
+        if _flag_ok("--no-speech-thold"):
+            cmd += ["--no-speech-thold", str(self.no_speech_threshold)]
         
         # Add language flag (skip if auto-detect)
         if self.language and self.language.lower() != "auto":
@@ -252,12 +288,12 @@ class WhisperCppBackend(TranscriptionBackend):
         
         # Hallucination suppression flags
         # Use --suppress-nst to suppress non-speech tokens (works in current whisper.cpp)
-        if self.suppress_nst:
+        if self.suppress_nst and _flag_ok("--suppress-nst"):
             cmd.append("--suppress-nst")
         
         # GPU is enabled by default in Vulkan builds of whisper.cpp
         # Use --no-gpu to disable it if user doesn't want GPU acceleration
-        if not self.use_gpu:
+        if not self.use_gpu and _flag_ok("--no-gpu"):
             cmd.append("--no-gpu")
 
         try:

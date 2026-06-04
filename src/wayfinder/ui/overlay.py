@@ -1906,20 +1906,22 @@ def run_overlay():
                         _debug_log(f"tray: send '{verb}' failed: {_e}")
 
                 _idle_icon = QIcon(_tray_icon_path) if _tray_icon_path else QIcon()
-                # Red-tinted "recording" variant so the tray reflects state (idle -> red while
-                # listening/processing). Drawn from the base icon, so no extra bundled asset.
+                # Recording variant = the base icon with a red "REC" dot in the bottom-right
+                # corner. A full red tint (SourceIn) flattens the logo into a featureless blob;
+                # a dot badge stays recognizable and reads clearly as "recording".
                 _rec_icon = _idle_icon
                 try:
                     _base_px = QPixmap(_tray_icon_path) if _tray_icon_path else QPixmap()
                     if not _base_px.isNull():
-                        _red_px = QPixmap(_base_px.size())
-                        _red_px.fill(QColor(0, 0, 0, 0))
-                        _qp = QPainter(_red_px)
-                        _qp.drawPixmap(0, 0, _base_px)
-                        _qp.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-                        _qp.fillRect(_red_px.rect(), QColor(220, 40, 40))
+                        _px = QPixmap(_base_px)
+                        _qp = QPainter(_px)
+                        _qp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                        _d = max(6, int(min(_px.width(), _px.height()) * 0.45))
+                        _qp.setPen(QColor(255, 255, 255, 220))
+                        _qp.setBrush(QColor(220, 40, 40))
+                        _qp.drawEllipse(_px.width() - _d - 1, _px.height() - _d - 1, _d, _d)
                         _qp.end()
-                        _rec_icon = QIcon(_red_px)
+                        _rec_icon = QIcon(_px)
                 except Exception as _e:
                     _debug_log(f"tray: rec-icon build failed: {_e}")
                 tray_icon = QSystemTrayIcon(_idle_icon)
