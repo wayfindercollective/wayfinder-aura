@@ -1813,20 +1813,31 @@ def run_overlay():
         except:
             pass
     
-    def _update_tray(active: bool):
-        """Reflect record state on the tray icon (red while active, idle otherwise).
+    def _update_tray(state):
+        """Drive the tray icon to match the overlay state, like the from-source arrow tray:
+        LISTENING -> animated red "drawing" arrow; PROCESSING -> gold; otherwise white idle.
 
-        Reads ``tray_icon`` from the enclosing scope at call time -- it is created further below,
-        before any command is processed by the timer. All Qt calls are guarded: the tray may be
-        absent (non-Flatpak) or mid-teardown.
+        Reads ``tray_icon`` from the enclosing scope at call time (created below, before any
+        command is processed). All Qt calls are guarded -- the tray may be absent or tearing down.
         """
         try:
             if tray_icon is None:
                 return
-            icon = getattr(tray_icon, '_wfa_rec_icon', None) if active else getattr(tray_icon, '_wfa_idle_icon', None)
-            if icon is not None:
-                tray_icon.setIcon(icon)
-            tray_icon.setToolTip("Wayfinder Aura - Recording" if active else "Wayfinder Aura")
+            timer = getattr(tray_icon, '_wfa_anim_timer', None)
+            if state == OverlayState.LISTENING:
+                tray_icon.setToolTip("Wayfinder Aura - Recording")
+                if timer is not None and not timer.isActive():
+                    tray_icon._wfa_progress[0] = 0.0
+                    timer.start(50)
+                return
+            if timer is not None and timer.isActive():
+                timer.stop()
+            if state == OverlayState.PROCESSING:
+                tray_icon.setIcon(tray_icon._wfa_make("processing"))
+                tray_icon.setToolTip("Wayfinder Aura - Processing")
+            else:
+                tray_icon.setIcon(tray_icon._wfa_idle_icon)
+                tray_icon.setToolTip("Wayfinder Aura")
         except Exception as _e:
             _debug_log(f"tray: state update failed: {_e}")
 
@@ -1848,11 +1859,11 @@ def run_overlay():
             state = state_map.get(state_name, OverlayState.LISTENING)
             _debug_log(f"SHOW state_name={state_name} -> enum={state} current={overlay._state}")
             overlay.set_state(state)
-            _update_tray(state in (OverlayState.LISTENING, OverlayState.PROCESSING))
+            _update_tray(state)
 
         elif command == "hide":
             overlay.set_state(OverlayState.HIDDEN)
-            _update_tray(False)
+            _update_tray(OverlayState.READY)
         
         elif command == "level":
             level = cmd.get("value", 0.0)
@@ -1905,28 +1916,29 @@ def run_overlay():
                     except Exception as _e:
                         _debug_log(f"tray: send '{verb}' failed: {_e}")
 
-                _idle_icon = QIcon(_tray_icon_path) if _tray_icon_path else QIcon()
-                # Recording variant = the base icon with a red "REC" dot in the bottom-right
-                # corner. A full red tint (SourceIn) flattens the logo into a featureless blob;
-                # a dot badge stays recognizable and reads clearly as "recording".
-                _rec_icon = _idle_icon
-                try:
-                    _base_px = QPixmap(_tray_icon_path) if _tray_icon_path else QPixmap()
-                    if not _base_px.isNull():
-                        _px = QPixmap(_base_px)
-                        _qp = QPainter(_px)
-                        _qp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                        _d = max(6, int(min(_px.width(), _px.height()) * 0.45))
-                        _qp.setPen(QColor(255, 255, 255, 220))
-                        _qp.setBrush(QColor(220, 40, 40))
-                        _qp.drawEllipse(_px.width() - _d - 1, _px.height() - _d - 1, _d, _d)
-                        _qp.end()
-                        _rec_icon = QIcon(_px)
-                except Exception as _e:
-                    _debug_log(f"tray: rec-icon build failed: {_e}")
+                # Wayfinder navigation-arrow tray icon (matches the from-source pystray tray):
+                # white idle, gold processing, and the outline traced then filled red while
+                # recording. The logo PNG (_tray_icon_path) is deliberately NOT used here so the
+                # indicator is identical to the desktop tray.
+                from wayfinder.ui.tray_icon import make_arrow_icon
+                _idle_icon = make_arrow_icon("idle")
                 tray_icon = QSystemTrayIcon(_idle_icon)
                 tray_icon._wfa_idle_icon = _idle_icon
-                tray_icon._wfa_rec_icon = _rec_icon
+                tray_icon._wfa_make = make_arrow_icon
+                tray_icon._wfa_progress = [0.0]
+                # Recording "drawing" animation: a QTimer traces the arrow then fills it (~20fps,
+                # 50ms), matching the from-source tray. _update_tray() runs it only while
+                # recording and stops it otherwise, so idle CPU is unaffected.
+                def _wfa_tray_anim():
+                    try:
+                        pr = tray_icon._wfa_progress
+                        pr[0] = 0.0 if pr[0] > 1.0 else pr[0] + 0.04
+                        tray_icon.setIcon(make_arrow_icon("recording", pr[0]))
+                    except Exception:
+                        pass
+                _wfa_anim_timer = QTimer()
+                _wfa_anim_timer.timeout.connect(_wfa_tray_anim)
+                tray_icon._wfa_anim_timer = _wfa_anim_timer
                 tray_icon.setToolTip("Wayfinder Aura")
                 _tray_menu = QMenu()
                 _tray_menu.addAction("Open Wayfinder Aura").triggered.connect(lambda: _tray_send("show"))
