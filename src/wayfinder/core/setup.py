@@ -793,9 +793,13 @@ def get_dependencies(config: dict) -> list[Dependency]:
             # install handled by install_system_packages
         ))
 
-    # Build tools are only needed when whisper.cpp must be compiled from source;
-    # bundled environments (AppImage/Flatpak) ship a pre-built binary.
-    if not (IS_APPIMAGE or IS_FLATPAK):
+    # Build tools (git/cmake/compiler) are only needed to compile whisper.cpp from source.
+    # Bundled environments (AppImage/Flatpak) ship a pre-built binary, and once whisper.cpp is
+    # already built there is nothing left to compile — so don't surface a Build Tools entry at
+    # all (no "Missing: cmake" row, no "Install" button). That button runs `dnf install`, which
+    # is blocked on immutable distros (Bazzite/SteamOS use rpm-ostree) and can never succeed
+    # there, so it's pure noise on a working install.
+    if not (IS_APPIMAGE or IS_FLATPAK) and not check_whisper_cpp(config).installed:
         deps.append(Dependency(
             id="build_tools",
             name="Build Tools",

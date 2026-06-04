@@ -907,8 +907,13 @@ class TestFullSetupFlow:
         mock_sys.executable = sys.executable
         """Simulate full setup on a fresh NVIDIA Ubuntu system."""
 
-        # Step 1: Check — everything missing
-        deps = get_dependencies(sample_config)
+        # Step 1: Check — everything missing. On a fresh system whisper.cpp isn't built yet, so
+        # Build Tools is surfaced (it's hidden once whisper.cpp exists — nothing left to compile).
+        with patch(
+            "wayfinder.core.setup.check_whisper_cpp",
+            return_value=DependencyStatus(installed=False, error="not built"),
+        ):
+            deps = get_dependencies(sample_config)
         ydotool_dep = next(d for d in deps if d.id == "ydotool")
         assert ydotool_dep.check().installed is False
 

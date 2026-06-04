@@ -252,11 +252,19 @@ def get_text_injector() -> str:
     """
     if is_linux():
         if is_wayland():
-            # Prefer wtype: injects via the Wayland virtual-keyboard protocol with no uinput
-            # device and no daemon, so it works inside a Flatpak sandbox where ydotool's
-            # /dev/uinput path does not (Codex review). On compositors that don't implement
-            # the protocol (some KDE versions) wtype fails at runtime and we fall back to
-            # ydotool — and ultimately the RemoteDesktop portal (the sandbox-safe last resort).
+            # Prefer ydotool when its daemon is reachable: KDE Plasma's KWin shows a per-use
+            # "allow input control" security prompt for wtype's Wayland virtual-keyboard
+            # protocol, but ydotool injects via /dev/uinput (kernel level) with no prompt.
+            # wtype stays the fallback for Flatpak (no uinput device/daemon) and for wlroots
+            # compositors without a running ydotoold. (Lazy import avoids a platform<->injector
+            # import cycle.)
+            if is_ydotool_available():
+                try:
+                    from ..core.injector import check_ydotool_ready
+                    if check_ydotool_ready()[0]:
+                        return "ydotool"
+                except Exception:
+                    pass
             if is_wtype_available():
                 return "wtype"
             if is_ydotool_available():
