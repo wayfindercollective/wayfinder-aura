@@ -257,15 +257,27 @@ class TestBinaryDetection:
 class TestTextInjector:
     """Tests for get_text_injector() tool selection."""
 
-    def test_get_text_injector_wayland_prefers_wtype(self, wayland_env):
-        """Wayland prefers wtype (sandbox-safe, no uinput) when available."""
-        with patch("wayfinder.utils.platform.is_wtype_available", return_value=True):
+    def test_get_text_injector_wayland_prefers_ydotool_when_ready(self, wayland_env):
+        """Wayland prefers ydotool when its daemon is reachable — avoids KDE's per-use
+        input-control prompt that wtype's virtual-keyboard protocol triggers."""
+        with patch("wayfinder.utils.platform.is_ydotool_available", return_value=True), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "ready")), \
+             patch("wayfinder.utils.platform.is_wtype_available", return_value=True):
+            assert get_text_injector() == "ydotool"
+
+    def test_get_text_injector_wayland_uses_wtype_when_ydotool_not_ready(self, wayland_env):
+        """Wayland falls back to wtype when the ydotool daemon isn't reachable (e.g. Flatpak —
+        no uinput device)."""
+        with patch("wayfinder.utils.platform.is_ydotool_available", return_value=True), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(False, "no socket")), \
+             patch("wayfinder.utils.platform.is_wtype_available", return_value=True):
             assert get_text_injector() == "wtype"
 
     def test_get_text_injector_wayland_falls_back_to_ydotool(self, wayland_env):
-        """Wayland falls back to ydotool when wtype is unavailable."""
+        """Wayland uses ydotool when wtype is unavailable, even if the daemon probe is negative."""
         with patch("wayfinder.utils.platform.is_wtype_available", return_value=False), \
-             patch("wayfinder.utils.platform.is_ydotool_available", return_value=True):
+             patch("wayfinder.utils.platform.is_ydotool_available", return_value=True), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(False, "no socket")):
             assert get_text_injector() == "ydotool"
 
     def test_get_text_injector_x11_prefers_xdotool(self, x11_env):
