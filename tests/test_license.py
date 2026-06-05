@@ -112,7 +112,7 @@ class TestLicenseStorage:
         assert path.name == "license.json"
         assert "wayfinder-aura" in str(path)
 
-    def test_store_and_load_license(self, temp_config_dir: Path):
+    def test_store_and_load_license(self, temp_config_dir: Path, mock_online_license):
         """Test storing and loading a license."""
         from wayfinder.license import generate_license_key, store_license, load_stored_license
 
@@ -126,7 +126,7 @@ class TestLicenseStorage:
         assert loaded.is_valid
         assert loaded.license_key == key
 
-    def test_remove_license(self, temp_config_dir: Path):
+    def test_remove_license(self, temp_config_dir: Path, mock_online_license):
         """Test removing a stored license."""
         from wayfinder.license import (
             generate_license_key,
@@ -176,7 +176,7 @@ class TestFeatureGate:
             if not gate.is_premium:
                 assert not gate.has_feature(feature_id), f"Premium feature {feature_id} should be locked"
 
-    def test_activate_license(self, temp_config_dir: Path):
+    def test_activate_license(self, temp_config_dir: Path, mock_online_license):
         """Test activating a license."""
         from wayfinder.license import FeatureGate, generate_license_key, PREMIUM_FEATURES
 
@@ -192,7 +192,7 @@ class TestFeatureGate:
         for feature_id in PREMIUM_FEATURES:
             assert gate.has_feature(feature_id)
 
-    def test_deactivate_license(self, temp_config_dir: Path):
+    def test_deactivate_license(self, temp_config_dir: Path, mock_online_license):
         """Test deactivating a license."""
         from wayfinder.license import FeatureGate, generate_license_key
 
@@ -229,7 +229,7 @@ class TestFeatureGate:
 
         assert "gpu_acceleration" in FREE_FEATURES
 
-    def test_premium_user_has_all_features(self, temp_config_dir: Path):
+    def test_premium_user_has_all_features(self, temp_config_dir: Path, mock_online_license):
         """Test that premium user can access all premium features."""
         from wayfinder.license import FeatureGate, PREMIUM_FEATURES, generate_license_key
 
@@ -250,7 +250,7 @@ class TestFeatureGate:
         for feat_id in PREMIUM_FEATURES:
             assert not gate.has_feature(feat_id), f"Free user should not have {feat_id}"
 
-    def test_force_refresh_feature_gate(self, temp_config_dir: Path):
+    def test_force_refresh_feature_gate(self, temp_config_dir: Path, mock_online_license):
         """Test that force_refresh creates a new FeatureGate instance."""
         import wayfinder.license as lic
         from wayfinder.license import get_feature_gate, generate_license_key, store_license
