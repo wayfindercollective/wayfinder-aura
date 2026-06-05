@@ -105,7 +105,7 @@ class TestLicenseIntegration:
 
         assert gate1 is gate2
 
-    def test_license_activation_flow(self, temp_config_dir: Path):
+    def test_license_activation_flow(self, temp_config_dir: Path, mock_online_license):
         """Test complete license activation flow."""
         from wayfinder.license import (
             generate_license_key,

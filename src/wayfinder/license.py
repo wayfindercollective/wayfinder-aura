@@ -11,6 +11,7 @@ Where each X is alphanumeric (0-9, A-Z excluding confusing chars)
 import hashlib
 import hmac
 import json
+import os
 import platform
 import re
 import subprocess
@@ -62,8 +63,25 @@ def _get_license_secret() -> str:
     return hashlib.sha256(machine_data.encode()).hexdigest()
 
 
-# License secret - loaded from environment for security
+# License secret - loaded from environment for security (legacy offline HMAC path)
 LICENSE_SECRET = _get_license_secret()
+
+
+# === Online activation (Convex licensing service) ===
+# Ed25519 public key (hex) used to verify activation tokens OFFLINE. The matching private key
+# lives ONLY in the licensing Convex deployment's environment — nothing secret ships in the app,
+# and tokens cannot be forged. Overridable via env for testing.
+LICENSE_PUBLIC_KEY_HEX = os.environ.get(
+    "WAYFINDER_LICENSE_PUBKEY",
+    "e45d352f85af09afd208ca55458964aae2c018f4a538e17a11fd47211190c60a",
+)
+# Activation endpoint. NOTE: points at the DEV deployment for now — switch the default to the
+# production (shiny-goshawk-432) URL at go-live. Overridable via env for testing.
+LICENSE_API_URL = os.environ.get(
+    "WAYFINDER_LICENSE_API_URL",
+    "https://valuable-stoat-578.convex.site/activate",
+)
+LICENSE_HTTP_TIMEOUT = 10  # seconds for the activation request
 
 
 @dataclass
@@ -273,63 +291,162 @@ def get_license_path() -> Path:
     return config_dir / "license.json"
 
 
-def load_stored_license() -> LicenseInfo:
-    """Load and validate stored license."""
-    license_path = get_license_path()
-    
-    if not license_path.exists():
-        return LicenseInfo(
-            is_valid=False,
-            is_premium=False,
-            error_message="No license found"
+def _verify_token(token: str, machine_id: Optional[str] = None) -> Optional[dict]:
+    """Verify an Ed25519 activation token OFFLINE with the embedded public key.
+
+    Returns the payload dict when the signature is valid, the token is unexpired, and (if given)
+    the machine matches; otherwise None. Lets a previously-activated install keep working offline
+    for the token's grace window without contacting the server.
+    """
+    if not token or "." not in token:
+        return None
+    try:
+        import base64
+        import time as _time
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        payload_b64, sig_b64 = token.split(".", 1)
+
+        def _b64url(s: str) -> bytes:
+            return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+        pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(LICENSE_PUBLIC_KEY_HEX))
+        pub.verify(_b64url(sig_b64), payload_b64.encode())  # raises on a bad signature
+        payload = json.loads(_b64url(payload_b64))
+        if float(payload.get("exp", 0)) < _time.time():
+            return None  # grace window elapsed
+        if machine_id is not None and payload.get("machineId") != machine_id:
+            return None  # token bound to a different machine
+        return payload
+    except Exception:
+        return None
+
+
+def activate_online(key: str, machine_id: str):
+    """Activate/refresh against the licensing service.
+
+    Returns (LicenseInfo, token_or_None, reachable). reachable=False means the server couldn't be
+    reached (offline / down) — callers then fall back to the cached offline token within its grace.
+    """
+    try:
+        import requests
+
+        resp = requests.post(
+            LICENSE_API_URL,
+            json={"key": key, "machineId": machine_id},
+            timeout=LICENSE_HTTP_TIMEOUT,
         )
-    
+        data = resp.json()
+    except Exception:
+        return (
+            LicenseInfo(is_valid=False, is_premium=False, error_message="offline"),
+            None,
+            False,
+        )
+
+    if data.get("valid"):
+        return (
+            LicenseInfo(
+                is_valid=True,
+                is_premium=True,
+                license_key=key,
+                machine_id=machine_id,
+            ),
+            data.get("token"),
+            True,
+        )
+
+    reason = data.get("reason", "invalid")
+    msg = {
+        "not_found": "License key not found",
+        "activation_limit": "Activation limit reached for this license",
+        "revoked": "This license has been revoked",
+        "refunded": "This license was refunded",
+        "missing_fields": "Invalid request",
+    }.get(reason, f"License invalid ({reason})")
+    return (LicenseInfo(is_valid=False, is_premium=False, error_message=msg), None, True)
+
+
+def load_stored_license() -> LicenseInfo:
+    """Load the stored license: trust a valid offline token, refresh online when reachable.
+
+    Works offline within the token's grace window; refreshes (catching refunds/revocations and
+    extending the window) whenever the server is reachable and the token is missing/old.
+    """
+    license_path = get_license_path()
+    if not license_path.exists():
+        return LicenseInfo(is_valid=False, is_premium=False, error_message="No license found")
+
     try:
         data = json.loads(license_path.read_text())
-        key = data.get("license_key", "")
-        stored_machine = data.get("machine_id")
-        
-        # Validate the stored key
-        current_machine = get_machine_id()
-        result = validate_license_key(key, current_machine)
-        
-        if result.is_valid:
-            result.activated_date = data.get("activated_date")
-        
-        return result
-        
     except Exception as e:
+        return LicenseInfo(is_valid=False, is_premium=False, error_message=f"Error loading license: {e}")
+
+    key = data.get("license_key", "")
+    machine_id = data.get("machine_id") or get_machine_id()
+    payload = _verify_token(data.get("token", ""), machine_id)
+
+    # Refresh online if the token is missing/expired, or past the midpoint of its grace window.
+    needs_refresh = payload is None
+    if payload is not None:
+        try:
+            import time as _time
+
+            iat = float(payload.get("iat", 0))
+            exp = float(payload.get("exp", 0))
+            if iat and exp and _time.time() > iat + (exp - iat) / 2:
+                needs_refresh = True
+        except Exception:
+            pass
+
+    if needs_refresh and key:
+        info, new_token, reachable = activate_online(key, machine_id)
+        if reachable:
+            if info.is_valid and new_token:
+                data["token"] = new_token
+                data["machine_id"] = machine_id
+                try:
+                    license_path.write_text(json.dumps(data, indent=2))
+                except Exception:
+                    pass
+                info.activated_date = data.get("activated_date")
+                return info
+            return info  # server says invalid (revoked/refunded/limit) — premium off
+        # unreachable: fall back to the cached token below
+
+    if payload is not None:
         return LicenseInfo(
-            is_valid=False,
-            is_premium=False,
-            error_message=f"Error loading license: {e}"
+            is_valid=True,
+            is_premium=True,
+            license_key=key,
+            machine_id=machine_id,
+            activated_date=data.get("activated_date"),
         )
+    return LicenseInfo(
+        is_valid=False,
+        is_premium=False,
+        error_message="License needs re-activation (offline grace expired)",
+    )
 
 
 def store_license(key: str) -> LicenseInfo:
-    """
-    Validate and store a license key.
-    
-    Args:
-        key: License key to store
-    
-    Returns:
-        LicenseInfo with result
-    """
+    """Activate a license key online and store the signed offline token for future grace use."""
+    key = (key or "").strip().upper()
     machine_id = get_machine_id()
-    result = validate_license_key(key, machine_id)
-    
-    if result.is_valid:
+    info, token, _reachable = activate_online(key, machine_id)
+
+    if info.is_valid and token:
         license_path = get_license_path()
         data = {
             "license_key": key,
             "machine_id": machine_id,
+            "token": token,
             "activated_date": datetime.now().isoformat(),
         }
         license_path.write_text(json.dumps(data, indent=2))
-        result.activated_date = data["activated_date"]
-    
-    return result
+        info.activated_date = data["activated_date"]
+
+    return info
 
 
 def remove_license() -> None:

@@ -13,8 +13,11 @@
 # UI Framework
 customtkinter>=5.2.0
 
-# HTTP requests for model downloads
+# HTTP requests for model downloads + online license activation
 requests>=2.28.0
+
+# Ed25519 signature verification for online license tokens (installs a prebuilt wheel — no Rust)
+cryptography>=41.0.0
 
 # Glassmorphic Status Overlay (PyQt6)
 # Premium overlay with blur effects, animations, and squircle shape

@@ -46,6 +46,35 @@ def temp_config_dir(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return config_dir
 
 
+@pytest.fixture
+def mock_online_license():
+    """Make store_license / load_stored_license succeed without a network: activate_online returns
+    a valid premium result + a token, and _verify_token accepts any token as a valid premium
+    payload. These tests exercise the gating logic; the real online activation + Ed25519 verify
+    path is covered by the licensing-service e2e tests."""
+    import time
+    from unittest.mock import patch
+    from wayfinder.license import LicenseInfo
+
+    def _activate(key, machine_id):
+        return (
+            LicenseInfo(is_valid=True, is_premium=True, license_key=key, machine_id=machine_id),
+            "TEST.TOKEN",
+            True,
+        )
+
+    def _verify(token, machine_id=None):
+        if not token:
+            return None
+        now = int(time.time())
+        return {"plan": "pro", "machineId": machine_id, "iat": now, "exp": now + 10 ** 9, "v": 1}
+
+    with patch("wayfinder.license.activate_online", _activate), patch(
+        "wayfinder.license._verify_token", _verify
+    ):
+        yield
+
+
 # =============================================================================
 # Configuration Fixtures
 # =============================================================================
