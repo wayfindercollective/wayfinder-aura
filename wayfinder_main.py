@@ -9717,17 +9717,21 @@ class WayfinderApp(ctk.CTk):
             self._license_feedback.configure(text="Please enter a license key", text_color="#CF7B7B")
             return
 
-        from wayfinder.license import validate_license_key, store_license, get_feature_gate
-        result = validate_license_key(key)
-        if result.is_valid:
-            store_license(key)
-            # Refresh the feature gate singleton
-            self.feature_gate = get_feature_gate(force_refresh=True)
+        # store_license() is the authoritative activation: it validates the key against the
+        # licensing service (Convex) and writes the signed offline token on success. We deliberately
+        # DO NOT pre-gate on validate_license_key() — that's the legacy offline-HMAC scheme, which
+        # real (randomly-minted) Convex keys can't satisfy, so it would reject valid purchased keys.
+        from wayfinder.license import store_license, get_feature_gate
+        self._license_feedback.configure(text="Activating…", text_color=COLORS["text_muted"])
+        self.update_idletasks()  # paint the feedback before the blocking network call
+        result = store_license(key)
+        self.feature_gate = get_feature_gate(force_refresh=True)
+        if result.is_valid and self.feature_gate.is_premium:
             self._license_status_label.configure(text="Premium", text_color=COLORS["accent"])
             self._license_feedback.configure(text="License activated! Restart for full effect.", text_color=COLORS["accent"])
             self.log("License activated — premium features unlocked")
         else:
-            self._license_feedback.configure(text=result.error_message or "Invalid license key", text_color="#CF7B7B")
+            self._license_feedback.configure(text=result.error_message or "Activation failed", text_color="#CF7B7B")
 
     def _deactivate_license(self) -> None:
         """Deactivate the current license."""
