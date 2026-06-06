@@ -19,6 +19,13 @@ import os
 import subprocess
 import sys
 
+# Pure positioning math (Qt-free; unit-tested in tests/test_overlay_geometry.py). Works
+# whether this file is imported as wayfinder.ui.overlay or run as a bare-script subprocess.
+try:
+    from wayfinder.ui.overlay_geometry import clamp_overlay_y
+except ImportError:  # standalone script — its own directory is on sys.path
+    from overlay_geometry import clamp_overlay_y
+
 # Force native Wayland path for PyQt6 if running on Wayland
 # This ensures proper transparency and always-on-top behavior
 if os.environ.get("XDG_SESSION_TYPE") == "wayland":
@@ -833,21 +840,12 @@ class GlassmorphicOverlay(QWidget):
         # Center horizontally within available area
         x = avail.x() + (avail.width() - widget_width) // 2
         
-        # Calculate y position at bottom of available area
-        y = avail.y() + avail.height() - self.TASKBAR_GAP - widget_height
-        
-        # Safety check: if availableGeometry extends to screen bottom (dock/overlay taskbar),
-        # we need to add an explicit offset. Assume minimum 48px for taskbar.
-        MIN_TASKBAR_HEIGHT = 48
-        screen_bottom = full.y() + full.height()
-        avail_bottom = avail.y() + avail.height()
-        
-        if avail_bottom >= screen_bottom - 10:  # availableGeometry includes nearly full screen
-            # Taskbar is likely a dock/overlay - add explicit offset
-            y = screen_bottom - MIN_TASKBAR_HEIGHT - self.TASKBAR_GAP - widget_height
-
-        # Apply user vertical offset (negative = higher, positive = lower)
-        y += self._vertical_offset
+        # Y (top edge) is computed AND clamped above the taskbar by the shared pure helper,
+        # so the math lives in one place and stays unit-testable. Size-aware via widget_height.
+        y = clamp_overlay_y(
+            avail.y(), avail.height(), full.y(), full.height(),
+            widget_height, self._vertical_offset, self.TASKBAR_GAP,
+        )
 
         return (x, y)
     
@@ -1094,18 +1092,13 @@ class GlassmorphicOverlay(QWidget):
                     estimated_width = estimated_content_width + (self.glow_margin * 2)
                     estimated_height = self.widget_height
                     
-                    # Use same positioning formula as _calculate_position
+                    # Same single-source positioning as _calculate_position — now also
+                    # respects the user's vertical offset + clamp at startup.
                     x = avail.x() + (avail.width() - estimated_width) // 2
-                    y = avail.y() + avail.height() - self.TASKBAR_GAP - estimated_height
-                    
-                    # Safety check for dock/overlay taskbars
-                    MIN_TASKBAR_HEIGHT = 48
-                    screen_bottom = full.y() + full.height()
-                    avail_bottom = avail.y() + avail.height()
-                    
-                    if avail_bottom >= screen_bottom - 10:
-                        y = screen_bottom - MIN_TASKBAR_HEIGHT - self.TASKBAR_GAP - estimated_height
-                    
+                    y = clamp_overlay_y(
+                        avail.y(), avail.height(), full.y(), full.height(),
+                        estimated_height, self._vertical_offset, self.TASKBAR_GAP,
+                    )
                     _setup_kwin_window_rule(x, y, estimated_width, estimated_height)
         except Exception as e:
             print(f"KWin positioning rule setup failed: {e}", file=sys.stderr)

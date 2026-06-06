@@ -452,6 +452,29 @@ STATE_LABELS = {
 }
 
 
+# === Output Style: single source for cycle order, Whisper prompts, and display labels ===
+# Used by BOTH the in-app Style tab click and the style-toggle hotkey so the two paths
+# can never drift (the in-app click and hotkey previously diverged — that drift was the bug).
+STYLE_CYCLE = ["minimal", "professional", "casual", "dev", "personal"]
+
+TONE_PROMPTS = {
+    "minimal": "Dictation with natural speech.",
+    "professional": "This is a professional dictation with formal language, proper punctuation, and business-appropriate terminology.",
+    "casual": "This is a casual conversation with natural, relaxed language and everyday expressions.",
+    # Dev mode includes vocabulary hints to help recognize git/coding terms
+    "dev": "Developer dictation for coding and git. Terms: main, dev, branch, pull, push, commit, merge, rebase, checkout, stash, diff, log, fetch, clone, fork, repo, PR, issue, Cursor, VS Code, npm, pip, yarn, pnpm, API, JSON, TypeScript, Python, JavaScript, React, function, class, variable, const, let, import, export, async, await, promise, callback, component, props, state, hook, useState, useEffect.",
+    "personal": "Natural dictation in the user's personal speaking style.",
+}
+
+STYLE_LABELS = {
+    "minimal": "🎤 Minimal",
+    "professional": "💼 Professional",
+    "casual": "💬 Casual",
+    "dev": "🖥️ Dev",
+    "personal": "✨ Personal",
+}
+
+
 # === Tooltip Helper ===
 
 class ToolTip:
@@ -1550,16 +1573,36 @@ WHISPER_CPP_MODELS = {
 
 # Recommended GGUF models for post-processing (llama.cpp)
 LLM_GGUF_MODELS = {
+    "gemma3-1b": {
+        "name": "Gemma 3 1B ⭐",
+        "size": "806 MB",
+        "size_bytes": 806_058_496,
+        "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf",
+        "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
+        "description": "Top recommendation. Most consistent gentle-guide cleanup across tones; smaller and faster than Qwen 3.5.",
+        "speed": "Very Fast",
+        "accuracy": "Excellent",
+        "recommended": True,
+    },
     "qwen3.5-2b": {
-        "name": "Qwen 3.5 2B ⭐",
+        "name": "Qwen 3.5 2B",
         "size": "1.3 GB",
         "size_bytes": 1_390_000_000,
         "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
-        "description": "Top recommendation. Best balance of speed and quality for dictation.",
+        "description": "Capable reasoning model, but less consistent than Gemma 3 1B for light dictation cleanup.",
         "speed": "Very Fast",
         "accuracy": "Excellent",
-        "recommended": True,
+    },
+    "lfm2.5-1.2b": {
+        "name": "LFM2.5 1.2B",
+        "size": "697 MB",
+        "size_bytes": 730_895_168,
+        "url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+        "filename": "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+        "description": "Liquid AI on-device model. Very fast, but tended to echo input unchanged in our cleanup eval.",
+        "speed": "Very Fast",
+        "accuracy": "Fair",
     },
     "phi-3-mini": {
         "name": "Phi-3 Mini (3.8B)",
@@ -6048,7 +6091,9 @@ class WayfinderApp(ctk.CTk):
         # Style selection cards
         tone_container = ctk.CTkFrame(tone_tile, fg_color="transparent")
         tone_container.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
-        
+        self.tone_container = tone_container   # kept so Voice Profile can be shown/hidden without a full rebuild
+        self.voice_profile_frame = None        # set by _build_voice_profile_section when Personal is active
+
         self.tone_buttons = {}
         self.tone_checkmarks = {}  # Store checkmark label references
         self.tone_title_labels = {}  # Store title label references
@@ -6417,41 +6462,9 @@ class WayfinderApp(ctk.CTk):
         if tone_id == current_tone:
             return
 
-        self.config["output_tone"] = tone_id
-        
-        # Also update the whisper prompt to match the tone
-        # Dev mode includes vocabulary hints to help recognize git/coding terms
-        tone_prompts = {
-            "minimal": "Dictation with natural speech.",
-            "professional": "This is a professional dictation with formal language, proper punctuation, and business-appropriate terminology.",
-            "casual": "This is a casual conversation with natural, relaxed language and everyday expressions.",
-            "dev": "Developer dictation for coding and git. Terms: main, dev, branch, pull, push, commit, merge, rebase, checkout, stash, diff, log, fetch, clone, fork, repo, PR, issue, Cursor, VS Code, npm, pip, yarn, pnpm, API, JSON, TypeScript, Python, JavaScript, React, function, class, variable, const, let, import, export, async, await, promise, callback, component, props, state, hook, useState, useEffect.",
-            "personal": "Natural dictation in the user's personal speaking style.",
-        }
-        self.config["prompt"] = tone_prompts.get(tone_id, tone_prompts["professional"])
-        
-        save_config(self.config)
-        
-        # Update card styles
-        for tid, card in self.tone_buttons.items():
-            is_selected = tid == tone_id
-            card.configure(
-                fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_input"],
-                border_width=2 if is_selected else 1,
-                border_color=COLORS["accent"] if is_selected else COLORS["border_subtle"],
-            )
-        
-        # Rebuild the style tab to update checkmarks and show/hide voice profile section
-        self._rebuild_style_tab()
-        
-        tone_labels = {
-            "minimal": "🎤 Minimal",
-            "professional": "💼 Professional",
-            "casual": "💬 Casual",
-            "dev": "🖥️ Dev",
-            "personal": "✨ Personal"
-        }
-        self.log(f"✎ Style: {tone_labels.get(tone_id, tone_id)}")
+        # Everything else (config + Whisper prompt + save + log + smooth UI/overlay sync)
+        # is owned by the shared core so the click and hotkey paths stay identical.
+        self._set_output_style(tone_id)
     
     def _on_intensity_changed(self, tone_id: str, intensity_id: str) -> None:
         """Handle intensity change for a specific tone."""
@@ -6525,7 +6538,73 @@ class WayfinderApp(ctk.CTk):
                         checkmark.pack_forget()
                 except Exception:
                     pass
-    
+
+    def _update_voice_profile_visibility(self, tone_id: str) -> None:
+        """Show the Voice Profile section only for the Personal style by adding/removing
+        just that one sub-frame — no full-tab rebuild (this is what avoids the black flash).
+        The section sits at the end of tone_container (after the compatibility banner); the
+        Strong/Caricature toggles live on the parent tone_tile, so ordering is preserved."""
+        if not hasattr(self, "tone_container"):
+            return  # Style tab not built yet (e.g. never opened)
+
+        # Treat a destroyed-but-not-None frame as absent so we never re-show a dead widget.
+        frame = getattr(self, "voice_profile_frame", None)
+        if frame is not None:
+            try:
+                if not frame.winfo_exists():
+                    frame = None
+                    self.voice_profile_frame = None
+            except Exception:
+                frame = None
+                self.voice_profile_frame = None
+
+        if tone_id == "personal":
+            if frame is None:
+                try:
+                    self._build_voice_profile_section(self.tone_container)
+                except Exception:
+                    pass
+        elif frame is not None:
+            try:
+                frame.destroy()
+            except Exception:
+                pass
+            self.voice_profile_frame = None
+
+    def _apply_style_to_ui(self, tone_id: str) -> None:
+        """Apply a style change to every UI surface, smoothly (no full-tab rebuild).
+        Shared by the in-app Style tab click and the style-toggle hotkey so the two paths
+        can't drift. UI-only — callers own the config writes via _set_output_style."""
+        try:
+            self._update_style_selection(tone_id)           # cards + checkmarks + titles
+        except Exception:
+            pass
+        try:
+            self._update_voice_profile_visibility(tone_id)  # show/hide the Personal sub-section
+        except Exception:
+            pass
+        try:
+            self._update_compatibility_banner()             # banner depends on the active tone/config
+        except Exception:
+            pass
+        # Update the floating always-on overlay pill (send_command already swallows errors).
+        if getattr(self, "_use_pyqt_overlay", False) and getattr(self, "overlay_controller", None):
+            self.overlay_controller.send_command({"cmd": "style", "value": tone_id})
+
+    def _set_output_style(self, tone_id: str) -> None:
+        """Single source of truth for changing the output style: writes config (tone +
+        Whisper prompt), persists, logs, and syncs every UI surface. Used by BOTH the
+        Style tab click and the style-toggle hotkey. Premium gating, if any, is the
+        caller's responsibility."""
+        if tone_id == self.config.get("output_tone"):
+            return  # already on this style — nothing to do
+        self.config["output_tone"] = tone_id
+        # Keep the Whisper prompt in sync with the tone (dev vocab hints, etc.)
+        self.config["prompt"] = TONE_PROMPTS.get(tone_id, TONE_PROMPTS["professional"])
+        save_config(self.config)
+        self.log(f"✎ Style: {STYLE_LABELS.get(tone_id, tone_id)}")
+        self._apply_style_to_ui(tone_id)
+
     def _rebuild_style_tab(self) -> None:
         """Rebuild the style tab to reflect current settings."""
         # Destroy current content
@@ -6949,6 +7028,7 @@ class WayfinderApp(ctk.CTk):
         if not self.feature_gate.has_feature("voice_profiles"):
             locked_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"])
             locked_frame.pack(fill="x", pady=(8, 0))
+            self.voice_profile_frame = locked_frame  # tracked so it can be removed without a full tab rebuild
             ctk.CTkLabel(
                 locked_frame, text="Voice Profiles require Wayfinder Aura Premium",
                 font=(self.font_body[0], 12), text_color=COLORS["text_muted"],
@@ -6963,6 +7043,7 @@ class WayfinderApp(ctk.CTk):
 
         profile_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"])
         profile_frame.pack(fill="x", pady=(8, 0))
+        self.voice_profile_frame = profile_frame  # tracked so it can be removed without a full tab rebuild
 
         try:
             from wayfinder.core.voice_profile import get_voice_profile
@@ -12998,16 +13079,7 @@ class WayfinderApp(ctk.CTk):
         Args:
             target_style: If None, cycle to next style. Otherwise set to specified style.
         """
-        # Style cycle order: Minimal → Professional → Casual → AI Prompt → Personal
-        STYLE_CYCLE = ["minimal", "professional", "casual", "dev", "personal"]
-        STYLE_NAMES = {
-            "minimal": "🎤 Minimal",
-            "professional": "💼 Professional",
-            "casual": "💬 Casual",
-            "dev": "🖥️ Dev",
-            "personal": "✨ Personal"
-        }
-        
+        # Cycle order + labels live in module-level STYLE_CYCLE / STYLE_LABELS (single source).
         if target_style and target_style in STYLE_CYCLE:
             # Set specific style
             next_style = target_style
@@ -13022,27 +13094,9 @@ class WayfinderApp(ctk.CTk):
             next_index = (current_index + 1) % len(STYLE_CYCLE)
             next_style = STYLE_CYCLE[next_index]
         
-        # Skip if already on this style
-        if next_style == self.config.get("output_tone"):
-            return
-        
-        # Update config
-        self.config["output_tone"] = next_style
-        save_config(self.config)
-        
-        # Log the change
-        style_name = STYLE_NAMES.get(next_style, next_style.title())
-        self.log(f"✎ Style: {style_name}")
-        
-        # Update overlay indicator
-        if self._use_pyqt_overlay and self.overlay_controller:
-            self.overlay_controller.send_command({"cmd": "style", "value": next_style})
-        
-        # Update main UI Style tab to match (smooth, no flicker)
-        try:
-            self._update_style_selection(next_style)
-        except Exception:
-            pass  # UI might not be ready
+        # Shared core handles skip-if-same, config + Whisper prompt, save, log, and the smooth
+        # UI + overlay-pill sync — identical to the in-app Style tab click (no path drift).
+        self._set_output_style(next_style)
 
     def start_recording(self):
         try:

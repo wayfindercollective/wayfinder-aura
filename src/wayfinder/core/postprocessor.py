@@ -44,17 +44,17 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
         "caricature": "Add [nervous laughter], [ummmm], [clears throat] throughout. Make it sound anxious and hesitant.",
     },
     "professional": {
-        "standard": "Use proper capitalization and punctuation.",
+        "standard": "Keep the speaker's words and order. Tighten punctuation and capitalization only. Do not restructure.",
         "strong": "Professional email style. Clear, polite, direct. Remove casual filler.",
         "caricature": "Corporate buzzwords overload. Use: synergy, leverage, circle back, low-hanging fruit. End with 'Thoughts? 👇'",
     },
     "casual": {
-        "standard": "Relaxed punctuation, lowercase okay.",
+        "standard": "Keep the speaker's words and order. Relaxed and human, like a calm text. Lowercase is fine. Do not rewrite.",
         "strong": "Friendly text message. Light slang okay (gonna, wanna). Gender-neutral (no 'man', 'bro', 'dude'). Relaxed tone.",
         "caricature": "Extreme Gen-Z slang. Use: fr fr, no cap, lowkey, slay, 💀😭. All lowercase. Be dramatic and funny.",
     },
     "dev": {
-        "standard": "Developer context. Recognize technical terms (git commands, file paths, function names). Preserve the user's natural phrasing.",
+        "standard": "Developer context. Keep code and git terms intact. Do not restructure.",
         "strong": "Clean up for Slack or code comments. Recognize git and programming terms. Keep the user's voice — tighten, don't rewrite.",
         "caricature": "Over-engineered AI prompt style. Add CRITICAL:, IMPORTANT:, use CAPS for emphasis. End with 'my career depends on this 🙏'",
     },
@@ -77,17 +77,17 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
         "caricature": "Use... SO many ellipses... everywhere... Add [annotations] constantly: [clears throat], [nervous laughter], [dies inside], [sweating].",
     },
     "professional": {
-        "standard": "Use proper punctuation and capitalization.",
+        "standard": "Use proper capitalization and punctuation. Fix only light slang, e.g. \"oh thats tight bro\" -> \"Oh, very cool brother.\" Keep sentence order.",
         "strong": "Use proper punctuation. Structure with clear paragraphs if needed.",
         "caricature": "Use EXCESSIVE CAPS for EMPHASIS on KEY BUSINESS TERMS. Add unnecessary bullet points. Include a 'Key Takeaways' section. Sign off with 'Best, [Name] | Thought Leader | Disruptor | Coffee Enthusiast ☕'.",
     },
     "casual": {
-        "standard": "Relaxed punctuation. Periods optional at end of sentences.",
+        "standard": "Relaxed punctuation, lowercase is fine, periods optional. Do not add heavy punctuation.",
         "strong": "No periods. Text message style. Lowercase is fine. Only use ? when asking.",
         "caricature": "all lowercase always. no periods ever. excessive question marks??? multiple exclamation marks!!! add emojis constantly 💀😭🔥✨ break up sentences for dramatic. effect. like. this.",
     },
     "dev": {
-        "standard": "Use clear punctuation. Preserve technical terms exactly. Do not restructure sentences.",
+        "standard": "Light punctuation. Keep technical terms exactly.",
         "strong": "Use clear punctuation. Preserve all technical terminology. Only add structure (bullets, code blocks) if the user clearly listed items.",
         "caricature": "Use XML tags: <context>, <objective>, <constraints>, <expected_output>. Add numbered steps. Include [CRITICAL], [IMPORTANT], [WARNING], [NOTE] prefixes. Use ```code blocks``` for emphasis. Add a ## Prerequisites section.",
     },
@@ -109,17 +109,17 @@ FILLER_RULES: Dict[str, Dict[str, str]] = {
         "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
     },
     "professional": {
-        "standard": "Remove filler words: um, uh, ah, like, you know. Keep the user's sentence structure.",
+        "standard": "Remove filler sounds (um, uh, ah). Keep the speaker's sentence structure.",
         "strong": "Remove all filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well.",
         "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
     },
     "casual": {
-        "standard": "Remove filler sounds: um, uh, ah. Keep casual filler like 'like' and 'you know' — they sound natural.",
+        "standard": "Remove filler sounds (um, uh, ah). Keep casual words like 'like' and 'you know' — they sound natural.",
         "strong": "Remove filler words: um, uh, ah, like, you know. Keep the user's sentence structure.",
         "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
     },
     "dev": {
-        "standard": "Remove ONLY filler sounds: um, uh, ah, er. Keep discourse markers like 'so', 'basically', 'actually' — they're normal in technical speech.",
+        "standard": "Remove um, uh, ah. Keep 'so', 'basically', 'actually'.",
         "strong": "Remove filler sounds: um, uh, ah. Remove 'like' and 'you know' if used as filler, but keep 'so', 'basically', 'actually'.",
         "caricature": "Keep ALL filler words and ADD MORE for comedic effect. Exaggerate hesitation and verbal tics.",
     },
@@ -1576,6 +1576,18 @@ class LlamaCppBackend(PostProcessorBackend):
 # llama.cpp CLI Backend (Local - No Python Bindings Required)
 # =============================================================================
 
+def _is_reasoning_model(model_path: str) -> bool:
+    """Heuristic: does this local model emit <think> reasoning blocks by default?
+
+    Qwen3 / Qwen3.5 are hybrid-reasoning; QwQ, DeepSeek-R1 and *-thinking variants
+    too. We must NOT match qwen2.5 (non-reasoning) — hence the explicit qwen3 check.
+    """
+    name = os.path.basename(model_path or "").lower()
+    if "qwen3" in name:  # covers qwen3, qwen3.5, qwen35
+        return True
+    return any(tok in name for tok in ("qwq", "-r1", "deepseek-r1", "thinking", "reasoning"))
+
+
 class LlamaCppCliBackend(PostProcessorBackend):
     """
     Local LLM backend using llama.cpp CLI binary (llama-simple).
@@ -1595,15 +1607,23 @@ class LlamaCppCliBackend(PostProcessorBackend):
         max_tokens: int = 1024,
         temperature: float = 0.1,
         timeout: int = 60,
+        output_tone: str = "professional",
+        strong_mode: bool = False,
+        caricature_mode: bool = False,
     ):
-        # Use llama-simple instead of llama-cli for non-interactive mode
+        # Resolve the actual CLI binary. Prefer llama-simple (non-interactive,
+        # stable stdout format). Be robust to upstream renames (llama.cpp renamed
+        # llama-cli -> llama): if the configured binary is the generic CLI name or
+        # is missing, search the same directory for a known-good sibling.
         binary_path = os.path.expanduser(llama_binary)
-        # If llama-cli was specified, check if llama-simple exists in same dir
-        if binary_path.endswith('llama-cli'):
-            simple_path = binary_path.replace('llama-cli', 'llama-simple')
-            if Path(simple_path).exists():
-                binary_path = simple_path
-        
+        bin_dir = Path(binary_path).parent
+        if binary_path.endswith(("llama-cli", "/llama")) or not Path(binary_path).exists():
+            for name in ("llama-simple", "llama-cli", "llama"):
+                cand = bin_dir / name
+                if cand.exists():
+                    binary_path = str(cand)
+                    break
+
         self.llama_binary = binary_path
         self.model_path = os.path.expanduser(model_path) if model_path else ""
         self.n_ctx = n_ctx
@@ -1612,7 +1632,17 @@ class LlamaCppCliBackend(PostProcessorBackend):
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.timeout = timeout
-    
+        # Tone is threaded in from config so the CLI path applies real per-tone
+        # guidance instead of collapsing every styled tone onto one generic prompt.
+        # Intensity stays "standard" here — strong/caricature are out of the CLI
+        # path's scope (it has always produced standard-style output regardless).
+        self.output_tone = output_tone or "professional"
+        self.intensity = "standard"
+        # Reasoning models (Qwen3/3.5, QwQ, R1) emit <think> blocks by default and
+        # would spend the token budget reasoning instead of answering. Detected here
+        # so build_cli_prompt can pre-fill an empty think block to suppress it.
+        self.is_reasoning = _is_reasoning_model(self.model_path)
+
     def get_name(self) -> str:
         return "llama.cpp CLI (Local)"
     
@@ -1624,28 +1654,44 @@ class LlamaCppCliBackend(PostProcessorBackend):
             return False
         return Path(self.model_path).exists()
     
-    def _build_simple_prompt(self, text: str, config_tone: str = "minimal") -> str:
+    def build_cli_prompt(self, text: str, tone: str = "minimal", intensity: str = "standard") -> str:
         """
-        Build a simple prompt optimized for llama-simple CLI.
-        Uses a completion-style format that works well with small models.
-        
-        Note: We use a clear instruction format to avoid models echoing back
-        the instruction as part of their output.
+        Build a compact prompt optimized for llama-simple CLI.
+
+        Pure function (no subprocess) so it can be unit-tested without a model.
+        Pulls per-tone guidance from the shared TONE_GUIDANCE/FORMATTING_RULES/
+        FILLER_RULES dicts so the CLI path applies the SAME tone steering as the
+        python-bindings path — the dicts are the single source of truth.
+
+        The format stays a single 'Cleaned text:' completion marker (which the
+        stdout parser depends on) and leads with a hard "keep ~90%, don't rewrite"
+        guard so a 2B/1B model treats the tone as a guide, not a rewrite license.
         """
-        if config_tone == "minimal":
+        if tone == "minimal":
             # Minimal: just remove um/uh/ah - use clear instruction format
-            return f"""Task: Remove only filler sounds (um, uh, ah, er) from the text below. Output ONLY the cleaned text, nothing else.
+            prompt = f"""Task: Remove only filler sounds (um, uh, ah, er) from the text below. Keep every other word and the original order. Output ONLY the cleaned text, nothing else.
 
 Text: {text}
 
 Cleaned text:"""
         else:
-            # Standard cleanup with light grammar fixes
-            return f"""Task: Clean up the text below by removing filler words and fixing grammar. Output ONLY the cleaned text, nothing else.
+            guidance = get_tone_guidance(tone, intensity)
+            formatting = get_formatting_rules(tone, intensity)
+            filler = get_filler_rules(tone, intensity)
+            prompt = f"""Task: Lightly clean the text below. Keep about 90 percent of the speaker's exact words and their order. Do not rewrite, summarize, reorder, or add ideas.
+Guide: {guidance} {formatting} {filler}
+Output ONLY the cleaned text, nothing else.
 
 Text: {text}
 
 Cleaned text:"""
+
+        # For reasoning models, pre-fill an empty think block so the model skips
+        # its <think> reasoning and continues straight to the cleaned text. Without
+        # this, Qwen3/3.5 burn the whole token budget reasoning and never answer.
+        if getattr(self, "is_reasoning", False):
+            prompt += "<think>\n\n</think>\n"
+        return prompt
     
     def process(self, text: str, prompt_template: str) -> str:
         """
@@ -1676,130 +1722,49 @@ Cleaned text:"""
             return text
         
         try:
-            # Detect tone from prompt template
-            prompt_lower = prompt_template.lower()
-            is_minimal = (
-                "filler sounds" in prompt_lower or 
-                "um/uh/ah" in prompt_lower or
-                "just remove um" in prompt_lower or
-                "remove um, uh, ah" in prompt_lower or
-                "remove only filler" in prompt_lower or  # New prompt format
-                "um, uh, ah, er" in prompt_lower  # New prompt format
-            )
-            tone = "minimal" if is_minimal else "standard"
+            # Route by the explicit tone threaded in from config. This is the fix
+            # for the old bug where every styled tone collapsed onto one of two
+            # generic prompts (and dev/casual misrouted to the minimal prompt).
+            tone = self.output_tone or "professional"
+            if tone not in ("minimal", "professional", "casual", "dev", "personal"):
+                # Fallback: legacy sniff (should not normally trigger now)
+                prompt_lower = prompt_template.lower()
+                is_minimal = (
+                    "remove only filler" in prompt_lower or
+                    "um, uh, ah, er" in prompt_lower
+                )
+                tone = "minimal" if is_minimal else "professional"
+
+            # Build the compact, tone-aware prompt for the CLI (llama-simple)
+            simple_prompt = self.build_cli_prompt(text, tone, self.intensity)
             
-            # Build simple prompt for CLI (much better for llama-simple)
-            simple_prompt = self._build_simple_prompt(text, tone)
-            
-            # Estimate tokens: ~1.3x input length for safety
-            estimated_output_tokens = min(self.max_tokens, max(30, int(len(text) * 0.4)))
-            
-            # Build command for llama-simple
-            # IMPORTANT: -ngl must come BEFORE -p to avoid the model seeing it in context
-            cmd = [
-                self.llama_binary,
-                "-m", self.model_path,
-            ]
-            
-            # GPU layers (-1 = all, 0 = none) - must come before -p
+            # Token budget: the cleaned text is ~the same length as the input.
+            # Give headroom so the answer isn't truncated (we trim any trailing
+            # annotation the model appends). Min 64 covers short inputs.
+            estimated_output_tokens = min(self.max_tokens, max(64, int(len(text) * 0.8)))
+
+            # Build command for llama-simple. The prompt is POSITIONAL (llama-simple's
+            # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),
+            # and -ngl must precede it so the model never sees the flag in context.
+            cmd = [self.llama_binary, "-m", self.model_path]
             if self.n_gpu_layers != 0:
                 ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
                 cmd.extend(["-ngl", str(ngl)])
-            
-            # Add remaining args - prompt must be last
-            cmd.extend([
-                "-n", str(estimated_output_tokens),
-                "-p", simple_prompt,
-            ])
-            
+            cmd.extend(["-n", str(estimated_output_tokens), simple_prompt])
+
             start_time = time.time()
-            
-            # Run llama-simple
             result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
+                cmd, capture_output=True, text=True, timeout=self.timeout,
             )
-            
             elapsed = time.time() - start_time
-            
+
             if result.returncode != 0:
                 stderr = result.stderr.strip()
                 if "error" in stderr.lower() and "warning" not in stderr.lower():
                     raise PostProcessingError(f"llama error: {stderr}")
-            
-            # Parse output - look for "Cleaned text:" or "Cleaned:" prefix in the response
-            output = result.stdout
-            
-            # Find lines containing cleaned output markers
-            cleaned = ""
-            for line in output.split('\n'):
-                # Check for both "Cleaned text:" and "Cleaned:" markers
-                for marker in ['Cleaned text:', 'Cleaned:']:
-                    if marker in line:
-                        # Extract the text after the marker
-                        idx = line.find(marker)
-                        response = line[idx + len(marker):].strip()
-                        # Stop at "main:" or other debug markers
-                        if 'main:' in response:
-                            response = response[:response.find('main:')].strip()
-                        if response:
-                            # Take first occurrence (avoid repetition)
-                            if not cleaned:
-                                cleaned = response
-                            break
-                if cleaned:
-                    break
-            
-            # Remove any trailing repetition or debug text
-            if cleaned:
-                # Stop at common model artifacts
-                for marker in ['(Cleaned', 'main:', 'decoded', '\n\n']:
-                    if marker in cleaned:
-                        cleaned = cleaned[:cleaned.find(marker)].strip()
-                
-                # Remove duplicate sentence endings
-                if cleaned.endswith('..'):
-                    cleaned = cleaned[:-1]
-            
-            # Fallback: if no "Cleaned:" found, the model might have just continued
-            if not cleaned:
-                # Try to find any reasonable text in output
-                for line in output.split('\n'):
-                    line = line.strip()
-                    if line.startswith('-p '):
-                        continue
-                    # Skip llama.cpp debug output
-                    if any(line.startswith(p) for p in ['llama_', 'ggml_', 'main:', 'graph_', 'sched_', '~llama', 'WARNING', 'Loading']):
-                        continue
-                    # Skip lines that look like prompt instructions (at start of line)
-                    line_lower = line.lower()
-                    if line_lower.startswith('task:') or line_lower.startswith('text:'):
-                        continue
-                    if line_lower.startswith('remove only filler') or line_lower.startswith('clean up the text'):
-                        continue
-                    if 'output only the cleaned' in line_lower:
-                        continue
-                    if line and len(line) > 10:
-                        cleaned = line
-                        break
-            
-            # Final cleanup: strip any instruction prefixes that might have been echoed
-            # This handles cases where the model outputs "Remove um/uh/ah only: <actual text>"
-            instruction_prefixes = [
-                'Remove um/uh/ah only:',
-                'Remove only filler sounds',
-                'Clean up (remove filler, fix grammar):',
-                'Clean up the text',
-            ]
-            for prefix in instruction_prefixes:
-                if cleaned.lower().startswith(prefix.lower()):
-                    cleaned = cleaned[len(prefix):].strip()
-                    # Also strip any "Text:" prefix that might follow
-                    if cleaned.lower().startswith('text:'):
-                        cleaned = cleaned[5:].strip()
-            
+
+            cleaned = self._extract_cli_output(result.stdout, simple_prompt)
+
             if not cleaned:
                 print("[Post-processing] ⚠ No output from llama - using original")
                 return text
@@ -1819,6 +1784,65 @@ Cleaned text:"""
             raise PostProcessingError(f"Could not execute: {self.llama_binary}")
         except Exception as e:
             raise PostProcessingError(f"llama processing failed: {e}")
+
+    def _extract_cli_output(self, stdout: str, prompt: str) -> str:
+        """Extract the model's answer from llama-simple stdout.
+
+        llama-simple echoes the full prompt verbatim then the generation, so the
+        most robust extraction is to take everything AFTER the prompt we sent. We
+        then strip any leading <think> block, cut at the first self-annotation the
+        model appends ("**Changes made:**", "Note:", bullet lists), and stop at
+        prompt repetition / debug markers. Returns the single cleaned paragraph.
+        """
+        if not stdout:
+            return ""
+
+        # Primary: split on the exact prompt (llama-simple echoes it verbatim).
+        idx = stdout.find(prompt)
+        if idx != -1:
+            gen = stdout[idx + len(prompt):]
+        else:
+            # Fallback: text after the last "Cleaned text:" marker.
+            m = stdout.rfind("Cleaned text:")
+            gen = stdout[m + len("Cleaned text:"):] if m != -1 else stdout
+
+        # Strip a leading think block if one slipped through (reasoning models).
+        gen = re.sub(r'^\s*<think>.*?</think>\s*', '', gen, flags=re.DOTALL)
+        gen = gen.strip()
+
+        # Cut at self-annotation / explanation blocks or any prompt repetition.
+        cut_markers = [
+            "\n\n**", "\n**Changes", "\nChanges made", "\nChanges:", "\nNote:",
+            "\n\n- ", "\n\n* ", "\n\nHere", "\n(Note", "\nExplanation",
+            "Cleaned text:", "\nText:", "\nTask:", "main:", "llama_", "~llama",
+            "\nGuide:", "Output ONLY",
+        ]
+        for mk in cut_markers:
+            j = gen.find(mk)
+            if j != -1:
+                gen = gen[:j]
+
+        # Keep the first paragraph; collapse internal newlines to a single block.
+        gen = gen.split("\n\n")[0].strip()
+        gen = re.sub(r'\s*\n\s*', ' ', gen).strip()
+
+        # Reject guidance echo: small models sometimes repeat the instructions
+        # instead of cleaning the text. Returning "" makes the caller fall back to
+        # the original text (safe) rather than emit instruction text as output.
+        low = gen.lower()
+        echo_signals = (
+            "developer context", "keep the speaker", "do not restructure",
+            "do not rewrite", "keep coding terms", "remove um", "remove filler",
+            "light punctuation", "relaxed punctuation", "tighten punctuation",
+            "output only", "lightly clean", "keep about 90",
+        )
+        if any(low.startswith(s) for s in echo_signals):
+            return ""
+
+        # Strip stray wrapping quotes the model sometimes adds.
+        if len(gen) >= 2 and gen[0] in "\"'" and gen[-1] == gen[0]:
+            gen = gen[1:-1].strip()
+        return gen
 
 
 # =============================================================================
@@ -2148,9 +2172,16 @@ def get_backend(config: dict) -> PostProcessorBackend:
         # Default to llama.cpp - prefer CLI backend if available
         use_cli = config.get("llama_cpp_use_cli", True)
         llama_binary = os.path.expanduser(config.get("llama_cpp_binary", "~/llama.cpp/build/bin/llama-cli"))
-        
-        # Use CLI backend if enabled and binary exists
-        if use_cli and Path(llama_binary).exists():
+
+        # Robust to upstream renames (llama-cli -> llama): the CLI backend is
+        # usable if the configured binary OR any known sibling exists in its dir.
+        _bin_dir = Path(llama_binary).parent
+        _cli_present = Path(llama_binary).exists() or any(
+            (_bin_dir / n).exists() for n in ("llama-simple", "llama-cli", "llama")
+        )
+
+        # Use CLI backend if enabled and a usable binary exists
+        if use_cli and _cli_present:
             return LlamaCppCliBackend(
                 llama_binary=llama_binary,
                 model_path=config.get("llama_cpp_model_path", ""),
@@ -2159,6 +2190,9 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 n_gpu_layers=config.get("llama_cpp_n_gpu_layers", -1),
                 max_tokens=config.get("post_processing_max_tokens", 1024),
                 temperature=config.get("post_processing_temperature", 0.1),
+                output_tone=config.get("output_tone", "professional"),
+                strong_mode=config.get("strong_mode", False),
+                caricature_mode=config.get("caricature_mode", False),
             )
         
         # Fall back to Python bindings (llama-cpp-python)
@@ -2218,13 +2252,18 @@ def process_with_config(text: str, config: dict) -> str:
     if not config.get("post_processing_enabled", True):
         return text
 
-    # === SHORT INPUT BYPASS: Skip LLM for very short text ===
-    # Small models (2B) hallucinate badly on short inputs — they generate
-    # 100x+ fabricated text that gets caught by is_hallucination() and falls
-    # back to original anyway, wasting ~6 seconds for nothing.
+    # === SHORT INPUT BYPASS: Skip LLM for ULTRA-short text only ===
+    # Small models can hallucinate on short inputs, but the is_hallucination()
+    # guard already falls back to the original text when that happens. The bypass
+    # used to fire at <=10 words, which meant short styled phrases (e.g. a 4-word
+    # "oh thats tight bro") never got tone cleanup at all. We now only bypass
+    # 1–3 word inputs (where there is essentially nothing for a tone to do and
+    # the latency isn't worth it); 4+ word styled inputs go through the LLM and
+    # rely on the hallucination guard for safety.
+    SHORT_INPUT_BYPASS_MAX_WORDS = 3
     input_words = len(text.split())
     backend_type = config.get("post_processing_backend", "llama_cpp")
-    if input_words <= 10 and backend_type == "llama_cpp":
+    if input_words <= SHORT_INPUT_BYPASS_MAX_WORDS and backend_type == "llama_cpp":
         start_time = time.time()
         result = fast_filler_removal(text)
         elapsed = time.time() - start_time

@@ -33,3 +33,6 @@ recordings/
 *.AppImage
 
 
+
+# Tone eval harness generated reports
+scripts/tone_eval/results/

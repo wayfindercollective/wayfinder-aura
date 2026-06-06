@@ -49,17 +49,40 @@ elif IS_APPIMAGE and APPDIR:
 else:
     ICON_PATH = PROJECT_ROOT / "assets" / "icon.png"
 
+# Preferred local post-processing models, best-first. The June 2026 tone eval
+# found Gemma 3 1B the most consistent "gentle guide" cleaner — it reliably
+# applies per-tone formatting (e.g. professional "oh thats tight bro" ->
+# "Oh, very cool brother.") where Qwen 3.5 2B was inconsistent and LFM2.5 echoed
+# the input verbatim. Keep Qwen 3.5 / 2.5 as fallbacks. New models added here are
+# picked up automatically by _pick_llm (no per-environment edits needed).
+_LLM_PREFERENCE = [
+    "google_gemma-3-1b-it-Q4_K_M.gguf",
+    "Qwen3.5-2B-Q4_K_M.gguf",
+    "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+]
+
+
+def _pick_llm(*dirs: str) -> str:
+    """Return the first preferred model that exists across dirs (best-first),
+    else the top-preference path in the last dir as a download target."""
+    for fname in _LLM_PREFERENCE:
+        for d in dirs:
+            p = os.path.join(d, fname)
+            if os.path.exists(p):
+                return p
+    return os.path.join(dirs[-1], _LLM_PREFERENCE[0])
+
+
 # Default whisper paths - varies by runtime environment
 if IS_FLATPAK:
     _default_whisper_binary = "/app/bin/whisper-cli"
     _default_model_dir = os.environ.get("WHISPER_MODELS_DIR", "/app/share/whisper-models")
     # base.en is the bundled model and the right Deck-class default (Issues 11/17).
     _default_model_path = f"{_default_model_dir}/ggml-base.en.bin"
-    # LLM model for post-processing (bundled in Flatpak)
-    # Prefer Qwen 3.5 if available, fall back to Qwen 2.5
-    _flatpak_llm_new = "/app/share/llm-models/Qwen3.5-2B-Q4_K_M.gguf"
-    _flatpak_llm_old = "/app/share/llm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-    _default_llm_model_path = _flatpak_llm_new if os.path.exists(_flatpak_llm_new) else _flatpak_llm_old
+    # LLM model for post-processing (bundled in Flatpak, or user-downloaded).
+    # Best-first across the bundled dir and the user data dir.
+    _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
+    _default_llm_model_path = _pick_llm("/app/share/llm-models", _user_llm_dir)
 elif IS_APPIMAGE and APPDIR:
     # AppImage uses bundled binaries if they exist, otherwise fall back to system
     _appimage_whisper = os.path.join(APPDIR, "usr", "bin", "whisper-cli")
@@ -69,18 +92,10 @@ elif IS_APPIMAGE and APPDIR:
         _default_model_path = os.path.join(_appimage_model_dir, "ggml-small.en.bin")
     else:
         _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
-    # Prefer Qwen 3.5 if available, fall back to Qwen 2.5
-    _appimage_llm_new = os.path.join(APPDIR, "usr", "share", "llm-models", "Qwen3.5-2B-Q4_K_M.gguf")
-    _appimage_llm_old = os.path.join(APPDIR, "usr", "share", "llm-models", "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+    # Prefer the bundled model, then any user-downloaded one (best-first).
+    _appimage_llm_dir = os.path.join(APPDIR, "usr", "share", "llm-models")
     _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
-    if os.path.exists(_appimage_llm_new):
-        _default_llm_model_path = _appimage_llm_new
-    elif os.path.exists(_appimage_llm_old):
-        _default_llm_model_path = _appimage_llm_old
-    elif os.path.exists(os.path.join(_user_llm_dir, "Qwen3.5-2B-Q4_K_M.gguf")):
-        _default_llm_model_path = os.path.join(_user_llm_dir, "Qwen3.5-2B-Q4_K_M.gguf")
-    else:
-        _default_llm_model_path = os.path.join(_user_llm_dir, "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+    _default_llm_model_path = _pick_llm(_appimage_llm_dir, _user_llm_dir)
 else:
     _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
     _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
@@ -90,9 +105,7 @@ else:
         _user_llm_dir = str(Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models")
     else:
         _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
-    _llm_new = os.path.join(_user_llm_dir, "Qwen3.5-2B-Q4_K_M.gguf")
-    _llm_old = os.path.join(_user_llm_dir, "qwen2.5-1.5b-instruct-q4_k_m.gguf")
-    _default_llm_model_path = _llm_new if os.path.exists(_llm_new) else _llm_old
+    _default_llm_model_path = _pick_llm(_user_llm_dir)
 
 # Default configuration values
 DEFAULT_CONFIG: dict[str, Any] = {

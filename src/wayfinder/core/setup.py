@@ -66,12 +66,19 @@ MODEL_DOWNLOAD_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main
 
 # LLM models for post-processing (dictation cleanup)
 LLM_MODELS: dict[str, dict] = {
+    "google_gemma-3-1b-it-Q4_K_M": {
+        "label": "Gemma 3 1B (Recommended)",
+        "size": "~806 MB",
+        "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf",
+        "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
+        "note": "Most consistent gentle-guide cleanup across tones; smaller and faster than Qwen 3.5",
+    },
     "Qwen3.5-2B-Q4_K_M": {
-        "label": "Qwen 3.5 2B (Recommended)",
+        "label": "Qwen 3.5 2B",
         "size": "~1.3 GB",
         "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
-        "note": "Best balance of speed and quality for dictation cleanup",
+        "note": "Capable reasoning model; less consistent than Gemma 3 for light cleanup",
     },
     "qwen2.5-1.5b-instruct-q4_k_m": {
         "label": "Qwen 2.5 1.5B (Legacy)",
