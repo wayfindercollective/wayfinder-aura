@@ -17,15 +17,30 @@ from ..config import CONFIG_DIR
 # Cache file for update check results
 UPDATE_CACHE_FILE = CONFIG_DIR / "model_updates_cache.json"
 
-# Check interval: once per day (seconds)
-CHECK_INTERVAL = 86400
+# Check interval: once per week (seconds)
+CHECK_INTERVAL = 604800
 
-# HuggingFace repos to monitor for updates
+# HuggingFace repos to monitor for updates. Keep in sync with the download
+# catalog (LLM_GGUF_MODELS in wayfinder_main.py / LLM_MODELS in core/setup.py) —
+# every downloadable post-processing model should be monitored so new revisions
+# are detected and offered for download.
 MONITORED_MODELS = {
+    "llm_gemma3_1b": {
+        "repo_id": "bartowski/google_gemma-3-1b-it-GGUF",
+        "description": "Gemma 3 1B (post-processing, recommended)",
+        "current_filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
+        "category": "llm",
+    },
     "llm_qwen35": {
         "repo_id": "unsloth/Qwen3.5-2B-GGUF",
         "description": "Qwen 3.5 2B (post-processing)",
         "current_filename": "Qwen3.5-2B-Q4_K_M.gguf",
+        "category": "llm",
+    },
+    "llm_lfm2_5": {
+        "repo_id": "LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
+        "description": "LFM2.5 1.2B (post-processing)",
+        "current_filename": "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
         "category": "llm",
     },
     "llm_qwen25": {
