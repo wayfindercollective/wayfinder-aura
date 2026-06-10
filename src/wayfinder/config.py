@@ -40,7 +40,7 @@ else:
 
 # Handle icon path for Flatpak / AppImage / regular install
 if IS_FLATPAK:
-    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.user.WayfinderAura')}.png"
+    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.wayfindercollective.WayfinderAura')}.png"
     if not ICON_PATH.exists():
         ICON_PATH = PROJECT_ROOT / "assets" / "icon.png"
 elif IS_APPIMAGE and APPDIR:

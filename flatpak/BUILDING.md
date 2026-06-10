@@ -20,10 +20,10 @@ flatpak install flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.
 cd flatpak/
 
 # Build and install locally
-flatpak-builder --user --install --force-clean build-dir io.github.user.WayfinderVoice.yml
+flatpak-builder --user --install --force-clean build-dir io.github.wayfindercollective.WayfinderAura.yml
 
 # Run the app
-flatpak run io.github.user.WayfinderVoice
+flatpak run io.github.wayfindercollective.WayfinderAura
 ```
 
 ## Generating Python Dependencies
@@ -44,9 +44,9 @@ This creates `python-deps.json` which contains all the pip packages with their S
 
 ```
 flatpak/
-├── io.github.user.WayfinderVoice.yml      # Main Flatpak manifest
-├── io.github.user.WayfinderVoice.desktop  # Desktop entry
-├── io.github.user.WayfinderVoice.metainfo.xml  # AppStream metadata
+├── io.github.wayfindercollective.WayfinderAura.yml      # Main Flatpak manifest
+├── io.github.wayfindercollective.WayfinderAura.desktop  # Desktop entry
+├── io.github.wayfindercollective.WayfinderAura.metainfo.xml  # AppStream metadata
 ├── wayfinder-aura-launcher.sh            # Launch script
 ├── flatpak-requirements.txt               # Python deps for Flatpak
 ├── python-deps.json                       # Generated pip sources
@@ -54,19 +54,15 @@ flatpak/
 └── BUILDING.md                            # This file
 ```
 
-## Customizing the App ID
+## App ID
 
-Before publishing, change `io.github.user` to your actual identifier:
-
-1. Rename all files from `io.github.user.WayfinderVoice.*` to your ID
-2. Update references in:
-   - `io.github.user.WayfinderVoice.yml` (app-id and all paths)
-   - `io.github.user.WayfinderVoice.metainfo.xml` (id, launchable, developer)
-   - `io.github.user.WayfinderVoice.desktop` (Icon)
-
-Example: If your GitHub username is `johndoe`:
-- App ID: `io.github.johndoe.WayfinderVoice`
-- Files: `io.github.johndoe.WayfinderVoice.yml`, etc.
+The app ID is `io.github.wayfindercollective.WayfinderAura`, derived from the
+upstream repository (github.com/wayfindercollective/wayfinder-aura) per Flathub
+convention. If you fork this project under a different account, rename the three
+`io.github.wayfindercollective.WayfinderAura.*` files and update the ID inside
+the manifest (app-id and install paths), the metainfo (id, launchable,
+developer), the desktop file (Icon), `flatpak/resize-icons.py`, and the
+`FLATPAK_ID` fallbacks in `wayfinder_main.py` / `src/wayfinder/config.py`.
 
 ## Publishing to Flathub
 
@@ -101,13 +97,13 @@ Detailed instructions: https://docs.flathub.org/docs/for-app-authors/submission
 
 ```bash
 # Validate AppStream metadata
-appstream-util validate io.github.user.WayfinderVoice.metainfo.xml
+appstream-util validate io.github.wayfindercollective.WayfinderAura.metainfo.xml
 
 # Validate desktop file
-desktop-file-validate io.github.user.WayfinderVoice.desktop
+desktop-file-validate io.github.wayfindercollective.WayfinderAura.desktop
 
 # Test the built app
-flatpak run io.github.user.WayfinderVoice
+flatpak run io.github.wayfindercollective.WayfinderAura
 ```
 
 ## Permissions Explained
@@ -144,10 +140,10 @@ Regenerate `python-deps.json` with the latest versions:
 
 ```bash
 # Rebuild after changes
-flatpak-builder --user --install --force-clean build-dir io.github.user.WayfinderVoice.yml
+flatpak-builder --user --install --force-clean build-dir io.github.wayfindercollective.WayfinderAura.yml
 
 # Check logs
-flatpak run io.github.user.WayfinderVoice 2>&1 | tee app.log
+flatpak run io.github.wayfindercollective.WayfinderAura 2>&1 | tee app.log
 ```
 
 
