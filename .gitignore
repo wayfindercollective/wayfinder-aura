@@ -36,3 +36,7 @@ recordings/
 
 # Tone eval harness generated reports
 scripts/tone_eval/results/
+
+# Local dev tooling (machine-specific paths, MCP server keys)
+.mcp.json
+.claude/

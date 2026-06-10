@@ -113,13 +113,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
     
-    # Hotkey settings
-    "hotkey_key": 61,  # F3 - default (F9=67 on Linux)
-    "hotkey_modifiers": [],
-    
+    # Hotkey settings — Super+F2 / Super+F3 by default.
+    # Bare F-keys collide with countless game keybinds (e.g. DAoC qbinds);
+    # Super+F* almost never does, since DEs reserve the Super key for the
+    # compositor. Existing user configs keep whatever they had saved.
+    "hotkey_key": 60,  # F2
+    "hotkey_modifiers": ["super"],
+
     # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal)
-    "style_toggle_key": 68,  # F10 default
-    "style_toggle_modifiers": [],
+    "style_toggle_key": 61,  # F3
+    "style_toggle_modifiers": ["super"],
     
     # Audio settings
     "audio_device": None,
