@@ -94,28 +94,15 @@
   <releases>
     <release version="1.1.0" date="2026-06-10">
       <description>
-        <p>Ship-readiness release</p>
+        <p>First public release of Wayfinder Aura</p>
         <ul>
+          <li>Local voice dictation with whisper.cpp — hotkey-triggered, Wayland and X11</li>
           <li>Steam Deck support: SIGILL-safe CPU build, R4 trigger socket, tray, font and scaling fixes</li>
           <li>Stable microphone selection by device name — survives PipeWire device renumbering</li>
           <li>Game-aware hotkeys: dictation keys pause while a GameMode game is running</li>
-          <li>New default hotkeys Super+F2 / Super+F3 (avoid in-game F-key collisions)</li>
+          <li>Default hotkeys Super+F2 / Super+F3 (avoid in-game F-key collisions)</li>
           <li>Tone-aware local post-processing with Gemma 3 1B as the default model</li>
-          <li>Online license activation with offline grace period</li>
-        </ul>
-      </description>
-    </release>
-    <release version="1.0.0" date="2024-12-22">
-      <description>
-        <p>Initial release of Wayfinder Aura</p>
-        <ul>
-          <li>Local voice dictation with whisper.cpp</li>
-          <li>Hotkey-triggered recording</li>
-          <li>Wayland and X11 support</li>
-          <li>System tray integration</li>
-          <li>Multiple whisper model support</li>
-          <li>Configurable typing speeds</li>
-          <li>Modern dark theme UI</li>
+          <li>System tray integration and configurable typing speeds</li>
         </ul>
       </description>
     </release>
