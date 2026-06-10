@@ -68,7 +68,7 @@ IS_MACOS = _sys.platform == 'darwin'
 # to $XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock (host<->sandbox shared) or /tmp.
 from wayfinder.config import SOCKET_PATH
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, SILENCE_PEAK_THRESHOLD
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
@@ -9885,48 +9885,43 @@ class WayfinderApp(ctk.CTk):
         """
         # Build options list with auto-detect first
         options = ["🎤 Auto-detect (Recommended)"]
-        device_map = {}  # Map display name -> device index
-        
+        device_map = {}        # display name -> device index (may be None for a
+                               # pactl source not yet mapped to a PortAudio device)
+        display_to_name = {}   # display name -> full device/source name (persisted)
+        name_to_display = {}   # full name (lower) -> display name
+
         try:
             all_devices = list_input_devices(exclude_outputs=True)
-            
+
             for dev in all_devices:
                 name = dev.get('name', f"Device {dev['index']}")
-                
+
                 # Create display name - truncate long names
                 short_name = name.split(':')[0].strip() if ':' in name else name.split('(')[0].strip()
                 if len(short_name) > 35:
                     short_name = short_name[:32] + "..."
-                
+
                 # Add star badge for recommended mics
                 if dev.get('recommended'):
                     display_name = f"{short_name} (★)"
                 else:
                     display_name = short_name
-                
+
                 # Ensure unique display names
                 if display_name in device_map:
                     display_name = f"{display_name} [{dev['index']}]"
-                
+
                 options.append(display_name)
                 device_map[display_name] = dev['index']
+                display_to_name[display_name] = name
+                name_to_display.setdefault(name.lower(), display_name)
         except Exception as e:
             print(f"Error getting audio devices for dropdown: {e}")
-        
-        # Store the device map for selection handling
+
+        # Store the maps for selection handling and name-based lookup
         self._mic_device_map = device_map
-        
-        # Also build a reverse map of device name -> display name for name-based lookup
-        self._mic_name_to_display = {}
-        try:
-            for dev in list_input_devices(exclude_outputs=True):
-                dev_name = dev.get('name', '')
-                for display_name, idx in device_map.items():
-                    if idx == dev['index']:
-                        self._mic_name_to_display[dev_name.lower()] = display_name
-                        break
-        except Exception:
-            pass
+        self._mic_display_to_name = display_to_name
+        self._mic_name_to_display = name_to_display
         
         # Find current selection
         # First check if we have a saved device name (preferred, since indices can change)
@@ -9968,23 +9963,17 @@ class WayfinderApp(ctk.CTk):
             self.config["audio_device_name"] = None
             device_display = "Auto-detect"
         else:
-            # Find the device index from the map
-            device_idx = self._mic_device_map.get(selection)
-            if device_idx is not None:
-                self.config["audio_device"] = device_idx
-                # Also save the device name for reconnection
-                try:
-                    from wayfinder.core.recorder import list_input_devices
-                    for dev in list_input_devices():
-                        if dev['index'] == device_idx:
-                            self.config["audio_device_name"] = dev['name']
-                            break
-                except Exception:
-                    pass
-                device_display = selection
-            else:
+            # A curated pactl source can map to index None (visible in the OS but not
+            # yet in PortAudio) — that's still a valid pick, persisted by NAME and
+            # resolved at record start. Only an unknown display string is an error.
+            if selection not in self._mic_device_map:
                 self.log(f"⚠ Could not find device: {selection}")
                 return
+            self.config["audio_device"] = self._mic_device_map[selection]
+            full_name = getattr(self, "_mic_display_to_name", {}).get(selection)
+            if full_name:
+                self.config["audio_device_name"] = full_name
+            device_display = selection
         
         # Save config
         save_config(self.config)
@@ -13323,6 +13312,15 @@ class WayfinderApp(ctk.CTk):
             return
 
         audio_path = self.recorder.stop()
+
+        # Silence guard: a muted/disconnected/wrong mic yields near-zero samples, and
+        # whisper hallucinates text on silence. Tell the user what's actually wrong
+        # instead of injecting junk or showing "no output".
+        if self.recorder.get_peak_amplitude() < SILENCE_PEAK_THRESHOLD:
+            self.recorder.cleanup()
+            self.on_error("No audio detected — mic muted or wrong device (Settings → Audio)", gen)
+            return
+
         self.executor.submit(self.transcribe_and_inject, audio_path, gen)
     
     def _stop_chunked_recording(self, gen=None):
@@ -13346,6 +13344,14 @@ class WayfinderApp(ctk.CTk):
             if self.chunked_recorder is recorder:
                 self.chunked_recorder = None
             self.on_error("Too short - speak longer", gen)
+            return
+
+        # Silence guard — same rationale as the simple-recording path.
+        if recorder.get_peak_amplitude() < SILENCE_PEAK_THRESHOLD:
+            recorder.cleanup()
+            if self.chunked_recorder is recorder:
+                self.chunked_recorder = None
+            self.on_error("No audio detected — mic muted or wrong device (Settings → Audio)", gen)
             return
 
         # Submit final chunk for transcription if exists

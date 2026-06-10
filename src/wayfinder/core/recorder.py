@@ -7,6 +7,7 @@ Supports chunked recording for indefinite duration sessions.
 """
 
 import queue
+import subprocess
 import sys
 import tempfile
 import threading
@@ -61,6 +62,13 @@ EXCLUDED_DEVICE_KEYWORDS = [
     # ALSA output nodes
     "alsa_output",
 ]
+
+
+# Peak amplitude below this means the recording is effectively silence — a muted,
+# disconnected, or wrong-device capture (true silence is exact zeros; floor noise on a
+# live mic is well above this). Whisper hallucinates text on silence, so callers should
+# check get_peak_amplitude() against this before transcribing and tell the user instead.
+SILENCE_PEAK_THRESHOLD = 0.001
 
 
 def is_output_device(device_name: str) -> bool:
@@ -221,27 +229,132 @@ def find_best_input_device(preferred_name: str | None = None) -> int | None:
 def get_input_device_by_name(name: str) -> int | None:
     """
     Find a device by name (partial match, case-insensitive).
-    
+
     Args:
         name: Device name to search for
-        
+
     Returns:
         Device index or None if not found
     """
     if not name:
         return None
-    
+
     try:
         devices = sd.query_devices()
         name_lower = name.lower()
-        
+
         for i, dev in enumerate(devices):
             if name_lower in dev.get('name', '').lower():
                 if dev.get('max_input_channels', 0) > 0:
                     return i
     except Exception:
         pass
-    
+
+    # The picker may have stored a pactl friendly description (e.g. "Webcam C920")
+    # that has no PortAudio name equivalent on Pulse-only systems — resolve it via
+    # the same source→device matching the curated picker uses.
+    try:
+        name_lower = name.lower()
+        for s in _pactl_input_sources():
+            if name_lower == s['description'].lower():
+                return _match_source_to_device(s, sd.query_devices(), sd.query_hostapis())
+    except Exception:
+        pass
+
+    return None
+
+
+def _pactl_input_sources() -> list[dict]:
+    """Real capture sources from pactl — the same list KDE/GNOME sound settings show.
+
+    Returns [{'name', 'description', 'alsa_card', 'alsa_device', 'is_default'}, ...] or
+    [] when pactl is unavailable or returns nothing (non-PipeWire/Pulse systems,
+    sandboxes without the socket). Monitor sources (sink loopbacks) are skipped — they
+    are playback taps, not microphones.
+    """
+    try:
+        out = subprocess.run(["pactl", "list", "sources"],
+                             capture_output=True, text=True, timeout=3)
+        if out.returncode != 0 or not out.stdout:
+            return []
+    except Exception:
+        return []
+
+    default_name = ""
+    try:
+        d = subprocess.run(["pactl", "get-default-source"],
+                           capture_output=True, text=True, timeout=3)
+        if d.returncode == 0:
+            default_name = d.stdout.strip()
+    except Exception:
+        pass
+
+    sources: list[dict] = []
+    cur: dict | None = None
+    for raw in out.stdout.splitlines():
+        line = raw.strip()
+        if line.startswith("Source #"):
+            cur = {"name": "", "description": "", "alsa_card": "", "alsa_device": "",
+                   "is_default": False}
+            sources.append(cur)
+        elif cur is None:
+            continue
+        elif line.startswith("Name:"):
+            cur["name"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Description:"):
+            cur["description"] = line.split(":", 1)[1].strip()
+        elif line.startswith("alsa.card = "):
+            cur["alsa_card"] = line.split("=", 1)[1].strip().strip('"')
+        elif line.startswith("alsa.device = "):
+            cur["alsa_device"] = line.split("=", 1)[1].strip().strip('"')
+
+    result = []
+    for s in sources:
+        if not s["name"] or s["name"].endswith(".monitor") or not s["description"]:
+            continue
+        s["is_default"] = bool(default_name) and s["name"] == default_name
+        result.append(s)
+    return result
+
+
+def _match_source_to_device(source: dict, devices, hostapis) -> int | None:
+    """Map a pactl source to its PortAudio device index.
+
+    Preference order: exact JACK/PipeWire name match (PipeWire names JACK capture
+    nodes after the source description) → exact name match on any host API → ALSA
+    "(hw:card,device)" match via the source's alsa.* properties (Pulse-only systems,
+    where descriptions never appear in PortAudio names) → substring match.
+    """
+    desc = source["description"].lower()
+    hw_tag = None
+    if source["alsa_card"]:
+        hw_tag = f"(hw:{source['alsa_card']},{source['alsa_device'] or '0'}"
+    jack_eq = name_eq = alsa_hw = fuzzy = None
+
+    for i, dev in enumerate(devices):
+        if dev.get("max_input_channels", 0) < 1:
+            continue
+        name = dev.get("name", "").lower()
+        try:
+            api = hostapis[dev.get("hostapi", -1)].get("name", "")
+        except (IndexError, KeyError, TypeError):
+            api = ""
+        if name == desc:
+            if "JACK" in api:
+                if jack_eq is None:
+                    jack_eq = i
+            elif name_eq is None:
+                name_eq = i
+        elif hw_tag and hw_tag in name:
+            if alsa_hw is None:
+                alsa_hw = i
+        elif desc in name or name in desc:
+            if fuzzy is None:
+                fuzzy = i
+
+    for cand in (jack_eq, name_eq, alsa_hw, fuzzy):
+        if cand is not None:
+            return cand
     return None
 
 
@@ -256,11 +369,42 @@ def list_input_devices(exclude_outputs: bool = False) -> list[dict]:
         List of dicts with device info (index, name, channels, recommended, excluded)
     """
     result = []
-    
+
     try:
         devices = sd.query_devices()
         hostapis = sd.query_hostapis()
         is_linux = sys.platform.startswith('linux')
+
+        # Curated path (desktop Linux): pactl's source list is exactly what KDE/GNOME
+        # sound settings show. PortAudio's raw list both over-shows (sink monitors
+        # exposed as JACK capture nodes, raw ALSA hw: duplicates, app streams) and
+        # under-shows (keyword filters can hide odd-named real mics) — the two picker
+        # complaints. Show the real sources by friendly name, mapped to their PortAudio
+        # index. Fall back to legacy enumeration when pactl is absent (non-PipeWire
+        # distros) or nothing maps (e.g. ALSA-only sandbox, where the pulse-PCM
+        # fallback below takes over). Deck keeps its validated legacy behavior.
+        if is_linux and not _is_steam_deck():
+            pw_sources = _pactl_input_sources()
+            if pw_sources:
+                curated = []
+                for s in pw_sources:
+                    idx = _match_source_to_device(s, devices, hostapis)
+                    channels = 1
+                    if idx is not None:
+                        channels = devices[idx].get('max_input_channels', 1)
+                    curated.append({
+                        # idx None = source visible in the OS but unmapped in PortAudio;
+                        # keep it listed (it may be the user's mic) — selection falls
+                        # back to the system default stream until it maps.
+                        'index': idx,
+                        'name': s['description'],
+                        'channels': channels,
+                        'recommended': s['is_default'] or any(
+                            kw in s['description'].lower() for kw in PREFERRED_MIC_KEYWORDS),
+                        'excluded': False,
+                    })
+                if any(c['index'] is not None for c in curated):
+                    return curated
 
         for i, dev in enumerate(devices):
             max_inputs = dev.get('max_input_channels', 0)
@@ -490,6 +634,7 @@ class AudioRecorder:
         self.frames: list[np.ndarray] = []
         self.stream: sd.InputStream | None = None
         self._temp_file: tempfile.NamedTemporaryFile | None = None
+        self.last_peak: float = 0.0
 
     @property
     def sample_rate(self) -> int:
@@ -500,8 +645,15 @@ class AudioRecorder:
         """Callback function for sounddevice stream."""
         if status:
             print(f"Audio status: {status}")
+        peak = float(np.max(np.abs(indata)))
+        if peak > self.last_peak:
+            self.last_peak = peak
         # Make a copy since indata is reused
         self.frames.append(indata.copy())
+
+    def get_peak_amplitude(self) -> float:
+        """Highest absolute sample seen since start() — compare to SILENCE_PEAK_THRESHOLD."""
+        return self.last_peak
 
     def start(self) -> None:
         """Start recording audio.
@@ -511,6 +663,7 @@ class AudioRecorder:
         dictation still works instead of failing.
         """
         self.frames = []
+        self.last_peak = 0.0
         fallbacks = []
         if self.device is not None:
             fallbacks.append(self.device)
@@ -718,6 +871,7 @@ class ChunkedRecorder:
         self._stop_event = threading.Event()
         self._chunk_thread: threading.Thread | None = None
         self._temp_files: list[str] = []
+        self.last_peak: float = 0.0
         
         # Calculate samples (will be updated based on actual recording rate)
         self._chunk_samples = int(chunk_duration * sample_rate)
@@ -732,8 +886,15 @@ class ChunkedRecorder:
         """Callback function for sounddevice stream."""
         if status:
             print(f"Audio status: {status}")
+        peak = float(np.max(np.abs(indata)))
+        if peak > self.last_peak:
+            self.last_peak = peak
         with self._buffer_lock:
             self._buffer.append(indata.copy())
+
+    def get_peak_amplitude(self) -> float:
+        """Highest absolute sample seen since start() — compare to SILENCE_PEAK_THRESHOLD."""
+        return self.last_peak
 
     def _get_total_samples(self) -> int:
         """Get total number of samples in buffer."""
@@ -841,6 +1002,7 @@ class ChunkedRecorder:
         self._chunk_index = 0
         self._last_chunk_end = 0
         self._temp_files = []
+        self.last_peak = 0.0
         self._stop_event.clear()
         
         # Clear queue
