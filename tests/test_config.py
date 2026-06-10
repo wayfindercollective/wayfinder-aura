@@ -104,3 +104,81 @@ class TestKeyCodeMappings:
         for codes in MODIFIER_CODES.values():
             assert isinstance(codes, list)
             assert len(codes) >= 2
+
+
+class TestHotkeyDefaultMigration:
+    """Existing installs keep bare F3/F10; only fresh installs get Super+F2/F3.
+
+    Regression: a config that saved hotkey_key=61 but no modifiers got the NEW
+    default modifiers ['super'] merged on top, silently breaking a mouse button
+    mapped to bare F3 — and a later settings save baked the corruption in.
+    """
+
+    def _write_config(self, data: dict):
+        from wayfinder.config import CONFIG_FILE
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(data, f)
+
+    def test_existing_config_without_hotkeys_keeps_legacy_f3(self, temp_config_dir: Path):
+        from wayfinder.config import load_config
+
+        self._write_config({"typing_speed": "instant"})  # old install, defaults never saved
+        config = load_config()
+
+        assert config["hotkey_key"] == 61          # F3, NOT the new F2 default
+        assert config["hotkey_modifiers"] == []    # bare key, no super
+        assert config["style_toggle_key"] == 68    # F10
+        assert config["style_toggle_modifiers"] == []
+
+    def test_saved_bare_key_does_not_gain_new_default_modifiers(self, temp_config_dir: Path):
+        from wayfinder.config import load_config
+
+        # User explicitly saved F3 long ago, before modifiers existed in the file.
+        self._write_config({"hotkey_key": 61})
+        config = load_config()
+
+        assert config["hotkey_key"] == 61
+        assert config["hotkey_modifiers"] == []
+
+    def test_fresh_install_gets_super_f2_defaults(self, temp_config_dir: Path):
+        from wayfinder.config import load_config, CONFIG_FILE
+
+        if CONFIG_FILE.exists():
+            CONFIG_FILE.unlink()
+        config = load_config()
+
+        assert config["hotkey_key"] == 60
+        assert config["hotkey_modifiers"] == ["super"]
+        assert config["style_toggle_key"] == 61
+        assert config["style_toggle_modifiers"] == ["super"]
+
+    def test_colliding_combos_repaired(self, temp_config_dir: Path):
+        from wayfinder.config import load_config
+
+        # The baked-in corruption: both actions on the same chord.
+        self._write_config({
+            "hotkey_key": 61, "hotkey_modifiers": ["super"],
+            "style_toggle_key": 61, "style_toggle_modifiers": ["super"],
+        })
+        config = load_config()
+
+        # Recording keeps the user's saved combo; style yields to legacy F10.
+        assert config["hotkey_key"] == 61
+        assert config["hotkey_modifiers"] == ["super"]
+        assert config["style_toggle_key"] == 68
+        assert config["style_toggle_modifiers"] == []
+
+    def test_explicitly_saved_distinct_hotkeys_untouched(self, temp_config_dir: Path):
+        from wayfinder.config import load_config
+
+        self._write_config({
+            "hotkey_key": 67, "hotkey_modifiers": ["ctrl"],
+            "style_toggle_key": 68, "style_toggle_modifiers": ["alt"],
+        })
+        config = load_config()
+
+        assert config["hotkey_key"] == 67
+        assert config["hotkey_modifiers"] == ["ctrl"]
+        assert config["style_toggle_key"] == 68
+        assert config["style_toggle_modifiers"] == ["alt"]

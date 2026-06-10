@@ -392,7 +392,11 @@ class TestConfigPersistenceRoundTrip:
         # Missing keys come from DEFAULT_CONFIG
         assert "whisper_binary" in reloaded
         assert "hotkey_key" in reloaded
-        assert reloaded["hotkey_key"] == DEFAULT_CONFIG["hotkey_key"]
+        # EXCEPTION: hotkey fields missing from a pre-existing config pin to the
+        # LEGACY defaults (bare F3/F10), not DEFAULT_CONFIG's Super+F2/F3 — an
+        # update must never silently rebind an existing install's hotkeys.
+        assert reloaded["hotkey_key"] == 61
+        assert reloaded["hotkey_modifiers"] == []
 
     def test_config_file_is_valid_json(self, temp_dir: Path):
         """Saved config file should be valid, readable JSON."""

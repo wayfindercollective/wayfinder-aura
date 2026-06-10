@@ -295,6 +295,30 @@ def load_config() -> dict:
             if config.get("prompt") == _old_prompt:
                 config["prompt"] = DEFAULT_CONFIG["prompt"]
 
+            # Hotkey defaults changed for NEW installs (bare F3/F10 → Super+F2/F3,
+            # to dodge in-game F-key collisions; the GameMode pause covers games).
+            # In an EXISTING config, every hotkey field the user never explicitly
+            # saved must fall to its LEGACY default — never the new one. Otherwise
+            # a config with a saved key but unsaved modifiers gets ["super"] merged
+            # onto it, silently breaking e.g. a mouse button mapped to bare F3.
+            _legacy_hotkeys = {
+                "hotkey_key": 61,              # F3 — pre-change default
+                "hotkey_modifiers": [],
+                "style_toggle_key": 68,        # F10 — pre-change default
+                "style_toggle_modifiers": [],
+            }
+            for _key, _legacy in _legacy_hotkeys.items():
+                if _key not in user_config:
+                    config[_key] = _legacy
+
+            # Repair colliding combos (recording == style toggle). Merging new
+            # default modifiers onto a partially-saved old config could land both
+            # actions on one chord; style yields and returns to its legacy default.
+            if (config.get("hotkey_key") == config.get("style_toggle_key")
+                    and config.get("hotkey_modifiers") == config.get("style_toggle_modifiers")):
+                config["style_toggle_key"] = 68
+                config["style_toggle_modifiers"] = []
+
             # Validate critical paths — if saved path doesn't exist, fall back
             # to auto-detected default. Prevents stale paths from a previous
             # environment (e.g. Flatpak /app/bin path after switching to venv).
