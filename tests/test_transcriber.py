@@ -303,3 +303,96 @@ class TestTranscribeWithConfig:
         # Verify context was passed
         call_args = mock_backend.transcribe.call_args
         assert mock_backend.transcribe.called
+
+
+class TestGpuCpuFallback:
+    """Vulkan whisper crash -> automatic retry with the bundled CPU sibling binary."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_memo(self):
+        from wayfinder.core import transcriber
+        transcriber._CPU_FALLBACK_ACTIVE.clear()
+        yield
+        transcriber._CPU_FALLBACK_ACTIVE.clear()
+
+    def _write_stub(self, path: Path, body: str) -> None:
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+
+    def _backend(self, tmp_path: Path, gpu_body: str, cpu_body: str | None):
+        """Backend wired to stub 'binaries' + dummy model/audio files."""
+        from wayfinder.core.transcriber import WhisperCppBackend
+
+        gpu = tmp_path / "whisper-cli"
+        self._write_stub(gpu, gpu_body)
+        if cpu_body is not None:
+            self._write_stub(tmp_path / "whisper-cli-cpu", cpu_body)
+        model = tmp_path / "model.bin"
+        model.write_bytes(b"\x00")
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"\x00")
+        backend = WhisperCppBackend(
+            whisper_binary=str(gpu), model_path=str(model), timeout=10,
+        )
+        return backend, str(audio)
+
+    def test_signal_death_falls_back_to_cpu_sibling(self, tmp_path):
+        from wayfinder.core import transcriber
+
+        backend, audio = self._backend(
+            tmp_path,
+            gpu_body="kill -SEGV $$",
+            cpu_body='echo "hello fallback"',
+        )
+        assert backend.transcribe(audio) == "hello fallback"
+        # Memoized for the session
+        assert transcriber._CPU_FALLBACK_ACTIVE[backend.whisper_binary].endswith("-cpu")
+
+    def test_fallback_is_memoized(self, tmp_path):
+        """Second transcription must not touch the crashed GPU binary again."""
+        marker = tmp_path / "gpu-runs"
+        backend, audio = self._backend(
+            tmp_path,
+            # Only count real transcription calls ($1 = -m) — the _supported_flags()
+            # --help probe also executes this stub once.
+            gpu_body=f'if [ "$1" = "-m" ]; then echo run >> "{marker}"; fi; kill -SEGV $$',
+            cpu_body='echo "ok"',
+        )
+        assert backend.transcribe(audio) == "ok"
+        assert backend.transcribe(audio) == "ok"
+        # GPU stub ran exactly once (first attempt), not on the second call.
+        assert marker.read_text().count("run") == 1
+
+    def test_vulkan_error_exit_falls_back(self, tmp_path):
+        backend, audio = self._backend(
+            tmp_path,
+            gpu_body='echo "ggml_vulkan: device init failed" >&2; exit 1',
+            cpu_body='echo "cpu text"',
+        )
+        assert backend.transcribe(audio) == "cpu text"
+
+    def test_no_sibling_means_real_error(self, tmp_path):
+        from wayfinder.core.transcriber import TranscriptionError
+
+        backend, audio = self._backend(tmp_path, gpu_body="kill -SEGV $$", cpu_body=None)
+        with pytest.raises(TranscriptionError):
+            backend.transcribe(audio)
+
+    def test_non_vulkan_failure_does_not_fall_back(self, tmp_path):
+        """An ordinary whisper error (bad model etc.) must surface, not mask as CPU retry."""
+        from wayfinder.core import transcriber
+        from wayfinder.core.transcriber import TranscriptionError
+
+        backend, audio = self._backend(
+            tmp_path,
+            gpu_body='echo "failed to load model" >&2; exit 1',
+            cpu_body='echo "should not be used"',
+        )
+        with pytest.raises(TranscriptionError):
+            backend.transcribe(audio)
+        assert backend.whisper_binary not in transcriber._CPU_FALLBACK_ACTIVE
+
+    def test_cpu_only_install_unaffected(self, tmp_path):
+        """From-source installs (no sibling) keep working exactly as before."""
+        backend, audio = self._backend(tmp_path, gpu_body='echo "normal text"', cpu_body=None)
+        assert backend.transcribe(audio) == "normal text"

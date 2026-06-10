@@ -7,7 +7,7 @@ name = "wayfinder-aura"
 version = "1.1.0"
 description = "Wayfinder Aura - Local voice dictation for Linux using whisper.cpp"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Elastic-2.0"}
 requires-python = ">=3.10"
 authors = [
     {name = "Wayfinder Aura Contributors"}
