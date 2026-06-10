@@ -156,16 +156,16 @@ Launch the app and go to Settings:
 1. **Whisper Binary**: Set to `~/whisper.cpp/build/bin/whisper-cli`
 2. **Model Path**: Set to `~/whisper.cpp/models/ggml-large-v3-turbo.bin`
 3. **GPU**: Enable GPU acceleration (should auto-detect your 3090)
-4. **Hotkey**: Default is F9 to start/stop recording
+4. **Hotkey**: Default is Super+F2 to start/stop recording
 
 ---
 
 ## 7. Test It
 
 1. Open any text editor or browser
-2. Press F9 to start recording
+2. Press Super+F2 to start recording
 3. Speak naturally
-4. Press F9 again to stop
+4. Press Super+F2 again to stop
 5. Your transcribed text appears at the cursor
 
 ---
@@ -224,5 +224,5 @@ sudo apt install -y libfuse2  # Required for AppImage on Ubuntu 22.04+
 | whisper.cpp | `~/whisper.cpp/build/bin/whisper-cli` |
 | Models | `~/whisper.cpp/models/` |
 | ydotool socket | `/run/ydotool/ydotool.sock` |
-| Hotkey | F9 (toggle recording) |
-| Style toggle | F10 (cycle output styles) |
+| Hotkey | Super+F2 (toggle recording) |
+| Style toggle | Super+F3 (cycle output styles) |

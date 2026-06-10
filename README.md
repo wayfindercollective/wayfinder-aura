@@ -7,7 +7,7 @@ Local voice dictation for Linux (Wayland/X11) using whisper.cpp for transcriptio
 ## Features
 
 - **Local & Private**: All processing happens on your machine using whisper.cpp
-- **Hotkey Triggered**: Press F3 (configurable) to start/stop recording
+- **Hotkey Triggered**: Press Super+F2 (configurable) to start/stop recording
 - **LLM Post-Processing**: Clean up transcriptions with llama.cpp (local) or cloud APIs
 - **Wayland Support**: Works on modern Linux desktops including KDE Plasma on Wayland
 - **System Tray**: Runs in background with status indicator
@@ -80,8 +80,8 @@ Config is stored at `~/.config/wayfinder-aura/config.json`
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `hotkey_key` | 67 (F3) | Trigger key code |
-| `hotkey_modifiers` | [] | Optional modifiers (ctrl, alt, shift) |
+| `hotkey_key` | 60 (F2) | Trigger key code |
+| `hotkey_modifiers` | ["super"] | Optional modifiers (ctrl, alt, shift, super) |
 | `model_path` | `~/whisper.cpp/models/ggml-small.bin` | Whisper model |
 | `typing_speed` | "instant" | instant, fast, normal, slow, very_slow |
 | `ui_scale` | 1.0 | UI scaling factor (0.7 - 2.5) |
@@ -92,7 +92,7 @@ Config is stored at `~/.config/wayfinder-aura/config.json`
 
 | Shortcut | Action |
 |----------|--------|
-| F3 (default) | Toggle recording |
+| Super+F2 (default) | Toggle recording |
 | Ctrl + Plus | Increase UI scale |
 | Ctrl + Minus | Decrease UI scale |
 | Ctrl + 0 | Reset UI scale to 100% |
@@ -204,7 +204,7 @@ python scripts/benchmark_llama_cpp.py --quick
 - **Dev**: Recognizes git/coding terms
 - **Personal**: Learns your speaking patterns
 
-Toggle with F10 or in Settings → Style.
+Toggle with Super+F3 or in Settings → Style.
 
 ## Troubleshooting
 
