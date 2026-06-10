@@ -85,6 +85,26 @@ class TranscriptionBackend(ABC):
         pass
 
 
+# Machines where the GPU (Vulkan) whisper binary crashed route transcriptions to the
+# sibling CPU binary for the rest of the session, keyed by original binary path.
+# Per-session ON PURPOSE (not persisted): a Mesa/driver update can fix Vulkan, and
+# the next session then retries GPU automatically instead of being pinned to CPU.
+_CPU_FALLBACK_ACTIVE: dict = {}
+
+
+def _cpu_fallback_binary(binary: str) -> Optional[str]:
+    """Sibling CPU-only whisper build (e.g. /app/bin/whisper-cli-cpu), if bundled.
+
+    The Flatpak ships whisper-cli (Vulkan) + whisper-cli-cpu (CPU baseline); from-source
+    installs usually have only one binary, so this returns None there.
+    """
+    if binary.endswith("-cpu"):
+        return None
+    p = Path(binary)
+    candidate = p.with_name(p.name + "-cpu")
+    return str(candidate) if candidate.exists() else None
+
+
 class WhisperCppBackend(TranscriptionBackend):
     """
     Whisper.cpp backend for transcription.
@@ -260,8 +280,11 @@ class WhisperCppBackend(TranscriptionBackend):
         def _flag_ok(flag):
             return (not _sup) or (flag in _sup)
 
+        # Route to the CPU sibling if the GPU binary already crashed this session.
+        active_binary = _CPU_FALLBACK_ACTIVE.get(self.whisper_binary, self.whisper_binary)
+
         cmd = [
-            self.whisper_binary,
+            active_binary,
             "-m", self.model_path,
             "-f", audio_path,
             "--no-timestamps",
@@ -296,59 +319,91 @@ class WhisperCppBackend(TranscriptionBackend):
         if not self.use_gpu and _flag_ok("--no-gpu"):
             cmd.append("--no-gpu")
 
-        try:
-            # GPU device selection is handled at app startup via setup_gpu_environment()
-            # which sets GGML_VK_VISIBLE_DEVICES in os.environ.
-            # Subprocesses automatically inherit this - no extra logic needed here.
-            
-            # Log which GPU device is being used (if set)
-            gpu_device = os.environ.get("GGML_VK_VISIBLE_DEVICES")
-            if gpu_device and self.use_gpu:
-                print(f"[Transcription] Using GPU device {gpu_device}")
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                # No env= needed - subprocess inherits GGML_VK_VISIBLE_DEVICES from parent
-            )
+        # GPU device selection is handled at app startup via setup_gpu_environment()
+        # which sets GGML_VK_VISIBLE_DEVICES in os.environ.
+        # Subprocesses automatically inherit this - no extra logic needed here.
 
-            if result.returncode != 0:
-                raise TranscriptionError(f"whisper.cpp failed: {result.stderr}")
+        # Log which GPU device is being used (if set)
+        gpu_device = os.environ.get("GGML_VK_VISIBLE_DEVICES")
+        if gpu_device and self.use_gpu:
+            print(f"[Transcription] Using GPU device {gpu_device}")
 
-            # Parse output - filter metadata and get transcription
-            output_lines = result.stdout.strip().split("\n")
-            text_lines = []
-            
-            for line in output_lines:
-                line = line.strip()
-                if not line:
+        # Attempt order: active binary, then the CPU sibling (Flatpak bundles both).
+        # A Vulkan binary that crashes (signal death), hangs, or errors out with a
+        # Vulkan-specific message degrades to CPU transparently — the user gets their
+        # transcription either way, and the choice is memoized for this session.
+        attempts = [active_binary]
+        if active_binary == self.whisper_binary:
+            _fb = _cpu_fallback_binary(self.whisper_binary)
+            if _fb:
+                attempts.append(_fb)
+
+        def _activate_fallback(reason: str) -> None:
+            _CPU_FALLBACK_ACTIVE[self.whisper_binary] = attempts[-1]
+            print(f"[Transcription] GPU whisper binary {reason} — "
+                  "falling back to the CPU binary for the rest of this session")
+
+        result = None
+        for attempt_idx, binary in enumerate(attempts):
+            cmd[0] = binary
+            is_last = attempt_idx == len(attempts) - 1
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    # No env= needed - subprocess inherits GGML_VK_VISIBLE_DEVICES from parent
+                )
+            except subprocess.TimeoutExpired:
+                if is_last:
+                    raise TranscriptionError(f"Transcription timed out after {self.timeout} seconds")
+                _activate_fallback(f"hung past {self.timeout}s")
+                continue
+            except FileNotFoundError:
+                raise TranscriptionError(f"Could not execute whisper.cpp: {binary}")
+
+            if not is_last:
+                died_by_signal = result.returncode < 0
+                vulkan_error = result.returncode != 0 and "vulkan" in (result.stderr or "").lower()
+                if died_by_signal:
+                    _activate_fallback(f"died with signal {-result.returncode}")
                     continue
-                # Skip whisper.cpp info lines
-                if any(
-                    line.startswith(prefix)
-                    for prefix in [
-                        "whisper_",
-                        "main:",
-                        "system_info:",
-                        "operator():",
-                        "log_mel_spectrogram",
-                        "ggml_",
-                        "vk_",  # Vulkan messages
-                        "cuda_",  # CUDA messages
-                    ]
-                ):
+                if vulkan_error:
+                    _activate_fallback("failed with a Vulkan error")
                     continue
-                text_lines.append(line)
+            break
 
-            transcription = " ".join(text_lines).strip()
-            return transcription
+        if result.returncode != 0:
+            raise TranscriptionError(f"whisper.cpp failed: {result.stderr}")
 
-        except subprocess.TimeoutExpired:
-            raise TranscriptionError(f"Transcription timed out after {self.timeout} seconds")
-        except FileNotFoundError:
-            raise TranscriptionError(f"Could not execute whisper.cpp: {self.whisper_binary}")
+        # Parse output - filter metadata and get transcription
+        output_lines = result.stdout.strip().split("\n")
+        text_lines = []
+
+        for line in output_lines:
+            line = line.strip()
+            if not line:
+                continue
+            # Skip whisper.cpp info lines
+            if any(
+                line.startswith(prefix)
+                for prefix in [
+                    "whisper_",
+                    "main:",
+                    "system_info:",
+                    "operator():",
+                    "log_mel_spectrogram",
+                    "ggml_",
+                    "vk_",  # Vulkan messages
+                    "cuda_",  # CUDA messages
+                ]
+            ):
+                continue
+            text_lines.append(line)
+
+        transcription = " ".join(text_lines).strip()
+        return transcription
 
 
 class WhisperServerBackend(TranscriptionBackend):

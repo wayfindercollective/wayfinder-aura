@@ -9,7 +9,14 @@ between the repo and a live listing.
 - ✅ Real app ID `io.github.wayfindercollective.WayfinderAura` everywhere
   (manifest, desktop, metainfo, code `FLATPAK_ID` fallbacks, CI, icon script).
 - ✅ `appstreamcli validate` clean; `desktop-file-validate` clean (both files).
-- ✅ MIT `LICENSE` file present (README/metainfo already claimed MIT).
+- ✅ `LICENSE` is the **Elastic License 2.0** (source-available; SPDX `Elastic-2.0`).
+  Chosen deliberately for the $20 premium model: the repo can stay public
+  (required for the io.github app ID — Flathub's linter HTTP-checks the repo
+  URL), Flathub may legally build and redistribute, but stripping or
+  circumventing the license-key functionality is prohibited by the license
+  text itself. Free download + external license purchase is the established
+  Flathub pattern (Sublime Text, Bitwig, Master PDF Editor); Flathub has no
+  native payments as of mid-2026.
 - ✅ Metainfo: real developer/URLs, ≤35-char summary, OARS rating, branding
   colors, 1.1.0 release notes with date.
 - ✅ Manifest builds and runs on SteamOS (Deck-validated, SIGILL-safe CPU
