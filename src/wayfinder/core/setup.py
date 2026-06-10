@@ -635,50 +635,85 @@ def download_whisper_model(
     target = model_dir / f"ggml-{model_name}.bin"
 
     def _run():
-        try:
-            model_dir.mkdir(parents=True, exist_ok=True)
-
-            model_info = WHISPER_MODELS.get(model_name, {})
-            size_label = model_info.get("size", "unknown size")
-            log(f"Downloading ggml-{model_name}.bin ({size_label})...")
-            log(f"From: {url}")
-            log("")
-
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-
-            total = int(response.headers.get("content-length", 0))
-            downloaded = 0
-
-            # Use a temp file to avoid partial downloads
-            tmp_target = target.with_suffix(".bin.part")
-            with open(tmp_target, "wb") as f:
-                for chunk in response.iter_content(chunk_size=1_048_576):  # 1MB chunks
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress:
-                        progress(downloaded, total)
-                    # Log every ~50MB
-                    if total > 0 and downloaded % (50 * 1_048_576) < 1_048_576:
-                        pct = downloaded * 100 // total
-                        log(f"  {pct}% ({downloaded // 1_000_000} / {total // 1_000_000} MB)")
-
-            # Rename from .part to final
-            tmp_target.rename(target)
-
-            log("")
-            log(f"Model saved to: {target}")
-            done(True, str(target))
-
-        except Exception as e:
-            log(f"Download failed: {e}")
-            # Clean up partial download
-            tmp = target.with_suffix(".bin.part")
-            if tmp.exists():
-                tmp.unlink()
-            done(False, str(e))
+        model_info = WHISPER_MODELS.get(model_name, {})
+        size_label = model_info.get("size", "unknown size")
+        _download_model_file(url, target, ".bin.part", size_label, log, done, progress)
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _download_model_file(
+    url: str,
+    target: Path,
+    part_suffix: str,
+    size_label: str,
+    log: Callable[[str], None],
+    done: Callable[[bool, str], None],
+    progress: Optional[Callable[[int, int], None]] = None,
+    min_bytes: int = 10_000_000,
+) -> None:
+    """Shared model downloader: atomic .part file, integrity checks, clear errors.
+
+    Integrity: the byte count must match content-length (a CDN/proxy can serve a
+    short 200 body without raising), and the file must clear min_bytes so an HTML
+    error page never gets renamed into a "model" that fails hours later with a
+    cryptic load error.
+    """
+    tmp_target = target.with_suffix(part_suffix)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        log(f"Downloading {target.name} ({size_label})...")
+        log(f"From: {url}")
+        log("")
+
+        response = requests.get(url, stream=True, timeout=30)
+        if response.status_code == 429:
+            done(False, "Hugging Face is rate-limiting downloads — try again in a few minutes")
+            return
+        response.raise_for_status()
+
+        total = int(response.headers.get("content-length", 0))
+        downloaded = 0
+
+        with open(tmp_target, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1_048_576):  # 1MB chunks
+                f.write(chunk)
+                downloaded += len(chunk)
+                if progress:
+                    progress(downloaded, total)
+                # Log every ~50MB
+                if total > 0 and downloaded % (50 * 1_048_576) < 1_048_576:
+                    pct = downloaded * 100 // total
+                    log(f"  {pct}% ({downloaded // 1_000_000} / {total // 1_000_000} MB)")
+
+        if total > 0 and downloaded != total:
+            raise IOError(
+                f"incomplete download ({downloaded // 1_000_000} of {total // 1_000_000} MB) — "
+                "connection dropped, please retry"
+            )
+        if downloaded < min_bytes:
+            raise IOError(
+                f"downloaded file is too small ({downloaded} bytes) — "
+                "the server returned an error page instead of the model"
+            )
+
+        # Rename from .part to final
+        tmp_target.rename(target)
+
+        log("")
+        log(f"Model saved to: {target}")
+        done(True, str(target))
+
+    except Exception as e:
+        log(f"Download failed: {e}")
+        # Clean up partial download
+        if tmp_target.exists():
+            try:
+                tmp_target.unlink()
+            except OSError:
+                pass
+        done(False, str(e))
 
 
 def download_llm_model(
@@ -707,43 +742,9 @@ def download_llm_model(
     target = model_dir / filename
 
     def _run():
-        try:
-            model_dir.mkdir(parents=True, exist_ok=True)
-
-            size_label = model_info.get("size", "unknown size")
-            log(f"Downloading {filename} ({size_label})...")
-            log(f"From: {url}")
-            log("")
-
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-
-            total = int(response.headers.get("content-length", 0))
-            downloaded = 0
-
-            tmp_target = target.with_suffix(".gguf.part")
-            with open(tmp_target, "wb") as f:
-                for chunk in response.iter_content(chunk_size=1_048_576):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress:
-                        progress(downloaded, total)
-                    if total > 0 and downloaded % (50 * 1_048_576) < 1_048_576:
-                        pct = downloaded * 100 // total
-                        log(f"  {pct}% ({downloaded // 1_000_000} / {total // 1_000_000} MB)")
-
-            tmp_target.rename(target)
-
-            log("")
-            log(f"Model saved to: {target}")
-            done(True, str(target))
-
-        except Exception as e:
-            log(f"Download failed: {e}")
-            tmp = target.with_suffix(".gguf.part")
-            if tmp.exists():
-                tmp.unlink()
-            done(False, str(e))
+        size_label = model_info.get("size", "unknown size")
+        _download_model_file(url, target, ".gguf.part", size_label, log, done, progress,
+                             min_bytes=100_000_000)
 
     threading.Thread(target=_run, daemon=True).start()
 

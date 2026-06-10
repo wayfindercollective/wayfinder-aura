@@ -753,9 +753,11 @@ class TestDownloadWhisperModel:
     def test_successful_download(self, mock_get, temp_dir: Path):
         (temp_dir / "whisper.cpp" / "models").mkdir(parents=True)
 
+        # 12MB payload — must clear the 10MB error-page floor in _download_model_file
         mock_response = MagicMock()
-        mock_response.headers = {"content-length": "1000"}
-        mock_response.iter_content.return_value = [b"\x00" * 500, b"\x00" * 500]
+        mock_response.status_code = 200
+        mock_response.headers = {"content-length": "12000000"}
+        mock_response.iter_content.return_value = [b"\x00" * 6_000_000, b"\x00" * 6_000_000]
         mock_response.raise_for_status = MagicMock()
         mock_get.return_value = mock_response
 
@@ -803,6 +805,7 @@ class TestDownloadWhisperModel:
         models_dir.mkdir(parents=True)
 
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.headers = {"content-length": "1000"}
         mock_response.iter_content.side_effect = Exception("Connection lost")
         mock_response.raise_for_status = MagicMock()
@@ -816,6 +819,83 @@ class TestDownloadWhisperModel:
 
         part_file = models_dir / "ggml-tiny.en.bin.part"
         assert not part_file.exists()
+
+    @patch("requests.get")
+    def test_truncated_download_rejected(self, mock_get, temp_dir: Path):
+        """Fewer bytes than content-length (silent CDN truncation) must fail."""
+        models_dir = temp_dir / "whisper.cpp" / "models"
+        models_dir.mkdir(parents=True)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-length": "20000000"}
+        mock_response.iter_content.return_value = [b"\x00" * 11_000_000]  # short body
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        done_result = {}
+        done_event = threading.Event()
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+            download_whisper_model(
+                "tiny.en",
+                lambda m: None,
+                lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
+            )
+            _wait_done(done_event)
+
+        assert done_result["success"] is False
+        assert "incomplete" in done_result["detail"]
+        assert not (models_dir / "ggml-tiny.en.bin").exists()
+        assert not (models_dir / "ggml-tiny.en.bin.part").exists()
+
+    @patch("requests.get")
+    def test_error_page_rejected(self, mock_get, temp_dir: Path):
+        """A tiny 200 body (HTML error page) must never become a model file."""
+        models_dir = temp_dir / "whisper.cpp" / "models"
+        models_dir.mkdir(parents=True)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {}  # no content-length
+        mock_response.iter_content.return_value = [b"<html>Service Unavailable</html>"]
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        done_result = {}
+        done_event = threading.Event()
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+            download_whisper_model(
+                "tiny.en",
+                lambda m: None,
+                lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
+            )
+            _wait_done(done_event)
+
+        assert done_result["success"] is False
+        assert "too small" in done_result["detail"]
+        assert not (models_dir / "ggml-tiny.en.bin").exists()
+
+    @patch("requests.get")
+    def test_rate_limit_message(self, mock_get, temp_dir: Path):
+        """HTTP 429 should surface a clear retry-later message."""
+        (temp_dir / "whisper.cpp" / "models").mkdir(parents=True)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_get.return_value = mock_response
+
+        done_result = {}
+        done_event = threading.Event()
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+            download_whisper_model(
+                "tiny.en",
+                lambda m: None,
+                lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
+            )
+            _wait_done(done_event)
+
+        assert done_result["success"] is False
+        assert "rate-limiting" in done_result["detail"]
 
 
 # =============================================================================
@@ -950,11 +1030,12 @@ class TestFullSetupFlow:
             _wait_done(build_event)
         assert build_result["success"] is True
 
-        # Step 4: Download model
+        # Step 4: Download model (16MB — clears the 10MB error-page floor)
         (temp_dir / "whisper.cpp" / "models").mkdir(parents=True, exist_ok=True)
         mock_response = MagicMock()
-        mock_response.headers = {"content-length": "1600000"}
-        mock_response.iter_content.return_value = [b"\x00" * 1_000_000, b"\x00" * 600_000]
+        mock_response.status_code = 200
+        mock_response.headers = {"content-length": "16000000"}
+        mock_response.iter_content.return_value = [b"\x00" * 10_000_000, b"\x00" * 6_000_000]
         mock_response.raise_for_status = MagicMock()
         mock_requests.return_value = mock_response
 
