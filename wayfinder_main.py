@@ -105,11 +105,11 @@ else:
 DEFAULT_CONFIG = {
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
-    "hotkey_key": 61,  # F3 - default (F9=67 on Linux)
-    "hotkey_modifiers": [],
+    "hotkey_key": 60,  # F2 - default (Super+F2 to dodge bare-F-key game collisions)
+    "hotkey_modifiers": ["super"],
     # Style toggle hotkey (cycles Minimal → Professional → Casual → AI Prompt → Personal)
-    "style_toggle_key": 68,  # F10 default
-    "style_toggle_modifiers": [],
+    "style_toggle_key": 61,  # F3 - default (Super+F3)
+    "style_toggle_modifiers": ["super"],
     "audio_device": None,
     "sample_rate": 16000,
     "prompt": "Hello, this is a dictation with proper punctuation and grammar.",
@@ -12870,6 +12870,11 @@ class WayfinderApp(ctk.CTk):
         # keyboard listener — see restart_evdev_listener). Liveness-based so it self-heals.
         self._ensure_socket_listener()
 
+        # Pause F-keys while a Lutris/Steam game is running (gamemoded). Linux-only;
+        # silent no-op when gamemoded / python-dbus is absent.
+        if sys.platform.startswith("linux"):
+            self._ensure_gamemode_listener()
+
         if sys.platform == "darwin":
             # macOS: pynput global listener reads config live — no evdev, no restart.
             self._start_pynput_listener()
@@ -12907,6 +12912,32 @@ class WayfinderApp(ctk.CTk):
             daemon=True,
         )
         self._socket_thread.start()
+
+    def _ensure_gamemode_listener(self):
+        """Spawn the Feral GameMode D-Bus listener thread. Idempotent.
+
+        While any game is registered with gamemoded, ``handle_event`` drops
+        HOTKEY_PRESSED / STYLE_TOGGLE events — the F-keys reach the focused
+        game instead of triggering Wayfinder. Lutris activates gamemoded
+        by default; Steam does via Proton.
+
+        Silent no-op if python-dbus / PyGObject aren't importable, or if
+        gamemoded isn't on the bus — hotkeys keep working unmodified.
+        """
+        existing = getattr(self, "_gamemode_thread", None)
+        if existing is not None and existing.is_alive():
+            return
+        try:
+            from wayfinder.integrations.gamemode import gamemode_pause_listener
+        except ImportError:
+            return
+        self._gamemode_thread = threading.Thread(
+            target=gamemode_pause_listener,
+            args=(self.stop_event, self.log),
+            daemon=True,
+            name="wayfinder-gamemode",
+        )
+        self._gamemode_thread.start()
 
     def _start_pynput_listener(self):
         """macOS global hotkey listener (pynput). Reads config live; started once."""
@@ -13037,6 +13068,17 @@ class WayfinderApp(ctk.CTk):
         return data, None
 
     def handle_event(self, event_type, data):
+        # gamemoded pause: silently drop F-key triggers while a Lutris/Steam game
+        # is registered. Other event types (transcription results, UI updates,
+        # quit, etc.) must still flow so the app can finish in-flight work.
+        if event_type in (EventType.HOTKEY_PRESSED, EventType.STYLE_TOGGLE):
+            try:
+                from wayfinder.integrations.gamemode import is_hotkeys_paused
+            except ImportError:
+                pass  # integration absent — hotkeys must keep working
+            else:
+                if is_hotkeys_paused():
+                    return
         if event_type == EventType.HOTKEY_PRESSED:
             self.on_hotkey()
         elif event_type == EventType.STYLE_TOGGLE:
