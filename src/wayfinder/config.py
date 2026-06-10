@@ -298,7 +298,7 @@ def load_config() -> dict:
             # Validate critical paths — if saved path doesn't exist, fall back
             # to auto-detected default. Prevents stale paths from a previous
             # environment (e.g. Flatpak /app/bin path after switching to venv).
-            _path_keys = ("whisper_binary", "model_path", "llm_model_path")
+            _path_keys = ("whisper_binary", "model_path", "llama_cpp_model_path")
             for key in _path_keys:
                 saved = config.get(key, "")
                 if saved and not os.path.exists(os.path.expanduser(saved)):
