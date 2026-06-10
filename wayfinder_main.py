@@ -86,7 +86,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # Handle icon path for Flatpak vs regular install
 if IS_FLATPAK:
-    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.user.WayfinderAura')}.png"
+    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.wayfindercollective.WayfinderAura')}.png"
     if not ICON_PATH.exists():
         ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
 else:

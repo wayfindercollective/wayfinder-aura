@@ -1,7 +1,7 @@
 # Flatpak manifest for Wayfinder Aura
 # 
 # Quick test build:
-#   flatpak-builder --user --install --force-clean build-dir io.github.user.WayfinderAura.yml
+#   flatpak-builder --user --install --force-clean build-dir io.github.wayfindercollective.WayfinderAura.yml
 #
 # For Flathub submission:
 #   1. Fork this repo and update app-id to your organization
@@ -14,7 +14,7 @@
 #   - For organization: com.yourorg.WayfinderAura
 #   - Update all references below when changing
 
-app-id: io.github.user.WayfinderAura
+app-id: io.github.wayfindercollective.WayfinderAura
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
@@ -231,10 +231,10 @@ modules:
       - PYTHONPATH="$(ls -d ${FLATPAK_DEST}/lib/python3*/site-packages | head -1)" python3 flatpak/resize-icons.py ${FLATPAK_DEST}
       
       # Desktop file
-      - install -Dm644 flatpak/io.github.user.WayfinderAura.desktop ${FLATPAK_DEST}/share/applications/io.github.user.WayfinderAura.desktop
+      - install -Dm644 flatpak/io.github.wayfindercollective.WayfinderAura.desktop ${FLATPAK_DEST}/share/applications/io.github.wayfindercollective.WayfinderAura.desktop
       
       # AppStream metadata for software centers
-      - install -Dm644 flatpak/io.github.user.WayfinderAura.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.user.WayfinderAura.metainfo.xml
+      - install -Dm644 flatpak/io.github.wayfindercollective.WayfinderAura.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.wayfindercollective.WayfinderAura.metainfo.xml
     sources:
       - type: dir
         path: ..

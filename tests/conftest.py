@@ -303,7 +303,7 @@ def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
 def flatpak_env(monkeypatch: pytest.MonkeyPatch):
     """Set up environment variables to simulate running in Flatpak."""
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setenv("FLATPAK_ID", "io.github.user.WayfinderAura")
+    monkeypatch.setenv("FLATPAK_ID", "io.github.wayfindercollective.WayfinderAura")
     monkeypatch.setenv("WAYFINDER_FLATPAK", "1")
 
 

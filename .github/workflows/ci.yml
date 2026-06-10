@@ -202,7 +202,7 @@ jobs:
       - name: Build Flatpak
         run: |
           cd flatpak
-          flatpak-builder --user --force-clean build-dir io.github.user.WayfinderAura.yml
+          flatpak-builder --user --force-clean build-dir io.github.wayfindercollective.WayfinderAura.yml
         continue-on-error: true
 
   # Release job (only on tags)
