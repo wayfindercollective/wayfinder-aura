@@ -147,6 +147,15 @@ class VoiceProfile:
                     self._data["transcriptions_since_regen"] = loaded.get("transcriptions_since_regen", 0)
             except (json.JSONDecodeError, IOError) as e:
                 print(f"[Voice Profile] Warning: Could not load profile: {e}")
+                # Preserve the corrupt file — the next _save() would otherwise
+                # overwrite it with empty defaults and silently destroy the
+                # user's transcription history.
+                try:
+                    backup = self.profile_file.with_suffix(".json.corrupt")
+                    self.profile_file.rename(backup)
+                    print(f"[Voice Profile] Corrupt profile preserved at {backup}")
+                except OSError:
+                    pass
     
     def _save(self) -> None:
         """Save profile data to disk."""

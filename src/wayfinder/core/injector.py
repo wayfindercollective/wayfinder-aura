@@ -45,6 +45,12 @@ def _get_ydotool_env() -> dict:
     """Get environment with correct ydotool socket path."""
     env = os.environ.copy()
 
+    # A user-set YDOTOOL_SOCKET is authoritative (custom daemon setups) —
+    # only probe the common locations when it's unset or stale.
+    preset = env.get("YDOTOOL_SOCKET")
+    if preset and Path(preset).exists():
+        return env
+
     # Check common socket locations (varies by distro/setup)
     socket_paths = [
         "/run/ydotool/ydotool.sock",  # System service (Bazzite/Fedora)
@@ -87,10 +93,11 @@ def check_ydotool_ready() -> tuple[bool, str]:
     socket_path = env.get("YDOTOOL_SOCKET")
     if not socket_path:
         # No socket found - daemon may not be running
-        return False, (
-            "ydotool daemon socket not found. "
-            "Start the daemon: sudo systemctl enable --now ydotoold"
-        )
+        if shutil.which("systemctl"):
+            hint = "Start the daemon: sudo systemctl enable --now ydotoold"
+        else:
+            hint = "Start the ydotoold daemon with your init system"
+        return False, f"ydotool daemon socket not found. {hint}"
 
     return True, f"ydotool ready (socket: {socket_path})"
 

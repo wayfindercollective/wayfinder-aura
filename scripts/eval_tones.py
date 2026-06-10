@@ -51,8 +51,8 @@ BASE_CONFIG = {
     "post_processing_backend": "llama_cpp",
     "llama_cpp_use_cli": True,
     "llama_cpp_binary": "~/llama.cpp/build/bin/llama-cli",   # ctor swaps to llama-simple
-    "llama_cpp_model_path": "/home/bazzite/.local/share/wayfinder-aura/"
-                            "llm-models/Qwen3.5-2B-Q4_K_M.gguf",
+    "llama_cpp_model_path": str(Path.home() / ".local/share/wayfinder-aura"
+                                / "llm-models/Qwen3.5-2B-Q4_K_M.gguf"),
     "llama_cpp_n_ctx": 2048,
     "llama_cpp_n_threads": 4,
     "llama_cpp_n_gpu_layers": -1,
