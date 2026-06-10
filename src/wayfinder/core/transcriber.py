@@ -5,9 +5,13 @@ Supports multiple backends: whisper.cpp (with Vulkan GPU) and Faster-Whisper (wi
 
 import os
 import subprocess
+import tempfile
+import threading
+import time
+import wave
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 # Developer vocabulary - common terms that Whisper often mishears
@@ -86,10 +90,60 @@ class TranscriptionBackend(ABC):
 
 
 # Machines where the GPU (Vulkan) whisper binary crashed route transcriptions to the
-# sibling CPU binary for the rest of the session, keyed by original binary path.
-# Per-session ON PURPOSE (not persisted): a Mesa/driver update can fix Vulkan, and
-# the next session then retries GPU automatically instead of being pinned to CPU.
+# sibling CPU binary, keyed by original binary path. Not persisted across sessions:
+# a Mesa/driver update can fix Vulkan, and the next session retries GPU automatically.
+# Within a session, a background recovery probe (see _maybe_probe_gpu_recovery) keeps
+# re-testing the GPU binary on an exponential-backoff schedule and lifts the fallback
+# the moment it works again — so a transient GPU reset doesn't pin a long session to CPU.
 _CPU_FALLBACK_ACTIVE: dict = {}
+
+# Per-binary retry bookkeeping: {"failures": int, "next_retry": epoch_seconds}.
+# Kept (with halved failure count) after a successful restore so a flapping GPU
+# climbs the backoff ladder instead of crash-looping a user's dictations.
+_gpu_retry_state: dict = {}
+_GPU_RETRY_BASE_SECONDS = 60.0
+_GPU_RETRY_CAP_SECONDS = 1800.0
+
+_gpu_probe_lock = threading.Lock()
+_gpu_probe_inflight = False
+
+# Optional app-level logger (the UI activity log). The transcriber works fine
+# without one — events still go to stdout.
+_gpu_event_logger: Optional[Callable[[str], None]] = None
+
+
+def set_gpu_event_logger(callback: Optional[Callable[[str], None]]) -> None:
+    """Register an app-level logger for GPU fallback/restore events.
+
+    The app passes its activity-log method so users SEE "GPU went down / GPU
+    restored" instead of it disappearing into stdout.
+    """
+    global _gpu_event_logger
+    _gpu_event_logger = callback
+
+
+def _log_gpu_event(message: str) -> None:
+    print(f"[Transcription] {message}")
+    callback = _gpu_event_logger
+    if callback is not None:
+        try:
+            callback(message)
+        except Exception:
+            pass  # a dying UI must never break transcription
+
+
+def _fmt_delay(seconds: float) -> str:
+    return f"{int(seconds)}s" if seconds < 120 else f"{int(seconds // 60)}m"
+
+
+def _schedule_gpu_retry(binary: str) -> float:
+    """Record a GPU failure and compute the next retry time. Returns the delay."""
+    state = _gpu_retry_state.setdefault(binary, {"failures": 0, "next_retry": 0.0})
+    state["failures"] += 1
+    delay = min(_GPU_RETRY_BASE_SECONDS * (2 ** (state["failures"] - 1)),
+                _GPU_RETRY_CAP_SECONDS)
+    state["next_retry"] = time.time() + delay
+    return delay
 
 
 def _cpu_fallback_binary(binary: str) -> Optional[str]:
@@ -280,8 +334,12 @@ class WhisperCppBackend(TranscriptionBackend):
         def _flag_ok(flag):
             return (not _sup) or (flag in _sup)
 
-        # Route to the CPU sibling if the GPU binary already crashed this session.
+        # Route to the CPU sibling if the GPU binary already crashed this session,
+        # and (in the background) periodically re-test the GPU so it comes back
+        # automatically once the driver recovers.
         active_binary = _CPU_FALLBACK_ACTIVE.get(self.whisper_binary, self.whisper_binary)
+        if active_binary != self.whisper_binary:
+            self._maybe_probe_gpu_recovery()
 
         cmd = [
             active_binary,
@@ -340,8 +398,11 @@ class WhisperCppBackend(TranscriptionBackend):
 
         def _activate_fallback(reason: str) -> None:
             _CPU_FALLBACK_ACTIVE[self.whisper_binary] = attempts[-1]
-            print(f"[Transcription] GPU whisper binary {reason} — "
-                  "falling back to the CPU binary for the rest of this session")
+            delay = _schedule_gpu_retry(self.whisper_binary)
+            _log_gpu_event(
+                f"⚠️ GPU transcription {reason} — switched to CPU "
+                f"(will retry GPU in {_fmt_delay(delay)})"
+            )
 
         result = None
         for attempt_idx, binary in enumerate(attempts):
@@ -404,6 +465,70 @@ class WhisperCppBackend(TranscriptionBackend):
 
         transcription = " ".join(text_lines).strip()
         return transcription
+
+    def _maybe_probe_gpu_recovery(self) -> None:
+        """Spawn a background GPU recovery probe if the retry window has elapsed.
+
+        Never blocks or risks the caller's transcription — the current dictation
+        proceeds on CPU while the probe tests the GPU binary off to the side.
+        """
+        state = _gpu_retry_state.get(self.whisper_binary)
+        if state is None or time.time() < state["next_retry"]:
+            return
+        global _gpu_probe_inflight
+        with _gpu_probe_lock:
+            if _gpu_probe_inflight:
+                return
+            _gpu_probe_inflight = True
+        threading.Thread(
+            target=self._probe_gpu_recovery, daemon=True, name="wayfinder-gpu-probe",
+        ).start()
+
+    def _probe_gpu_recovery(self) -> None:
+        """Test the GPU binary on silence; restore it on success, back off on failure."""
+        global _gpu_probe_inflight
+        try:
+            if self._gpu_probe_succeeds():
+                _CPU_FALLBACK_ACTIVE.pop(self.whisper_binary, None)
+                # Keep (halved) failure history so a flapping GPU climbs the
+                # backoff ladder instead of crash-looping the user's dictations.
+                state = _gpu_retry_state.get(self.whisper_binary)
+                if state is not None:
+                    state["failures"] = state["failures"] // 2
+                    state["next_retry"] = 0.0
+                _log_gpu_event("✅ GPU transcription restored — back on the GPU binary")
+            else:
+                delay = _schedule_gpu_retry(self.whisper_binary)
+                _log_gpu_event(f"GPU still unavailable — next retry in {_fmt_delay(delay)}")
+        finally:
+            _gpu_probe_inflight = False
+
+    def _gpu_probe_succeeds(self) -> bool:
+        """Run the GPU binary over 0.1s of silence; True iff it exits cleanly."""
+        probe_wav = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                probe_wav = f.name
+            with wave.open(probe_wav, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(b"\x00\x00" * 1600)
+            result = subprocess.run(
+                [self.whisper_binary, "-m", self.model_path, "-f", probe_wav,
+                 "--no-timestamps"],
+                capture_output=True,
+                timeout=60,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+        finally:
+            if probe_wav:
+                try:
+                    os.unlink(probe_wav)
+                except OSError:
+                    pass
 
 
 class WhisperServerBackend(TranscriptionBackend):

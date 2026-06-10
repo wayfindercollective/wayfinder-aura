@@ -4917,7 +4917,7 @@ class WayfinderApp(ctk.CTk):
         if not is_premium:
             import webbrowser
             ctk.CTkButton(
-                action_row, text="Get Premium — $20",
+                action_row, text="Get Premium — $20 (reg. $40)",
                 font=(self.font_body[0], 12, "bold"),
                 height=32, corner_radius=8,
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
@@ -9694,7 +9694,7 @@ class WayfinderApp(ctk.CTk):
             self._premium_banner = None
 
         ctk.CTkButton(
-            btn_row, text="Get Premium — $20", font=(self.font_body[0], 13, "bold"),
+            btn_row, text="Get Premium — $20 (reg. $40)", font=(self.font_body[0], 13, "bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
             text_color="#FFFFFF", height=34, corner_radius=8,
             command=lambda: [webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")), _dismiss()],
@@ -12858,6 +12858,14 @@ class WayfinderApp(ctk.CTk):
         # Socket listener stays up for the app's lifetime (config changes restart only the
         # keyboard listener — see restart_evdev_listener). Liveness-based so it self-heals.
         self._ensure_socket_listener()
+
+        # Surface GPU fallback/restore events in the activity log (the transcriber
+        # otherwise only prints to stdout, which users never see).
+        try:
+            from wayfinder.core.transcriber import set_gpu_event_logger
+            set_gpu_event_logger(self.log)
+        except ImportError:
+            pass
 
         # Pause F-keys while a Lutris/Steam game is running (gamemoded). Linux-only;
         # silent no-op when gamemoded / python-dbus is absent.

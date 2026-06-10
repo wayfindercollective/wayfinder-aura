@@ -396,3 +396,128 @@ class TestGpuCpuFallback:
         """From-source installs (no sibling) keep working exactly as before."""
         backend, audio = self._backend(tmp_path, gpu_body='echo "normal text"', cpu_body=None)
         assert backend.transcribe(audio) == "normal text"
+
+
+class TestGpuRecoveryProbe:
+    """Background probe re-tests a crashed GPU binary and restores it when healthy."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_state(self):
+        from wayfinder.core import transcriber
+        transcriber._CPU_FALLBACK_ACTIVE.clear()
+        transcriber._gpu_retry_state.clear()
+        transcriber.set_gpu_event_logger(None)
+        yield
+        transcriber._CPU_FALLBACK_ACTIVE.clear()
+        transcriber._gpu_retry_state.clear()
+        transcriber.set_gpu_event_logger(None)
+
+    def _write_stub(self, path, body):
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+
+    def _backend(self, tmp_path, gpu_body, cpu_body="echo cpu-text"):
+        from wayfinder.core.transcriber import WhisperCppBackend
+
+        gpu = tmp_path / "whisper-cli"
+        self._write_stub(gpu, gpu_body)
+        self._write_stub(tmp_path / "whisper-cli-cpu", cpu_body)
+        model = tmp_path / "model.bin"
+        model.write_bytes(b"\x00")
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"\x00")
+        return WhisperCppBackend(
+            whisper_binary=str(gpu), model_path=str(model), timeout=10,
+        ), str(audio)
+
+    def test_fallback_logs_to_registered_app_logger(self, tmp_path):
+        from wayfinder.core import transcriber
+
+        events = []
+        transcriber.set_gpu_event_logger(events.append)
+        backend, audio = self._backend(tmp_path, "kill -SEGV $$")
+        backend.transcribe(audio)
+
+        assert any("switched to CPU" in e and "retry" in e.lower() for e in events)
+
+    def test_fallback_schedules_backoff_retry(self, tmp_path):
+        from wayfinder.core import transcriber
+
+        backend, audio = self._backend(tmp_path, "kill -SEGV $$")
+        backend.transcribe(audio)
+
+        state = transcriber._gpu_retry_state[backend.whisper_binary]
+        assert state["failures"] == 1
+        assert state["next_retry"] > __import__("time").time()
+
+    def test_probe_restores_gpu_when_healthy_again(self, tmp_path):
+        from wayfinder.core import transcriber
+
+        flag = tmp_path / "gpu-fixed"
+        # Crashes until the flag file exists, then behaves.
+        body = f'if [ -f "{flag}" ]; then echo gpu-text; else kill -SEGV $$; fi'
+        events = []
+        transcriber.set_gpu_event_logger(events.append)
+        backend, audio = self._backend(tmp_path, body)
+
+        assert backend.transcribe(audio) == "cpu-text"  # crashed -> CPU
+        flag.touch()  # GPU "driver" recovers
+        backend._probe_gpu_recovery()  # run the probe synchronously
+
+        assert backend.whisper_binary not in transcriber._CPU_FALLBACK_ACTIVE
+        assert any("restored" in e for e in events)
+        assert backend.transcribe(audio) == "gpu-text"  # back on GPU
+
+    def test_probe_failure_escalates_backoff(self, tmp_path):
+        from wayfinder.core import transcriber
+
+        backend, audio = self._backend(tmp_path, "kill -SEGV $$")
+        backend.transcribe(audio)  # failures = 1
+        backend._probe_gpu_recovery()  # still crashing -> failures = 2
+
+        state = transcriber._gpu_retry_state[backend.whisper_binary]
+        assert state["failures"] == 2
+        assert backend.whisper_binary in transcriber._CPU_FALLBACK_ACTIVE
+
+    def test_transcribe_spawns_probe_after_window(self, tmp_path):
+        import time as _time
+        from wayfinder.core import transcriber
+
+        flag = tmp_path / "gpu-fixed"
+        body = f'if [ -f "{flag}" ]; then echo gpu-text; else kill -SEGV $$; fi'
+        backend, audio = self._backend(tmp_path, body)
+
+        backend.transcribe(audio)  # crash -> fallback armed
+        flag.touch()
+        # Force the retry window open, then transcribe (on CPU) — the probe
+        # should fire in the background and lift the fallback.
+        transcriber._gpu_retry_state[backend.whisper_binary]["next_retry"] = 0.0
+        assert backend.transcribe(audio) == "cpu-text"
+
+        deadline = _time.time() + 5
+        while (backend.whisper_binary in transcriber._CPU_FALLBACK_ACTIVE
+               and _time.time() < deadline):
+            _time.sleep(0.05)
+        assert backend.whisper_binary not in transcriber._CPU_FALLBACK_ACTIVE
+
+    def test_retry_window_not_elapsed_means_no_probe(self, tmp_path):
+        from wayfinder.core import transcriber
+
+        backend, audio = self._backend(tmp_path, "kill -SEGV $$")
+        backend.transcribe(audio)
+        state = transcriber._gpu_retry_state[backend.whisper_binary]
+        before = dict(state)
+
+        # Window is ~60s out; another transcription must not probe or mutate state.
+        assert backend.transcribe(audio) == "cpu-text"
+        assert transcriber._gpu_retry_state[backend.whisper_binary] == before
+
+    def test_dying_logger_does_not_break_transcription(self, tmp_path):
+        from wayfinder.core import transcriber
+
+        def bad_logger(_msg):
+            raise RuntimeError("UI gone")
+
+        transcriber.set_gpu_event_logger(bad_logger)
+        backend, audio = self._backend(tmp_path, "kill -SEGV $$")
+        assert backend.transcribe(audio) == "cpu-text"

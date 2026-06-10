@@ -19,7 +19,7 @@
 
 ### Recommended Approach: Hybrid
 1. **Flathub**: Free version with basic features (builds your brand)
-2. **Your website**: Premium `.flatpak` bundle for $20 (one-time)
+2. **Your website**: Premium license for $40 one-time ($20 launch price)
 3. **License key**: Unlocks premium features in both versions
 
 ---
@@ -37,7 +37,7 @@
 | Typing Speed | Instant only |
 | UI | Full UI, all settings visible |
 
-### 💎 PREMIUM TIER ($20 one-time)
+### 💎 PREMIUM TIER ($40 one-time — $20 launch price)
 | Feature | Value Proposition |
 |---------|-------------------|
 | **GPU Acceleration** | 3-10x faster transcription |
@@ -119,7 +119,13 @@
 
 ## Part 5: Pricing Psychology
 
-### Why $20 is the Sweet Spot
+### Pricing (updated 2026-06): $40 list, $20 launch discount
+List price is $40 one-time; launch promotion sells at $20 (50% off). The
+launch price keeps the original "sweet spot" psychology below while the $40
+anchor signals real product value and leaves room to end the promotion later
+without a price *increase* announcement.
+
+### Why ~$20 at launch is the Sweet Spot
 - **Below impulse threshold** - Many devs will pay without much thought
 - **Above "throwaway"** - Signals quality, not abandonware
 - **One hour of work** - Easy ROI justification for professionals
@@ -133,7 +139,7 @@
 | Pay-what-you-want | $5-50 | Good PR | Lower average |
 | Donations only | $0+ | Maximum reach | Minimal income |
 
-**Recommendation**: Stick with $20 one-time. It matches your "no subscription" messaging perfectly.
+**Recommendation**: One-time pricing, no subscription — $40 list / $20 launch. It matches the "no subscription" messaging perfectly.
 
 ---
 
@@ -149,7 +155,7 @@
 - "30-day money-back guarantee"
 
 ### Comparison Hook
-> "Otter.ai: $100/year. Google Cloud Speech: $0.006/15 seconds. Wayfinder Aura Premium: $20 once, forever, private."
+> "Otter.ai: $100/year. Google Cloud Speech: $0.006/15 seconds. Wayfinder Aura Premium: one payment, forever, private — $20 during launch."
 
 
 

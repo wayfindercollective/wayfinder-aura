@@ -515,7 +515,7 @@ class FeatureGate:
         """Get upgrade prompt for a locked feature."""
         if feature_id in PREMIUM_FEATURES:
             name, desc = PREMIUM_FEATURES[feature_id]
-            return f"🔒 {name} requires Wayfinder Aura Premium.\n\n{desc}\n\nUpgrade for $20 at wayfinder.dev/premium"
+            return f"🔒 {name} requires Wayfinder Aura Premium.\n\n{desc}\n\nUpgrade for $20 (launch price, reg. $40) at wayfinder.dev/premium"
         return "This feature requires Wayfinder Aura Premium."
     
     def activate(self, key: str) -> LicenseInfo:
