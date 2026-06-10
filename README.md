@@ -41,7 +41,7 @@ voice never leaves your computer.
 
 The free tier is the full dictation experience — not a demo.
 
-| | Free | Premium ($20, one-time) |
+| | Free | Premium ($40 one-time — **$20 launch price**) |
 |---|---|---|
 | Local transcription (whisper.cpp) | ✅ | ✅ |
 | GPU acceleration | ✅ | ✅ |
@@ -56,8 +56,9 @@ The free tier is the full dictation experience — not a demo.
 | Custom vocabulary | — | ✅ |
 | High-accuracy beam search & audio preprocessing | — | ✅ |
 
-Premium is a one-time purchase — hit **Get Premium** in the app, enter your
-license key, done. Keys activate online once and keep working offline.
+Premium is a one-time purchase — no subscription, ever. It's $40, and **$20
+during launch**. Hit **Get Premium** in the app, enter your license key, done.
+Keys activate online once and keep working offline.
 
 ## Install
 

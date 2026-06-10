@@ -10,7 +10,7 @@ between the repo and a live listing.
   (manifest, desktop, metainfo, code `FLATPAK_ID` fallbacks, CI, icon script).
 - ✅ `appstreamcli validate` clean; `desktop-file-validate` clean (both files).
 - ✅ `LICENSE` is the **Elastic License 2.0** (source-available; SPDX `Elastic-2.0`).
-  Chosen deliberately for the $20 premium model: the repo can stay public
+  Chosen deliberately for the paid premium model ($40, $20 launch price): the repo can stay public
   (required for the io.github app ID — Flathub's linter HTTP-checks the repo
   URL), Flathub may legally build and redistribute, but stripping or
   circumventing the license-key functionality is prohibited by the license
