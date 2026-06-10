@@ -83,9 +83,11 @@ dashboard for the verified checkmark.
   Qt can't place windows on Wayland) — it appears as a normal window where
   the compositor puts it. X11 and KDE Plasma are fully supported.
   (Future fix: LayerShellQt.)
-- Whisper runs CPU-only inside the sandbox (ggml-vulkan is disabled in the
-  manifest — it SIGSEGVs in-sandbox on RDNA2). base.en is ~2× real-time on a
-  Zen 2 APU; faster on desktop CPUs.
+- GPU transcription works in the sandbox: the Flatpak ships a Vulkan
+  whisper-cli (validated in-sandbox on RDNA4/RADV: jfk.wav in 0.9s vs 2.2s
+  CPU) plus a whisper-cli-cpu fallback the app switches to automatically on
+  machines where Vulkan init crashes (e.g. the Deck's RDNA2) — worst case is
+  CPU speed, never "no output".
 - Global hotkeys inside the sandbox use the XDG GlobalShortcuts portal — the
   user binds the shortcut once in their DE's settings when prompted.
 
