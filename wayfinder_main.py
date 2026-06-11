@@ -1924,10 +1924,19 @@ def find_keyboard_devices(enabled_devices: list[str] = None) -> list:
         return [d["device"] for d in all_devices]
 
 
+def _gamemode_hotkeys_paused() -> bool:
+    """True while a GameMode game is registered (hotkeys paused). Safe everywhere."""
+    try:
+        from wayfinder.integrations.gamemode import is_hotkeys_paused
+        return is_hotkeys_paused()
+    except ImportError:
+        return False
+
+
 def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabled_devices=None, log_callback=None,
-                    style_toggle_key=None, style_toggle_modifiers=None):
+                    style_toggle_key=None, style_toggle_modifiers=None, grabbed_devices=None):
     import select
-    
+
     def log(msg):
         if log_callback:
             try:
@@ -1972,6 +1981,47 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
 
     # Map file descriptors to devices
     fd_to_device = {dev.fd: dev for dev in devices}
+
+    # === Exclusive grabs (config: grabbed_input_devices) ===
+    # Devices listed here are taken exclusively so their keys reach ONLY this
+    # listener — e.g. an MMO mouse's side-grid interface whose hardware F3
+    # would otherwise also open the browser's find bar. Released while a
+    # GameMode game runs (the grid returns to the game), re-acquired after.
+    grabbed_devices = grabbed_devices or []
+    grabbed = {}  # fd -> device currently held exclusively
+
+    def _wants_grab(dev) -> bool:
+        return any(pat.lower() in dev.name.lower() for pat in grabbed_devices)
+
+    def _grab(dev):
+        if dev.fd in grabbed:
+            return
+        try:
+            dev.grab()
+            grabbed[dev.fd] = dev
+            log(f"🔒 Exclusive grab: {dev.name} — its keys now reach only Wayfinder")
+        except OSError as e:
+            log(f"⚠️ Could not grab {dev.name} ({e}) — another tool may hold it "
+                "(e.g. GPU Screen Recorder's global hotkeys); its keys stay visible to other apps")
+
+    def _ungrab_all(reason: str = ""):
+        had_any = bool(grabbed)
+        for fd, dev in list(grabbed.items()):
+            try:
+                dev.ungrab()
+            except OSError:
+                pass
+            grabbed.pop(fd, None)
+        if had_any and reason:
+            log(f"🔓 Released exclusive grabs {reason}")
+
+    def _grab_wanted():
+        for dev in fd_to_device.values():
+            if _wants_grab(dev):
+                _grab(dev)
+
+    _grab_wanted()
+    gm_paused_prev = False
     
     def check_modifiers(required_mods, modifier_names):
         """Check if all required modifiers are currently pressed."""
@@ -1986,6 +2036,17 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
 
     while not stop_event.is_set():
         try:
+            # GameMode transitions: release exclusive grabs while a game runs
+            # (the buttons belong to the game), re-acquire when it ends.
+            if grabbed_devices:
+                gm_paused = _gamemode_hotkeys_paused()
+                if gm_paused != gm_paused_prev:
+                    if gm_paused:
+                        _ungrab_all("(game running — buttons returned to the game)")
+                    else:
+                        _grab_wanted()
+                    gm_paused_prev = gm_paused
+
             # No devices: wait (honoring shutdown) and rescan instead of dying — a slept
             # wireless keyboard or USB re-enumeration then recovers automatically.
             if not fd_to_device:
@@ -1996,6 +2057,8 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                 fd_to_device = {dev.fd: dev for dev in rescanned}
                 if fd_to_device:
                     log(f"🔌 Input device(s) available ({len(fd_to_device)}) — resuming hotkey monitoring")
+                    if not gm_paused_prev:
+                        _grab_wanted()
                 continue
             
             try:
@@ -2055,6 +2118,7 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                     # Device read failed - remove it from monitoring
                     log(f"⚠️ Device read failed, removing: {device.name} ({e})")
                     del fd_to_device[fd]
+                    grabbed.pop(fd, None)  # its grab died with the device
         except Exception as e:
             # Last-resort guard: never let one unexpected error permanently kill the hotkey
             # listener (that strands the app in RECORDING). Log, brief backoff, and continue.
@@ -2062,6 +2126,9 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
             if stop_event.wait(0.2):
                 break
 
+    # Listener restarts on config changes — grabs MUST be released or the
+    # device would stay dead to the rest of the desktop.
+    _ungrab_all("(listener stopping)")
     log("🛑 Hotkey listener stopped")
 
 
@@ -13035,7 +13102,8 @@ class WayfinderApp(ctk.CTk):
         self._hotkey_thread = threading.Thread(
             target=hotkey_listener,
             args=(self.event_queue, hotkey_key, hotkey_modifiers, self._evdev_stop_event,
-                  enabled_devices, self.log, style_toggle_key, style_toggle_modifiers),
+                  enabled_devices, self.log, style_toggle_key, style_toggle_modifiers,
+                  self.config.get("grabbed_input_devices", [])),
             daemon=True,
         )
         self._hotkey_thread.start()
