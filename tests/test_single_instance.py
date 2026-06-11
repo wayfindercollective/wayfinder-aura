@@ -113,3 +113,110 @@ class TestInputDeviceFilter:
         ])
         assert "ydotoold virtual device" not in names
         assert "Keychron Link Keyboard" in names
+
+
+class TestExclusiveGrab:
+    """grabbed_input_devices: exclusive-grab named devices, release during games.
+
+    Use case: an MMO mouse's side-grid interface emits hardware F3 — without a
+    grab the same press also opens the browser's find bar. During a GameMode
+    game the grab is released so the grid returns to the game's keybinds.
+    """
+
+    def _fake_device(self, name, fd):
+        from unittest.mock import MagicMock
+        dev = MagicMock()
+        dev.name = name
+        dev.fd = fd
+        dev.grab = MagicMock()
+        dev.ungrab = MagicMock()
+        return dev
+
+    def _run_listener(self, monkeypatch, devices, grabbed_patterns, body,
+                      gamemode_flag=None):
+        """Run hotkey_listener in a thread against fake devices; body(stop) drives it."""
+        import os
+        import queue
+        import threading
+
+        pipes = []
+        for dev in devices:
+            r, w = os.pipe()
+            dev.fd = r
+            pipes.append((r, w))
+
+        monkeypatch.setattr(wayfinder_main, "find_keyboard_devices",
+                            lambda enabled: devices)
+        if gamemode_flag is not None:
+            monkeypatch.setattr(wayfinder_main, "_gamemode_hotkeys_paused",
+                                lambda: gamemode_flag["paused"])
+
+        stop = threading.Event()
+        t = threading.Thread(
+            target=wayfinder_main.hotkey_listener,
+            args=(queue.Queue(), 61, [], stop, None, None, 68, [], grabbed_patterns),
+            daemon=True,
+        )
+        t.start()
+        try:
+            body(stop)
+        finally:
+            stop.set()
+            t.join(timeout=3)
+            for r, w in pipes:
+                os.close(r)
+                os.close(w)
+        assert not t.is_alive()
+
+    def test_matching_device_grabbed_then_released_on_stop(self, monkeypatch):
+        import time
+        grid = self._fake_device("Corsair SCIMITAR Gaming Mouse Keyboard", -1)
+        keychron = self._fake_device("Keychron Link Keyboard", -1)
+
+        def body(stop):
+            time.sleep(0.7)
+            grid.grab.assert_called_once()
+            keychron.grab.assert_not_called()
+
+        self._run_listener(monkeypatch, [grid, keychron],
+                           ["Gaming Mouse Keyboard"], body)
+        grid.ungrab.assert_called()
+
+    def test_gamemode_releases_and_reacquires_grab(self, monkeypatch):
+        import time
+        grid = self._fake_device("Corsair SCIMITAR Gaming Mouse Keyboard", -1)
+        flag = {"paused": False}
+
+        def body(stop):
+            time.sleep(0.7)
+            grid.grab.assert_called_once()        # grabbed on desktop
+            flag["paused"] = True                  # game starts
+            time.sleep(1.2)
+            grid.ungrab.assert_called()            # released for the game
+            flag["paused"] = False                 # game ends
+            time.sleep(1.2)
+            assert grid.grab.call_count == 2       # re-acquired
+
+        self._run_listener(monkeypatch, [grid], ["Gaming Mouse Keyboard"], body,
+                           gamemode_flag=flag)
+
+    def test_grab_failure_is_tolerated(self, monkeypatch):
+        import time
+        grid = self._fake_device("Corsair SCIMITAR Gaming Mouse Keyboard", -1)
+        grid.grab.side_effect = OSError(16, "Device or resource busy")
+
+        def body(stop):
+            time.sleep(0.7)
+            grid.grab.assert_called()  # attempted, failed, listener kept running
+
+        self._run_listener(monkeypatch, [grid], ["Gaming Mouse Keyboard"], body)
+
+    def test_no_patterns_means_no_grabs(self, monkeypatch):
+        import time
+        grid = self._fake_device("Corsair SCIMITAR Gaming Mouse Keyboard", -1)
+
+        def body(stop):
+            time.sleep(0.5)
+            grid.grab.assert_not_called()
+
+        self._run_listener(monkeypatch, [grid], [], body)

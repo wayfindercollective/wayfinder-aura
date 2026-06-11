@@ -124,6 +124,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "style_toggle_key": 61,  # F3
     "style_toggle_modifiers": ["super"],
     
+    # Exclusive-grab devices (name substrings). Wayfinder takes these input
+    # devices exclusively (EVIOCGRAB) so their keys reach ONLY the dictation
+    # hotkey listener — nothing leaks to the focused app. Made for MMO-mouse
+    # side grids (e.g. Corsair Scimitar's separate "Gaming Mouse Keyboard"
+    # interface): the dictation button stops opening browser find bars.
+    # The grab is released automatically while a GameMode game is running, so
+    # the buttons return to the game, and re-acquired when the game ends.
+    "grabbed_input_devices": [],
+
     # Audio settings
     "audio_device": None,
     "sample_rate": 16000,
