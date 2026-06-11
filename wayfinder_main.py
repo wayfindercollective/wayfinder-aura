@@ -13802,11 +13802,43 @@ class WayfinderApp(ctk.CTk):
         return call_llm
 
 
+def _raise_existing_instance() -> bool:
+    """Ask a live instance to raise its window via the control socket.
+
+    The most reliable liveness test there is — only a running Wayfinder answers
+    this socket (no PID/cmdline heuristics) — and it doubles as the right UX:
+    double-launching surfaces the existing window instead of silently exiting.
+    A stale socket file refuses the connection, which correctly reads as
+    "no instance running".
+
+    Complements main.py's /tmp lock-socket guard rather than duplicating it:
+    that one covers the normal desktop entry path, but a Flatpak gets a private
+    /tmp per launch, so ONLY this control-socket probe (xdg-run path, shared
+    host<->sandbox) prevents double instances in the store build.
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1.0)
+            client.connect(str(SOCKET_PATH))
+            client.sendall(b"show")
+            return True
+    except OSError:
+        return False
+
+
 def _check_single_instance() -> bool:
     """Check if another instance is already running using a lock file.
-    
+
     Returns True if this is the only instance, False if another is running.
     """
+    # Live-socket probe first: catches instances regardless of how they were
+    # launched (the cmdline heuristic below misses relative-path launches like
+    # `./venv-gpu/bin/python main.py`, which is exactly how a double-launch
+    # slipped through) — and raises the existing window for the user.
+    if _raise_existing_instance():
+        print("⚠️ Wayfinder Aura is already running — raised the existing window")
+        return False
+
     lock_file = CONFIG_DIR / "wayfinder.lock"
     pid_to_check = None
     
@@ -13827,8 +13859,11 @@ def _check_single_instance() -> bool:
                         # Process exists - check if it's actually wayfinder
                         cmdline_path = Path(f"/proc/{stored_pid}/cmdline")
                         if cmdline_path.exists():
-                            cmdline = cmdline_path.read_text()
-                            if "wayfinder" in cmdline.lower():
+                            cmdline = cmdline_path.read_text().lower()
+                            # Relative-path launches ("./venv-gpu/bin/python
+                            # main.py") contain no "wayfinder" — match the
+                            # entry script too.
+                            if "wayfinder" in cmdline or "main.py" in cmdline:
                                 # Another instance is running
                                 print(f"⚠️ Wayfinder Aura is already running (PID {stored_pid})")
                                 return False
