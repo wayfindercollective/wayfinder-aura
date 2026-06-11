@@ -1933,6 +1933,37 @@ def _gamemode_hotkeys_paused() -> bool:
         return False
 
 
+# Settings "Detect" button: while armed, the evdev listener reports the next key
+# press as HOTKEY_CAPTURED instead of acting on it. Must run INSIDE the listener
+# (not a separate reader) because exclusively-grabbed devices — e.g. an MMO
+# mouse's side grid — deliver events ONLY to the listener's fds.
+_HOTKEY_CAPTURE = {"armed": False}
+
+
+def _keycode_display(code: int) -> str:
+    """Human label for an evdev keycode — covers keys no dropdown lists (F13+, keypad,
+    whatever an MMO-mouse side button emits)."""
+    known = {
+        59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
+        65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
+        70: "ScrollLock", 119: "Pause", 57: "Space",
+        274: "Mouse Middle", 275: "Mouse Side", 276: "Mouse Extra",
+        277: "Mouse Forward", 278: "Mouse Back",
+    }
+    if code in known:
+        return known[code]
+    if HAS_EVDEV:
+        try:
+            name = ecodes.KEY.get(code) or ecodes.BTN.get(code)
+            if isinstance(name, (list, tuple)):
+                name = name[0]
+            if name:
+                return str(name).replace("KEY_", "").replace("BTN_", "Btn ").title()
+        except Exception:
+            pass
+    return f"Key {code}"
+
+
 def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabled_devices=None, log_callback=None,
                     style_toggle_key=None, style_toggle_modifiers=None, grabbed_devices=None):
     import select
@@ -2094,11 +2125,25 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                                     pressed_modifiers.add(keycode)
                                 elif key_event.keystate == 0:
                                     pressed_modifiers.discard(keycode)
-                            
+
+                            # Settings "Detect": report the next non-modifier press to
+                            # the UI (with whatever modifiers are held) instead of
+                            # acting on it. This is the only way to learn what an
+                            # exclusively-grabbed side button emits.
+                            if (_HOTKEY_CAPTURE["armed"] and key_event.keystate == 1
+                                    and keycode not in all_modifier_codes):
+                                _HOTKEY_CAPTURE["armed"] = False
+                                held = [name for name, codes in MODIFIER_CODES.items()
+                                        if pressed_modifiers & set(codes)]
+                                event_queue.put((EventType.HOTKEY_CAPTURED,
+                                                 {"code": keycode, "modifiers": held,
+                                                  "device": device.name}))
+                                continue
+
                             # Debug: log all key presses (F-keys only to reduce noise)
                             if key_event.keystate == 1 and 59 <= keycode <= 88:
                                 print(f"[DEBUG] Key pressed: code={keycode} from {device.name[:30]}", flush=True)
-                            
+
                             # Check for recording hotkey press
                             if keycode == hotkey_key and key_event.keystate == 1:
                                 if check_modifiers(required_modifiers, hotkey_modifiers):
@@ -4764,7 +4809,22 @@ class WayfinderApp(ctk.CTk):
             self._hotkey_key_var, self._on_hotkey_key_changed,
             tooltip=SETTING_TOOLTIPS["hotkey"], width=160,
         )
-        
+
+        # Detect: bind keys the dropdown can't list (an MMO-mouse side button,
+        # F13+, keypad). Captured through the live listener — required for
+        # exclusively-grabbed devices whose presses only Wayfinder can see.
+        detect_row = ctk.CTkFrame(system_content, fg_color="transparent")
+        detect_row.pack(fill="x", padx=16, pady=(0, 6))
+        self._detect_btn_record = ctk.CTkButton(
+            detect_row, text="🎯 Detect — press the key you want",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            fg_color=COLORS["bg_card"], hover_color=COLORS["accent_glow"],
+            border_width=1, border_color=COLORS["border_rim"],
+            text_color=COLORS["text_primary"], height=26,
+            command=lambda: self._start_hotkey_detect("record"),
+        )
+        self._detect_btn_record.pack(side="left")
+
         # Hotkey modifier checkboxes (inline row)
         mod_row = ctk.CTkFrame(system_content, fg_color="transparent")
         mod_row.pack(fill="x", padx=16, pady=(0, 10))
@@ -6369,7 +6429,19 @@ class WayfinderApp(ctk.CTk):
             self._style_hotkey_key_var, self._on_style_hotkey_key_changed,
             width=160,
         )
-        
+
+        style_detect_row = ctk.CTkFrame(hotkey_content, fg_color="transparent")
+        style_detect_row.pack(fill="x", padx=16, pady=(0, 6))
+        self._detect_btn_style = ctk.CTkButton(
+            style_detect_row, text="🎯 Detect — press the key you want",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            fg_color=COLORS["bg_card"], hover_color=COLORS["accent_glow"],
+            border_width=1, border_color=COLORS["border_rim"],
+            text_color=COLORS["text_primary"], height=26,
+            command=lambda: self._start_hotkey_detect("style"),
+        )
+        self._detect_btn_style.pack(side="left")
+
         # Style hotkey modifier checkboxes (inline row)
         style_mod_row = ctk.CTkFrame(hotkey_content, fg_color="transparent")
         style_mod_row.pack(fill="x", padx=16, pady=(0, 10))
@@ -9822,37 +9894,87 @@ class WayfinderApp(ctk.CTk):
     def get_hotkey_display(self) -> str:
         hotkey_key = self.config.get("hotkey_key", 67)
         hotkey_modifiers = self.config.get("hotkey_modifiers", [])
-        
-        # Map codes to display names
-        code_to_name = {
-            59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
-            65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
-            70: "ScrollLock", 119: "Pause", 57: "Space",
-        }
-        key_name = code_to_name.get(hotkey_key, f"Key{hotkey_key}")
-        
+        key_name = _keycode_display(hotkey_key)
+
         if hotkey_modifiers:
             mods = "+".join(m.capitalize() for m in hotkey_modifiers)
             return f"{mods}+{key_name}"
         return key_name
-    
+
     def get_style_hotkey_display(self) -> str:
         """Get the display string for the style toggle hotkey."""
         style_key = self.config.get("style_toggle_key", 68)
         style_modifiers = self.config.get("style_toggle_modifiers", [])
-        
-        # Map codes to display names
-        code_to_name = {
-            59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
-            65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
-            70: "ScrollLock", 119: "Pause", 57: "Space",
-        }
-        key_name = code_to_name.get(style_key, f"Key{style_key}")
-        
+        key_name = _keycode_display(style_key)
+
         if style_modifiers:
             mods = "+".join(m.capitalize() for m in style_modifiers)
             return f"{mods}+{key_name}"
         return key_name
+
+    # === Settings "Detect" hotkey capture ===
+
+    _DETECT_IDLE_TEXT = "🎯 Detect — press the key you want"
+
+    def _start_hotkey_detect(self, target: str) -> None:
+        """Arm capture: the listener reports the next key press instead of acting on it."""
+        self._hotkey_capture_target = target
+        _HOTKEY_CAPTURE["armed"] = True
+        btn = self._detect_btn_record if target == "record" else self._detect_btn_style
+        btn.configure(text="Listening… press a key or side button", state="disabled")
+        self.log("🎯 Press the key/button you want to use…")
+        # Safety: disarm if nothing was pressed (e.g. user clicked by accident).
+        self.after(8000, lambda: self._cancel_hotkey_detect(target))
+
+    def _cancel_hotkey_detect(self, target: str) -> None:
+        if _HOTKEY_CAPTURE["armed"] and getattr(self, "_hotkey_capture_target", None) == target:
+            _HOTKEY_CAPTURE["armed"] = False
+            self._reset_detect_button(target)
+            self.log("🎯 Detect cancelled (no key pressed)")
+
+    def _reset_detect_button(self, target: str) -> None:
+        btn = self._detect_btn_record if target == "record" else self._detect_btn_style
+        try:
+            btn.configure(text=self._DETECT_IDLE_TEXT, state="normal")
+        except Exception:
+            pass  # settings panel may have been rebuilt/destroyed
+
+    def _apply_captured_hotkey(self, data: dict) -> None:
+        """A Detect capture arrived from the listener — bind it and restart."""
+        target = getattr(self, "_hotkey_capture_target", None)
+        if target is None:
+            return
+        self._hotkey_capture_target = None
+        code = data["code"]
+        modifiers = list(data.get("modifiers", []))
+        display = _keycode_display(code)
+        if modifiers:
+            display = "+".join(m.capitalize() for m in modifiers) + "+" + display
+
+        if target == "record":
+            self.config["hotkey_key"] = code
+            self.config["hotkey_modifiers"] = modifiers
+            try:
+                self._hotkey_key_var.set(_keycode_display(code))
+                for mod, var in self._hotkey_mod_vars.items():
+                    var.set(mod in modifiers)
+            except Exception:
+                pass
+        else:
+            self.config["style_toggle_key"] = code
+            self.config["style_toggle_modifiers"] = modifiers
+            try:
+                self._style_hotkey_key_var.set(_keycode_display(code))
+                for mod, var in self._style_hotkey_mod_vars.items():
+                    var.set(mod in modifiers)
+            except Exception:
+                pass
+
+        save_config(self.config)
+        self._reset_detect_button(target)
+        which = "Record hotkey" if target == "record" else "Style toggle"
+        self.log(f"🎯 {which} set to {display} (from {data.get('device', 'input device')})")
+        self.restart_evdev_listener("hotkey detected")
 
     def _apply_hotkey_change(self):
         """Apply hotkey config change and update the listener."""
@@ -13157,6 +13279,8 @@ class WayfinderApp(ctk.CTk):
             self.on_hotkey()
         elif event_type == EventType.STYLE_TOGGLE:
             self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
+        elif event_type == EventType.HOTKEY_CAPTURED:
+            self._apply_captured_hotkey(data)
         elif event_type == EventType.SHOW_WINDOW:
             self.show_from_tray()
         elif event_type == EventType.FORCE_RESET:

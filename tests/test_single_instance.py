@@ -220,3 +220,75 @@ class TestExclusiveGrab:
             grid.grab.assert_not_called()
 
         self._run_listener(monkeypatch, [grid], [], body)
+
+
+class TestHotkeyDetect:
+    """Settings 'Detect' button: the listener reports the next press to the UI."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_capture(self):
+        wayfinder_main._HOTKEY_CAPTURE["armed"] = False
+        yield
+        wayfinder_main._HOTKEY_CAPTURE["armed"] = False
+
+    def test_keycode_display_known_and_unknown(self):
+        assert wayfinder_main._keycode_display(61) == "F3"
+        assert wayfinder_main._keycode_display(275) == "Mouse Side"
+        assert wayfinder_main._keycode_display(99999) == "Key 99999"
+
+    def test_armed_capture_reports_key_instead_of_firing_hotkey(self, monkeypatch):
+        import os
+        import queue
+        import threading
+        import time
+        from itertools import chain, repeat
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        r, w = os.pipe()
+        fake_event = SimpleNamespace(type=1, code=183, value=1)  # F13 press
+        dev = MagicMock()
+        dev.name = "Corsair SCIMITAR Gaming Mouse Keyboard"
+        dev.fd = r
+        dev.read = MagicMock(side_effect=chain([[fake_event]], repeat([])))
+
+        monkeypatch.setattr(wayfinder_main, "find_keyboard_devices", lambda e: [dev])
+        monkeypatch.setattr(wayfinder_main, "ecodes", SimpleNamespace(EV_KEY=1))
+        monkeypatch.setattr(
+            wayfinder_main, "categorize",
+            lambda ev: SimpleNamespace(scancode=ev.code, keystate=ev.value))
+
+        q = queue.Queue()
+        stop = threading.Event()
+        t = threading.Thread(
+            target=wayfinder_main.hotkey_listener,
+            # hotkey_key=183 ON PURPOSE: armed capture must win over hotkey firing
+            args=(q, 183, [], stop, None, None, 68, [], []),
+            daemon=True,
+        )
+        wayfinder_main._HOTKEY_CAPTURE["armed"] = True
+        t.start()
+        try:
+            time.sleep(0.3)
+            os.write(w, b"x")  # wake select; device.read() yields the F13 press
+            deadline = time.time() + 3
+            captured = None
+            while time.time() < deadline:
+                try:
+                    captured = q.get(timeout=0.2)
+                    break
+                except queue.Empty:
+                    continue
+            assert captured is not None, "no event emitted"
+            ev_type, data = captured
+            assert ev_type == wayfinder_main.EventType.HOTKEY_CAPTURED
+            assert data["code"] == 183
+            assert data["modifiers"] == []
+            assert "SCIMITAR" in data["device"]
+            assert wayfinder_main._HOTKEY_CAPTURE["armed"] is False
+            assert q.empty(), "press must not ALSO fire HOTKEY_PRESSED"
+        finally:
+            stop.set()
+            t.join(timeout=3)
+            os.close(r)
+            os.close(w)
