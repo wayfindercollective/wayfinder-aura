@@ -1883,9 +1883,18 @@ def get_all_input_devices() -> list[dict]:
             has_fkeys = ecodes.KEY_F1 in key_caps and ecodes.KEY_F12 in key_caps
             
             name_lower = device.name.lower()
-            is_virtual = "virtual" in name_lower or "ydotool" in name_lower
-            
-            if has_fkeys and not is_virtual:
+            # Exclude ONLY our own text-injection device (ydotool's uinput
+            # keyboard) — monitoring it would feed injected text back into the
+            # hotkey listener. Other virtual keyboards must stay ELIGIBLE:
+            # remappers (keyd, input-remapper, gsr-ui, Steam Input) grab the
+            # physical devices and re-emit through a virtual one, so for a
+            # remapped mouse button — or every key on a keyd-managed system —
+            # the virtual device is the ONLY place the hotkey ever appears.
+            # The old blanket '"virtual" in name' filter silently broke
+            # dictation for every remapper user.
+            is_own_injector = "ydotool" in name_lower or "dotoold" in name_lower
+
+            if has_fkeys and not is_own_injector:
                 # Determine device type for display
                 device_type = "keyboard"
                 if "mouse" in name_lower:

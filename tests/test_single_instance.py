@@ -66,3 +66,50 @@ class TestSingleInstanceGuard:
         assert wayfinder_main._check_single_instance() is False
         t.join(timeout=3)
         assert received and received[0].strip() == b"show"
+
+
+class TestInputDeviceFilter:
+    """Remapper virtual keyboards must be monitored; only our injector is excluded.
+
+    Regression: a mouse button remapped to F3 re-emits through the remapper's
+    virtual keyboard (gsr-ui / keyd / input-remapper grab the physical device),
+    so the blanket '"virtual" in name' exclusion made the hotkey invisible.
+    """
+
+    def _fake_device(self, name):
+        from unittest.mock import MagicMock
+        dev = MagicMock()
+        dev.name = name
+        dev.path = "/dev/input/event99"
+        # EV_KEY capabilities including F1..F12
+        dev.capabilities.return_value = {1: list(range(59, 89))}
+        return dev
+
+    def _devices_for(self, monkeypatch, names):
+        from unittest.mock import MagicMock
+        fake_evdev = MagicMock()
+        devices = [self._fake_device(n) for n in names]
+        fake_evdev.list_devices.return_value = [d.path for d in devices]
+        fake_evdev.InputDevice.side_effect = devices
+        monkeypatch.setattr(wayfinder_main, "evdev", fake_evdev)
+        monkeypatch.setattr(wayfinder_main, "HAS_EVDEV", True)
+        return [d["name"] for d in wayfinder_main.get_all_input_devices()]
+
+    def test_remapper_virtual_keyboards_included(self, monkeypatch):
+        names = self._devices_for(monkeypatch, [
+            "gsr-ui virtual keyboard",
+            "keyd virtual keyboard",
+            "input-remapper Corsair SCIMITAR forwarded",
+            "Keychron Link Keyboard",
+        ])
+        assert "gsr-ui virtual keyboard" in names
+        assert "keyd virtual keyboard" in names
+        assert "Keychron Link Keyboard" in names
+
+    def test_own_injection_device_excluded(self, monkeypatch):
+        names = self._devices_for(monkeypatch, [
+            "ydotoold virtual device",
+            "Keychron Link Keyboard",
+        ])
+        assert "ydotoold virtual device" not in names
+        assert "Keychron Link Keyboard" in names
