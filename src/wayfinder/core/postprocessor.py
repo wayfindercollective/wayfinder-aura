@@ -1747,9 +1747,12 @@ Cleaned text:"""
             # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),
             # and -ngl must precede it so the model never sees the flag in context.
             cmd = [self.llama_binary, "-m", self.model_path]
-            if self.n_gpu_layers != 0:
-                ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
-                cmd.extend(["-ngl", str(ngl)])
+            # Always pass -ngl explicitly — n_gpu_layers=0 must force CPU even if
+            # a future llama.cpp build changes its default offload behavior.
+            # (CPU matters: on hosts whose Mesa predates the GPU's architecture,
+            # Vulkan llama runs at ~1 tok/s while CPU does the same job in ~1s.)
+            ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
+            cmd.extend(["-ngl", str(ngl)])
             cmd.extend(["-n", str(estimated_output_tokens), simple_prompt])
 
             start_time = time.time()
