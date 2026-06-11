@@ -16,6 +16,7 @@ class EventType(Enum):
     SHOW_WINDOW = auto()   # Tray "Open" — raise/restore the main window
     FORCE_RESET = auto()   # Tray "Reset" — unstick overlay / abort in-flight dictation
     QUIT_APP = auto()      # Tray "Quit" — clean full shutdown
+    HOTKEY_CAPTURED = auto()  # Settings "Detect" — next pressed key reported to the UI
     TRANSCRIPTION_DONE = auto()
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()
