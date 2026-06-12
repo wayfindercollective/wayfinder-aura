@@ -1595,8 +1595,18 @@ class LlamaCppCliBackend(PostProcessorBackend):
     Works with Vulkan GPU acceleration on AMD/Intel/NVIDIA.
     
     Uses llama-simple for batch processing (non-interactive mode).
+
+    For instant post-processing, when llama-cpp-python is importable the model is
+    kept RESIDENT in-process (class-level cache) and the same tuned prompt is run
+    through it — ~0.2s vs ~1s for a per-call subprocess that reloads the model.
+    The subprocess (llama-simple) path remains the fallback when the bindings are
+    absent (e.g. the Flatpak, which excludes llama-cpp-python), so output is
+    identical and the feature degrades gracefully.
     """
-    
+
+    # Resident model cache shared across instances: {(model_path, n_ctx, ngl): Llama}
+    _resident_cache: Dict[Any, Any] = {}
+
     def __init__(
         self,
         llama_binary: str = "~/llama.cpp/build/bin/llama-cli",
@@ -1645,7 +1655,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
 
     def get_name(self) -> str:
         return "llama.cpp CLI (Local)"
-    
+
     def is_available(self) -> bool:
         """Check if llama binary exists and model exists."""
         if not Path(self.llama_binary).exists():
@@ -1653,6 +1663,46 @@ class LlamaCppCliBackend(PostProcessorBackend):
         if not self.model_path:
             return False
         return Path(self.model_path).exists()
+
+    def _resident_model(self):
+        """Return a resident llama-cpp-python model (cached), or None if unavailable.
+
+        Keeping the model loaded is what makes post-processing instant — the
+        ~1.5GB-or-less model is paid for once, not per dictation. Returns None
+        when llama-cpp-python isn't importable (the Flatpak), so callers fall
+        back to the subprocess path.
+        """
+        try:
+            from llama_cpp import Llama
+        except ImportError:
+            return None
+        if not self.model_path or not Path(self.model_path).exists():
+            return None
+        ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
+        key = (self.model_path, self.n_ctx, ngl)
+        model = LlamaCppCliBackend._resident_cache.get(key)
+        if model is None:
+            try:
+                model = Llama(
+                    model_path=self.model_path, n_ctx=self.n_ctx,
+                    n_threads=self.n_threads, n_gpu_layers=ngl, verbose=False,
+                )
+            except Exception as e:
+                print(f"[Post-processing] Resident model load failed ({e}); using CLI subprocess")
+                return None
+            LlamaCppCliBackend._resident_cache[key] = model
+        return model
+
+    def warm_up(self) -> None:
+        """Load the resident model + build the compute graph so the first real
+        dictation is instant (the very first generation is otherwise ~1s slower
+        while llama.cpp builds its graph). Safe in a background thread; never raises."""
+        try:
+            model = self._resident_model()
+            if model is not None:
+                model("ok", max_tokens=1, temperature=0.0)
+        except Exception as e:
+            print(f"[Post-processing] Warm-up skipped: {e}")
     
     def build_cli_prompt(self, text: str, tone: str = "minimal", intensity: str = "standard") -> str:
         """
@@ -1743,44 +1793,59 @@ Cleaned text:"""
             # annotation the model appends). Min 64 covers short inputs.
             estimated_output_tokens = min(self.max_tokens, max(64, int(len(text) * 0.8)))
 
-            # Build command for llama-simple. The prompt is POSITIONAL (llama-simple's
-            # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),
-            # and -ngl must precede it so the model never sees the flag in context.
-            cmd = [self.llama_binary, "-m", self.model_path]
-            # Always pass -ngl explicitly — n_gpu_layers=0 must force CPU even if
-            # a future llama.cpp build changes its default offload behavior.
-            # (CPU matters: on hosts whose Mesa predates the GPU's architecture,
-            # Vulkan llama runs at ~1 tok/s while CPU does the same job in ~1s.)
-            ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
-            cmd.extend(["-ngl", str(ngl)])
-            cmd.extend(["-n", str(estimated_output_tokens), simple_prompt])
-
             start_time = time.time()
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.timeout,
-            )
+
+            # Fast path: resident in-process model (instant after warm-up). Reuses
+            # the EXACT same compact prompt + extraction as the subprocess path, so
+            # the cleaned output is identical — only the execution differs.
+            resident = self._resident_model()
+            if resident is not None:
+                out = resident(
+                    simple_prompt,
+                    max_tokens=estimated_output_tokens,
+                    temperature=self.temperature,
+                    echo=True,  # echo the prompt so _extract_cli_output works unchanged
+                )
+                cleaned = self._extract_cli_output(out["choices"][0]["text"], simple_prompt)
+                mode = "resident"
+            else:
+                # Fallback: spawn llama-simple. The prompt is POSITIONAL (llama-simple's
+                # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),
+                # and -ngl must precede it so the model never sees the flag in context.
+                cmd = [self.llama_binary, "-m", self.model_path]
+                # Always pass -ngl explicitly — n_gpu_layers=0 must force CPU even if
+                # a future llama.cpp build changes its default offload behavior.
+                # (CPU matters: on hosts whose Mesa predates the GPU's architecture,
+                # Vulkan llama runs at ~1 tok/s while CPU does the same job in ~1s.)
+                ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
+                cmd.extend(["-ngl", str(ngl)])
+                cmd.extend(["-n", str(estimated_output_tokens), simple_prompt])
+
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=self.timeout,
+                )
+                if result.returncode != 0:
+                    stderr = result.stderr.strip()
+                    if "error" in stderr.lower() and "warning" not in stderr.lower():
+                        raise PostProcessingError(f"llama error: {stderr}")
+                cleaned = self._extract_cli_output(result.stdout, simple_prompt)
+                mode = "CLI"
+
             elapsed = time.time() - start_time
-
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-                if "error" in stderr.lower() and "warning" not in stderr.lower():
-                    raise PostProcessingError(f"llama error: {stderr}")
-
-            cleaned = self._extract_cli_output(result.stdout, simple_prompt)
 
             if not cleaned:
                 print("[Post-processing] ⚠ No output from llama - using original")
                 return text
-            
+
             # Check for hallucination
             if is_hallucination(text, cleaned, model_name=Path(self.model_path).stem, threshold=0.25):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
                 return text
-            
-            print(f"[Post-processing] llama.cpp CLI completed in {elapsed:.2f}s")
-            
+
+            print(f"[Post-processing] llama.cpp {mode} completed in {elapsed:.2f}s")
+
             return cleaned
-            
+
         except subprocess.TimeoutExpired:
             raise PostProcessingError(f"llama timed out after {self.timeout}s")
         except FileNotFoundError:
@@ -2135,6 +2200,27 @@ class OpenAIBackend(PostProcessorBackend):
 # =============================================================================
 # Factory Functions
 # =============================================================================
+
+def warm_up_postprocessing(config: dict) -> None:
+    """Pre-load the local LLM so the first dictation's cleanup is instant.
+
+    Only does work for the local llama.cpp backend with the resident-model
+    fast path available (llama-cpp-python importable). A cheap no-op for cloud
+    backends or when the bindings are absent. Call in a daemon thread at startup;
+    never raises.
+    """
+    try:
+        if config.get("post_processing_backend", "llama_cpp") != "llama_cpp":
+            return
+        if not config.get("post_processing_enabled", True):
+            return
+        backend = get_backend(config)
+        warm = getattr(backend, "warm_up", None)
+        if callable(warm):
+            warm()
+    except Exception as e:
+        print(f"[Post-processing] Warm-up skipped: {e}")
+
 
 def get_backend(config: dict) -> PostProcessorBackend:
     """

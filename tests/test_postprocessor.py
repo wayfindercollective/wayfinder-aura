@@ -679,3 +679,85 @@ class TestEdgeCases:
         assert issubclass(PostProcessingError, Exception)
         err = PostProcessingError("test error")
         assert str(err) == "test error"
+
+
+class TestResidentLlamaFastPath:
+    """LlamaCppCliBackend: resident in-process model for instant post-processing."""
+
+    def _backend(self, tmp_path):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        binary = tmp_path / "llama-simple"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"\x00")
+        return LlamaCppCliBackend(llama_binary=str(binary), model_path=str(model),
+                                  output_tone="professional", n_gpu_layers=0)
+
+    def test_resident_model_none_without_bindings(self, tmp_path, monkeypatch):
+        b = self._backend(tmp_path)
+        # Simulate llama-cpp-python not installed
+        import builtins
+        real_import = builtins.__import__
+        def fake_import(name, *a, **k):
+            if name == "llama_cpp":
+                raise ImportError("no llama_cpp")
+            return real_import(name, *a, **k)
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        assert b._resident_model() is None
+
+    def test_process_uses_resident_model_when_available(self, tmp_path):
+        from unittest.mock import MagicMock
+        b = self._backend(tmp_path)
+        # Fake resident model: echoes prompt + a cleaned continuation
+        fake_model = MagicMock(return_value={
+            "choices": [{"text": "...Cleaned text: This is the cleaned result."}]
+        })
+        with patch.object(b, "_resident_model", return_value=fake_model), \
+             patch("subprocess.run") as sub:
+            out = b.process("this is the cleaned result", "")
+        # Resident path used — subprocess must NOT be spawned
+        sub.assert_not_called()
+        fake_model.assert_called_once()
+        assert "cleaned result" in out.lower()
+
+    def test_process_falls_back_to_subprocess_without_resident(self, tmp_path):
+        from unittest.mock import MagicMock
+        b = self._backend(tmp_path)
+        with patch.object(b, "_resident_model", return_value=None), \
+             patch("subprocess.run", return_value=MagicMock(
+                 returncode=0,
+                 stdout="...Cleaned text: subprocess cleaned output.",
+                 stderr="")) as sub:
+            out = b.process("subprocess cleaned output", "")
+        sub.assert_called_once()
+        assert "subprocess cleaned output" in out.lower()
+
+    def test_warm_up_pokes_resident_model(self, tmp_path):
+        from unittest.mock import MagicMock
+        b = self._backend(tmp_path)
+        fake_model = MagicMock()
+        with patch.object(b, "_resident_model", return_value=fake_model):
+            b.warm_up()
+        fake_model.assert_called_once()  # one tiny generation to build the graph
+
+    def test_warm_up_noop_without_bindings(self, tmp_path):
+        b = self._backend(tmp_path)
+        with patch.object(b, "_resident_model", return_value=None):
+            b.warm_up()  # must not raise
+
+    def test_module_warm_up_routes_to_local_backend(self, tmp_path):
+        from wayfinder.core import postprocessor
+        binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
+        cfg = {"post_processing_backend": "llama_cpp", "post_processing_enabled": True,
+               "llama_cpp_use_cli": True, "llama_cpp_binary": str(binary),
+               "llama_cpp_model_path": str(model)}
+        with patch.object(postprocessor.LlamaCppCliBackend, "warm_up") as warm:
+            postprocessor.warm_up_postprocessing(cfg)
+            warm.assert_called_once()
+
+    def test_module_warm_up_noop_for_cloud_backend(self):
+        from wayfinder.core import postprocessor
+        # Cloud backend has nothing local to warm
+        postprocessor.warm_up_postprocessing({"post_processing_backend": "anthropic"})
