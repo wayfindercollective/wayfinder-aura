@@ -13115,7 +13115,14 @@ class WayfinderApp(ctk.CTk):
                     self.log("✅ Transcription model loaded — ready for instant dictation")
             except Exception as e:
                 self.log(f"⚠️ Transcription warm-up skipped: {e}")
-        threading.Thread(target=_warm, daemon=True, name="wayfinder-whisper-warmup").start()
+            # Warm the post-processing LLM too (keeps the cleanup model resident so
+            # the first dictation's grammar/tone pass is instant, not a cold load).
+            try:
+                from wayfinder.core.postprocessor import warm_up_postprocessing
+                warm_up_postprocessing(self.config)
+            except Exception as e:
+                self.log(f"⚠️ Post-processing warm-up skipped: {e}")
+        threading.Thread(target=_warm, daemon=True, name="wayfinder-model-warmup").start()
 
     def _ensure_socket_listener(self):
         """Start the socket listener if it isn't already running. Idempotent.
