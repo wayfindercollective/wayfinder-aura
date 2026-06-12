@@ -13081,14 +13081,29 @@ class WayfinderApp(ctk.CTk):
             self._start_pynput_listener()
             return
 
-        # Inside a Flatpak sandbox (X11 OR Wayland): evdev can't read /dev/input and pynput
-        # can't do Wayland global keys, so the GlobalShortcuts portal is the only viable path.
-        # KDE's portal serves X11 sessions too, so gate on IS_FLATPAK, not the session type
-        # (the Deck Desktop session is X11). Non-sandboxed installs keep using evdev + the
-        # 'input' group (the validated Steam Deck dev-path).
+        # Inside a Flatpak sandbox: evdev can't read /dev/input, so hotkeys ride the
+        # GlobalShortcuts portal — BUT the portal needs dbus-python, which the bundle
+        # may not ship. On X11, pynput's XRecord listener works fine through the shared
+        # X socket, so fall back to it rather than dying silently: a missing import must
+        # not take the advertised hotkey down with one invisible UI-log line (exactly
+        # what shipped — F3 was dead in every Flatpak build while the socket path
+        # masked it). Non-sandboxed installs keep using evdev + the 'input' group.
         if IS_FLATPAK:
-            self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
-            self._start_portal_listener()
+            is_x11 = os.environ.get("XDG_SESSION_TYPE", "").lower() != "wayland"
+            if DBUS_AVAILABLE:
+                self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
+                self._start_portal_listener()
+                return
+            if is_x11:
+                msg = "Flatpak X11 — dbus-python missing, portal unavailable; using pynput global listener"
+                self.log(f"🖥️ {msg}")
+                print(f"[Hotkeys] {msg}", flush=True)
+                self._start_pynput_listener()
+                return
+            msg = ("Flatpak Wayland without dbus-python — global hotkeys UNAVAILABLE "
+                   "(socket trigger still works)")
+            self.log(f"⚠️ {msg}")
+            print(f"[Hotkeys] {msg}", flush=True)
             return
         is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
         if is_wayland:
@@ -13168,7 +13183,7 @@ class WayfinderApp(ctk.CTk):
         self._gamemode_thread.start()
 
     def _start_pynput_listener(self):
-        """macOS global hotkey listener (pynput). Reads config live; started once."""
+        """pynput global hotkey listener (macOS + Flatpak-X11 fallback). Reads config live; started once."""
         if getattr(self, '_pynput_listener_started', False):
             # Already running — config changes are picked up automatically.
             self.log("⚙ Hotkey updated (live)")
@@ -13181,7 +13196,8 @@ class WayfinderApp(ctk.CTk):
         hotkey_modifiers = self.config.get("hotkey_modifiers", [])
         style_toggle_key = self.config.get("style_toggle_key", 68)
         style_toggle_modifiers = self.config.get("style_toggle_modifiers", [])
-        self.log("🖥️ macOS — using pynput (global keyboard listener)")
+        platform_label = "macOS" if sys.platform == "darwin" else "X11 Flatpak fallback"
+        self.log(f"🖥️ {platform_label} — using pynput (global keyboard listener)")
         self._pynput_listener_started = True
 
         def _pynput_wrapper():
