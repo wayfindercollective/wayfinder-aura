@@ -74,6 +74,47 @@ class TestConfigLoading:
         assert config["sample_rate"] == DEFAULT_CONFIG["sample_rate"]
 
 
+class TestStalePathRepair:
+    """load_config heals saved paths that no longer exist on this machine by
+    falling back to the auto-detected default — e.g. a from-source config with
+    llama_cpp_binary=~/llama.cpp/... is meaningless inside the Flatpak sandbox,
+    where the bundled /app/bin/llama-simple is the working default."""
+
+    def test_stale_llama_binary_repaired_to_existing_default(
+        self, temp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from wayfinder import config as cfg
+
+        bundled = tmp_path / "llama-simple"
+        bundled.write_text("")
+        monkeypatch.setitem(cfg.DEFAULT_CONFIG, "llama_cpp_binary", str(bundled))
+
+        cfg.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(cfg.CONFIG_FILE, "w") as f:
+            json.dump({"llama_cpp_binary": "/nonexistent/llama.cpp/build/bin/llama-cli"}, f)
+
+        config = cfg.load_config()
+        assert config["llama_cpp_binary"] == str(bundled)
+
+    def test_existing_llama_binary_is_kept(
+        self, temp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from wayfinder import config as cfg
+
+        bundled = tmp_path / "llama-simple"
+        bundled.write_text("")
+        user_binary = tmp_path / "my-llama-cli"
+        user_binary.write_text("")
+        monkeypatch.setitem(cfg.DEFAULT_CONFIG, "llama_cpp_binary", str(bundled))
+
+        cfg.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(cfg.CONFIG_FILE, "w") as f:
+            json.dump({"llama_cpp_binary": str(user_binary)}, f)
+
+        config = cfg.load_config()
+        assert config["llama_cpp_binary"] == str(user_binary)
+
+
 class TestKeyCodeMappings:
     """Test key code utilities."""
 

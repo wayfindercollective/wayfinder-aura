@@ -83,6 +83,10 @@ if IS_FLATPAK:
     # Best-first across the bundled dir and the user data dir.
     _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
     _default_llm_model_path = _pick_llm("/app/share/llm-models", _user_llm_dir)
+    # Bundled CPU llama-simple — the subprocess fallback behind the resident
+    # llama-cpp-python fast path (both ship in the Flatpak). Host paths like
+    # ~/llama.cpp are invisible inside the sandbox.
+    _default_llama_binary = "/app/bin/llama-simple"
 elif IS_APPIMAGE and APPDIR:
     # AppImage uses bundled binaries if they exist, otherwise fall back to system
     _appimage_whisper = os.path.join(APPDIR, "usr", "bin", "whisper-cli")
@@ -96,6 +100,7 @@ elif IS_APPIMAGE and APPDIR:
     _appimage_llm_dir = os.path.join(APPDIR, "usr", "share", "llm-models")
     _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
     _default_llm_model_path = _pick_llm(_appimage_llm_dir, _user_llm_dir)
+    _default_llama_binary = "~/llama.cpp/build/bin/llama-cli"
 else:
     _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
     _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
@@ -106,6 +111,7 @@ else:
     else:
         _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
     _default_llm_model_path = _pick_llm(_user_llm_dir)
+    _default_llama_binary = "~/llama.cpp/build/bin/llama-cli"
 
 # Default configuration values
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -228,7 +234,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # llama.cpp post-processing settings
     "llama_cpp_model_path": _default_llm_model_path,  # Path to GGUF model file
-    "llama_cpp_binary": "~/llama.cpp/build/bin/llama-cli",  # Path to llama-cli binary (CLI backend)
+    "llama_cpp_binary": _default_llama_binary,  # llama CLI binary (Flatpak: bundled /app/bin/llama-simple)
     "llama_cpp_n_ctx": 2048,  # Context window size
     "llama_cpp_n_threads": 4,  # CPU threads
     "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
@@ -334,8 +340,10 @@ def load_config() -> dict:
 
             # Validate critical paths — if saved path doesn't exist, fall back
             # to auto-detected default. Prevents stale paths from a previous
-            # environment (e.g. Flatpak /app/bin path after switching to venv).
-            _path_keys = ("whisper_binary", "model_path", "llama_cpp_model_path")
+            # environment (e.g. Flatpak /app/bin path after switching to venv,
+            # or a saved host ~/llama.cpp path inside the sandbox where only
+            # the bundled /app/bin/llama-simple exists).
+            _path_keys = ("whisper_binary", "model_path", "llama_cpp_model_path", "llama_cpp_binary")
             for key in _path_keys:
                 saved = config.get(key, "")
                 if saved and not os.path.exists(os.path.expanduser(saved)):

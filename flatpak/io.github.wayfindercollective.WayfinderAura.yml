@@ -116,8 +116,10 @@ modules:
       # whisper-server (built by WHISPER_BUILD_EXAMPLES=ON) keeps the model resident
       # so dictation is instant. The app warms it at startup and routes through it
       # when whisper_server_mode is on; install it next to whisper-cli (the app
-      # derives the server path by name).
-      - if [ -f bin/whisper-server ]; then install -Dm755 bin/whisper-server ${FLATPAK_DEST}/bin/whisper-server; fi
+      # derives the server path by name). v1.7.2 builds it as bin/server — the
+      # whisper-server rename is a later release; without the elif this install
+      # silently skipped and the Flatpak fell back to per-call CLI reloads.
+      - if [ -f bin/whisper-server ]; then install -Dm755 bin/whisper-server ${FLATPAK_DEST}/bin/whisper-server; elif [ -f bin/server ]; then install -Dm755 bin/server ${FLATPAK_DEST}/bin/whisper-server; fi
 
   # whisper.cpp — CPU-only fallback binary (the Deck-validated configuration).
   # Same source/version as the Vulkan build, installed as whisper-cli-cpu. The app
@@ -180,8 +182,11 @@ modules:
 
   # Python dependencies — installed from PyPI at build time (local build uses --share=network).
   # Reads the repo's requirements.txt (PyQt6, pynput, numpy, scipy, customtkinter, sounddevice,
-  # requests, openai, groq). evdev + llama-cpp-python live in requirements-optional and are
-  # excluded here. For a reproducible Flathub submission, regenerate hashed sources with
+  # requests, openai, groq). evdev lives in requirements-optional and is excluded here
+  # (the sandbox can't read /dev/input anyway — hotkeys come via the host-side trigger);
+  # llama-cpp-python is deliberately excluded too — post-processing runs through the
+  # bundled llama-simple subprocess (see the llama-cpp module for the measured why).
+  # For a reproducible Flathub submission, regenerate hashed sources with
   # flatpak-pip-generator instead.
   - name: python-deps
     buildsystem: simple
@@ -226,6 +231,44 @@ modules:
       - type: archive
         url: https://prdownloads.sourceforge.net/tcl/tk8.6.14-src.tar.gz
         sha256: 8ffdb720f47a6ca6107eac2dd877e30b0ef7fac14f3a84ebbd0b3612cee41a94
+
+  # llama.cpp — local LLM post-processing (tone cleanup) via the llama-simple
+  # subprocess, CPU-only. Deliberately NOT the resident llama-cpp-python path
+  # the from-source install uses — measured in this sandbox on a Ryzen 9600X:
+  #   - llama-simple (this build): 1.4s per cleanup INCLUDING model load,
+  #     zero idle RAM (the ~1.1GB model is only in memory during the call —
+  #     matters on a 16GB Steam Deck running a game).
+  #   - llama-cpp-python 0.3.20/0.3.28 resident at the same AVX2 baseline:
+  #     1.7-3.6s per cleanup (older vendored ggml; ~80-150 tok/s prompt eval
+  #     vs ~300 here) while holding 1.1GB resident. Slower AND hungrier.
+  #     (GGML_CPU_ALL_VARIANTS runtime dispatch would fix the speed, but the
+  #     wheel build doesn't package the variant backends — load fails.)
+  # Future instant path: bundle llama-server with cache_prompt (KV reuse of the
+  # shared tone-guidance prefix), mirroring the whisper-server architecture.
+  # CPU-only (GGML_VULKAN=OFF) is deliberate: unlike whisper, the llama path has
+  # no GPU->CPU auto-fallback, and on hosts with broken/mismatched Vulkan a GPU
+  # llama run degrades to ~1 tok/s — a 60s hang per dictation.
+  # Instruction sets MUST be enabled explicitly: modern ggml with GGML_NATIVE=OFF
+  # builds pure SCALAR kernels (no SSE/AVX at all — measured 25-40x slower, 29s
+  # per cleanup). AVX2/FMA/F16C/BMI2 is the Zen 2 (Deck) baseline = any x86-64
+  # CPU from ~2013+; AVX-512 stays off (Zen 2 lacks it, SIGILL).
+  # Built as a single ninja target (not the full cmake-ninja buildsystem): a full
+  # build links ~380 targets including the unified `llama` app, whose link line
+  # requires llama-server-impl/llama-cli-impl even with LLAMA_BUILD_SERVER=OFF —
+  # an upstream target-dependency bug at this tag. We only need llama-simple.
+  - name: llama-cpp
+    buildsystem: simple
+    build-commands:
+      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
+      - cmake --build build --target llama-simple -j$(nproc)
+      # The app's CLI backend prefers llama-simple (stable echo+generation stdout
+      # format its extraction is built around); config defaults to /app/bin/llama-simple
+      # inside the sandbox (config.py IS_FLATPAK branch).
+      - install -Dm755 build/bin/llama-simple ${FLATPAK_DEST}/bin/llama-simple
+    sources:
+      - type: git
+        url: https://github.com/ggml-org/llama.cpp.git
+        tag: b9608
 
 
   # Main application

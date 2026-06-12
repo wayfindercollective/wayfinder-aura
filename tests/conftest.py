@@ -43,6 +43,16 @@ def temp_config_dir(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Patch home directory for config tests
     monkeypatch.setenv("HOME", str(temp_dir))
 
+    # CONFIG_DIR/CONFIG_FILE are computed at import time from Path.home(), so if
+    # wayfinder.config was already imported (any earlier test), they still point
+    # at the REAL ~/.config/wayfinder-aura/config.json and the HOME patch above
+    # does nothing — a full-suite run once clobbered the developer's real config
+    # this way. Patch the module attributes directly so config tests can never
+    # escape the temp dir, regardless of import order.
+    from wayfinder import config as _cfg
+    monkeypatch.setattr(_cfg, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", config_dir / "config.json")
+
     return config_dir
 
 
