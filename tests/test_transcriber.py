@@ -566,10 +566,15 @@ class TestWhisperServerWarmup:
         with patch.object(b, "_start_server", side_effect=RuntimeError("boom")):
             b.warm_up()  # must not raise
 
-    def test_module_warm_up_routes_to_server_backend(self):
+    def test_module_warm_up_routes_to_server_backend(self, tmp_path):
         from wayfinder.core import transcriber
+        # get_backend only returns the server backend when the binary exists.
+        (tmp_path / "whisper-cli").write_text("#!/bin/sh\n")
+        (tmp_path / "whisper-server").write_text("#!/bin/sh\n")
+        (tmp_path / "m.bin").write_bytes(b"\x00")
         cfg = {"transcription_backend": "whisper_cpp", "whisper_server_mode": True,
-               "whisper_binary": "/x/whisper-cli", "model_path": "/x/m.bin"}
+               "whisper_binary": str(tmp_path / "whisper-cli"),
+               "model_path": str(tmp_path / "m.bin")}
         with patch.object(transcriber.WhisperServerBackend, "warm_up") as warm:
             transcriber.warm_up_transcription(cfg)
             warm.assert_called_once()
@@ -603,3 +608,36 @@ class TestWhisperServerTranscribeParsing:
             text = b.transcribe(str(audio))
         # Must parse + strip — a missing `import json` made this raise NameError.
         assert text == "hello world"
+
+
+class TestServerModeDefaultAndFallback:
+    """Server mode is the default, but falls back to CLI when the binary is absent."""
+
+    def test_default_config_enables_server_mode(self):
+        from wayfinder.config import DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["whisper_server_mode"] is True
+
+    def test_get_backend_uses_server_when_binary_present(self, tmp_path):
+        from wayfinder.core.transcriber import get_backend, WhisperServerBackend
+        server = tmp_path / "whisper-server"
+        server.write_text("#!/bin/sh\n")
+        cli = tmp_path / "whisper-cli"
+        cli.write_text("#!/bin/sh\n")
+        model = tmp_path / "m.bin"
+        model.write_bytes(b"\x00")
+        cfg = {"whisper_server_mode": True, "whisper_binary": str(cli),
+               "model_path": str(model)}
+        assert isinstance(get_backend(cfg), WhisperServerBackend)
+
+    def test_get_backend_falls_back_to_cli_when_server_missing(self, tmp_path):
+        from wayfinder.core.transcriber import get_backend, WhisperCppBackend
+        # Only whisper-cli exists, no whisper-server next to it.
+        cli = tmp_path / "whisper-cli"
+        cli.write_text("#!/bin/sh\n")
+        model = tmp_path / "m.bin"
+        model.write_bytes(b"\x00")
+        cfg = {"whisper_server_mode": True, "whisper_binary": str(cli),
+               "model_path": str(model)}
+        backend = get_backend(cfg)
+        assert isinstance(backend, WhisperCppBackend)
+        assert not hasattr(backend, "whisper_server_binary")

@@ -1461,12 +1461,16 @@ def get_backend(config: dict) -> TranscriptionBackend:
             custom_vocabulary=config.get("custom_vocabulary", []),
         )
     else:
-        # Default to whisper.cpp — use server mode if enabled (keeps model in memory)
-        if config.get("whisper_server_mode", False):
+        # Default to whisper.cpp — use server mode if enabled (keeps model in memory
+        # for instant transcription). Server mode is the default, but it requires the
+        # whisper-server binary: the Flatpak bundles it, and a from-source install may
+        # only have whisper-cli built. So fall back to the per-invocation CLI backend
+        # whenever the server binary is absent — instant where possible, always working.
+        if config.get("whisper_server_mode", True):
             server_binary = config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
             # Derive server binary path from CLI binary path
             server_binary = server_binary.replace("whisper-cli", "whisper-server")
-            return WhisperServerBackend(
+            server_backend = WhisperServerBackend(
                 whisper_server_binary=server_binary,
                 model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),
                 port=config.get("whisper_server_port", 8178),
@@ -1482,6 +1486,10 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 prompt=config.get("prompt", ""),
                 custom_vocabulary=config.get("custom_vocabulary", []),
             )
+            if server_backend.is_available():
+                return server_backend
+            print("[Transcription] whisper-server binary not found — using whisper-cli "
+                  "(per-dictation model load). Build whisper-server for instant mode.")
         return WhisperCppBackend(
             whisper_binary=config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli"),
             model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),
