@@ -521,3 +521,63 @@ class TestGpuRecoveryProbe:
         transcriber.set_gpu_event_logger(bad_logger)
         backend, audio = self._backend(tmp_path, "kill -SEGV $$")
         assert backend.transcribe(audio) == "cpu-text"
+
+
+class TestWhisperServerWarmup:
+    """whisper-server backend: instant first dictation via startup warm-up."""
+
+    def test_server_backend_is_concrete(self):
+        """Regression: backend was missing get_name/supports_gpu (abstract -> uninstantiable)."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+        b = WhisperServerBackend(model_path="/tmp/none.bin")
+        assert b.get_name()
+        assert b.supports_gpu() is True
+
+    def test_warm_up_noop_when_binary_missing(self, tmp_path):
+        from wayfinder.core.transcriber import WhisperServerBackend
+        b = WhisperServerBackend(
+            whisper_server_binary=str(tmp_path / "absent"),
+            model_path=str(tmp_path / "absent.bin"),
+        )
+        # is_available() is False -> warm_up must return without starting anything
+        with patch.object(b, "_start_server") as start:
+            b.warm_up()
+            start.assert_not_called()
+
+    def test_warm_up_starts_server_when_available(self, tmp_path):
+        from wayfinder.core.transcriber import WhisperServerBackend
+        binary = tmp_path / "whisper-server"
+        binary.write_text("#!/bin/sh\n")
+        model = tmp_path / "m.bin"
+        model.write_bytes(b"\x00")
+        b = WhisperServerBackend(whisper_server_binary=str(binary), model_path=str(model))
+        with patch.object(b, "_start_server") as start:
+            b.warm_up()
+            start.assert_called_once()
+
+    def test_warm_up_swallows_start_failure(self, tmp_path):
+        """A broken warm-up must never propagate (would block app startup)."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+        binary = tmp_path / "whisper-server"
+        binary.write_text("#!/bin/sh\n")
+        model = tmp_path / "m.bin"
+        model.write_bytes(b"\x00")
+        b = WhisperServerBackend(whisper_server_binary=str(binary), model_path=str(model))
+        with patch.object(b, "_start_server", side_effect=RuntimeError("boom")):
+            b.warm_up()  # must not raise
+
+    def test_module_warm_up_routes_to_server_backend(self):
+        from wayfinder.core import transcriber
+        cfg = {"transcription_backend": "whisper_cpp", "whisper_server_mode": True,
+               "whisper_binary": "/x/whisper-cli", "model_path": "/x/m.bin"}
+        with patch.object(transcriber.WhisperServerBackend, "warm_up") as warm:
+            transcriber.warm_up_transcription(cfg)
+            warm.assert_called_once()
+
+    def test_module_warm_up_noop_for_cli_backend(self):
+        """whisper-cli has nothing to warm — must not raise or start a server."""
+        from wayfinder.core import transcriber
+        cfg = {"transcription_backend": "whisper_cpp", "whisper_server_mode": False,
+               "whisper_binary": "/x/whisper-cli", "model_path": "/x/m.bin"}
+        # WhisperCppBackend has no warm_up attr -> helper is a clean no-op
+        transcriber.warm_up_transcription(cfg)

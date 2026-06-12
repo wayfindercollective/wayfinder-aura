@@ -728,6 +728,26 @@ class WhisperServerBackend(TranscriptionBackend):
         """Check if the whisper-server binary exists."""
         return Path(self.whisper_server_binary).exists() and Path(self.model_path).exists()
 
+    def get_name(self) -> str:
+        return "whisper.cpp (server)"
+
+    def supports_gpu(self) -> bool:
+        return True
+
+    def warm_up(self) -> None:
+        """Pre-load the model into the server so the FIRST dictation is instant.
+
+        Safe to call from a background thread at app startup. Swallows failures
+        (a broken warm-up must never block launch — the lazy start in transcribe()
+        is the fallback). No-op if the binary/model aren't present.
+        """
+        if not self.is_available():
+            return
+        try:
+            self._start_server()
+        except Exception as e:
+            print(f"[Whisper Server] Warm-up skipped: {e}")
+
     def transcribe(self, audio_path: str, context: str = "") -> str:
         """Transcribe audio via the whisper-server HTTP API."""
         if not Path(audio_path).exists():
@@ -1356,13 +1376,31 @@ class OpenAIWhisperBackend(TranscriptionBackend):
             raise TranscriptionError(f"OpenAI Whisper API call failed: {e}")
 
 
+def warm_up_transcription(config: dict) -> None:
+    """Pre-load the transcription model so the first dictation is instant.
+
+    Only does work for backends that benefit from a persistent process — today
+    that's whisper-server mode, which loads the ~1.5GB model into VRAM once and
+    keeps it resident. For per-invocation backends (whisper-cli) there's nothing
+    to warm, so this is a cheap no-op. Designed to be called in a daemon thread
+    at app startup; never raises.
+    """
+    try:
+        backend = get_backend(config)
+        warm = getattr(backend, "warm_up", None)
+        if callable(warm):
+            warm()
+    except Exception as e:
+        print(f"[Transcription] Warm-up skipped: {e}")
+
+
 def get_backend(config: dict) -> TranscriptionBackend:
     """
     Factory function to create the appropriate transcription backend.
-    
+
     Args:
         config: Configuration dictionary with transcription settings
-        
+
     Returns:
         A TranscriptionBackend instance
     """

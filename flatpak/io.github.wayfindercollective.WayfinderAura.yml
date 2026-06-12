@@ -113,6 +113,11 @@ modules:
       # only in later releases). Install it under the whisper-cli name the app/config expects.
       # Static build (BUILD_SHARED_LIBS=OFF) so it's standalone — no rpath shim needed (Issue 12).
       - if [ -f bin/whisper-cli ]; then install -Dm755 bin/whisper-cli ${FLATPAK_DEST}/bin/whisper-cli; else install -Dm755 bin/main ${FLATPAK_DEST}/bin/whisper-cli; fi
+      # whisper-server (built by WHISPER_BUILD_EXAMPLES=ON) keeps the model resident
+      # so dictation is instant. The app warms it at startup and routes through it
+      # when whisper_server_mode is on; install it next to whisper-cli (the app
+      # derives the server path by name).
+      - if [ -f bin/whisper-server ]; then install -Dm755 bin/whisper-server ${FLATPAK_DEST}/bin/whisper-server; fi
 
   # whisper.cpp — CPU-only fallback binary (the Deck-validated configuration).
   # Same source/version as the Vulkan build, installed as whisper-cli-cpu. The app
