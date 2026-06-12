@@ -581,3 +581,25 @@ class TestWhisperServerWarmup:
                "whisper_binary": "/x/whisper-cli", "model_path": "/x/m.bin"}
         # WhisperCppBackend has no warm_up attr -> helper is a clean no-op
         transcriber.warm_up_transcription(cfg)
+
+
+class TestWhisperServerTranscribeParsing:
+    """Exercise the real HTTP response parsing — the path that hit NameError: json."""
+
+    def test_transcribe_parses_json_response(self, tmp_path):
+        from unittest.mock import MagicMock, patch
+        from wayfinder.core.transcriber import WhisperServerBackend
+        import io
+
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"RIFF....WAVE")
+        b = WhisperServerBackend(model_path=str(tmp_path / "m.bin"))
+
+        fake_resp = MagicMock()
+        fake_resp.read.return_value = b'{"text": " hello world "}'
+        with patch.object(b, "_start_server"), \
+             patch("urllib.request.urlopen", return_value=fake_resp):
+            WhisperServerBackend._server_port = 8178
+            text = b.transcribe(str(audio))
+        # Must parse + strip — a missing `import json` made this raise NameError.
+        assert text == "hello world"
