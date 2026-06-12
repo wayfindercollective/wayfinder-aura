@@ -549,6 +549,10 @@ class WhisperServerBackend(TranscriptionBackend):
     _server_port: int = 0
     _server_lock = None  # Initialized lazily
     _server_model_path: str = ""
+    # Set when every startup attempt failed on this machine — transcribe()
+    # then delegates straight to the per-call CLI backend instead of paying
+    # the failed-startup cost on every dictation.
+    _server_disabled: bool = False
 
     def __init__(
         self,
@@ -632,6 +636,41 @@ class WhisperServerBackend(TranscriptionBackend):
                 sock.close()
         return self.port  # Fall back to configured port
 
+    def _server_cmd_attempts(self, port: int) -> list:
+        """Ordered list of server spawn commands to try.
+
+        whisper-server's flag set varies by release — v1.7.2 (the Flatpak's
+        pinned build, whose server is examples/server installed under the
+        whisper-server name) lacks -nth and -sns, and an unknown flag makes it
+        print usage and exit, killing dictation entirely. And on machines with
+        broken Vulkan the GPU build can die during model load. So the ladder is:
+        full modern flags -> v1.7.2-safe flags -> v1.7.2-safe + no-GPU (the same
+        degradation whisper-cli's binary auto-fallback provides).
+        """
+        base = [
+            self.whisper_server_binary,
+            "-m", self.model_path,
+            "-t", str(self.threads),
+            "--port", str(port),
+            "-l", self.language if self.language and self.language.lower() != "auto" else "en",
+            "-bs", str(self.beam_size),
+            "-bo", str(self.best_of),
+            "-et", str(self.entropy_threshold),
+            "-nf",  # No fallback (faster)
+        ]
+        if not self.use_gpu:
+            base = base + ["-ng"]
+
+        full = list(base)
+        full.extend(["-nth", str(self.no_speech_threshold)])
+        if self.suppress_nst:
+            full.append("-sns")
+
+        attempts = [full, base]
+        if self.use_gpu:
+            attempts.append(base + ["-ng"])  # broken-Vulkan rescue: CPU server
+        return attempts
+
     def _start_server(self) -> None:
         """Start the whisper-server process if not already running."""
         with WhisperServerBackend._server_lock:
@@ -653,51 +692,52 @@ class WhisperServerBackend(TranscriptionBackend):
                 print(f"[Whisper Server] Reusing existing server on port {port}")
                 return
 
-            cmd = [
-                self.whisper_server_binary,
-                "-m", self.model_path,
-                "-t", str(self.threads),
-                "--port", str(port),
-                "-l", self.language if self.language and self.language.lower() != "auto" else "en",
-                "-bs", str(self.beam_size),
-                "-bo", str(self.best_of),
-                "-et", str(self.entropy_threshold),
-                "-nth", str(self.no_speech_threshold),
-                "-nf",  # No fallback (faster)
-            ]
-
-            if not self.use_gpu:
-                cmd.append("-ng")
-
-            if self.suppress_nst:
-                cmd.append("-sns")
-
-            print(f"[Whisper Server] Starting on port {port}...")
-            WhisperServerBackend._server_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            WhisperServerBackend._server_port = port
-            WhisperServerBackend._server_model_path = self.model_path
-
-            # Register atexit handler for cleanup
             import atexit
-            atexit.register(WhisperServerBackend.shutdown)
-
-            # Wait for server to be ready (model loading takes a few seconds)
             import time
-            for i in range(60):  # Wait up to 30 seconds
-                time.sleep(0.5)
-                if self._is_our_server(port):
-                    print(f"[Whisper Server] Ready on port {port} (took {(i+1)*0.5:.1f}s)")
-                    return
-                # Check if process died
-                if WhisperServerBackend._server_process.poll() is not None:
-                    stdout = WhisperServerBackend._server_process.stdout.read().decode("utf-8", errors="ignore")
-                    raise TranscriptionError(f"whisper-server failed to start: {stdout[-500:]}")
 
-            raise TranscriptionError("whisper-server timed out during startup (30s)")
+            last_error = ""
+            for attempt, cmd in enumerate(self._server_cmd_attempts(port)):
+                if attempt:
+                    print(f"[Whisper Server] Start failed ({last_error.strip()[-200:]}) — "
+                          f"retrying with reduced flags (attempt {attempt + 1})...")
+                else:
+                    print(f"[Whisper Server] Starting on port {port}...")
+
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                WhisperServerBackend._server_process = proc
+                WhisperServerBackend._server_port = port
+                WhisperServerBackend._server_model_path = self.model_path
+
+                # Register atexit handler for cleanup (idempotent: shutdown is
+                # safe to call multiple times)
+                atexit.register(WhisperServerBackend.shutdown)
+
+                # Wait for server to be ready (model loading takes a few seconds)
+                died = False
+                for i in range(60):  # Wait up to 30 seconds
+                    time.sleep(0.5)
+                    if self._is_our_server(port):
+                        print(f"[Whisper Server] Ready on port {port} (took {(i+1)*0.5:.1f}s)")
+                        return
+                    if proc.poll() is not None:
+                        last_error = proc.stdout.read().decode("utf-8", errors="ignore")[-500:]
+                        died = True
+                        break
+
+                if not died:
+                    # Startup hang — reduced flags won't fix that; stop trying.
+                    self._stop_server_internal()
+                    WhisperServerBackend._server_disabled = True
+                    raise TranscriptionError("whisper-server timed out during startup (30s)")
+
+            WhisperServerBackend._server_process = None
+            WhisperServerBackend._server_model_path = ""
+            WhisperServerBackend._server_disabled = True
+            raise TranscriptionError(f"whisper-server failed to start: {last_error}")
 
     @classmethod
     def _stop_server_internal(cls) -> None:
@@ -749,13 +789,47 @@ class WhisperServerBackend(TranscriptionBackend):
         except Exception as e:
             print(f"[Whisper Server] Warm-up skipped: {e}")
 
+    def _cli_fallback(self) -> "WhisperCppBackend":
+        """Per-call whisper-cli backend used when the server can't run here.
+
+        The CLI backend has its own GPU->CPU binary auto-fallback, so the full
+        degradation ladder is: server(GPU) -> server(CPU) -> cli(GPU) -> cli(CPU)
+        — slower per dictation but always working.
+        """
+        if getattr(self, "_cli_backend", None) is None:
+            self._cli_backend = WhisperCppBackend(
+                whisper_binary=self.whisper_server_binary.replace("whisper-server", "whisper-cli"),
+                model_path=self.model_path,
+                prompt=self.prompt,
+                threads=self.threads,
+                timeout=self.timeout,
+                use_gpu=self.use_gpu,
+                beam_size=self.beam_size,
+                best_of=self.best_of,
+                language=self.language,
+                entropy_threshold=self.entropy_threshold,
+                no_speech_threshold=self.no_speech_threshold,
+                custom_vocabulary=self.custom_vocabulary,
+                suppress_nst=self.suppress_nst,
+            )
+        return self._cli_backend
+
     def transcribe(self, audio_path: str, context: str = "") -> str:
         """Transcribe audio via the whisper-server HTTP API."""
         if not Path(audio_path).exists():
             raise TranscriptionError(f"Audio file not found: {audio_path}")
 
+        # Server already proved unusable on this machine — go straight to CLI.
+        if WhisperServerBackend._server_disabled:
+            return self._cli_fallback().transcribe(audio_path, context)
+
         # Ensure server is running
-        self._start_server()
+        try:
+            self._start_server()
+        except TranscriptionError as e:
+            print(f"[Whisper Server] Unusable on this machine ({e}). "
+                  "Falling back to whisper-cli per dictation.")
+            return self._cli_fallback().transcribe(audio_path, context)
         port = WhisperServerBackend._server_port
 
         # Build prompt

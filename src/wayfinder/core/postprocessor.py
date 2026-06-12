@@ -1600,8 +1600,14 @@ class LlamaCppCliBackend(PostProcessorBackend):
     kept RESIDENT in-process (class-level cache) and the same tuned prompt is run
     through it — ~0.2s vs ~1s for a per-call subprocess that reloads the model.
     The subprocess (llama-simple) path remains the fallback when the bindings are
-    absent (e.g. the Flatpak, which excludes llama-cpp-python), so output is
-    identical and the feature degrades gracefully.
+    absent or fail to load, so output is identical and the feature degrades
+    gracefully. The Flatpak intentionally ships ONLY the subprocess path (a
+    bundled CPU llama-simple at /app/bin): a recent llama.cpp subprocess
+    measured FASTER per cleanup (1.4s incl. model load) than a resident
+    llama-cpp-python at the same portable-AVX2 baseline (1.7-3.6s, older
+    vendored ggml), and it holds no idle RAM — which matters on a Steam Deck
+    running a game. Resident shines on from-source installs where pip builds
+    llama-cpp-python with -march=native.
     """
 
     # Resident model cache shared across instances: {(model_path, n_ctx, ngl): Llama}
@@ -1669,8 +1675,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
 
         Keeping the model loaded is what makes post-processing instant — the
         ~1.5GB-or-less model is paid for once, not per dictation. Returns None
-        when llama-cpp-python isn't importable (the Flatpak), so callers fall
-        back to the subprocess path.
+        when llama-cpp-python isn't importable (e.g. a from-source install
+        without it), so callers fall back to the subprocess path.
         """
         try:
             from llama_cpp import Llama
@@ -1695,12 +1701,17 @@ class LlamaCppCliBackend(PostProcessorBackend):
 
     def warm_up(self) -> None:
         """Load the resident model + build the compute graph so the first real
-        dictation is instant (the very first generation is otherwise ~1s slower
-        while llama.cpp builds its graph). Safe in a background thread; never raises."""
+        dictation is instant. Runs a real (tiny) cleanup prompt, not a 1-token
+        poke: llama.cpp builds compute graphs per batch shape on first use, and
+        a trivial warm-up left the FIRST real dictation paying ~4s of graph and
+        prompt-cache build (measured in the Flatpak) while later calls took
+        ~0.2s. A representative prompt moves that cost into this background
+        warm-up. Safe in a background thread; never raises."""
         try:
             model = self._resident_model()
             if model is not None:
-                model("ok", max_tokens=1, temperature=0.0)
+                prompt = self.build_cli_prompt("warm up", self.output_tone, self.intensity)
+                model(prompt, max_tokens=8, temperature=0.0)
         except Exception as e:
             print(f"[Post-processing] Warm-up skipped: {e}")
     

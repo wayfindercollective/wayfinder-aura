@@ -641,3 +641,87 @@ class TestServerModeDefaultAndFallback:
         backend = get_backend(cfg)
         assert isinstance(backend, WhisperCppBackend)
         assert not hasattr(backend, "whisper_server_binary")
+
+
+class TestServerFlagLadderAndCliDelegation:
+    """Bulletproof server startup: v1.7.2's bundled server lacks -nth/-sns (an
+    unknown flag makes it print usage and exit), broken-Vulkan machines need a
+    no-GPU retry, and a machine where the server can't run at all must degrade
+    to the per-call CLI backend instead of failing every dictation."""
+
+    def _backend(self, tmp_path):
+        from wayfinder.core.transcriber import WhisperServerBackend
+        binary = tmp_path / "whisper-server"
+        binary.write_text("#!/bin/sh\n")
+        model = tmp_path / "m.bin"
+        model.write_bytes(b"\x00")
+        return WhisperServerBackend(
+            whisper_server_binary=str(binary), model_path=str(model),
+            use_gpu=True, suppress_nst=True,
+        )
+
+    def test_attempt_ladder_full_then_safe_then_cpu(self, tmp_path):
+        b = self._backend(tmp_path)
+        attempts = b._server_cmd_attempts(8178)
+        assert len(attempts) == 3
+        full, safe, cpu = attempts
+        # Attempt 1: full modern flag set
+        assert "-nth" in full and "-sns" in full
+        # Attempt 2: v1.7.2-safe — no post-1.7.2 flags, still GPU
+        assert "-nth" not in safe and "-sns" not in safe and "-ng" not in safe
+        # Attempt 3: broken-Vulkan rescue — safe flags + no-GPU
+        assert "-nth" not in cpu and cpu[-1] == "-ng"
+        # All attempts keep the universally-supported accuracy flags
+        for cmd in attempts:
+            for flag in ("-m", "-t", "--port", "-l", "-bs", "-bo", "-et", "-nf"):
+                assert flag in cmd
+
+    def test_no_gpu_config_skips_cpu_rescue_attempt(self, tmp_path):
+        b = self._backend(tmp_path)
+        b.use_gpu = False
+        attempts = b._server_cmd_attempts(8178)
+        assert len(attempts) == 2
+        assert all("-ng" in cmd for cmd in attempts)
+
+    def test_transcribe_delegates_to_cli_when_server_disabled(self, tmp_path):
+        from unittest.mock import MagicMock, patch
+        from wayfinder.core.transcriber import WhisperServerBackend
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"RIFF....WAVE")
+        b = self._backend(tmp_path)
+        fake_cli = MagicMock()
+        fake_cli.transcribe.return_value = "via cli"
+        old = WhisperServerBackend._server_disabled
+        try:
+            WhisperServerBackend._server_disabled = True
+            with patch.object(b, "_cli_fallback", return_value=fake_cli):
+                assert b.transcribe(str(audio)) == "via cli"
+            fake_cli.transcribe.assert_called_once()
+        finally:
+            WhisperServerBackend._server_disabled = old
+
+    def test_transcribe_falls_back_to_cli_when_start_raises(self, tmp_path):
+        from unittest.mock import MagicMock, patch
+        from wayfinder.core.transcriber import WhisperServerBackend, TranscriptionError
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"RIFF....WAVE")
+        b = self._backend(tmp_path)
+        fake_cli = MagicMock()
+        fake_cli.transcribe.return_value = "via cli"
+        old = WhisperServerBackend._server_disabled
+        try:
+            WhisperServerBackend._server_disabled = False
+            with patch.object(b, "_start_server", side_effect=TranscriptionError("nope")), \
+                 patch.object(b, "_cli_fallback", return_value=fake_cli):
+                assert b.transcribe(str(audio)) == "via cli"
+        finally:
+            WhisperServerBackend._server_disabled = old
+
+    def test_cli_fallback_derives_cli_binary_and_keeps_settings(self, tmp_path):
+        b = self._backend(tmp_path)
+        cli = b._cli_fallback()
+        assert cli.whisper_binary.endswith("whisper-cli")
+        assert cli.model_path == b.model_path
+        assert cli.threads == b.threads
+        # Cached — same object on second call
+        assert b._cli_fallback() is cli
