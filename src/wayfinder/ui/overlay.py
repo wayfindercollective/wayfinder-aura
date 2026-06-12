@@ -26,6 +26,12 @@ try:
 except ImportError:  # standalone script — its own directory is on sys.path
     from overlay_geometry import clamp_overlay_y
 
+# Blocking stdin reader thread (Qt-free; unit-tested in tests/test_stdin_reader.py).
+try:
+    from wayfinder.ui.stdin_reader import StdinCommandReader
+except ImportError:  # standalone script — its own directory is on sys.path
+    from stdin_reader import StdinCommandReader
+
 # Force native Wayland path for PyQt6 if running on Wayland
 # This ensures proper transparency and always-on-top behavior
 if os.environ.get("XDG_SESSION_TYPE") == "wayland":
@@ -1651,6 +1657,13 @@ def run_overlay():
     # Make stdin unbuffered for immediate command processing
     # This is critical for responsive state changes
     sys.stdin = io.TextIOWrapper(sys.stdin.buffer, line_buffering=True)
+
+    # All command input flows through a blocking reader thread. readline() on a
+    # buffered stream can pull several pipe writes into Python's buffer in one
+    # go, where a select() gate on the raw fd can no longer see them — a state
+    # change coalesced with the final audio-level burst then sat undelivered
+    # until the next write, seconds later (the "stuck on Listening..." bug).
+    stdin_reader = StdinCommandReader(sys.stdin).start()
     
     # Handle termination signals for clean shutdown
     def signal_handler(signum, frame):
@@ -1719,8 +1732,6 @@ def run_overlay():
     # In "standard" mode, window starts hidden
     
     # Command processing timer
-    import select
-    
     import time as _time_mod
     _last_command_time = [_time_mod.time()]  # mutable ref for closure
     _stdin_eof = [False]
@@ -1746,24 +1757,19 @@ def run_overlay():
                         overlay.set_state(OverlayState.READY)
                 return
 
-            # Read ALL available commands in one poll cycle
-            # This prevents state change commands from getting stuck behind level updates
+            # Read ALL commands received since the last tick — the reader thread
+            # hands lines over the moment they arrive, so a state change can no
+            # longer hide in the stream buffer behind level updates.
             commands = []
-            while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
-                line = sys.stdin.readline()
-                if not line:
-                    # EOF — stdin pipe broke (main process died or pipe closed)
-                    _stdin_eof[0] = True
-                    _debug_log("STDIN EOF detected — pipe broken")
-                    break
-                line = line.strip()
-                if not line:
-                    continue
+            for line in stdin_reader.drain():
                 try:
-                    cmd = json.loads(line)
-                    commands.append(cmd)
+                    commands.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
+            if stdin_reader.at_eof and not _stdin_eof[0]:
+                # EOF — stdin pipe broke (main process died or pipe closed)
+                _stdin_eof[0] = True
+                _debug_log("STDIN EOF detected — pipe broken")
 
             if commands:
                 _last_command_time[0] = _time_mod.time()
