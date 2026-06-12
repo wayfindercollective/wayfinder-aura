@@ -702,3 +702,49 @@ The `integration/flatpak-v2` branch now **builds, installs, transcribes, and run
 ### Still pre-existing / follow-ups
 - 16 unit-test failures in `test_injector`/`test_platform`/`test_e2e_*` are stale assertions from the earlier ydotool→wtype injection refactor (they assert `ydotool`, code now returns `wtype`) — not touched by this pass; should be updated to the wtype/xdotool reality.
 - Portal (in-app keyboard) hotkey still unproven on the Deck KDE — R4 rides the proven socket path, so this isn't on the critical path.
+
+
+## Update — 2026-06-12: USB hotplug wedges Steam Input; overlay "stuck on Listening" root-caused
+
+**Symptom 1: R4 dictation died the moment a USB hub (Keychron dongle + Corsair
+Scimitar + Shure MV7) re-enumerated.** Both the Keychron Link dongle and the
+Scimitar expose joystick HID interfaces; when they appeared, Steam Input
+dropped the Deck controller from PollState 2 (active) to 1 and never
+re-activated it — last line in `~/.local/share/Steam/logs/controller.txt` was
+`Controller PollState Changed from 2 to 1` at the exact plug-in second. Every
+mapping (R4 included) goes silent while the bridge, app, and whisper all look
+healthy. **Fix: restart the Steam client.** The bridge auto-reattaches to the
+recreated virtual pad.
+
+**Symptom 2: after the stop press the overlay said "Listening..." through the
+whole transcription, then flashed Processing for ~800ms.** Root cause in
+`overlay.py`: the command drain gated `readline()` on `select()` against the
+raw fd. `readline()` pulls a whole buffered chunk off the pipe, so lines
+coalesced into one read vanish from the fd's readability while sitting
+unprocessed in Python's buffer — and the sender stops the 30Hz audio-level
+stream *right before* writing `show processing`, making it the last write
+before seconds of pipe silence. It surfaced only when `show ready` woke the
+fd after transcription. Fixed with a blocking reader thread
+(`src/wayfinder/ui/stdin_reader.py`) + regression test
+(`tests/test_stdin_reader.py`). Diagnosis trick for next time: correlate
+`~/.cache/wayfinder-aura/overlay-debug.log` RECV epochs against `[STATE]`
+lines and the journal's `Toggle sent!` entries.
+
+**R4 chain reality check:** R4 currently reaches the app via Steam key
+injection → KDE custom shortcut → trigger script → Unix socket (`Toggle
+sent!` in the user journal) — NOT via the r4-f3-bridge (now committed under
+`scripts/steamdeck/` as a dormant backup; bind R4 → Right Joystick Click to
+use it).
+
+**Corsair Scimitar side grid:** mappings created in iCUE as software Actions
+do not fire on Linux — a 5-minute evdev capture across all five HID
+interfaces saw zero side-grid events. They must be saved as Hardware
+Actions / onboard-memory profile. Note the flatpak's evdev listener can't see
+/dev/input anyway (sandbox grants only `--device=dri`); a side-button F3
+arrives via the X11 layer exactly like keyboard F3. Granting
+`--device=input` in the manifest would enable the in-app evdev grab path
+("MMO mouse side-grid" exclusive grab + Detect button).
+
+**Audio:** after a hub re-plug PipeWire may fail to recreate the Shure MV7
+source and the default falls back to Internal Mic. Check
+`pactl list sources short`; kick with `systemctl --user restart wireplumber`.
