@@ -1,0 +1,6 @@
+[Unit]
+Description=Wayfinder Aura failure notification
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/notify-send -u critical -i dialog-error "Wayfinder Aura crashed" "Service failed — see /tmp/wfa-stderr.log for details"

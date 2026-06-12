@@ -1,0 +1,17 @@
+[Unit]
+Description=R4 -> F3 bridge (Steam Input keyboard-injection workaround)
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/home/deck/.local/bin/r4-f3-bridge.py
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/tmp/r4-f3-bridge.log
+StandardError=append:/tmp/r4-f3-bridge.log
+
+[Install]
+WantedBy=graphical-session.target
