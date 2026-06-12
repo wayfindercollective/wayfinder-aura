@@ -13065,6 +13065,12 @@ class WayfinderApp(ctk.CTk):
         except ImportError:
             pass
 
+        # Warm the transcription model in the background so the FIRST dictation is
+        # instant — no manual warm-up, no slow first press. Only does real work in
+        # whisper-server mode (loads the model into VRAM once); a cheap no-op
+        # otherwise. Daemon thread so it never delays startup.
+        self._warm_up_transcription()
+
         # Pause F-keys while a Lutris/Steam game is running (gamemoded). Linux-only;
         # silent no-op when gamemoded / python-dbus is absent.
         if sys.platform.startswith("linux"):
@@ -13090,6 +13096,26 @@ class WayfinderApp(ctk.CTk):
         else:
             self.log("🖥️ X11 detected - using evdev")
         self._start_evdev_listener()
+
+    def _warm_up_transcription(self):
+        """Pre-load the transcription model in the background (whisper-server mode).
+
+        Makes the first dictation instant without the user warming anything up.
+        A no-op for per-invocation backends. Daemon thread; failures are logged
+        but never block startup — the lazy start at first transcription remains
+        the fallback.
+        """
+        def _warm():
+            try:
+                from wayfinder.core.transcriber import warm_up_transcription
+                if self.config.get("whisper_server_mode"):
+                    self.log("⏳ Warming up transcription model (first dictation will be instant)…")
+                warm_up_transcription(self.config)
+                if self.config.get("whisper_server_mode"):
+                    self.log("✅ Transcription model loaded — ready for instant dictation")
+            except Exception as e:
+                self.log(f"⚠️ Transcription warm-up skipped: {e}")
+        threading.Thread(target=_warm, daemon=True, name="wayfinder-whisper-warmup").start()
 
     def _ensure_socket_listener(self):
         """Start the socket listener if it isn't already running. Idempotent.
