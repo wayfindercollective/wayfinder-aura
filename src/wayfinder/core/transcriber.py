@@ -3,6 +3,7 @@ Transcription module for Wayfinder Aura.
 Supports multiple backends: whisper.cpp (with Vulkan GPU) and Faster-Whisper (with ROCm).
 """
 
+import json
 import os
 import subprocess
 import tempfile
