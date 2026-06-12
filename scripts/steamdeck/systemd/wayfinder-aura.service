@@ -1,0 +1,18 @@
+[Unit]
+Description=Wayfinder Aura voice dictation
+After=graphical-session.target ydotool.service
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+OnFailure=wayfinder-aura-failed.service
+
+[Service]
+Type=simple
+ExecStart=/home/deck/.local/bin/wayfinder-aura-launcher
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/tmp/wfa-stdout.log
+StandardError=append:/tmp/wfa-stderr.log
+
+[Install]
+WantedBy=graphical-session.target
