@@ -725,3 +725,14 @@ class TestServerFlagLadderAndCliDelegation:
         assert cli.threads == b.threads
         # Cached — same object on second call
         assert b._cli_fallback() is cli
+
+    def test_cpu_server_sibling_is_last_resort(self, tmp_path):
+        # A whisper-server-cpu next to the server binary adds a final attempt
+        # using it (Vulkan builds can crash at lib init even with -ng).
+        from wayfinder.core.transcriber import WhisperServerBackend
+        b = self._backend(tmp_path)
+        (tmp_path / "whisper-server-cpu").write_text("#!/bin/sh\n")
+        attempts = b._server_cmd_attempts(8178)
+        assert len(attempts) == 4
+        assert attempts[-1][0].endswith("whisper-server-cpu")
+        assert "-nth" not in attempts[-1]

@@ -141,6 +141,12 @@ modules:
         tag: v1.7.2
     post-install:
       - if [ -f bin/whisper-cli ]; then install -Dm755 bin/whisper-cli ${FLATPAK_DEST}/bin/whisper-cli-cpu; else install -Dm755 bin/main ${FLATPAK_DEST}/bin/whisper-cli-cpu; fi
+      # CPU whisper-server: the Vulkan-built server crashes at ggml-vulkan
+      # LIBRARY INIT — before -ng is honored — on broken-Vulkan devices
+      # (observed SIGSEGV on the Deck's RDNA2 in-sandbox), so no flag can save
+      # it. The server startup ladder's last resort is this separate CPU-only
+      # binary: instant (model-resident) transcription survives even there.
+      - if [ -f bin/whisper-server ]; then install -Dm755 bin/whisper-server ${FLATPAK_DEST}/bin/whisper-server-cpu; elif [ -f bin/server ]; then install -Dm755 bin/server ${FLATPAK_DEST}/bin/whisper-server-cpu; fi
 
   # Bundled whisper model: base.en — the right default for Steam-Deck-class CPU
   # (~141 MB, ~2x real-time on the Zen 2 APU; large-v3-turbo is unusable there —
