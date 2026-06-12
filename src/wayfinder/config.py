@@ -144,7 +144,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "min_recording_duration": 0.5,
 
     # Whisper server mode: keep model loaded in memory for fast inference
-    "whisper_server_mode": sys.platform == "darwin",  # Enabled by default on macOS
+    # Instant transcription: keep the model resident in a whisper-server process
+    # instead of reloading it per dictation. On by default everywhere; get_backend
+    # falls back to the whisper-cli backend automatically if the server binary
+    # isn't present (e.g. a from-source install that only built whisper-cli).
+    "whisper_server_mode": True,
     "whisper_server_port": 8178,
     
     # UI settings

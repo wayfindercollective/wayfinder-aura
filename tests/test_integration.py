@@ -24,6 +24,12 @@ class TestE2ETranscriptionFlow:
         from wayfinder.core.recorder import AudioRecorder
         from wayfinder.core.transcriber import transcribe_with_config
 
+        # This test exercises the whisper-cli (subprocess) path — pin it to CLI mode
+        # so it doesn't route through a real whisper-server (server mode is now the
+        # config default).
+        sample_config = dict(sample_config)
+        sample_config["whisper_server_mode"] = False
+
         # Mock subprocess for whisper-cli
         mock_run.return_value = MagicMock(
             returncode=0,
