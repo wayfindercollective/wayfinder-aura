@@ -669,6 +669,14 @@ class WhisperServerBackend(TranscriptionBackend):
         attempts = [full, base]
         if self.use_gpu:
             attempts.append(base + ["-ng"])  # broken-Vulkan rescue: CPU server
+        # A Vulkan-built server can crash at LIBRARY INIT even with -ng (ggml
+        # enumerates Vulkan devices before no-gpu is honored — observed SIGSEGV
+        # on the Deck's RDNA2 in-sandbox), so no flag can save it. The Flatpak
+        # ships a separate CPU-only server binary for exactly this; try it last
+        # so instant (model-resident) transcription survives broken Vulkan.
+        cpu_server = self.whisper_server_binary.replace("whisper-server", "whisper-server-cpu")
+        if cpu_server != self.whisper_server_binary and Path(cpu_server).exists():
+            attempts.append([cpu_server] + base[1:])
         return attempts
 
     def _start_server(self) -> None:
