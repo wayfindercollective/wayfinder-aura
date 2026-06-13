@@ -1,0 +1,17 @@
+[Unit]
+Description=Wayfinder Aura mode supervisor (SteamOS Game Mode lifecycle)
+After=default.target
+Before=wayfinder-aura.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/home/deck/.local/bin/wayfinder-mode-supervisor.py
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/tmp/wayfinder-mode-supervisor.log
+StandardError=append:/tmp/wayfinder-mode-supervisor.log
+
+[Install]
+WantedBy=default.target
