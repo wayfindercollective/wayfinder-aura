@@ -1,0 +1,19 @@
+[Unit]
+Description=Wayfinder Aura trigger daemon (evdev -> Unix socket; works in Desktop and Game Mode)
+# Supersedes r4-f3-bridge.service — do not enable both (double-trigger on BTN_THUMBR).
+Conflicts=r4-f3-bridge.service
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/home/deck/.local/bin/wayfinder-trigger-daemon.py
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/tmp/wayfinder-trigger.log
+StandardError=append:/tmp/wayfinder-trigger.log
+
+[Install]
+WantedBy=graphical-session.target
