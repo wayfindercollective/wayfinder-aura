@@ -9,7 +9,9 @@ for disaster recovery — if the Deck is wiped, this directory plus
 | Repo file | Deck location |
 |---|---|
 | `wayfinder-trigger-daemon.py` | `~/.local/bin/wayfinder-trigger-daemon.py` (executable) |
+| `wayfinder-mode-supervisor.py` | `~/.local/bin/wayfinder-mode-supervisor.py` (executable) |
 | `systemd/wayfinder-trigger.service` | `~/.config/systemd/user/wayfinder-trigger.service` |
+| `systemd/wayfinder-mode-supervisor.service` | `~/.config/systemd/user/wayfinder-mode-supervisor.service` |
 | `systemd/wayfinder-aura.service` | `~/.config/systemd/user/wayfinder-aura.service` |
 | `systemd/wayfinder-aura.service.d-flatpak.conf` | `~/.config/systemd/user/wayfinder-aura.service.d/flatpak.conf` |
 | `systemd/wayfinder-aura-failed.service` | `~/.config/systemd/user/wayfinder-aura-failed.service` |
@@ -21,7 +23,8 @@ Enable with:
 ```sh
 systemctl --user daemon-reload
 systemctl --user disable --now r4-f3-bridge.service   # superseded; do not run both
-systemctl --user enable  --now wayfinder-aura.service wayfinder-trigger.service
+systemctl --user enable  --now wayfinder-aura.service wayfinder-trigger.service \
+                                wayfinder-mode-supervisor.service
 ```
 
 ## How dictation gets triggered
@@ -57,6 +60,57 @@ It watches two devices:
 Survives USB hotplug: on `device lost` it rescans every 3s and re-grabs when
 the device returns (validated across the Deck's flaky hub dropping mid-session
 and an overnight suspend — the daemon reattached and re-grabbed each time).
+
+## Game Mode lifecycle
+
+### `wayfinder-mode-supervisor.py` — start/stop the app per SteamOS mode
+
+By default you don't want the dictation app eating RAM while you game: its
+warm whisper/llama servers hold a meaningful chunk of the Deck's 16 GB. But
+some users keybind dictation onto a controller and *do* want it live in Game
+Mode. A host-side `systemd --user` daemon reconciles this every 5s. Logs to
+`/tmp/wayfinder-mode-supervisor.log`.
+
+* **Mode detection** is self-contained — it reads
+  `systemctl --user is-active gamescope-session.service` (active → Game Mode,
+  a clean inactive/failed → Desktop), with an exact-match `ps -eo comm`
+  scan for `gamescope` as a fallback. It does **not** depend on the
+  compositor, which swaps out underneath it on every Desktop↔Game transition.
+* **A user toggle** at `~/.config/wayfinder-aura/game-mode-dictation` decides
+  the Game-Mode behaviour: file content `1` = keep dictation on in Game Mode;
+  anything else (missing/empty/`0`) = off.
+* **Lifecycle:**
+    * **OFF in Game Mode** → the supervisor `stop`s `wayfinder-aura.service`,
+      freeing the RAM its servers held.
+    * **ON in Game Mode** → it keeps the app running.
+    * **Desktop Mode (or an indeterminate read)** → it *always* keeps the app
+      running. It is fail-safe by design: it never stops the app outside a
+      confirmed Game-Mode-with-toggle-off state.
+    * On a **mode transition** (e.g. Game → Desktop) while the app should stay
+      up, it `restart`s `wayfinder-aura.service` so the app re-reads its mode.
+* **Mode marker for the app:** every poll it atomically writes `game` or
+  `desktop` to `$XDG_RUNTIME_DIR/wayfinder-aura/mode` (an indeterminate mode
+  is published as `desktop`), so the app can read which mode it is in without
+  doing its own compositor sniffing.
+
+Safety properties (covered by `tests/test_mode_supervisor.py`): it never stops
+the app unless mode is genuinely Game **and** the toggle is off; the first poll
+seeds the mode and never counts as a transition (so it won't bounce an
+already-correct app on supervisor startup); and a 3s min-interval guard
+suppresses rapid start/stop churn.
+
+The unit is `WantedBy=default.target` (**not** `graphical-session.target`) and
+declares `Before=wayfinder-aura.service` with **no** `PartOf`/`Requires`/
+`BindsTo` on the unit it controls — binding the supervisor to the app it
+starts and stops would create a dependency cycle.
+
+### Trigger daemon rebound to `default.target`
+
+The trigger daemon was previously `PartOf=`/`WantedBy=graphical-session.target`,
+which dies when the Game-Mode compositor replaces the Desktop one. Both the
+trigger daemon and the mode supervisor are now `WantedBy=default.target` so
+they survive the Desktop↔Game compositor swap and keep running in Game Mode —
+exactly where the in-sandbox X listener can't reach.
 
 ### Why a host daemon and not just an X listener (Game Mode)
 
