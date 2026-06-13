@@ -748,3 +748,49 @@ arrives via the X11 layer exactly like keyboard F3. Granting
 **Audio:** after a hub re-plug PipeWire may fail to recreate the Shure MV7
 source and the default falls back to Internal Mic. Check
 `pactl list sources short`; kick with `systemctl --user restart wireplumber`.
+
+
+## Update — 2026-06-13: host-side trigger daemon (Game-Mode-proof) + Game Mode findings
+
+**Game Mode reality check (simulated in nested gamescope, Desktop session).**
+Ran a nested `gamescope -W 1280 -H 800 --backend sdl` on `:0` and tested the
+three hotkey mechanics against its Xwayland (`:1`):
+
+* **Key injection (XTEST / xdotool):** works — typed text + keys land in a
+  client under gamescope.
+* **Key *listening* (pynput / XRecord):** dead — zero events under gamescope,
+  while the identical listener + injection on `:0` works. gamescope routes
+  real input Wayland-side; XRecord on its Xwayland never sees it. **Implication:
+  any trigger that relies on catching a global keypress in X — the app's own
+  pynput listener, the old KDE-shortcut path, and r4-f3-bridge's `xdotool key
+  F3` — cannot work in Game Mode.**
+* **Overlay pipeline under 100% CPU (7 busy threads ≈ a running game):**
+  stop→Processing stayed instant; the stdin-reader fix holds under load.
+
+**Fix: `wayfinder-trigger-daemon.py`** (`scripts/steamdeck/`). Host-side evdev
+daemon → app Unix socket, no X at all, so it works in Desktop **and** Game
+Mode. Grabs the Scimitar "Keyboard" interface exclusively (`F3→toggle`,
+`F2→style`, other side-grid keys swallowed — no leak to focused window, no
+double-fire with the app's own F3 listener) and watches Steam's virtual X360
+pad for `BTN_THUMBR→toggle` (replaces r4-f3-bridge, which faked F3 via xdotool
+and therefore died wherever X listening dies). `wayfinder-trigger.service`
+declares `Conflicts=r4-f3-bridge.service`; the bridge is now disabled.
+
+**Validation (real hardware, 2026-06-12 → 06-13):** mouse F3 round-tripped to
+typed text; F2 cycled style; the `KEY_O` third button was correctly swallowed
+by the grab; the daemon survived the flaky hub dropping mid-session and an
+overnight suspend, reattaching and re-grabbing `event26` each time
+(`/tmp/wayfinder-trigger.log`). Both the daemon F3 and the in-app keyboard F3
+work without conflict.
+
+**Suspend finding:** the warm whisper-server does not survive overnight/suspend;
+the app cold-starts `whisper-server-cpu` on the next press (~0.5s once, then
+warm). Graceful fallback, documented so it isn't read as a regression.
+
+**Still needs a real Game Mode session (can't simulate solo):** does the PyQt
+overlay render over a game at all (likely not — gamescope shows one surface, so
+the app probably needs an audio/rumble/Steam-notification feedback channel in
+Game Mode); does the flatpak stay resident under gamescope-session; what uinput
+device Steam's injected keys appear as (the `extest` node) — if the daemon can
+grab that, ANY Steam Input binding becomes a dictation trigger; real-speech
+transcription latency under in-game CPU load.
