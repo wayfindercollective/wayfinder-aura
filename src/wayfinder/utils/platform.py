@@ -176,13 +176,17 @@ def is_game_mode(wait_secs: float = 0.0) -> bool:
 def write_game_mode_marker(enabled: bool) -> None:
     """Write the toggle marker the host supervisor polls.
 
-    Path is `~/.config/wayfinder-aura/game-mode-dictation` ("1"/"0"); the
-    Flatpak bind-mounts this dir onto the real host config dir, so the
-    host-side supervisor reads the same file. Atomic (temp + replace) so the
-    supervisor never reads a half-written value. Never raises.
+    Path is ``~/.config/wayfinder-aura/game-mode-dictation`` ("1"/"0"). We use
+    ``Path.home()/.config`` (NOT get_config_dir(), which honors XDG_CONFIG_HOME)
+    on purpose: inside the Flatpak, XDG_CONFIG_HOME points at the sandbox-private
+    ``~/.var/app/<id>/config`` which the host supervisor can't see, whereas
+    ``~/.config/wayfinder-aura`` is bind-mounted to the real host dir
+    (--filesystem=xdg-config/wayfinder-aura). This also matches both the host
+    supervisor's read path and the app's own CONFIG_DIR, so all three agree on
+    one host-visible file. Atomic (temp + replace); never raises.
     """
     try:
-        d = get_config_dir()
+        d = Path.home() / ".config" / "wayfinder-aura"
         d.mkdir(parents=True, exist_ok=True)
         target = d / "game-mode-dictation"
         tmp = d / ".game-mode-dictation.tmp"

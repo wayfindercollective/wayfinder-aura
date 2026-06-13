@@ -104,10 +104,11 @@ def test_is_game_mode_wait_for_marker(runtime_dir):
 
 @pytest.fixture
 def config_dir(temp_dir, monkeypatch):
-    cfg = temp_dir / "config"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+    # write_game_mode_marker uses Path.home()/.config (NOT XDG_CONFIG_HOME) so it
+    # matches the host supervisor's read path through the Flatpak bind mount.
+    monkeypatch.setenv("HOME", str(temp_dir))
     monkeypatch.setattr(sys, "platform", "linux")
-    return p.get_config_dir()  # <cfg>/wayfinder-aura
+    return temp_dir / ".config" / "wayfinder-aura"
 
 
 def test_write_game_mode_marker_true(config_dir):
@@ -127,8 +128,9 @@ def test_write_game_mode_marker_atomic_no_temp_left(config_dir):
 
 
 def test_write_game_mode_marker_never_raises(monkeypatch):
-    # Unwritable config dir must not raise (UI/startup must survive).
-    monkeypatch.setattr(p, "get_config_dir", lambda: __import__("pathlib").Path("/proc/nonexistent/wayfinder"))
+    # Unwritable home (=> unwritable ~/.config) must not raise (UI/startup must survive).
+    monkeypatch.setenv("HOME", "/proc/nonexistent")
+    monkeypatch.setattr(sys, "platform", "linux")
     p.write_game_mode_marker(True)  # should swallow the error
 
 
