@@ -125,6 +125,74 @@ def get_session_type() -> str:
 
 
 # =============================================================================
+# SteamOS Game Mode (gamescope session)
+# =============================================================================
+#
+# The host-side `wayfinder-mode-supervisor` is the authority on the current
+# mode (it can read `systemctl --user is-active gamescope-session.service`,
+# which a sandboxed XWayland client can't). It publishes the mode to a marker
+# the app reads, so the app doesn't have to guess from in-sandbox env vars
+# (which may not survive into the Flatpak).
+
+def get_runtime_dir() -> Path:
+    """App runtime dir (`$XDG_RUNTIME_DIR/wayfinder-aura`), host-shared by the Flatpak."""
+    xdg_run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return Path(xdg_run) / "wayfinder-aura"
+
+
+def read_mode_marker() -> str | None:
+    """Read the supervisor-published mode: 'game', 'desktop', or None if absent/unreadable."""
+    try:
+        value = (get_runtime_dir() / "mode").read_text().strip().lower()
+    except OSError:
+        return None
+    return value if value in ("game", "desktop") else None
+
+
+def is_game_mode(wait_secs: float = 0.0) -> bool:
+    """True if running inside SteamOS Game Mode (gamescope session).
+
+    Primary signal is the supervisor's mode marker; ``wait_secs`` lets startup
+    briefly wait for it to appear (it races the supervisor's first write on a
+    cold boot). Falls back to in-sandbox env vars only if the marker never
+    shows. Non-Linux always returns False.
+    """
+    if not is_linux():
+        return False
+    deadline_steps = max(0, int(wait_secs / 0.1))
+    for _ in range(deadline_steps + 1):
+        mode = read_mode_marker()
+        if mode is not None:
+            return mode == "game"
+        if deadline_steps:
+            import time
+            time.sleep(0.1)
+    # Marker never appeared — best-effort env fallback (gamescope advertises itself).
+    if os.environ.get("GAMESCOPE_WAYLAND_DISPLAY"):
+        return True
+    return "gamescope" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+
+
+def write_game_mode_marker(enabled: bool) -> None:
+    """Write the toggle marker the host supervisor polls.
+
+    Path is `~/.config/wayfinder-aura/game-mode-dictation` ("1"/"0"); the
+    Flatpak bind-mounts this dir onto the real host config dir, so the
+    host-side supervisor reads the same file. Atomic (temp + replace) so the
+    supervisor never reads a half-written value. Never raises.
+    """
+    try:
+        d = get_config_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / "game-mode-dictation"
+        tmp = d / ".game-mode-dictation.tmp"
+        tmp.write_text("1" if enabled else "0")
+        os.replace(tmp, target)
+    except OSError:
+        pass  # never break the UI/startup on a marker-write failure
+
+
+# =============================================================================
 # Cross-Platform Directory Paths
 # =============================================================================
 

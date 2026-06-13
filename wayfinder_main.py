@@ -156,6 +156,12 @@ DEFAULT_CONFIG = {
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
+    # SteamOS Game Mode: when True, dictation keeps working in Game Mode with audio cues instead
+    # of the (un-renderable-over-a-game) overlay; the host-side wayfinder-mode-supervisor reads the
+    # mirror marker ~/.config/wayfinder-aura/game-mode-dictation to keep/stop the app there.
+    # NOTE: this DEFAULT_CONFIG (wayfinder_main.py) is the one the running app loads via the local
+    # load_config(); the key is ALSO in src/wayfinder/config.py to keep the duplicate in sync.
+    "game_mode_dictation": False,
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     # Style settings (5 presets that cycle via hotkey)
     "output_tone": "professional",  # minimal | professional | casual | dev | personal
@@ -3529,7 +3535,30 @@ class WayfinderApp(ctk.CTk):
         # PyQt6 glassmorphic overlay controller (preferred)
         self.overlay_controller: OverlayController | None = None
         self._use_pyqt_overlay = False  # Will be set based on PyQt6 availability
-        
+
+        # --- SteamOS Game Mode detection (snapshot at startup) ---
+        # The host-side wayfinder-mode-supervisor is the mode authority and publishes the
+        # current mode to a marker we read; on a cold boot into Game Mode we can race its
+        # first write, so wait briefly for it. This snapshot decides overlay-vs-audio for
+        # this process lifetime — the supervisor RESTARTS us on any Desktop<->Game switch,
+        # so we always boot into the right snapshot rather than live-reconfiguring.
+        try:
+            from wayfinder.utils.platform import is_game_mode, write_game_mode_marker
+            self._game_mode_session = is_game_mode(wait_secs=2.0)
+            # Keep the host-visible toggle marker in sync with config (self-heal on every start).
+            write_game_mode_marker(self.config.get("game_mode_dictation", False))
+        except Exception as e:
+            self._game_mode_session = False
+            self.log(f"⚠ Game Mode detection failed ({e}) — assuming Desktop")
+        # Active only when we're IN Game Mode AND the user enabled Game Mode dictation.
+        self._game_mode = self._game_mode_session and self.config.get("game_mode_dictation", False)
+        if self._game_mode:
+            try:
+                from wayfinder.feedback import audio as _audio
+                _audio.prewarm()
+            except Exception:
+                pass
+
         self.setup_window()
         
         # Create indicator with voice-reactive callback
@@ -3553,7 +3582,13 @@ class WayfinderApp(ctk.CTk):
         if getattr(sys, 'frozen', False):
             overlay_type = "disappearing"
 
-        if overlay_type == "always_on":
+        if getattr(self, "_game_mode", False):
+            # Game Mode: neither the PyQt overlay nor the CTk indicator can render over a
+            # fullscreen gamescope game — feedback is audio cues only (feedback/audio.py).
+            self._use_pyqt_overlay = False
+            self.overlay_controller = None
+            self.log("🎮 Game Mode: visual overlay disabled (audio cues only)")
+        elif overlay_type == "always_on":
             # Use PyQt6 overlay (always on, no focus steal)
             try:
                 import PyQt6
@@ -3588,10 +3623,11 @@ class WayfinderApp(ctk.CTk):
             self._use_pyqt_overlay = False
             self.log(f"✨ Using Disappearing indicator (CTk)")
         
-        # Only create CTk indicator if NOT using PyQt overlay
-        if not self._use_pyqt_overlay:
+        # Only create CTk indicator if NOT using PyQt overlay AND not in Game Mode
+        # (the CTk indicator also can't render over a fullscreen game).
+        if not self._use_pyqt_overlay and not getattr(self, "_game_mode", False):
             self.indicator = FloatingIndicator(
-                self, 
+                self,
                 target_fps=self.config.get("indicator_fps", 0),
                 audio_level_callback=get_audio_level
             )
@@ -4919,6 +4955,12 @@ class WayfinderApp(ctk.CTk):
 
         # Overlay Position slider
         self._create_overlay_position_slider_row(overlay_content)
+
+        # Game Mode dictation toggle (SteamOS / Steam Deck only): in Game Mode the overlay
+        # can't render over a fullscreen game, so this swaps it for audio cues and keeps the
+        # dictation stack alive there (the host supervisor stops it when this is off).
+        if sys.platform.startswith("linux"):
+            self._create_game_mode_toggle_row(overlay_content)
 
         # === BENTO TILE 4: Benchmark (inline, no popup) ===
         # This tile is for local mode only - hidden in remote mode
@@ -6798,12 +6840,56 @@ class WayfinderApp(ctk.CTk):
         enabled = self.strong_mode_var.get()
         self.config["strong_mode"] = enabled
         save_config(self.config)
-        
+
         status = "enabled" if enabled else "disabled"
         self.log(f"💪 Strong mode {status}")
-        
+
         # Update compatibility check
         self._update_compatibility_banner()
+
+    def _create_game_mode_toggle_row(self, parent) -> None:
+        """Inline toggle row for SteamOS Game Mode dictation (label + CTkSwitch)."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=(2, 6))
+        ctk.CTkLabel(
+            row, text="🎮 Game Mode dictation",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        self.game_mode_dictation_var = ctk.BooleanVar(
+            value=self.config.get("game_mode_dictation", False)
+        )
+        toggle = ctk.CTkSwitch(
+            row, text="",
+            variable=self.game_mode_dictation_var,
+            command=self._on_game_mode_dictation_toggled,
+            width=40, height=22, switch_width=36, switch_height=18, corner_radius=9,
+            fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"], button_hover_color=COLORS["text_bright"],
+        )
+        toggle.pack(side="right")
+        ToolTip(
+            row,
+            "Keep voice dictation working in SteamOS Game Mode — audio cues replace the\n"
+            "overlay (which can't draw over a game). Off = the dictation app is stopped in\n"
+            "Game Mode to free resources for the game. Desktop Mode is unaffected.",
+        )
+
+    def _on_game_mode_dictation_toggled(self) -> None:
+        """Persist the Game Mode dictation toggle + mirror it to the host-visible marker."""
+        enabled = self.game_mode_dictation_var.get()
+        self.config["game_mode_dictation"] = enabled
+        save_config(self.config)
+        try:
+            from wayfinder.utils.platform import write_game_mode_marker
+            write_game_mode_marker(enabled)
+        except Exception as e:
+            self.log(f"⚠ Could not write Game Mode marker: {e}")
+        # Recompute the in-process flag. Overlay-skip is decided at startup, so flipping this
+        # mid-session won't retro-add/remove the overlay — the host supervisor restarts the
+        # app on the next Desktop<->Game switch, which applies the new setting cleanly.
+        self._game_mode = getattr(self, "_game_mode_session", False) and enabled
+        self.log(f"🎮 Game Mode dictation {'enabled' if enabled else 'disabled'}")
     
     def _update_compatibility_banner(self) -> None:
         """
@@ -12833,6 +12919,19 @@ class WayfinderApp(ctk.CTk):
         # stuck-overlay report can be correlated against the overlay-debug.log timeline.
         if old_state != new_state:
             print(f"[STATE] {old_state.name} -> {new_state.name}", flush=True)
+            # Game Mode audio cues — sound is the only feedback when the overlay is off.
+            # 'done'/'error' are fired from on_injection_done()/on_error(), NOT here: both
+            # the success and failure paths funnel through IDLE, so a →IDLE cue here would
+            # chime success even when nothing landed.
+            if getattr(self, "_game_mode", False):
+                try:
+                    from wayfinder.feedback import audio as _audio
+                    if new_state == AppState.RECORDING:
+                        _audio.play_cue("start")
+                    elif old_state == AppState.RECORDING and new_state == AppState.PROCESSING:
+                        _audio.play_cue("stop")
+                except Exception:
+                    pass
 
         # Audio ducking on state transitions
         if self.config.get("audio_ducking_enabled", True) and hasattr(self, 'audio_ducker'):
@@ -13347,7 +13446,12 @@ class WayfinderApp(ctk.CTk):
             except ImportError:
                 pass  # integration absent — hotkeys must keep working
             else:
-                if is_hotkeys_paused():
+                # In Game Mode the user EXPLICITLY wants to dictate while a game runs, so the
+                # gamemoded pause (which exists to dodge F-key collisions in Desktop Mode) must
+                # not drop the trigger here. This gates ONLY the event-drop — the separate
+                # exclusive-grab-release path in the evdev listener still runs, so grabbed
+                # devices keep returning to the game.
+                if is_hotkeys_paused() and not getattr(self, "_game_mode", False):
                     return
         if event_type == EventType.HOTKEY_PRESSED:
             self.on_hotkey()
@@ -13920,6 +14024,14 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             return
         self.log("✓ Text inserted")
+        # Game Mode: success chime (the overlay is off). Only on the real success path —
+        # see update_state(), which deliberately does NOT cue on the shared →IDLE transition.
+        if getattr(self, "_game_mode", False):
+            try:
+                from wayfinder.feedback import audio as _audio
+                _audio.play_cue("done")
+            except Exception:
+                pass
 
         # Ensure processing state was visible for at least 800ms
         # This prevents the overlay from flashing too quickly
@@ -13963,6 +14075,14 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⏭ Ignoring stale error (session changed): {message}")
             return
         self.log(f"⚠ {message}")
+        # Game Mode: distinct failure cue so the user can tell a failed dictation (nothing
+        # landed) from a successful one without the overlay.
+        if getattr(self, "_game_mode", False):
+            try:
+                from wayfinder.feedback import audio as _audio
+                _audio.play_cue("error")
+            except Exception:
+                pass
 
         # Ensure processing state was visible for at least 800ms
         import time as time_module

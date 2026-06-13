@@ -213,6 +213,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
+    # SteamOS Game Mode dictation (audio cues, no overlay). Mirrored in wayfinder_main.py's
+    # DEFAULT_CONFIG — which is the block the running app actually loads. Keep both in sync.
+    "game_mode_dictation": False,
     "overlay_scale": 0.7,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     "overlay_vertical_offset": 0,  # Vertical offset in pixels (negative = higher, positive = lower)
     
