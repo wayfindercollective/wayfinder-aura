@@ -4937,7 +4937,20 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
-        
+
+        # Clarify what the number means — users (rightly) read "2.0s" as their
+        # dictation latency, but it's a 10s clip transcribed from a COLD start
+        # (model loaded fresh each run). Live dictation keeps the model resident
+        # in the whisper-server, so it's several times faster than this figure.
+        ctk.CTkLabel(
+            benchmark_tile,
+            text="Transcribes a 10-second clip from a cold start (model load included). "
+                 "Live dictation keeps the model loaded, so it runs faster than this.",
+            font=(self.font_body[0], 10),
+            text_color=COLORS["text_muted"],
+            wraplength=520, justify="left",
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 6))
+
         benchmark_content = ctk.CTkFrame(benchmark_tile, fg_color="transparent")
         benchmark_content.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
         
@@ -5089,9 +5102,11 @@ class WayfinderApp(ctk.CTk):
                 cpu_time = result.get("cpu_10s")
                 model_fastest = result.get("fastest", "")
                 
-                gpu_str = f"GPU: {gpu_time:.1f}s" if gpu_time else "GPU: —"
-                cpu_str = f"CPU: {cpu_time:.1f}s" if cpu_time else "CPU: —"
-                
+                # Show the realtime factor (10s clip / time) so the number reads as
+                # throughput ("5× realtime") rather than as per-dictation latency.
+                gpu_str = f"GPU {gpu_time:.1f}s ({10.0/gpu_time:.0f}× realtime)" if gpu_time else "GPU —"
+                cpu_str = f"CPU {cpu_time:.1f}s ({10.0/cpu_time:.0f}× realtime)" if cpu_time else "CPU —"
+
                 # Highlight the faster one
                 if model_fastest == "gpu":
                     result_text = f"{model_name}: {gpu_str} ✓  |  {cpu_str}"
@@ -12549,7 +12564,13 @@ class WayfinderApp(ctk.CTk):
             pystray.MenuItem("Quit", self.quit_app),
         )
         
-        icon_image = self.custom_icon if self.custom_icon else self.get_tray_icon(AppState.IDLE)
+        # Idle tray = the drawn brand-blue arrow (NOT the logo PNG). It morphs to red
+        # while recording / gold while processing, and update_tray() also uses
+        # get_tray_icon, so the idle indicator stays the same blue arrow before AND
+        # after the first dictation. (Previously the logo showed at startup, then the
+        # first state change silently switched it to a white drawn arrow — the
+        # blue/white split the user reported between this tray and the Qt overlay.)
+        icon_image = self.get_tray_icon(AppState.IDLE)
         self.tray_icon = pystray.Icon("wayfinder-aura", icon_image, "Wayfinder Aura", menu)
 
         if sys.platform == "darwin":
@@ -12633,9 +12654,13 @@ class WayfinderApp(ctk.CTk):
             glyph_color = (93, 212, 168, 255)
             draw.polygon(arrow_points, fill=glyph_color)
         else:  # IDLE
-            glyph_color = (255, 255, 255, 255)
+            # Wayfinder brand blue (sampled from assets/icon.png) — the idle arrow
+            # matches the logo, then flips red while recording / gold while processing.
+            # Kept identical to src/wayfinder/ui/tray_icon.py so the from-source and
+            # Flatpak (Qt overlay) trays render the same indicator.
+            glyph_color = (70, 130, 220, 255)
             draw.polygon(arrow_points, fill=glyph_color)
-        
+
         return icon
 
     def update_tray(self, state: AppState):
