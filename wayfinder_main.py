@@ -13617,6 +13617,16 @@ class WayfinderApp(ctk.CTk):
         try:
             self.log("🎤 Listening...")
 
+            # Capture the window focused RIGHT NOW (record-start) so we can target it at inject
+            # time. With a global-hotkey trigger the user's terminal/chat is focused here; a long
+            # dictation's processing can later drift focus, which made injection land nowhere
+            # ("works, but intermittent on long dictations"). Best-effort; X11 only.
+            try:
+                from wayfinder.core.injector import get_active_window
+                self._inject_target_window = get_active_window()
+            except Exception:
+                self._inject_target_window = None
+
             # New recording session: bump the generation so any still-in-flight work or
             # scheduled callbacks from a previous session are recognised as stale and ignored.
             self.session_generation += 1
@@ -14107,7 +14117,19 @@ class WayfinderApp(ctk.CTk):
             if gen is not None and gen != self.session_generation:
                 return
 
-            inject_text(text, typing_speed="instant")
+            # Target the window captured at record-start, and log a focus-drift diagnostic to the
+            # persisted activity.log so an intermittent miss is traceable after the fact.
+            target = getattr(self, "_inject_target_window", None)
+            try:
+                from wayfinder.core.injector import get_active_window
+                now_focused = get_active_window()
+            except Exception:
+                now_focused = None
+            drift = " [focus drifted since record-start → retargeting]" if (
+                target and now_focused and target != now_focused) else ""
+            self.log(f"⌨ Inject {len(text)} chars → win {target or now_focused or '?'}{drift}")
+
+            inject_text(text, typing_speed="instant", target_window=target)
             self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))

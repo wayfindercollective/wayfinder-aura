@@ -211,7 +211,25 @@ def warmup_clipboard() -> None:
         pass  # Best-effort — never block startup
 
 
-def _inject_text_xdotool(text: str, typing_speed: str = "instant") -> None:
+def get_active_window() -> "str | None":
+    """Return the active X11 window id, or None.
+
+    Captured at record-start so injection can target the user's window even if focus drifts
+    during transcription (global-hotkey dictation). Best-effort; None on any failure.
+    """
+    try:
+        result = subprocess.run(
+            ["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            wid = result.stdout.strip()
+            return wid or None
+    except Exception:
+        pass
+    return None
+
+
+def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window: "str | None" = None) -> None:
     """Inject text on Linux/X11 using xdotool type.
 
     xdotool synthesizes keystrokes via X11 XTEST — no daemon, no uinput, no input-group
@@ -221,6 +239,18 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant") -> None:
         key_delay, _ = TYPING_SPEEDS[typing_speed]
     else:
         key_delay = 2
+
+    # Refocus the window that was active when recording started, so the text lands there even
+    # if focus drifted during transcription. Best-effort: a stale/closed id just fails here and
+    # we fall through to typing into whatever is currently focused (the old behavior).
+    if target_window:
+        try:
+            subprocess.run(
+                ["xdotool", "windowactivate", "--sync", str(target_window)],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            pass
 
     cmd = [
         "xdotool", "type",
@@ -265,7 +295,7 @@ def _inject_text_wtype(text: str) -> None:
         raise InjectionError("wtype not found in PATH")
 
 
-def inject_text(text: str, typing_speed: str = "instant") -> None:
+def inject_text(text: str, typing_speed: str = "instant", target_window: "str | None" = None) -> None:
     """
     Inject text into the active window.
 
@@ -277,6 +307,9 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
     Args:
         text: Text to inject
         typing_speed: Speed preset (Linux only) - "instant", "fast", "normal", "slow", "very_slow"
+        target_window: X11 window id (from get_active_window() at record-start) to refocus before
+            typing, so a long dictation lands in the user's window even if focus drifted during
+            transcription. xdotool backend only; ignored elsewhere.
     """
     if not text:
         return
@@ -296,7 +329,7 @@ def inject_text(text: str, typing_speed: str = "instant") -> None:
     from ..utils.platform import get_text_injector
     tool = get_text_injector()
     if tool == "xdotool":
-        _inject_text_xdotool(text, typing_speed)
+        _inject_text_xdotool(text, typing_speed, target_window)
         return
     if tool == "wtype":
         _inject_text_wtype(text)
