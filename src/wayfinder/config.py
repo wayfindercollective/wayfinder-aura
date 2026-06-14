@@ -216,6 +216,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # SteamOS Game Mode dictation (audio cues, no overlay). Mirrored in wayfinder_main.py's
     # DEFAULT_CONFIG — which is the block the running app actually loads. Keep both in sync.
     "game_mode_dictation": False,
+    # Watchdog timeout (s) for a hung PROCESSING state; 0 disables. Mirrored in wayfinder_main.py.
+    "processing_timeout_secs": 120,
     "overlay_scale": 0.7,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     "overlay_vertical_offset": 0,  # Vertical offset in pixels (negative = higher, positive = lower)
     
