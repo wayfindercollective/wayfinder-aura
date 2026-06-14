@@ -240,17 +240,30 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     else:
         key_delay = 2
 
-    # Refocus the window that was active when recording started, so the text lands there even
-    # if focus drifted during transcription. Best-effort: a stale/closed id just fails here and
-    # we fall through to typing into whatever is currently focused (the old behavior).
+    # Refocus the record-start window ONLY if focus actually drifted off it. When it's already
+    # focused (the common case) we must NOT windowactivate — a redundant activate immediately
+    # before typing races the synthetic keys (window not input-ready for ~tens of ms) and
+    # intermittently dropped the WHOLE injection into a focused terminal. So: check current
+    # focus; if it's already the target, type straight away (the proven-reliable path); only on
+    # real drift do we activate, then settle so the focus-in completes before typing.
     if target_window:
         try:
-            subprocess.run(
-                ["xdotool", "windowactivate", "--sync", str(target_window)],
-                capture_output=True, text=True, timeout=5,
+            active = subprocess.run(
+                ["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=5
             )
+            already_focused = active.returncode == 0 and active.stdout.strip() == str(target_window)
         except Exception:
-            pass
+            already_focused = False
+        if not already_focused:
+            try:
+                subprocess.run(
+                    ["xdotool", "windowactivate", "--sync", str(target_window)],
+                    capture_output=True, text=True, timeout=5,
+                )
+                import time as _t
+                _t.sleep(0.06)  # let the WM/app finish the focus-in before synthetic keys
+            except Exception:
+                pass
 
     cmd = [
         "xdotool", "type",
