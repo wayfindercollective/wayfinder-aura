@@ -1,12 +1,12 @@
-"""Unit tests for the pure overlay-position clamp (no Qt required).
+"""Unit tests for the pure overlay-position helpers (no Qt required).
 
-The overlay rests gap-above the taskbar by default, but the user CAN push it (via a large
-positive offset) all the way down so its bottom edge touches the bottom of the SCREEN (over
-the taskbar) — requested behavior. The clamp's job is to keep the whole widget on the screen:
-never off the top, and at most flush with the screen bottom.
+clamp_overlay_y keeps the whole widget on the USABLE area — flush above the taskbar at most,
+never off the top (placing it OVER the taskbar would need KWin scripting, which X11 avoids).
+It also handles the 'top' anchor. anchor_x places the widget left/center/right of the usable
+area. parse_anchor splits 'bottom-center' → ('bottom', 'center').
 """
 
-from wayfinder.ui.overlay_geometry import clamp_overlay_y
+from wayfinder.ui.overlay_geometry import clamp_overlay_y, anchor_x, parse_anchor
 
 
 class TestReservedPanel:
@@ -29,12 +29,18 @@ class TestReservedPanel:
         assert y == 1050 - self.GAP - self.WIDGET_H  # 998
         assert y + self.WIDGET_H == 1050 - self.GAP
 
-    def test_drag_fully_down_reaches_screen_bottom(self):
-        # Large positive offset pushes the overlay down until its bottom edge touches the
-        # bottom of the SCREEN (over the taskbar), not just the usable area.
+    def test_drag_fully_down_clamps_flush_above_taskbar(self):
+        # Large positive offset clamps so the bottom edge rests at the usable bottom (1050),
+        # above the taskbar (KWin would clamp native positioning here anyway).
         y = self._y(200)
-        assert y == 1080 - self.WIDGET_H  # 1040 (FULL_H, not the 1050 usable bottom)
-        assert y + self.WIDGET_H == 1080  # flush with the screen bottom
+        assert y == 1050 - self.WIDGET_H  # 1010
+        assert y + self.WIDGET_H == 1050  # flush above the taskbar, whole widget visible
+
+    def test_top_anchor_rests_below_top_edge(self):
+        # The 'top' vertical anchor sits gap px below the usable top, offset nudges it down.
+        y = clamp_overlay_y(self.AVAIL_Y, self.AVAIL_H, self.FULL_Y, self.FULL_H,
+                            self.WIDGET_H, 0, self.GAP, vertical="top")
+        assert y == self.AVAIL_Y + self.GAP  # 12
 
     def test_drag_fully_up_clamps_to_top_of_available(self):
         y = self._y(-5000)
@@ -63,11 +69,10 @@ class TestDockOverlayPanel:
         # usable_bottom = 1080 - 48 = 1032; y = 1032 - 12 - 40 = 980
         assert self._y(0) == 1032 - self.GAP - self.WIDGET_H  # 980
 
-    def test_drag_down_reaches_screen_bottom(self):
-        # Even in the heuristic case, a large positive offset reaches the true screen bottom.
+    def test_drag_down_clamps_above_assumed_taskbar(self):
         y = self._y(500)
-        assert y == 1080 - self.WIDGET_H  # 1040
-        assert y + self.WIDGET_H == 1080  # flush with the screen bottom
+        assert y == 1032 - self.WIDGET_H  # 992
+        assert y + self.WIDGET_H == 1032  # just above the assumed 48px panel
 
 
 class TestSizeAware:
@@ -77,11 +82,40 @@ class TestSizeAware:
         common = dict(avail_y=0, avail_h=1050, full_y=0, full_h=1080, offset=200, gap=12)
         short = clamp_overlay_y(widget_h=40, **common)
         tall = clamp_overlay_y(widget_h=80, **common)
-        assert short == 1080 - 40  # 1040
-        assert tall == 1080 - 80   # 1000, higher up
-        # Both keep their bottom edge flush with the screen bottom (1080)
-        assert short + 40 == 1080
-        assert tall + 80 == 1080
+        assert short == 1050 - 40  # 1010
+        assert tall == 1050 - 80   # 970, higher up
+        # Both keep their bottom edge flush at the usable bottom (1050)
+        assert short + 40 == 1050
+        assert tall + 80 == 1050
+
+
+class TestAnchors:
+    """anchor_x horizontal placement + parse_anchor splitting."""
+
+    def test_anchor_x_left_center_right(self):
+        # usable area x=0..1920, widget 100 wide, margin 12
+        assert anchor_x(0, 1920, 100, "left", 12) == 12
+        assert anchor_x(0, 1920, 100, "center", 12) == (1920 - 100) // 2  # 910
+        assert anchor_x(0, 1920, 100, "right", 12) == 1920 - 100 - 12     # 1808
+
+    def test_anchor_x_respects_offset_origin(self):
+        # A non-zero usable-area x (e.g. a left panel) shifts left/center/right with it.
+        assert anchor_x(50, 1000, 100, "left", 12) == 62
+        assert anchor_x(50, 1000, 100, "right", 12) == 50 + 1000 - 100 - 12  # 938
+
+    def test_anchor_x_clamps_oversize_widget(self):
+        # A widget wider than the area never runs off the left edge.
+        assert anchor_x(0, 100, 300, "right", 12) == 0
+
+    def test_parse_anchor(self):
+        assert parse_anchor("bottom-center") == ("bottom", "center")
+        assert parse_anchor("top-left") == ("top", "left")
+        assert parse_anchor("top-right") == ("top", "right")
+        assert parse_anchor("bottom-left") == ("bottom", "left")
+        # Garbage / empty falls back to the historical default.
+        assert parse_anchor("") == ("bottom", "center")
+        assert parse_anchor("nonsense") == ("bottom", "center")
+        assert parse_anchor("top-banana") == ("top", "center")
 
 
 class TestTopPanelOffset:

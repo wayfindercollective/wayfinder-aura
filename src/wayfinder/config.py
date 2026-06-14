@@ -220,6 +220,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "processing_timeout_secs": 120,
     "overlay_scale": 0.7,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     "overlay_vertical_offset": 0,  # Vertical offset in pixels (negative = higher, positive = lower)
+    "overlay_anchor": "bottom-center",  # {top,bottom}-{left,center,right}; mirrored in wayfinder_main.py
     
     # Audio ducking settings (reduce other audio while recording)
     "audio_ducking_enabled": True,  # Enable automatic volume reduction during recording
