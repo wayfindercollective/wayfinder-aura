@@ -162,6 +162,10 @@ DEFAULT_CONFIG = {
     # NOTE: this DEFAULT_CONFIG (wayfinder_main.py) is the one the running app loads via the local
     # load_config(); the key is ALSO in src/wayfinder/config.py to keep the duplicate in sync.
     "game_mode_dictation": False,
+    # Watchdog: if PROCESSING (transcription + post-processing) outlives this many seconds, reset
+    # to idle instead of hanging on "Processing" forever. 0 disables. Generous so a long chunked
+    # recording + cold local LLM still completes normally.
+    "processing_timeout_secs": 120,
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     # Style settings (5 presets that cycle via hotkey)
     "output_tone": "professional",  # minimal | professional | casual | dev | personal
@@ -8382,12 +8386,19 @@ class WayfinderApp(ctk.CTk):
                 if self._socket_thread is None or not self._socket_thread.is_alive():
                     self.log("🔄 Socket listener not running - restarting...")
                     self._ensure_socket_listener()
-                # In a Flatpak the GlobalShortcuts portal is the only in-app global-hotkey
-                # path; if its listener exited (D-Bus briefly unavailable, or setup returned
-                # False), bring it back. Rides this same 10s tick — no new timer (Rule #1).
-                if IS_FLATPAK and not getattr(self, '_portal_listener_started', False):
-                    self.log("🔄 Portal hotkey listener not running - restarting...")
-                    self._start_portal_listener()
+                # In a Flatpak the in-app global-hotkey path is the GlobalShortcuts portal when
+                # dbus-python is bundled, else the pynput X11 fallback (see start_hotkey_listener).
+                # Supervise whichever the app ACTUALLY chose — NOT the portal unconditionally, or
+                # we churn every 10s restarting a portal listener that can't run without dbus and
+                # clears its own _portal_listener_started flag on each failed start (log spam +
+                # wasted KWin/dbus attempts). Mirror the backend selection here.
+                if IS_FLATPAK and DBUS_AVAILABLE:
+                    if not getattr(self, '_portal_listener_started', False):
+                        self.log("🔄 Portal hotkey listener not running - restarting...")
+                        self._start_portal_listener()
+                elif IS_FLATPAK and not getattr(self, '_pynput_listener_started', False):
+                    self.log("🔄 pynput hotkey listener not running - restarting...")
+                    self._start_pynput_listener()
             except Exception as e:
                 self.log(f"⚠️ Hotkey supervisor error: {e}")
             # Re-check every 10 seconds (Rule #1: >=100ms, no busy polling)
@@ -9880,12 +9891,45 @@ class WayfinderApp(ctk.CTk):
     def log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_line = f"[{timestamp}] {message}\n"
-        
+
+        # Persist to a file so a stuck/hung session is diagnosable after the fact — the in-app
+        # log textbox is in-memory only, so a hang was previously invisible once the window
+        # scrolled. Best-effort, never raises, never blocks logging.
+        try:
+            self._append_activity_log(log_line)
+        except Exception:
+            pass
+
         # Use event queue for thread-safe logging (avoids Tk threading crash)
         # The actual UI update happens in _do_log() called from handle_event()
         try:
             self.event_queue.put((EventType.LOG_MESSAGE, log_line))
         except:
+            pass
+
+    def _append_activity_log(self, log_line: str) -> None:
+        """Append one line to the persistent activity log. Best-effort; never raises.
+
+        Lives in Path.home()/.cache (host-visible in the Flatpak via the xdg-cache grant —
+        NOT get_cache_dir()/XDG_CACHE_HOME, which is the sandbox-private dir). Truncates once
+        per session if it has grown past ~5 MB so it can't grow without bound.
+        """
+        path = getattr(self, "_activity_log_path", None)
+        if path is None:
+            path = Path.home() / ".cache" / "wayfinder-aura" / "activity.log"
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
+                    path.write_text("")  # cap unbounded growth across sessions
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(f"\n===== session start {datetime.now():%Y-%m-%d %H:%M:%S} =====\n")
+            except OSError:
+                pass
+            self._activity_log_path = path
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(log_line)
+        except OSError:
             pass
     
     def _do_log(self, log_line: str):
@@ -12933,6 +12977,14 @@ class WayfinderApp(ctk.CTk):
                 except Exception:
                     pass
 
+            # PROCESSING watchdog: if a transcription or post-processing step hangs, the app can
+            # sit on PROCESSING (yellow) forever with no output. Arm a timer on entry; if we
+            # haven't left PROCESSING by the timeout, surface an error and reset to IDLE.
+            if new_state == AppState.PROCESSING:
+                self._start_processing_watchdog()
+            elif old_state == AppState.PROCESSING:
+                self._cancel_processing_watchdog()
+
         # Audio ducking on state transitions
         if self.config.get("audio_ducking_enabled", True) and hasattr(self, 'audio_ducker'):
             if new_state == AppState.RECORDING and old_state != AppState.RECORDING:
@@ -12970,7 +13022,48 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             # Log but don't break recording functionality
             self.log(f"⚠ UI update error: {e}")
-    
+
+    # === PROCESSING watchdog (recover from a hung transcription / post-processing) ===
+
+    def _start_processing_watchdog(self) -> None:
+        """Arm a one-shot timer that fires if PROCESSING never resolves."""
+        self._cancel_processing_watchdog()
+        try:
+            timeout_s = float(self.config.get("processing_timeout_secs", 120))
+        except (TypeError, ValueError):
+            timeout_s = 120.0
+        if timeout_s <= 0:
+            return  # 0/negative disables the watchdog
+        gen = self.session_generation
+        self._processing_watchdog_job = self.after(
+            int(timeout_s * 1000), lambda: self._on_processing_timeout(gen, timeout_s)
+        )
+
+    def _cancel_processing_watchdog(self) -> None:
+        job = getattr(self, "_processing_watchdog_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._processing_watchdog_job = None
+
+    def _on_processing_timeout(self, gen: int, timeout_s: float) -> None:
+        """PROCESSING outlived the timeout — discard the stuck session and reset to IDLE."""
+        self._processing_watchdog_job = None
+        # Already moved on, or a newer session took over → nothing stuck.
+        if self.app_state != AppState.PROCESSING or gen != self.session_generation:
+            return
+        # Bump the generation so the hung worker's eventual (late) output is dropped instead of
+        # injected into whatever the user has focused now; then route through on_error, which
+        # resets the overlay to ready + state to IDLE and (in Game Mode) plays the error cue.
+        self.session_generation += 1
+        self.on_error(
+            f"Processing exceeded {timeout_s:.0f}s — likely a stuck transcription or "
+            f"post-processing step. Reset to idle (see ~/.cache/wayfinder-aura/activity.log).",
+            self.session_generation,
+        )
+
     # === Hero Animation System ===
     
     def _start_hero_animation(self):
