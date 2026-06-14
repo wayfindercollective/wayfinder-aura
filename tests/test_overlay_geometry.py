@@ -1,8 +1,9 @@
 """Unit tests for the pure overlay-position clamp (no Qt required).
 
-Covers the bug these guard against: dragging the overlay position slider used to push the
-pill *behind* the taskbar. clamp_overlay_y must keep the whole widget on the usable area —
-flush above the taskbar at most, never off the top.
+The overlay rests gap-above the taskbar by default, but the user CAN push it (via a large
+positive offset) all the way down so its bottom edge touches the bottom of the SCREEN (over
+the taskbar) — requested behavior. The clamp's job is to keep the whole widget on the screen:
+never off the top, and at most flush with the screen bottom.
 """
 
 from wayfinder.ui.overlay_geometry import clamp_overlay_y
@@ -28,12 +29,12 @@ class TestReservedPanel:
         assert y == 1050 - self.GAP - self.WIDGET_H  # 998
         assert y + self.WIDGET_H == 1050 - self.GAP
 
-    def test_drag_fully_down_clamps_flush_above_taskbar(self):
-        # Large positive offset must NOT disappear behind the taskbar — it clamps so the
-        # bottom edge rests exactly at the usable bottom (fully visible).
+    def test_drag_fully_down_reaches_screen_bottom(self):
+        # Large positive offset pushes the overlay down until its bottom edge touches the
+        # bottom of the SCREEN (over the taskbar), not just the usable area.
         y = self._y(200)
-        assert y == 1050 - self.WIDGET_H  # 1010
-        assert y + self.WIDGET_H == 1050  # flush, whole widget on screen
+        assert y == 1080 - self.WIDGET_H  # 1040 (FULL_H, not the 1050 usable bottom)
+        assert y + self.WIDGET_H == 1080  # flush with the screen bottom
 
     def test_drag_fully_up_clamps_to_top_of_available(self):
         y = self._y(-5000)
@@ -62,10 +63,11 @@ class TestDockOverlayPanel:
         # usable_bottom = 1080 - 48 = 1032; y = 1032 - 12 - 40 = 980
         assert self._y(0) == 1032 - self.GAP - self.WIDGET_H  # 980
 
-    def test_drag_down_clamps_above_assumed_taskbar(self):
+    def test_drag_down_reaches_screen_bottom(self):
+        # Even in the heuristic case, a large positive offset reaches the true screen bottom.
         y = self._y(500)
-        assert y == 1032 - self.WIDGET_H  # 992
-        assert y + self.WIDGET_H == 1032  # just above the assumed 48px panel
+        assert y == 1080 - self.WIDGET_H  # 1040
+        assert y + self.WIDGET_H == 1080  # flush with the screen bottom
 
 
 class TestSizeAware:
@@ -75,11 +77,11 @@ class TestSizeAware:
         common = dict(avail_y=0, avail_h=1050, full_y=0, full_h=1080, offset=200, gap=12)
         short = clamp_overlay_y(widget_h=40, **common)
         tall = clamp_overlay_y(widget_h=80, **common)
-        assert short == 1050 - 40  # 1010
-        assert tall == 1050 - 80   # 970, higher up
-        # Both keep their bottom edge flush at the usable bottom (1050)
-        assert short + 40 == 1050
-        assert tall + 80 == 1050
+        assert short == 1080 - 40  # 1040
+        assert tall == 1080 - 80   # 1000, higher up
+        # Both keep their bottom edge flush with the screen bottom (1080)
+        assert short + 40 == 1080
+        assert tall + 80 == 1080
 
 
 class TestTopPanelOffset:
