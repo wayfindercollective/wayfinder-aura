@@ -68,7 +68,7 @@ IS_MACOS = _sys.platform == 'darwin'
 # to $XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock (host<->sandbox shared) or /tmp.
 from wayfinder.config import SOCKET_PATH
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, SILENCE_PEAK_THRESHOLD
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, SILENCE_PEAK_THRESHOLD
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
@@ -3513,12 +3513,23 @@ class WayfinderApp(ctk.CTk):
         # regression). The user's explicit choice lives in audio_device_name; auto stays None.
         self._resolved_audio_device = resolve_audio_device(self.config)
 
+        # Shared "warm" mic: one persistent capture stream kept open between recordings so
+        # rapid-fire and short dictations don't lose their first words to the ~0.4-0.5s
+        # stream-open latency (plus a ~0.15s dead-index probe) that a fresh-open-per-recording
+        # incurred on SteamOS/PipeWire. Auto-closes after the idle window; heals a stale cached
+        # device index once. Both recorders attach to it. See WarmMic in core/recorder.py.
+        self.warm_mic = WarmMic(
+            device=self._resolved_audio_device,
+            sample_rate=self.config["sample_rate"],
+            idle_secs=self.config.get("mic_warm_idle_secs", 30.0),
+        )
 
         # Standard recorder for short recordings
         self.recorder = AudioRecorder(
             sample_rate=self.config["sample_rate"],
             device=self._resolved_audio_device,
             preprocessing=self.config.get("audio_preprocessing", "light"),
+            warm_mic=self.warm_mic,
         )
         
         # Chunked recorder for indefinite recording
@@ -11635,13 +11646,19 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
         
+        # Repoint the warm mic at the new device and drop its current stream so the next
+        # recording reopens on the chosen mic rather than the previously warmed one.
+        if getattr(self, "warm_mic", None) is not None:
+            self.warm_mic.set_device(self._resolved_audio_device)
+
         # Update standard recorder
         self.recorder = AudioRecorder(
             sample_rate=self.config["sample_rate"],
             device=self._resolved_audio_device,
             preprocessing=self.config.get("audio_preprocessing", "light"),
+            warm_mic=getattr(self, "warm_mic", None),
         )
-        
+
         # Chunked recorder will be recreated when needed with new device
 
     def open_accuracy_mode_settings(self):
@@ -12969,6 +12986,8 @@ class WayfinderApp(ctk.CTk):
                 self.recorder.cleanup()
             if hasattr(self, 'chunked_recorder') and self.chunked_recorder:
                 self.chunked_recorder.cleanup()
+            if hasattr(self, 'warm_mic') and self.warm_mic:
+                self.warm_mic.close()
         except:
             pass
         
@@ -13721,6 +13740,8 @@ class WayfinderApp(ctk.CTk):
                 if is_remote and self.config.get("chunked_mode", True):
                     self.log("ℹ️ Chunked mode skipped (cloud API handles long audio)")
                 self.recorder.start()
+                # Adopt the WarmMic's healed device index (see _start_chunked_recording).
+                self._resolved_audio_device = self.warm_mic.device
             
             # Start duration update timer
             import time
@@ -13752,8 +13773,12 @@ class WayfinderApp(ctk.CTk):
             chunk_duration=self.config.get("chunk_duration", 30),
             chunk_overlap=self.config.get("chunk_overlap", 2),
             on_chunk_ready=on_chunk_ready,
+            warm_mic=self.warm_mic,
         )
         self.chunked_recorder.start()
+        # WarmMic healed any stale/dead cached index on open — adopt the working one so other
+        # code paths (mic-name display, re-resolve) and the next recording use it directly.
+        self._resolved_audio_device = self.warm_mic.device
     
     def _transcribe_chunk(self, chunk_path: str, chunk_index: int, gen=None, store=None):
         """Transcribe a single chunk in the background."""
@@ -14319,6 +14344,14 @@ class WayfinderApp(ctk.CTk):
                     pass
         except Exception as e:
             self.log(f"⚠ Reset recorder cleanup: {e}")
+
+        # Drop the warm capture stream too — a reset is a full clean slate. The next recording
+        # re-warms it (one open's worth of latency, acceptable on this rare recovery path).
+        try:
+            if getattr(self, "warm_mic", None) is not None:
+                self.warm_mic.close()
+        except Exception:
+            pass
 
         # Stop the audio-level flood and return the overlay to ready. update() (unlike show())
         # stops audio polling when leaving the listening state — this is what unsticks a frozen

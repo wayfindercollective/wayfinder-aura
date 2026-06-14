@@ -597,15 +597,158 @@ def preprocess_audio(
     return audio.astype(np.float32)
 
 
+class WarmMic:
+    """A single persistent capture stream, kept 'warm' between recordings.
+
+    Opening the capture stream on SteamOS/PipeWire (the 'pulse' PCM in the Flatpak sandbox)
+    costs ~0.4-0.5s, and a stale cached device index adds a ~0.15s dead-probe on top — so a
+    fresh open per recording clipped the first words of short or rapid-fire dictations into
+    silence ("No speech detected"). WarmMic opens the stream once and keeps it open, routing
+    audio to whichever recorder is currently attached (its ``_audio_callback``) and dropping it
+    otherwise, so the next recording starts capturing instantly. The stream auto-closes after
+    ``idle_secs`` with no recorder attached, releasing the mic.
+
+    It also heals the dead/renumbered-index problem once: ``acquire()`` walks the same fallback
+    chain the recorders used (configured device -> system-default PCM -> None) and remembers the
+    index that actually opened, so a dead index is probed at most once instead of on every
+    recording. Shared by both AudioRecorder and ChunkedRecorder; only one is ever attached at a
+    time (start/stop are serialized on the Tk thread).
+    """
+
+    def __init__(self, device: int | None = None, sample_rate: int = 16000,
+                 channels: int = 1, idle_secs: float = 30.0):
+        self.device = device
+        self.target_sample_rate = sample_rate
+        self.channels = channels
+        self.idle_secs = idle_secs
+        self._stream: sd.InputStream | None = None
+        self._recording_sample_rate: int | None = None
+        self._sink: Callable | None = None
+        # RLock so acquire() can cancel the idle timer and open the stream while holding it,
+        # and the idle-timer thread can take the same lock without self-deadlock.
+        self._lock = threading.RLock()
+        self._idle_timer: threading.Timer | None = None
+
+    @property
+    def sample_rate(self) -> int:
+        """The open stream's rate, or the target rate until opened."""
+        return self._recording_sample_rate or self.target_sample_rate
+
+    @property
+    def is_open(self) -> bool:
+        return self._stream is not None
+
+    def _callback(self, indata, frames, time_info, status) -> None:
+        # Runs on PortAudio's thread. Read the sink once (atomic under the GIL) and forward to
+        # the attached recorder's callback, which makes its own copy. No lock on this hot path —
+        # a swap at the boundary at worst mis-routes a single frame, which is harmless.
+        sink = self._sink
+        if sink is not None:
+            sink(indata, frames, time_info, status)
+
+    def _open(self) -> None:
+        """Open the stream, healing a stale device index via the fallback chain."""
+        fallbacks: list[int | None] = []
+        if self.device is not None:
+            fallbacks.append(self.device)
+        sys_default = _system_default_input_index()
+        if sys_default is not None and sys_default not in fallbacks:
+            fallbacks.append(sys_default)
+        fallbacks.append(None)
+        last_err = None
+        for dev in fallbacks:
+            try:
+                rate = get_supported_sample_rate(device=dev, target_rate=self.target_sample_rate)
+                stream = sd.InputStream(
+                    samplerate=rate,
+                    channels=self.channels,
+                    device=dev,
+                    dtype=np.float32,
+                    callback=self._callback,
+                )
+                stream.start()
+                self._stream = stream
+                self._recording_sample_rate = rate
+                self.device = dev  # remember the working index — heals a stale/dead cached one
+                return
+            except Exception as e:
+                last_err = e
+                if dev is not None:
+                    print(f"WarmMic: device {dev} failed to open ({e}); trying next input")
+        raise last_err if last_err else RuntimeError("WarmMic: no audio input device could be opened")
+
+    def acquire(self, sink: Callable) -> int | None:
+        """Attach ``sink`` (a recorder's ``_audio_callback``) and ensure the stream is warm.
+
+        Returns the device index that actually opened so the caller can heal its cached index.
+        """
+        with self._lock:
+            self._cancel_idle_timer()
+            self._sink = sink
+            if self._stream is None:
+                self._open()
+            return self.device
+
+    def release(self) -> None:
+        """Detach the current sink and arm the idle-close timer. Leaves the stream warm."""
+        with self._lock:
+            self._sink = None
+            self._arm_idle_timer()
+
+    def _arm_idle_timer(self) -> None:
+        self._cancel_idle_timer()
+        if self.idle_secs and self.idle_secs > 0:
+            self._idle_timer = threading.Timer(self.idle_secs, self._on_idle)
+            self._idle_timer.daemon = True
+            self._idle_timer.start()
+
+    def _cancel_idle_timer(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _on_idle(self) -> None:
+        # Timer target. Only close if still idle — a recording may have re-acquired the mic
+        # after the timer fired but before this ran.
+        with self._lock:
+            if self._sink is None:
+                self._close_stream()
+                self._idle_timer = None
+
+    def _close_stream(self) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+            self._recording_sample_rate = None
+
+    def close(self) -> None:
+        """Stop and close the stream entirely (app shutdown, device change, force reset)."""
+        with self._lock:
+            self._cancel_idle_timer()
+            self._sink = None
+            self._close_stream()
+
+    def set_device(self, device: int | None) -> None:
+        """Point at a new device and drop the warm stream so the next acquire reopens on it."""
+        with self._lock:
+            self.device = device
+            self._close_stream()
+
+
 class AudioRecorder:
     """Records audio to a temporary WAV file for transcription."""
 
     def __init__(
-        self, 
-        sample_rate: int = 16000, 
-        channels: int = 1, 
+        self,
+        sample_rate: int = 16000,
+        channels: int = 1,
         device: int | None = None,
         preprocessing: bool | str = "light",
+        warm_mic: "WarmMic | None" = None,
     ):
         """
         Initialize the audio recorder.
@@ -619,6 +762,9 @@ class AudioRecorder:
                 - True or "light": Only gain normalization (recommended)
                 - "medium": Normalization + high-pass filter
                 - "heavy": Full processing with noise gate
+            warm_mic: Optional shared WarmMic. When given, this recorder does not own its own
+                stream — it attaches to the warm stream on start() (instant capture) and detaches
+                on stop(), instead of opening/closing a stream each time.
         """
         self.target_sample_rate = sample_rate  # What we want (for Whisper)
         self.channels = channels
@@ -633,6 +779,8 @@ class AudioRecorder:
             self.preprocessing = preprocessing
         self.frames: list[np.ndarray] = []
         self.stream: sd.InputStream | None = None
+        self.warm_mic = warm_mic
+        self._active = False
         self._temp_file: tempfile.NamedTemporaryFile | None = None
         self.last_peak: float = 0.0
 
@@ -664,6 +812,14 @@ class AudioRecorder:
         """
         self.frames = []
         self.last_peak = 0.0
+
+        # Warm path: attach to the shared, already-open stream — capture is instant.
+        if self.warm_mic is not None:
+            self.device = self.warm_mic.acquire(self._audio_callback)
+            self.recording_sample_rate = self.warm_mic.sample_rate
+            self._active = True
+            return
+
         fallbacks = []
         if self.device is not None:
             fallbacks.append(self.device)
@@ -676,6 +832,7 @@ class AudioRecorder:
             try:
                 self._open_stream(dev)
                 self.device = dev
+                self._active = True
                 return
             except Exception as e:
                 last_err = e
@@ -713,7 +870,10 @@ class AudioRecorder:
         Returns:
             Path to the temporary WAV file containing the recording.
         """
-        if self.stream is not None:
+        self._active = False
+        if self.warm_mic is not None:
+            self.warm_mic.release()  # detach, leave the stream warm for the next recording
+        elif self.stream is not None:
             self.stream.stop()
             self.stream.close()
             self.stream = None
@@ -801,6 +961,8 @@ class AudioRecorder:
 
     def is_recording(self) -> bool:
         """Check if currently recording."""
+        if self.warm_mic is not None:
+            return self._active
         return self.stream is not None and self.stream.active
 
 
@@ -825,6 +987,7 @@ class ChunkedRecorder:
         chunk_duration: float = 30.0,
         chunk_overlap: float = 2.0,
         on_chunk_ready: Callable[[str, int], None] | None = None,
+        warm_mic: "WarmMic | None" = None,
     ):
         """
         Initialize the chunked audio recorder.
@@ -841,6 +1004,8 @@ class ChunkedRecorder:
             chunk_duration: Duration of each chunk in seconds
             chunk_overlap: Overlap between chunks in seconds
             on_chunk_ready: Callback when a chunk is ready (path, chunk_index)
+            warm_mic: Optional shared WarmMic. When given, this recorder attaches to the warm
+                stream on start() (instant capture) instead of opening its own each time.
         """
         self.target_sample_rate = sample_rate  # What we want (for Whisper)
         self.recording_sample_rate = None  # Will be set when starting
@@ -868,6 +1033,8 @@ class ChunkedRecorder:
         
         # Recording state
         self._stream: sd.InputStream | None = None
+        self.warm_mic = warm_mic
+        self._active = False
         self._stop_event = threading.Event()
         self._chunk_thread: threading.Thread | None = None
         self._temp_files: list[str] = []
@@ -1012,46 +1179,55 @@ class ChunkedRecorder:
             except queue.Empty:
                 break
         
-        # Open the audio stream. If the configured device fails (renumbered index, or a JACK
-        # clone with PaErrorCode -9999), fall back to the system default so recording still
-        # works instead of failing.
-        _sys_default = _system_default_input_index()
-        _devices = [self.device] if self.device is not None else []
-        if _sys_default is not None and _sys_default not in _devices:
-            _devices.append(_sys_default)
-        _devices.append(None)
-        _last_err = None
-        for _dev in _devices:
-            try:
-                self.recording_sample_rate = get_supported_sample_rate(
-                    device=_dev,
-                    target_rate=self.target_sample_rate
-                )
-                if self.recording_sample_rate != self.target_sample_rate:
-                    print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
-                # Recalculate chunk samples based on actual recording rate
-                self._chunk_samples = int(self.chunk_duration * self.recording_sample_rate)
-                self._overlap_samples = int(self.chunk_overlap * self.recording_sample_rate)
-                self._stream = sd.InputStream(
-                    samplerate=self.recording_sample_rate,
-                    channels=self.channels,
-                    device=_dev,
-                    dtype=np.float32,
-                    callback=self._audio_callback,
-                )
-                self._stream.start()
-                self.device = _dev
-                break
-            except Exception as e:
-                _last_err = e
-                if _dev is not None:
-                    print(f"Audio device {_dev} failed to open ({e}); falling back to system default")
+        if self.warm_mic is not None:
+            # Warm path: attach to the shared open stream — capture is instant. Chunk sizes
+            # come from the warm stream's actual rate, not the 16k target.
+            self.device = self.warm_mic.acquire(self._audio_callback)
+            self.recording_sample_rate = self.warm_mic.sample_rate
+            self._chunk_samples = int(self.chunk_duration * self.recording_sample_rate)
+            self._overlap_samples = int(self.chunk_overlap * self.recording_sample_rate)
         else:
-            raise _last_err if _last_err else RuntimeError("Failed to open any audio input device")
-        
+            # Open the audio stream. If the configured device fails (renumbered index, or a JACK
+            # clone with PaErrorCode -9999), fall back to the system default so recording still
+            # works instead of failing.
+            _sys_default = _system_default_input_index()
+            _devices = [self.device] if self.device is not None else []
+            if _sys_default is not None and _sys_default not in _devices:
+                _devices.append(_sys_default)
+            _devices.append(None)
+            _last_err = None
+            for _dev in _devices:
+                try:
+                    self.recording_sample_rate = get_supported_sample_rate(
+                        device=_dev,
+                        target_rate=self.target_sample_rate
+                    )
+                    if self.recording_sample_rate != self.target_sample_rate:
+                        print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
+                    # Recalculate chunk samples based on actual recording rate
+                    self._chunk_samples = int(self.chunk_duration * self.recording_sample_rate)
+                    self._overlap_samples = int(self.chunk_overlap * self.recording_sample_rate)
+                    self._stream = sd.InputStream(
+                        samplerate=self.recording_sample_rate,
+                        channels=self.channels,
+                        device=_dev,
+                        dtype=np.float32,
+                        callback=self._audio_callback,
+                    )
+                    self._stream.start()
+                    self.device = _dev
+                    break
+                except Exception as e:
+                    _last_err = e
+                    if _dev is not None:
+                        print(f"Audio device {_dev} failed to open ({e}); falling back to system default")
+            else:
+                raise _last_err if _last_err else RuntimeError("Failed to open any audio input device")
+
         # Start chunk monitoring thread
         self._chunk_thread = threading.Thread(target=self._chunk_monitor_thread, daemon=True)
         self._chunk_thread.start()
+        self._active = True
 
     def stop(self) -> tuple[str | None, list[str]]:
         """
@@ -1060,13 +1236,16 @@ class ChunkedRecorder:
         Returns:
             Tuple of (final_chunk_path, list_of_all_chunk_paths)
         """
+        self._active = False
         self._stop_event.set()
-        
-        if self._stream is not None:
+
+        if self.warm_mic is not None:
+            self.warm_mic.release()  # detach, leave the stream warm for the next recording
+        elif self._stream is not None:
             self._stream.stop()
             self._stream.close()
             self._stream = None
-        
+
         if self._chunk_thread is not None:
             self._chunk_thread.join(timeout=2.0)
             self._chunk_thread = None
@@ -1122,6 +1301,8 @@ class ChunkedRecorder:
 
     def is_recording(self) -> bool:
         """Check if currently recording."""
+        if self.warm_mic is not None:
+            return self._active
         return self._stream is not None and self._stream.active
 
     def cleanup(self) -> None:
