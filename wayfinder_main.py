@@ -167,6 +167,8 @@ DEFAULT_CONFIG = {
     # recording + cold local LLM still completes normally.
     "processing_timeout_secs": 120,
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
+    # Overlay corner/edge placement: {top,bottom}-{left,center,right} (within the work area).
+    "overlay_anchor": "bottom-center",
     # Style settings (5 presets that cycle via hotkey)
     "output_tone": "professional",  # minimal | professional | casual | dev | personal
     "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
@@ -3153,8 +3155,10 @@ class OverlayController:
                 if self._config_ref:
                     scale = self._config_ref.get("overlay_scale", 0.7)
                     offset = self._config_ref.get("overlay_vertical_offset", 0)
+                    anchor = self._config_ref.get("overlay_anchor", "bottom-center")
                     cmd_args.append(f"--scale={scale}")
                     cmd_args.append(f"--offset={offset}")
+                    cmd_args.append(f"--anchor={anchor}")
                 self._process = subprocess.Popen(
                     cmd_args,
                     stdin=subprocess.PIPE,
@@ -3314,6 +3318,10 @@ class OverlayController:
     def set_vertical_offset(self, offset: int):
         """Set the overlay vertical position offset."""
         self._send_command({"cmd": "offset", "value": offset})
+
+    def set_anchor(self, anchor: str):
+        """Set the overlay corner/edge anchor (e.g. 'bottom-center', 'top-right')."""
+        self._send_command({"cmd": "anchor", "value": anchor})
 
     def quit(self):
         """Shut down the overlay subprocess."""
@@ -4957,7 +4965,10 @@ class WayfinderApp(ctk.CTk):
         # Overlay Scale slider
         self._create_overlay_scale_slider_row(overlay_content)
 
-        # Overlay Position slider
+        # Overlay Placement — 6-position corner/edge anchor picker
+        self._create_overlay_anchor_row(overlay_content)
+
+        # Overlay Position slider (fine-tunes the chosen anchor)
         self._create_overlay_position_slider_row(overlay_content)
 
         # Game Mode dictation toggle (SteamOS / Steam Deck only): in Game Mode the overlay
@@ -9571,6 +9582,53 @@ class WayfinderApp(ctk.CTk):
             self.overlay_controller.set_scale(new_scale)
         
         self.log(f"⚙ Overlay Scale: {int(new_scale * 100)}%")
+
+    def _create_overlay_anchor_row(self, parent):
+        """6-position corner/edge anchor picker (top/bottom × left/center/right)."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(8, 2))
+
+        label = ctk.CTkLabel(
+            row, text="Overlay Placement",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_secondary"],
+        )
+        label.pack(side="left")
+        ToolTip(label, "Pick which corner/edge the overlay sits at (within the usable screen "
+                       "area, above the taskbar). The Position slider then fine-tunes it.")
+
+        grid = ctk.CTkFrame(row, fg_color="transparent")
+        grid.pack(side="right")
+        self._anchor_buttons = {}
+        current = self.config.get("overlay_anchor", "bottom-center")
+        layout = [
+            [("top-left", "↖"), ("top-center", "↑"), ("top-right", "↗")],
+            [("bottom-left", "↙"), ("bottom-center", "↓"), ("bottom-right", "↘")],
+        ]
+        for r, rowdef in enumerate(layout):
+            for c, (anchor, glyph) in enumerate(rowdef):
+                btn = ctk.CTkButton(
+                    grid, text=glyph, width=30, height=26,
+                    fg_color=COLORS["accent"] if anchor == current else COLORS["bg_input"],
+                    hover_color=COLORS["accent"],
+                    text_color=COLORS["text_bright"],
+                    command=lambda a=anchor: self._on_overlay_anchor_selected(a),
+                )
+                btn.grid(row=r, column=c, padx=2, pady=2)
+                self._anchor_buttons[anchor] = btn
+
+    def _on_overlay_anchor_selected(self, anchor: str) -> None:
+        """Apply an overlay anchor selection and highlight it."""
+        self.config["overlay_anchor"] = anchor
+        save_config(self.config)
+        if self.overlay_controller and self._use_pyqt_overlay:
+            self.overlay_controller.set_anchor(anchor)
+        for a, btn in getattr(self, "_anchor_buttons", {}).items():
+            try:
+                btn.configure(fg_color=COLORS["accent"] if a == anchor else COLORS["bg_input"])
+            except Exception:
+                pass
+        self.log(f"⚙ Overlay placement: {anchor}")
 
     def _create_overlay_position_slider_row(self, parent):
         """Create overlay vertical position slider."""

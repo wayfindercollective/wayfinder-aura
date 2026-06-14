@@ -8,6 +8,33 @@ then defers the actual coordinate math to here.
 from __future__ import annotations
 
 
+def parse_anchor(anchor: str) -> tuple[str, str]:
+    """Split an anchor like 'bottom-center' into (vertical, horizontal).
+
+    vertical ∈ {top, bottom}; horizontal ∈ {left, center, right}. Anything unrecognized
+    falls back to ('bottom', 'center') — the historical default.
+    """
+    parts = (anchor or "").lower().split("-")
+    vertical = parts[0] if parts and parts[0] in ("top", "bottom") else "bottom"
+    horizontal = parts[1] if len(parts) > 1 and parts[1] in ("left", "center", "right") else "center"
+    return vertical, horizontal
+
+
+def anchor_x(avail_x: int, avail_w: int, widget_w: int, horizontal: str, margin: int = 12) -> int:
+    """X (left edge) for the horizontal anchor within the usable area.
+
+    left/right sit ``margin`` px from the usable edge; center is centered. Clamped so the
+    whole widget stays on the usable area.
+    """
+    if horizontal == "left":
+        x = avail_x + margin
+    elif horizontal == "right":
+        x = avail_x + avail_w - widget_w - margin
+    else:  # center
+        x = avail_x + (avail_w - widget_w) // 2
+    return max(avail_x, min(x, avail_x + avail_w - widget_w))
+
+
 def clamp_overlay_y(
     avail_y: int,
     avail_h: int,
@@ -17,6 +44,7 @@ def clamp_overlay_y(
     offset: int,
     gap: int = 12,
     min_taskbar: int = 48,
+    vertical: str = "bottom",
 ) -> int:
     """Return the Y for the overlay's *top* edge.
 
@@ -51,13 +79,16 @@ def clamp_overlay_y(
     else:
         usable_bottom = avail_bottom
 
-    # Base = gap above the usable bottom, then apply the user's offset.
-    y = usable_bottom - gap - widget_h + offset
+    # Base position from the anchored edge, then apply the user's fine-tune offset (positive =
+    # lower on screen for both anchors).
+    if vertical == "top":
+        y = avail_y + gap + offset
+    else:  # bottom
+        y = usable_bottom - gap - widget_h + offset
 
-    # Clamp: never above the top of the screen; the lower bound lets the user push the overlay
-    # all the way down so its BOTTOM edge can touch the bottom of the SCREEN (over the taskbar)
-    # — requested behavior. Default offsets still rest gap-above the usable bottom; only a large
-    # positive offset reaches the very bottom. (Was clamped to usable_bottom, i.e. the taskbar
-    # top, which is what stopped the slider ~12px above the taskbar.)
-    lower_bound = screen_bottom - widget_h
+    # Clamp so the WHOLE widget stays on the usable area: never off the top, never below the
+    # taskbar edge. (KWin also clamps native X11 positioning to the work area, so the overlay
+    # rests above the taskbar — placing it OVER the taskbar would need KWin frameGeometry
+    # scripting, which we deliberately don't use on X11 to avoid the reposition-freeze.)
+    lower_bound = usable_bottom - widget_h
     return max(avail_y, min(y, lower_bound))

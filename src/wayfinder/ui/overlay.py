@@ -22,9 +22,9 @@ import sys
 # Pure positioning math (Qt-free; unit-tested in tests/test_overlay_geometry.py). Works
 # whether this file is imported as wayfinder.ui.overlay or run as a bare-script subprocess.
 try:
-    from wayfinder.ui.overlay_geometry import clamp_overlay_y
+    from wayfinder.ui.overlay_geometry import clamp_overlay_y, anchor_x, parse_anchor
 except ImportError:  # standalone script — its own directory is on sys.path
-    from overlay_geometry import clamp_overlay_y
+    from overlay_geometry import clamp_overlay_y, anchor_x, parse_anchor
 
 # Blocking stdin reader thread (Qt-free; unit-tested in tests/test_stdin_reader.py).
 try:
@@ -735,10 +735,11 @@ class GlassmorphicOverlay(QWidget):
     TASKBAR_GAP = 12  # Gap above taskbar to prevent overlap
     STARTUP_POSITION_RETRIES = 5  # Number of position checks after startup
     
-    def __init__(self, scale: float = 0.7, vertical_offset: int = 0):
+    def __init__(self, scale: float = 0.7, vertical_offset: int = 0, anchor: str = "bottom-center"):
         # Scale factor must be set first (before any property access)
         self._scale = max(0.5, min(2.0, scale))
         self._vertical_offset = vertical_offset  # pixels: negative = higher, positive = lower
+        self._anchor = anchor  # corner/edge placement: {top,bottom}-{left,center,right}
         
         # Setup KWin positioning rule BEFORE creating window
         # This ensures the window is positioned correctly from the first frame
@@ -843,14 +844,13 @@ class GlassmorphicOverlay(QWidget):
         full = screen.geometry()
         avail = screen.availableGeometry()
         
-        # Center horizontally within available area
-        x = avail.x() + (avail.width() - widget_width) // 2
-        
-        # Y (top edge) is computed AND clamped above the taskbar by the shared pure helper,
-        # so the math lives in one place and stays unit-testable. Size-aware via widget_height.
+        # Position from the configured anchor (corner/edge) within the usable area; pure helpers
+        # keep the math testable. The vertical edge also takes the user's fine-tune offset.
+        vertical, horizontal = parse_anchor(self._anchor)
+        x = anchor_x(avail.x(), avail.width(), widget_width, horizontal, self.TASKBAR_GAP)
         y = clamp_overlay_y(
             avail.y(), avail.height(), full.y(), full.height(),
-            widget_height, self._vertical_offset, self.TASKBAR_GAP,
+            widget_height, self._vertical_offset, self.TASKBAR_GAP, vertical=vertical,
         )
 
         return (x, y)
@@ -860,6 +860,13 @@ class GlassmorphicOverlay(QWidget):
         if offset == self._vertical_offset:
             return
         self._vertical_offset = offset
+        self._position_at_bottom()
+
+    def set_anchor(self, anchor: str):
+        """Update the corner/edge anchor and reposition."""
+        if anchor == self._anchor:
+            return
+        self._anchor = anchor
         self._position_at_bottom()
 
     def set_scale(self, scale: float):
@@ -1098,12 +1105,13 @@ class GlassmorphicOverlay(QWidget):
                     estimated_width = estimated_content_width + (self.glow_margin * 2)
                     estimated_height = self.widget_height
                     
-                    # Same single-source positioning as _calculate_position — now also
-                    # respects the user's vertical offset + clamp at startup.
-                    x = avail.x() + (avail.width() - estimated_width) // 2
+                    # Same single-source positioning as _calculate_position — respects the
+                    # configured anchor + the user's vertical offset at startup.
+                    vertical, horizontal = parse_anchor(self._anchor)
+                    x = anchor_x(avail.x(), avail.width(), estimated_width, horizontal, self.TASKBAR_GAP)
                     y = clamp_overlay_y(
                         avail.y(), avail.height(), full.y(), full.height(),
-                        estimated_height, self._vertical_offset, self.TASKBAR_GAP,
+                        estimated_height, self._vertical_offset, self.TASKBAR_GAP, vertical=vertical,
                     )
                     _setup_kwin_window_rule(x, y, estimated_width, estimated_height)
         except Exception as e:
@@ -1689,6 +1697,7 @@ def run_overlay():
     initial_style = "professional"  # default
     initial_scale = 0.7
     initial_offset = 0
+    initial_anchor = "bottom-center"
     enable_tray = False  # --tray: host a QSystemTrayIcon in this subprocess (Flatpak/KDE)
     for arg in sys.argv:
         if arg.startswith("--mode="):
@@ -1705,13 +1714,15 @@ def run_overlay():
                 initial_offset = int(arg.split("=", 1)[1])
             except ValueError:
                 pass
+        elif arg.startswith("--anchor="):
+            initial_anchor = arg.split("=", 1)[1]
         elif arg == "--tray":
             enable_tray = True
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    overlay = GlassmorphicOverlay(scale=initial_scale, vertical_offset=initial_offset)
+    overlay = GlassmorphicOverlay(scale=initial_scale, vertical_offset=initial_offset, anchor=initial_anchor)
     overlay._overlay_mode = mode  # Store mode for later use
     overlay.set_style_indicator(initial_style, animate=False)  # Set initial style
     
@@ -1885,6 +1896,9 @@ def run_overlay():
         elif command == "offset":
             offset = int(cmd.get("value", 0))
             overlay.set_vertical_offset(offset)
+
+        elif command == "anchor":
+            overlay.set_anchor(str(cmd.get("value", "bottom-center")))
 
         elif command == "style":
             style = cmd.get("value", "professional")
