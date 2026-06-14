@@ -54,7 +54,10 @@ def clamp_overlay_y(
     # Base = gap above the usable bottom, then apply the user's offset.
     y = usable_bottom - gap - widget_h + offset
 
-    # Clamp: never above the top of the usable area, never below the taskbar edge.
-    # The lower bound subtracts widget_h so the whole widget remains visible.
-    lower_bound = usable_bottom - widget_h
+    # Clamp: never above the top of the screen; the lower bound lets the user push the overlay
+    # all the way down so its BOTTOM edge can touch the bottom of the SCREEN (over the taskbar)
+    # — requested behavior. Default offsets still rest gap-above the usable bottom; only a large
+    # positive offset reaches the very bottom. (Was clamped to usable_bottom, i.e. the taskbar
+    # top, which is what stopped the slider ~12px above the taskbar.)
+    lower_bound = screen_bottom - widget_h
     return max(avail_y, min(y, lower_bound))
