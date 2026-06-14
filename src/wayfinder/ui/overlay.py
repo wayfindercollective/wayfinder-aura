@@ -1138,8 +1138,18 @@ class GlassmorphicOverlay(QWidget):
         except Exception:
             pass
         
-        # Method 4: Force via KWin script (the ONLY reliable way on Wayland/KDE)
-        if self.isVisible():
+        # Method 4: Force via KWin script — needed ONLY on Wayland, where Qt can't set an
+        # absolute window position. On X11 the native setGeometry/move above already work, and
+        # calling KWin scripting on every reposition is harmful: each loadScript registers a new
+        # script (never unloaded) and `start` re-runs ALL of them, so repeated repositioning (e.g.
+        # dragging the position slider) accumulates in KWin until the qdbus calls hit their
+        # timeouts and the overlay+tray subprocess stalls — the SteamOS-X11 "overlay froze, tray
+        # stopped" hang. Gate to Wayland so X11 uses native positioning only.
+        _is_wayland = (
+            os.environ.get("XDG_SESSION_TYPE") == "wayland"
+            or bool(os.environ.get("WAYLAND_DISPLAY"))
+        )
+        if self.isVisible() and _is_wayland:
             _force_kde_window_position("Wayfinder Aura Overlay", x, y, w, h)
     
     def _update_size(self):
