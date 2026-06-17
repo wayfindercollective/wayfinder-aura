@@ -238,9 +238,23 @@ modules:
         url: https://prdownloads.sourceforge.net/tcl/tk8.6.14-src.tar.gz
         sha256: 8ffdb720f47a6ca6107eac2dd877e30b0ef7fac14f3a84ebbd0b3612cee41a94
 
+  # SPIRV-Headers — build-only dep of llama.cpp b9608's ggml-vulkan shader
+  # generator (find_package(SPIRV-Headers)). whisper.cpp's pinned ggml predates
+  # this dependency, which is why only the GPU llama build needs it. Header-only;
+  # installs its cmake config into /app so the next module's find_package resolves.
+  - name: spirv-headers
+    buildsystem: cmake-ninja
+    cleanup:
+      - '*'
+    sources:
+      - type: git
+        url: https://github.com/KhronosGroup/SPIRV-Headers.git
+        tag: vulkan-sdk-1.3.290.0
+
   # llama.cpp — local LLM post-processing (tone cleanup) via the llama-simple
-  # subprocess, CPU-only. Deliberately NOT the resident llama-cpp-python path
-  # the from-source install uses — measured in this sandbox on a Ryzen 9600X:
+  # subprocess. GPU (Vulkan) build with a CPU twin + runtime GPU->CPU fallback
+  # (see the long note below). NOT the resident llama-cpp-python path the
+  # from-source install uses — measured in this sandbox on a Ryzen 9600X:
   #   - llama-simple (this build): 1.4s per cleanup INCLUDING model load,
   #     zero idle RAM (the ~1.1GB model is only in memory during the call —
   #     matters on a 16GB Steam Deck running a game).
@@ -251,9 +265,15 @@ modules:
   #     wheel build doesn't package the variant backends — load fails.)
   # Future instant path: bundle llama-server with cache_prompt (KV reuse of the
   # shared tone-guidance prefix), mirroring the whisper-server architecture.
-  # CPU-only (GGML_VULKAN=OFF) is deliberate: unlike whisper, the llama path has
-  # no GPU->CPU auto-fallback, and on hosts with broken/mismatched Vulkan a GPU
-  # llama run degrades to ~1 tok/s — a 60s hang per dictation.
+  # GPU (GGML_VULKAN=ON) + a CPU twin (llama-simple-cpu, the next module): the
+  # post-processor now has a GPU->CPU auto-fallback (postprocessor.py
+  # _subprocess_target — a one-time 16-token GPU probe; a Vulkan crash or the
+  # ~1 tok/s "radv not conformant" degradation routes cleanup to llama-simple-cpu).
+  # That fallback is what makes shipping a Vulkan llama SAFE: broken-Vulkan hosts
+  # (e.g. an older Steam Deck Mesa) fall back to CPU instead of the old
+  # 60s-hang-per-dictation. A Vulkan build can SIGSEGV at ggml-vulkan init even with
+  # -ngl 0, so the CPU fallback needs its OWN binary (the llama-simple-cpu twin) —
+  # exactly like whisper-server-cpu.
   # Instruction sets MUST be enabled explicitly: modern ggml with GGML_NATIVE=OFF
   # builds pure SCALAR kernels (no SSE/AVX at all — measured 25-40x slower, 29s
   # per cleanup). AVX2/FMA/F16C/BMI2 is the Zen 2 (Deck) baseline = any x86-64
@@ -265,12 +285,28 @@ modules:
   - name: llama-cpp
     buildsystem: simple
     build-commands:
-      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
+      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
       - cmake --build build --target llama-simple -j$(nproc)
       # The app's CLI backend prefers llama-simple (stable echo+generation stdout
       # format its extraction is built around); config defaults to /app/bin/llama-simple
-      # inside the sandbox (config.py IS_FLATPAK branch).
+      # inside the sandbox (config.py IS_FLATPAK branch). This is the Vulkan build —
+      # the post-processor probes it and falls back to llama-simple-cpu if GPU is bad.
       - install -Dm755 build/bin/llama-simple ${FLATPAK_DEST}/bin/llama-simple
+    sources:
+      - type: git
+        url: https://github.com/ggml-org/llama.cpp.git
+        tag: b9608
+
+  # CPU twin of llama-cpp — the GPU->CPU fallback target (postprocessor.py
+  # _subprocess_target). Same source/SIMD flags, Vulkan OFF, installed as
+  # llama-simple-cpu. Needed as a SEPARATE binary because a Vulkan build can
+  # SIGSEGV at ggml-vulkan init even with -ngl 0 (mirrors whisper-server-cpu).
+  - name: llama-cpp-cpu
+    buildsystem: simple
+    build-commands:
+      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
+      - cmake --build build --target llama-simple -j$(nproc)
+      - install -Dm755 build/bin/llama-simple ${FLATPAK_DEST}/bin/llama-simple-cpu
     sources:
       - type: git
         url: https://github.com/ggml-org/llama.cpp.git

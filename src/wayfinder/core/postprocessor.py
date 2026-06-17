@@ -5,6 +5,7 @@ Supports llama-cpp-python for local inference and Anthropic Claude for cloud.
 """
 
 import os
+import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -1588,6 +1589,13 @@ def _is_reasoning_model(model_path: str) -> bool:
     return any(tok in name for tok in ("qwq", "-r1", "deepseek-r1", "thinking", "reasoning"))
 
 
+# GPU post-proc probe budget: a 16-token generation on a healthy GPU finishes well
+# under a second (incl. model load); a broken/mismatched Vulkan runs at ~1 tok/s, so
+# 16 tokens blow past the timeout (-> CPU fallback). AVX2 CPU is the safety net.
+_GPU_PROBE_TIMEOUT = 8.0
+_GPU_PROBE_MAX_SECONDS = 5.0
+
+
 class LlamaCppCliBackend(PostProcessorBackend):
     """
     Local LLM backend using llama.cpp CLI binary (llama-simple).
@@ -1612,6 +1620,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
 
     # Resident model cache shared across instances: {(model_path, n_ctx, ngl): Llama}
     _resident_cache: Dict[Any, Any] = {}
+    # One-time GPU-post-proc probe result, shared across instances:
+    # {(binary, model): True if a GPU cleanup is fast & working}. A broken/mismatched
+    # Vulkan either crashes at init or degrades to ~1 tok/s (a 60s hang per dictation);
+    # the probe catches both and routes cleanup to the CPU binary instead.
+    _gpu_probe: Dict[Any, bool] = {}
 
     def __init__(
         self,
@@ -1626,7 +1639,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
         output_tone: str = "professional",
         strong_mode: bool = False,
         caricature_mode: bool = False,
+        force_subprocess: bool = False,
     ):
+        # When True, skip the resident llama-cpp-python wheel and always use the
+        # llama-simple subprocess (see config: post_processing_force_subprocess).
+        self.force_subprocess = force_subprocess
         # Resolve the actual CLI binary. Prefer llama-simple (non-interactive,
         # stable stdout format). Be robust to upstream renames (llama.cpp renamed
         # llama-cli -> llama): if the configured binary is the generic CLI name or
@@ -1678,6 +1695,10 @@ class LlamaCppCliBackend(PostProcessorBackend):
         when llama-cpp-python isn't importable (e.g. a from-source install
         without it), so callers fall back to the subprocess path.
         """
+        # Honor the explicit opt-out before touching the import: a host may have a
+        # slow CPU-only wheel but a fast GPU/AVX2 `llama-simple` subprocess.
+        if getattr(self, "force_subprocess", False):
+            return None
         try:
             from llama_cpp import Llama
         except ImportError:
@@ -1699,6 +1720,52 @@ class LlamaCppCliBackend(PostProcessorBackend):
             LlamaCppCliBackend._resident_cache[key] = model
         return model
 
+    def _cpu_sibling(self) -> Optional[str]:
+        """The dedicated CPU llama-simple next to the (Vulkan) binary, if present.
+
+        The Flatpak ships ``llama-simple-cpu`` for exactly this fallback: a Vulkan
+        build can SIGSEGV at ggml-vulkan init even with ``-ngl 0`` (the crash is
+        before the flag is honored — the same reason whisper needs whisper-server-cpu),
+        so CPU fallback needs a separately-built CPU binary, not the Vulkan one.
+        """
+        cand = self.llama_binary.replace("llama-simple", "llama-simple-cpu")
+        return cand if cand != self.llama_binary and Path(cand).exists() else None
+
+    def _probe_gpu_ok(self, ngl: int) -> bool:
+        """One tiny GPU generation. False if Vulkan crashes (rc != 0) or degrades to
+        ~1 tok/s (times out) — the 60s-hang case the Flatpak used to dodge by staying
+        CPU-only. Isolated in a subprocess so a Vulkan-init crash can't take us down."""
+        if not self.model_path or not Path(self.model_path).exists():
+            return False
+        import time as _t
+        try:
+            t0 = _t.time()
+            r = subprocess.run(
+                [self.llama_binary, "-m", self.model_path, "-ngl", str(ngl), "-n", "16", "warm up"],
+                capture_output=True, text=True, timeout=_GPU_PROBE_TIMEOUT,
+            )
+        except Exception:
+            return False
+        return r.returncode == 0 and (_t.time() - t0) < _GPU_PROBE_MAX_SECONDS
+
+    def _subprocess_target(self) -> tuple:
+        """Return ``(binary, ngl)`` for the subprocess cleanup, with a cached one-time
+        GPU probe + CPU-binary fallback — the llama mirror of the whisper-server
+        GPU->CPU ladder. GPU machines get fast cleanup; broken-Vulkan hosts (e.g. an
+        older Steam Deck Mesa) auto-route to the bundled CPU binary instead of hanging."""
+        requested = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
+        if requested == 0:
+            return self.llama_binary, 0  # CPU explicitly requested
+        key = (self.llama_binary, self.model_path)
+        cache = LlamaCppCliBackend._gpu_probe
+        if key not in cache:
+            cache[key] = self._probe_gpu_ok(requested)
+            if not cache[key]:
+                print("[Post-processing] GPU llama unavailable/slow — using CPU for cleanup")
+        if cache[key]:
+            return self.llama_binary, requested
+        return (self._cpu_sibling() or self.llama_binary), 0
+
     def warm_up(self) -> None:
         """Load the resident model + build the compute graph so the first real
         dictation is instant. Runs a real (tiny) cleanup prompt, not a 1-token
@@ -1712,6 +1779,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
             if model is not None:
                 prompt = self.build_cli_prompt("warm up", self.output_tone, self.intensity)
                 model(prompt, max_tokens=8, temperature=0.0)
+            else:
+                # Subprocess path (Flatpak / force_subprocess / no wheel): run the GPU
+                # probe now so the FIRST dictation already lands on the right binary
+                # (GPU or CPU-fallback) instead of paying the probe — or a 60s hang — live.
+                self._subprocess_target()
         except Exception as e:
             print(f"[Post-processing] Warm-up skipped: {e}")
     
@@ -1823,14 +1895,11 @@ Cleaned text:"""
                 # Fallback: spawn llama-simple. The prompt is POSITIONAL (llama-simple's
                 # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),
                 # and -ngl must precede it so the model never sees the flag in context.
-                cmd = [self.llama_binary, "-m", self.model_path]
-                # Always pass -ngl explicitly — n_gpu_layers=0 must force CPU even if
-                # a future llama.cpp build changes its default offload behavior.
-                # (CPU matters: on hosts whose Mesa predates the GPU's architecture,
-                # Vulkan llama runs at ~1 tok/s while CPU does the same job in ~1s.)
-                ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
-                cmd.extend(["-ngl", str(ngl)])
-                cmd.extend(["-n", str(estimated_output_tokens), simple_prompt])
+                # _subprocess_target() resolves GPU vs CPU once (probe + CPU-binary
+                # fallback) so broken-Vulkan hosts never hang at ~1 tok/s.
+                binary, ngl = self._subprocess_target()
+                cmd = [binary, "-m", self.model_path, "-ngl", str(ngl),
+                       "-n", str(estimated_output_tokens), simple_prompt]
 
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=self.timeout,
@@ -1840,7 +1909,7 @@ Cleaned text:"""
                     if "error" in stderr.lower() and "warning" not in stderr.lower():
                         raise PostProcessingError(f"llama error: {stderr}")
                 cleaned = self._extract_cli_output(result.stdout, simple_prompt)
-                mode = "CLI"
+                mode = "CLI-GPU" if ngl != 0 else "CLI-CPU"
 
             elapsed = time.time() - start_time
 
@@ -1895,6 +1964,8 @@ Cleaned text:"""
             "\n\n- ", "\n\n* ", "\n\nHere", "\n(Note", "\nExplanation",
             "Cleaned text:", "\nText:", "\nTask:", "main:", "llama_", "~llama",
             "\nGuide:", "Output ONLY",
+            # Gemma sometimes appends a trailing meta line after the cleaned text.
+            "Final Answer:", "\nFinal Answer",
         ]
         for mk in cut_markers:
             j = gen.find(mk)
@@ -2293,6 +2364,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 output_tone=config.get("output_tone", "professional"),
                 strong_mode=config.get("strong_mode", False),
                 caricature_mode=config.get("caricature_mode", False),
+                force_subprocess=config.get("post_processing_force_subprocess", False),
             )
         
         # Fall back to Python bindings (llama-cpp-python)
