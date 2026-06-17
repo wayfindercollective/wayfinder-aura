@@ -244,6 +244,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "llama_cpp_n_ctx": 2048,  # Context window size
     "llama_cpp_n_threads": 4,  # CPU threads
     "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
+    # Force the llama-simple SUBPROCESS path even when the resident llama-cpp-python
+    # wheel is importable. The resident wheel is preferred by default (it stays warm),
+    # but a CPU-only / unoptimized wheel can be far slower than a locally-built,
+    # GPU(Vulkan)-or-AVX2 `llama-simple`. Set True on a host whose subprocess binary
+    # is faster than its installed wheel. Default False = unchanged everywhere,
+    # including the Flatpak (which ships no resident wheel and already uses subprocess).
+    "post_processing_force_subprocess": False,
     "llama_cpp_use_cli": True,  # Use CLI backend (faster, no Python bindings needed)
     
     # Cloud API settings (keys stored in config, loaded into environment on startup)

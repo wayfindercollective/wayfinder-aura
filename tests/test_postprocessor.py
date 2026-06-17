@@ -761,3 +761,71 @@ class TestResidentLlamaFastPath:
         from wayfinder.core import postprocessor
         # Cloud backend has nothing local to warm
         postprocessor.warm_up_postprocessing({"post_processing_backend": "anthropic"})
+
+
+class TestLlamaGpuCpuFallback:
+    """GPU post-proc probe + CPU-binary auto-fallback — the safety net that lets the
+    Flatpak ship a Vulkan llama (broken-Vulkan hosts route to llama-simple-cpu instead
+    of hanging at ~1 tok/s)."""
+
+    def _backend(self, tmp_path, ngl=-1, cpu_sibling=False):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        LlamaCppCliBackend._gpu_probe.clear()
+        gpu = tmp_path / "llama-simple"; gpu.write_text("#!/bin/sh\n"); gpu.chmod(0o755)
+        if cpu_sibling:
+            cpu = tmp_path / "llama-simple-cpu"; cpu.write_text("#!/bin/sh\n"); cpu.chmod(0o755)
+        model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
+        return LlamaCppCliBackend(llama_binary=str(gpu), model_path=str(model),
+                                  output_tone="professional", n_gpu_layers=ngl)
+
+    def test_gpu_good_uses_gpu_binary(self, tmp_path):
+        b = self._backend(tmp_path, ngl=-1)
+        with patch.object(b, "_probe_gpu_ok", return_value=True):
+            binary, ngl = b._subprocess_target()
+        assert ngl == 99 and binary == b.llama_binary
+
+    def test_gpu_bad_falls_back_to_cpu_sibling(self, tmp_path):
+        b = self._backend(tmp_path, ngl=-1, cpu_sibling=True)
+        with patch.object(b, "_probe_gpu_ok", return_value=False):
+            binary, ngl = b._subprocess_target()
+        assert ngl == 0 and binary.endswith("llama-simple-cpu")
+
+    def test_probe_runs_once_and_is_cached(self, tmp_path):
+        b = self._backend(tmp_path, ngl=-1, cpu_sibling=True)
+        with patch.object(b, "_probe_gpu_ok", return_value=False) as probe:
+            b._subprocess_target(); b._subprocess_target(); b._subprocess_target()
+        probe.assert_called_once()
+
+    def test_explicit_cpu_skips_probe(self, tmp_path):
+        b = self._backend(tmp_path, ngl=0)
+        with patch.object(b, "_probe_gpu_ok", return_value=True) as probe:
+            binary, ngl = b._subprocess_target()
+        probe.assert_not_called()
+        assert ngl == 0 and binary == b.llama_binary
+
+    def test_cpu_sibling_detected_only_when_present(self, tmp_path):
+        assert self._backend(tmp_path, cpu_sibling=False)._cpu_sibling() is None
+        assert self._backend(tmp_path, cpu_sibling=True)._cpu_sibling().endswith("llama-simple-cpu")
+
+    def test_probe_false_on_subprocess_failure(self, tmp_path):
+        b = self._backend(tmp_path)
+        with patch("subprocess.run", side_effect=Exception("boom")):
+            assert b._probe_gpu_ok(99) is False
+
+    def test_probe_false_on_crash_returncode(self, tmp_path):
+        b = self._backend(tmp_path)
+        with patch("subprocess.run", return_value=MagicMock(returncode=-11, stdout="", stderr="")):
+            assert b._probe_gpu_ok(99) is False  # SIGSEGV at ggml-vulkan init
+
+    def test_probe_false_on_timeout(self, tmp_path):
+        import subprocess as sp
+        b = self._backend(tmp_path)
+        with patch("subprocess.run", side_effect=sp.TimeoutExpired(cmd="x", timeout=8)):
+            assert b._probe_gpu_ok(99) is False  # ~1 tok/s degraded Vulkan
+
+    def test_warm_up_triggers_probe_on_subprocess_path(self, tmp_path):
+        b = self._backend(tmp_path, ngl=-1)
+        with patch.object(b, "_resident_model", return_value=None), \
+             patch.object(b, "_probe_gpu_ok", return_value=True) as probe:
+            b.warm_up()
+        probe.assert_called_once()  # first dictation lands on the right binary
