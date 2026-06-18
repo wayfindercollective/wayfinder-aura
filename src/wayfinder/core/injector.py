@@ -13,6 +13,7 @@ import os
 import subprocess
 import shutil
 import sys
+import time
 from pathlib import Path
 
 IS_MACOS = sys.platform == 'darwin'
@@ -287,6 +288,13 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
         raise InjectionError("xdotool not found in PATH")
 
 
+# Belt-and-suspenders for the very first wtype injection after launch: even with the
+# startup primer (prime_wayland_injection), if the KDE "allow input control" approval is
+# still settling, a short pause lets focus return to the target window before we type — so
+# the first dictation can't land as garble (the classic "recurring T's") in the wrong window.
+_wtype_first_injection = True
+
+
 def _inject_text_wtype(text: str) -> None:
     """Inject text on Linux/Wayland using wtype (virtual-keyboard protocol).
 
@@ -294,6 +302,10 @@ def _inject_text_wtype(text: str) -> None:
     ydotool). No per-key delay control. The compositor must implement the virtual-keyboard
     protocol (KDE Plasma 6 does); if it doesn't, wtype errors and the caller can fall back.
     """
+    global _wtype_first_injection
+    if _wtype_first_injection:
+        _wtype_first_injection = False
+        time.sleep(0.35)
     try:
         result = subprocess.run(
             ["wtype", text],
@@ -306,6 +318,42 @@ def _inject_text_wtype(text: str) -> None:
         raise InjectionError("wtype timed out after 120s")
     except FileNotFoundError:
         raise InjectionError("wtype not found in PATH")
+
+
+def prime_wayland_injection() -> "tuple[bool, str]":
+    """Surface the compositor's one-time "allow input control" approval BEFORE any dictation.
+
+    On Wayland (KDE Plasma) the first wtype call after an install/rebuild triggers a per-app
+    security prompt for the virtual-keyboard protocol. If that prompt races the first REAL
+    injection, the keystrokes land in the wrong window — the "recurring T's" garble the user hit
+    on a fresh Flatpak build. This sends a benign no-op (press+release Shift, which emits no
+    character) so the approval dialog appears at startup, decoupled from real text. Once the user
+    approves, KDE remembers it and every injection after is clean.
+
+    Best-effort and only meaningful when wtype is the active injector (i.e. the Flatpak/Wayland
+    path); a no-op everywhere else (e.g. the desktop's ydotool path, which needs no approval).
+    Returns (ran, message) for logging.
+    """
+    from ..utils.platform import get_text_injector
+    if get_text_injector() != "wtype":
+        return False, ""
+    if not shutil.which("wtype"):
+        return False, "wtype not found — can't pre-arm Wayland injection approval"
+    try:
+        # -M presses a modifier, -m releases it: Shift down then up types nothing, but it
+        # exercises the virtual-keyboard protocol and so triggers the KDE approval prompt.
+        result = subprocess.run(
+            ["wtype", "-M", "shift", "-m", "shift"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+            return False, f"injection primer failed (exit {result.returncode}): {detail}"
+        return True, "Wayland injection pre-armed — approve KDE's 'allow input' prompt once if it appears"
+    except subprocess.TimeoutExpired:
+        return False, "injection primer timed out (an approval dialog may be waiting for you)"
+    except FileNotFoundError:
+        return False, "wtype not found — can't pre-arm Wayland injection approval"
 
 
 def inject_text(text: str, typing_speed: str = "instant", target_window: "str | None" = None) -> None:

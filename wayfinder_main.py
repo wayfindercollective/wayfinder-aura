@@ -2036,16 +2036,21 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
     def _wants_grab(dev) -> bool:
         return any(pat.lower() in dev.name.lower() for pat in grabbed_devices)
 
-    def _grab(dev):
+    def _grab(dev, quiet: bool = False) -> bool:
         if dev.fd in grabbed:
-            return
+            return True
         try:
             dev.grab()
             grabbed[dev.fd] = dev
             log(f"🔒 Exclusive grab: {dev.name} — its keys now reach only Wayfinder")
+            return True
         except OSError as e:
-            log(f"⚠️ Could not grab {dev.name} ({e}) — another tool may hold it "
-                "(e.g. GPU Screen Recorder's global hotkeys); its keys stay visible to other apps")
+            # quiet=True during post-game retries: the game may still be releasing the device
+            # (EBUSY), and we don't want to spam the log on every retry tick.
+            if not quiet:
+                log(f"⚠️ Could not grab {dev.name} ({e}) — another tool may hold it "
+                    "(e.g. GPU Screen Recorder's global hotkeys); its keys stay visible to other apps")
+            return False
 
     def _ungrab_all(reason: str = ""):
         had_any = bool(grabbed)
@@ -2058,13 +2063,21 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
         if had_any and reason:
             log(f"🔓 Released exclusive grabs {reason}")
 
-    def _grab_wanted():
+    def _grab_wanted(quiet: bool = False):
         for dev in fd_to_device.values():
             if _wants_grab(dev):
-                _grab(dev)
+                _grab(dev, quiet=quiet)
+
+    def _all_wanted_grabbed() -> bool:
+        """True only if at least one wanted device is present AND all present ones are held.
+        (Vacuously-true when none are present would wrongly read as 'done' during retries.)"""
+        wanted = [dev for dev in fd_to_device.values() if _wants_grab(dev)]
+        return bool(wanted) and all(dev.fd in grabbed for dev in wanted)
 
     _grab_wanted()
     gm_paused_prev = False
+    regrab_retries = 0  # >0: keep retrying the re-grab after game-mode exit (device still busy)
+    REGRAB_MAX_RETRIES = 20  # ~10s at the 0.5s select tick — covers a slow game teardown
     
     def check_modifiers(required_mods, modifier_names):
         """Check if all required modifiers are currently pressed."""
@@ -2086,9 +2099,29 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                 if gm_paused != gm_paused_prev:
                     if gm_paused:
                         _ungrab_all("(game running — buttons returned to the game)")
+                        regrab_retries = 0
                     else:
-                        _grab_wanted()
+                        # Returning from Game Mode: re-take the device so its F-keys stop
+                        # leaking to the desktop (e.g. the browser's Find bar). The game may
+                        # still be releasing it, so if the first attempt fails, keep retrying
+                        # quietly for a few seconds instead of staying ungrabbed until restart.
+                        _grab_wanted(quiet=True)
+                        if _all_wanted_grabbed():
+                            log("🔒 Re-grabbed input device(s) after Game Mode")
+                        else:
+                            regrab_retries = REGRAB_MAX_RETRIES
+                            log("⏳ Back from Game Mode — device still busy, retrying the grab…")
                     gm_paused_prev = gm_paused
+                elif regrab_retries and not gm_paused:
+                    _grab_wanted(quiet=True)
+                    if _all_wanted_grabbed():
+                        log("🔒 Re-grabbed input device(s) after Game Mode")
+                        regrab_retries = 0
+                    else:
+                        regrab_retries -= 1
+                        if regrab_retries == 0:
+                            log("⚠️ Couldn't re-grab the device after Game Mode — toggle hotkeys "
+                                "off/on in Settings to retry if its keys leak to other apps")
 
             # No devices: wait (honoring shutdown) and rescan instead of dying — a slept
             # wireless keyboard or USB re-enumeration then recovers automatically.
@@ -2159,6 +2192,9 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                             # Check for recording hotkey press
                             if keycode == hotkey_key and key_event.keystate == 1:
                                 if check_modifiers(required_modifiers, hotkey_modifiers):
+                                    # Name the firing device so mouse-vs-keyboard is visible — the
+                                    # same F-key can come from an MMO mouse's grid or the keyboard.
+                                    log(f"🎙️ Dictation triggered by: {device.name}")
                                     event_queue.put((EventType.HOTKEY_PRESSED, None))
                             
                             # Check for style toggle hotkey press
@@ -2168,6 +2204,7 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                                     print(f"[DEBUG] Style toggle key {keycode} detected!", flush=True)
                                     log(f"🎯 Style toggle key {keycode} pressed!")
                                     if check_modifiers(required_style_modifiers, style_toggle_modifiers):
+                                        log(f"🎨 Style toggle by: {device.name}")
                                         event_queue.put((EventType.STYLE_TOGGLE, None))
                                     else:
                                         log(f"   (modifiers not matched)")
@@ -13431,6 +13468,18 @@ class WayfinderApp(ctk.CTk):
                 warm_up_postprocessing(self.config)
             except Exception as e:
                 self.log(f"⚠️ Post-processing warm-up skipped: {e}")
+            # Pre-arm Wayland text injection: surface KDE's one-time "allow input control"
+            # approval now (a benign no-op keystroke), so it can't race the first real
+            # dictation on a fresh install/rebuild and garble the output. No-op unless wtype
+            # is the active injector (the Flatpak/Wayland path); the desktop's ydotool needs
+            # no approval, so this does nothing there.
+            try:
+                from wayfinder.core.injector import prime_wayland_injection
+                ran, msg = prime_wayland_injection()
+                if ran or msg:
+                    self.log(f"⌨️ {msg}")
+            except Exception as e:
+                self.log(f"⚠️ Injection pre-arm skipped: {e}")
         threading.Thread(target=_warm, daemon=True, name="wayfinder-model-warmup").start()
 
     def _ensure_socket_listener(self):
