@@ -16,9 +16,53 @@ from wayfinder.core.injector import (
     InjectionError,
     TYPING_SPEEDS,
     inject_text,
+    prime_wayland_injection,
     _get_ydotool_binary,
     _get_ydotool_env,
 )
+
+
+# =============================================================================
+# prime_wayland_injection — surface KDE's "allow input" approval before dictation
+# =============================================================================
+class TestPrimeWaylandInjection:
+    """The startup primer is a no-op except on the wtype/Wayland path, where it
+    fires a benign Shift no-op to trigger KDE's one-time approval early."""
+
+    def test_noop_when_injector_is_not_wtype(self):
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch("subprocess.run") as mock_run:
+            ran, msg = prime_wayland_injection()
+        assert ran is False
+        assert msg == ""
+        mock_run.assert_not_called()  # never touch the desktop's ydotool path
+
+    def test_fires_benign_shift_noop_on_wtype(self):
+        result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector.shutil.which", return_value="/usr/bin/wtype"), \
+             patch("subprocess.run", return_value=result) as mock_run:
+            ran, msg = prime_wayland_injection()
+        assert ran is True
+        cmd = mock_run.call_args[0][0]
+        # Press+release Shift = no character typed, but it exercises the protocol.
+        assert cmd == ["wtype", "-M", "shift", "-m", "shift"]
+
+    def test_reports_failure_without_raising_when_wtype_missing(self):
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector.shutil.which", return_value=None):
+            ran, msg = prime_wayland_injection()
+        assert ran is False
+        assert "wtype not found" in msg
+
+    def test_nonzero_exit_is_reported_not_raised(self):
+        result = MagicMock(returncode=1, stdout="", stderr="boom")
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector.shutil.which", return_value="/usr/bin/wtype"), \
+             patch("subprocess.run", return_value=result):
+            ran, msg = prime_wayland_injection()
+        assert ran is False
+        assert "boom" in msg
 
 
 # =============================================================================
