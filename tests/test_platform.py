@@ -131,6 +131,30 @@ class TestSessionDetection:
         """is_wayland() returns False when on X11."""
         assert is_wayland() is False
 
+    def test_is_wayland_true_via_wayland_display_when_session_type_unset(self, monkeypatch):
+        """Regression: a KDE Wayland session can launch the app with XDG_SESSION_TYPE
+        unset (only WAYLAND_DISPLAY set). is_wayland() must still detect Wayland, or we
+        fall to the X11/xdotool path and hit XWayland's gated, truncating XTEST."""
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        assert is_wayland() is True
+
+    def test_is_wayland_x11_session_wins_over_stray_wayland_display(self, monkeypatch):
+        """An explicit XDG_SESSION_TYPE=x11 must keep is_wayland() False even if a stray
+        WAYLAND_DISPLAY lingers (e.g. nested/XWayland helpers)."""
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        assert is_wayland() is False
+
+    def test_is_wayland_false_when_neither_signal_present(self, monkeypatch):
+        """No XDG_SESSION_TYPE and no WAYLAND_DISPLAY → not Wayland."""
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        assert is_wayland() is False
+
     def test_is_kde_true(self, wayland_env):
         """is_kde() returns True when KDE is in XDG_CURRENT_DESKTOP."""
         # wayland_env sets XDG_CURRENT_DESKTOP=KDE

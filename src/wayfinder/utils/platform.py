@@ -84,7 +84,18 @@ def is_wayland() -> bool:
     """Check if running on Wayland (Linux only)."""
     if not is_linux():
         return False
-    return os.environ.get("XDG_SESSION_TYPE") == "wayland"
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+        return True
+    # XDG_SESSION_TYPE isn't always propagated (apps launched outside a login shell, or via
+    # certain .desktop/launcher paths, often don't have it). WAYLAND_DISPLAY is the canonical
+    # "a Wayland server is here" signal, so trust it too — but only when not an explicit X11
+    # session. Without this, a KDE Wayland session with XDG_SESSION_TYPE unset wrongly falls to
+    # the X11/xdotool path, hitting XWayland's gated + unreliable XTEST: KWin's "allow input"
+    # approval prompt plus truncated long dictations, instead of ydotool's clean kernel-uinput
+    # injection (no prompt, no truncation).
+    if os.environ.get("XDG_SESSION_TYPE") == "x11":
+        return False
+    return bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
 def is_x11() -> bool:
