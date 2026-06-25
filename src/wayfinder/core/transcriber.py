@@ -889,9 +889,16 @@ class WhisperServerBackend(TranscriptionBackend):
             text = result.get("text", "").strip()
             return text
 
-        except urllib.error.URLError as e:
-            # Server may have died — try to restart and retry once
-            print(f"[Whisper Server] Connection error: {e}. Restarting server...")
+        except (urllib.error.URLError, TimeoutError) as e:
+            # Server may have died (URLError: connection refused) OR wedged its
+            # inference worker while still listening (TimeoutError: the request
+            # hangs past self.timeout — observed after a suspend/resume cycle,
+            # where GET / still returns 200 but POST /inference never completes).
+            # A hung-but-listening server raises TimeoutError, which is NOT a
+            # URLError, so it must be caught here explicitly — otherwise it falls
+            # through to the generic handler below and the dead server is left
+            # running, hanging every subsequent dictation until manually killed.
+            print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
             with WhisperServerBackend._server_lock:
                 self._stop_server_internal()
             self._start_server()

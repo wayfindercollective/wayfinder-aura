@@ -117,6 +117,47 @@ class TestWhisperCppBackend:
                 backend.transcribe(str(sample_audio_file))
 
 
+class TestWhisperServerBackend:
+    """Test the whisper-server (warm) backend recovery behavior."""
+
+    def _make_resp(self, text: str) -> MagicMock:
+        resp = MagicMock()
+        resp.read.return_value = ('{"text": "%s"}' % text).encode("utf-8")
+        return resp
+
+    def test_hung_server_timeout_triggers_restart_and_retry(
+        self, sample_audio_file: Path
+    ):
+        """Regression: a wedged-but-listening whisper-server makes urlopen raise
+        TimeoutError (not URLError) — observed after a suspend/resume cycle.
+        That must restart the server and retry, not fall through to an
+        unrecoverable error that leaves the dead server hanging every dictation.
+        """
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        backend = WhisperServerBackend(use_gpu=False, timeout=1)
+
+        def fake_start():
+            WhisperServerBackend._server_port = 8178
+
+        # First inference hangs (TimeoutError); after restart it succeeds.
+        urlopen = MagicMock(side_effect=[TimeoutError("timed out"),
+                                         self._make_resp("recovered")])
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server",
+                          side_effect=fake_start) as mock_start, \
+             patch.object(WhisperServerBackend, "_stop_server_internal") as mock_stop, \
+             patch("urllib.request.urlopen", urlopen):
+            result = backend.transcribe(str(sample_audio_file))
+
+        assert result == "recovered"
+        assert mock_stop.called, "wedged server must be stopped before retry"
+        # _start_server: once at entry + once on restart
+        assert mock_start.call_count == 2
+        assert urlopen.call_count == 2
+
+
 class TestFasterWhisperBackend:
     """Test Faster-Whisper backend."""
 
