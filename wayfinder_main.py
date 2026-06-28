@@ -5971,10 +5971,12 @@ class WayfinderApp(ctk.CTk):
         
         # Note: Prompt button removed - now configured via Style tab
         
-        # GPU Acceleration toggle
-        self.gpu_var = ctk.BooleanVar(value=self.config.get("use_gpu", True))
+        # GPU Acceleration toggle (premium feature). Reflect the effective state:
+        # free tier shows OFF (GPU is gated) with a lock hint; enabling prompts upgrade.
+        _gpu_premium = self.feature_gate.has_feature("gpu_acceleration")
+        self.gpu_var = ctk.BooleanVar(value=bool(self.config.get("use_gpu", True)) and _gpu_premium)
         self.create_toggle_row(
-            parent, "GPU Acceleration",
+            parent, "GPU Acceleration" if _gpu_premium else "GPU Acceleration  🔒 Premium",
             self.gpu_var, self.toggle_gpu,
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
             tooltip_key="gpu_acceleration",
@@ -7401,12 +7403,26 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⚙ Punctuation: {status}")
 
     def toggle_gpu(self):
-        """Toggle GPU acceleration."""
-        if hasattr(self, 'gpu_var'):
-            self.config["use_gpu"] = self.gpu_var.get()
-            save_config(self.config)
-            status = "enabled" if self.gpu_var.get() else "disabled"
-            self.log(f"⚙ GPU acceleration: {status}")
+        """Toggle GPU acceleration (premium-gated; applies live, no app restart)."""
+        if not hasattr(self, 'gpu_var'):
+            return
+        want = self.gpu_var.get()
+        # GPU acceleration is a premium feature — block enabling it on the free tier
+        # (the backend factory also enforces this, so config edits can't bypass it).
+        if want and not self.feature_gate.has_feature("gpu_acceleration"):
+            self.gpu_var.set(False)
+            self._show_premium_prompt("gpu_acceleration")
+            return
+        self.config["use_gpu"] = want
+        save_config(self.config)
+        # Apply live: drop the resident whisper-server so the next dictation respawns
+        # it in the new CPU/GPU mode — no app restart needed.
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+            WhisperServerBackend.shutdown()
+        except Exception:
+            pass
+        self.log(f"⚙ GPU acceleration: {'enabled (GPU)' if want else 'disabled (CPU)'} — applied")
 
     # === Post-Processing Handlers ===
     

@@ -1496,6 +1496,16 @@ def get_backend(config: dict) -> TranscriptionBackend:
     """
     backend_type = config.get("transcription_backend", "whisper_cpp")
 
+    # GPU acceleration is a PREMIUM feature — enforce here (the backend factory), not
+    # only in the UI, so editing config.json can't unlock GPU without a license. Every
+    # GPU-capable backend below uses use_gpu_effective instead of the raw config value.
+    try:
+        from wayfinder.license import get_feature_gate
+        _gpu_allowed = get_feature_gate().has_feature("gpu_acceleration")
+    except Exception:
+        _gpu_allowed = False
+    use_gpu_effective = bool(config.get("use_gpu", True)) and _gpu_allowed
+
     # Map accuracy_mode to beam_size/best_of overrides
     accuracy_mode = config.get("accuracy_mode", "balanced")
     accuracy_presets = {
@@ -1512,7 +1522,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
     if backend_type == "faster_whisper":
         return FasterWhisperBackend(
             model_size=config.get("faster_whisper_model", "small"),
-            use_gpu=config.get("use_gpu", True),
+            use_gpu=use_gpu_effective,
             compute_type=config.get("faster_whisper_compute_type", "float16"),
             prompt=config.get("prompt", "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next."),
             language=config.get("language", "en"),
@@ -1565,7 +1575,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 port=config.get("whisper_server_port", 8178),
                 threads=config.get("threads", 4),
                 timeout=config.get("timeout", 120),
-                use_gpu=config.get("use_gpu", True),
+                use_gpu=use_gpu_effective,
                 beam_size=config.get("beam_size", 5),
                 best_of=config.get("best_of", 3),
                 language=config.get("language", "en"),
@@ -1585,7 +1595,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             prompt=config.get("prompt", "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next."),
             threads=config.get("threads", 6),
             timeout=config.get("timeout", 120),
-            use_gpu=config.get("use_gpu", True),
+            use_gpu=use_gpu_effective,
             gpu_layers=config.get("gpu_layers", 0),
             beam_size=config.get("beam_size", 5),
             best_of=config.get("best_of", 3),

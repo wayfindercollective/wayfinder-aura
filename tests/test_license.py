@@ -223,11 +223,12 @@ class TestFeatureGate:
         for feat in expected:
             assert feat in PREMIUM_FEATURES, f"Missing premium feature: {feat}"
 
-    def test_gpu_is_free(self, temp_config_dir: Path):
-        """Test that GPU acceleration is a free feature."""
-        from wayfinder.license import FREE_FEATURES
+    def test_gpu_is_premium(self, temp_config_dir: Path):
+        """GPU acceleration is now a PREMIUM feature (gated for free users)."""
+        from wayfinder.license import FREE_FEATURES, PREMIUM_FEATURES
 
-        assert "gpu_acceleration" in FREE_FEATURES
+        assert "gpu_acceleration" in PREMIUM_FEATURES
+        assert "gpu_acceleration" not in FREE_FEATURES
 
     def test_premium_user_has_all_features(self, temp_config_dir: Path, mock_online_license):
         """Test that premium user can access all premium features."""
