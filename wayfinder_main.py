@@ -5230,6 +5230,36 @@ class WayfinderApp(ctk.CTk):
                 command=self._deactivate_license,
             ).pack(side="left")
 
+        # === DEV-UNLOCK (remove before GA) ==================================
+        # Developer toggle: force-unlock all premium features for testing without
+        # a license key. Persists via "dev_unlock_all" in config (read by
+        # FeatureGate). Remove this block + _toggle_dev_unlock/_render_dev_feature_list
+        # + the override in src/wayfinder/license.py before shipping (grep: DEV-UNLOCK).
+        dev_tile = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
+        dev_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+
+        ctk.CTkLabel(
+            dev_tile, text="🛠 Developer",
+            font=(self.font_header[0], self.font_sizes["caption"], "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 4))
+
+        self._dev_unlock_var = ctk.BooleanVar(value=bool(self.config.get("dev_unlock_all", False)))
+        ctk.CTkCheckBox(
+            dev_tile, text="Unlock all premium features (testing)",
+            variable=self._dev_unlock_var, command=self._toggle_dev_unlock,
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_primary"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+            checkmark_color="#000000",
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 6))
+
+        # Live readout: each premium feature with ✓ (unlocked) / 🔒 (locked); refreshes on toggle.
+        self._dev_feature_frame = ctk.CTkFrame(dev_tile, fg_color="transparent")
+        self._dev_feature_frame.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        self._render_dev_feature_list()
+        # === end DEV-UNLOCK ================================================
+
         self._settings_scroll = scroll
     
     def _update_benchmark_results_display(self):
@@ -10180,6 +10210,46 @@ class WayfinderApp(ctk.CTk):
         self._license_feedback.configure(text="License deactivated", text_color=COLORS["text_muted"])
         self._license_key_entry.delete(0, "end")
         self.log("License deactivated")
+
+    # === DEV-UNLOCK (remove before GA) ===
+    def _toggle_dev_unlock(self) -> None:
+        """DEV: persist the unlock flag, refresh the gate, update badge + readout."""
+        from wayfinder.license import get_feature_gate
+        on = bool(self._dev_unlock_var.get())
+        self.config["dev_unlock_all"] = on
+        save_config(self.config)
+        self.feature_gate = get_feature_gate(force_refresh=True)
+        prem = self.feature_gate.is_premium
+        if hasattr(self, "_license_status_label"):
+            try:
+                self._license_status_label.configure(
+                    text="Premium" if prem else "Free",
+                    text_color=COLORS["accent"] if prem else COLORS["text_muted"],
+                )
+            except Exception:
+                pass
+        self._render_dev_feature_list()
+        self.log(
+            "🛠 DEV unlock ON — all premium features enabled (reopen panels / restart for full effect)"
+            if on else "🛠 DEV unlock OFF — premium gating restored"
+        )
+
+    def _render_dev_feature_list(self) -> None:
+        """DEV: show each premium feature with ✓ (unlocked) / 🔒 (locked)."""
+        from wayfinder.license import PREMIUM_FEATURES
+        frame = getattr(self, "_dev_feature_frame", None)
+        if frame is None:
+            return
+        for w in frame.winfo_children():
+            w.destroy()
+        for fid, (name, _desc) in PREMIUM_FEATURES.items():
+            unlocked = self.feature_gate.has_feature(fid)
+            ctk.CTkLabel(
+                frame, text=f"{'✓' if unlocked else '🔒'}  {name}",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["accent"] if unlocked else COLORS["text_muted"],
+            ).pack(anchor="w")
+    # === end DEV-UNLOCK ===
 
     def get_hotkey_display(self) -> str:
         hotkey_key = self.config.get("hotkey_key", 67)
