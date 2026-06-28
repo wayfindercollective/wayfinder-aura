@@ -25,10 +25,11 @@ top — what's needed from you (Peter). Complements `SHIPPING.md`._
    testing premium and I'll strip it — everything is tagged `DEV-UNLOCK`, one commit removes it
    (license.py + wayfinder_main.py + tests/test_dev_unlock.py).
 
-3. **Screenshots for the store listing.** The metainfo points at
-   `screenshots/main-window.png` + `screenshots/settings.png`, which **don't exist** (they 404
-   on a Flathub listing). Either drop in your own, or tell me to auto-capture drafts from the
-   running app for you to replace.
+3. **Screenshots — DONE (drafts).** ✅ Real captures of the running app are committed at
+   `screenshots/main-window.png` (Dictate/home) + `screenshots/settings.png` (Settings/Audio),
+   so the metainfo URLs now resolve. They show your live state (turbo-q5, 95% zoom, a leftover
+   "Thank you." transcription) — **replace with polished marketing shots before submission** if
+   you want, but this no longer blocks a build/listing.
 
 4. **Confirm the storefront.** Is `https://wayfinder.dev/premium` live, and is the price
    ("$20 launch / reg. $40") correct? It's hardcoded in the upgrade prompts
@@ -70,7 +71,7 @@ top — what's needed from you (Peter). Complements `SHIPPING.md`._
     network, which Flathub forbids.
   - Commit-pin the 8 `git` sources (add `commit:` next to each `tag:`).
   - Switch the app module from `type: dir` to `git` + `tag` + `commit` (do at tag time).
-  - Wire the real screenshots (#3).
+  - Screenshots: done (drafts committed, #3) — swap for polished shots if desired.
 - **Tag `v1.1.0`** at actual ship time (metainfo release + the Flathub app-source pin need it).
 - **On-device QA:** a real GPU dictation run end-to-end, and the **Game-Mode / DAoC live test**
   (designed but never validated on hardware).
