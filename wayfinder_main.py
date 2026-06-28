@@ -5436,6 +5436,20 @@ class WayfinderApp(ctk.CTk):
                     debug_log(f"Error: {error}")
                     return
                 
+                # CPU test binary: the GPU (Vulkan) build SIGSEGVs at Vulkan init on some
+                # devices (e.g. the Steam Deck's RDNA2) — which also kills the --no-gpu run,
+                # since the crash happens before the flag is read. Use the dedicated CPU-only
+                # binary (whisper-cli-cpu) when present so the CPU test still works there.
+                whisper_cli_cpu = whisper_cli
+                for path in [
+                    Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli-cpu",
+                    Path("/usr/bin/whisper-cli-cpu"),
+                    Path("/app/bin/whisper-cli-cpu"),
+                ]:
+                    if path.exists():
+                        whisper_cli_cpu = str(path)
+                        break
+
                 # Find model across all model dirs (download dir first)
                 model_path = _resolve_whisper_model(selected_model)
                 
@@ -5492,7 +5506,12 @@ class WayfinderApp(ctk.CTk):
                     else:
                         stderr = result.stderr.decode('utf-8', errors='replace')[:200]
                         debug_log(f"GPU stderr: {stderr}")
-                        self.after(0, lambda: self.log(f"   ⚠️ GPU failed: exit {result.returncode}"))
+                        if result.returncode < 0:
+                            # Negative = killed by a signal (SIGSEGV at Vulkan init on the
+                            # Deck's RDNA2). GPU acceleration just isn't available here.
+                            self.after(0, lambda: self.log("   ⚠️ GPU unavailable on this device (Vulkan crashed) — CPU only"))
+                        else:
+                            self.after(0, lambda: self.log(f"   ⚠️ GPU failed: exit {result.returncode}"))
                     
                     # CPU TEST  
                     debug_log("Starting CPU test...")
@@ -5500,7 +5519,8 @@ class WayfinderApp(ctk.CTk):
                     self.after(0, lambda: self.benchmark_status_label.configure(text="Testing CPU..."))
                     self.after(0, lambda: self.log("   🧠 CPU test starting..."))
                     
-                    cmd_cpu = cmd_gpu + ["--no-gpu"]
+                    cmd_cpu = [whisper_cli_cpu, "-m", str(model_path), "-f", test_audio.name,
+                               "-t", "6", "--no-timestamps", "--no-prints", "--no-gpu"]
                     
                     start = time.perf_counter()
                     result = subprocess.run(cmd_cpu, capture_output=True, timeout=120)
@@ -5601,7 +5621,7 @@ class WayfinderApp(ctk.CTk):
             elif gpu_time:
                 self.benchmark_status_label.configure(text=f"✓ GPU: {gpu_time:.1f}s (CPU failed)")
             elif cpu_time:
-                self.benchmark_status_label.configure(text=f"✓ CPU: {cpu_time:.1f}s (GPU failed)")
+                self.benchmark_status_label.configure(text=f"✓ CPU: {cpu_time:.1f}s (GPU unavailable)")
             else:
                 self.benchmark_status_label.configure(text="Both tests failed")
         
