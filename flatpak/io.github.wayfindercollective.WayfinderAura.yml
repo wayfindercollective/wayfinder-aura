@@ -63,6 +63,11 @@ finish-args:
   
   # GPU acceleration (Vulkan for whisper.cpp and llama.cpp)
   - --device=dri
+  # RADV VANGOGH (Steam Deck RDNA2) has no matrix cores → ggml-vulkan's
+  # cooperative-matrix path is emulated (slow, and it SIGSEGV'd at init on
+  # whisper.cpp <=1.7.2). Disabling coopmat makes GPU whisper fast AND stable
+  # here; it's a no-op for the CPU-only builds. Required for the v1.9.x GPU path.
+  - --env=GGML_VK_DISABLE_COOPMAT=1
   
   # Network for API-based transcription (OpenAI, Groq) and model downloads
   - --share=network
@@ -90,6 +95,19 @@ modules:
         url: https://github.com/PortAudio/portaudio.git
         tag: v19.7.0
 
+  # SPIRV-Headers — build-only dep of ggml-vulkan's shader generator
+  # (find_package(SPIRV-Headers)) in whisper.cpp v1.8+ AND llama.cpp b9608. Must
+  # build BEFORE the Vulkan whisper modules below. Header-only; installs its cmake
+  # config into /app so later modules' find_package resolves. Cleaned from the app.
+  - name: spirv-headers
+    buildsystem: cmake-ninja
+    cleanup:
+      - '*'
+    sources:
+      - type: git
+        url: https://github.com/KhronosGroup/SPIRV-Headers.git
+        tag: vulkan-sdk-1.3.290.0
+
   # whisper.cpp — GPU (Vulkan) transcription engine, the default binary.
   # GGML_VULKAN=ON initializes Vulkan at startup; on hardware/driver combos where
   # that init crashes (it SIGSEGVed on the Deck's RDNA2 — STEAMDECK-INSTALL-LOG
@@ -100,6 +118,10 @@ modules:
   # freedesktop GL extension supplies the Vulkan ICDs at runtime.
   - name: whisper-cpp
     buildsystem: cmake-ninja
+    # v1.9.x's `ninja install` installs the example binaries (whisper-cli/server)
+    # into /app/bin; with two whisper modules that would overwrite GPU<->CPU. Skip
+    # install — the post-install below copies each binary under its correct name.
+    no-make-install: true
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
       - -DWHISPER_BUILD_EXAMPLES=ON
@@ -109,11 +131,20 @@ modules:
       # build SIGILLs on it (STEAMDECK-INSTALL-LOG.md Crit-Finding 2 / Issue 13).
       - -DGGML_NATIVE=OFF
       - -DGGML_AVX512=OFF
+      # v1.9.x ggml builds PURE SCALAR CPU kernels with GGML_NATIVE=OFF unless the
+      # instruction sets are enabled explicitly (measured: base.en CPU 2.2s -> 14.5s
+      # without these). AVX2/FMA/F16C/BMI2 = the Zen 2 (Deck) baseline; AVX-512 off.
+      - -DGGML_SSE42=ON
+      - -DGGML_AVX=ON
+      - -DGGML_AVX2=ON
+      - -DGGML_FMA=ON
+      - -DGGML_F16C=ON
+      - -DGGML_BMI2=ON
       - -DGGML_VULKAN=ON
     sources:
       - type: git
         url: https://github.com/ggerganov/whisper.cpp.git
-        tag: v1.7.2
+        tag: v1.9.1
     post-install:
       # whisper.cpp v1.7.2 builds the transcription CLI as bin/main (renamed to whisper-cli
       # only in later releases). Install it under the whisper-cli name the app/config expects.
@@ -133,6 +164,7 @@ modules:
   # base.en on the Deck's Zen 2 CPU is ~2x real-time — an acceptable worst case.
   - name: whisper-cpp-cpu
     buildsystem: cmake-ninja
+    no-make-install: true
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
       - -DWHISPER_BUILD_EXAMPLES=ON
@@ -140,11 +172,20 @@ modules:
       - -DBUILD_SHARED_LIBS=OFF
       - -DGGML_NATIVE=OFF
       - -DGGML_AVX512=OFF
+      # v1.9.x ggml builds PURE SCALAR CPU kernels with GGML_NATIVE=OFF unless the
+      # instruction sets are enabled explicitly (measured: base.en CPU 2.2s -> 14.5s
+      # without these). AVX2/FMA/F16C/BMI2 = the Zen 2 (Deck) baseline; AVX-512 off.
+      - -DGGML_SSE42=ON
+      - -DGGML_AVX=ON
+      - -DGGML_AVX2=ON
+      - -DGGML_FMA=ON
+      - -DGGML_F16C=ON
+      - -DGGML_BMI2=ON
       - -DGGML_VULKAN=OFF
     sources:
       - type: git
         url: https://github.com/ggerganov/whisper.cpp.git
-        tag: v1.7.2
+        tag: v1.9.1
     post-install:
       - if [ -f bin/whisper-cli ]; then install -Dm755 bin/whisper-cli ${FLATPAK_DEST}/bin/whisper-cli-cpu; else install -Dm755 bin/main ${FLATPAK_DEST}/bin/whisper-cli-cpu; fi
       # CPU whisper-server: the Vulkan-built server crashes at ggml-vulkan
@@ -243,19 +284,6 @@ modules:
       - type: archive
         url: https://prdownloads.sourceforge.net/tcl/tk8.6.14-src.tar.gz
         sha256: 8ffdb720f47a6ca6107eac2dd877e30b0ef7fac14f3a84ebbd0b3612cee41a94
-
-  # SPIRV-Headers — build-only dep of llama.cpp b9608's ggml-vulkan shader
-  # generator (find_package(SPIRV-Headers)). whisper.cpp's pinned ggml predates
-  # this dependency, which is why only the GPU llama build needs it. Header-only;
-  # installs its cmake config into /app so the next module's find_package resolves.
-  - name: spirv-headers
-    buildsystem: cmake-ninja
-    cleanup:
-      - '*'
-    sources:
-      - type: git
-        url: https://github.com/KhronosGroup/SPIRV-Headers.git
-        tag: vulkan-sdk-1.3.290.0
 
   # llama.cpp — local LLM post-processing (tone cleanup) via the llama-simple
   # subprocess. GPU (Vulkan) build with a CPU twin + runtime GPU->CPU fallback
