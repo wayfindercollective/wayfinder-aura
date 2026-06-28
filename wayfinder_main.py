@@ -225,6 +225,53 @@ def _get_llm_models_dir() -> Path:
     return Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
 
 
+def _get_whisper_models_dir() -> Path:
+    """Writable whisper models directory for in-app model downloads.
+
+    In a Flatpak the host model dirs (~/whisper.cpp/models and
+    ~/.local/share/whisper.cpp) are mounted READ-ONLY, so downloading a model
+    into them fails with EROFS ("Read-only file system"). Downloads must target a
+    granted, writable location that mirrors the llm-models layout — see the
+    matching `--filesystem=~/.local/share/wayfinder-aura/whisper-models:create`
+    grant in flatpak/io.github.wayfindercollective.WayfinderAura.yml. Outside a
+    Flatpak the long-standing ~/whisper.cpp/models location is kept (existing
+    installs, docs and from-source builds all use it).
+    """
+    if IS_FLATPAK:
+        return Path.home() / ".local" / "share" / "wayfinder-aura" / "whisper-models"
+    return Path.home() / "whisper.cpp" / "models"
+
+
+def _whisper_model_search_dirs() -> list[Path]:
+    """Directories that may hold whisper GGML models, best-first.
+
+    The writable download dir comes first so a freshly downloaded model wins; the
+    read-only host dirs and the bundled /app dir follow so pre-existing and
+    shipped models stay visible. Callers take the first match.
+    """
+    candidates = [
+        _get_whisper_models_dir(),
+        Path.home() / "whisper.cpp" / "models",
+        Path.home() / ".local" / "share" / "whisper.cpp",
+        Path("/app/share/whisper-models"),  # bundled (Flatpak)
+    ]
+    dirs: list[Path] = []
+    for d in candidates:
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _resolve_whisper_model(filename: str) -> Path | None:
+    """First existing path for a GGML model filename across all model dirs
+    (download dir first), or None if it isn't present anywhere."""
+    for d in _whisper_model_search_dirs():
+        p = d / filename
+        if p.exists():
+            return p
+    return None
+
+
 def load_config() -> dict:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if CONFIG_FILE.exists():
@@ -1272,16 +1319,11 @@ class BenchmarkRunner:
         return info
     
     def _find_models_dir(self) -> Path:
-        """Find the whisper models directory."""
-        possible_dirs = [
-            Path.home() / "whisper.cpp" / "models",
-            Path.home() / ".local" / "share" / "whisper.cpp",
-            Path("/app/share/whisper-models"),  # Flatpak
-        ]
-        for d in possible_dirs:
+        """Find the whisper models directory (download dir first, then host/bundled)."""
+        for d in _whisper_model_search_dirs():
             if d.exists():
                 return d
-        return possible_dirs[0]  # Default
+        return _get_whisper_models_dir()  # writable default
     
     def _find_whisper_binary(self) -> str | None:
         """Find whisper-cli binary."""
@@ -1391,11 +1433,11 @@ class BenchmarkRunner:
         self.log_callback(f"📁 Models: {models_dir}")
         self.log_callback(f"🔧 Binary: {whisper_cli}")
         
-        # Find available models
+        # Find available models across all model dirs (download dir first)
         available = []
         for model_id, filename, display_name in self.BENCHMARK_MODELS:
-            path = models_dir / filename
-            if path.exists():
+            path = _resolve_whisper_model(filename)
+            if path is not None:
                 # In quick mode, only test the selected model
                 if quick_mode and selected_model:
                     if filename in selected_model or selected_model in filename:
@@ -1673,7 +1715,7 @@ class ModelDownloader:
     """Downloads whisper models with progress tracking."""
     
     def __init__(self, models_dir: Path = None):
-        self.models_dir = models_dir or (Path.home() / "whisper.cpp" / "models")
+        self.models_dir = models_dir or _get_whisper_models_dir()
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self._cancel_requested = False
         self._current_download = None
@@ -5364,13 +5406,10 @@ class WayfinderApp(ctk.CTk):
                     debug_log(f"Error: {error}")
                     return
                 
-                # Find model
-                models_dir = Path.home() / "whisper.cpp" / "models"
-                if not models_dir.exists():
-                    models_dir = Path("/app/share/whisper-models")
-                model_path = models_dir / selected_model
+                # Find model across all model dirs (download dir first)
+                model_path = _resolve_whisper_model(selected_model)
                 
-                if not model_path.exists():
+                if model_path is None:
                     error = f"Model not found: {selected_model}"
                     debug_log(f"Error: {error}")
                     return
@@ -10983,8 +11022,7 @@ class WayfinderApp(ctk.CTk):
         }
 
     def get_available_models(self) -> list[dict]:
-        """Scan for available whisper models."""
-        models_dir = Path.home() / "whisper.cpp" / "models"
+        """Scan for available whisper models across all model dirs."""
         models = []
         
         # Default model info with estimated latencies
@@ -11009,8 +11047,8 @@ class WayfinderApp(ctk.CTk):
         fastest = self.config.get("benchmark_fastest_processor", None)
         
         for filename, (name, size, default_speed, model_id) in model_info.items():
-            path = models_dir / filename
-            if path.exists():
+            path = _resolve_whisper_model(filename)
+            if path is not None:
                 # Try to get benchmarked speed
                 speed = default_speed
                 if model_id in benchmark_results:
@@ -12751,12 +12789,13 @@ class WayfinderApp(ctk.CTk):
     
     def _apply_model_from_tray(self, model_name: str):
         """Apply model selection from tray menu - runs on main Tk thread."""
-        models_dir = Path.home() / "whisper.cpp" / "models"
-        model_path = models_dir / f"ggml-{model_name}.bin"
+        model_path = _resolve_whisper_model(f"ggml-{model_name}.bin")
         
-        if model_path.exists():
-            # Store with ~ for portability
-            relative_path = f"~/whisper.cpp/models/ggml-{model_name}.bin"
+        if model_path is not None:
+            # Store with ~ for portability (collapse $HOME -> ~ like the model panel does)
+            home = str(Path.home())
+            path_str = str(model_path)
+            relative_path = "~" + path_str[len(home):] if path_str.startswith(home) else path_str
             self.config["model_path"] = relative_path
             save_config(self.config)
             self.log(f"⚙ Model: {model_name}")
