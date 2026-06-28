@@ -11,7 +11,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 APP_NAME="Wayfinder_Aura"
 ARCH="x86_64"
 APPIMAGE_NAME="${APP_NAME}-${VERSION}-${ARCH}.AppImage"

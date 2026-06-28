@@ -7,7 +7,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 BUILD_TYPE="${1:-release}"
 
 echo "╔════════════════════════════════════════════════════════════╗"
@@ -91,8 +91,16 @@ if [ -f "dist/wayfinder-aura" ]; then
     echo "📋 Install system-wide:"
     echo "   sudo install -m 755 dist/wayfinder-aura /usr/local/bin/"
     echo ""
-    echo "📄 Create desktop entry:"
-    echo "   cp wayfinder-aura.desktop ~/.local/share/applications/"
+    # Install the desktop entry, rewriting the hardcoded developer path to this
+    # checkout's real location so Exec/Icon (the app + trigger_record.py +
+    # trigger_style.py) resolve for any user. The in-repo .desktop keeps the dev
+    # path as a template that this substitution replaces at install time.
+    DESKTOP_DEST="$HOME/.local/share/applications/wayfinder-aura.desktop"
+    echo "📄 Installing desktop entry to $DESKTOP_DEST ..."
+    mkdir -p "$(dirname "$DESKTOP_DEST")"
+    sed "s|/home/bazzite/Dev/wayfinder-aura|$SCRIPT_DIR|g" \
+        "$SCRIPT_DIR/wayfinder-aura.desktop" > "$DESKTOP_DEST"
+    echo "   ✅ Installed (paths point at $SCRIPT_DIR)"
     echo ""
 else
     echo ""

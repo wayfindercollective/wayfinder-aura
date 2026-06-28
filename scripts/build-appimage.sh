@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 APP_NAME="WayfinderAura"
 APPDIR="AppDir"
 ARCH=$(uname -m)
@@ -163,8 +163,8 @@ if [ "$BUILD_MODE" = "--full" ]; then
     # ── whisper.cpp ──
     WHISPER_DIR="/tmp/whisper.cpp-appimage"
     if [ ! -d "$WHISPER_DIR" ]; then
-        echo "   📥 Cloning whisper.cpp..."
-        git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
+        echo "   📥 Cloning whisper.cpp (v1.9.1, pinned to match the Flatpak)..."
+        git clone --depth 1 --branch v1.9.1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
     fi
     echo "   🔨 Building whisper.cpp (Vulkan)..."
     cmake -S "$WHISPER_DIR" -B "$WHISPER_DIR/build" \
@@ -183,8 +183,8 @@ if [ "$BUILD_MODE" = "--full" ]; then
     # ── llama.cpp ──
     LLAMA_DIR="/tmp/llama.cpp-appimage"
     if [ ! -d "$LLAMA_DIR" ]; then
-        echo "   📥 Cloning llama.cpp..."
-        git clone --depth 1 https://github.com/ggerganov/llama.cpp.git "$LLAMA_DIR"
+        echo "   📥 Cloning llama.cpp (b9608, pinned to match the Flatpak)..."
+        git clone --depth 1 --branch b9608 https://github.com/ggerganov/llama.cpp.git "$LLAMA_DIR"
     fi
     echo "   🔨 Building llama.cpp (Vulkan)..."
     cmake -S "$LLAMA_DIR" -B "$LLAMA_DIR/build" \
