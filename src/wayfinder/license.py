@@ -458,6 +458,33 @@ def remove_license() -> None:
 
 # === Feature Gating ===
 
+
+# === DEV-UNLOCK (remove before GA) =========================================
+# Developer-only override that forces every premium feature ON so licensing can
+# be exercised without a real key. Enabled by the "DEV — Unlock all premium
+# features" checkbox (writes "dev_unlock_all": true to config.json) or by the
+# WAYFINDER_DEV_UNLOCK=1 environment variable (handy for headless tests). To
+# remove before shipping real licensing: delete this block and the two
+# `_dev_unlock` lines in FeatureGate, plus the checkbox in wayfinder_main.py
+# (grep the tree for: DEV-UNLOCK).
+def _dev_unlock_enabled() -> bool:
+    env = os.environ.get("WAYFINDER_DEV_UNLOCK", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    try:
+        import wayfinder.config as _wc
+        cfg_path = Path(_wc.CONFIG_FILE)
+    except Exception:
+        cfg_path = Path.home() / ".config" / "wayfinder-aura" / "config.json"
+    try:
+        if cfg_path.exists():
+            return bool(json.loads(cfg_path.read_text()).get("dev_unlock_all", False))
+    except Exception:
+        pass
+    return False
+# === end DEV-UNLOCK ========================================================
+
+
 class FeatureGate:
     """
     Controls access to premium features.
@@ -481,10 +508,13 @@ class FeatureGate:
     def refresh(self) -> None:
         """Reload license status."""
         self._license_info = load_stored_license()
+        self._dev_unlock = _dev_unlock_enabled()  # DEV-UNLOCK (remove before GA)
     
     @property
     def is_premium(self) -> bool:
         """Check if user has premium license."""
+        if getattr(self, "_dev_unlock", False):  # DEV-UNLOCK (remove before GA)
+            return True
         return self._license_info.is_valid and self._license_info.is_premium
     
     @property
