@@ -292,6 +292,11 @@ def save_config(config: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+    # Config holds API keys + the license token in plaintext — restrict to owner-only.
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:
+        pass
 
 
 # === GPU Detection ===

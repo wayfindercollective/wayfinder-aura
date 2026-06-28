@@ -444,6 +444,11 @@ def store_license(key: str) -> LicenseInfo:
             "activated_date": datetime.now().isoformat(),
         }
         license_path.write_text(json.dumps(data, indent=2))
+        # The license token is a bearer credential — restrict to owner-only.
+        try:
+            os.chmod(license_path, 0o600)
+        except OSError:
+            pass
         info.activated_date = data["activated_date"]
 
     return info

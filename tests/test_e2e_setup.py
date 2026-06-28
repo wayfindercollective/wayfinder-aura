@@ -516,16 +516,22 @@ class TestModelCatalog:
         model = get_recommended_model()
         assert model in WHISPER_MODELS
 
+    # is_steam_deck() is mocked False so these exercise the GPU-vendor branch
+    # deterministically — on real Deck hardware get_recommended_model() short-circuits
+    # to base.en regardless of GPU vendor.
+    @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="nvidia")
-    def test_nvidia_recommends_large_turbo(self, mock_vendor):
+    def test_nvidia_recommends_large_turbo(self, mock_vendor, mock_deck):
         assert get_recommended_model() == "large-v3-turbo"
 
+    @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="amd")
-    def test_amd_recommends_large_turbo(self, mock_vendor):
+    def test_amd_recommends_large_turbo(self, mock_vendor, mock_deck):
         assert get_recommended_model() == "large-v3-turbo"
 
+    @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="unknown")
-    def test_cpu_recommends_small(self, mock_vendor):
+    def test_cpu_recommends_small(self, mock_vendor, mock_deck):
         assert get_recommended_model() == "small.en"
 
     def test_download_url_format(self):
@@ -644,9 +650,10 @@ class TestInstallSystemPackages:
         assert done_result["success"] is False
         assert "manual install needed" in done_result["detail"].lower()
 
+    @patch("wayfinder.core.setup._detect_package_manager", return_value="apt")
     @patch("subprocess.run")
     @patch("subprocess.Popen")
-    def test_ydotool_daemon_enabled_after_install(self, mock_popen, mock_run):
+    def test_ydotool_daemon_enabled_after_install(self, mock_popen, mock_run, mock_pkg_mgr):
         """After installing ydotool, systemctl enable should be called."""
         mock_popen.return_value = _mock_popen_success(["Done\n"])
         mock_run.return_value = MagicMock(returncode=0)
@@ -661,9 +668,12 @@ class TestInstallSystemPackages:
         )
         _wait_done(done_event)
 
-        # systemctl enable should have been called via subprocess.run
+        # systemctl enable should have been called via subprocess.run. Which call
+        # carries it depends on the package manager (apt/dnf bundle it into one pkexec
+        # invocation; pacman issues a separate `systemctl --user` call), so scan the
+        # whole call list rather than only the last call.
         assert mock_run.called
-        all_args = str(mock_run.call_args)
+        all_args = str(mock_run.call_args_list)
         assert "systemctl" in all_args
 
 

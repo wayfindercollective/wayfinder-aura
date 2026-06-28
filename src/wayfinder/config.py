@@ -207,7 +207,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Groq Whisper API settings (ultra-fast cloud transcription)
     # Get API key from: https://console.groq.com/keys
     "groq_whisper_model": "whisper-large-v3",  # whisper-large-v3 (same quality as local, 10x faster)
-    "groq_api_key": "",  # Groq API key (stored encrypted, loaded into GROQ_API_KEY env var)
+    "groq_api_key": "",  # Groq API key (stored in plaintext config.json, chmod 600; loaded into GROQ_API_KEY env var)
     
     # Floating indicator settings
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
@@ -391,6 +391,11 @@ def save_config(config: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+    # Config holds API keys + the license token in plaintext — restrict to owner-only.
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:
+        pass
 
 
 def load_api_keys_to_env(config: dict) -> None:
