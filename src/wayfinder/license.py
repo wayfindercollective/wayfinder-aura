@@ -101,6 +101,7 @@ PREMIUM_FEATURES = {
     # Feature ID: (display name, description)
     "faster_whisper": ("Faster-Whisper Backend", "CTranslate2 optimized inference engine"),
     "large_models": ("Large Models", "Access to Medium.en and Large v3 Turbo models"),
+    "gpu_acceleration": ("GPU Acceleration", "Vulkan GPU transcription — much faster, and makes the large/turbo models usable on a Steam Deck"),
     "cloud_backends": ("Cloud Transcription", "Groq and OpenAI Whisper API backends"),
     "chunked_recording": ("Chunked Recording", "Unlimited duration with real-time feedback"),
     "advanced_preprocessing": ("Advanced Audio", "Medium and Heavy preprocessing modes"),
@@ -117,7 +118,6 @@ FREE_FEATURES = {
     "standard_recording": ("Standard Recording", "Single-session recording"),
     "light_preprocessing": ("Light Audio Processing", "Gain normalization"),
     "instant_typing": ("Instant Paste", "Clipboard-based text injection"),
-    "gpu_acceleration": ("GPU Acceleration", "Vulkan GPU support for fast transcription"),
     "basic_overlay": ("Status Overlay", "Real-time recording status display"),
     "basic_postprocessing": ("LLM Cleanup", "Local llama.cpp text post-processing"),
 }
