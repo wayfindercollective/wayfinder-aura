@@ -239,14 +239,38 @@ def get_input_device_by_name(name: str) -> int | None:
     if not name:
         return None
 
+    jack_fallback = None  # a JACK-only name match — used only if nothing better exists
     try:
         devices = sd.query_devices()
+        hostapis = sd.query_hostapis()
         name_lower = name.lower()
 
         for i, dev in enumerate(devices):
-            if name_lower in dev.get('name', '').lower():
-                if dev.get('max_input_channels', 0) > 0:
-                    return i
+            if name_lower in dev.get('name', '').lower() and dev.get('max_input_channels', 0) > 0:
+                # Avoid the JACK host API on Linux: on PipeWire a mic is often exposed
+                # ONLY as a pipewire-jack clone, whose tiny ~3ms buffer xruns ("input
+                # overflow") every time audio ducking reconfigures the graph — and that
+                # occasionally cascades into a wedged whisper-server request or a
+                # PortAudio teardown abort. The ALSA/Pulse PCM has a real ~35ms buffer.
+                # (Mirrors the JACK avoidance in find_best_input_device.)
+                hostapi_name = ""
+                try:
+                    hostapi_name = hostapis[dev['hostapi']].get('name', '').lower()
+                except Exception:
+                    pass
+                if 'jack' in hostapi_name and sys.platform.startswith('linux'):
+                    if jack_fallback is None:
+                        jack_fallback = i
+                    continue
+                return i
+
+        # Only a JACK clone matched the name (common on PipeWire). Route through the
+        # system-default Pulse/PipeWire PCM, which carries the same mic when it's the
+        # default source but with a buffer big enough to survive ducking.
+        if jack_fallback is not None:
+            sysdef = _system_default_input_index()
+            if sysdef is not None:
+                return sysdef
     except Exception:
         pass
 
@@ -261,7 +285,9 @@ def get_input_device_by_name(name: str) -> int | None:
     except Exception:
         pass
 
-    return None
+    # Last resort: if the only match was a JACK clone and nothing better resolved,
+    # use it rather than failing to find the mic at all (never worse than before).
+    return jack_fallback
 
 
 def _pactl_input_sources() -> list[dict]:
@@ -665,6 +691,13 @@ class WarmMic:
                     device=dev,
                     dtype=np.float32,
                     callback=self._callback,
+                    # 'high' latency = a larger input ring buffer, so a momentary stall
+                    # (audio ducking reconfiguring the PipeWire graph at record start, or
+                    # general system jitter) can't overrun it. Without this, PortAudio's
+                    # default small buffer overflowed on EVERY recording ("input overflow"),
+                    # which occasionally cascaded into a wedged whisper-server request or a
+                    # PortAudio teardown abort. Capture latency is irrelevant for dictation.
+                    latency="high",
                 )
                 stream.start()
                 self._stream = stream
@@ -856,6 +889,7 @@ class AudioRecorder:
             device=device,
             dtype=np.float32,
             callback=self._audio_callback,
+            latency="high",  # larger input buffer — tolerate duck/jitter stalls (see WarmMic)
         )
         self.stream.start()
 
@@ -1213,6 +1247,7 @@ class ChunkedRecorder:
                         device=_dev,
                         dtype=np.float32,
                         callback=self._audio_callback,
+                        latency="high",  # larger input buffer — tolerate duck/jitter stalls (see WarmMic)
                     )
                     self._stream.start()
                     self.device = _dev
@@ -1536,6 +1571,7 @@ class AudioCalibrator:
             device=self.device,
             dtype=np.float32,
             callback=self._audio_callback,
+            latency="high",  # larger input buffer — tolerate duck/jitter stalls (see WarmMic)
         )
         self._stream.start()
     

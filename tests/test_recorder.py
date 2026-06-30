@@ -390,3 +390,40 @@ class TestPactlCuration:
             idx = get_input_device_by_name("USB Audio Microphone")
 
         assert alsa_only[idx]["name"] == "USB Audio: #2 (hw:4,2)"
+
+    @patch("wayfinder.core.recorder.sys")
+    def test_get_device_by_name_avoids_jack_clone(self, mock_sys):
+        """A mic exposed only as a pipewire-jack clone must NOT be captured via JACK
+        (its tiny ~3ms buffer xruns on every ducking). Route to the system-default
+        Pulse PCM instead. Regression for the 'input overflow' + stuck-Processing bug."""
+        from wayfinder.core.recorder import get_input_device_by_name
+        mock_sys.platform = "linux"
+        devices = [
+            {"name": "pulse", "max_input_channels": 32, "hostapi": 0},          # 0 ALSA
+            {"name": "Shure MV7 Mono", "max_input_channels": 1, "hostapi": 1},  # 1 JACK
+        ]
+        with patch("wayfinder.core.recorder.sd") as mock_sd, \
+             patch("wayfinder.core.recorder._system_default_input_index", return_value=0):
+            mock_sd.query_devices.return_value = devices
+            mock_sd.query_hostapis.return_value = [
+                {"name": "ALSA"}, {"name": "JACK Audio Connection Kit"},
+            ]
+            idx = get_input_device_by_name("Shure MV7 Mono")
+        assert idx == 0  # the pulse PCM, NOT the JACK clone at index 1
+
+    @patch("wayfinder.core.recorder.sys")
+    def test_get_device_by_name_prefers_nonjack_match(self, mock_sys):
+        """When both a non-JACK and a JACK match exist, take the non-JACK one directly."""
+        from wayfinder.core.recorder import get_input_device_by_name
+        mock_sys.platform = "linux"
+        devices = [
+            {"name": "Shure MV7 Mono", "max_input_channels": 1, "hostapi": 1},  # 0 JACK
+            {"name": "Shure MV7 Mono", "max_input_channels": 1, "hostapi": 0},  # 1 ALSA
+        ]
+        with patch("wayfinder.core.recorder.sd") as mock_sd:
+            mock_sd.query_devices.return_value = devices
+            mock_sd.query_hostapis.return_value = [
+                {"name": "ALSA"}, {"name": "JACK Audio Connection Kit"},
+            ]
+            idx = get_input_device_by_name("Shure MV7 Mono")
+        assert idx == 1  # the ALSA match, skipping the JACK clone at index 0
