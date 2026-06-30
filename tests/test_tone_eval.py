@@ -36,10 +36,13 @@ from tone_eval.corpus import CORPUS  # noqa: E402
 # ---------------------------------------------------------------------------
 class TestToneGuidanceStrings:
     def test_dev_standard_preserves_terms_and_phrasing(self):
+        # Imperative phrasing (no bare "Developer context." opener, which Gemma-1B
+        # echoed → dev had no output). Must still preserve technical terms + no-rewrite.
         g = (get_tone_guidance("dev", "standard")
              + " " + FORMATTING_RULES["dev"]["standard"]).lower()
-        assert "developer" in g
+        assert "code" in g and "technical terms" in g  # preserves dev vocabulary
         assert "restructure" in g  # "Do not restructure"
+        assert not get_tone_guidance("dev", "standard").lower().startswith("developer context")
 
     def test_casual_standard_allows_lowercase_relaxed(self):
         g = FORMATTING_RULES["casual"]["standard"].lower()

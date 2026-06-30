@@ -55,8 +55,11 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
         "caricature": "Extreme Gen-Z slang. Use: fr fr, no cap, lowkey, slay, 💀😭. All lowercase. Be dramatic and funny.",
     },
     "dev": {
-        "standard": "Developer context. Keep code and git terms intact. Do not restructure.",
-        "strong": "Clean up for Slack or code comments. Recognize git and programming terms. Keep the user's voice — tighten, don't rewrite.",
+        # Imperative phrasing (mirrors professional) so a 1B model cleans instead of
+        # echoing the guide — the old "Developer context." fragment made Gemma repeat
+        # the instructions, which the echo-guard rejected, leaving dev with no output.
+        "standard": "Keep the speaker's words and order. Keep all code, git, and technical terms exactly as spoken. Tighten punctuation and capitalization only. Do not restructure.",
+        "strong": "Keep the speaker's voice and keep all code, git, and technical terms exactly. Tighten the wording for a Slack message or code comment. Do not reorder or add ideas.",
         "caricature": "Over-engineered AI prompt style. Add CRITICAL:, IMPORTANT:, use CAPS for emphasis. End with 'my career depends on this 🙏'",
     },
     "personal": {
@@ -1670,7 +1673,29 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # Intensity stays "standard" here — strong/caricature are out of the CLI
         # path's scope (it has always produced standard-style output regardless).
         self.output_tone = output_tone or "professional"
-        self.intensity = "standard"
+        # Thread the intensity through from config so the Strong toggle and the
+        # caricature easter egg actually change the prompt (they were previously
+        # accepted but ignored — every styled tone collapsed onto standard output).
+        # BUT apply the same model-tier cap that build_prompt() uses: a 1B/2B model
+        # can't honor strong/caricature (it leaks the guide text into the output or
+        # over-rewrites), so those downgrade to standard on small models and only
+        # truly fire on 3B+ / cloud backends. Keeps the CLI path consistent with the
+        # rest of the app instead of feeding raw strong guidance to a tiny model.
+        requested = (
+            "caricature" if caricature_mode
+            else "strong" if strong_mode
+            else "standard"
+        )
+        self.intensity = requested
+        if requested != "standard" and self.model_path:
+            try:
+                compat = get_model_compatibility(
+                    Path(self.model_path).stem, self.output_tone, requested,
+                    False, backend="llama_cpp",
+                )
+                self.intensity = compat["auto_adjustments"].get("intensity", requested)
+            except Exception:
+                pass  # best-effort: fall back to the requested intensity
         # Reasoning models (Qwen3/3.5, QwQ, R1) emit <think> blocks by default and
         # would spend the token budget reasoning instead of answering. Detected here
         # so build_cli_prompt can pre-fill an empty think block to suppress it.

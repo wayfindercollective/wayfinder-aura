@@ -575,6 +575,55 @@ class TestGetBackend:
         backend = get_backend(config)
         assert isinstance(backend, AnthropicBackend)
 
+
+class TestCliIntensityWiring:
+    """The CLI backend used to hardcode intensity='standard', so the Strong toggle
+    and caricature easter egg were silently ignored. They now thread through, but
+    with the same model-tier cap build_prompt() applies (small models can't honor
+    strong without leaking the guide text / over-rewriting)."""
+
+    SMALL = "/x/google_gemma-3-1b-it-Q4_K_M.gguf"
+    LARGE = "/x/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+
+    def test_standard_when_no_modes(self):
+        b = LlamaCppCliBackend(model_path=self.SMALL)
+        assert b.intensity == "standard"
+
+    def test_strong_caps_to_standard_on_small_model(self):
+        b = LlamaCppCliBackend(model_path=self.SMALL, strong_mode=True)
+        assert b.intensity == "standard"
+
+    def test_caricature_caps_to_standard_on_small_model(self):
+        b = LlamaCppCliBackend(model_path=self.SMALL, caricature_mode=True)
+        assert b.intensity == "standard"
+
+    def test_strong_honored_on_large_model(self):
+        b = LlamaCppCliBackend(model_path=self.LARGE, strong_mode=True)
+        assert b.intensity == "strong"
+
+    def test_caricature_honored_on_large_model(self):
+        b = LlamaCppCliBackend(model_path=self.LARGE, caricature_mode=True)
+        assert b.intensity == "caricature"
+
+
+class TestDevToneGuidance:
+    """Regression: dev guidance opened with the fragment 'Developer context.', which
+    Gemma-1B echoed instead of cleaning — the echo-guard then rejected it, leaving the
+    dev tone with NO output (it returned raw text verbatim). Guidance must read as an
+    imperative cleanup instruction like the other working tones."""
+
+    def test_dev_guidance_is_imperative_not_echoed_fragment(self):
+        g = get_tone_guidance("dev", "standard").lower()
+        assert not g.startswith("developer context")
+        assert "code" in g or "technical terms" in g
+
+    def test_dev_cli_prompt_not_collapsed_onto_minimal(self):
+        b = LlamaCppCliBackend(model_path="/x/google_gemma-3-1b-it-Q4_K_M.gguf",
+                               output_tone="dev")
+        p = b.build_cli_prompt("git rebase the the branch", "dev", "standard")
+        assert "Cleaned text:" in p
+        assert "Remove only filler" not in p  # that's the minimal-only prompt
+
     def test_returns_openai_backend(self):
         config = {"post_processing_backend": "openai"}
         backend = get_backend(config)
