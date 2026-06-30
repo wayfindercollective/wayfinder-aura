@@ -146,7 +146,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Transcription settings
     "prompt": "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next.",
     "threads": 4,  # Default to 4, auto-adjusted on first run based on CPU cores
-    "timeout": 120,
+    "timeout": 120,  # whisper-CLI fallback (per-dictation model load needs headroom)
+    # whisper-SERVER request timeout. Deliberately MUCH shorter than the PROCESSING
+    # watchdog (processing_timeout_secs, 120s): the server occasionally wedges its
+    # inference worker (keeps answering health checks but never returns a result —
+    # seen after an audio "input overflow" glitch or suspend/resume). A short request
+    # timeout detects the wedge fast, so the backend can restart the server and retry
+    # on a healthy one and still PASTE the dictation well before the watchdog abandons
+    # the session. GPU transcribes a chunk in 1-3s, so 30s is huge headroom.
+    "whisper_server_timeout": 30,
     "min_recording_duration": 0.5,
 
     # Whisper server mode: keep model loaded in memory for fast inference

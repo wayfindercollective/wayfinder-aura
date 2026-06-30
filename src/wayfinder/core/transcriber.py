@@ -1574,7 +1574,10 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),
                 port=config.get("whisper_server_port", 8178),
                 threads=config.get("threads", 4),
-                timeout=config.get("timeout", 120),
+                # Short, dedicated timeout (see config: whisper_server_timeout) so a
+                # wedged inference worker is caught fast → restart + retry can salvage
+                # the dictation before the 120s PROCESSING watchdog abandons it.
+                timeout=config.get("whisper_server_timeout", 30),
                 use_gpu=use_gpu_effective,
                 beam_size=config.get("beam_size", 5),
                 best_of=config.get("best_of", 3),
