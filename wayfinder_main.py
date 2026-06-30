@@ -14090,11 +14090,25 @@ class WayfinderApp(ctk.CTk):
         # instead of injecting junk or showing "no output".
         if self.recorder.get_peak_amplitude() < SILENCE_PEAK_THRESHOLD:
             self.recorder.cleanup()
-            self.on_error("No audio detected — mic muted or wrong device (Settings → Audio)", gen)
+            self.on_error(self._silence_error_message(), gen)
             return
 
         self.executor.submit(self.transcribe_and_inject, audio_path, gen)
-    
+
+    def _silence_error_message(self) -> str:
+        """Actionable 'no audio' message that NAMES the selected mic.
+
+        The recording was pure/near silence (whisper would hallucinate on it). Naming the
+        device makes the common cause obvious — the right mic IS selected but it's muted at
+        the hardware (e.g. a Shure MV7's touch-mute / gain knob), which reads as digital zero.
+        Without the name, users assume it's a wrong-device bug and never check the mic itself.
+        """
+        name = self.config.get("audio_device_name")
+        if name:
+            return (f"No audio from “{name}” — check the mic's own mute button/gain, "
+                    "or pick another in Settings → Audio")
+        return "No audio detected — mic muted or wrong device (Settings → Audio)"
+
     def _stop_chunked_recording(self, gen=None):
         """Stop chunked recording and process all chunks."""
         # Capture the recorder + chunk store HERE (Tk thread, at stop time) so they unambiguously
@@ -14123,7 +14137,7 @@ class WayfinderApp(ctk.CTk):
             recorder.cleanup()
             if self.chunked_recorder is recorder:
                 self.chunked_recorder = None
-            self.on_error("No audio detected — mic muted or wrong device (Settings → Audio)", gen)
+            self.on_error(self._silence_error_message(), gen)
             return
 
         # Submit final chunk for transcription if exists
