@@ -574,6 +574,26 @@ class TestWhisperServerWarmup:
         assert b.get_name()
         assert b.supports_gpu() is True
 
+    def test_server_uses_short_dedicated_timeout(self, tmp_path):
+        """The server request timeout comes from whisper_server_timeout (short, ~30s),
+        NOT the generic 'timeout' (120s, for the CLI fallback). It must be well below
+        the PROCESSING watchdog so a wedged server's restart+retry can salvage the
+        dictation before the session is abandoned."""
+        from wayfinder.core.transcriber import get_backend, WhisperServerBackend
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        server = tmp_path / "whisper-server"; server.write_text("#!/bin/sh\n"); server.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        config = {
+            "whisper_server_mode": True,
+            "whisper_binary": str(binary),
+            "model_path": str(model),
+            "timeout": 120,              # CLI fallback value — must NOT be used here
+            "whisper_server_timeout": 30,
+        }
+        backend = get_backend(config)
+        assert isinstance(backend, WhisperServerBackend)
+        assert backend.timeout == 30  # short, dedicated — not the 120s CLI value
+
     def test_warm_up_noop_when_binary_missing(self, tmp_path):
         from wayfinder.core.transcriber import WhisperServerBackend
         b = WhisperServerBackend(
