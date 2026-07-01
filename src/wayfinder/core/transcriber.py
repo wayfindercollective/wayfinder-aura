@@ -3,6 +3,7 @@ Transcription module for Wayfinder Aura.
 Supports multiple backends: whisper.cpp (with Vulkan GPU) and Faster-Whisper (with ROCm).
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -843,6 +844,20 @@ class WhisperServerBackend(TranscriptionBackend):
         # Build prompt
         final_prompt = self._build_prompt(context)
 
+        # Adaptive request timeout: self.timeout (30s) is the worst-case budget for a full
+        # 30s chunk on slow hardware, but a healthy GPU transcribes in a fraction of the
+        # audio length (measured ~0.2s for 3s of audio). Sizing the timeout to THIS clip's
+        # length means an intermittent GPU-contention wedge on a short dictation self-heals
+        # in a few seconds (restart+retry) instead of stalling the full 30s. Floor 8s covers
+        # cold starts; capped at self.timeout so long chunks keep their headroom.
+        req_timeout = self.timeout
+        try:
+            with contextlib.closing(wave.open(audio_path, "rb")) as _wf:
+                _dur = _wf.getnframes() / float(_wf.getframerate() or 16000)
+            req_timeout = max(8.0, min(float(self.timeout), _dur * 2.0 + 4.0))
+        except Exception:
+            pass  # unreadable header → fall back to the full configured timeout
+
         try:
             import urllib.request
             import urllib.parse
@@ -884,7 +899,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 method="POST",
             )
 
-            resp = urllib.request.urlopen(req, timeout=self.timeout)
+            resp = urllib.request.urlopen(req, timeout=req_timeout)
             result = json.loads(resp.read().decode("utf-8"))
             text = result.get("text", "").strip()
             return text
@@ -905,7 +920,7 @@ class WhisperServerBackend(TranscriptionBackend):
 
             # Retry once
             try:
-                resp = urllib.request.urlopen(req, timeout=self.timeout)
+                resp = urllib.request.urlopen(req, timeout=req_timeout)
                 result = json.loads(resp.read().decode("utf-8"))
                 return result.get("text", "").strip()
             except Exception as retry_err:
