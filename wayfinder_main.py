@@ -5090,7 +5090,38 @@ class WayfinderApp(ctk.CTk):
         )
         # Set display value
         self.overlay_type_dropdown.set(overlay_type)
-        
+
+        # Inline "restart needed" banner — shown under the Indicator Style row
+        # instead of a popup dialog (see _show_restart_banner). Built now, hidden
+        # until a status-indicator change actually needs a restart.
+        self.restart_banner = ctk.CTkFrame(
+            overlay_content, fg_color=COLORS["warning_bg"], corner_radius=RADIUS["sm"],
+        )
+        _rb_inner = ctk.CTkFrame(self.restart_banner, fg_color="transparent")
+        _rb_inner.pack(fill="x", padx=12, pady=8)
+        ctk.CTkLabel(
+            _rb_inner,
+            text="Status indicator change takes effect after restart.",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["accent_yellow"],
+        ).pack(side="left")
+        ctk.CTkButton(
+            _rb_inner, text="Restart Now",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            height=28, width=100, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color=COLORS["bg_base"],
+            command=self._restart_for_overlay_change,
+        ).pack(side="right")
+        ctk.CTkButton(
+            _rb_inner, text="Later",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            height=28, width=70, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=self._hide_restart_banner,
+        ).pack(side="right", padx=(0, 8))
+
         # Overlay Scale slider
         self._create_overlay_scale_slider_row(overlay_content)
 
@@ -6370,139 +6401,124 @@ class WayfinderApp(ctk.CTk):
             self.remote_api_btn.configure(text=status)
     
     def open_remote_api_settings(self) -> None:
-        """Open dialog to configure remote API settings (Groq or OpenAI)."""
-        self._open_remote_api_dialog()
-    
-    def _open_remote_api_dialog(self) -> None:
-        """Open dialog to configure the selected remote transcription API (Groq or OpenAI)."""
+        """Show an inline panel to configure the selected remote transcription API (Groq or OpenAI)."""
         backend = self.config.get("transcription_backend", "groq_whisper")
         is_groq = backend == "groq_whisper"
-        
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Groq API Configuration" if is_groq else "OpenAI API Configuration")
-        dialog.transient(self)
-        dialog.grab_set()
-        self._setup_dialog(dialog, 520, 440)
-        
-        # Header
-        ctk.CTkLabel(
-            dialog,
-            text="⚡ Groq API Configuration" if is_groq else "☁️ OpenAI API Configuration",
-            font=(self.font_header[0], self.font_sizes["title"], "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(padx=24, pady=(24, 4))
-        
-        # Description
-        if is_groq:
-            desc = "Ultra-fast cloud transcription using Groq's LPU hardware.\n~10x faster than local GPU • Free tier: 14,400 requests/day"
-        else:
-            desc = "Reliable cloud transcription using OpenAI's Whisper API.\nPer-minute billing • High accuracy"
-        
-        ctk.CTkLabel(
-            dialog,
-            text=desc,
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_muted"],
-            justify="center",
-        ).pack(padx=24, pady=(0, 16))
-        
-        # API Key input
-        form_frame = ctk.CTkFrame(dialog, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
-        form_frame.pack(fill="x", padx=24, pady=8)
-        
-        env_var = "GROQ_API_KEY" if is_groq else "OPENAI_API_KEY"
-        config_key = "groq_api_key" if is_groq else "openai_api_key"
-        # Try config first, then environment
-        current_key = self.config.get(config_key, "") or os.environ.get(env_var, "")
-        
-        ctk.CTkLabel(
-            form_frame,
-            text="API Key",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            text_color=COLORS["text_primary"],
-        ).pack(anchor="w", padx=16, pady=(16, 4))
-        
-        key_var = ctk.StringVar(value=current_key)
-        key_entry = ctk.CTkEntry(
-            form_frame,
-            textvariable=key_var,
-            font=(self.font_mono[0], self.font_sizes["small"]),
-            fg_color=COLORS["bg_input"],
-            border_color=COLORS["border"],
-            text_color=COLORS["text_primary"],
-            width=380,
-            height=40,
-            show="•",
-        )
-        key_entry.pack(padx=16, pady=(0, 8))
-        
-        # Show/hide toggle
-        show_var = ctk.BooleanVar(value=False)
-        def toggle_show():
-            key_entry.configure(show="" if show_var.get() else "•")
-        
-        ctk.CTkCheckBox(
-            form_frame,
-            text="Show key",
-            variable=show_var,
-            command=toggle_show,
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_secondary"],
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_dim"],
-        ).pack(anchor="w", padx=16, pady=(0, 16))
-        
-        # Link to get API key
-        if is_groq:
-            link_text = "Get your free API key at: console.groq.com/keys"
-            link_url = "https://console.groq.com/keys"
-        else:
-            link_text = "Get your API key at: platform.openai.com/api-keys"
-            link_url = "https://platform.openai.com/api-keys"
-        
-        link = ctk.CTkLabel(
-            dialog,
-            text=link_text,
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["accent"],
-            cursor="hand2",
-        )
-        link.pack(pady=(8, 16))
-        link.bind("<Button-1>", lambda e: webbrowser.open(link_url))
-        self._bind_link_hover(link, self.font_sizes["small"])
-        
-        # Save button
-        def save_and_close():
-            key = key_var.get().strip()
-            if key:
-                # Save to environment (for current session)
-                os.environ[env_var] = key
-                
-                # Save to config (for persistence across restarts)
-                config_key = "groq_api_key" if is_groq else "openai_api_key"
-                self.config[config_key] = key
-                save_config(self.config)
-                
-                self.log(f"⚙ {env_var} configured and saved")
-            
-            # Update the status in the main UI
-            self._update_remote_api_status()
-            
-            dialog.destroy()
-        
-        ctk.CTkButton(
-            dialog,
-            text="Save",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            width=200,
-            height=44,
-            corner_radius=RADIUS["md"],
-            command=save_and_close,
-        ).pack(pady=(8, 24))
-    
+        title = "Groq API Configuration" if is_groq else "OpenAI API Configuration"
+
+        def build_panel(content, close_panel):
+            # Description
+            if is_groq:
+                desc = "Ultra-fast cloud transcription using Groq's LPU hardware.\n~10x faster than local GPU • Free tier: 14,400 requests/day"
+            else:
+                desc = "Reliable cloud transcription using OpenAI's Whisper API.\nPer-minute billing • High accuracy"
+
+            ctk.CTkLabel(
+                content,
+                text=desc,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_muted"],
+                justify="left",
+            ).pack(anchor="w", padx=8, pady=(0, 16))
+
+            # API Key input
+            form_frame = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
+            form_frame.pack(fill="x", padx=8, pady=8)
+
+            env_var = "GROQ_API_KEY" if is_groq else "OPENAI_API_KEY"
+            config_key = "groq_api_key" if is_groq else "openai_api_key"
+            # Try config first, then environment
+            current_key = self.config.get(config_key, "") or os.environ.get(env_var, "")
+
+            ctk.CTkLabel(
+                form_frame,
+                text="API Key",
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["text_primary"],
+            ).pack(anchor="w", padx=16, pady=(16, 4))
+
+            key_var = ctk.StringVar(value=current_key)
+            key_entry = ctk.CTkEntry(
+                form_frame,
+                textvariable=key_var,
+                font=(self.font_mono[0], self.font_sizes["small"]),
+                fg_color=COLORS["bg_input"],
+                border_color=COLORS["border"],
+                text_color=COLORS["text_primary"],
+                width=380,
+                height=40,
+                show="•",
+            )
+            key_entry.pack(anchor="w", padx=16, pady=(0, 8))
+
+            # Show/hide toggle
+            show_var = ctk.BooleanVar(value=False)
+            def toggle_show():
+                key_entry.configure(show="" if show_var.get() else "•")
+
+            ctk.CTkCheckBox(
+                form_frame,
+                text="Show key",
+                variable=show_var,
+                command=toggle_show,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_dim"],
+            ).pack(anchor="w", padx=16, pady=(0, 16))
+
+            # Link to get API key
+            if is_groq:
+                link_text = "Get your free API key at: console.groq.com/keys"
+                link_url = "https://console.groq.com/keys"
+            else:
+                link_text = "Get your API key at: platform.openai.com/api-keys"
+                link_url = "https://platform.openai.com/api-keys"
+
+            link = ctk.CTkLabel(
+                content,
+                text=link_text,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["accent"],
+                cursor="hand2",
+            )
+            link.pack(anchor="w", padx=8, pady=(8, 16))
+            link.bind("<Button-1>", lambda e: webbrowser.open(link_url))
+            self._bind_link_hover(link, self.font_sizes["small"])
+
+            # Save button
+            def save_and_close():
+                key = key_var.get().strip()
+                if key:
+                    # Save to environment (for current session)
+                    os.environ[env_var] = key
+
+                    # Save to config (for persistence across restarts)
+                    self.config[config_key] = key
+                    save_config(self.config)
+
+                    self.log(f"⚙ {env_var} configured and saved")
+
+                # Update the status in the main UI
+                self._update_remote_api_status()
+
+                close_panel()
+
+            ctk.CTkButton(
+                content,
+                text="Save",
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_glow"],
+                text_color="#000000",
+                width=200,
+                height=44,
+                corner_radius=RADIUS["md"],
+                command=save_and_close,
+            ).pack(anchor="w", padx=8, pady=(8, 24))
+
+        self._show_inline_panel(self.mode_settings_container, title, build_panel)
+
     def _create_advanced_section_header(self, parent, text: str) -> None:
         """Create a section header for advanced settings."""
         ctk.CTkLabel(
@@ -7692,11 +7708,11 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_card"],
             text_color=COLORS["text_primary"],
-            command=self.open_voice_profile_dialog,
+            command=lambda: self.open_voice_profile_dialog(parent),
         ).pack(side="left", padx=(0, 8))
-        
+
         if history_count > 0:
-            ctk.CTkButton(
+            clear_btn = ctk.CTkButton(
                 btn_row,
                 text="Clear",
                 font=(self.font_body[0], self.font_sizes["small"]),
@@ -7706,8 +7722,9 @@ class WayfinderApp(ctk.CTk):
                 fg_color=COLORS["bg_hover"],
                 hover_color=COLORS["danger_bg_hover"],
                 text_color=COLORS["text_muted"],
-                command=self.clear_voice_profile,
-            ).pack(side="left")
+            )
+            clear_btn.configure(command=lambda: self.clear_voice_profile(clear_btn))
+            clear_btn.pack(side="left")
     
     def _build_voice_profile_status(self, parent):
         """Build voice profile status display with action buttons."""
@@ -7763,11 +7780,11 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_primary"],
-            command=self.open_voice_profile_dialog,
+            command=lambda: self.open_voice_profile_dialog(parent),
         ).pack(side="left", padx=(0, 8))
-        
+
         # Clear Data button
-        ctk.CTkButton(
+        clear_data_btn = ctk.CTkButton(
             btn_row,
             text="Clear Data",
             font=(self.font_body[0], self.font_sizes["small"]),
@@ -7777,232 +7794,236 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["danger_bg_hover"],  # Reddish hover
             text_color=COLORS["text_muted"],
-            command=self.clear_voice_profile,
-        ).pack(side="left")
+        )
+        clear_data_btn.configure(command=lambda: self.clear_voice_profile(clear_data_btn))
+        clear_data_btn.pack(side="left")
     
-    def open_voice_profile_dialog(self):
-        """Open dialog to view and edit voice profile."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Voice Profile")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        self._setup_dialog(dialog, 600, 680)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        ctk.CTkLabel(
-            inner,
-            text="Voice Profile",
-            font=(self.font_header[0], self.font_sizes["display"], "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 5))
-        
-        ctk.CTkLabel(
-            inner,
-            text="Your personal voice profile, learned from transcriptions.",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(0, 20))
-        
-        # Load profile data
-        try:
-            from wayfinder.core.voice_profile import get_voice_profile
-            voice_profile = get_voice_profile()
-            stats = voice_profile.get_stats()
-        except Exception as e:
-            ctk.CTkLabel(
-                inner,
-                text=f"Error loading profile: {e}",
-                font=(self.font_body[0], self.font_sizes["body"]),
-                text_color=COLORS["error"],
-            ).pack(anchor="w")
+    def open_voice_profile_dialog(self, container=None):
+        """Show an inline panel to view and edit the voice profile."""
+        if container is None:
+            container = getattr(self, "tone_container", None)
+        if container is None:
+            self.log("⚠ Cannot open voice profile — settings not ready")
             return
-        
-        # Stats section
-        stats_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_input"], corner_radius=RADIUS["md"])
-        stats_frame.pack(fill="x", pady=(0, 15))
-        
-        history_count = stats.get("history_count", 0)
-        vocab_count = stats.get("vocabulary_count", 0)
-        total_words = stats.get("total_words", 0)
-        
-        ctk.CTkLabel(
-            stats_frame,
-            text=f"📊 Statistics: {history_count} transcriptions • {total_words:,} words • {vocab_count} unique terms",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            text_color=COLORS["text_primary"],
-        ).pack(padx=15, pady=12)
-        
-        # Profile Summary section
-        ctk.CTkLabel(
-            inner,
-            text="Profile Summary",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            text_color=COLORS["text_primary"],
-        ).pack(anchor="w", pady=(10, 5))
-        
-        summary = stats.get("summary", "")
-        summary_text = ctk.CTkTextbox(
-            inner,
-            font=(self.font_body[0], self.font_sizes["body"]),
-            fg_color=COLORS["bg_card"],
-            text_color=COLORS["text_primary"],
-            corner_radius=RADIUS["md"],
-            height=100,
-            wrap="word",
-        )
-        summary_text.pack(fill="x", pady=(0, 5))
-        if summary:
-            summary_text.insert("1.0", summary)
-        else:
-            summary_text.insert("1.0", "(No profile summary yet — keep talking to build one!)")
-            summary_text.configure(text_color=COLORS["text_muted"])
-        
-        # Learned Vocabulary section
-        ctk.CTkLabel(
-            inner,
-            text="Learned Vocabulary",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            text_color=COLORS["text_primary"],
-        ).pack(anchor="w", pady=(15, 5))
-        
-        vocabulary = stats.get("vocabulary", [])
-        vocab_display = ", ".join(vocabulary[:30]) if vocabulary else "(No vocabulary learned yet)"
-        
-        vocab_label = ctk.CTkLabel(
-            inner,
-            text=vocab_display,
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["accent"] if vocabulary else COLORS["text_muted"],
-            wraplength=490,
-            justify="left",
-        )
-        vocab_label.pack(anchor="w", pady=(0, 15))
-        
-        # Buttons
-        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(10, 0))
-        
-        def save_summary():
-            new_summary = summary_text.get("1.0", "end").strip()
+
+        def build_panel(content, close_panel):
+            ctk.CTkLabel(
+                content,
+                text="Your personal voice profile, learned from transcriptions.",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", padx=8, pady=(0, 16))
+
+            # Load profile data
             try:
-                voice_profile.set_summary(new_summary)
-                self.log("✓ Voice profile summary saved")
-                dialog.destroy()
+                from wayfinder.core.voice_profile import get_voice_profile
+                voice_profile = get_voice_profile()
+                stats = voice_profile.get_stats()
             except Exception as e:
-                self.log(f"⚠ Error saving profile: {e}")
-        
-        def regenerate_profile():
-            if not self.config.get("post_processing_enabled", True):
-                self.log("⚠ Enable Post-Processing to regenerate profile")
+                ctk.CTkLabel(
+                    content,
+                    text=f"Error loading profile: {e}",
+                    font=(self.font_body[0], self.font_sizes["body"]),
+                    text_color=COLORS["error"],
+                ).pack(anchor="w", padx=8)
                 return
-            
-            llm_callback = self._get_llm_callback_for_voice_learning()
-            if voice_profile.regenerate_profile(llm_callback):
-                self.log("🔄 Regenerating voice profile...")
-                dialog.destroy()
+
+            # Stats section
+            stats_frame = ctk.CTkFrame(content, fg_color=COLORS["bg_input"], corner_radius=RADIUS["md"])
+            stats_frame.pack(fill="x", padx=8, pady=(0, 15))
+
+            history_count = stats.get("history_count", 0)
+            vocab_count = stats.get("vocabulary_count", 0)
+            total_words = stats.get("total_words", 0)
+
+            ctk.CTkLabel(
+                stats_frame,
+                text=f"📊 Statistics: {history_count} transcriptions • {total_words:,} words • {vocab_count} unique terms",
+                font=(self.font_body[0], self.font_sizes["body"]),
+                text_color=COLORS["text_primary"],
+            ).pack(padx=15, pady=12)
+
+            # Profile Summary section
+            ctk.CTkLabel(
+                content,
+                text="Profile Summary",
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["text_primary"],
+            ).pack(anchor="w", padx=8, pady=(10, 5))
+
+            summary = stats.get("summary", "")
+            summary_text = ctk.CTkTextbox(
+                content,
+                font=(self.font_body[0], self.font_sizes["body"]),
+                fg_color=COLORS["bg_card"],
+                text_color=COLORS["text_primary"],
+                corner_radius=RADIUS["md"],
+                height=100,
+                wrap="word",
+            )
+            summary_text.pack(fill="x", padx=8, pady=(0, 5))
+            if summary:
+                summary_text.insert("1.0", summary)
             else:
-                self.log("⚠ Profile regeneration already in progress or not enough data")
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Save Changes",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            height=40,
-            corner_radius=RADIUS["md"],
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
-            text_color="#000000",
-            command=save_summary,
-        ).pack(side="left", padx=(0, 10))
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Regenerate Profile",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            height=40,
-            corner_radius=RADIUS["md"],
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_primary"],
-            command=regenerate_profile,
-        ).pack(side="left", padx=(0, 10))
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Close",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            height=40,
-            corner_radius=RADIUS["md"],
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=dialog.destroy,
-        ).pack(side="left")
-    
-    def clear_voice_profile(self):
-        """Clear all voice profile data after confirmation."""
-        # Simple confirmation via a popup
-        confirm_dialog = ctk.CTkToplevel(self)
-        confirm_dialog.title("Clear Voice Profile")
-        confirm_dialog.configure(fg_color=COLORS["bg_base"])
-        confirm_dialog.transient(self)
-        confirm_dialog.after(100, confirm_dialog.lift)
-        self._setup_dialog(confirm_dialog, 400, 200)
-        
-        ctk.CTkLabel(
-            confirm_dialog,
-            text="Clear all voice learning data?\n\nThis cannot be undone.",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            text_color=COLORS["text_primary"],
-            justify="center",
-        ).pack(pady=20)
-        
-        btn_frame = ctk.CTkFrame(confirm_dialog, fg_color="transparent")
-        btn_frame.pack(pady=10)
-        
+                summary_text.insert("1.0", "(No profile summary yet — keep talking to build one!)")
+                summary_text.configure(text_color=COLORS["text_muted"])
+
+            # Learned Vocabulary section
+            ctk.CTkLabel(
+                content,
+                text="Learned Vocabulary",
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["text_primary"],
+            ).pack(anchor="w", padx=8, pady=(15, 5))
+
+            vocabulary = stats.get("vocabulary", [])
+            vocab_display = ", ".join(vocabulary[:30]) if vocabulary else "(No vocabulary learned yet)"
+
+            ctk.CTkLabel(
+                content,
+                text=vocab_display,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["accent"] if vocabulary else COLORS["text_muted"],
+                wraplength=490,
+                justify="left",
+            ).pack(anchor="w", padx=8, pady=(0, 15))
+
+            # Buttons
+            btn_frame = ctk.CTkFrame(content, fg_color="transparent")
+            btn_frame.pack(fill="x", padx=8, pady=(10, 0))
+
+            def save_summary():
+                new_summary = summary_text.get("1.0", "end").strip()
+                try:
+                    voice_profile.set_summary(new_summary)
+                    self.log("✓ Voice profile summary saved")
+                    close_panel()
+                except Exception as e:
+                    self.log(f"⚠ Error saving profile: {e}")
+
+            def regenerate_profile():
+                if not self.config.get("post_processing_enabled", True):
+                    self.log("⚠ Enable Post-Processing to regenerate profile")
+                    return
+
+                llm_callback = self._get_llm_callback_for_voice_learning()
+                if voice_profile.regenerate_profile(llm_callback):
+                    self.log("🔄 Regenerating voice profile...")
+                    close_panel()
+                else:
+                    self.log("⚠ Profile regeneration already in progress or not enough data")
+
+            ctk.CTkButton(
+                btn_frame,
+                text="Save Changes",
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                height=40,
+                corner_radius=RADIUS["md"],
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_glow"],
+                text_color="#000000",
+                command=save_summary,
+            ).pack(side="left", padx=(0, 10))
+
+            ctk.CTkButton(
+                btn_frame,
+                text="Regenerate Profile",
+                font=(self.font_body[0], self.font_sizes["body"]),
+                height=40,
+                corner_radius=RADIUS["md"],
+                fg_color=COLORS["bg_hover"],
+                hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_primary"],
+                command=regenerate_profile,
+            ).pack(side="left", padx=(0, 10))
+
+            ctk.CTkButton(
+                btn_frame,
+                text="Close",
+                font=(self.font_body[0], self.font_sizes["body"]),
+                height=40,
+                corner_radius=RADIUS["md"],
+                fg_color=COLORS["bg_hover"],
+                hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_secondary"],
+                command=close_panel,
+            ).pack(side="left")
+
+        self._show_inline_panel(container, "Voice Profile", build_panel)
+
+    def _arm_danger_button(self, btn, armed_text, on_confirm, revert_ms=4000):
+        """Two-step danger confirmation on the button itself (no popup).
+
+        First click restyles the SAME button as a destructive action and swaps
+        its command to `on_confirm`; a one-shot timer reverts style/text/command
+        if the user doesn't confirm within `revert_ms`. The revert is guarded so
+        a completed confirm or a destroyed widget can never crash it.
+        """
+        try:
+            original = {
+                "text": btn.cget("text"),
+                "fg_color": btn.cget("fg_color"),
+                "hover_color": btn.cget("hover_color"),
+                "text_color": btn.cget("text_color"),
+                "command": btn.cget("command"),
+            }
+        except Exception:
+            return
+
+        btn._danger_armed = True
+
+        def confirm():
+            btn._danger_armed = False  # so a pending revert no-ops
+            on_confirm()
+
+        def revert():
+            # Skip if already confirmed (flag cleared) or the widget is gone.
+            if not getattr(btn, "_danger_armed", False):
+                return
+            btn._danger_armed = False
+            try:
+                btn.configure(
+                    text=original["text"],
+                    fg_color=original["fg_color"],
+                    hover_color=original["hover_color"],
+                    text_color=original["text_color"],
+                    command=original["command"],
+                )
+            except Exception:
+                pass
+
+        try:
+            btn.configure(
+                text=armed_text,
+                fg_color=COLORS["danger"],
+                hover_color=COLORS["danger_hover"],
+                text_color="#FFFFFF",
+                command=confirm,
+            )
+        except Exception:
+            return
+
+        self.after(revert_ms, revert)
+
+    def clear_voice_profile(self, btn=None):
+        """Clear all voice profile data (two-step confirm on the trigger button)."""
         def do_clear():
             try:
                 from wayfinder.core.voice_profile import get_voice_profile
                 voice_profile = get_voice_profile()
                 voice_profile.clear()
                 self.log("🗑️ Voice profile data cleared")
-                confirm_dialog.destroy()
                 # Rebuild settings to update status
                 current_mode = self.config.get("processing_mode", "local")
                 self._build_mode_settings(current_mode)
             except Exception as e:
                 self.log(f"⚠ Error clearing profile: {e}")
-                confirm_dialog.destroy()
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Clear Data",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            height=36,
-            width=100,
-            corner_radius=RADIUS["sm"],
-            fg_color=COLORS["danger"],
-            hover_color=COLORS["danger_hover"],
-            text_color="#FFFFFF",
-            command=do_clear,
-        ).pack(side="left", padx=10)
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Cancel",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            height=36,
-            width=80,
-            corner_radius=RADIUS["sm"],
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_secondary"],
-            command=confirm_dialog.destroy,
-        ).pack(side="left", padx=10)
-    
+
+        if btn is not None:
+            self._arm_danger_button(btn, "Really clear?", do_clear)
+        else:
+            do_clear()
+
     def on_postproc_backend_changed(self, value: str):
         """Handle post-processing backend change."""
         self.config["post_processing_backend"] = value
@@ -8830,27 +8851,16 @@ class WayfinderApp(ctk.CTk):
         return "Not configured"
     
     def open_postproc_settings(self):
-        """Open post-processing configuration dialog with provider switching."""
+        """Show an inline panel to configure cloud post-processing (OpenAI/Anthropic)."""
+        self._show_inline_panel(
+            self.mode_settings_container, "Cloud API Configuration",
+            self._build_postproc_panel,
+        )
+
+    def _build_postproc_panel(self, inner, close_panel):
+        """Build the cloud post-processing config body inside an inline panel."""
         import os
-        
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Cloud API Configuration")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        self._setup_dialog(dialog, 640, 600)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        # Title
-        ctk.CTkLabel(
-            inner,
-            text="Cloud API Configuration",
-            font=(self.font_header[0], self.font_sizes["display"], "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 16))
-        
+
         # Get current provider from config
         current_backend = self.config.get("post_processing_backend", "openai")
         if current_backend == "llama_cpp":
@@ -9151,7 +9161,7 @@ class WayfinderApp(ctk.CTk):
                 self.remote_api_btn.configure(text=status)
             
             self.log(f"⚙ Cloud API settings saved ({provider.title()})")
-            dialog.destroy()
+            close_panel()
         
         # Buttons
         btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
@@ -9167,9 +9177,9 @@ class WayfinderApp(ctk.CTk):
             height=40,
             width=100,
             corner_radius=RADIUS["sm"],
-            command=dialog.destroy,
+            command=close_panel,
         ).pack(side="left")
-        
+
         ctk.CTkButton(
             btn_frame,
             text="Save",
@@ -9182,22 +9192,6 @@ class WayfinderApp(ctk.CTk):
             corner_radius=RADIUS["sm"],
             command=save_settings,
         ).pack(side="right")
-
-    def _setup_dialog(self, dialog, base_w, base_h):
-        """Center a dialog on the main window with proper sizing."""
-        dialog.update_idletasks()
-        parent_x = self.winfo_x()
-        parent_y = self.winfo_y()
-        parent_w = self.winfo_width()
-        parent_h = self.winfo_height()
-        x = parent_x + (parent_w - base_w) // 2
-        y = parent_y + (parent_h - base_h) // 2
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
-        x = max(20, min(x, screen_w - base_w - 20))
-        y = max(20, min(y, screen_h - base_h - 20))
-        dialog.geometry(f"{base_w}x{base_h}+{x}+{y}")
-        dialog.minsize(base_w, base_h)
 
     def _show_inline_panel(self, container, title: str, build_fn):
         """Show an inline settings panel, hiding the container's current children.
@@ -9811,86 +9805,52 @@ class WayfinderApp(ctk.CTk):
             pass
         
         self.log("  ℹ️ Restart the app to apply the change")
-        
-        # Show restart dialog
+
+        # Show inline restart banner
         try:
-            self._show_restart_dialog()
+            self._show_restart_banner()
         except Exception as e:
-            self.log(f"  ⚠ Dialog error: {e}")
-    
-    def _show_restart_dialog(self):
-        """Show a dialog prompting user to restart the app."""
-        self.log("  📋 Opening restart dialog...")
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Restart Required")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.focus_force()
-        dialog.lift()
-        dialog.attributes("-topmost", True)
-        dialog.after(200, lambda: dialog.attributes("-topmost", False))
-        self._setup_dialog(dialog, 460, 220)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        ctk.CTkLabel(
-            inner,
-            text="Restart Required",
-            font=(self.font_header[0], self.font_sizes["display"], "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(pady=(0, 12))
-        
-        ctk.CTkLabel(
-            inner,
-            text="The status indicator change requires a restart to take effect.",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            text_color=COLORS["text_secondary"],
-            wraplength=340,
-        ).pack(pady=(0, 20))
-        
-        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        btn_frame.pack(fill="x")
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Later",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            fg_color=COLORS["bg_surface"],
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_secondary"],
-            height=36,
-            width=100,
-            corner_radius=RADIUS["sm"],
-            command=dialog.destroy,
-        ).pack(side="left", expand=True)
-        
-        def restart_now():
-            dialog.destroy()
-            # Kill overlay and restart
-            import subprocess as sp
-            import sys
+            self.log(f"  ⚠ Banner error: {e}")
+
+    def _show_restart_banner(self):
+        """Show the inline 'restart needed' banner under the status-indicator row.
+
+        Idempotent — repeated calls don't duplicate it. Falls back to a log line
+        if the banner frame doesn't exist yet (settings section not built)."""
+        banner = getattr(self, "restart_banner", None)
+        if banner is None:
+            self.log("  ℹ️ Restart the app to apply the status indicator change")
+            return
+        try:
+            if banner.winfo_manager():
+                return  # already packed
+            # Pack it directly under the Indicator Style dropdown row.
+            anchor = self.overlay_type_dropdown.master
+            banner.pack(fill="x", padx=16, pady=(0, 6), after=anchor)
+        except Exception as e:
+            self.log(f"  ⚠ Banner error: {e}")
+
+    def _hide_restart_banner(self):
+        """Hide the inline restart banner (Later button)."""
+        banner = getattr(self, "restart_banner", None)
+        if banner is not None:
             try:
-                sp.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
-            except:
+                banner.pack_forget()
+            except Exception:
                 pass
-            # Restart the app
-            import os
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        
-        ctk.CTkButton(
-            btn_frame,
-            text="Restart Now",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_dim"],
-            text_color=COLORS["bg_base"],
-            height=36,
-            width=120,
-            corner_radius=RADIUS["sm"],
-            command=restart_now,
-        ).pack(side="right", expand=True)
+
+    def _restart_for_overlay_change(self):
+        """Kill the overlay and re-exec the app to apply a status-indicator change."""
+        # Kill overlay and restart
+        import subprocess as sp
+        import sys
+        try:
+            sp.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
+        except:
+            pass
+        # Restart the app
+        import os
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def clear_log(self):
         self.log_textbox.configure(state="normal")
