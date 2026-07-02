@@ -533,143 +533,89 @@ class ToolTip:
 # 🎭 CONFETTI ANIMATION (Easter Egg!)
 # =============================================================================
 
-class ConfettiOverlay(ctk.CTkToplevel):
+class ConfettiOverlay(ctk.CTkFrame):
     """
-    Fun celebration toast for easter eggs!
-    Shows as a floating notification instead of covering the whole window.
-    
-    Click anywhere to dismiss early.
+    Inline celebration toast for the caricature easter egg.
+
+    A static, well-set place()'d card on the main window — NO Toplevel and NO
+    animation loop (the old 16ms emoji bounce was a rule-1 violation). Restraint
+    reads as more premium than a jittering popup. Click anywhere to dismiss, or
+    wait for the 2.5s auto-dismiss.
+
+    Module-scope (outside WayfinderApp) → no self.font_sizes; fonts are literals
+    with the sanctioned whitelist comment. RADIUS/COLORS are module globals so
+    the card uses tokens directly.
     """
-    
-    CONFETTI_EMOJIS = ["🎉", "🎊", "✨", "🌟", "💫", "🎭", "🥳", "🎈"]
-    
-    def __init__(self, parent, num_particles=50, duration_ms=2500):
-        super().__init__(parent)
-        
-        self._destroyed = False  # Track if already destroyed
-        
-        self.overrideredirect(True)
-        self.wm_attributes("-topmost", True)
-        
-        # Try to set transparency
-        try:
-            self.wm_attributes("-alpha", 0.95)
-        except:
-            pass
-        
-        # Toast size - compact notification style
-        toast_width = 380
-        toast_height = 120
-        
-        # Position in top-center of parent window
-        parent_x = parent.winfo_rootx()
-        parent_y = parent.winfo_rooty()
-        parent_w = parent.winfo_width()
-        
-        pos_x = parent_x + (parent_w - toast_width) // 2
-        pos_y = parent_y + 60  # Below title bar
-        
-        self.geometry(f"{toast_width}x{toast_height}+{pos_x}+{pos_y}")
-        
-        # Main container with celebration styling
-        self.configure(fg_color="#1A0A1A")  # Deep purple-black
-        
-        main_frame = ctk.CTkFrame(
-            self,
-            fg_color="#2D1B2D",  # Dark magenta
-            corner_radius=16,  # module-scope squircle: no matching token
-            border_width=2,
-            border_color="#FF6B9D",  # Hot pink border
+
+    def __init__(self, parent, main_container=None):
+        # Host on the app's main container so the toast places OVER the tab
+        # content rather than in a separate window.
+        host = main_container if main_container is not None else parent
+        super().__init__(
+            host,
+            fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["md"],
+            border_width=1,
+            border_color=COLORS["accent"],  # brand violet rim
         )
-        main_frame.pack(fill="both", expand=True, padx=3, pady=3)
-        
-        # Animated emoji row
-        emoji_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-        emoji_frame.pack(fill="x", pady=(12, 4))
-        
-        import random
-        emojis = random.sample(self.CONFETTI_EMOJIS, 5)
-        self.emoji_labels = []
-        for emoji in emojis:
-            lbl = ctk.CTkLabel(
-                emoji_frame,
-                text=emoji,
-                font=("Inter", 20),  # module-scope: no font_sizes access
-                text_color="#FFFFFF",
-            )
-            lbl.pack(side="left", expand=True)
-            self.emoji_labels.append(lbl)
-        
-        # Title
+
+        self._destroyed = False
+
+        # Top-center of the main container.
+        self.place(relx=0.5, rely=0.06, anchor="n")
+
+        # Title — brand violet
         ctk.CTkLabel(
-            main_frame,
-            text="🎭 CARICATURE MODE UNLOCKED! 🎭",
-            font=("Inter", 16, "bold"),  # module-scope: no font_sizes access
-            text_color="#FF6B9D",
-        ).pack(pady=(4, 2))
-        
+            self,
+            text="🎭 caricature mode unlocked",
+            font=("Inter", 15, "bold"),  # module-scope: no font_sizes access
+            text_color=COLORS["accent"],
+        ).pack(padx=24, pady=(14, 4))
+
+        # Static emoji row (plain text label — no bounce)
+        ctk.CTkLabel(
+            self,
+            text="🎉  ✨  🎭  ✨  🎉",
+            font=("Inter", 18),  # module-scope: no font_sizes access
+            text_color=COLORS["text_primary"],
+        ).pack(padx=24, pady=(0, 4))
+
         # Subtitle
         ctk.CTkLabel(
-            main_frame,
-            text="Get ready for some silly fun! (click to dismiss)",
+            self,
+            text="things are about to get silly (click to dismiss)",
             font=("Inter", 11),  # module-scope: no font_sizes access
-            text_color="#B8A0B8",
-        ).pack(pady=(0, 8))
-        
-        # Click anywhere to dismiss
+            text_color=COLORS["text_secondary"],
+        ).pack(padx=24, pady=(0, 14))
+
+        # Click anywhere to dismiss (bind the frame + every child).
         self.bind("<Button-1>", self._dismiss)
-        main_frame.bind("<Button-1>", self._dismiss)
-        emoji_frame.bind("<Button-1>", self._dismiss)
-        # Also bind Escape key
-        self.bind("<Escape>", self._dismiss)
-        self.bind("<Key>", self._dismiss)
-        
-        # Animate emojis
-        self._frame = 0
-        self._animate_emojis()
-        
-        # Auto-destroy after duration
-        self.after(duration_ms, self._safe_destroy)
-        
-        # Safety fallback: destroy after 5 seconds no matter what
-        self.after(5000, self._force_destroy)
-    
-    def _animate_emojis(self):
-        """Animate emoji bounce effect."""
-        if self._destroyed:
-            return
-        
-        try:
-            import math
-            for i, lbl in enumerate(self.emoji_labels):
-                # Staggered bounce
-                offset = math.sin((self._frame + i * 3) * 0.2) * 2
-                lbl.configure(font=("Inter", 20 + int(offset)))  # module-scope: no font_sizes access
-            
-            self._frame += 1
-            if self._frame < 150:  # ~2.5 seconds at 60fps
-                self.after(16, self._animate_emojis)
-        except Exception:
-            pass
-    
+        for child in self.winfo_children():
+            try:
+                child.bind("<Button-1>", self._dismiss)
+            except Exception:
+                pass
+
+        # Auto-dismiss (one-shot, >=100ms — no self-rearming loop).
+        self.after(2500, self._safe_destroy)
+
     def _dismiss(self, event=None):
-        """Dismiss the toast when clicked or key pressed."""
+        """Dismiss the toast when clicked."""
         self._safe_destroy()
-    
+
     def _safe_destroy(self):
-        """Safely destroy the window, preventing double-destroy errors."""
+        """Safely tear down the toast, preventing double-destroy errors."""
         if self._destroyed:
             return
         self._destroyed = True
         try:
+            self.place_forget()
+        except Exception:
+            pass
+        try:
             self.destroy()
         except Exception:
             pass
-    
-    def _force_destroy(self):
-        """Force destroy as a safety fallback."""
-        if not self._destroyed:
-            self._safe_destroy()
 
 
 class CompatibilityBanner(ctk.CTkFrame):
@@ -4090,6 +4036,10 @@ class WayfinderApp(ctk.CTk):
         """Create the app header with refined, minimal branding and scale controls."""
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.pack(fill="x", pady=(0, 8))
+        # Stored so _rebuild_header can destroy + re-create in place when the
+        # Ultra tier flips live (activate/deactivate) — no restart needed.
+        self._header_frame = header
+        self._header_parent = parent
 
         # Title container - compact and elegant
         title_frame = ctk.CTkFrame(header, fg_color="transparent")
@@ -4235,7 +4185,41 @@ class WayfinderApp(ctk.CTk):
         )
         plus_btn.pack(side="left", padx=1)
         ToolTip(plus_btn, "Increase UI Scale (Ctrl++)")
-    
+
+    def _rebuild_header(self) -> None:
+        """Rebuild the header in place so the Ultra badge/glow/underline flip
+        live (no restart) when the tier changes. Also re-syncs the sidebar tier
+        label. Safe to call twice in a row and before the header exists."""
+        parent = getattr(self, "_header_parent", None)
+        old = getattr(self, "_header_frame", None)
+        if parent is not None:
+            try:
+                if old is not None and old.winfo_exists():
+                    old.destroy()
+            except Exception:
+                pass
+            # Re-create and re-pack in the ORIGINAL slot: the header sits directly
+            # above the hero frame, so pack before it to preserve column order.
+            self._create_header(parent)
+            try:
+                hero = getattr(self, "hero_frame", None)
+                if hero is not None and hero.winfo_exists():
+                    self._header_frame.pack_configure(before=hero)
+            except Exception:
+                pass
+
+        # Re-sync the sidebar tier label (badge/glow already rebuilt above).
+        tier_label = getattr(self, "_sidebar_tier_label", None)
+        if tier_label is not None:
+            is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
+            try:
+                tier_label.configure(
+                    text="😇 ultra" if is_ultra else "free",
+                    text_color=COLORS["accent_yellow"] if is_ultra else COLORS["text_muted"],
+                )
+            except Exception:
+                pass
+
     def _create_hero_section(self, parent) -> None:
         """Create the hero section with visualizer and mic button."""
         # Hero card with layered depth effect
@@ -4691,6 +4675,8 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["accent_yellow"] if is_ultra else COLORS["text_muted"],
         )
         footer.pack(side="bottom", pady=(0, 4))
+        # Stored so _rebuild_header can re-color/re-text it live when the tier flips.
+        self._sidebar_tier_label = footer
         if is_ultra:
             ToolTip(footer, "Ultra 😇 — thanks for supporting Wayfinder")
     
@@ -5224,6 +5210,7 @@ class WayfinderApp(ctk.CTk):
         # === BENTO TILE: License ===
         license_tile = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
         license_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        self._license_tile = license_tile  # for the live activation banner
 
         ctk.CTkLabel(
             license_tile, text="License",
@@ -6934,9 +6921,8 @@ class WayfinderApp(ctk.CTk):
                 except Exception:
                     pass
             
-            # Create confetti overlay
-            self._confetti_overlay = ConfettiOverlay(self, num_particles=60, duration_ms=3000)
-            self._confetti_overlay.focus_set()
+            # Inline toast placed over the main container (no Toplevel).
+            self._confetti_overlay = ConfettiOverlay(self, main_container=self.main_container)
         except Exception as e:
             print(f"[Easter Egg] Couldn't show confetti: {e}")
     
@@ -10108,10 +10094,54 @@ class WayfinderApp(ctk.CTk):
         self.feature_gate = get_feature_gate(force_refresh=True)
         if result.is_valid and self.feature_gate.is_premium:
             self._license_status_label.configure(text="Ultra 😇", text_color=COLORS["accent"])
-            self._license_feedback.configure(text="Ultra activated — halo on 😇 Restart for full effect.", text_color=COLORS["accent"])
+            # Live activation — the badge/glow/underline/tier flip without a restart.
+            self._license_feedback.configure(text="Ultra activated — welcome to the halo 😇", text_color=COLORS["accent"])
             self.log("😇 Ultra activated — halo on. Thanks for supporting Wayfinder!")
+            self._rebuild_header()
+            self._show_ultra_banner()
         else:
             self._license_feedback.configure(text=result.error_message or "Activation failed", text_color=COLORS["error"])
+
+    def _show_ultra_banner(self) -> None:
+        """Slim gold banner inside the License tile confirming activation.
+        Auto-hides after 6s; double-activation safe (destroys any prior banner)."""
+        # Destroy any prior banner first.
+        prior = getattr(self, "_ultra_banner", None)
+        if prior is not None:
+            try:
+                prior.destroy()
+            except Exception:
+                pass
+            self._ultra_banner = None
+
+        tile = getattr(self, "_license_tile", None)
+        if tile is None:
+            return
+        try:
+            banner = ctk.CTkFrame(
+                tile, fg_color=COLORS["bg_card"],
+                border_color=COLORS["accent_yellow"], border_width=1,
+                corner_radius=RADIUS["sm"],
+            )
+            banner.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+            self._ultra_banner = banner
+            ctk.CTkLabel(
+                banner, text="welcome to ultra 😇 — everything unlocked",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["accent_yellow"],
+            ).pack(anchor="w", padx=SPACING["md"], pady=SPACING["sm"])
+
+            def _hide():
+                try:
+                    if getattr(self, "_ultra_banner", None) is banner:
+                        banner.destroy()
+                        self._ultra_banner = None
+                except Exception:
+                    pass
+
+            self.after(6000, _hide)
+        except Exception:
+            pass
 
     def _deactivate_license(self) -> None:
         """Deactivate the current license."""
@@ -10122,6 +10152,15 @@ class WayfinderApp(ctk.CTk):
         self._license_feedback.configure(text="License deactivated", text_color=COLORS["text_muted"])
         self._license_key_entry.delete(0, "end")
         self.log("License deactivated")
+        # Revert the badge/glow/underline/tier live.
+        prior = getattr(self, "_ultra_banner", None)
+        if prior is not None:
+            try:
+                prior.destroy()
+            except Exception:
+                pass
+            self._ultra_banner = None
+        self._rebuild_header()
 
     # === DEV-UNLOCK (remove before GA) ===
     def _toggle_dev_unlock(self) -> None:
