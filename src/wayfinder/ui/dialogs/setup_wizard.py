@@ -153,11 +153,15 @@ class SetupWizard(ctk.CTkToplevel):
             variable=self._model_var,
             font=(FONTS["body"][0], sz_detail),
             fg_color=COLORS["bg_elevated"],
-            button_color=COLORS["accent_dim"],
-            button_hover_color=COLORS["accent"],
+            button_color=COLORS["bg_elevated"],
+            button_hover_color=COLORS["accent_dim"],
             dropdown_fg_color=COLORS["bg_surface"],
             dropdown_hover_color=COLORS["bg_hover"],
+            dropdown_text_color=COLORS["text_primary"],
+            dropdown_font=(FONTS["body"][0], FONT_SIZES["body"]),
+            text_color=COLORS["text_primary"],
             width=220,
+            corner_radius=RADIUS["sm"],
         )
         self._model_menu.pack(side="left", padx=(0, 10), pady=6)
 
