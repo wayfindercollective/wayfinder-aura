@@ -194,6 +194,38 @@ def test_all_state_palette_hexes_are_tokens_or_documented():
 
 
 # =============================================================================
+# Boot animators — first painted frame must already be the READY palette
+# (2026-07-02: stale pre-unification greys made the overlay boot grey until
+# the first dictation, because zero-duration QVariantAnimations never emit).
+# =============================================================================
+
+def test_overlay_boot_animators_seed_from_ready_palette():
+    src = OVERLAY.read_text()
+    for stale in ("#3D444D", "#2D333B", "#21262D"):
+        assert stale not in src, (
+            f"stale pre-unification idle grey {stale} is back in overlay.py"
+        )
+    boot = re.search(
+        r'_boot = STATE_PALETTES\[OverlayState\.READY\](.*?)_style_badge_color',
+        src, re.DOTALL,
+    )
+    assert boot, "boot seeding block (_boot = STATE_PALETTES[...READY]) not found"
+    for field in ("border_top", "border_bottom", "glow", "wave"):
+        assert f"_boot.{field}" in boot.group(1), (
+            f"boot animator for {field} does not reference the READY palette"
+        )
+
+
+def test_overlay_animators_apply_zero_duration_immediately():
+    """animate=False paths use duration=0; both animator classes need the
+    jump-now fast path (QVariantAnimation emits nothing at duration 0)."""
+    src = OVERLAY.read_text()
+    assert src.count("if duration <= 0:") >= 2, (
+        "AnimatedValue/ColorAnimator zero-duration fast path missing"
+    )
+
+
+# =============================================================================
 # Tray idle color — LOGO BLUE in BOTH renderers (user's call, 2026-07-02):
 # the tray indicator matches the blue taskbar/app icon, not the in-app violet.
 # =============================================================================
