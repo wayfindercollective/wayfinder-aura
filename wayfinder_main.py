@@ -484,6 +484,14 @@ COLORS = {
     "border_subtle": "#21262D",     # Subtle borders
     "border_light": "#1A1D24",      # Pre-blended 5% white
     "border_glow": "#1E1B26",       # Pre-blended 10% violet
+
+    # Feedback colors (previously scattered as hardcoded one-offs)
+    "error": "#CF7B7B",             # Inline error/warning text
+    "danger": "#8B3030",            # Destructive buttons (Clear Data, Cancel download)
+    "danger_hover": "#A03030",      # Destructive button hover
+    "danger_bg_hover": "#3A2020",   # Reddish row-hover tint
+    "success_bg": "#1A2A1A",        # Green-tinted banner background (privacy)
+    "warning_bg": "#2A1A1A",        # Red-tinted banner background (cloud warning)
 }
 
 # Corner radius design tokens for consistent rounded corners
@@ -2676,7 +2684,7 @@ class FloatingIndicator:
             fg_color=shadow_color,
             corner_radius=24,  # Squircle feel
             border_width=1,
-            border_color="#1E1B26",  # Pre-blended 10% violet
+            border_color=COLORS["border_rim"],  # Pre-blended 10% violet
         )
         self.glow_frame.pack(padx=0, pady=0)
         
@@ -3898,6 +3906,41 @@ class WayfinderApp(ctk.CTk):
         self.bind("<Control-minus>", lambda e: self.scale_ui(0.9))
         self.bind("<Control-0>", lambda e: self.reset_scale())
         self.bind("<Control-r>", lambda e: self.rescue_window())  # Emergency rescue
+        self._enable_linux_mousewheel()
+
+    def _enable_linux_mousewheel(self):
+        """Make the mouse wheel scroll CTkScrollableFrames on Linux.
+
+        CTk 5.2.2 binds only <MouseWheel>, an event X11/XWayland never delivers
+        (Linux wheel input arrives as Button-4/Button-5), so every scrollable
+        frame in the app was wheel-dead. One root-level binding scrolls whichever
+        scrollable frame is under the pointer — covers all current and future
+        frames without subclassing (project rule: standard CTk widgets only).
+        """
+        import tkinter as tk
+
+        def _make_handler(direction: int):
+            def _handler(event):
+                try:
+                    widget = self.winfo_containing(event.x_root, event.y_root)
+                except Exception:
+                    return None
+                # Text/entry widgets scroll themselves via Tk class bindings
+                if isinstance(widget, tk.Text):
+                    return None
+                while widget is not None:
+                    if isinstance(widget, ctk.CTkScrollableFrame):
+                        try:
+                            widget._parent_canvas.yview_scroll(direction * 3, "units")
+                        except Exception:
+                            pass
+                        return "break"
+                    widget = getattr(widget, "master", None)
+                return None
+            return _handler
+
+        self.bind_all("<Button-4>", _make_handler(-1), add="+")
+        self.bind_all("<Button-5>", _make_handler(1), add="+")
     
     def _get_recommended_scale(self) -> float:
         """Calculate recommended UI scale based on screen resolution for READABILITY.
@@ -4135,51 +4178,104 @@ class WayfinderApp(ctk.CTk):
             optimal = get_optimal_thread_count()
             self.log(f"💡 Tip: {cpu_count} CPU cores detected, consider setting threads to {optimal}")
     
+    def _ultra_glow_logo(self, icon_path, logo_size: int):
+        """Golden glow radiating from the logo silhouette — the Ultra badge 😇.
+
+        Returns (hi-res RGBA composite, logical display size). Rendered once at
+        4x with PIL (silhouette → gold tint → gaussian blur), so it's a static
+        image — no timers, no repaint cost — and CTkImage downsamples the 4x
+        source for crisp HiDPI rendering (a 1x source went muddy at 2.67x UI
+        scaling).
+        """
+        from PIL import ImageFilter
+
+        ss, pad = 4, 6
+        logical = logo_size + pad * 2
+        S = logical * ss
+        logo = Image.open(icon_path).convert("RGBA").resize(
+            (logo_size * ss, logo_size * ss), Image.LANCZOS)
+
+        gold = (229, 172, 42)  # palette accent_yellow — matches the "ultra" text
+        silhouette = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        tint = Image.new("RGBA", (logo_size * ss, logo_size * ss), gold + (200,))
+        silhouette.paste(tint, (pad * ss, pad * ss), logo.split()[3])
+        silhouette = silhouette.filter(ImageFilter.GaussianBlur(2.0 * ss))
+
+        out = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        out.alpha_composite(silhouette)
+        out.alpha_composite(silhouette)  # double pass = luminous core
+        out.alpha_composite(logo, (pad * ss, pad * ss))
+        return out, (logical, logical)
+
     def _create_header(self, parent) -> None:
         """Create the app header with refined, minimal branding and scale controls."""
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.pack(fill="x", pady=(0, 8))
-        
+
         # Title container - compact and elegant
         title_frame = ctk.CTkFrame(header, fg_color="transparent")
         title_frame.pack(side="left")
-        
+
         # Logo icon - navigation arrow matching brand
         logo_size = 24
+        is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         try:
-            logo_img = Image.open(ICON_PATH).resize((logo_size, logo_size), Image.LANCZOS)
-            self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=(logo_size, logo_size))
-            ctk.CTkLabel(
+            if is_ultra:
+                # 😇 Ultra badge — golden glow radiating from the brand mark
+                logo_img, display_size = self._ultra_glow_logo(ICON_PATH, logo_size)
+            else:
+                logo_img = Image.open(ICON_PATH).resize((logo_size, logo_size), Image.LANCZOS)
+                display_size = (logo_size, logo_size)
+            self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
+            logo_label = ctk.CTkLabel(
                 title_frame,
                 image=self._header_logo_img,
                 text="",
-            ).pack(side="left", padx=(0, 8))
+            )
+            logo_label.pack(side="left", padx=(0, 8))
+            if is_ultra:
+                ToolTip(logo_label, "Ultra 😇 — thanks for supporting Wayfinder")
         except Exception:
             pass  # Skip logo if icon not found
-        
-        # Smaller, refined logo wordmark
+
+        # Smaller, refined logo wordmark (underlined when Ultra is active)
+        wordmark_font = (
+            (self.font_mono[0], self.font_sizes["body"], "underline") if is_ultra
+            else (self.font_mono[0], self.font_sizes["body"])
+        )
         ctk.CTkLabel(
             title_frame,
             text="wayfinder",
-            font=(self.font_mono[0], self.font_sizes["body"]),
+            font=wordmark_font,
             text_color=COLORS["text_muted"],
         ).pack(side="left")
-        
+
         # Accent dot separator
         ctk.CTkLabel(
             title_frame,
             text=" · ",
-            font=(self.font_mono[0], self.font_sizes["body"]),
+            font=wordmark_font,
             text_color=COLORS["text_muted"],
         ).pack(side="left")
-        
+
         # "aura" in accent - lowercase for modern feel
         ctk.CTkLabel(
             title_frame,
             text="aura",
-            font=(self.font_mono[0], self.font_sizes["body"]),
+            font=wordmark_font,
             text_color=COLORS["accent"],
         ).pack(side="left")
+
+        if is_ultra:
+            # Gold "ultra" tag next to the wordmark — the supporter badge
+            ultra_label = ctk.CTkLabel(
+                title_frame,
+                text="ultra",
+                font=(self.font_mono[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["accent_yellow"],
+            )
+            ultra_label.pack(side="left", padx=(8, 0))
+            ToolTip(ultra_label, "Ultra 😇 — thanks for supporting Wayfinder")
         
         # Right side controls container
         right_controls = ctk.CTkFrame(header, fg_color="transparent")
@@ -4213,7 +4309,7 @@ class WayfinderApp(ctk.CTk):
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_muted"],
             font=(self.font_body[0], 14),
-            corner_radius=4,
+            corner_radius=RADIUS["sm"],
             command=self.rescue_window,
         )
         rescue_btn.pack(side="left", padx=(0, 4))
@@ -4229,7 +4325,7 @@ class WayfinderApp(ctk.CTk):
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_primary"],
             font=(self.font_mono[0], 14),
-            corner_radius=4,
+            corner_radius=RADIUS["sm"],
             command=lambda: self.scale_ui(0.9),
         )
         minus_btn.pack(side="left", padx=1)
@@ -4256,7 +4352,7 @@ class WayfinderApp(ctk.CTk):
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_primary"],
             font=(self.font_mono[0], 14),
-            corner_radius=4,
+            corner_radius=RADIUS["sm"],
             command=lambda: self.scale_ui(1.1),
         )
         plus_btn.pack(side="left", padx=1)
@@ -4638,17 +4734,20 @@ class WayfinderApp(ctk.CTk):
         
         self.tab_buttons = {}
         self.tab_colors = {}
-        
-        # Each tab has unique color accent (matching premium palette)
+
+        # One accent for active nav (the brand violet) — the old per-tab candy
+        # colors (lavender/zinc/pink/mint) read as four unrelated highlights
+        # instead of a design system.
         tabs = [
-            ("dictate", "∿", "Dictate", "#C4B5FD"),     # Lavender - sine wave
-            ("settings", "⚙", "Settings", "#A1A1AA"),   # Zinc - neutral
-            ("style", "✎", "Style", "#F9A8D4"),         # Pink - creative/tone
-            ("history", "◷", "History", "#6EE7B7"),     # Soft mint
+            ("dictate", "∿", "Dictate"),
+            ("settings", "⚙", "Settings"),
+            ("style", "✎", "Style"),
+            ("history", "◷", "History"),
         ]
-        
-        for tab_id, icon, label, color in tabs:
-            # Big clickable button - entire area is clickable
+
+        for tab_id, icon, label in tabs:
+            # Fixed-height nav rows (the old expand-to-fill made four huge
+            # stretched buttons; compact rows read as deliberate navigation)
             btn = ctk.CTkButton(
                 nav_container,
                 text=f"  {icon}   {label}",
@@ -4657,13 +4756,27 @@ class WayfinderApp(ctk.CTk):
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_secondary"],
                 corner_radius=RADIUS["md"],
+                height=42,
                 anchor="w",
                 command=lambda t=tab_id: self._switch_tab(t),
             )
-            btn.pack(fill="both", expand=True, pady=4)
-            
+            btn.pack(fill="x", pady=3)
+
             self.tab_buttons[tab_id] = btn
-            self.tab_colors[tab_id] = color
+            self.tab_colors[tab_id] = COLORS["accent"]
+
+        # Footer pinned to the sidebar bottom: tier badge grounds the column
+        # and ties the Ultra branding into the chrome.
+        is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
+        footer = ctk.CTkLabel(
+            nav_container,
+            text="😇 ultra" if is_ultra else "free",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["accent_yellow"] if is_ultra else COLORS["text_muted"],
+        )
+        footer.pack(side="bottom", pady=(0, 4))
+        if is_ultra:
+            ToolTip(footer, "Ultra 😇 — thanks for supporting Wayfinder")
     
     def _switch_tab(self, tab_id: str) -> None:
         """Switch to the specified tab."""
@@ -4725,9 +4838,9 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             header,
-            text="LAST TRANSCRIPTION",
-            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
-            text_color=COLORS["text_muted"],
+            text="✎   L A S T   T R A N S C R I P T I O N",
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
         ).pack(side="left")
         
         # Copy button
@@ -5172,7 +5285,7 @@ class WayfinderApp(ctk.CTk):
         is_premium = license_info.is_premium
 
         # Status badge
-        status_text = "Premium" if is_premium else "Free"
+        status_text = "Ultra 😇" if is_premium else "Free"
         status_color = COLORS["accent"] if is_premium else COLORS["text_muted"]
         self._license_status_label = ctk.CTkLabel(
             license_tile, text=status_text,
@@ -5218,7 +5331,7 @@ class WayfinderApp(ctk.CTk):
         if not is_premium:
             import webbrowser
             ctk.CTkButton(
-                action_row, text="Get Premium — $20 (reg. $40)",
+                action_row, text="Get Ultra — $20 (reg. $40)",
                 font=(self.font_body[0], 12, "bold"),
                 height=32, corner_radius=8,
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
@@ -5228,8 +5341,8 @@ class WayfinderApp(ctk.CTk):
         else:
             ctk.CTkButton(
                 action_row, text="Deactivate",
-                font=(self.font_body[0], 11),
-                height=28, corner_radius=6,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                height=28, corner_radius=RADIUS["sm"],
                 fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
                 text_color=COLORS["text_muted"],
                 command=self._deactivate_license,
@@ -5956,14 +6069,14 @@ class WayfinderApp(ctk.CTk):
     def _build_local_mode_settings(self, parent) -> None:
         """Build settings panel for Local mode (100% private, on-device processing)."""
         # Privacy indicator
-        privacy_frame = ctk.CTkFrame(parent, fg_color="#1A2A1A", corner_radius=RADIUS["sm"])
+        privacy_frame = ctk.CTkFrame(parent, fg_color=COLORS["success_bg"], corner_radius=RADIUS["sm"])
         privacy_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(0, 12))
         
         ctk.CTkLabel(
             privacy_frame,
             text="🔒  100% Private — All processing happens on your device",
             font=(self.font_body[0], self.font_sizes["small"]),
-            text_color="#7BCF7B",
+            text_color=COLORS["accent_green"],
         ).pack(padx=12, pady=8)
         
         # Whisper Model
@@ -5981,7 +6094,7 @@ class WayfinderApp(ctk.CTk):
         _gpu_premium = self.feature_gate.has_feature("gpu_acceleration")
         self.gpu_var = ctk.BooleanVar(value=bool(self.config.get("use_gpu", True)) and _gpu_premium)
         self.create_toggle_row(
-            parent, "GPU Acceleration" if _gpu_premium else "GPU Acceleration  🔒 Premium",
+            parent, "GPU Acceleration" if _gpu_premium else "GPU Acceleration  🔒 Ultra",
             self.gpu_var, self.toggle_gpu,
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
             tooltip_key="gpu_acceleration",
@@ -6055,14 +6168,14 @@ class WayfinderApp(ctk.CTk):
     def _build_remote_mode_settings(self, parent) -> None:
         """Build settings panel for Remote mode (full cloud transcription)."""
         # Cloud warning
-        warning_frame = ctk.CTkFrame(parent, fg_color="#2A1A1A", corner_radius=RADIUS["sm"])
+        warning_frame = ctk.CTkFrame(parent, fg_color=COLORS["warning_bg"], corner_radius=RADIUS["sm"])
         warning_frame.pack(fill="x", padx=SPACING["tile_pad"]-4, pady=(0, 12))
         
         ctk.CTkLabel(
             warning_frame,
             text="☁️  Audio recordings will be sent to cloud for transcription",
             font=(self.font_body[0], self.font_sizes["small"]),
-            text_color="#CF7B7B",
+            text_color=COLORS["error"],
         ).pack(padx=12, pady=8)
         
         # Provider selector (Groq vs OpenAI Whisper)
@@ -6217,13 +6330,23 @@ class WayfinderApp(ctk.CTk):
             )
     
     def _create_mode_section_header(self, parent, text: str) -> None:
-        """Create a section header within mode settings."""
+        """Create a section header within mode settings.
+
+        Label + hairline divider filling the rest of the row — sub-sections get
+        a layered, deliberate structure instead of floating caps text that was
+        easy to miss (text_muted on bg_card had almost no contrast).
+        """
+        wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        wrap.pack(fill="x", padx=SPACING["tile_pad"], pady=(14, 8))
         ctk.CTkLabel(
-            parent,
+            wrap,
             text=text.upper(),
             font=(self.font_body[0], self.font_sizes["caption"], "bold"),
-            text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(8, 8))
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        ctk.CTkFrame(
+            wrap, fg_color=COLORS["border_subtle"], height=1,
+        ).pack(side="left", fill="x", expand=True, padx=(12, 0))
     
     def _on_remote_provider_changed(self, display_value: str) -> None:
         """Handle remote provider selection change."""
@@ -6569,7 +6692,7 @@ class WayfinderApp(ctk.CTk):
         strong_toggle.pack(side="right")
         
         # Add tooltip for strong mode
-        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your exact words.")
+        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your exact words.\nWorks best with Cloud AI (Ultra) or a 🎭-marked local model (3B+).")
         
         # Caricature mode toggle (right side) - always visible now!
         caricature_container = ctk.CTkFrame(toggles_row, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
@@ -6607,8 +6730,16 @@ class WayfinderApp(ctk.CTk):
         caricature_toggle.pack(side="right")
         
         # Add tooltip for caricature mode
-        ToolTip(caricature_container, "Maximum parody mode! Exaggerates your style hilariously.")
-        
+        ToolTip(caricature_container, "Maximum parody mode! Exaggerates your style hilariously.\nWorks best with Cloud AI (Ultra) or a 🎭-marked local model (3B+).")
+
+        # Note: intensity modes are model-limited — cloud (Ultra) gives the best results
+        ctk.CTkLabel(
+            modes_frame,
+            text="💡 Strong & Caricature shine with Cloud AI (Ultra) — or a 🎭-marked local model (3B+).",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", pady=(6, 0))
+
         # === SECTION: Style Toggle Hotkey ===
         hotkey_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
@@ -6740,11 +6871,24 @@ class WayfinderApp(ctk.CTk):
                 self._play_silly_sound()
                 self._show_confetti()
             self.log("🎭 CARICATURE MODE ACTIVATED! Things are about to get silly...")
+            # Caricature is model-limited (3B+). Tell the user up front if the
+            # current model can't honor it — otherwise the engine silently falls
+            # back to standard and the easter egg looks broken.
+            try:
+                compat = check_settings_compatibility(self.config)
+                if compat.get("effective_intensity") != compat.get("requested_intensity"):
+                    self.log(
+                        "🎭 …but the current LLM model is too small for caricature. "
+                        "Pick a 🎭-marked model (3B+) in Settings → Post-Processing — "
+                        "or use Cloud AI (Ultra) for the best results."
+                    )
+            except Exception:
+                pass
         else:
             # Deactivated - clean up any lingering confetti
             self._cleanup_confetti()
             self.log("🎭 Caricature mode deactivated. Back to normal!")
-        
+
         # Update compatibility check - caricature requires 3B+ model
         self._update_compatibility_banner()
     
@@ -7003,6 +7147,19 @@ class WayfinderApp(ctk.CTk):
         status = "enabled" if enabled else "disabled"
         self.log(f"💪 Strong mode {status}")
 
+        # Strong is model-limited (3B+) — warn instead of silently downgrading.
+        if enabled:
+            try:
+                compat = check_settings_compatibility(self.config)
+                if compat.get("effective_intensity") != compat.get("requested_intensity"):
+                    self.log(
+                        "💪 …but the current LLM model is too small for strong mode. "
+                        "Pick a 🎭-marked model (3B+) in Settings → Post-Processing — "
+                        "or use Cloud AI (Ultra) for the best results."
+                    )
+            except Exception:
+                pass
+
         # Update compatibility check
         self._update_compatibility_banner()
 
@@ -7085,9 +7242,9 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             header,
-            text="ACTIVITY LOG",
-            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
-            text_color=COLORS["text_muted"],
+            text="📜   A C T I V I T Y   L O G",
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_secondary"],
         ).pack(side="left")
         
         ctk.CTkButton(
@@ -7452,7 +7609,7 @@ class WayfinderApp(ctk.CTk):
             locked_frame.pack(fill="x", pady=(8, 0))
             self.voice_profile_frame = locked_frame  # tracked so it can be removed without a full tab rebuild
             ctk.CTkLabel(
-                locked_frame, text="Voice Profiles require Wayfinder Aura Premium",
+                locked_frame, text="Voice Profiles require Wayfinder Aura Ultra",
                 font=(self.font_body[0], 12), text_color=COLORS["text_muted"],
             ).pack(padx=12, pady=8)
             ctk.CTkButton(
@@ -7533,7 +7690,7 @@ class WayfinderApp(ctk.CTk):
                 width=60,
                 corner_radius=6,
                 fg_color=COLORS["bg_hover"],
-                hover_color="#3A2020",
+                hover_color=COLORS["danger_bg_hover"],
                 text_color=COLORS["text_muted"],
                 command=self.clear_voice_profile,
             ).pack(side="left")
@@ -7604,7 +7761,7 @@ class WayfinderApp(ctk.CTk):
             width=80,
             corner_radius=6,
             fg_color=COLORS["bg_hover"],
-            hover_color="#3A2020",  # Reddish hover
+            hover_color=COLORS["danger_bg_hover"],  # Reddish hover
             text_color=COLORS["text_muted"],
             command=self.clear_voice_profile,
         ).pack(side="left")
@@ -7645,7 +7802,7 @@ class WayfinderApp(ctk.CTk):
                 inner,
                 text=f"Error loading profile: {e}",
                 font=(self.font_body[0], 12),
-                text_color="#CF7B7B",
+                text_color=COLORS["error"],
             ).pack(anchor="w")
             return
         
@@ -7813,8 +7970,8 @@ class WayfinderApp(ctk.CTk):
             height=36,
             width=100,
             corner_radius=8,
-            fg_color="#8B3030",
-            hover_color="#A03030",
+            fg_color=COLORS["danger"],
+            hover_color=COLORS["danger_hover"],
             text_color="#FFFFFF",
             command=do_clear,
         ).pack(side="left", padx=10)
@@ -7882,13 +8039,21 @@ class WayfinderApp(ctk.CTk):
         model_options = []
         model_data = {}  # model_display -> {id, info, path, installed}
         
+        # Mark models that can honor Strong/Caricature intensity (3B+ tier) —
+        # smaller models silently fall back to standard, so the mark is how the
+        # user knows which models those modes are limited to.
+        from wayfinder.core.postprocessor import detect_model_tier, MODEL_TIERS
+
         for model_id, model_info in LLM_GGUF_MODELS.items():
             model_file = models_dir / model_info["filename"]
             is_installed = model_file.exists()
             is_selected = str(model_file) == current_model_path
-            
+
+            tier = detect_model_tier(Path(model_info["filename"]).stem)
+            supports_intense = MODEL_TIERS[tier]["max_intensity"] == "strong"
+            intense_icon = " 🎭" if supports_intense else ""
             status_icon = "✓ " if is_installed else ""
-            display_name = f"{status_icon}{model_info['name']}"
+            display_name = f"{status_icon}{model_info['name']}{intense_icon}"
             model_options.append(display_name)
             model_data[display_name] = {
                 "id": model_id,
@@ -7948,7 +8113,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         info_icon.pack(side="left", padx=(6, 0))
-        llamacpp_tooltip = f"GGUF models run locally via llama.cpp.\nModels are downloaded to {_get_llm_models_dir()}/\nGPU acceleration is automatic (Metal on macOS, CUDA/ROCm on Linux)."
+        llamacpp_tooltip = f"GGUF models run locally via llama.cpp.\nModels are downloaded to {_get_llm_models_dir()}/\nGPU acceleration is automatic (Metal on macOS, CUDA/ROCm on Linux).\n🎭 = supports Strong & Caricature intensity (3B+). Smaller models fall back to standard."
         ToolTip(label_widget, llamacpp_tooltip)
         ToolTip(info_icon, llamacpp_tooltip)
         
@@ -7981,7 +8146,10 @@ class WayfinderApp(ctk.CTk):
             variable=self._llamacpp_model_var,
             command=self._on_llamacpp_model_selected,
             fg_color=COLORS["bg_input"],
-            button_color=COLORS["bg_hover"],
+            # Chevron matches the field so the dropdown reads as ONE piece
+            # (the lighter chevron block made it look like two stuck-together
+            # widgets); hover still lights it up for affordance.
+            button_color=COLORS["bg_input"],
             button_hover_color=COLORS["accent_dim"],
             dropdown_fg_color=COLORS["bg_card"],
             dropdown_hover_color=COLORS["bg_hover"],
@@ -8171,8 +8339,8 @@ class WayfinderApp(ctk.CTk):
         # Update button to show Cancel option (white text on accent color for readability)
         self._llamacpp_download_btn.configure(
             text="✕ Cancel",
-            fg_color="#CF6679",  # Reddish cancel color
-            hover_color="#B55566",
+            fg_color=COLORS["danger"],  # Reddish cancel color
+            hover_color=COLORS["danger_hover"],
             text_color="#FFFFFF",  # White text for readability
             state="normal",
             command=self._cancel_llamacpp_download,
@@ -8357,7 +8525,7 @@ class WayfinderApp(ctk.CTk):
                     else:
                         self._llamacpp_status_label.configure(
                             text=f"✗ Error: {error_msg[:60]}",
-                            text_color="#CF7B7B"
+                            text_color=COLORS["error"]
                         )
                         self.log(f"❌ Download error: {error_msg}")
                         # Reset download button for retry
@@ -9004,7 +9172,7 @@ class WayfinderApp(ctk.CTk):
                 def on_error():
                     try:
                         if progress_dialog.winfo_exists():
-                            status_label.configure(text=f"Error: {error_msg}", text_color="#CF7B7B")
+                            status_label.configure(text=f"Error: {error_msg}", text_color=COLORS["error"])
                             speed_label.configure(text="")
                             cancel_btn.configure(text="Close")
                     except:
@@ -9083,7 +9251,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             provider_frame,
             text="PROVIDER",
-            font=(self.font_body[0], 11, "bold"),
+            font=(self.font_body[0], self.font_sizes["caption"], "bold"),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", pady=(0, 8))
         
@@ -9975,7 +10143,10 @@ class WayfinderApp(ctk.CTk):
             variable=variable,
             command=command,
             fg_color=COLORS["bg_input"],
-            button_color=COLORS["bg_hover"],
+            # Chevron matches the field so the dropdown reads as ONE piece
+            # (the lighter chevron block made it look like two stuck-together
+            # widgets); hover still lights it up for affordance.
+            button_color=COLORS["bg_input"],
             button_hover_color=COLORS["accent_dim"],
             dropdown_fg_color=COLORS["bg_surface"],
             dropdown_hover_color=COLORS["bg_hover"],
@@ -10184,7 +10355,7 @@ class WayfinderApp(ctk.CTk):
         inner.pack(fill="both", expand=True, padx=16, pady=12)
 
         ctk.CTkLabel(
-            inner, text="✨ Premium Feature",
+            inner, text="😇 Ultra Feature",
             font=(self.font_body[0], 14, "bold"),
             text_color=COLORS["accent"],
         ).pack(anchor="w")
@@ -10203,7 +10374,7 @@ class WayfinderApp(ctk.CTk):
             self._premium_banner = None
 
         ctk.CTkButton(
-            btn_row, text="Get Premium — $20 (reg. $40)", font=(self.font_body[0], 13, "bold"),
+            btn_row, text="Get Ultra — $20 (reg. $40)", font=(self.font_body[0], 13, "bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
             text_color="#FFFFFF", height=34, corner_radius=8,
             command=lambda: [webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")), _dismiss()],
@@ -10223,7 +10394,7 @@ class WayfinderApp(ctk.CTk):
         """Activate a license key from the Settings UI."""
         key = self._license_key_entry.get().strip().upper()
         if not key:
-            self._license_feedback.configure(text="Please enter a license key", text_color="#CF7B7B")
+            self._license_feedback.configure(text="Please enter a license key", text_color=COLORS["error"])
             return
 
         # store_license() is the authoritative activation: it validates the key against the
@@ -10236,11 +10407,11 @@ class WayfinderApp(ctk.CTk):
         result = store_license(key)
         self.feature_gate = get_feature_gate(force_refresh=True)
         if result.is_valid and self.feature_gate.is_premium:
-            self._license_status_label.configure(text="Premium", text_color=COLORS["accent"])
-            self._license_feedback.configure(text="License activated! Restart for full effect.", text_color=COLORS["accent"])
-            self.log("License activated — premium features unlocked")
+            self._license_status_label.configure(text="Ultra 😇", text_color=COLORS["accent"])
+            self._license_feedback.configure(text="Ultra activated — halo on 😇 Restart for full effect.", text_color=COLORS["accent"])
+            self.log("😇 Ultra activated — halo on. Thanks for supporting Wayfinder!")
         else:
-            self._license_feedback.configure(text=result.error_message or "Activation failed", text_color="#CF7B7B")
+            self._license_feedback.configure(text=result.error_message or "Activation failed", text_color=COLORS["error"])
 
     def _deactivate_license(self) -> None:
         """Deactivate the current license."""
@@ -10264,7 +10435,7 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, "_license_status_label"):
             try:
                 self._license_status_label.configure(
-                    text="Premium" if prem else "Free",
+                    text="Ultra 😇" if prem else "Free",
                     text_color=COLORS["accent"] if prem else COLORS["text_muted"],
                 )
             except Exception:
@@ -10692,25 +10863,18 @@ class WayfinderApp(ctk.CTk):
     
     def _build_audio_ducking_section(self, parent):
         """Build audio ducking controls - toggle and percentage slider."""
-        # Separator line
-        separator = ctk.CTkFrame(parent, fg_color=COLORS["border_subtle"], height=1)
-        separator.pack(fill="x", padx=16, pady=(16, 8))
-        
-        # Section label
-        ctk.CTkLabel(
-            parent,
-            text="Audio Ducking",
-            font=(self.font_body[0], 13),
-            text_color=COLORS["text_primary"],
-        ).pack(anchor="w", padx=(24, 0), pady=(0, 4))
-        
+        # Same caps-and-divider recipe as every other sub-section — this one
+        # previously used its own one-off header style (plain body text +
+        # separate separator line above it).
+        self._create_mode_section_header(parent, "Audio Ducking")
+
         ctk.CTkLabel(
             parent,
             text="Automatically lower other audio while recording",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=(24, 0), pady=(0, 8))
-        
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 8))
+
         # Enable toggle
         ducking_enabled = self.config.get("audio_ducking_enabled", True)
         self.audio_ducking_var = ctk.BooleanVar(value=ducking_enabled)
@@ -11570,7 +11734,7 @@ class WayfinderApp(ctk.CTk):
         vocab_text.pack(fill="x", pady=(0, 10))
 
         if vocab_locked:
-            vocab_text.insert("1.0", "Custom vocabulary requires Premium")
+            vocab_text.insert("1.0", "Custom vocabulary requires Ultra")
             vocab_text.configure(state="disabled")
         else:
             # Load existing vocabulary
@@ -14365,8 +14529,12 @@ class WayfinderApp(ctk.CTk):
             self.on_error("No speech detected", gen)
             return
 
-        # Add to voice learning history when "Personal" style is active
-        if self.config.get("output_tone") == "personal":
+        # Add to voice learning history when "Personal" style is active.
+        # NOT during caricature mode: the text here is post-processed, so learning
+        # from parody output would poison the voice profile (and that profile is
+        # re-injected into future transcription prompts).
+        if (self.config.get("output_tone") == "personal"
+                and not self.config.get("caricature_mode", False)):
             self._add_to_voice_learning(text.strip())
 
         # Note: Post-processing is already applied in transcribe_with_config()
