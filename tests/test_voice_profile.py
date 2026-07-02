@@ -10,13 +10,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from wayfinder.core.voice_profile import (
-    COMMON_WORDS,
+    MIN_OCCURRENCES,
+    VOCAB_LIMIT,
     VoiceProfile,
     diff_vocab_edit,
     get_voice_profile,
     merge_vocab_view,
     reset_voice_profile,
 )
+from wayfinder.core.wordlist import STOP_WORDS
 
 
 # =============================================================================
@@ -197,10 +199,10 @@ class TestAddTranscription:
 
 
 class TestVocabularyExtraction:
-    """Test the _update_vocabulary method."""
+    """Test the _update_vocabulary method (distinctiveness model)."""
 
     def test_extracts_frequent_uncommon_words(self, voice_profile_dir: Path):
-        """Words appearing 2+ times that aren't in COMMON_WORDS are extracted."""
+        """Distinctive words appearing 2+ times are extracted."""
         vp = VoiceProfile(config_dir=voice_profile_dir)
 
         # Add the same domain term multiple times
@@ -212,8 +214,8 @@ class TestVocabularyExtraction:
         assert "cluster" in vocab
         assert "refactoring" in vocab
 
-    def test_excludes_common_words(self, voice_profile_dir: Path):
-        """Words in COMMON_WORDS are never included in vocabulary."""
+    def test_excludes_stop_words(self, voice_profile_dir: Path):
+        """Ordinary English (STOP_WORDS) is never included in vocabulary."""
         vp = VoiceProfile(config_dir=voice_profile_dir)
 
         for _ in range(5):
@@ -221,16 +223,19 @@ class TestVocabularyExtraction:
 
         vocab = vp.get_vocabulary()
         for word in vocab:
-            assert word not in COMMON_WORDS, f"{word!r} should be excluded"
+            assert word.casefold() not in STOP_WORDS, f"{word!r} should be excluded"
 
     def test_ignores_short_words(self, voice_profile_dir: Path):
         """Words shorter than 3 characters are excluded by the regex."""
         vp = VoiceProfile(config_dir=voice_profile_dir)
 
+        # "kubernetes" recurs so the learned list is non-empty; the 2-letter
+        # AI/ML/DB tokens must never sneak in.
         for _ in range(5):
-            vp.add_transcription("An AI ML DB is not enough here today")
+            vp.add_transcription("An AI ML DB kubernetes is not enough today")
 
         vocab = vp.get_vocabulary()
+        assert "kubernetes" in vocab
         for word in vocab:
             assert len(word) >= 3
 
@@ -246,12 +251,210 @@ class TestVocabularyExtraction:
         assert "xylophone" not in vocab
         assert "architecture" not in vocab
 
-    def test_common_words_set_is_populated(self):
-        """COMMON_WORDS is a non-empty set of lowercase strings."""
-        assert isinstance(COMMON_WORDS, set)
-        assert len(COMMON_WORDS) > 50
-        for word in COMMON_WORDS:
-            assert word == word.lower()
+    def test_surfaces_distinctive_over_generic(self, voice_profile_dir: Path):
+        """THE USER STORY: generic English is dropped; names/jargon/products
+        surface WITH their capitalization.
+
+        Regression for the real complaint — the learned list used to be pure
+        junk ("everything, something, looks, stuff, fix, ...") because it ranked
+        by raw frequency."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        # Realistic generic speech, repeated (this is what a person says most).
+        generic = [
+            "everything looks cool, fix the checkout page later",
+            "add something to the main window",
+            "everything looks great, fix the order page later",
+            "add something cool to the window",
+        ]
+        # Distinctive lines — names, product terms, jargon.
+        distinctive = [
+            "Daan pushed the Flatpak build",
+            "the Wayfinder overlay needs the dictation fix",
+            "Daan tested the Flatpak on Bazzite",
+            "Wayfinder dictation through the overlay again",
+        ]
+        for line in generic + distinctive:
+            vp.add_transcription(line)
+
+        vocab = vp.get_vocabulary()
+
+        # None of the generic junk from the real complaint survives.
+        junk = {
+            "everything", "something", "looks", "stuff", "fix", "anything",
+            "add", "off", "check", "mode", "running", "main", "window", "page",
+            "cool", "later", "any", "order", "match", "style", "models",
+            "november", "cart", "discount", "orders", "checkout", "great",
+        }
+        for word in vocab:
+            assert word.casefold() not in junk, f"junk word {word!r} leaked in"
+
+        # Distinctive terms appear WITH their capitalization preserved.
+        assert "Daan" in vocab
+        assert "Flatpak" in vocab
+        assert "Wayfinder" in vocab
+
+    def test_distinctive_outranks_mid_at_equal_count(self, voice_profile_dir: Path):
+        """A distinctive word said 2x outranks a mid-band word said 2x."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        # "kubernetes" = distinctive tail; "endpoint" = mid-band. Equal counts.
+        for _ in range(2):
+            vp.add_transcription("the kubernetes endpoint was migrated cleanly")
+
+        vocab = vp.get_vocabulary()
+        assert "kubernetes" in vocab
+        assert "endpoint" in vocab
+        assert vocab.index("kubernetes") < vocab.index("endpoint")
+
+    def test_mid_word_surfaces_when_repeated_far_more(self, voice_profile_dir: Path):
+        """A mid-band word said >4x as often DOES outrank a distinctive one.
+
+        DISTINCTIVE_WEIGHT is 4x MID_WEIGHT, so a mid word needs more than a 4:1
+        repetition ratio to win."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        # "endpoint" (mid) said 10x vs "kubernetes" (distinctive) said 2x.
+        for _ in range(10):
+            vp.add_transcription("the endpoint endpoint responded to the endpoint")
+        for _ in range(2):
+            vp.add_transcription("the kubernetes migration finished today")
+
+        vocab = vp.get_vocabulary()
+        assert "endpoint" in vocab
+        assert "kubernetes" in vocab
+        # endpoint score = 30*1 = 30; kubernetes score = 2*4 = 8 -> endpoint wins
+        assert vocab.index("endpoint") < vocab.index("kubernetes")
+
+    def test_min_occurrences_excludes_single_distinctive(self, voice_profile_dir: Path):
+        """A distinctive word said only ONCE does not appear (MIN_OCCURRENCES)."""
+        assert MIN_OCCURRENCES == 2
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        vp.add_transcription("Daan reviewed the pull request this morning")
+        vp.add_transcription("the deploy finished without any trouble tonight")
+
+        assert "Daan" not in vp.get_vocabulary()
+
+    def test_vocab_limit_respected(self, voice_profile_dir: Path):
+        """The learned list is capped at VOCAB_LIMIT entries."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        # 40 distinct distinctive words (purely alphabetic — the tokenizer only
+        # matches letter runs), each said twice -> 40 candidates.
+        words = [f"zzq{chr(97 + i // 26)}{chr(97 + i % 26)}" for i in range(40)]
+        for w in words:
+            vp.add_transcription(f"the {w} {w} appeared in the transcript")
+
+        vocab = vp.get_vocabulary()
+        assert len(vocab) == VOCAB_LIMIT
+
+    def test_surface_form_capitalized_word_keeps_capital(self, voice_profile_dir: Path):
+        """A word usually said capitalized is stored with its capital."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        # "Daan" capitalized 3x, lowercase once -> most-common surface is "Daan".
+        vp.add_transcription("Daan opened the merge request")
+        vp.add_transcription("Daan approved the change")
+        vp.add_transcription("Daan shipped it, said daan happily")
+
+        vocab = vp.get_vocabulary()
+        assert "Daan" in vocab
+        assert "daan" not in vocab
+
+    def test_surface_form_lowercase_word_stays_lowercase(self, voice_profile_dir: Path):
+        """A word usually said lowercase is stored lowercase."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        # "kubernetes" lowercase 3x, capitalized once -> surface stays lowercase.
+        vp.add_transcription("the kubernetes rollout went fine")
+        vp.add_transcription("another kubernetes upgrade landed")
+        vp.add_transcription("kubernetes again, plus one Kubernetes typo")
+
+        vocab = vp.get_vocabulary()
+        assert "kubernetes" in vocab
+        assert "Kubernetes" not in vocab
+
+    def test_contraction_fragments_never_learned(self, voice_profile_dir: Path):
+        """"doesn't" tokenizes to "doesn" — fragments land in the distinctive
+        tier of the written-web corpus and must be stopped by the curated
+        EXTRA_STOP_WORDS supplement."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(3):
+            vp.add_transcription("it doesn't work and it wasn't the Flatpak build")
+
+        vocab = vp.get_vocabulary()
+        assert "doesn" not in [w.lower() for w in vocab]
+        assert "wasn" not in [w.lower() for w in vocab]
+        assert "Flatpak" in vocab
+
+    def test_spoken_fillers_never_learned(self, voice_profile_dir: Path):
+        """Universal speech fillers (okay/dude/gonna) are not personal signal,
+        even though the written-web corpus rates them mid-band or rarer."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(4):
+            vp.add_transcription("Okay dude, gonna fix the Flatpak build now, alright")
+
+        vocab_lower = [w.lower() for w in vp.get_vocabulary()]
+        for filler in ("okay", "dude", "gonna", "alright"):
+            assert filler not in vocab_lower
+        assert "flatpak" in vocab_lower
+
+    def test_ignoring_lowercase_removes_cased_learned_word(self, voice_profile_dir: Path):
+        """Ignoring 'daan' (lowercase) removes the learned 'Daan' (cased)."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(3):
+            vp.add_transcription("Daan pushed the Flatpak build again")
+
+        assert "Daan" in vp.get_vocabulary()
+
+        vp.set_ignored_words(["daan"])  # lowercase ignore
+
+        vocab = vp.get_vocabulary()
+        assert "Daan" not in vocab
+        assert "Flatpak" in vocab
+
+    def test_self_heal_recomputes_junk_without_disk_write(self, voice_profile_dir: Path):
+        """A stale junk vocabulary is cleaned in memory on load — no disk write.
+
+        Older profiles were built by the frequency-only extractor. Loading one
+        must recompute a clean list immediately (from history) but must NOT
+        persist until the next real save, so the on-disk file is untouched."""
+        profile_file = voice_profile_dir / "voice_profile.json"
+        stale = {
+            "history": [
+                {"text": "Daan pushed the Flatpak build today", "timestamp": 1, "word_count": 6},
+                {"text": "Daan tested the Flatpak on Bazzite", "timestamp": 2, "word_count": 6},
+                {"text": "the Wayfinder overlay handles dictation", "timestamp": 3, "word_count": 5},
+                {"text": "Wayfinder dictation with the overlay again", "timestamp": 4, "word_count": 6},
+            ],
+            "profile": {
+                "summary": "prior summary",
+                # Pure junk from the old extractor.
+                "vocabulary": ["everything", "something", "looks", "stuff", "fix"],
+                "vocabulary_ignore": [],
+                "generated_at": 5,
+                "samples_used": 4,
+            },
+            "transcriptions_since_regen": 0,
+        }
+        raw_before = json.dumps(stale, indent=2)
+        profile_file.write_text(raw_before)
+
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        # In-memory vocabulary is recomputed clean.
+        vocab = vp.get_vocabulary()
+        assert "everything" not in vocab
+        assert "something" not in vocab
+        assert "Daan" in vocab
+        assert "Flatpak" in vocab
+
+        # Disk is UNCHANGED — self-heal did not save.
+        assert profile_file.read_text() == raw_before
 
 
 # =============================================================================
@@ -827,20 +1030,20 @@ class TestVocabularyIgnore:
         vp = VoiceProfile(config_dir=voice_profile_dir)
 
         for _ in range(3):
-            vp.add_transcription("the standup with don covered kubernetes work")
+            vp.add_transcription("the standup with Daan covered kubernetes work")
 
-        # "don" would normally be learned (appears 3x, not a common word)
-        assert "don" in vp.get_vocabulary()
+        # "Daan" is learned (distinctive name, appears 3x)
+        assert "Daan" in vp.get_vocabulary()
 
-        vp.set_ignored_words(["don"])
+        vp.set_ignored_words(["Daan"])
         # Immediately reflected — set_ignored_words re-runs extraction
-        assert "don" not in vp.get_vocabulary()
+        assert "Daan" not in vp.get_vocabulary()
         assert "kubernetes" in vp.get_vocabulary()
 
         # And it stays gone as new transcriptions arrive
         for _ in range(2):
-            vp.add_transcription("another standup where don talked about kubernetes")
-        assert "don" not in vp.get_vocabulary()
+            vp.add_transcription("another standup where Daan talked about kubernetes")
+        assert "Daan" not in vp.get_vocabulary()
 
     def test_set_ignored_words_takes_effect_immediately(self, voice_profile_dir: Path):
         """get_vocabulary reflects a new ignore list without any re-add."""
