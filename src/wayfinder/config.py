@@ -221,14 +221,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
-    # SteamOS Game Mode dictation (audio cues, no overlay). Mirrored in wayfinder_main.py's
-    # DEFAULT_CONFIG — which is the block the running app actually loads. Keep both in sync.
+    # SteamOS Game Mode dictation (audio cues, no overlay). This module is the single
+    # source of DEFAULT_CONFIG — wayfinder_main.py imports it (no mirror to keep in sync).
     "game_mode_dictation": False,
-    # Watchdog timeout (s) for a hung PROCESSING state; 0 disables. Mirrored in wayfinder_main.py.
+    # Watchdog timeout (s) for a hung PROCESSING state; 0 disables.
     "processing_timeout_secs": 120,
-    "overlay_scale": 0.7,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
+    "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     "overlay_vertical_offset": 0,  # Vertical offset in pixels (negative = higher, positive = lower)
-    "overlay_anchor": "bottom-center",  # {top,bottom}-{left,center,right}; mirrored in wayfinder_main.py
+    "overlay_anchor": "bottom-center",  # {top,bottom}-{left,center,right}
     
     # Audio ducking settings (reduce other audio while recording)
     "audio_ducking_enabled": True,  # Enable automatic volume reduction during recording
@@ -266,6 +266,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
     "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
+    "openai_whisper_model": "whisper-1",  # OpenAI Whisper transcription model
     "openai_base_url": "",  # Custom base URL for OpenAI-compatible APIs (xAI Grok: "https://api.x.ai/v1")
     
     # Model update checking
