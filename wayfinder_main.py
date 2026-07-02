@@ -5315,6 +5315,26 @@ class WayfinderApp(ctk.CTk):
         self._render_dev_feature_list()
         # === end DEV-UNLOCK ================================================
 
+        # === Version signature (quiet footer, bottom of the scroll) =========
+        try:
+            from wayfinder import __version__ as _wf_version
+        except Exception:
+            _wf_version = "1.1.0"
+        _is_premium = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
+        _tier = "ultra 😇" if _is_premium else "free"
+        ctk.CTkLabel(
+            scroll,
+            text=f"wayfinder aura v{_wf_version} · {_tier}",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["accent_yellow"] if _is_premium else COLORS["text_muted"],
+        ).pack(pady=(SPACING["xl"], 0))
+        ctk.CTkLabel(
+            scroll,
+            text="handcrafted for Linux",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+        ).pack(pady=(2, SPACING["md"]))
+
         self._settings_scroll = scroll
     
     def _update_benchmark_results_display(self):
