@@ -4297,6 +4297,9 @@ class WayfinderApp(ctk.CTk):
         )
         self.mic_button_canvas.pack()
         self.mic_button_canvas.bind("<Button-1>", lambda e: self.on_record_button())
+        # Hover glow — one redraw per Enter/Leave (no timers). Bound on the canvas only.
+        self.mic_button_canvas.bind("<Enter>", lambda e: self._on_mic_hover(True))
+        self.mic_button_canvas.bind("<Leave>", lambda e: self._on_mic_hover(False))
         
         # STABILITY FIX: Pre-created mic button item tracking
         self._mic_items_created = False
@@ -4325,7 +4328,20 @@ class WayfinderApp(ctk.CTk):
         )
         self.hotkey_label.pack(pady=(4, 0))
     
-    def _draw_mic_button(self, color: str, pressed: bool = False) -> None:
+    def _on_mic_hover(self, entering: bool) -> None:
+        """Redraw the mic button once on Enter/Leave with a brighter glow while hovered.
+        Re-reads the live app state (race guard) so a state change mid-hover can't paint
+        the wrong colour. No timers — a single redraw per crossing (rule 1)."""
+        try:
+            color = STATE_COLORS[self.app_state]
+        except Exception:
+            return
+        try:
+            self._draw_mic_button(color, hover=entering)
+        except Exception:
+            pass
+
+    def _draw_mic_button(self, color: str, pressed: bool = False, hover: bool = False) -> None:
         """Draw premium tactile mic button with depth and glow."""
         canvas = self.mic_button_canvas
 
@@ -4333,6 +4349,15 @@ class WayfinderApp(ctk.CTk):
         self._mic_items_created = False
         self._mic_glow_ids = []
         self._mic_button_id = None
+
+        # Hover: blend the state colour ~15% toward white so the whole button + glow
+        # brightens by one redraw (no size/scale change — brief, deliberate feedback).
+        if hover:
+            hr = int(color[1:3], 16); hg = int(color[3:5], 16); hb = int(color[5:7], 16)
+            hr = int(hr + (255 - hr) * 0.15)
+            hg = int(hg + (255 - hg) * 0.15)
+            hb = int(hb + (255 - hb) * 0.15)
+            color = f"#{hr:02x}{hg:02x}{hb:02x}"
 
         size = 80
         cx, cy = size // 2, size // 2
@@ -6363,6 +6388,7 @@ class WayfinderApp(ctk.CTk):
         )
         link.pack(pady=(8, 16))
         link.bind("<Button-1>", lambda e: webbrowser.open(link_url))
+        self._bind_link_hover(link, self.font_sizes["small"])
         
         # Save button
         def save_and_close():
@@ -6515,12 +6541,19 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_muted"],
             ).pack(anchor="w", pady=(4, 0))
             
-            # Bind click for style selection
+            # Bind click for style selection + hover feedback (instant bg swap, no timers).
+            # Enter/Leave are bound on the same widget set as the click so crossing into a
+            # child keeps the card's visual state consistent (selection stays dominant —
+            # the handler no-ops on the currently selected card).
             for widget in [card, card_inner, title_row]:
                 widget.bind("<Button-1>", lambda e, t=tone_id: self._on_tone_selected(t))
+                widget.bind("<Enter>", lambda e, t=tone_id: self._on_tone_card_hover(t, True))
+                widget.bind("<Leave>", lambda e, t=tone_id: self._on_tone_card_hover(t, False))
                 for child in widget.winfo_children():
                     child.bind("<Button-1>", lambda e, t=tone_id: self._on_tone_selected(t))
-            
+                    child.bind("<Enter>", lambda e, t=tone_id: self._on_tone_card_hover(t, True))
+                    child.bind("<Leave>", lambda e, t=tone_id: self._on_tone_card_hover(t, False))
+
             self.tone_buttons[tone_id] = card
         
         # === Model Compatibility Banner ===
@@ -6844,6 +6877,68 @@ class WayfinderApp(ctk.CTk):
             self._confetti_overlay = None
     
     
+    def _bind_row_hover(self, row, normal="transparent") -> None:
+        """Instant bg_hover feedback for a non-selected list row (whisper model rows).
+        Bound on the row and all descendants so crossing into a child keeps the row's
+        state consistent (same idiom as the tone-card click loop). No timers."""
+        def on_enter(_e):
+            try:
+                row.configure(fg_color=COLORS["bg_hover"])
+            except Exception:
+                pass
+
+        def on_leave(_e):
+            try:
+                row.configure(fg_color=normal)
+            except Exception:
+                pass
+
+        def bind_all(w):
+            try:
+                w.bind("<Enter>", on_enter, add="+")
+                w.bind("<Leave>", on_leave, add="+")
+                for c in w.winfo_children():
+                    bind_all(c)
+            except Exception:
+                pass
+
+        bind_all(row)
+
+    def _bind_link_hover(self, label, size) -> None:
+        """Give a clickable CTkLabel link instant hover feedback: accent_hover + underline
+        on Enter, restore accent + plain on Leave. `size` preserves the caller's exact size
+        token so the font tuple round-trips unchanged. No timers."""
+        fam = self.font_body[0]
+
+        def on_enter(_e):
+            try:
+                label.configure(text_color=COLORS["accent_hover"], font=(fam, size, "underline"))
+            except Exception:
+                pass
+
+        def on_leave(_e):
+            try:
+                label.configure(text_color=COLORS["accent"], font=(fam, size))
+            except Exception:
+                pass
+
+        label.bind("<Enter>", on_enter, add="+")
+        label.bind("<Leave>", on_leave, add="+")
+
+    def _on_tone_card_hover(self, tone_id: str, entering: bool) -> None:
+        """Instant hover feedback for a tone card. No-op on the selected card so the
+        selection (bg_card + accent border) stays visually dominant; non-selected cards
+        swap bg_input <-> bg_hover. No timers, no size change (rule 1 / design brief)."""
+        card = self.tone_buttons.get(tone_id) if hasattr(self, "tone_buttons") else None
+        if card is None:
+            return
+        if tone_id == self.config.get("output_tone"):
+            return  # selected — leave it alone
+        try:
+            card.configure(fg_color=COLORS["bg_hover"] if entering else COLORS["bg_input"])
+        except Exception:
+            pass
+
     def _on_tone_selected(self, tone_id: str) -> None:
         """Handle tone selection from Style tab."""
         # Gate non-minimal tones behind premium
@@ -8890,7 +8985,8 @@ class WayfinderApp(ctk.CTk):
                 )
                 link.pack(anchor="w", pady=(0, 8))
                 link.bind("<Button-1>", lambda e: webbrowser.open("https://platform.openai.com/api-keys"))
-                
+                self._bind_link_hover(link, self.font_sizes["caption"])
+
             else:  # anthropic
                 api_frame = ctk.CTkFrame(settings_container, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
                 api_frame.pack(fill="x", pady=(0, 12))
@@ -8973,6 +9069,7 @@ class WayfinderApp(ctk.CTk):
                 )
                 link.pack(anchor="w", pady=(0, 8))
                 link.bind("<Button-1>", lambda e: webbrowser.open("https://console.anthropic.com"))
+                self._bind_link_hover(link, self.font_sizes["caption"])
         
         # Build initial settings
         rebuild_provider_settings()
@@ -10923,6 +11020,9 @@ class WayfinderApp(ctk.CTk):
                         font=(self.font_body[0], self.font_sizes["caption"]), text_color=COLORS["text_muted"],
                     ).pack(anchor="w")
 
+                    if not is_current:
+                        self._bind_row_hover(row)
+
                 def save_selection():
                     selected = model_var.get()
                     large_keywords = ("medium", "large", "turbo")
@@ -11012,6 +11112,9 @@ class WayfinderApp(ctk.CTk):
                                 hover_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
                                 command=make_handler(),
                             ).pack(side="right", padx=8, pady=5)
+
+                        if not is_installed:
+                            self._bind_row_hover(row)
 
             def do_download(model_id: str):
                 """Download a model with inline progress."""
