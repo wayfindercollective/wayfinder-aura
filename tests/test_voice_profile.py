@@ -12,7 +12,9 @@ import pytest
 from wayfinder.core.voice_profile import (
     COMMON_WORDS,
     VoiceProfile,
+    diff_vocab_edit,
     get_voice_profile,
+    merge_vocab_view,
     reset_voice_profile,
 )
 
@@ -752,3 +754,246 @@ class TestGlobalSingleton:
         # Still the same instance with the original limit
         assert vp2 is vp1
         assert vp2.history_limit == 42
+
+
+# =============================================================================
+# Editable vocabulary — ignore list (persistence + effect)
+# =============================================================================
+
+
+class TestVocabularyIgnore:
+    """Test the persistent vocabulary_ignore list on VoiceProfile."""
+
+    def test_ignore_empty_by_default(self, voice_profile_dir: Path):
+        """A fresh profile has an empty ignore list."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+        assert vp.get_ignored_words() == []
+
+    def test_set_ignored_words_persists_across_reload(self, voice_profile_dir: Path):
+        """Ignored words survive a save/load round-trip."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+        vp.set_ignored_words(["don", "foo"])
+
+        vp2 = VoiceProfile(config_dir=voice_profile_dir)
+        assert vp2.get_ignored_words() == ["don", "foo"]
+
+    def test_set_ignored_words_dedups_and_strips(self, voice_profile_dir: Path):
+        """Ignore list is deduped case-insensitively; blanks are dropped."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+        vp.set_ignored_words(["  don  ", "Don", "", "   ", "foo"])
+
+        assert vp.get_ignored_words() == ["don", "foo"]
+
+    def test_get_ignored_words_returns_copy(self, voice_profile_dir: Path):
+        """get_ignored_words returns a distinct list object."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+        vp.set_ignored_words(["don"])
+
+        a = vp.get_ignored_words()
+        b = vp.get_ignored_words()
+        assert a == b
+        assert a is not b
+
+    def test_clear_resets_ignore_list(self, voice_profile_dir: Path):
+        """clear() wipes the ignore list."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+        vp.set_ignored_words(["don"])
+        assert vp.get_ignored_words() == ["don"]
+
+        vp.clear()
+
+        assert vp.get_ignored_words() == []
+
+    def test_load_old_file_defaults_ignore_empty(self, voice_profile_dir: Path):
+        """A profile file predating the feature loads with an empty ignore list."""
+        old_data = {
+            "history": [],
+            "profile": {
+                "summary": "old",
+                "vocabulary": ["kubernetes"],
+                "generated_at": 0,
+                "samples_used": 0,
+            },
+            "transcriptions_since_regen": 0,
+        }
+        profile_file = voice_profile_dir / "voice_profile.json"
+        profile_file.write_text(json.dumps(old_data))
+
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+        assert vp.get_ignored_words() == []
+
+    def test_update_vocabulary_excludes_ignored_after_add(self, voice_profile_dir: Path):
+        """A learned word, once ignored, is filtered from future extraction."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(3):
+            vp.add_transcription("the standup with don covered kubernetes work")
+
+        # "don" would normally be learned (appears 3x, not a common word)
+        assert "don" in vp.get_vocabulary()
+
+        vp.set_ignored_words(["don"])
+        # Immediately reflected — set_ignored_words re-runs extraction
+        assert "don" not in vp.get_vocabulary()
+        assert "kubernetes" in vp.get_vocabulary()
+
+        # And it stays gone as new transcriptions arrive
+        for _ in range(2):
+            vp.add_transcription("another standup where don talked about kubernetes")
+        assert "don" not in vp.get_vocabulary()
+
+    def test_set_ignored_words_takes_effect_immediately(self, voice_profile_dir: Path):
+        """get_vocabulary reflects a new ignore list without any re-add."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+        for _ in range(3):
+            vp.add_transcription("kubernetes terraform ansible orchestration test")
+
+        assert "terraform" in vp.get_vocabulary()
+        vp.set_ignored_words(["terraform"])
+        assert "terraform" not in vp.get_vocabulary()
+
+
+# =============================================================================
+# merge_vocab_view (pure function)
+# =============================================================================
+
+
+class TestMergeVocabView:
+    """Test the merge_vocab_view helper."""
+
+    def test_custom_terms_come_first(self):
+        """Custom (pinned) terms are listed before learned words."""
+        result = merge_vocab_view(["Daan", "Wayfinder"], ["standup", "kubernetes"], [])
+        assert result[:2] == ["Daan", "Wayfinder"]
+        assert "standup" in result
+        assert "kubernetes" in result
+
+    def test_case_insensitive_dedup_custom_suppresses_learned(self):
+        """A custom term case-insensitively suppresses the learned duplicate."""
+        result = merge_vocab_view(["Daan"], ["daan", "standup"], [])
+        # "daan" learned is dropped in favour of the pinned "Daan"
+        assert result == ["Daan", "standup"]
+
+    def test_ignored_words_excluded(self):
+        """Ignored learned words never appear in the view."""
+        result = merge_vocab_view([], ["don", "standup"], ["don"])
+        assert result == ["standup"]
+
+    def test_case_preserved_and_order_preserved(self):
+        """Custom case and order are preserved verbatim."""
+        result = merge_vocab_view(["ZeroTier", "aBc"], [], [])
+        assert result == ["ZeroTier", "aBc"]
+
+    def test_empty_inputs(self):
+        """All-empty inputs yield an empty list."""
+        assert merge_vocab_view([], [], []) == []
+
+    def test_no_case_insensitive_duplicates(self):
+        """The result contains no case-insensitive duplicates."""
+        result = merge_vocab_view(["Foo"], ["foo", "FOO", "bar"], [])
+        lowered = [w.lower() for w in result]
+        assert len(lowered) == len(set(lowered))
+        assert result == ["Foo", "bar"]
+
+
+# =============================================================================
+# diff_vocab_edit (pure function)
+# =============================================================================
+
+
+class TestDiffVocabEdit:
+    """Test the diff_vocab_edit helper."""
+
+    def test_the_daan_story(self):
+        """The motivating case: fix a mis-learned name.
+
+        Whisper heard "Daan" as "don"; the user deletes "don" and types "Daan".
+        Result: "Daan" is pinned (custom), "don" is ignored.
+        """
+        custom, ignored = diff_vocab_edit(["Daan", "standup"], ["don", "standup"])
+        assert custom == ["Daan"]
+        assert ignored == ["don"]
+
+    def test_pure_addition_ignores_nothing(self):
+        """Adding a new term ignores no learned words."""
+        custom, ignored = diff_vocab_edit(["standup", "Daan"], ["standup"])
+        assert custom == ["Daan"]
+        assert ignored == []
+
+    def test_pure_deletion_pins_nothing(self):
+        """Deleting a learned word pins no custom terms."""
+        custom, ignored = diff_vocab_edit(["standup"], ["don", "standup"])
+        assert custom == []
+        assert ignored == ["don"]
+
+    def test_whitespace_and_blank_lines_dropped(self):
+        """Blank and whitespace-only lines are ignored; terms are stripped."""
+        custom, ignored = diff_vocab_edit(
+            ["", "  Daan  ", "   ", "standup"], ["standup"]
+        )
+        assert custom == ["Daan"]
+        assert ignored == []
+
+    def test_case_insensitive_learned_match_kept(self):
+        """A learned word re-typed with different case is kept, not ignored."""
+        custom, ignored = diff_vocab_edit(["Standup"], ["standup"])
+        assert custom == []
+        assert ignored == []
+
+    def test_custom_deduped_case_insensitively(self):
+        """Duplicate custom lines collapse case-insensitively (first wins)."""
+        custom, ignored = diff_vocab_edit(["Daan", "daan", "DAAN"], [])
+        assert custom == ["Daan"]
+        assert ignored == []
+
+    def test_empty_edit_ignores_all_learned(self):
+        """An emptied editor ignores every learned word."""
+        custom, ignored = diff_vocab_edit([], ["don", "standup"])
+        assert custom == []
+        assert ignored == ["don", "standup"]
+
+    def test_prior_ignores_survive_a_second_save(self):
+        """REGRESSION: 'don' was ignored on save 1, so it's absent from
+        `learned` by save 2 — without prev_ignored it would drop off the
+        ignore list and the extractor would resurrect it from history."""
+        custom, ignored = diff_vocab_edit(
+            ["Daan", "standup"], ["standup"], prev_ignored=["don"]
+        )
+        assert custom == ["Daan"]
+        assert ignored == ["don"]
+
+    def test_retyping_an_ignored_word_unignores_it(self):
+        """Typing a previously deleted word back in revives it (as pinned)."""
+        custom, ignored = diff_vocab_edit(
+            ["don", "standup"], ["standup"], prev_ignored=["don"]
+        )
+        assert ignored == []
+        assert custom == ["don"]
+
+    def test_prev_ignored_not_duplicated_into_ignores(self):
+        """A word both freshly deleted AND previously ignored appears once."""
+        custom, ignored = diff_vocab_edit(
+            [], ["don"], prev_ignored=["don", "Don"]
+        )
+        assert custom == []
+        assert ignored == ["don"]
+
+
+# =============================================================================
+# custom_vocabulary config round-trip
+# =============================================================================
+
+
+class TestCustomVocabularyConfigRoundTrip:
+    """The pinned vocabulary must survive save_config/load_config."""
+
+    def test_custom_vocabulary_survives_round_trip(self, temp_config_dir: Path):
+        """A custom_vocabulary list persists through save/load."""
+        from wayfinder.config import load_config, save_config
+
+        config = load_config()
+        config["custom_vocabulary"] = ["Daan", "Wayfinder", "ZeroTier"]
+        save_config(config)
+
+        reloaded = load_config()
+        assert reloaded["custom_vocabulary"] == ["Daan", "Wayfinder", "ZeroTier"]
