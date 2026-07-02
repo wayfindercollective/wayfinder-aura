@@ -24,3 +24,4 @@ class EventType(Enum):
     CHUNK_TRANSCRIBED = auto()  # A chunk was transcribed during recording
     CHUNKED_TRANSCRIPTION_DONE = auto()  # All chunks transcribed
     LOG_MESSAGE = auto()  # Thread-safe log message (avoids Tk threading crash)
+    SWITCH_TAB = auto()  # Dev/verification: switch main-window tab via socket ("tab:<id>")
