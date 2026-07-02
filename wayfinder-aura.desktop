@@ -9,7 +9,7 @@ Terminal=false
 Categories=Utility;Accessibility;
 Keywords=voice;dictation;speech;whisper;transcription;speech-to-text;
 StartupNotify=true
-StartupWMClass=wayfinder-aura
+StartupWMClass=Wayfinder-aura
 Actions=toggle-recording;cycle-style;
 
 [Desktop Action toggle-recording]

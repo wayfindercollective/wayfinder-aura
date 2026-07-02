@@ -3400,10 +3400,14 @@ class WayfinderApp(ctk.CTk):
             ctk.deactivate_automatic_dpi_awareness()
         except Exception:
             pass  # older CustomTkinter without the API — harmless
-        super().__init__()
+        # className sets the WM_CLASS *class* part — Tk capitalizes it to "Wayfinder-aura"
+        # (verified via KWin resourceClass). Plasma's taskbar matches StartupWMClass against
+        # the class, so without this the window reported class "Tk" and never merged into the
+        # pinned launcher — the "two taskbar icons" bug. Keep the .desktop files'
+        # StartupWMClass=Wayfinder-aura in sync with this.
+        super().__init__(className="wayfinder-aura")
 
-        # Set WM_CLASS so Linux desktop environments show the correct icon
-        # This must match the .desktop file's StartupWMClass
+        # And the WM_CLASS *instance* part (some DEs/tools match on this instead).
         self.tk.call('tk', 'appname', 'wayfinder-aura')
         
         self.config = load_config()
@@ -4332,11 +4336,121 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
+    def _mic_button_phys(self) -> int:
+        """The mic canvas's real pixel size — falls back to the design size (80)
+        before the canvas is mapped (winfo returns 1 during setup). The SAME value
+        must be used for rendering AND centering, or the first paint lands the
+        image at (0,0) and shows only a quarter of the button."""
+        try:
+            phys = max(self.mic_button_canvas.winfo_width(),
+                       self.mic_button_canvas.winfo_height())
+        except Exception:
+            phys = 80
+        return phys if phys >= 10 else 80
+
+    def _render_mic_button_photo(self, color: str, pressed: bool = False,
+                                 is_active: bool = False, pulse: float | None = None):
+        """Render the mic button as a supersampled PIL image (4x, LANCZOS downscale).
+
+        Tk canvas ovals/arcs have NO antialiasing, so the old primitive-drawn button
+        had visibly jagged edges — the hero read as "low res" on HiDPI. Rendering the
+        same design in PIL at 4x and blitting ONE image gives crisp edges at zero
+        per-frame cost: results are cached per (color, state, quantized pulse), so a
+        state change renders once and the recording pulse is a dict hit + itemconfig.
+        Pre-composited over bg_card (the canvas bg), same blend the primitives used.
+        """
+        phys = self._mic_button_phys()
+        key = (color, bool(pressed), bool(is_active), pulse, phys)
+        cache = getattr(self, "_mic_photo_cache", None)
+        if cache is None:
+            cache = self._mic_photo_cache = {}
+        photo = cache.get(key)
+        if photo is not None:
+            return photo
+        if len(cache) > 128:  # bounded: states x hover x ~13 pulse steps
+            cache.clear()
+
+        from PIL import ImageTk
+        SS = 4
+        S = phys * SS
+        k = S / 80.0  # the design is authored in 80px units
+        img = Image.new("RGB", (S, S), COLORS["bg_card"])
+        draw = ImageDraw.Draw(img)
+        cx = cy = S / 2.0
+
+        r = int(color[1:3], 16); g = int(color[3:5], 16); b = int(color[5:7], 16)
+        bg_r = int(COLORS["bg_card"][1:3], 16)
+        bg_g = int(COLORS["bg_card"][3:5], 16)
+        bg_b = int(COLORS["bg_card"][5:7], 16)
+
+        def blend(intensity: float) -> tuple:
+            i = min(intensity, 1.0)
+            return (int(bg_r + (r - bg_r) * i),
+                    int(bg_g + (g - bg_g) * i),
+                    int(bg_b + (b - bg_b) * i))
+
+        def circle(radius: float, fill) -> None:
+            draw.ellipse([cx - radius * k, cy - radius * k,
+                          cx + radius * k, cy + radius * k], fill=fill)
+
+        stroke = max(1, round(2 * k))
+
+        if pulse is not None:
+            # Recording pulse: soft glow + button + stop square (same design as the
+            # old coords/itemconfig path, now antialiased).
+            for radius, intensity in ((38 * pulse, 0.06 * pulse),
+                                      (34 * pulse, 0.12 * pulse),
+                                      (30 * pulse, 0.22 * pulse)):
+                circle(radius, blend(intensity))
+            circle(24 * (0.95 + 0.05 * pulse), color)
+            sq = 8 * k
+            draw.rectangle([cx - sq, cy - sq, cx + sq, cy + sq], fill=COLORS["bg_base"])
+        else:
+            if is_active:
+                # Active state: outer glow (soft ambient light)
+                for radius, intensity in ((38, 0.06), (34, 0.12), (30, 0.20), (27, 0.30)):
+                    circle(radius, blend(intensity))
+
+            # Outer shadow (button sits in a depression), offset down
+            draw.ellipse([cx - 28 * k, cy - 27 * k, cx + 28 * k, cy + 29 * k],
+                         fill="#050506")
+            # Darker bottom edge (3D effect)
+            dark = (max(0, int(r * 0.7)), max(0, int(g * 0.7)), max(0, int(b * 0.7)))
+            draw.ellipse([cx - 26 * k, cy - 24 * k, cx + 26 * k, cy + 28 * k], fill=dark)
+            # Main button face
+            circle(24, color)
+            # Top highlight arc (Tk start=30 extent=120 CCW == PIL 210..330 y-down)
+            hi = (min(255, int(r * 1.2 + 40)), min(255, int(g * 1.2 + 40)),
+                  min(255, int(b * 1.2 + 40)))
+            draw.arc([cx - 18 * k, cy - 22 * k, cx + 18 * k, cy - 6 * k],
+                     210, 330, fill=hi, width=stroke)
+            # Inner shadow ring when pressed/active (concave effect)
+            if pressed or is_active:
+                inner = (max(0, r - 60), max(0, g - 60), max(0, b - 60))
+                draw.ellipse([cx - 21 * k, cy - 21 * k, cx + 21 * k, cy + 21 * k],
+                             outline=inner, width=stroke)
+
+            # Microphone glyph — refined, minimal
+            icon = COLORS["bg_base"]
+            draw.ellipse([cx - 5 * k, cy - 14 * k, cx + 5 * k, cy - 6 * k], fill=icon)
+            draw.rectangle([cx - 5 * k, cy - 10 * k, cx + 5 * k, cy + 2 * k], fill=icon)
+            draw.ellipse([cx - 5 * k, cy - 2 * k, cx + 5 * k, cy + 6 * k], fill=icon)
+            # Cradle arc (Tk start=180 extent=180 == PIL 0..180 y-down)
+            draw.arc([cx - 10 * k, cy - 2 * k, cx + 10 * k, cy + 14 * k],
+                     0, 180, fill=icon, width=stroke)
+            # Stand
+            draw.line([cx, cy + 13 * k, cx, cy + 18 * k], fill=icon, width=stroke)
+
+        img = img.resize((phys, phys), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        cache[key] = photo
+        return photo
+
     def _draw_mic_button(self, color: str, pressed: bool = False, hover: bool = False) -> None:
-        """Draw premium tactile mic button with depth and glow."""
+        """Draw the mic button — supersampled PIL render, single image blit."""
         canvas = self.mic_button_canvas
 
-        # Reset item tracking since we're recreating
+        # Reset item tracking since we're recreating (pulse mode re-inits its own item)
         self._mic_items_created = False
         self._mic_glow_ids = []
         self._mic_button_id = None
@@ -4350,138 +4464,16 @@ class WayfinderApp(ctk.CTk):
             hb = int(hb + (255 - hb) * 0.15)
             color = f"#{hr:02x}{hg:02x}{hb:02x}"
 
-        size = 80
-        cx, cy = size // 2, size // 2
-
-        # Parse color for glow
-        r = int(color[1:3], 16)
-        g = int(color[3:5], 16)
-        b = int(color[5:7], 16)
-
-        # Background color for blending
-        bg_r = int(COLORS["bg_card"][1:3], 16)
-        bg_g = int(COLORS["bg_card"][3:5], 16)
-        bg_b = int(COLORS["bg_card"][5:7], 16)
-
-        # Check if this is an active state (recording or processing)
         is_active = self.app_state in [AppState.RECORDING, AppState.PROCESSING, AppState.PASTING]
 
         try:
+            phys = self._mic_button_phys()
+            photo = self._render_mic_button_photo(color, pressed=pressed, is_active=is_active)
             canvas.delete("all")
-
-            if is_active:
-                # Active state: outer glow effect (soft ambient light)
-                glow_layers = [
-                    (38, 0.06),  # Outermost - barely visible
-                    (34, 0.12),
-                    (30, 0.20),
-                    (27, 0.30),  # Inner glow
-                ]
-
-                for radius, intensity in glow_layers:
-                    gr = int(bg_r + (r - bg_r) * intensity)
-                    gg = int(bg_g + (g - bg_g) * intensity)
-                    gb = int(bg_b + (b - bg_b) * intensity)
-                    glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
-                    canvas.create_oval(
-                        cx - radius, cy - radius,
-                        cx + radius, cy + radius,
-                        fill=glow_color, outline="",
-                    )
-
-            # Button bezel - creates tactile depth
-            bezel_radius = 26
-
-            # Outer shadow (button sits in a depression)
-            shadow_color = "#050506"
-            canvas.create_oval(
-                cx - bezel_radius - 2, cy - bezel_radius - 1,
-                cx + bezel_radius + 2, cy + bezel_radius + 3,
-                fill=shadow_color, outline="",
-            )
-
-            # Button face with subtle gradient simulation
-            # Darker bottom edge (3D effect)
-            dr = max(0, int(r * 0.7))
-            dg = max(0, int(g * 0.7))
-            db = max(0, int(b * 0.7))
-            dark_color = f"#{dr:02x}{dg:02x}{db:02x}"
-
-            canvas.create_oval(
-                cx - bezel_radius, cy - bezel_radius + 2,
-                cx + bezel_radius, cy + bezel_radius + 2,
-                fill=dark_color, outline="",
-            )
-
-            # Main button face
-            main_radius = 24
-            canvas.create_oval(
-                cx - main_radius, cy - main_radius,
-                cx + main_radius, cy + main_radius,
-                fill=color, outline="",
-            )
-
-            # Top highlight (gives convex/tactile feel)
-            hr = min(255, int(r * 1.2 + 40))
-            hg = min(255, int(g * 1.2 + 40))
-            hb = min(255, int(b * 1.2 + 40))
-            highlight_color = f"#{hr:02x}{hg:02x}{hb:02x}"
-
-            # Small arc highlight at top
-            canvas.create_arc(
-                cx - 18, cy - 22,
-                cx + 18, cy - 6,
-                start=30, extent=120,
-                style="arc", outline=highlight_color,
-                width=2,
-            )
-
-            # Inner shadow when pressed (concave effect)
-            if pressed or is_active:
-                # Subtle inner shadow ring
-                inner_shadow = f"#{max(0,r-60):02x}{max(0,g-60):02x}{max(0,b-60):02x}"
-                canvas.create_oval(
-                    cx - main_radius + 3, cy - main_radius + 3,
-                    cx + main_radius - 3, cy + main_radius - 3,
-                    fill="", outline=inner_shadow, width=2,
-                )
-
-            # Microphone icon - refined, minimal
-            icon_color = COLORS["bg_base"]
-
-            # Mic body (rounded rectangle simulated with oval + rect)
-            mic_w = 5
-            canvas.create_oval(
-                cx - mic_w, cy - 14,
-                cx + mic_w, cy - 6,
-                fill=icon_color, outline="",
-            )
-            canvas.create_rectangle(
-                cx - mic_w, cy - 10,
-                cx + mic_w, cy + 2,
-                fill=icon_color, outline="",
-            )
-            canvas.create_oval(
-                cx - mic_w, cy - 2,
-                cx + mic_w, cy + 6,
-                fill=icon_color, outline="",
-            )
-
-            # Mic cradle arc
-            canvas.create_arc(
-                cx - 10, cy - 2,
-                cx + 10, cy + 14,
-                start=180, extent=180,
-                style="arc", outline=icon_color, width=2,
-            )
-
-            # Mic stand
-            canvas.create_line(
-                cx, cy + 13, cx, cy + 18,
-                fill=icon_color, width=2, capstyle="round",
-            )
-        except tk.TclError:
-            pass
+            canvas.create_image(phys // 2, phys // 2, image=photo)
+            self._mic_photo = photo  # keep a ref — Tk doesn't
+        except Exception:
+            pass  # rule 10: canvas ops must never crash the app
     
     def _on_hero_canvas_resize(self, event=None):
         """Handle canvas resize - reset image item to fill new width."""
@@ -4621,8 +4613,10 @@ class WayfinderApp(ctk.CTk):
             parent,
             fg_color=COLORS["bg_surface"],
             corner_radius=RADIUS["lg"],
-            width=180,
-            height=380,  # Fixed height to match content area
+            width=188,
+            # Hugs the nav content + tier footer with modest breathing room — the old
+            # 380 left a large dead band between History and the footer.
+            height=320,
         )
         sidebar.grid(row=0, column=0, sticky="nw")  # Don't stretch vertically
         sidebar.grid_propagate(False)
@@ -4654,18 +4648,18 @@ class WayfinderApp(ctk.CTk):
             btn = ctk.CTkButton(
                 nav_container,
                 text=label,
-                image=get_icon(icon_name, 16, COLORS["text_secondary"]),
+                image=get_icon(icon_name, 18, COLORS["text_secondary"]),
                 compound="left",
-                font=(self.font_body[0], self.font_sizes["heading"]),
+                font=(self.font_body[0], self.font_sizes["title"]),
                 fg_color="transparent",
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_secondary"],
                 corner_radius=RADIUS["md"],
-                height=42,
+                height=46,
                 anchor="w",
                 command=lambda t=tab_id: self._switch_tab(t),
             )
-            btn.pack(fill="x", pady=3)
+            btn.pack(fill="x", pady=4)
 
             self.tab_buttons[tab_id] = btn
             self.tab_colors[tab_id] = COLORS["accent"]
@@ -6328,7 +6322,9 @@ class WayfinderApp(ctk.CTk):
         easy to miss (text_muted on bg_card had almost no contrast).
         """
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
-        wrap.pack(fill="x", padx=SPACING["tile_pad"], pady=(14, 8))
+        # padx matches the settings rows (create_dropdown_row/create_toggle_row use 16)
+        # so the header's left edge lines up exactly with the row labels below it.
+        wrap.pack(fill="x", padx=SPACING["lg"], pady=(14, 8))
         ctk.CTkLabel(
             wrap,
             text=text.upper(),
@@ -10534,22 +10530,24 @@ class WayfinderApp(ctk.CTk):
         """Build simple mic test section - record and playback with level meter."""
         # Container frame
         self._mic_test_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        self._mic_test_frame.pack(fill="x", pady=(8, 0))
-        
+        # padx=16 lands the label at the same left edge as every other settings row
+        # (rows use padx=16 inside the tile content) — was 8px left of its siblings.
+        self._mic_test_frame.pack(fill="x", padx=SPACING["lg"], pady=(8, 0))
+
         # Header row
         header_row = ctk.CTkFrame(self._mic_test_frame, fg_color="transparent")
         header_row.pack(fill="x")
-        
+
         ctk.CTkLabel(
             header_row,
             text="Mic Test",
-            font=(self.font_body[0], self.font_sizes["body"]),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),  # match sibling row labels
             text_color=COLORS["text_primary"],
-        ).pack(side="left", padx=(8, 0))
-        
+        ).pack(side="left")
+
         # Buttons on the right
         btn_frame = ctk.CTkFrame(header_row, fg_color="transparent")
-        btn_frame.pack(side="right", padx=(0, 8))
+        btn_frame.pack(side="right")
         
         self._mic_play_btn = ctk.CTkButton(
             btn_frame,
@@ -10590,7 +10588,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
             width=40,
-        ).pack(side="left", padx=(8, 0))
+        ).pack(side="left")
         
         self._mic_meter_bg = ctk.CTkFrame(
             self._mic_meter_frame,
@@ -10616,7 +10614,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         )
-        self._mic_test_status.pack(pady=(4, 0), padx=8, anchor="w")
+        self._mic_test_status.pack(pady=(4, 0), anchor="w")  # frame already at row padx
         
         # State
         self._mic_test_recording = False
@@ -10637,7 +10635,7 @@ class WayfinderApp(ctk.CTk):
             text="Automatically lower other audio while recording",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 8))
+        ).pack(anchor="w", padx=SPACING["lg"], pady=(0, 8))  # align with row labels
 
         # Enable toggle
         ducking_enabled = self.config.get("audio_ducking_enabled", True)
@@ -10664,8 +10662,8 @@ class WayfinderApp(ctk.CTk):
         label_widget = ctk.CTkLabel(
             row,
             text="Duck Amount",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            text_color=COLORS["text_secondary"],
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),  # match sibling row labels
+            text_color=COLORS["text_primary"],
         )
         label_widget.grid(row=0, column=0, sticky="w")
         
@@ -13374,89 +13372,39 @@ class WayfinderApp(ctk.CTk):
         self._hero_animation_job = self.after(66, self._animate_hero)
     
     def _init_mic_pulse_items(self, color: str):
-        """Create mic button pulse items ONCE."""
+        """Create the single pulse-mode image item ONCE (replaces 5 aliased ovals)."""
         if self._mic_items_created:
             return
-        
         canvas = self.mic_button_canvas
-        size = 80
-        cx, cy = size // 2, size // 2
-        
-        # Create 3 glow layers
-        self._mic_glow_ids = []
-        for radius in [38, 34, 30]:
-            item_id = canvas.create_oval(
-                cx - radius, cy - radius, cx + radius, cy + radius,
-                fill=color, outline=""
-            )
-            self._mic_glow_ids.append(item_id)
-        
-        # Main button circle
-        self._mic_button_id = canvas.create_oval(
-            cx - 24, cy - 24, cx + 24, cy + 24,
-            fill=color, outline=""
-        )
-        
-        # Stop icon (square)
-        self._mic_stop_id = canvas.create_rectangle(
-            cx - 8, cy - 8, cx + 8, cy + 8,
-            fill=COLORS["bg_base"], outline=""
-        )
-        
-        self._mic_items_created = True
-    
+        try:
+            phys = self._mic_button_phys()
+            photo = self._render_mic_button_photo(color, pulse=1.0)
+            canvas.delete("all")
+            self._mic_pulse_image_id = canvas.create_image(phys // 2, phys // 2, image=photo)
+            self._mic_pulse_photo = photo  # keep a ref — Tk doesn't
+            self._mic_items_created = True
+        except Exception:
+            pass  # rule 10
+
     def _draw_mic_button_with_pulse(self, color: str, pulse: float = 1.0):
-        """Update mic button with pulse - STABLE version using coords/itemconfig."""
-        canvas = self.mic_button_canvas
-        
-        # Initialize items on first call
+        """Recording pulse — cached supersampled frames, ONE itemconfig per tick.
+
+        Pulse is quantized to 0.05 steps so the whole animation resolves to ~13
+        cached PIL frames per colour; after the first cycle every tick is a dict
+        hit + a single canvas call (cheaper than the old 5x coords/itemconfig)."""
         if not self._mic_items_created:
             self._init_mic_pulse_items(color)
             return
-        
-        # Wrap all canvas operations in try/except - Tk 9.0 can crash on coords
         try:
             # Validate pulse to avoid NaN/Inf crashes
             if not isinstance(pulse, (int, float)) or pulse != pulse or abs(pulse) > 100:
                 pulse = 1.0
-            
-            size = 80
-            cx, cy = size // 2, size // 2
-            
-            # Parse color
-            r = int(color[1:3], 16)
-            g = int(color[3:5], 16)
-            b = int(color[5:7], 16)
-            
-            bg_r = int(COLORS["bg_card"][1:3], 16)
-            bg_g = int(COLORS["bg_card"][3:5], 16)
-            bg_b = int(COLORS["bg_card"][5:7], 16)
-            
-            # Update glow layers
-            glow_configs = [
-                (int(38 * pulse), 0.06 * pulse),
-                (int(34 * pulse), 0.12 * pulse),
-                (int(30 * pulse), 0.22 * pulse),
-            ]
-            
-            for i, (radius, intensity) in enumerate(glow_configs):
-                if i < len(self._mic_glow_ids):
-                    gr = int(bg_r + (r - bg_r) * intensity)
-                    gg = int(bg_g + (g - bg_g) * intensity)
-                    gb = int(bg_b + (b - bg_b) * intensity)
-                    glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
-                    
-                    canvas.coords(self._mic_glow_ids[i],
-                        cx - radius, cy - radius, cx + radius, cy + radius)
-                    canvas.itemconfig(self._mic_glow_ids[i], fill=glow_color)
-            
-            # Update main button
-            button_radius = int(24 * (0.95 + 0.05 * pulse))
-            canvas.coords(self._mic_button_id,
-                cx - button_radius, cy - button_radius, cx + button_radius, cy + button_radius)
-            canvas.itemconfig(self._mic_button_id, fill=color)
+            q = round(pulse * 20) / 20.0
+            photo = self._render_mic_button_photo(color, pulse=q)
+            self.mic_button_canvas.itemconfig(self._mic_pulse_image_id, image=photo)
+            self._mic_pulse_photo = photo
         except Exception:
-            pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
+            pass  # Tk 9.0 canvas quirk — never crash the app (rule 10)
     
     # Legacy method for compatibility
     def _draw_status_indicator(self, color: str):
