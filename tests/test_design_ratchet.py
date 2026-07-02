@@ -283,3 +283,62 @@ def test_spacing_mirror_parity():
         "SPACING token mirror drifted between wayfinder_main.py and theme.py:\n"
         f"  main : {main_spacing}\n  theme: {theme_spacing}"
     )
+
+
+# ---------------------------------------------------------------------------
+# (f) No-popup-dialogs enforcement — CLAUDE.md rule 2
+# ---------------------------------------------------------------------------
+# Every settings/confirm UI must be an inline CTkFrame panel (via
+# _show_inline_panel) or an in-place control, NOT a spawned Toplevel. The only
+# two sanctioned Toplevels are the transient chrome that genuinely can't live
+# inline: the ToolTip hover bubble and the FloatingIndicator overlay window.
+# Any Toplevel instantiated ANYWHERE ELSE fails CI, and modal `.grab_set()` is
+# banned outright (it was the source of the Wayland focus/sizing bugs rule 2
+# was written to end).
+TOPLEVEL_RE = re.compile(r"Toplevel\s*\(")
+GRAB_SET_RE = re.compile(r"\.grab_set\s*\(")
+
+# Classes whose bodies are allowed to instantiate a Toplevel.
+TOPLEVEL_ALLOWED_CLASSES = {"ToolTip", "FloatingIndicator"}
+
+
+def _allowed_toplevel_line_ranges(src: str):
+    """Return [(start_line, end_line), ...] for each sanctioned class body."""
+    tree = ast.parse(src)
+    ranges = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name in TOPLEVEL_ALLOWED_CLASSES:
+            ranges.append((node.lineno, node.end_lineno))
+    return ranges
+
+
+def test_toplevels_only_in_sanctioned_classes():
+    ranges = _allowed_toplevel_line_ranges(MAIN_SRC)
+    # Guard against the class names being renamed and the test silently passing.
+    assert len(ranges) == len(TOPLEVEL_ALLOWED_CLASSES), (
+        "expected to locate every sanctioned Toplevel class "
+        f"{sorted(TOPLEVEL_ALLOWED_CLASSES)}; found {len(ranges)} class bodies"
+    )
+
+    offenders = []
+    for m in TOPLEVEL_RE.finditer(MAIN_SRC):
+        lineno = MAIN_SRC.count("\n", 0, m.start()) + 1
+        if not any(start <= lineno <= end for start, end in ranges):
+            offenders.append((lineno, _line_of(m.start()).strip()))
+
+    assert not offenders, (
+        "Toplevel/CTkToplevel instantiated outside ToolTip/FloatingIndicator "
+        "(CLAUDE.md rule 2: no popup dialogs — use an inline _show_inline_panel "
+        f"CTkFrame instead). Offenders (line, src): {offenders}"
+    )
+
+
+def test_no_grab_set_call_sites():
+    hits = [
+        (MAIN_SRC.count("\n", 0, m.start()) + 1, _line_of(m.start()).strip())
+        for m in GRAB_SET_RE.finditer(MAIN_SRC)
+    ]
+    assert not hits, (
+        "`.grab_set()` is banned (CLAUDE.md rule 2 — modal Toplevels caused the "
+        f"Wayland focus/sizing bugs). Hits: {hits}"
+    )
