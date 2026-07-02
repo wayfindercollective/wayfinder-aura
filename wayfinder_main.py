@@ -5179,7 +5179,21 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         self.benchmark_status_label.pack(side="left", padx=(15, 0))
-        
+
+        # Thin indeterminate busy bar under the button row — hidden until a run starts.
+        # Driven by our own >=100ms tick (_tick_benchmark_bar); NEVER .start() (its
+        # internal loop re-arms every 20ms, banned by rule 1 + the ratchet test).
+        self.benchmark_progress = ctk.CTkProgressBar(
+            benchmark_content,
+            height=4,
+            mode="indeterminate",
+            progress_color=COLORS["accent"],
+            fg_color=COLORS["bg_input"],
+        )
+        self.benchmark_progress.pack(fill="x", pady=(8, 0))
+        self.benchmark_progress.pack_forget()  # hidden by default
+        self._benchmark_running = False
+
         # Hide local benchmark tile if starting in Remote mode
         current_mode = self.config.get("processing_mode", "local")
         if current_mode == "remote":
@@ -5362,6 +5376,25 @@ class WayfinderApp(ctk.CTk):
         
         self.log("   📊 Updated tooltips with new benchmark data")
     
+    def _tick_benchmark_bar(self) -> None:
+        """Advance the indeterminate benchmark bar at 120ms (>=100ms, ratchet-safe;
+        NEVER .start() — that re-arms every 20ms). Self-cancels and hides the bar once
+        _benchmark_running clears (set in the benchmark's completion/error path)."""
+        if not getattr(self, "_benchmark_running", False):
+            try:
+                self.benchmark_progress.pack_forget()
+            except Exception:
+                pass
+            return
+        try:
+            self.benchmark_progress.step()
+        except Exception:
+            pass
+        try:
+            self.after(120, self._tick_benchmark_bar)
+        except Exception:
+            pass
+
     def _run_inline_benchmark(self):
         """Run a quick benchmark on the current model with live timer feedback."""
         import subprocess
@@ -5437,6 +5470,13 @@ class WayfinderApp(ctk.CTk):
         # Disable button and start timer
         self.benchmark_test_btn.configure(state="disabled", text="⏳ Starting 0s", fg_color=COLORS["accent_green"])
         self.benchmark_status_label.configure(text=f"Preparing {model_name}...")
+        # Show + drive the indeterminate busy bar (our own >=100ms tick, never .start()).
+        self._benchmark_running = True
+        try:
+            self.benchmark_progress.pack(fill="x", pady=(8, 0))
+            self._tick_benchmark_bar()
+        except Exception:
+            pass
         timer_state["timer_id"] = self.after(1000, update_timer)
         
         def run_benchmark_thread():
@@ -5590,6 +5630,9 @@ class WayfinderApp(ctk.CTk):
         
         def on_complete(gpu_time, cpu_time, error):
             """Handle benchmark completion on main thread."""
+            # Clear the busy flag first so the bar's next tick stops + hides it,
+            # covering both the success and the early-return error path below.
+            self._benchmark_running = False
             try:
                 debug_log(f"on_complete EXECUTING: GPU={gpu_time}, CPU={cpu_time}, error={error}")
                 stop_timer()
