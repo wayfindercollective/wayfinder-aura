@@ -7816,7 +7816,11 @@ class WayfinderApp(ctk.CTk):
 
             # Load profile data
             try:
-                from wayfinder.core.voice_profile import get_voice_profile
+                from wayfinder.core.voice_profile import (
+                    get_voice_profile,
+                    merge_vocab_view,
+                    diff_vocab_edit,
+                )
                 voice_profile = get_voice_profile()
                 stats = voice_profile.get_stats()
             except Exception as e:
@@ -7868,25 +7872,47 @@ class WayfinderApp(ctk.CTk):
                 summary_text.insert("1.0", "(No profile summary yet — keep talking to build one!)")
                 summary_text.configure(text_color=COLORS["text_muted"])
 
-            # Learned Vocabulary section
+            # Vocabulary section — editable. Pinned terms bias whisper; deleting a
+            # learned word permanently ignores it (fixes bad auto-learns like "don").
             ctk.CTkLabel(
                 content,
-                text="Learned Vocabulary",
+                text="Vocabulary",
                 font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 text_color=COLORS["text_primary"],
-            ).pack(anchor="w", padx=8, pady=(15, 5))
-
-            vocabulary = stats.get("vocabulary", [])
-            vocab_display = ", ".join(vocabulary[:30]) if vocabulary else "(No vocabulary learned yet)"
+            ).pack(anchor="w", padx=8, pady=(15, 2))
 
             ctk.CTkLabel(
                 content,
-                text=vocab_display,
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["accent"] if vocabulary else COLORS["text_muted"],
+                text='one term per line — add names or fix spellings ("Daan"); your edits stick',
+                font=(self.font_body[0], self.font_sizes["caption"]),
+                text_color=COLORS["text_muted"],
                 wraplength=490,
                 justify="left",
-            ).pack(anchor="w", padx=8, pady=(0, 15))
+            ).pack(anchor="w", padx=8, pady=(0, 5))
+
+            # Snapshot the learned/ignored lists the editor is seeded from — the
+            # save diff must run against THESE, not a live re-read: a dictation
+            # while the panel is open must not get its new words auto-ignored,
+            # and prior ignores must survive saves (see diff_vocab_edit).
+            learned_at_seed = stats.get("vocabulary", [])
+            ignored_at_seed = voice_profile.get_ignored_words()
+            vocab_view = merge_vocab_view(
+                self.config.get("custom_vocabulary", []),
+                learned_at_seed,
+                ignored_at_seed,
+            )
+            vocab_text = ctk.CTkTextbox(
+                content,
+                font=(self.font_body[0], self.font_sizes["body"]),
+                fg_color=COLORS["bg_input"],
+                text_color=COLORS["text_primary"],
+                corner_radius=RADIUS["sm"],
+                height=120,
+                wrap="none",
+            )
+            vocab_text.pack(fill="x", padx=8, pady=(0, 15))
+            if vocab_view:
+                vocab_text.insert("1.0", "\n".join(vocab_view))
 
             # Buttons
             btn_frame = ctk.CTkFrame(content, fg_color="transparent")
@@ -7896,6 +7922,21 @@ class WayfinderApp(ctk.CTk):
                 new_summary = summary_text.get("1.0", "end").strip()
                 try:
                     voice_profile.set_summary(new_summary)
+                    # Persist the edited vocabulary: split the editor lines into
+                    # pinned (custom) terms fed to whisper and deleted learned
+                    # words to permanently ignore. Guarded so a vocab failure can
+                    # never crash the panel or lose the summary save above.
+                    try:
+                        lines = vocab_text.get("1.0", "end").splitlines()
+                        custom, ignored = diff_vocab_edit(
+                            lines, learned_at_seed, ignored_at_seed
+                        )
+                        self.config["custom_vocabulary"] = custom
+                        save_config(self.config)
+                        voice_profile.set_ignored_words(ignored)
+                        self.log(f"✓ Vocabulary saved — {len(custom)} pinned term(s)")
+                    except Exception as ve:
+                        self.log(f"⚠ Could not save vocabulary: {ve}")
                     self.log("✓ Voice profile summary saved")
                     close_panel()
                 except Exception as e:

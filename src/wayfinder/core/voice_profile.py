@@ -15,7 +15,7 @@ import threading
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Common English words to exclude from vocabulary extraction
 # This is a minimal set - we want to catch domain-specific terms
@@ -117,12 +117,13 @@ class VoiceProfile:
             "profile": {
                 "summary": "",
                 "vocabulary": [],
+                "vocabulary_ignore": [],
                 "generated_at": 0,
                 "samples_used": 0,
             },
             "transcriptions_since_regen": 0,
         }
-        
+
         # Thread safety
         self._lock = threading.Lock()
         self._regen_in_progress = False
@@ -141,6 +142,8 @@ class VoiceProfile:
                     self._data["profile"] = {
                         "summary": loaded.get("profile", {}).get("summary", ""),
                         "vocabulary": loaded.get("profile", {}).get("vocabulary", []),
+                        # Default for old profile files written before the editable-vocab feature.
+                        "vocabulary_ignore": loaded.get("profile", {}).get("vocabulary_ignore", []),
                         "generated_at": loaded.get("profile", {}).get("generated_at", 0),
                         "samples_used": loaded.get("profile", {}).get("samples_used", 0),
                     }
@@ -229,17 +232,25 @@ class VoiceProfile:
         """
         Extract frequently used uncommon words from history.
         Called automatically after adding transcriptions.
+
+        Words the user permanently deleted (``vocabulary_ignore``) are filtered
+        out here so a bad auto-learn (e.g. whisper mishearing "Daan" as "don")
+        never reappears in the learned list. Extracted words are already
+        lowercase, so the ignore list is compared as a lowercase set.
         """
         # Combine all transcription text
         all_text = " ".join(item["text"] for item in self._data["history"])
-        
+
         # Extract words (alphanumeric, 3+ characters)
         words = re.findall(r'\b[a-zA-Z]{3,}\b', all_text.lower())
-        
-        # Count frequencies, excluding common words
+
+        # Words the user deleted from the editor — never re-learn these.
+        ignored = {w.lower() for w in self._data["profile"].get("vocabulary_ignore", [])}
+
+        # Count frequencies, excluding common and user-ignored words
         word_counts = Counter(
             word for word in words
-            if word not in COMMON_WORDS
+            if word not in COMMON_WORDS and word not in ignored
         )
         
         # Get top 50 most frequent uncommon words (appearing 2+ times)
@@ -354,6 +365,40 @@ class VoiceProfile:
         """Get the learned vocabulary list."""
         with self._lock:
             return self._data["profile"].get("vocabulary", []).copy()
+
+    def get_ignored_words(self) -> List[str]:
+        """Get the list of learned words the user permanently deleted.
+
+        These are auto-learned words the user removed in the editor; they are
+        filtered out of future vocabulary extraction so they never re-learn.
+        """
+        with self._lock:
+            return self._data["profile"].get("vocabulary_ignore", []).copy()
+
+    def set_ignored_words(self, words: List[str]) -> None:
+        """Replace the permanent ignore list and re-apply it immediately.
+
+        Persists the new list, then re-runs vocabulary extraction so the learned
+        list reflects the new ignores right away (the next ``get_vocabulary()``
+        call already excludes them). Whitespace-only entries are dropped and the
+        list is deduped case-insensitively (case and order preserved).
+        """
+        with self._lock:
+            seen = set()
+            cleaned: List[str] = []
+            for word in words or []:
+                if not word or not word.strip():
+                    continue
+                word = word.strip()
+                key = word.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                cleaned.append(word)
+            self._data["profile"]["vocabulary_ignore"] = cleaned
+            # Re-derive the learned list so removed words drop out immediately.
+            self._update_vocabulary()
+            self._save()
     
     def get_summary(self) -> str:
         """Get the profile summary."""
@@ -410,6 +455,7 @@ class VoiceProfile:
                 "profile": {
                     "summary": "",
                     "vocabulary": [],
+                    "vocabulary_ignore": [],
                     "generated_at": 0,
                     "samples_used": 0,
                 },
@@ -470,3 +516,121 @@ def reset_voice_profile() -> None:
     """Reset the global VoiceProfile instance (for testing)."""
     global _voice_profile
     _voice_profile = None
+
+
+# =============================================================================
+# Editable-vocabulary helpers (pure functions — no I/O, unit-testable)
+# =============================================================================
+#
+# The Voice Profile editor shows ONE flat list, but three kinds of terms feed it:
+#
+#   custom  — user-pinned terms. Stored in config["custom_vocabulary"] and fed
+#             directly to whisper's initial prompt every dictation. This is how
+#             the user teaches whisper a name/spelling ("Daan") it keeps mishearing.
+#   ignored — auto-learned words the user deleted. Stored in the profile's
+#             vocabulary_ignore list and permanently filtered from extraction so
+#             the bad guess (e.g. "don") never comes back.
+#   learned — auto-extracted frequent terms. Feeds the personal-tone LLM context,
+#             regenerated from history after every transcription.
+#
+# merge_vocab_view builds the editor's list from these three; diff_vocab_edit
+# splits the user's edited list back into (custom, ignored).
+
+
+def merge_vocab_view(
+    custom: List[str], learned: List[str], ignored: List[str]
+) -> List[str]:
+    """Build the flat list shown in the vocabulary editor.
+
+    Custom (user-pinned) terms come first with case and order preserved, then
+    the learned words minus any that are ignored or that case-insensitively
+    duplicate a custom term. The result has no case-insensitive duplicates.
+
+    Args:
+        custom: user-pinned terms (config["custom_vocabulary"]).
+        learned: auto-extracted vocabulary.
+        ignored: learned words the user permanently deleted.
+
+    Returns:
+        The de-duplicated display list, custom terms first.
+    """
+    ignored_lower = {w.lower() for w in ignored}
+    result: List[str] = []
+    seen = set()
+
+    for term in custom:
+        if not term or not term.strip():
+            continue
+        term = term.strip()
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(term)
+
+    for word in learned:
+        if not word or not word.strip():
+            continue
+        word = word.strip()
+        key = word.lower()
+        if key in ignored_lower or key in seen:
+            continue
+        seen.add(key)
+        result.append(word)
+
+    return result
+
+
+def diff_vocab_edit(
+    edited: List[str], learned: List[str], prev_ignored: List[str] = ()
+) -> Tuple[List[str], List[str]]:
+    """Split an edited vocabulary list back into (custom, ignored).
+
+    A line is treated as a *custom* pinned term if its lowercase form is NOT one
+    of the current learned words — i.e. the user typed something new (a name, a
+    corrected spelling). Learned words the user removed become *ignored*.
+
+    ``prev_ignored`` MUST be passed on every save: previously ignored words are
+    already filtered out of ``learned``, so a plain learned-vs-edited diff would
+    drop them from the ignore list and the extractor would resurrect them from
+    history on the next dictation. They stay ignored unless the user typed them
+    back into the editor (which revives them as a pinned custom term).
+
+    Args:
+        edited: the lines from the editor (one term per line).
+        learned: the learned vocabulary the editor was SEEDED from (a snapshot,
+            not a live re-read — words learned while the editor was open must
+            not be treated as user-deleted).
+        prev_ignored: the ignore list as of seeding time.
+
+    Returns:
+        (custom, ignored):
+          custom  — edited lines not in learned, case/order preserved, deduped
+                    case-insensitively, empty/whitespace lines dropped.
+          ignored — learned words whose lowercase form is absent from the
+                    edited list, plus prior ignores the user did not retype.
+    """
+    learned_lower = {w.lower() for w in learned}
+    edited_lower = set()
+    custom: List[str] = []
+    seen = set()
+
+    for line in edited:
+        if not line or not line.strip():
+            continue
+        line = line.strip()
+        key = line.lower()
+        edited_lower.add(key)
+        if key in learned_lower or key in seen:
+            continue
+        seen.add(key)
+        custom.append(line)
+
+    ignored = [w for w in learned if w.lower() not in edited_lower]
+    ignored_lower = {w.lower() for w in ignored}
+    for word in prev_ignored:
+        key = word.lower()
+        if key not in edited_lower and key not in ignored_lower:
+            ignored_lower.add(key)
+            ignored.append(word)
+    return custom, ignored
