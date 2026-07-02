@@ -102,7 +102,7 @@ PREMIUM_FEATURES = {
     "faster_whisper": ("Faster-Whisper Backend", "CTranslate2 optimized inference engine"),
     "large_models": ("Large Models", "Access to Medium.en and Large v3 Turbo models"),
     "gpu_acceleration": ("GPU Acceleration", "Vulkan GPU transcription — much faster, and makes the large/turbo models usable on a Steam Deck"),
-    "cloud_backends": ("Cloud Transcription", "Groq and OpenAI Whisper API backends"),
+    "cloud_backends": ("Cloud Processing", "Groq/OpenAI Whisper transcription + GPT/Claude text cleanup — best quality for Strong & Caricature modes"),
     "chunked_recording": ("Chunked Recording", "Unlimited duration with real-time feedback"),
     "advanced_preprocessing": ("Advanced Audio", "Medium and Heavy preprocessing modes"),
     "high_beam_search": ("High Accuracy Mode", "Beam search 4-10 for better accuracy"),
@@ -550,8 +550,10 @@ class FeatureGate:
         """Get upgrade prompt for a locked feature."""
         if feature_id in PREMIUM_FEATURES:
             name, desc = PREMIUM_FEATURES[feature_id]
-            return f"🔒 {name} requires Wayfinder Aura Premium.\n\n{desc}\n\nUpgrade for $20 (launch price, reg. $40) at wayfinder.dev/premium"
-        return "This feature requires Wayfinder Aura Premium."
+            return (f"🔒 {name} requires Wayfinder Aura Ultra.\n\n{desc}\n\n"
+                    f"Support the project — get Ultra for $20 (launch price, reg. $40) "
+                    f"at wayfinder.dev/premium and earn your halo 😇")
+        return "This feature requires Wayfinder Aura Ultra."
     
     def activate(self, key: str) -> LicenseInfo:
         """
