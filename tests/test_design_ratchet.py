@@ -189,17 +189,17 @@ def test_no_progressbar_start_loop():
 # marshaling (callback != enclosing method) is explicitly NOT flagged.
 #
 # The grandfathered whitelist below is every self-rearming loop that fires
-# faster than 100ms in the live app today. Four are contractual per CLAUDE.md
-# rule 9 (hero 30fps=33ms idle / 15fps=66ms, tray/mic feedback); one
-# (_animate_emojis, 16ms confetti) is a known rule violation slated for
-# deletion in Phase 11. The test's job is to make any NEW sub-100ms
-# self-rearming loop fail the suite.
+# faster than 100ms in the live app today. All four are contractual per
+# CLAUDE.md rule 9 (hero 30fps=33ms idle / 15fps=66ms, tray/mic feedback).
+# The old confetti _animate_emojis 16ms bounce was DELETED in Phase 11 (the
+# ConfettiOverlay is now a static inline toast) — its whitelist entry is gone
+# so the lint now enforces that it never returns. The test's job is to make any
+# NEW sub-100ms self-rearming loop fail the suite.
 GRANDFATHERED_SUB100_SELF_REARM = {
     "_animate_hero",        # hero waveform, 66ms = 15fps active (rule 9)
     "_animate_idle_breath",  # hero idle breath, 33ms = 30fps idle (rule 9)
     "_tray_pulse_step",     # tray recording pulse, 50ms (deliberate, CPU-validated)
     "_update_mic_test",     # calibration level meter, 50ms
-    "_animate_emojis",      # confetti easter egg, 16ms — Phase 11 deletes this
 }
 
 
