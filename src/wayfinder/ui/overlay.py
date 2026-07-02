@@ -663,7 +663,13 @@ class AnimatedValue(QObject):
         """Animate value to target over duration ms (250ms ease-out = engineered feel)."""
         if self._animation:
             self._animation.stop()
-        
+
+        # duration<=0 means "jump now" — a zero-duration QVariantAnimation never
+        # emits valueChanged, so the jump would silently not happen.
+        if duration <= 0:
+            self.value = target
+            return
+
         self._animation = QVariantAnimation(self)
         self._animation.setStartValue(self._value)
         self._animation.setEndValue(target)
@@ -696,7 +702,14 @@ class ColorAnimator(QObject):
         """Animate color to target over duration ms (250ms ease-out = engineered feel)."""
         if self._animation:
             self._animation.stop()
-        
+
+        # duration<=0 means "jump now" — a zero-duration QVariantAnimation never
+        # emits valueChanged, so animate=False transitions silently kept the old
+        # color (grey waves at boot until the first dictation, 2026-07-02).
+        if duration <= 0:
+            self.set_color_immediate(target)
+            return
+
         start_color = self._color
         
         self._animation = QVariantAnimation(self)
@@ -779,10 +792,14 @@ class GlassmorphicOverlay(QWidget):
         self._opacity = AnimatedValue(0.0, self)
         self._opacity.valueChanged.connect(self._on_opacity_changed)
         
-        self._border_color_top = ColorAnimator(QColor("#2D333B"), self)
-        self._border_color_bottom = ColorAnimator(QColor("#161B22"), self)
-        self._glow_color = ColorAnimator(QColor("#21262D"), self)
-        self._wave_color = ColorAnimator(QColor("#3D444D"), self)
+        # Seed from the READY palette so the very first painted frame is already
+        # on-brand. These previously duplicated pre-2026-07 idle greys and only
+        # healed on the first ANIMATED state change (boot showed grey waves).
+        _boot = STATE_PALETTES[OverlayState.READY]
+        self._border_color_top = ColorAnimator(QColor(_boot.border_top), self)
+        self._border_color_bottom = ColorAnimator(QColor(_boot.border_bottom), self)
+        self._glow_color = ColorAnimator(QColor(_boot.glow), self)
+        self._wave_color = ColorAnimator(QColor(_boot.wave), self)
         
         # Style badge color animator
         initial_style = STYLE_PALETTES.get("professional", STYLE_PALETTES["professional"])
@@ -1749,7 +1766,7 @@ def run_overlay():
     overlay.set_style_indicator(initial_style, animate=False)  # Set initial style
     
     if mode == "persistent":
-        # Start in READY state (visible, grey)
+        # Start in READY state (visible, indigo READY palette)
         overlay._overlay_mode = mode
         
         # Calculate initial size for "Ready" text
