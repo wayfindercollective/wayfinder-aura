@@ -2233,6 +2233,11 @@ def socket_listener(event_queue, stop_event, log_callback=None):
                     # Tray "Quit" — clean full shutdown
                     log("👋 Quit received via socket")
                     event_queue.put((EventType.QUIT_APP, None))
+                elif data_str.startswith("tab:"):
+                    # Dev/verification: switch the main-window tab deterministically
+                    # (used by the screenshot verification loop; harmless in production)
+                    tab_id = data_str.split(":", 1)[1]
+                    event_queue.put((EventType.SWITCH_TAB, tab_id))
                 conn.close()
             except socket.timeout:
                 continue
@@ -13473,6 +13478,9 @@ class WayfinderApp(ctk.CTk):
             self.force_reset()
         elif event_type == EventType.QUIT_APP:
             self.quit_app()
+        elif event_type == EventType.SWITCH_TAB:
+            if data in ("dictate", "settings", "style", "history"):
+                self._switch_tab(data)
         elif event_type == EventType.TRANSCRIPTION_DONE:
             text, gen = self._split_gen(data)
             self.on_transcription_done(text, gen)
