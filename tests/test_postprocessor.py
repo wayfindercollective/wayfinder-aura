@@ -878,3 +878,161 @@ class TestLlamaGpuCpuFallback:
              patch.object(b, "_probe_gpu_ok", return_value=True) as probe:
             b.warm_up()
         probe.assert_called_once()  # first dictation lands on the right binary
+
+
+# =============================================================================
+# GGUF stem tier detection (quirk keys are ollama-style; configs carry stems)
+# =============================================================================
+
+
+class TestGgufStemTierDetection:
+    """llama_cpp configs carry GGUF file stems, not ollama names — both must match.
+
+    Regression: 'phi3:mini' never matched 'Phi-3-mini-4k-instruct-q4', so the one
+    catalog model that supports strong/caricature fell through to the 'mini'
+    pattern (tier 'small') and both modes were silently downgraded on it.
+    """
+
+    def test_phi3_mini_gguf_stem_is_standard_tier(self):
+        assert detect_model_tier("Phi-3-mini-4k-instruct-q4") == "standard"
+
+    def test_gemma3_1b_gguf_stem_is_small(self):
+        assert detect_model_tier("google_gemma-3-1b-it-Q4_K_M") == "small"
+
+    def test_qwen35_2b_gguf_stem_is_small(self):
+        assert detect_model_tier("Qwen3.5-2B-Q4_K_M") == "small"
+
+    def test_smollm2_gguf_stem_is_tiny(self):
+        assert detect_model_tier("smollm2-360m-instruct-q8_0") == "tiny"
+
+    def test_llama32_3b_gguf_stem_is_standard(self):
+        assert detect_model_tier("Llama-3.2-3B-Instruct-Q4_K_M") == "standard"
+
+    def test_gguf_stem_quirks_match(self):
+        assert "rewrites_standard_mode" in get_model_quirks("Phi-3-mini-4k-instruct-q4")["issues"]
+
+
+# =============================================================================
+# Strong / caricature intensity routing
+# =============================================================================
+
+
+class TestIntensityRouting:
+    """Strong and caricature must actually change the prompt on capable models,
+    stay capped on small ones, and caricature must reach the minimal tone."""
+
+    CAPABLE = "/x/Phi-3-mini-4k-instruct-q4.gguf"
+    SMALL = "/x/google_gemma-3-1b-it-Q4_K_M.gguf"
+
+    def test_minimal_caricature_uses_caricature_prompt_on_capable_model(self):
+        from wayfinder.core.postprocessor import build_prompt
+        cfg = {"output_tone": "minimal", "caricature_mode": True,
+               "post_processing_backend": "llama_cpp",
+               "llama_cpp_model_path": self.CAPABLE}
+        prompt, _ = build_prompt("hello world test", cfg)
+        assert "SILLY" in prompt and "EXAGGERATED" in prompt
+
+    def test_minimal_caricature_downgrades_to_minimal_prompt_on_small_model(self):
+        from wayfinder.core.postprocessor import build_prompt
+        cfg = {"output_tone": "minimal", "caricature_mode": True,
+               "post_processing_backend": "llama_cpp",
+               "llama_cpp_model_path": self.SMALL}
+        prompt, _ = build_prompt("hello world test", cfg)
+        assert "SILLY" not in prompt
+        assert "filler sounds" in prompt
+
+    def test_minimal_caricature_small_model_keeps_instant_regex_path(self):
+        cfg = {"output_tone": "minimal", "caricature_mode": True,
+               "post_processing_enabled": True,
+               "post_processing_backend": "llama_cpp",
+               "llama_cpp_model_path": self.SMALL}
+        out = process_with_config("um so this is a test you know", cfg)
+        assert "um" not in out.lower().split()  # regex cleanup ran, no LLM needed
+
+    def test_minimal_filler_rules_caricature_entry_is_reachable(self):
+        assert get_filler_rules("minimal", "caricature") == FILLER_RULES["minimal"]["caricature"]
+
+    def test_cli_backend_keeps_caricature_on_capable_model(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="casual",
+                               caricature_mode=True)
+        assert b.intensity == "caricature"
+
+    def test_cli_backend_caps_caricature_on_small_model(self):
+        b = LlamaCppCliBackend(model_path=self.SMALL, output_tone="casual",
+                               caricature_mode=True)
+        assert b.intensity == "standard"
+
+    def test_cli_backend_caps_strong_on_small_model(self):
+        b = LlamaCppCliBackend(model_path=self.SMALL, output_tone="professional",
+                               strong_mode=True)
+        assert b.intensity == "standard"
+
+    def test_cli_caricature_prompt_is_a_rewrite_prompt(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="casual",
+                               caricature_mode=True)
+        p = b.build_cli_prompt("some text", "casual", "caricature")
+        assert "PARODY" in p
+        assert "90 percent" not in p  # the don't-rewrite guard must not neuter it
+
+    def test_cli_strong_prompt_allows_restructuring(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="professional",
+                               strong_mode=True)
+        p = b.build_cli_prompt("some text", "professional", "strong")
+        assert "restructure" in p
+        assert "90 percent" not in p
+
+    def test_cli_standard_prompt_keeps_dont_rewrite_guard(self):
+        b = LlamaCppCliBackend(model_path=self.SMALL, output_tone="professional")
+        p = b.build_cli_prompt("some text", "professional", "standard")
+        assert "90 percent" in p
+
+    def test_cli_minimal_caricature_prompt_is_parody(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="minimal",
+                               caricature_mode=True)
+        p = b.build_cli_prompt("some text", "minimal", "caricature")
+        assert "PARODY" in p
+
+
+# =============================================================================
+# Extractor behavior per intensity
+# =============================================================================
+
+
+class TestExtractorIntensity:
+    """Strong/caricature output is legitimately longer and multi-part — the
+    extractor must not truncate it at the first paragraph like standard mode."""
+
+    CAPABLE = "/x/Phi-3-mini-4k-instruct-q4.gguf"
+
+    def test_caricature_output_keeps_later_paragraphs(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="professional",
+                               caricature_mode=True)
+        prompt = b.build_cli_prompt("input", "professional", "caricature")
+        stdout = prompt + "PARA ONE with SYNERGY.\n\nPARA TWO is MISSION-CRITICAL ☕."
+        out = b._extract_cli_output(stdout, prompt)
+        assert "PARA TWO" in out
+
+    def test_strong_output_keeps_later_paragraphs(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="professional",
+                               strong_mode=True)
+        prompt = b.build_cli_prompt("input", "professional", "strong")
+        stdout = prompt + "First point.\n\nSecond paragraph of the answer."
+        out = b._extract_cli_output(stdout, prompt)
+        assert "Second paragraph" in out
+
+    def test_standard_output_still_truncates_trailing_junk(self):
+        b = LlamaCppCliBackend(model_path="/x/google_gemma-3-1b-it-Q4_K_M.gguf",
+                               output_tone="professional")
+        prompt = b.build_cli_prompt("input", "professional", "standard")
+        stdout = prompt + "First paragraph.\n\nHere is an explanation of the changes."
+        out = b._extract_cli_output(stdout, prompt)
+        assert "explanation" not in out
+
+    def test_caricature_output_still_cuts_debug_markers(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="casual",
+                               caricature_mode=True)
+        prompt = b.build_cli_prompt("input", "casual", "caricature")
+        stdout = prompt + "fr fr no cap 💀\nmain: decoded 42 tokens"
+        out = b._extract_cli_output(stdout, prompt)
+        assert "decoded" not in out
+        assert "fr fr" in out
