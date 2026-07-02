@@ -3453,6 +3453,11 @@ class WayfinderApp(ctk.CTk):
             device=self._resolved_audio_device,
             sample_rate=self.config["sample_rate"],
             idle_secs=self.config.get("mic_warm_idle_secs", 30.0),
+            # Called after a PortAudio rescan when every input fails: re-resolves the
+            # user's saved mic BY NAME against the fresh device table. Covers the
+            # boot-while-mic-off case (USB-hub mic powered on after the app started) —
+            # without this, dictation fails with PaErrorCode -9999 until an app restart.
+            resolve_device=lambda: resolve_audio_device(self.config),
         )
 
         # Standard recorder for short recordings

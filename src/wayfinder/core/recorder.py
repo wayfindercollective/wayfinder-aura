@@ -98,6 +98,24 @@ def _is_steam_deck() -> bool:
     return _IS_STEAM_DECK
 
 
+def _pa_rescan() -> bool:
+    """Force PortAudio to rebuild its device table. Returns True if the re-init worked.
+
+    PortAudio snapshots the host's devices at initialization and NEVER updates the
+    table, so a device that appears later (a mic on a USB hub powered on after the
+    app booted) is invisible to this process — by index OR by name — until the
+    library is re-initialized. sounddevice exposes that as _terminate/_initialize.
+    Only call this with no streams open: re-init invalidates existing streams.
+    """
+    try:
+        sd._terminate()
+        sd._initialize()
+        return True
+    except Exception as e:
+        print(f"PortAudio rescan failed: {e}")
+        return False
+
+
 def _system_default_input_index() -> int | None:
     """Index of the ALSA ``pulse``/``default`` PCM that routes to the user's system-default source.
 
@@ -642,11 +660,18 @@ class WarmMic:
     """
 
     def __init__(self, device: int | None = None, sample_rate: int = 16000,
-                 channels: int = 1, idle_secs: float = 30.0):
+                 channels: int = 1, idle_secs: float = 30.0,
+                 resolve_device: Callable[[], int | None] | None = None):
         self.device = device
         self.target_sample_rate = sample_rate
         self.channels = channels
         self.idle_secs = idle_secs
+        # Optional re-resolver (e.g. the app's name-based resolve_audio_device). Called
+        # after a PortAudio rescan when the whole fallback chain fails — the one case a
+        # rescan can fix is a device that APPEARED after this process initialized
+        # PortAudio (its device table is a snapshot from init and never updates), e.g.
+        # a mic on a USB hub powered on after the app booted.
+        self._resolve_device = resolve_device
         self._stream: sd.InputStream | None = None
         self._recording_sample_rate: int | None = None
         self._sink: Callable | None = None
@@ -673,7 +698,31 @@ class WarmMic:
             sink(indata, frames, time_info, status)
 
     def _open(self) -> None:
-        """Open the stream, healing a stale device index via the fallback chain."""
+        """Open the stream, healing a stale device index via the fallback chain.
+
+        If the ENTIRE chain fails, force a PortAudio rescan and retry once: PortAudio's
+        device table is a snapshot from process init, so a mic that appeared after the
+        app booted (USB hub powered on in the morning) is invisible to every rung of
+        the chain until the tables are rebuilt (2026-07-02 morning failure mode).
+        """
+        try:
+            self._open_chain()
+        except Exception as first_err:
+            if not _pa_rescan():
+                raise first_err
+            # Re-resolve the user's saved mic by name against the FRESH device table.
+            if self._resolve_device is not None:
+                try:
+                    fresh = self._resolve_device()
+                    if fresh is not None:
+                        self.device = fresh
+                except Exception:
+                    pass
+            print("WarmMic: all inputs failed — rescanned PortAudio devices, retrying")
+            self._open_chain()  # raises to the caller if the rescan didn't help
+
+    def _open_chain(self) -> None:
+        """Walk the fallback chain (configured -> system default -> None) once."""
         fallbacks: list[int | None] = []
         if self.device is not None:
             fallbacks.append(self.device)
