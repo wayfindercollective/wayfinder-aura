@@ -108,18 +108,50 @@ def test_font_literals_are_whitelisted():
 
 
 # ---------------------------------------------------------------------------
-# (b) Radius-literal ratchet
+# (b) Radius-literal whitelist (Phase 3: radius sweep complete)
 # ---------------------------------------------------------------------------
+# Phase 3 swept 77 hardcoded corner_radius values onto the RADIUS tokens
+# (xs=6/sm=8/md=12/lg=24/xl=28) for one corner language: 6→xs, 8→sm, 12→md
+# (pixel-identical), 10→md (the deliberate +2px unification), one-off 5→xs and
+# 24→lg. Every REMAINING literal must carry one of exactly three sanctioned
+# trailing comments, or the sweep has regressed:
+#   * "# pill: height/2, intentional off-token"     — CTkSwitch pills whose
+#                                                     radius is switch_height/2.
+#   * "# mic meter: intentional"                    — the calibration level
+#                                                     meter bg + fill bar (tiny
+#                                                     off-ramp radii by design).
+#   * "# module-scope squircle: no matching token"  — one-off squircle radii on
+#                                                     module-level helper classes
+#                                                     (ConfettiOverlay — Phase 11
+#                                                     rewrites it; FloatingIndicator
+#                                                     inset) with no ramp value.
 RADIUS_LITERAL_RE = re.compile(r"corner_radius=[0-9]+")
-RADIUS_LITERAL_BASELINE = 77  # Phase 3 will drive this toward a commented whitelist.
+SANCTIONED_RADIUS_COMMENTS = (
+    "# pill: height/2, intentional off-token",
+    "# mic meter: intentional",
+    "# module-scope squircle: no matching token",
+)
+RADIUS_WHITELIST_MAX = 7  # may only shrink, never grow
 
 
-def test_radius_literal_ratchet():
-    count = len(RADIUS_LITERAL_RE.findall(MAIN_SRC))
-    assert count <= RADIUS_LITERAL_BASELINE, (
-        f"hardcoded corner_radius literals rose to {count} (baseline "
-        f"{RADIUS_LITERAL_BASELINE}); use corner_radius=RADIUS[...] tokens. "
-        "Phase 3 drives this down to a whitelist — never up."
+def test_radius_literals_are_whitelisted():
+    unsanctioned = []
+    total = 0
+    for m in RADIUS_LITERAL_RE.finditer(MAIN_SRC):
+        total += 1
+        line = _line_of(m.start())
+        if not any(c in line for c in SANCTIONED_RADIUS_COMMENTS):
+            lineno = MAIN_SRC.count("\n", 0, m.start()) + 1
+            unsanctioned.append((lineno, line.strip()))
+    assert not unsanctioned, (
+        "hardcoded corner_radius literal(s) without a sanctioned whitelist "
+        f"comment ({SANCTIONED_RADIUS_COMMENTS}); use corner_radius=RADIUS[...] "
+        "tokens instead:\n"
+        + "\n".join(f"  {ln}: {txt}" for ln, txt in unsanctioned)
+    )
+    assert total <= RADIUS_WHITELIST_MAX, (
+        f"radius-literal whitelist grew to {total} (max {RADIUS_WHITELIST_MAX}); "
+        "the whitelist may only shrink. New shapes must use corner_radius=RADIUS[...]."
     )
 
 

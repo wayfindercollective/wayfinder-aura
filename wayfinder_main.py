@@ -573,7 +573,7 @@ class ConfettiOverlay(ctk.CTkToplevel):
         main_frame = ctk.CTkFrame(
             self,
             fg_color="#2D1B2D",  # Dark magenta
-            corner_radius=16,
+            corner_radius=16,  # module-scope squircle: no matching token
             border_width=2,
             border_color="#FF6B9D",  # Hot pink border
         )
@@ -2564,7 +2564,7 @@ class FloatingIndicator:
         self.glow_frame = ctk.CTkFrame(
             self.window,
             fg_color=shadow_color,
-            corner_radius=24,  # Squircle feel
+            corner_radius=RADIUS["lg"],  # Squircle feel
             border_width=1,
             border_color=COLORS["border_rim"],  # Pre-blended 10% violet
         )
@@ -2574,7 +2574,7 @@ class FloatingIndicator:
         self.main_frame = ctk.CTkFrame(
             self.glow_frame,
             fg_color=inner_glow_color,  # Subtle accent-tinted background
-            corner_radius=20,  # Squircle feel
+            corner_radius=20,  # Squircle feel  # module-scope squircle: no matching token
             border_width=1,
             border_color=color,
         )
@@ -5089,7 +5089,7 @@ class WayfinderApp(ctk.CTk):
         
         # Hardware info (inline)
         sys_info = BenchmarkRunner.get_system_info()
-        hw_frame = ctk.CTkFrame(benchmark_content, fg_color=COLORS["bg_hover"], corner_radius=8)
+        hw_frame = ctk.CTkFrame(benchmark_content, fg_color=COLORS["bg_hover"], corner_radius=RADIUS["sm"])
         hw_frame.pack(fill="x", pady=(0, 10))
         
         hw_text = f"CPU: {sys_info['cpu'][:45]}{'...' if len(sys_info['cpu']) > 45 else ''}\n"
@@ -5118,7 +5118,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=40,
             width=180,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -5168,7 +5168,7 @@ class WayfinderApp(ctk.CTk):
 
         self._license_key_entry = ctk.CTkEntry(
             key_row, placeholder_text="WV-XXXX-XXXX-XXXX-XXXX",
-            font=(self.font_body[0], self.font_sizes["body"]), height=34, corner_radius=8,
+            font=(self.font_body[0], self.font_sizes["body"]), height=34, corner_radius=RADIUS["sm"],
             fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
             border_color=COLORS["border_subtle"],
         )
@@ -5179,7 +5179,7 @@ class WayfinderApp(ctk.CTk):
 
         ctk.CTkButton(
             key_row, text="Activate", font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            width=90, height=34, corner_radius=8,
+            width=90, height=34, corner_radius=RADIUS["sm"],
             fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
             text_color="#FFFFFF",
             command=self._activate_license,
@@ -5201,7 +5201,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkButton(
                 action_row, text="Get Ultra — $20 (reg. $40)",
                 font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                height=32, corner_radius=8,
+                height=32, corner_radius=RADIUS["sm"],
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
                 text_color="#FFFFFF",
                 command=lambda: webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")),
@@ -6132,7 +6132,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=40,
             width=180,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -6551,7 +6551,7 @@ class WayfinderApp(ctk.CTk):
             height=22,
             switch_width=36,
             switch_height=18,
-            corner_radius=9,
+            corner_radius=9,  # pill: height/2, intentional off-token
             fg_color=COLORS["bg_elevated"],
             progress_color=COLORS["accent"],
             button_color=COLORS["text_bright"],
@@ -6589,7 +6589,7 @@ class WayfinderApp(ctk.CTk):
             height=22,
             switch_width=36,
             switch_height=18,
-            corner_radius=9,
+            corner_radius=9,  # pill: height/2, intentional off-token
             fg_color=COLORS["bg_elevated"],
             progress_color=COLORS["accent"],
             button_color=COLORS["text_bright"],
@@ -7047,7 +7047,7 @@ class WayfinderApp(ctk.CTk):
             row, text="",
             variable=self.game_mode_dictation_var,
             command=self._on_game_mode_dictation_toggled,
-            width=40, height=22, switch_width=36, switch_height=18, corner_radius=9,
+            width=40, height=22, switch_width=36, switch_height=18, corner_radius=9,  # pill: height/2, intentional off-token
             fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
             button_color=COLORS["text_bright"], button_hover_color=COLORS["text_bright"],
         )
@@ -7378,7 +7378,7 @@ class WayfinderApp(ctk.CTk):
         ]
         
         for value, title, desc in levels:
-            frame = ctk.CTkFrame(dialog, fg_color=COLORS["bg_card"], corner_radius=8)
+            frame = ctk.CTkFrame(dialog, fg_color=COLORS["bg_card"], corner_radius=RADIUS["sm"])
             frame.pack(fill="x", padx=20, pady=4)
             
             # Highlight current selection
@@ -7483,7 +7483,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkButton(
                 locked_frame, text="Upgrade", font=(self.font_body[0], self.font_sizes["small"]),
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
-                text_color="#FFFFFF", height=28, corner_radius=6,
+                text_color="#FFFFFF", height=28, corner_radius=RADIUS["xs"],
                 command=lambda: self._show_premium_prompt("voice_profiles"),
             ).pack(padx=12, pady=(0, 8))
             return
@@ -7542,7 +7542,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["small"]),
             height=28,
             width=90,
-            corner_radius=6,
+            corner_radius=RADIUS["xs"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_card"],
             text_color=COLORS["text_primary"],
@@ -7556,7 +7556,7 @@ class WayfinderApp(ctk.CTk):
                 font=(self.font_body[0], self.font_sizes["small"]),
                 height=28,
                 width=60,
-                corner_radius=6,
+                corner_radius=RADIUS["xs"],
                 fg_color=COLORS["bg_hover"],
                 hover_color=COLORS["danger_bg_hover"],
                 text_color=COLORS["text_muted"],
@@ -7613,7 +7613,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["small"]),
             height=28,
             width=90,
-            corner_radius=6,
+            corner_radius=RADIUS["xs"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_primary"],
@@ -7627,7 +7627,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["small"]),
             height=28,
             width=80,
-            corner_radius=6,
+            corner_radius=RADIUS["xs"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["danger_bg_hover"],  # Reddish hover
             text_color=COLORS["text_muted"],
@@ -7675,7 +7675,7 @@ class WayfinderApp(ctk.CTk):
             return
         
         # Stats section
-        stats_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_input"], corner_radius=10)
+        stats_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_input"], corner_radius=RADIUS["md"])
         stats_frame.pack(fill="x", pady=(0, 15))
         
         history_count = stats.get("history_count", 0)
@@ -7703,7 +7703,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_card"],
             text_color=COLORS["text_primary"],
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             height=100,
             wrap="word",
         )
@@ -7765,7 +7765,7 @@ class WayfinderApp(ctk.CTk):
             text="Save Changes",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -7777,7 +7777,7 @@ class WayfinderApp(ctk.CTk):
             text="Regenerate Profile",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_primary"],
@@ -7789,7 +7789,7 @@ class WayfinderApp(ctk.CTk):
             text="Close",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -7837,7 +7837,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=36,
             width=100,
-            corner_radius=8,
+            corner_radius=RADIUS["sm"],
             fg_color=COLORS["danger"],
             hover_color=COLORS["danger_hover"],
             text_color="#FFFFFF",
@@ -7850,7 +7850,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["body"]),
             height=36,
             width=80,
-            corner_radius=8,
+            corner_radius=RADIUS["sm"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -8044,7 +8044,7 @@ class WayfinderApp(ctk.CTk):
         self._llamacpp_download_btn.pack(side="left")
         
         # Row 2: Model info panel (shows details about selected model)
-        self._llamacpp_info_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_hover"], corner_radius=6)
+        self._llamacpp_info_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_hover"], corner_radius=RADIUS["xs"])
         self._llamacpp_info_frame.pack(fill="x", pady=(4, 6))
         
         info_inner = ctk.CTkFrame(self._llamacpp_info_frame, fg_color="transparent")
@@ -8797,7 +8797,7 @@ class WayfinderApp(ctk.CTk):
             
             if provider == "openai":
                 # OpenAI settings
-                api_frame = ctk.CTkFrame(settings_container, fg_color=COLORS["bg_card"], corner_radius=12)
+                api_frame = ctk.CTkFrame(settings_container, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
                 api_frame.pack(fill="x", pady=(0, 12))
                 
                 ctk.CTkLabel(
@@ -8875,7 +8875,7 @@ class WayfinderApp(ctk.CTk):
                 link.bind("<Button-1>", lambda e: webbrowser.open("https://platform.openai.com/api-keys"))
                 
             else:  # anthropic
-                api_frame = ctk.CTkFrame(settings_container, fg_color=COLORS["bg_card"], corner_radius=12)
+                api_frame = ctk.CTkFrame(settings_container, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
                 api_frame.pack(fill="x", pady=(0, 12))
                 
                 ctk.CTkLabel(
@@ -9007,7 +9007,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
             height=40,
             width=100,
-            corner_radius=8,
+            corner_radius=RADIUS["sm"],
             command=dialog.destroy,
         ).pack(side="left")
         
@@ -9020,7 +9020,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["bg_base"],
             height=40,
             width=100,
-            corner_radius=8,
+            corner_radius=RADIUS["sm"],
             command=save_settings,
         ).pack(side="right")
 
@@ -9554,7 +9554,7 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_input"],
             switch_width=44,
             switch_height=24,
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
         )
         switch.grid(row=0, column=1, sticky="e", padx=(16, 0))
 
@@ -9703,7 +9703,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
             height=36,
             width=100,
-            corner_radius=8,
+            corner_radius=RADIUS["sm"],
             command=dialog.destroy,
         ).pack(side="left", expand=True)
         
@@ -9729,7 +9729,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["bg_base"],
             height=36,
             width=120,
-            corner_radius=8,
+            corner_radius=RADIUS["sm"],
             command=restart_now,
         ).pack(side="right", expand=True)
 
@@ -9839,14 +9839,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_row, text="Get Ultra — $20 (reg. $40)", font=(self.font_body[0], self.font_sizes["body"], "bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
-            text_color="#FFFFFF", height=34, corner_radius=8,
+            text_color="#FFFFFF", height=34, corner_radius=RADIUS["sm"],
             command=lambda: [webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")), _dismiss()],
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
             btn_row, text="Dismiss", font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_card"],
-            text_color=COLORS["text_muted"], height=34, corner_radius=8,
+            text_color=COLORS["text_muted"], height=34, corner_radius=RADIUS["sm"],
             command=_dismiss,
         ).pack(side="left")
 
@@ -10294,7 +10294,7 @@ class WayfinderApp(ctk.CTk):
         self._mic_meter_bg = ctk.CTkFrame(
             self._mic_meter_frame,
             fg_color=COLORS["bg_input"],
-            corner_radius=4,
+            corner_radius=4,  # mic meter: intentional
             height=14,
         )
         self._mic_meter_bg.pack(side="left", fill="x", expand=True, padx=(4, 8))
@@ -10302,7 +10302,7 @@ class WayfinderApp(ctk.CTk):
         self._mic_meter_bar = ctk.CTkFrame(
             self._mic_meter_bg,
             fg_color=COLORS["accent_green"],
-            corner_radius=3,
+            corner_radius=3,  # mic meter: intentional
             width=0,
             height=10,
         )
@@ -10830,7 +10830,7 @@ class WayfinderApp(ctk.CTk):
             installed_btn = ctk.CTkButton(
                 tab_container, text="Installed",
                 font=(self.font_body[0], self.font_sizes["body"]), height=30,
-                corner_radius=6, fg_color=COLORS["accent"], text_color="#000000",
+                corner_radius=RADIUS["xs"], fg_color=COLORS["accent"], text_color="#000000",
                 hover_color=COLORS["accent_glow"],
             )
             installed_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
@@ -10838,13 +10838,13 @@ class WayfinderApp(ctk.CTk):
             download_btn = ctk.CTkButton(
                 tab_container, text="Download",
                 font=(self.font_body[0], self.font_sizes["body"]), height=30,
-                corner_radius=6, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
+                corner_radius=RADIUS["xs"], fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
                 hover_color=COLORS["bg_elevated"],
             )
             download_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
 
             # Content area
-            content_area = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=12)
+            content_area = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
             content_area.pack(fill="both", expand=True, padx=8)
 
             current_path = os.path.expanduser(self.config.get("model_path", ""))
@@ -10870,7 +10870,7 @@ class WayfinderApp(ctk.CTk):
                     ).pack(pady=(40, 8))
                     ctk.CTkButton(
                         content_area, text="Download Models",
-                        font=(self.font_body[0], self.font_sizes["body"], "bold"), height=36, corner_radius=8,
+                        font=(self.font_body[0], self.font_sizes["body"], "bold"), height=36, corner_radius=RADIUS["sm"],
                         fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
                         text_color="#000000", command=show_download,
                     ).pack(pady=(0, 30))
@@ -10883,7 +10883,7 @@ class WayfinderApp(ctk.CTk):
                 for model in models:
                     is_current = os.path.expanduser(model["path"]) == current_path
 
-                    row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=6)
+                    row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=RADIUS["xs"])
                     row.pack(fill="x", pady=1, padx=2)
 
                     radio = ctk.CTkRadioButton(
@@ -10923,7 +10923,7 @@ class WayfinderApp(ctk.CTk):
 
                 ctk.CTkButton(
                     content_area, text="Save & Apply",
-                    font=(self.font_body[0], self.font_sizes["body"], "bold"), height=38, corner_radius=8,
+                    font=(self.font_body[0], self.font_sizes["body"], "bold"), height=38, corner_radius=RADIUS["sm"],
                     fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
                     command=save_selection,
                 ).pack(fill="x", padx=8, pady=8)
@@ -10957,7 +10957,7 @@ class WayfinderApp(ctk.CTk):
                         info = WHISPER_CPP_MODELS[model_id]
                         is_installed = downloader.is_installed(model_id)
 
-                        row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=6)
+                        row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=RADIUS["xs"])
                         row.pack(fill="x", pady=1, padx=2)
 
                         info_frame = ctk.CTkFrame(row, fg_color="transparent")
@@ -10991,7 +10991,7 @@ class WayfinderApp(ctk.CTk):
                             ctk.CTkButton(
                                 row, text="Get",
                                 font=(self.font_body[0], self.font_sizes["caption"]), width=50, height=24,
-                                corner_radius=5, fg_color=COLORS["bg_elevated"],
+                                corner_radius=RADIUS["xs"], fg_color=COLORS["bg_elevated"],
                                 hover_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
                                 command=make_handler(),
                             ).pack(side="right", padx=8, pady=5)
@@ -11013,7 +11013,7 @@ class WayfinderApp(ctk.CTk):
                     text_color=COLORS["text_secondary"],
                 ).pack(pady=(0, 12))
 
-                progress_bar = ctk.CTkProgressBar(content_area, height=16, corner_radius=8)
+                progress_bar = ctk.CTkProgressBar(content_area, height=16, corner_radius=RADIUS["sm"])
                 progress_bar.pack(fill="x", padx=16, pady=(0, 6))
                 progress_bar.set(0)
 
@@ -11108,7 +11108,7 @@ class WayfinderApp(ctk.CTk):
         presets_frame = SmoothScrollableFrame(
             inner, 
             fg_color=COLORS["bg_card"], 
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             height=200,
         )
         presets_frame.pack(fill="x", pady=(0, 15))
@@ -11143,7 +11143,7 @@ class WayfinderApp(ctk.CTk):
                 fg_color=COLORS["accent_dim"] if is_selected else COLORS["bg_hover"],
                 hover_color=COLORS["accent_glow"] if is_selected else COLORS["bg_elevated"],
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
-                corner_radius=6,
+                corner_radius=RADIUS["xs"],
                 command=lambda n=name: on_preset_select(n),
             )
             btn.pack(fill="x", padx=10, pady=5)
@@ -11162,7 +11162,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_card"],
             text_color=COLORS["text_primary"],
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             height=100,
             wrap="word",
         )
@@ -11190,7 +11190,7 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_card"],
             text_color=COLORS["text_muted"] if vocab_locked else COLORS["accent"],
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             height=60,
             wrap="word",
         )
@@ -11206,7 +11206,7 @@ class WayfinderApp(ctk.CTk):
                 vocab_text.insert("1.0", ", ".join(current_vocab))
         
         # Tip
-        tip_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_hover"], corner_radius=8)
+        tip_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_hover"], corner_radius=RADIUS["sm"])
         tip_frame.pack(fill="x", pady=(0, 15))
         ctk.CTkLabel(
             tip_frame,
@@ -11242,7 +11242,7 @@ class WayfinderApp(ctk.CTk):
             text="Save & Apply",
             font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -11254,7 +11254,7 @@ class WayfinderApp(ctk.CTk):
             text="Cancel",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -11299,7 +11299,7 @@ class WayfinderApp(ctk.CTk):
         scroll_frame = SmoothScrollableFrame(
             inner,
             fg_color=COLORS["bg_card"],
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             height=220,
         )
         scroll_frame.pack(fill="both", expand=True, pady=(0, 20))
@@ -11426,7 +11426,7 @@ class WayfinderApp(ctk.CTk):
             text="Save & Apply",
             font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -11438,7 +11438,7 @@ class WayfinderApp(ctk.CTk):
             text="Cancel",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -11556,7 +11556,7 @@ class WayfinderApp(ctk.CTk):
         
         for mode_key, mode_info in modes.items():
             is_selected = mode_key == current_mode
-            frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=10)
+            frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
             frame.pack(fill="x", pady=5)
             
             btn = ctk.CTkButton(
@@ -11567,7 +11567,7 @@ class WayfinderApp(ctk.CTk):
                 fg_color=COLORS["accent_dim"] if is_selected else COLORS["bg_hover"],
                 hover_color=COLORS["accent_glow"] if is_selected else COLORS["bg_elevated"],
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
-                corner_radius=8,
+                corner_radius=RADIUS["sm"],
                 command=lambda m=mode_key: on_mode_select(m),
             )
             btn.pack(fill="x", padx=5, pady=5)
@@ -11598,7 +11598,7 @@ class WayfinderApp(ctk.CTk):
             text="Apply",
             font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -11610,7 +11610,7 @@ class WayfinderApp(ctk.CTk):
             text="Cancel",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -11693,7 +11693,7 @@ class WayfinderApp(ctk.CTk):
                 fg_color=COLORS["bg_hover"],
                 hover_color=COLORS["bg_elevated"],
                 text_color=COLORS["text_primary"],
-                corner_radius=6,
+                corner_radius=RADIUS["xs"],
                 command=lambda v=value: (beam_var.set(v), on_change(v)),
             ).pack(side="left", padx=5)
         
@@ -11720,7 +11720,7 @@ class WayfinderApp(ctk.CTk):
             text="Save",
             font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -11732,7 +11732,7 @@ class WayfinderApp(ctk.CTk):
             text="Cancel",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -11811,7 +11811,7 @@ class WayfinderApp(ctk.CTk):
             text="Save",
             font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -11823,7 +11823,7 @@ class WayfinderApp(ctk.CTk):
             text="Cancel",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -11913,7 +11913,7 @@ class WayfinderApp(ctk.CTk):
                 fg_color=COLORS["bg_hover"],
                 hover_color=COLORS["bg_elevated"],
                 text_color=COLORS["text_primary"],
-                corner_radius=6,
+                corner_radius=RADIUS["xs"],
                 command=lambda v=val: (chunk_var.set(v), on_change(v)),
             ).pack(side="left", padx=5)
         
@@ -11929,7 +11929,7 @@ class WayfinderApp(ctk.CTk):
             text="Save",
             font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -11941,7 +11941,7 @@ class WayfinderApp(ctk.CTk):
             text="Cancel",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -11978,7 +11978,7 @@ class WayfinderApp(ctk.CTk):
         
         # Show detected GPU info
         gpu_info = get_gpu_info()
-        gpu_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=10)
+        gpu_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
         gpu_frame.pack(fill="x", pady=(0, 15))
         
         gpu_label_frame = ctk.CTkFrame(gpu_frame, fg_color="transparent")
@@ -12081,7 +12081,7 @@ class WayfinderApp(ctk.CTk):
         scroll_frame = SmoothScrollableFrame(
             inner,
             fg_color=COLORS["bg_card"],
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             height=280,
         )
         scroll_frame.pack(fill="both", expand=True, pady=(0, 20))
@@ -12161,7 +12161,7 @@ class WayfinderApp(ctk.CTk):
             ).pack(anchor="w")
         
         # Faster-Whisper specific settings (shown when selected)
-        fw_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=12)
+        fw_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
         fw_frame.pack(fill="x", pady=(0, 15))
         
         ctk.CTkLabel(
@@ -12232,7 +12232,7 @@ class WayfinderApp(ctk.CTk):
         
         # NVIDIA-specific setup help
         if gpu_info.is_nvidia:
-            nvidia_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_hover"], corner_radius=10)
+            nvidia_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_hover"], corner_radius=RADIUS["md"])
             nvidia_frame.pack(fill="x", pady=(0, 15))
             
             ctk.CTkLabel(
@@ -12278,7 +12278,7 @@ class WayfinderApp(ctk.CTk):
             text="Save",
             font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -12290,7 +12290,7 @@ class WayfinderApp(ctk.CTk):
             text="Cancel",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -12379,7 +12379,7 @@ class WayfinderApp(ctk.CTk):
                 fg_color=COLORS["bg_hover"],
                 hover_color=COLORS["bg_elevated"],
                 text_color=COLORS["text_primary"],
-                corner_radius=6,
+                corner_radius=RADIUS["xs"],
                 command=lambda v=val: (layers_var.set(v), on_change(v)),
             ).pack(side="left", padx=5)
         
@@ -12405,7 +12405,7 @@ class WayfinderApp(ctk.CTk):
             text="Save",
             font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
-            corner_radius=12,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -12417,7 +12417,7 @@ class WayfinderApp(ctk.CTk):
             text="Cancel",
             font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
-            corner_radius=10,
+            corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
