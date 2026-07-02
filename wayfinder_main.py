@@ -66,7 +66,14 @@ IS_MACOS = _sys.platform == 'darwin'
 
 # SOCKET_PATH is the single source of truth in wayfinder.config (Rule #3) — it resolves
 # to $XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock (host<->sandbox shared) or /tmp.
-from wayfinder.config import SOCKET_PATH
+from wayfinder.config import (
+    SOCKET_PATH,
+    CONFIG_DIR,
+    CONFIG_FILE,
+    DEFAULT_CONFIG,
+    load_config,
+    save_config,
+)
 from wayfinder.core.injector import inject_text, InjectionError
 from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, SILENCE_PEAK_THRESHOLD
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
@@ -80,8 +87,7 @@ from wayfinder.utils.audio_ducker import AudioDucker
 # Detect Flatpak environment
 IS_FLATPAK = os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
 
-CONFIG_DIR = Path.home() / ".config" / "wayfinder-aura"
-CONFIG_FILE = CONFIG_DIR / "config.json"
+# CONFIG_DIR / CONFIG_FILE are imported from wayfinder.config (single source).
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # Handle icon path for Flatpak vs regular install
@@ -92,116 +98,7 @@ if IS_FLATPAK:
 else:
     ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
 
-# Default whisper paths - Flatpak uses bundled binary and models
-if IS_FLATPAK:
-    _default_whisper_binary = "/app/bin/whisper-cli"
-    _default_model_dir = os.environ.get("WHISPER_MODELS_DIR", "/app/share/whisper-models")
-    # base.en is the bundled model and the right Deck-class default (Issues 11/17).
-    _default_model_path = f"{_default_model_dir}/ggml-base.en.bin"
-else:
-    _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
-    _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
-
-DEFAULT_CONFIG = {
-    "whisper_binary": _default_whisper_binary,
-    "model_path": _default_model_path,
-    "hotkey_key": 60,  # F2 - default (Super+F2 to dodge bare-F-key game collisions)
-    "hotkey_modifiers": ["super"],
-    # Style toggle hotkey (cycles Minimal → Professional → Casual → AI Prompt → Personal)
-    "style_toggle_key": 61,  # F3 - default (Super+F3)
-    "style_toggle_modifiers": ["super"],
-    "audio_device": None,
-    "sample_rate": 16000,
-    "prompt": "Hello, this is a dictation with proper punctuation and grammar.",
-    "threads": 4,  # Default to 4, auto-adjusted on first run based on CPU cores
-    "timeout": 120,
-    "min_recording_duration": 0.5,
-    "start_minimized": False,
-    "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
-    "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
-    # Processing mode: local (100% private, offline) or remote (cloud APIs for speed/quality)
-    "processing_mode": "local",  # local | remote
-    # Accuracy enhancement settings
-    "beam_size": 5,  # Beam search size (1-5 recommended, higher is slow)
-    "best_of": 3,  # Number of best candidates to consider
-    "language": "en",  # Language code: "en", "auto" for auto-detect
-    "entropy_threshold": 2.6,  # Filter low-confidence outputs (higher = accept more)
-    "no_speech_threshold": 0.5,  # Silence detection threshold (lower = more sensitive)
-    "temperature": 0.0,  # Sampling temperature (0.0 = greedy/deterministic)
-    "temperature_fallback": 0.0,  # Temperature increment for retries (0 = no retries)
-    "accuracy_mode": "balanced",  # fast | balanced | high
-    "audio_preprocessing": "light",  # off | light | medium | heavy
-    "ensure_punctuation": False,  # Additional punctuation fixes (optional, most models do this well)
-    # Vocabulary and hallucination suppression
-    "custom_vocabulary": [],  # User's personal terms appended to prompt
-    "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
-    # Voice profile learning (auto-enabled when output_tone is "personal")
-    "voice_learning_history_limit": 100,  # Max transcriptions to keep in learning history
-    "voice_learning_regen_interval": 20,  # Regenerate profile summary every N transcriptions
-    # Chunked recording settings
-    "chunked_mode": True,  # Enable chunked processing for long recordings
-    "chunk_duration": 15,  # Seconds per chunk (shorter = faster feedback)
-    "chunk_overlap": 2,  # Overlap seconds to avoid word cuts
-    "max_recording_duration": 0,  # 0 = unlimited
-    # GPU acceleration settings
-    "transcription_backend": "whisper_cpp",  # whisper_cpp | faster_whisper | groq_whisper | openai_whisper
-    "use_gpu": True,  # Enable GPU acceleration
-    "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
-    "gpu_device": "auto",  # "auto" = benchmark and pick fastest, or "0", "1", "2" for manual selection
-    "gpu_benchmark_cache": {},  # Cached GPU benchmark results
-    # Faster-Whisper specific settings
-    "faster_whisper_model": "large-v3-turbo",  # tiny, base, small, medium, large-v3, large-v3-turbo
-    "faster_whisper_compute_type": "float16",  # float16, int8, int8_float16
-    # Floating indicator settings
-    "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
-    "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
-    "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
-    # SteamOS Game Mode: when True, dictation keeps working in Game Mode with audio cues instead
-    # of the (un-renderable-over-a-game) overlay; the host-side wayfinder-mode-supervisor reads the
-    # mirror marker ~/.config/wayfinder-aura/game-mode-dictation to keep/stop the app there.
-    # NOTE: this DEFAULT_CONFIG (wayfinder_main.py) is the one the running app loads via the local
-    # load_config(); the key is ALSO in src/wayfinder/config.py to keep the duplicate in sync.
-    "game_mode_dictation": False,
-    # Watchdog: if PROCESSING (transcription + post-processing) outlives this many seconds, reset
-    # to idle instead of hanging on "Processing" forever. 0 disables. Generous so a long chunked
-    # recording + cold local LLM still completes normally.
-    "processing_timeout_secs": 120,
-    "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
-    # Overlay corner/edge placement: {top,bottom}-{left,center,right} (within the work area).
-    "overlay_anchor": "bottom-center",
-    # Style settings (5 presets that cycle via hotkey)
-    "output_tone": "professional",  # minimal | professional | casual | dev | personal
-    "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
-    # Post-processing settings (LLM cleanup)
-    "post_processing_enabled": True,  # Enable LLM post-processing
-    "post_processing_backend": "llama_cpp",  # llama_cpp | anthropic | openai
-    "post_processing_max_tokens": 1024,  # Max tokens for LLM response
-    "post_processing_temperature": 0.1,  # LLM temperature (lower = more deterministic)
-    # llama.cpp post-processing settings
-    "llama_cpp_model_path": "",  # Path to GGUF model file
-    "llama_cpp_n_ctx": 2048,  # Context window size
-    "llama_cpp_n_threads": 4,  # CPU threads
-    "llama_cpp_n_gpu_layers": -1,  # -1 = auto (all layers)
-    # Groq Whisper API settings (ultra-fast cloud transcription)
-    "groq_whisper_model": "whisper-large-v3",  # whisper-large-v3 (same quality as local, 10x faster)
-    # Cloud API settings (keys stored in config, loaded into environment on startup)
-    "groq_api_key": "",  # Groq API key (for ultra-fast cloud transcription)
-    "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
-    "openai_whisper_model": "whisper-1",  # OpenAI Whisper model
-    "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
-    "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
-    "openai_model": "gpt-4o-mini",  # OpenAI model to use
-    "openai_base_url": "",  # Custom base URL for OpenAI-compatible APIs (xAI Grok: "https://api.x.ai/v1")
-    # Setup wizard
-    "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)
-    # Benchmark results - populated by running benchmark
-    # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}
-    "benchmark_results": {},
-    "benchmark_fastest_processor": None,  # "gpu" or "cpu" - auto-detected from benchmarks
-    # API benchmark results - populated by running API latency test
-    # Format: {"openai": {"latency_10s": 2.5, "timestamp": 1234567890}, "anthropic": {...}}
-    "api_benchmark_results": {},
-}
+# whisper default paths + DEFAULT_CONFIG now live in wayfinder.config (single source).
 
 KEY_CODES = {
     "f1": 59, "f2": 60, "f3": 61, "f4": 62, "f5": 63, "f6": 64,
@@ -272,31 +169,7 @@ def _resolve_whisper_model(filename: str) -> Path | None:
     return None
 
 
-def load_config() -> dict:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                user_config = json.load(f)
-            config = DEFAULT_CONFIG.copy()
-            config.update(user_config)
-            return config
-        except (json.JSONDecodeError, IOError):
-            return DEFAULT_CONFIG.copy()
-    else:
-        save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
-
-
-def save_config(config: dict) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
-    # Config holds API keys + the license token in plaintext — restrict to owner-only.
-    try:
-        os.chmod(CONFIG_FILE, 0o600)
-    except OSError:
-        pass
+# load_config / save_config imported from wayfinder.config (single source).
 
 
 # === GPU Detection ===
