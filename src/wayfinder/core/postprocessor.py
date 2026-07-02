@@ -46,7 +46,9 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
     },
     "professional": {
         "standard": "Keep the speaker's words and order. Tighten punctuation and capitalization only. Do not restructure.",
-        "strong": "Professional email style. Clear, polite, direct. Remove casual filler.",
+        # "email style" made 3B models invent subject lines/greetings/sign-offs
+        # (3x expansion, killed by the fabrication guard -> no output at all).
+        "strong": "Professional business tone. Clear, polite, direct. Remove casual filler. Do not add greetings, sign-offs, or new information.",
         "caricature": "Corporate buzzwords overload. Use: synergy, leverage, circle back, low-hanging fruit. End with 'Thoughts? 👇'",
     },
     "casual": {
@@ -60,13 +62,17 @@ TONE_GUIDANCE: Dict[str, Dict[str, str]] = {
         # the instructions, which the echo-guard rejected, leaving dev with no output.
         "standard": "Keep the speaker's words and order. Keep all code, git, and technical terms exactly as spoken. Tighten punctuation and capitalization only. Do not restructure.",
         "strong": "Keep the speaker's voice and keep all code, git, and technical terms exactly. Tighten the wording for a Slack message or code comment. Do not reorder or add ideas.",
-        "caricature": "Over-engineered AI prompt style. Add CRITICAL:, IMPORTANT:, use CAPS for emphasis. End with 'my career depends on this 🙏'",
+        # Melodrama, not tag-spam: telling the model to "sprinkle [CRITICAL]
+        # prefixes" made it wrap individual WORDS in tags (unreadable garbage).
+        "caricature": "Melodramatic developer crisis mode. Everything is a PRODUCTION INCIDENT, even trivial things. Panic about edge cases. End with 'my career depends on this 🙏'",
     },
     "personal": {
         # Personal style uses voice profile - these are fallbacks when no profile exists
         "standard": "",
         "strong": "Lightly polish while keeping the user's natural voice.",
-        "caricature": "Exaggerate their speaking style. Add extra filler words, amplify any verbal quirks. Make it a funny impression.",
+        # "Add extra filler words" made greedy models insert 'um' between EVERY
+        # word — steer toward a theatrical impression instead of filler-spam.
+        "caricature": "Do a loving parody of the speaker: exaggerate their word choices and pet phrases into a theatrical monologue. Make it a funny impression.",
     },
 }
 
@@ -78,12 +84,17 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
     "minimal": {
         "standard": "Keep natural punctuation exactly as transcribed.",
         "strong": "Keep natural punctuation exactly as transcribed.",
-        "caricature": "Use... SO many ellipses... everywhere... Add [annotations] constantly: [clears throat], [nervous laughter], [dies inside], [sweating].",
+        # "constantly" made greedy models annotate every single word — between
+        # phrases reads as comedy instead of noise.
+        "caricature": "Use... dramatic ellipses... Add a bracketed annotation between phrases (not between every word): [clears throat], [nervous laughter], [dies inside], [sweating].",
     },
     "professional": {
         "standard": "Use proper capitalization and punctuation. Fix only light slang, e.g. \"oh thats tight bro\" -> \"Oh, very cool brother.\" Keep sentence order.",
         "strong": "Use proper punctuation. Structure with clear paragraphs if needed.",
-        "caricature": "Use EXCESSIVE CAPS for EMPHASIS on KEY BUSINESS TERMS. Add unnecessary bullet points. Include a 'Key Takeaways' section. Sign off with 'Best, [Name] | Thought Leader | Disruptor | Coffee Enthusiast ☕'.",
+        # Inline comedy only — injection flattens newlines, so bullet lists and
+        # section headers would collapse into run-on mush. No [Name] placeholders
+        # either: small models type them literally (or invent a name).
+        "caricature": "Use EXCESSIVE CAPS for EMPHASIS on KEY BUSINESS TERMS. Everything is mission-critical and value-added. Sign off with an over-the-top title like 'Best, A Certified Thought Leader | Disruptor | Coffee Enthusiast ☕'.",
     },
     "casual": {
         "standard": "Relaxed punctuation, lowercase is fine, periods optional. Do not add heavy punctuation.",
@@ -93,12 +104,17 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
     "dev": {
         "standard": "Light punctuation. Keep technical terms exactly.",
         "strong": "Use clear punctuation. Preserve all technical terminology. Only add structure (bullets, code blocks) if the user clearly listed items.",
-        "caricature": "Use XML tags: <context>, <objective>, <constraints>, <expected_output>. Add numbered steps. Include [CRITICAL], [IMPORTANT], [WARNING], [NOTE] prefixes. Use ```code blocks``` for emphasis. Add a ## Prerequisites section.",
+        # Inline comedy only (see professional note above): no XML blocks, numbered
+        # steps, or ## sections — they'd be flattened to one line at injection.
+        # Sentence-level drama, not per-word tags (see tone-guide note).
+        "caricature": "Start with [CRITICAL]. Use CAPS for TECHNICAL TERMS. Mention that it works on my machine.",
     },
     "personal": {
         "standard": "Match the user's typical punctuation habits.",
         "strong": "Clean punctuation while keeping the user's style.",
-        "caricature": "Exaggerate ALL their quirks. Commas become,,, excessive. Add 'like' and 'you know' as written text constantly. Turn their verbal tics into a signature style.",
+        # "constantly"/",,, excessive" degenerated into a comma after EVERY word —
+        # a hard cap is the only phrasing greedy small models actually follow.
+        "caricature": "At most one 'um' or 'like' per sentence. Trail off with dramatic ellipses... Add theatrical asides in parentheses (you know how it is).",
     },
 }
 
@@ -185,6 +201,8 @@ MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
         "issues": ["safety_filter_email"],
         "workaround": "Disable smart_formatting for professional/dev modes",
         "avoid_words": ["email"],
+        "tier_override": "standard",
+        "best_for": ["standard", "strong"],
     },
     "smollm2:360m": {
         "issues": ["weak_instruction_following", "hallucination_prone"],
@@ -215,12 +233,20 @@ MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
         "best_for": ["standard", "strong"],
         "recommended": True,  # Top recommendation (replaces Qwen 2.5 1.5B)
     },
-    "llama3.2:3b": {
-        "issues": [],
-        "tier_override": "standard",
-        "best_for": ["standard", "strong"],
-    },
 }
+
+
+def _normalize_model_name(name: str) -> str:
+    """Collapse a model identifier for pattern matching.
+
+    Quirk keys use ollama-style names ("phi3:mini") while llama.cpp configs carry
+    GGUF file stems ("Phi-3-mini-4k-instruct-q4") — without normalization the two
+    never match, so e.g. Phi-3-mini lost its tier_override and fell through to the
+    "mini" pattern (tier "small"), silently disabling strong/caricature on the one
+    catalog model that supports them. Stripping separators makes both forms match.
+    """
+    import re as _re
+    return _re.sub(r"[-_.:\s]", "", name.lower())
 
 
 def detect_model_tier(model_name: str, backend: str = "") -> str:
@@ -238,34 +264,36 @@ def detect_model_tier(model_name: str, backend: str = "") -> str:
     # Even "mini" variants like gpt-4o-mini are highly capable for text cleanup
     if backend in CLOUD_BACKENDS:
         return "large"
-    
-    model_lower = model_name.lower()
-    
+
+    # Match on the normalized name so ollama-style quirk keys ("phi3:mini") and
+    # GGUF file stems ("Phi-3-mini-4k-instruct-q4") resolve to the same model.
+    model_norm = _normalize_model_name(model_name)
+
     # Check for specific model overrides first
     for known_model, quirks in MODEL_QUIRKS.items():
-        if known_model in model_lower:
+        if _normalize_model_name(known_model) in model_norm:
             if "tier_override" in quirks:
                 return quirks["tier_override"]
-    
+
     # Check patterns in reverse order (largest first) to match correctly
     for tier in ["large", "standard", "small", "tiny"]:
         tier_info = MODEL_TIERS[tier]
         for pattern in tier_info["patterns"]:
-            if pattern in model_lower:
+            if _normalize_model_name(pattern) in model_norm:
                 return tier
-    
+
     # Default to small (conservative but capable)
     return "small"
 
 
 def get_model_quirks(model_name: str) -> Dict[str, Any]:
     """Get known issues/quirks for a specific model."""
-    model_lower = model_name.lower()
-    
+    model_norm = _normalize_model_name(model_name)
+
     for known_model, quirks in MODEL_QUIRKS.items():
-        if known_model in model_lower:
+        if _normalize_model_name(known_model) in model_norm:
             return quirks
-    
+
     return {"issues": [], "workaround": None}
 
 
@@ -508,7 +536,8 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
                 {"name": "Llama-3.2-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - reliable option"},
             ],
             "message": "Caricature mode requires 3B+ parameter models for creative text generation. "
-                       "Download a 3B+ GGUF model from huggingface.co",
+                       "Download a 3B+ GGUF model from huggingface.co — or use a Cloud AI backend "
+                       "(Ultra) for the best results.",
         }
     elif intensity == "strong":
         return {
@@ -519,7 +548,8 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
                 {"name": "Llama-3.2-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - good alternative"},
             ],
             "message": "Strong intensity works best with 3B+ parameter models. "
-                       "Download a 3B+ GGUF model from huggingface.co",
+                       "Download a 3B+ GGUF model from huggingface.co — or use a Cloud AI backend "
+                       "(Ultra) for the best results.",
         }
     elif intensity == "standard":
         return {
@@ -790,7 +820,9 @@ def get_formatting_rules(tone: str, intensity: str = "standard") -> str:
 def get_filler_rules(tone: str, intensity: str = "standard") -> str:
     """Get the filler word removal rules for a given tone and intensity."""
     if tone == "minimal":
-        return FILLER_RULES["minimal"]["standard"]
+        # Minimal ignores strong, but caricature transforms even minimal
+        key = "caricature" if intensity == "caricature" else "standard"
+        return FILLER_RULES["minimal"][key]
     tone_dict = FILLER_RULES.get(tone, FILLER_RULES["professional"])
     return tone_dict.get(intensity, tone_dict["standard"])
 
@@ -1283,7 +1315,9 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
         return prompt, compatibility
     
     # === MINIMAL STYLE: Special case - just remove filler sounds ===
-    if tone == "minimal":
+    # Caricature transforms even minimal — but only when the model tier allows it
+    # (a downgraded caricature lands back here as intensity "standard").
+    if tone == "minimal" and intensity != "caricature":
         prompt = MINIMAL_PROMPT.format(text=text)
         return prompt, compatibility
     
@@ -1493,6 +1527,12 @@ class LlamaCppBackend(PostProcessorBackend):
             # Format the full prompt
             full_prompt = format_prompt(prompt_template, text)
 
+            # Caricature is a creative rewrite: run it hot (greedy comedy is flat)
+            # and skip the hallucination guard, which would reject the new words
+            # the mode exists to add (same exemption the cloud backends apply).
+            is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
+            gen_temperature = max(self.temperature, 0.8) if is_caricature else self.temperature
+
             # Generate response. The in-process model() call blocks in a C call that a plain
             # thread timeout cannot kill, so bound it with a watchdog: on timeout we raise and
             # process_with_config() falls back to the raw text (post-processing is non-fatal).
@@ -1503,7 +1543,7 @@ class LlamaCppBackend(PostProcessorBackend):
                     self.timeout,
                     full_prompt,
                     max_tokens=self.max_tokens,
-                    temperature=self.temperature,
+                    temperature=gen_temperature,
                     stop=["Transcription:", "Spoken text:", "\n\n\n"],  # Stop tokens
                     echo=False,
                 )
@@ -1513,26 +1553,32 @@ class LlamaCppBackend(PostProcessorBackend):
                 )
 
             result = response["choices"][0]["text"].strip()
-            
+
             # Clean up any artifacts and check for refusals
             # Extract model name from path for hallucination detection
             model_name = Path(self.model_path).stem if self.model_path else ""
-            result = self._clean_response(result, original_text=text, model_name=model_name)
-            
+            result = self._clean_response(
+                result, original_text=text, model_name=model_name,
+                skip_hallucination_check=is_caricature,
+            )
+
             return result if result else text
             
         except Exception as e:
             raise PostProcessingError(f"llama.cpp processing failed: {e}")
     
-    def _clean_response(self, text: str, original_text: str = "", model_name: str = "") -> str:
+    def _clean_response(self, text: str, original_text: str = "", model_name: str = "",
+                        skip_hallucination_check: bool = False) -> str:
         """
         Clean up LLM response artifacts and detect refusals/hallucinations.
-        
+
         Args:
             text: The LLM response
             original_text: The original input (returned if refusal/hallucination detected)
             model_name: The model name for model-specific hallucination thresholds
-            
+            skip_hallucination_check: True for caricature mode, whose output is
+                supposed to diverge from the input (new words, expansion)
+
         Returns:
             Cleaned text, or original_text if refusal/hallucination detected
         """
@@ -1569,10 +1615,11 @@ class LlamaCppBackend(PostProcessorBackend):
         cleaned = "\n".join(cleaned_lines).strip()
         
         # Check for hallucination (model generated unrelated content)
-        if original_text and is_hallucination(original_text, cleaned, model_name=model_name):
+        if (not skip_hallucination_check and original_text
+                and is_hallucination(original_text, cleaned, model_name=model_name)):
             print("[Post-processing] ⚠ Model hallucinated - using original text")
             return original_text
-        
+
         return cleaned
 
 
@@ -1670,8 +1717,6 @@ class LlamaCppCliBackend(PostProcessorBackend):
         self.timeout = timeout
         # Tone is threaded in from config so the CLI path applies real per-tone
         # guidance instead of collapsing every styled tone onto one generic prompt.
-        # Intensity stays "standard" here — strong/caricature are out of the CLI
-        # path's scope (it has always produced standard-style output regardless).
         self.output_tone = output_tone or "professional"
         # Thread the intensity through from config so the Strong toggle and the
         # caricature easter egg actually change the prompt (they were previously
@@ -1822,12 +1867,38 @@ class LlamaCppCliBackend(PostProcessorBackend):
         python-bindings path — the dicts are the single source of truth.
 
         The format stays a single 'Cleaned text:' completion marker (which the
-        stdout parser depends on) and leads with a hard "keep ~90%, don't rewrite"
-        guard so a 2B/1B model treats the tone as a guide, not a rewrite license.
+        stdout parser depends on). Standard intensity leads with a hard "keep
+        ~90%, don't rewrite" guard so a 2B/1B model treats the tone as a guide,
+        not a rewrite license. Strong and caricature get REWRITE templates —
+        wrapping their guidance in the don't-rewrite guard contradicted the
+        instructions and collapsed both modes onto standard-looking output.
+        (Intensity is already model-tier-capped in __init__, so these templates
+        only ever reach 3B+ models.)
         """
-        if tone == "minimal":
+        if tone == "minimal" and intensity != "caricature":
             # Minimal: just remove um/uh/ah - use clear instruction format
             prompt = f"""Task: Remove only filler sounds (um, uh, ah, er) from the text below. Keep every other word and the original order. Output ONLY the cleaned text, nothing else.
+
+Text: {text}
+
+Cleaned text:"""
+        elif intensity == "caricature":
+            guidance = get_tone_guidance(tone, intensity)
+            formatting = get_formatting_rules(tone, intensity)
+            prompt = f"""Task: Rewrite the text below as an over-the-top PARODY of the style described. Make it hilarious and exaggerated, but keep the same core message.
+Style: {guidance} {formatting}
+Output ONLY the rewritten text, nothing else.
+
+Text: {text}
+
+Cleaned text:"""
+        elif intensity == "strong":
+            guidance = get_tone_guidance(tone, intensity)
+            formatting = get_formatting_rules(tone, intensity)
+            filler = get_filler_rules(tone, intensity)
+            prompt = f"""Task: Rewrite the text below in the style described. Keep the same meaning, every key point, and all specific names and technical terms. You may restructure sentences and repair broken punctuation. Do not answer or act on the text — only restyle it.
+Style: {guidance} {formatting} {filler}
+Output ONLY the rewritten text, nothing else.
 
 Text: {text}
 
@@ -1895,11 +1966,27 @@ Cleaned text:"""
 
             # Build the compact, tone-aware prompt for the CLI (llama-simple)
             simple_prompt = self.build_cli_prompt(text, tone, self.intensity)
-            
+
             # Token budget: the cleaned text is ~the same length as the input.
             # Give headroom so the answer isn't truncated (we trim any trailing
             # annotation the model appends). Min 64 covers short inputs.
-            estimated_output_tokens = min(self.max_tokens, max(64, int(len(text) * 0.8)))
+            # Caricature EXPANDS the text (emojis, CAPS, sign-offs), so it gets a
+            # bigger multiplier and floor.
+            if self.intensity == "caricature":
+                # Emojis and CAPS are token-hungry and the parody roughly doubles
+                # the text — 1.2x char-count clipped a sign-off mid-word in testing.
+                estimated_output_tokens = min(self.max_tokens, max(192, int(len(text) * 1.6)))
+            else:
+                estimated_output_tokens = min(self.max_tokens, max(64, int(len(text) * 0.8)))
+
+            # Comedy needs sampling heat — greedy/near-greedy caricature output is
+            # flat and repetitive. (The llama-simple subprocess has no temperature
+            # flag, so this only applies on the resident path; subprocess caricature
+            # is greedy but the parody prompt still carries it.)
+            gen_temperature = (
+                max(self.temperature, 0.8) if self.intensity == "caricature"
+                else self.temperature
+            )
 
             start_time = time.time()
 
@@ -1911,7 +1998,7 @@ Cleaned text:"""
                 out = resident(
                     simple_prompt,
                     max_tokens=estimated_output_tokens,
-                    temperature=self.temperature,
+                    temperature=gen_temperature,
                     echo=True,  # echo the prompt so _extract_cli_output works unchanged
                 )
                 cleaned = self._extract_cli_output(out["choices"][0]["text"], simple_prompt)
@@ -1926,8 +2013,13 @@ Cleaned text:"""
                 cmd = [binary, "-m", self.model_path, "-ngl", str(ngl),
                        "-n", str(estimated_output_tokens), simple_prompt]
 
+                # errors="replace": llama-simple streams raw token bytes, so a
+                # generation cut mid-emoji (caricature mode loves emojis) leaves
+                # an invalid UTF-8 tail that strict decoding turns into a crash
+                # for the whole cleanup.
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=self.timeout,
+                    cmd, capture_output=True, text=True, errors="replace",
+                    timeout=self.timeout,
                 )
                 if result.returncode != 0:
                     stderr = result.stderr.strip()
@@ -1942,8 +2034,17 @@ Cleaned text:"""
                 print("[Post-processing] ⚠ No output from llama - using original")
                 return text
 
-            # Check for hallucination
-            if is_hallucination(text, cleaned, model_name=Path(self.model_path).stem, threshold=0.25):
+            # Check for hallucination — skipped for caricature, which is SUPPOSED
+            # to add new words (buzzwords, slang, emojis) and expand the text; the
+            # word-overlap/fabrication heuristics would reject exactly the outputs
+            # the mode exists to produce (cloud backends already exempt it).
+            # Strong mode keeps the guard but with a looser threshold: a licensed
+            # restructuring paraphrases heavily, so exact-word overlap runs ~25-35%
+            # on faithful rewrites (true hallucinations still land near 0-10%).
+            guard_threshold = 0.15 if self.intensity == "strong" else 0.25
+            if self.intensity != "caricature" and is_hallucination(
+                text, cleaned, model_name=Path(self.model_path).stem, threshold=guard_threshold
+            ):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
                 return text
 
@@ -1984,21 +2085,36 @@ Cleaned text:"""
         gen = gen.strip()
 
         # Cut at self-annotation / explanation blocks or any prompt repetition.
+        # Strong/caricature legitimately produce longer, multi-part output, so
+        # they keep everything up to a debug/annotation marker instead of being
+        # truncated at the first paragraph break or bullet (a strong-professional
+        # answer "structured with clear paragraphs" was losing every paragraph
+        # after the first).
+        rewrite_mode = self.intensity in ("strong", "caricature")
         cut_markers = [
-            "\n\n**", "\n**Changes", "\nChanges made", "\nChanges:", "\nNote:",
-            "\n\n- ", "\n\n* ", "\n\nHere", "\n(Note", "\nExplanation",
+            "\n**Changes", "\nChanges made", "\nChanges:", "\nNote:",
+            "\n(Note", "\nExplanation",
             "Cleaned text:", "\nText:", "\nTask:", "main:", "llama_", "~llama",
-            "\nGuide:", "Output ONLY",
+            "\nGuide:", "\nStyle:", "Output ONLY",
             # Gemma sometimes appends a trailing meta line after the cleaned text.
             "Final Answer:", "\nFinal Answer",
+            # Phi-3 sometimes restates its answer after a chat-format bleed marker,
+            # doubling the output (which then trips the fabrication guard).
+            # Both casings appear ("- response:" / "- Response:") — find() is
+            # case-sensitive, so list each.
+            "- response:", "- Response:", "\nResponse:", "\nresponse:",
+            "<|", "Rewritten text:", "\nRewritten",
         ]
+        if not rewrite_mode:
+            cut_markers += ["\n\n**", "\n\n- ", "\n\n* ", "\n\nHere"]
         for mk in cut_markers:
             j = gen.find(mk)
             if j != -1:
                 gen = gen[:j]
 
-        # Keep the first paragraph; collapse internal newlines to a single block.
-        gen = gen.split("\n\n")[0].strip()
+        if not rewrite_mode:
+            # Keep the first paragraph; collapse internal newlines to a single block.
+            gen = gen.split("\n\n")[0].strip()
         gen = re.sub(r'\s*\n\s*', ' ', gen).strip()
 
         # Reject guidance echo: small models sometimes repeat the instructions
@@ -2010,6 +2126,9 @@ Cleaned text:"""
             "do not rewrite", "keep coding terms", "remove um", "remove filler",
             "light punctuation", "relaxed punctuation", "tighten punctuation",
             "output only", "lightly clean", "keep about 90",
+            # Strong/caricature template echoes
+            "rewrite the text", "over-the-top parody", "keep the same meaning",
+            "extreme gen-z slang", "corporate buzzwords",
         )
         if any(low.startswith(s) for s in echo_signals):
             return ""
@@ -2017,6 +2136,28 @@ Cleaned text:"""
         # Strip stray wrapping quotes the model sometimes adds.
         if len(gen) >= 2 and gen[0] in "\"'" and gen[-1] == gen[0]:
             gen = gen[1:-1].strip()
+        # Drop U+FFFD replacement chars left by errors="replace" (a generation
+        # cut mid-emoji decodes to one or two of these at the tail).
+        gen = gen.replace("�", "").strip()
+        # Gemma sometimes appends empty code fences ("``` ```") after the text.
+        gen = re.sub(r'(?:\s*`{3,})+\s*$', '', gen).strip()
+
+        if rewrite_mode and gen:
+            # Greedy decoding (llama-simple has no sampling flags) makes rewrite
+            # modes loop: the model re-emits its own opening and riffs forever.
+            # If the first 60 chars reappear verbatim, keep only the first copy.
+            if len(gen) > 120:
+                j = gen.find(gen[:60], 60)
+                if j != -1:
+                    gen = gen[:j].strip()
+            # If generation hit the token cap mid-sentence ("...But fear"), trim
+            # back to the last sentence-terminal punctuation or emoji — but only
+            # when that keeps most of the text.
+            _terminal = r'[.!?…☀-➿\U0001F000-\U0001FAFF]'
+            if not re.search(_terminal + r'["\')\]]*\s*$', gen):
+                ends = [m.end() for m in re.finditer(_terminal, gen)]
+                if ends and ends[-1] > len(gen) // 2:
+                    gen = gen[:ends[-1]].strip()
         return gen
 
 
@@ -2097,15 +2238,19 @@ class AnthropicBackend(PostProcessorBackend):
         
         try:
             client = self._get_client()
-            
+
             # Format the prompt
             full_prompt = format_prompt(prompt_template, text)
-            
+
+            # Caricature is a creative rewrite — run it hot (temp 0.1 comedy is flat)
+            is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
+            gen_temperature = max(self.temperature, 0.8) if is_caricature else self.temperature
+
             # Call Claude API
             message = client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                temperature=self.temperature,
+                temperature=gen_temperature,
                 messages=[
                     {
                         "role": "user",
@@ -2129,13 +2274,12 @@ class AnthropicBackend(PostProcessorBackend):
             result = remove_repeated_sentences(result)
             
             # Check for hallucination - skip for caricature mode (expects creative output)
-            is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
             if not is_caricature and is_hallucination(text, result, model_name=self.model):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
                 return text
-            
+
             return result if result else text
-            
+
         except Exception as e:
             raise PostProcessingError(f"Anthropic API call failed: {e}")
 
@@ -2235,15 +2379,19 @@ class OpenAIBackend(PostProcessorBackend):
         
         try:
             client = self._get_client()
-            
+
             # Format the prompt
             full_prompt = format_prompt(prompt_template, text)
-            
+
+            # Caricature is a creative rewrite — run it hot (temp 0.1 comedy is flat)
+            is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
+            gen_temperature = max(self.temperature, 0.8) if is_caricature else self.temperature
+
             # Call OpenAI API
             response = client.chat.completions.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                temperature=self.temperature,
+                temperature=gen_temperature,
                 messages=[
                     {
                         "role": "user",
@@ -2292,13 +2440,12 @@ class OpenAIBackend(PostProcessorBackend):
             result = remove_repeated_sentences(result)
             
             # Check for hallucination - skip for caricature mode (expects creative output)
-            is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
             if not is_caricature and is_hallucination(text, result, model_name=self.model):
                 print("[Post-processing] ⚠ Model hallucinated - using original text")
                 return text
-            
+
             return result if result else text
-            
+
         except Exception as e:
             raise PostProcessingError(f"OpenAI API call failed: {e}")
 
@@ -2429,21 +2576,45 @@ def process_with_config(text: str, config: dict) -> str:
         return text
     
     tone = config.get("output_tone", "professional")
-    
+
     # === MINIMAL STYLE: Always use regex-based filler removal (no LLM) ===
     # Minimal style uses instant regex cleanup - runs even if LLM post-processing is disabled
     # This is ~1000x faster than LLM processing
+    # EXCEPTION: caricature transforms even minimal — take the LLM path when the
+    # easter egg is on AND the model can actually honor it (the tier cap would
+    # downgrade caricature back to plain cleanup on a 1B/2B model, so skipping
+    # the LLM round-trip there keeps minimal instant instead of pointlessly slow).
     if tone == "minimal":
-        start_time = time.time()
-        input_words = len(text.split())
-        
-        result = fast_filler_removal(text)
-        
-        elapsed = time.time() - start_time
-        output_words = len(result.split())
-        print(f"[Minimal] ⚡ Regex cleanup in {elapsed*1000:.1f}ms | {input_words} → {output_words} words")
-        
-        return result
+        use_caricature = (
+            config.get("caricature_mode", False)
+            and config.get("post_processing_enabled", True)
+        )
+        if use_caricature:
+            backend_type = config.get("post_processing_backend", "llama_cpp")
+            if backend_type == "llama_cpp":
+                model_path = config.get("llama_cpp_model_path", "")
+                model_name = Path(model_path).stem if model_path else ""
+            else:
+                model_name = config.get(f"{backend_type}_model", "")
+            if model_name:
+                compat = get_model_compatibility(
+                    model_name, tone, "caricature", False, backend=backend_type
+                )
+                effective = compat["auto_adjustments"].get("intensity", "caricature")
+                use_caricature = effective == "caricature"
+            else:
+                use_caricature = False
+        if not use_caricature:
+            start_time = time.time()
+            input_words = len(text.split())
+
+            result = fast_filler_removal(text)
+
+            elapsed = time.time() - start_time
+            output_words = len(result.split())
+            print(f"[Minimal] ⚡ Regex cleanup in {elapsed*1000:.1f}ms | {input_words} → {output_words} words")
+
+            return result
     
     # For non-minimal styles, check if LLM post-processing is enabled
     if not config.get("post_processing_enabled", True):
@@ -2713,9 +2884,11 @@ def get_model_recommendation_for_style(style: str, strong_mode: bool = False) ->
     if strong_mode:
         return {
             "recommended": ["qwen3.5:4b", "phi3:mini", "qwen2.5:3b"],
-            "also_works": ["qwen3.5:2b", "qwen2.5:1.5b", "llama3.2:3b"],
+            # Sub-3B models are NOT listed: the model-tier cap downgrades strong
+            # to standard on them, so advertising them here would be misleading.
+            "also_works": ["llama3.2:3b"],
             "avoid": [],
-            "message": "Strong mode allows restructuring. Larger models (3B+) give best results.",
+            "message": "Strong mode allows restructuring and requires a 3B+ model — smaller models fall back to standard.",
         }
 
     # Standard mode - need models that follow "keep exact words" instructions
