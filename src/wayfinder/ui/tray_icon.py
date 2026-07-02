@@ -17,7 +17,7 @@ _COLORS = {
     "recording": QColor(255, 77, 77),    # red
     "processing": QColor(229, 172, 42),   # gold
     "pasting": QColor(93, 212, 168),      # green
-    "idle": QColor(167, 139, 250),        # brand violet (app COLORS accent, #A78BFA)
+    "idle": QColor(70, 130, 220),         # logo blue — matches the taskbar/app icon (user's call)
 }
 
 
