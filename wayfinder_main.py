@@ -4242,7 +4242,7 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"],
             border_width=1,
-            border_color=COLORS["border"],
+            border_color=COLORS["border_rim"],  # pre-blended 10% violet rim (resting depth)
         )
         self.hero_frame.pack(fill="x", pady=(0, 12))
         
@@ -4609,6 +4609,14 @@ class WayfinderApp(ctk.CTk):
                 y1 = int(center_y - bar_height)
                 y2 = int(center_y + bar_height)
                 draw.rectangle([x, y1, x + bar_width, y2], fill=bar_color)
+
+            # Bake a 1px inner top-edge highlight into the backdrop (bg_card ~6% toward
+            # white) — a hairline rim light that reads as depth. One extra ImageDraw.line
+            # per frame into the already-fresh PIL image; no new canvas items, no timers.
+            hi_r = int(bg_r + (255 - bg_r) * 0.06)
+            hi_g = int(bg_g + (255 - bg_g) * 0.06)
+            hi_b = int(bg_b + (255 - bg_b) * 0.06)
+            draw.line([(0, 0), (w - 1, 0)], fill=(hi_r, hi_g, hi_b))
 
             # Single Tk call: update the canvas image
             self._hero_wave_photo = ImageTk.PhotoImage(img)
@@ -13022,7 +13030,7 @@ class WayfinderApp(ctk.CTk):
             # Update hero frame border for subtle glow effect
             if hasattr(self, 'hero_frame'):
                 if new_state == AppState.IDLE:
-                    self.hero_frame.configure(border_color=COLORS["border_subtle"])
+                    self.hero_frame.configure(border_color=COLORS["border_rim"])  # resting violet rim
                     self._stop_hero_animation()
                 else:
                     self.hero_frame.configure(border_color=color)
