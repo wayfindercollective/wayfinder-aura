@@ -12975,12 +12975,12 @@ class WayfinderApp(ctk.CTk):
             glyph_color = (93, 212, 168, 255)
             draw.polygon(arrow_points, fill=glyph_color)
         else:  # IDLE
-            # Idle arrow wears the brand violet (app COLORS accent, #A78BFA) so the
-            # tray unifies with the app palette; it then flips red while recording /
-            # gold while processing / green while pasting (those states unchanged).
-            # Kept identical to src/wayfinder/ui/tray_icon.py so the from-source and
-            # Flatpak (Qt overlay) trays render the same indicator.
-            glyph_color = (167, 139, 250, 255)
+            # Idle arrow keeps the LOGO BLUE — user's call (2026-07-02): the tray
+            # indicator should match the blue taskbar/app icon, not the in-app violet.
+            # It flips red while recording / gold while processing / green while
+            # pasting (those states unchanged). Kept identical to
+            # src/wayfinder/ui/tray_icon.py so both tray renderers match.
+            glyph_color = (70, 130, 220, 255)
             draw.polygon(arrow_points, fill=glyph_color)
 
         return icon

@@ -194,39 +194,27 @@ def test_all_state_palette_hexes_are_tokens_or_documented():
 
 
 # =============================================================================
-# Tray idle color — brand violet in BOTH renderers, matching app accent
+# Tray idle color — LOGO BLUE in BOTH renderers (user's call, 2026-07-02):
+# the tray indicator matches the blue taskbar/app icon, not the in-app violet.
 # =============================================================================
 
-VIOLET_RGB = (167, 139, 250)  # == #A78BFA == app accent
-
-
-def test_app_accent_is_violet_rgb():
-    accent = COLORS["accent"].lstrip("#")
-    assert tuple(int(accent[i:i + 2], 16) for i in (0, 2, 4)) == VIOLET_RGB
+LOGO_BLUE_RGB = (70, 130, 220)  # matches assets/icon.png's arrow
 
 
 def test_tray_idle_rgb_parity_both_files():
-    # Qt tray: _COLORS["idle"] = QColor(167, 139, 250)
+    # Qt tray: _COLORS["idle"] = QColor(70, 130, 220)
     qt_src = TRAY_QT.read_text()
     qt = re.search(r'"idle":\s*QColor\((\d+),\s*(\d+),\s*(\d+)\)', qt_src)
     assert qt, "idle QColor not found in tray_icon.py"
     qt_rgb = tuple(int(g) for g in qt.groups())
 
-    # pystray tray: IDLE branch  glyph_color = (167, 139, 250, 255)
+    # pystray tray: IDLE branch  glyph_color = (70, 130, 220, 255)
     main_src = MAIN.read_text()
     main = re.search(r'#\s*IDLE.*?glyph_color\s*=\s*\((\d+),\s*(\d+),\s*(\d+),\s*255\)',
                      main_src, re.DOTALL)
     assert main, "idle glyph_color tuple not found in wayfinder_main.py"
     main_rgb = tuple(int(g) for g in main.groups())
 
-    assert qt_rgb == VIOLET_RGB, f"tray_icon.py idle {qt_rgb} != {VIOLET_RGB}"
-    assert main_rgb == VIOLET_RGB, f"wayfinder_main.py idle {main_rgb} != {VIOLET_RGB}"
+    assert qt_rgb == LOGO_BLUE_RGB, f"tray_icon.py idle {qt_rgb} != {LOGO_BLUE_RGB}"
+    assert main_rgb == LOGO_BLUE_RGB, f"wayfinder_main.py idle {main_rgb} != {LOGO_BLUE_RGB}"
     assert qt_rgb == main_rgb
-
-
-def test_no_stale_blue_idle_rgb_remains():
-    """The old brand-blue idle (70,130,220) must be gone from both tray renderers."""
-    for path in (TRAY_QT, MAIN):
-        assert "70, 130, 220" not in path.read_text(), (
-            f"stale idle blue (70,130,220) still present in {path.name}"
-        )
