@@ -52,25 +52,58 @@ def _extract_dict_literal(src: str, name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# (a) Font-literal ratchet
+# (a) Font-literal whitelist (Phase 2: type-scale sweep complete)
 # ---------------------------------------------------------------------------
 # Pragmatic single-line regex: matches `font=(...., <int>` where the size arg
 # is an integer literal (not `self.font_sizes[...]`). Because `[^)]*` stops at
 # the first ')', it CANNOT see font tuples that span multiple physical lines
 # (`font=(\n   fam, 13\n)`), and it will not match token lookups like
 # `font=(self.font_body[0], self.font_sizes["small"])` (no bare int after a
-# comma). Validated against the live file: ~188 sites — plausible vs. the
-# plan's ~190 hardcoded-font estimate.
+# comma).
+#
+# Phase 2 swept ~190 hardcoded font sizes onto the 6-token ramp
+# (self.font_sizes). Every REMAINING literal must carry one of exactly two
+# sanctioned trailing comments, or the sweep has regressed:
+#   * "# optical glyph size"           — single-glyph buttons (× − + ⟲ ←) and
+#                                        hero value numerals, sized for optical
+#                                        balance rather than the text ramp.
+#   * "# module-scope: no font_sizes access" — font sites in module-level
+#                                        helper classes (ToolTip, ConfettiOverlay,
+#                                        CompatibilityBanner, ModeSelector,
+#                                        FloatingIndicator) that live OUTSIDE
+#                                        WayfinderApp and thus have no
+#                                        self.font_sizes to reference.
 FONT_LITERAL_RE = re.compile(r"font=\([^)]*,\s*[0-9]+")
-FONT_LITERAL_BASELINE = 188  # Phase 2 will drive this toward a commented whitelist.
+SANCTIONED_FONT_COMMENTS = ("# optical glyph size", "# module-scope: no font_sizes access")
+# Post-sweep count is the whitelist size. It may only shrink (delete a glyph /
+# rewrite a module-scope class), never grow — a new bare literal fails below.
+FONT_WHITELIST_MAX = 22
 
 
-def test_font_literal_ratchet():
-    count = len(FONT_LITERAL_RE.findall(MAIN_SRC))
-    assert count <= FONT_LITERAL_BASELINE, (
-        f"hardcoded font-size literals rose to {count} (baseline "
-        f"{FONT_LITERAL_BASELINE}); use self.font_sizes[...] tokens instead. "
-        "Phase 2 drives this down to a whitelist — never up."
+def _line_of(offset: int) -> str:
+    """Return the full physical line containing the given source offset."""
+    start = MAIN_SRC.rfind("\n", 0, offset) + 1
+    end = MAIN_SRC.find("\n", offset)
+    return MAIN_SRC[start: end if end != -1 else len(MAIN_SRC)]
+
+
+def test_font_literals_are_whitelisted():
+    unsanctioned = []
+    total = 0
+    for m in FONT_LITERAL_RE.finditer(MAIN_SRC):
+        total += 1
+        line = _line_of(m.start())
+        if not any(c in line for c in SANCTIONED_FONT_COMMENTS):
+            lineno = MAIN_SRC.count("\n", 0, m.start()) + 1
+            unsanctioned.append((lineno, line.strip()))
+    assert not unsanctioned, (
+        "hardcoded font-size literal(s) without a sanctioned whitelist comment "
+        f"({SANCTIONED_FONT_COMMENTS}); use self.font_sizes[...] tokens instead:\n"
+        + "\n".join(f"  {ln}: {txt}" for ln, txt in unsanctioned)
+    )
+    assert total <= FONT_WHITELIST_MAX, (
+        f"font-literal whitelist grew to {total} (max {FONT_WHITELIST_MAX}); the "
+        "whitelist may only shrink. New styled text must use self.font_sizes[...]."
     )
 
 
