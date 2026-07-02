@@ -210,7 +210,7 @@ class TestFeatureGate:
         gate = FeatureGate()
         message = gate.get_upgrade_message("faster_whisper")
 
-        assert "Premium" in message
+        assert "Ultra" in message  # paid tier branding (renamed from Premium)
         assert "Faster" in message or "Whisper" in message
 
     def test_new_premium_features_exist(self, temp_config_dir: Path):
