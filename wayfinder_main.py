@@ -7270,7 +7270,21 @@ class WayfinderApp(ctk.CTk):
         )
         self.log_textbox.pack(fill="both", expand=True, padx=12, pady=12)
         self.log_textbox.configure(state="disabled")
-        
+
+        # Empty-state placeholder, centered over the card. Normally unseen (boot writes
+        # log lines) — it appears after the user clears the log. Toggled via
+        # _update_log_placeholder; log()'s hot path only hides via a cheap shown-bool.
+        self._log_placeholder = ctk.CTkLabel(
+            log_card,
+            text=f"no activity yet — press {self.get_hotkey_display()} to dictate",
+            image=get_icon("inbox", 24, COLORS["text_muted"]),
+            compound="top",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._log_placeholder_shown = False
+        self._update_log_placeholder()  # initial state
+
         # Legacy compatibility - these are needed for old code references
         self.log_expanded = True
         self.log_container = log_card
@@ -9859,6 +9873,39 @@ class WayfinderApp(ctk.CTk):
         self.log_textbox.configure(state="normal")
         self.log_textbox.delete("1.0", "end")
         self.log_textbox.configure(state="disabled")
+        self._update_log_placeholder()
+
+    def _update_log_placeholder(self) -> None:
+        """Show the Activity Log empty-state placeholder iff the textbox is empty/whitespace.
+        This is the only path that reads the whole textbox (called from clear_log and initial
+        setup); log()'s hot path just hides via the shown-bool and never re-reads."""
+        placeholder = getattr(self, "_log_placeholder", None)
+        if placeholder is None:
+            return
+        try:
+            content = self.log_textbox.get("1.0", "end").strip()
+        except Exception:
+            content = "x"  # on error assume non-empty (keep placeholder hidden)
+        if content:
+            self._hide_log_placeholder()
+        else:
+            try:
+                placeholder.place(relx=0.5, rely=0.45, anchor="center")
+                self._log_placeholder_shown = True
+            except Exception:
+                pass
+
+    def _hide_log_placeholder(self) -> None:
+        """Cheap placeholder hide — no textbox read. Safe to call every log line."""
+        if not getattr(self, "_log_placeholder_shown", False):
+            return
+        placeholder = getattr(self, "_log_placeholder", None)
+        if placeholder is not None:
+            try:
+                placeholder.place_forget()
+            except Exception:
+                pass
+        self._log_placeholder_shown = False
 
     def log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -9911,6 +9958,9 @@ class WayfinderApp(ctk.CTk):
             self.log_textbox.insert("end", log_line)
             self.log_textbox.see("end")
             self.log_textbox.configure(state="disabled")
+            # Hide the empty-state placeholder on the first line (cheap bool check).
+            if getattr(self, "_log_placeholder_shown", False):
+                self._hide_log_placeholder()
         except:
             pass
 
