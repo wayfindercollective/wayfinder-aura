@@ -1,7 +1,7 @@
 """Qt renderer for the Wayfinder navigation-arrow tray icon.
 
 Mirrors the from-source pystray tray (``wayfinder_main.get_tray_icon``) so the Flatpak's
-``QSystemTrayIcon`` shows the same indicator: a clean cursor/arrow — Wayfinder brand blue
+``QSystemTrayIcon`` shows the same indicator: a clean cursor/arrow — brand violet (app accent)
 when idle, gold while processing — and, while recording, the outline traced stroke-by-stroke
 then filled red (the "drawing" animation the desktop/pystray tray has always had). Geometry
 and colours are kept identical to the from-source version so the two installs look the same.
@@ -17,7 +17,7 @@ _COLORS = {
     "recording": QColor(255, 77, 77),    # red
     "processing": QColor(229, 172, 42),   # gold
     "pasting": QColor(93, 212, 168),      # green
-    "idle": QColor(70, 130, 220),         # Wayfinder brand blue (sampled from assets/icon.png)
+    "idle": QColor(167, 139, 250),        # brand violet (app COLORS accent, #A78BFA)
 }
 
 

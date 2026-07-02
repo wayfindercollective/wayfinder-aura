@@ -260,35 +260,39 @@ class StateColors:
     """Color palette for a given state."""
     border_top: str      # Bright highlight
     border_bottom: str   # Dark shadow
-    glow: str            # Outer glow color
+    glow: str            # Outer glow color (read at set_state, :~1322)
     wave: str            # Wave color
-    text: str            # Text color
 
 
+# === Palette mirror-sync (parity enforced by tests/test_palette_parity.py) ===
+# STATE_PALETTES and STYLE_PALETTES below derive their hues from the app's
+# design tokens (wayfinder_main.py COLORS / src/wayfinder/ui/theme.py COLORS).
+# The overlay runs as a bare-script subprocess and cannot cleanly import
+# theme.py, so these values are DUPLICATED by design. When theme.py tokens
+# change, update these to match; tests/test_palette_parity.py source-parses
+# both files and fails if they drift.
 STATE_PALETTES = {
     OverlayState.READY: StateColors(
-        # Faint indigo tint (from the app's state_ready #7B8BD9 family) so the
-        # idle overlay reads as the same brand as the main window — the old
-        # flat GitHub-gray idle had no relation to the app palette.
-        border_top="#2F3450",      # Elevated with a whisper of indigo
-        border_bottom="#161B22",   # GitHub Dark surface (deep shadow)
-        glow="#232840",            # Muted indigo glow
-        wave="#4A5578",            # Subtle indigo wave
-        text="#8B8B8F",            # Secondary text (2025 accessible)
+        # Idle overlay reads as the same brand as the main window: hues are
+        # exact blends of the app's state_ready indigo (#7B8BD9) toward the
+        # app bg (#0D1117), luminance-matched to the previous idle colors so
+        # the overlay stays quiet. blend(f) = round(bg + (state_ready-bg)*f).
+        border_top="#2D344F",      # 29% state_ready→bg (luminance -1.7% vs old)
+        border_bottom="#161B22",   # GitHub Dark surface (deep shadow, unchanged)
+        glow="#23293E",            # 20% state_ready→bg (luminance +2.0% vs old)
+        wave="#4A5482",            # 55% state_ready→bg (luminance +1.1% vs old)
     ),
     OverlayState.LISTENING: StateColors(
         border_top="#E8A0A8",      # Muted rose highlight
         border_bottom="#2D1520",   # Deep rose shadow
-        glow="#E8707F",            # Muted rose glow
-        wave="#E8707F",            # Muted rose wave
-        text="#E8E8E8",            # Off-white (no pure white)
+        glow="#E8707F",            # Muted rose glow (app state_recording)
+        wave="#E8707F",            # Muted rose wave (app state_recording)
     ),
     OverlayState.PROCESSING: StateColors(
         border_top="#E8C86A",      # Muted gold highlight
         border_bottom="#2D2208",   # Deep bronze shadow
-        glow="#E5AC2A",            # Muted gold glow
-        wave="#E5AC2A",            # Muted gold wave
-        text="#E8E8E8",            # Off-white (no pure white)
+        glow="#E5AC2A",            # Muted gold glow (app state_processing)
+        wave="#E5AC2A",            # Muted gold wave (app state_processing)
     ),
 }
 
@@ -305,35 +309,34 @@ STATE_LABELS = {
 @dataclass
 class StyleColors:
     """Color palette for output style indicator."""
-    letter: str      # Single letter to display
+    letter: str      # Single letter/word to display
     color: str       # Main badge color
-    glow: str        # Glow color (slightly muted)
 
+
+# === Palette mirror-sync (parity enforced by tests/test_palette_parity.py) ===
+# Each style hue is an exact app design token (theme.py / wayfinder_main.py
+# COLORS). The overlay is a bare-script subprocess and cannot import theme.py,
+# so these are DUPLICATED by design; the parity test fails if they drift.
 STYLE_PALETTES = {
     "minimal": StyleColors(
-        letter="Raw",       # Raw/unprocessed
-        color="#9AA5CE",    # Soft gray-blue
-        glow="#7A85AE",     # Muted gray glow
+        letter="Raw",       # Raw/unprocessed — reads quiet
+        color="#8B8B8F",    # app text_secondary (muted gray)
     ),
     "professional": StyleColors(
         letter="Pro",
-        color="#7AA2F7",    # Soft blue
-        glow="#5D7FBF",     # Muted blue glow
+        color="#7B8BD9",    # app state_ready (indigo)
     ),
     "casual": StyleColors(
         letter="Chat",      # Conversational, friendly
-        color="#73DACA",    # Soft teal
-        glow="#5AAE9E",     # Muted teal glow
+        color="#5DD4A8",    # app state_typing (mint)
     ),
     "dev": StyleColors(
         letter="Dev",
-        color="#98C379",    # Green (like code/terminal)
-        glow="#7A9F61",     # Muted green glow
+        color="#E5AC2A",    # app accent_yellow (gold)
     ),
     "personal": StyleColors(
-        letter="You",       # Your personal voice
-        color="#BB9AF7",    # Soft purple
-        glow="#9A7ACC",     # Muted purple glow
+        letter="You",       # Your personal voice — wears the brand color
+        color="#A78BFA",    # app accent (violet)
     ),
 }
 
@@ -1605,7 +1608,9 @@ class GlassmorphicOverlay(QWidget):
         # Setup font and color
         painter.setFont(self._font)
         
-        # Match the palette's "off-white, no pure white" principle (#E8E8E8)
+        # Status label is intentionally hardcoded #E8E8E8 (app text_primary,
+        # "off-white, no pure white") for every state — the per-state text
+        # color was dead, so StateColors has no `text` field by design.
         text_color = QColor("#E8E8E8")
         text_color.setAlphaF(0.92)
         painter.setPen(QPen(text_color))

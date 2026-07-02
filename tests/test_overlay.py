@@ -111,13 +111,10 @@ class TestStylePalettes:
             assert style in palettes, f"Missing style palette: {style}"
 
     def test_style_colors_are_valid_hex(self, overlay_module):
-        """Each style's color and glow must be valid hex."""
+        """Each style's badge color must be valid hex (the dead `glow` field was removed)."""
         for name, palette in overlay_module.STYLE_PALETTES.items():
             assert HEX_COLOR_RE.match(palette.color), (
                 f"STYLE_PALETTES['{name}'].color = '{palette.color}' is not valid hex"
-            )
-            assert HEX_COLOR_RE.match(palette.glow), (
-                f"STYLE_PALETTES['{name}'].glow = '{palette.glow}' is not valid hex"
             )
 
     def test_style_letters_are_non_empty(self, overlay_module):
@@ -162,7 +159,7 @@ class TestOverlayStateConstants:
     def test_state_palette_colors_are_hex(self, overlay_module):
         """All colors in state palettes must be valid hex."""
         for state, palette in overlay_module.STATE_PALETTES.items():
-            for field in ["border_top", "border_bottom", "glow", "wave", "text"]:
+            for field in ["border_top", "border_bottom", "glow", "wave"]:
                 value = getattr(palette, field)
                 assert HEX_COLOR_RE.match(value), (
                     f"STATE_PALETTES[{state}].{field} = '{value}' is not valid hex"
