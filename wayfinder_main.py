@@ -481,7 +481,7 @@ class ToolTip:
         label = ctk.CTkLabel(
             frame,
             text=self.text,
-            font=("Inter", 12),
+            font=("Inter", 12),  # module-scope: no font_sizes access
             text_color=COLORS["text_primary"],
             wraplength=260,
             justify="left",
@@ -590,7 +590,7 @@ class ConfettiOverlay(ctk.CTkToplevel):
             lbl = ctk.CTkLabel(
                 emoji_frame,
                 text=emoji,
-                font=("Inter", 20),
+                font=("Inter", 20),  # module-scope: no font_sizes access
                 text_color="#FFFFFF",
             )
             lbl.pack(side="left", expand=True)
@@ -600,7 +600,7 @@ class ConfettiOverlay(ctk.CTkToplevel):
         ctk.CTkLabel(
             main_frame,
             text="🎭 CARICATURE MODE UNLOCKED! 🎭",
-            font=("Inter", 16, "bold"),
+            font=("Inter", 16, "bold"),  # module-scope: no font_sizes access
             text_color="#FF6B9D",
         ).pack(pady=(4, 2))
         
@@ -608,7 +608,7 @@ class ConfettiOverlay(ctk.CTkToplevel):
         ctk.CTkLabel(
             main_frame,
             text="Get ready for some silly fun! (click to dismiss)",
-            font=("Inter", 11),
+            font=("Inter", 11),  # module-scope: no font_sizes access
             text_color="#B8A0B8",
         ).pack(pady=(0, 8))
         
@@ -640,7 +640,7 @@ class ConfettiOverlay(ctk.CTkToplevel):
             for i, lbl in enumerate(self.emoji_labels):
                 # Staggered bounce
                 offset = math.sin((self._frame + i * 3) * 0.2) * 2
-                lbl.configure(font=("Inter", 20 + int(offset)))
+                lbl.configure(font=("Inter", 20 + int(offset)))  # module-scope: no font_sizes access
             
             self._frame += 1
             if self._frame < 150:  # ~2.5 seconds at 60fps
@@ -724,7 +724,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.icon_label = ctk.CTkLabel(
             self.header,
             text="⚠",
-            font=("Inter", 14),
+            font=("Inter", 14),  # module-scope: no font_sizes access
             text_color=COLORS["accent_yellow"],
         )
         self.icon_label.pack(side="left", padx=(0, 8))
@@ -732,7 +732,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.title_label = ctk.CTkLabel(
             self.header,
             text="Model Compatibility",
-            font=("Inter", 12, "bold"),
+            font=("Inter", 12, "bold"),  # module-scope: no font_sizes access
             text_color=COLORS["text_bright"],
         )
         self.title_label.pack(side="left")
@@ -741,7 +741,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.issue_label = ctk.CTkLabel(
             self.content,
             text="",
-            font=("Inter", 11),
+            font=("Inter", 11),  # module-scope: no font_sizes access
             text_color=COLORS["text_secondary"],
             wraplength=320,
             justify="left",
@@ -763,7 +763,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.suggestion_label = ctk.CTkLabel(
             self.suggestion_frame,
             text="",
-            font=("JetBrains Mono", 11),
+            font=("JetBrains Mono", 11),  # module-scope: no font_sizes access
             text_color=COLORS["accent"],
         )
         self.suggestion_label.pack(side="left", padx=10, pady=8)
@@ -822,7 +822,7 @@ class CompatibilityBanner(ctk.CTkFrame):
             rec_label = ctk.CTkLabel(
                 self.recommendations_frame,
                 text=f"• {rec}",
-                font=("Inter", 10),
+                font=("Inter", 10),  # module-scope: no font_sizes access
                 text_color=COLORS["text_muted"],
                 wraplength=300,
                 justify="left",
@@ -905,7 +905,7 @@ class ModeSelector(ctk.CTkFrame):
             btn = ctk.CTkButton(
                 inner,
                 text=text,
-                font=("Inter", 13, "bold" if is_selected else "normal"),
+                font=("Inter", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
                 fg_color=COLORS["bg_card"] if is_selected else "transparent",
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
@@ -930,7 +930,7 @@ class ModeSelector(ctk.CTkFrame):
             btn.configure(
                 fg_color=COLORS["bg_card"] if is_selected else "transparent",
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
-                font=("Inter", 13, "bold" if is_selected else "normal"),
+                font=("Inter", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
             )
         
         # Call callback
@@ -950,7 +950,7 @@ class ModeSelector(ctk.CTkFrame):
                 btn.configure(
                     fg_color=COLORS["bg_card"] if is_selected else "transparent",
                     text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
-                    font=("Inter", 13, "bold" if is_selected else "normal"),
+                    font=("Inter", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
                 )
 
 
@@ -2603,7 +2603,7 @@ class FloatingIndicator:
         self.label = ctk.CTkLabel(
             row,
             text=text,
-            font=("Geist Mono", 11) if self._font_exists("Geist Mono") else ("JetBrains Mono", 11),
+            font=("Geist Mono", 11) if self._font_exists("Geist Mono") else ("JetBrains Mono", 11),  # module-scope: no font_sizes access
             text_color=COLORS["text_bright"],
         )
         self.label.pack(side="left", padx=(0, 6))
@@ -4158,7 +4158,7 @@ class WayfinderApp(ctk.CTk):
             fg_color="transparent",
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_muted"],
-            font=(self.font_body[0], 18),
+            font=(self.font_body[0], 18),  # optical glyph size
             corner_radius=RADIUS["sm"],
             command=self.hide_to_tray,
         ).pack(side="right")
@@ -4176,7 +4176,7 @@ class WayfinderApp(ctk.CTk):
             fg_color="transparent",
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_muted"],
-            font=(self.font_body[0], 14),
+            font=(self.font_body[0], 14),  # optical glyph size
             corner_radius=RADIUS["sm"],
             command=self.rescue_window,
         )
@@ -4192,7 +4192,7 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_input"],
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_primary"],
-            font=(self.font_mono[0], 14),
+            font=(self.font_mono[0], 14),  # optical glyph size
             corner_radius=RADIUS["sm"],
             command=lambda: self.scale_ui(0.9),
         )
@@ -4219,7 +4219,7 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_input"],
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_primary"],
-            font=(self.font_mono[0], 14),
+            font=(self.font_mono[0], 14),  # optical glyph size
             corner_radius=RADIUS["sm"],
             command=lambda: self.scale_ui(1.1),
         )
@@ -5079,7 +5079,7 @@ class WayfinderApp(ctk.CTk):
             benchmark_tile,
             text="Transcribes a 10-second clip from a cold start (model load included). "
                  "Live dictation keeps the model loaded, so it runs faster than this.",
-            font=(self.font_body[0], 10),
+            font=(self.font_body[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
             wraplength=520, justify="left",
         ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 6))
@@ -5098,7 +5098,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             hw_frame, text=hw_text,
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
         ).pack(anchor="w", padx=12, pady=10)
@@ -5115,7 +5115,7 @@ class WayfinderApp(ctk.CTk):
         self.benchmark_test_btn = ctk.CTkButton(
             btn_row,
             text="⏱️ Test Current Model",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=40,
             width=180,
             corner_radius=10,
@@ -5129,7 +5129,7 @@ class WayfinderApp(ctk.CTk):
         self.benchmark_status_label = ctk.CTkLabel(
             btn_row,
             text="",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         )
         self.benchmark_status_label.pack(side="left", padx=(15, 0))
@@ -5157,7 +5157,7 @@ class WayfinderApp(ctk.CTk):
         status_color = COLORS["accent"] if is_premium else COLORS["text_muted"]
         self._license_status_label = ctk.CTkLabel(
             license_tile, text=status_text,
-            font=(self.font_body[0], 14, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=status_color,
         )
         self._license_status_label.pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 8))
@@ -5168,7 +5168,7 @@ class WayfinderApp(ctk.CTk):
 
         self._license_key_entry = ctk.CTkEntry(
             key_row, placeholder_text="WV-XXXX-XXXX-XXXX-XXXX",
-            font=(self.font_body[0], 12), height=34, corner_radius=8,
+            font=(self.font_body[0], self.font_sizes["body"]), height=34, corner_radius=8,
             fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
             border_color=COLORS["border_subtle"],
         )
@@ -5178,7 +5178,7 @@ class WayfinderApp(ctk.CTk):
             self._license_key_entry.insert(0, license_info.license_key)
 
         ctk.CTkButton(
-            key_row, text="Activate", font=(self.font_body[0], 12, "bold"),
+            key_row, text="Activate", font=(self.font_body[0], self.font_sizes["body"], "bold"),
             width=90, height=34, corner_radius=8,
             fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
             text_color="#FFFFFF",
@@ -5188,7 +5188,7 @@ class WayfinderApp(ctk.CTk):
         # Feedback label
         self._license_feedback = ctk.CTkLabel(
             license_tile, text="",
-            font=(self.font_body[0], 11), text_color=COLORS["text_muted"],
+            font=(self.font_body[0], self.font_sizes["small"]), text_color=COLORS["text_muted"],
         )
         self._license_feedback.pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 4))
 
@@ -5200,7 +5200,7 @@ class WayfinderApp(ctk.CTk):
             import webbrowser
             ctk.CTkButton(
                 action_row, text="Get Ultra — $20 (reg. $40)",
-                font=(self.font_body[0], 12, "bold"),
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 height=32, corner_radius=8,
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
                 text_color="#FFFFFF",
@@ -5281,7 +5281,7 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     self.benchmark_results_frame,
                     text=result_text,
-                    font=(self.font_body[0], 12),
+                    font=(self.font_body[0], self.font_sizes["body"]),
                     text_color=COLORS["text_primary"],
                 ).pack(anchor="w", pady=2)
             
@@ -5293,14 +5293,14 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     self.benchmark_results_frame,
                     text=f"Last tested: {last_run}",
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["text_muted"],
                 ).pack(anchor="w", pady=(5, 0))
         else:
             ctk.CTkLabel(
                 self.benchmark_results_frame,
                 text="No benchmark results yet. Click 'Test Current Model' to measure speed.",
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_muted"],
             ).pack(anchor="w")
     
@@ -5879,7 +5879,7 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     self.api_benchmark_results_frame,
                     text=f"{provider_name} Whisper: {latency:.1f}s ({audio_duration} audio)",
-                    font=(self.font_body[0], 12),
+                    font=(self.font_body[0], self.font_sizes["body"]),
                     text_color=COLORS["text_primary"],
                 ).pack(anchor="w", pady=2)
             
@@ -5890,14 +5890,14 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     self.api_benchmark_results_frame,
                     text=f"Last tested: {last_run}",
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["text_muted"],
                 ).pack(anchor="w", pady=(5, 0))
         else:
             ctk.CTkLabel(
                 self.api_benchmark_results_frame,
                 text="No API benchmark results yet.",
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_muted"],
             ).pack(anchor="w")
     
@@ -6129,7 +6129,7 @@ class WayfinderApp(ctk.CTk):
         self.api_benchmark_btn = ctk.CTkButton(
             btn_row,
             text="☁️ Test API Latency",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=40,
             width=180,
             corner_radius=10,
@@ -6143,7 +6143,7 @@ class WayfinderApp(ctk.CTk):
         self.api_benchmark_status_label = ctk.CTkLabel(
             btn_row,
             text="",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         )
         self.api_benchmark_status_label.pack(side="left", padx=(15, 0))
@@ -6373,7 +6373,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             dialog,
             text="Save",
-            font=(self.font_body[0], 14, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
             text_color="#000000",
@@ -7366,7 +7366,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             dialog,
             text="Audio Processing Levels",
-            font=(self.font_body[0], 16, "bold"),
+            font=(self.font_body[0], self.font_sizes["title"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(pady=(20, 15))
         
@@ -7389,14 +7389,14 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 frame,
                 text=title,
-                font=(self.font_body[0], 13, "bold"),
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 text_color=COLORS["accent"] if current == value else COLORS["text_primary"],
             ).pack(anchor="w", padx=12, pady=(8, 2))
             
             ctk.CTkLabel(
                 frame,
                 text=desc,
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_secondary"],
                 wraplength=360,
             ).pack(anchor="w", padx=12, pady=(0, 8))
@@ -7407,7 +7407,7 @@ class WayfinderApp(ctk.CTk):
             command=dialog.destroy,
             fg_color=COLORS["bg_elevated"],
             hover_color=COLORS["bg_hover"],
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=32,
             width=80,
         ).pack(pady=15)
@@ -7478,10 +7478,10 @@ class WayfinderApp(ctk.CTk):
             self.voice_profile_frame = locked_frame  # tracked so it can be removed without a full tab rebuild
             ctk.CTkLabel(
                 locked_frame, text="Voice Profiles require Wayfinder Aura Ultra",
-                font=(self.font_body[0], 12), text_color=COLORS["text_muted"],
+                font=(self.font_body[0], self.font_sizes["small"]), text_color=COLORS["text_muted"],
             ).pack(padx=12, pady=8)
             ctk.CTkButton(
-                locked_frame, text="Upgrade", font=(self.font_body[0], 11),
+                locked_frame, text="Upgrade", font=(self.font_body[0], self.font_sizes["small"]),
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
                 text_color="#FFFFFF", height=28, corner_radius=6,
                 command=lambda: self._show_premium_prompt("voice_profiles"),
@@ -7539,7 +7539,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_row,
             text="View Profile",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             height=28,
             width=90,
             corner_radius=6,
@@ -7553,7 +7553,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkButton(
                 btn_row,
                 text="Clear",
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 height=28,
                 width=60,
                 corner_radius=6,
@@ -7598,7 +7598,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             stats_row,
             text=status_text,
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(side="left")
         
@@ -7610,7 +7610,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_row,
             text="View Profile",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             height=28,
             width=90,
             corner_radius=6,
@@ -7624,7 +7624,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_row,
             text="Clear Data",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             height=28,
             width=80,
             corner_radius=6,
@@ -7649,14 +7649,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Voice Profile",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
             text="Your personal voice profile, learned from transcriptions.",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
         ).pack(anchor="w", pady=(0, 20))
         
@@ -7669,7 +7669,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 inner,
                 text=f"Error loading profile: {e}",
-                font=(self.font_body[0], 12),
+                font=(self.font_body[0], self.font_sizes["body"]),
                 text_color=COLORS["error"],
             ).pack(anchor="w")
             return
@@ -7685,7 +7685,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             stats_frame,
             text=f"📊 Statistics: {history_count} transcriptions • {total_words:,} words • {vocab_count} unique terms",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_primary"],
         ).pack(padx=15, pady=12)
         
@@ -7693,14 +7693,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Profile Summary",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         ).pack(anchor="w", pady=(10, 5))
         
         summary = stats.get("summary", "")
         summary_text = ctk.CTkTextbox(
             inner,
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_card"],
             text_color=COLORS["text_primary"],
             corner_radius=10,
@@ -7718,7 +7718,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Learned Vocabulary",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         ).pack(anchor="w", pady=(15, 5))
         
@@ -7728,7 +7728,7 @@ class WayfinderApp(ctk.CTk):
         vocab_label = ctk.CTkLabel(
             inner,
             text=vocab_display,
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["accent"] if vocabulary else COLORS["text_muted"],
             wraplength=490,
             justify="left",
@@ -7763,7 +7763,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame,
             text="Save Changes",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=40,
             corner_radius=10,
             fg_color=COLORS["accent"],
@@ -7775,7 +7775,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame,
             text="Regenerate Profile",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
@@ -7787,7 +7787,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame,
             text="Close",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
@@ -7809,7 +7809,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             confirm_dialog,
             text="Clear all voice learning data?\n\nThis cannot be undone.",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_primary"],
             justify="center",
         ).pack(pady=20)
@@ -7834,7 +7834,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame,
             text="Clear Data",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=36,
             width=100,
             corner_radius=8,
@@ -7847,7 +7847,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=36,
             width=80,
             corner_radius=8,
@@ -7977,7 +7977,7 @@ class WayfinderApp(ctk.CTk):
         info_icon = ctk.CTkLabel(
             left_frame,
             text="ⓘ",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         )
         info_icon.pack(side="left", padx=(6, 0))
@@ -8698,7 +8698,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Cloud API Configuration",
-            font=(self.font_header[0], 20, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 16))
         
@@ -8739,7 +8739,7 @@ class WayfinderApp(ctk.CTk):
                 btn.configure(
                     fg_color=COLORS["bg_card"] if is_selected else "transparent",
                     text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
-                    font=(self.font_body[0], 13, "bold" if is_selected else "normal"),
+                    font=(self.font_body[0], self.font_sizes["body"], "bold" if is_selected else "normal"),
                 )
         
         def select_provider(name):
@@ -8750,7 +8750,7 @@ class WayfinderApp(ctk.CTk):
         openai_btn = ctk.CTkButton(
             provider_inner,
             text="OpenAI",
-            font=(self.font_body[0], 13, "bold" if current_backend == "openai" else "normal"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold" if current_backend == "openai" else "normal"),
             fg_color=COLORS["bg_card"] if current_backend == "openai" else "transparent",
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_bright"] if current_backend == "openai" else COLORS["text_secondary"],
@@ -8764,7 +8764,7 @@ class WayfinderApp(ctk.CTk):
         anthropic_btn = ctk.CTkButton(
             provider_inner,
             text="Anthropic",
-            font=(self.font_body[0], 13, "bold" if current_backend == "anthropic" else "normal"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold" if current_backend == "anthropic" else "normal"),
             fg_color=COLORS["bg_card"] if current_backend == "anthropic" else "transparent",
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_bright"] if current_backend == "anthropic" else COLORS["text_secondary"],
@@ -8803,14 +8803,14 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     api_frame,
                     text="API Key",
-                    font=(self.font_body[0], 12),
+                    font=(self.font_body[0], self.font_sizes["small"]),
                     text_color=COLORS["text_secondary"],
                 ).pack(anchor="w", padx=16, pady=(12, 4))
                 
                 key_entry = ctk.CTkEntry(
                     api_frame,
                     textvariable=form_data["openai_key"],
-                    font=(self.font_mono[0], 11),
+                    font=(self.font_mono[0], self.font_sizes["small"]),
                     fg_color=COLORS["bg_input"],
                     border_color=COLORS["border_subtle"],
                     text_color=COLORS["text_primary"],
@@ -8829,7 +8829,7 @@ class WayfinderApp(ctk.CTk):
                     text="Show key",
                     variable=show_key_var,
                     command=toggle_visibility,
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["text_muted"],
                     fg_color=COLORS["accent"],
                     hover_color=COLORS["accent_dim"],
@@ -8838,7 +8838,7 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     api_frame,
                     text="OpenAI Model",
-                    font=(self.font_body[0], 12),
+                    font=(self.font_body[0], self.font_sizes["small"]),
                     text_color=COLORS["text_secondary"],
                 ).pack(anchor="w", padx=16, pady=(0, 4))
                 
@@ -8846,7 +8846,7 @@ class WayfinderApp(ctk.CTk):
                     api_frame,
                     variable=form_data["openai_model"],
                     values=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
-                    font=(self.font_body[0], 12),
+                    font=(self.font_body[0], self.font_sizes["body"]),
                     fg_color=COLORS["bg_input"],
                     button_color=COLORS["bg_surface"],
                     button_hover_color=COLORS["bg_hover"],
@@ -8859,7 +8859,7 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     settings_container,
                     text="GPT-4o-mini is fast and affordable. GPT-4o is higher quality but more expensive.",
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["text_muted"],
                     wraplength=460,
                 ).pack(anchor="w", pady=(0, 8))
@@ -8867,7 +8867,7 @@ class WayfinderApp(ctk.CTk):
                 link = ctk.CTkLabel(
                     settings_container,
                     text="Get your API key at: platform.openai.com/api-keys",
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["accent"],
                     cursor="hand2",
                 )
@@ -8881,14 +8881,14 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     api_frame,
                     text="API Key",
-                    font=(self.font_body[0], 12),
+                    font=(self.font_body[0], self.font_sizes["small"]),
                     text_color=COLORS["text_secondary"],
                 ).pack(anchor="w", padx=16, pady=(12, 4))
                 
                 key_entry = ctk.CTkEntry(
                     api_frame,
                     textvariable=form_data["anthropic_key"],
-                    font=(self.font_mono[0], 11),
+                    font=(self.font_mono[0], self.font_sizes["small"]),
                     fg_color=COLORS["bg_input"],
                     border_color=COLORS["border_subtle"],
                     text_color=COLORS["text_primary"],
@@ -8907,7 +8907,7 @@ class WayfinderApp(ctk.CTk):
                     text="Show key",
                     variable=show_key_var,
                     command=toggle_visibility,
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["text_muted"],
                     fg_color=COLORS["accent"],
                     hover_color=COLORS["accent_dim"],
@@ -8916,7 +8916,7 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     api_frame,
                     text="Claude Model",
-                    font=(self.font_body[0], 12),
+                    font=(self.font_body[0], self.font_sizes["small"]),
                     text_color=COLORS["text_secondary"],
                 ).pack(anchor="w", padx=16, pady=(0, 4))
                 
@@ -8929,7 +8929,7 @@ class WayfinderApp(ctk.CTk):
                         "claude-3-sonnet-20240229",
                         "claude-3-5-sonnet-20241022",
                     ],
-                    font=(self.font_body[0], 12),
+                    font=(self.font_body[0], self.font_sizes["body"]),
                     fg_color=COLORS["bg_input"],
                     button_color=COLORS["bg_surface"],
                     button_hover_color=COLORS["bg_hover"],
@@ -8942,7 +8942,7 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     settings_container,
                     text="Claude Haiku is fast and cheap (~$0.25/1M tokens). Sonnet is higher quality but slower.",
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["text_muted"],
                     wraplength=460,
                 ).pack(anchor="w", pady=(0, 8))
@@ -8950,7 +8950,7 @@ class WayfinderApp(ctk.CTk):
                 link = ctk.CTkLabel(
                     settings_container,
                     text="Get your API key at: console.anthropic.com",
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["accent"],
                     cursor="hand2",
                 )
@@ -9001,7 +9001,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_surface"],
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_secondary"],
@@ -9014,7 +9014,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame,
             text="Save",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_dim"],
             text_color=COLORS["bg_base"],
@@ -9069,7 +9069,7 @@ class WayfinderApp(ctk.CTk):
 
         back_btn = ctk.CTkButton(
             header, text="←", width=32, height=32,
-            font=(self.font_body[0], 16),
+            font=(self.font_body[0], 16),  # optical glyph size
             fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_primary"], corner_radius=RADIUS["sm"],
             command=close,
@@ -9078,7 +9078,7 @@ class WayfinderApp(ctk.CTk):
 
         ctk.CTkLabel(
             header, text=title,
-            font=(self.font_header[0], 16, "bold"),
+            font=(self.font_header[0], self.font_sizes["title"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(side="left", padx=(10, 0))
 
@@ -9169,7 +9169,7 @@ class WayfinderApp(ctk.CTk):
             info_icon = ctk.CTkLabel(
                 label_container,
                 text="ⓘ",
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_muted"],
             )
             info_icon.pack(side="left", padx=(8, 0))
@@ -9530,7 +9530,7 @@ class WayfinderApp(ctk.CTk):
             info_icon = ctk.CTkLabel(
                 label_container,
                 text="ⓘ",
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_muted"],
             )
             info_icon.pack(side="left", padx=(8, 0))
@@ -9587,7 +9587,7 @@ class WayfinderApp(ctk.CTk):
             info_icon = ctk.CTkLabel(
                 label_container,
                 text="ⓘ",
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_muted"],
             )
             info_icon.pack(side="left", padx=(8, 0))
@@ -9679,14 +9679,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Restart Required",
-            font=(self.font_header[0], 18, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(pady=(0, 12))
         
         ctk.CTkLabel(
             inner,
             text="The status indicator change requires a restart to take effect.",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_secondary"],
             wraplength=340,
         ).pack(pady=(0, 20))
@@ -9697,7 +9697,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame,
             text="Later",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_surface"],
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_secondary"],
@@ -9723,7 +9723,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame,
             text="Restart Now",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_dim"],
             text_color=COLORS["bg_base"],
@@ -9819,12 +9819,12 @@ class WayfinderApp(ctk.CTk):
 
         ctk.CTkLabel(
             inner, text="😇 Ultra Feature",
-            font=(self.font_body[0], 14, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["accent"],
         ).pack(anchor="w")
 
         ctk.CTkLabel(
-            inner, text=msg, font=(self.font_body[0], 12),
+            inner, text=msg, font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_primary"], wraplength=380, justify="left",
         ).pack(fill="x", pady=(4, 12))
 
@@ -9837,14 +9837,14 @@ class WayfinderApp(ctk.CTk):
             self._premium_banner = None
 
         ctk.CTkButton(
-            btn_row, text="Get Ultra — $20 (reg. $40)", font=(self.font_body[0], 13, "bold"),
+            btn_row, text="Get Ultra — $20 (reg. $40)", font=(self.font_body[0], self.font_sizes["body"], "bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
             text_color="#FFFFFF", height=34, corner_radius=8,
             command=lambda: [webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")), _dismiss()],
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
-            btn_row, text="Dismiss", font=(self.font_body[0], 12),
+            btn_row, text="Dismiss", font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_card"],
             text_color=COLORS["text_muted"], height=34, corner_radius=8,
             command=_dismiss,
@@ -10242,7 +10242,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             header_row,
             text="Mic Test",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_primary"],
         ).pack(side="left", padx=(8, 0))
         
@@ -10253,7 +10253,7 @@ class WayfinderApp(ctk.CTk):
         self._mic_play_btn = ctk.CTkButton(
             btn_frame,
             text="▶ Play",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_elevated"],
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_bright"],
@@ -10268,7 +10268,7 @@ class WayfinderApp(ctk.CTk):
         self._mic_test_btn = ctk.CTkButton(
             btn_frame,
             text="● Record",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["accent_red"],
             hover_color="#c55",
             text_color=COLORS["text_bright"],
@@ -10286,7 +10286,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             self._mic_meter_frame,
             text="Level:",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
             width=40,
         ).pack(side="left", padx=(8, 0))
@@ -10312,7 +10312,7 @@ class WayfinderApp(ctk.CTk):
         self._mic_test_status = ctk.CTkLabel(
             self._mic_test_frame,
             text="Click Record to test your mic",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         )
         self._mic_test_status.pack(pady=(4, 0), padx=8, anchor="w")
@@ -10819,7 +10819,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 content,
                 text="Select an installed model or download new ones.",
-                font=(self.font_body[0], 10),
+                font=(self.font_body[0], self.font_sizes["caption"]),
                 text_color=COLORS["text_secondary"],
             ).pack(anchor="w", padx=8, pady=(0, 8))
 
@@ -10829,7 +10829,7 @@ class WayfinderApp(ctk.CTk):
 
             installed_btn = ctk.CTkButton(
                 tab_container, text="Installed",
-                font=(self.font_body[0], 12), height=30,
+                font=(self.font_body[0], self.font_sizes["body"]), height=30,
                 corner_radius=6, fg_color=COLORS["accent"], text_color="#000000",
                 hover_color=COLORS["accent_glow"],
             )
@@ -10837,7 +10837,7 @@ class WayfinderApp(ctk.CTk):
 
             download_btn = ctk.CTkButton(
                 tab_container, text="Download",
-                font=(self.font_body[0], 12), height=30,
+                font=(self.font_body[0], self.font_sizes["body"]), height=30,
                 corner_radius=6, fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
                 hover_color=COLORS["bg_elevated"],
             )
@@ -10865,12 +10865,12 @@ class WayfinderApp(ctk.CTk):
                     ctk.CTkLabel(
                         content_area,
                         text="No models installed yet",
-                        font=(self.font_body[0], 14, "bold"),
+                        font=(self.font_body[0], self.font_sizes["body"], "bold"),
                         text_color=COLORS["text_primary"],
                     ).pack(pady=(40, 8))
                     ctk.CTkButton(
                         content_area, text="Download Models",
-                        font=(self.font_body[0], 12, "bold"), height=36, corner_radius=8,
+                        font=(self.font_body[0], self.font_sizes["body"], "bold"), height=36, corner_radius=8,
                         fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
                         text_color="#000000", command=show_download,
                     ).pack(pady=(0, 30))
@@ -10897,13 +10897,13 @@ class WayfinderApp(ctk.CTk):
 
                     ctk.CTkLabel(
                         info_frame, text=model["name"],
-                        font=(self.font_body[0], 12, "bold" if is_current else "normal"),
+                        font=(self.font_body[0], self.font_sizes["body"], "bold" if is_current else "normal"),
                         text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
                     ).pack(anchor="w")
 
                     ctk.CTkLabel(
                         info_frame, text=f"{model['speed']} • {model['size']}",
-                        font=(self.font_body[0], 9), text_color=COLORS["text_muted"],
+                        font=(self.font_body[0], self.font_sizes["caption"]), text_color=COLORS["text_muted"],
                     ).pack(anchor="w")
 
                 def save_selection():
@@ -10923,7 +10923,7 @@ class WayfinderApp(ctk.CTk):
 
                 ctk.CTkButton(
                     content_area, text="Save & Apply",
-                    font=(self.font_body[0], 13, "bold"), height=38, corner_radius=8,
+                    font=(self.font_body[0], self.font_sizes["body"], "bold"), height=38, corner_radius=8,
                     fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
                     command=save_selection,
                 ).pack(fill="x", padx=8, pady=8)
@@ -10946,7 +10946,7 @@ class WayfinderApp(ctk.CTk):
                 for section_title, model_ids in categories:
                     ctk.CTkLabel(
                         scroll, text=section_title,
-                        font=(self.font_body[0], 10, "bold"),
+                        font=(self.font_body[0], self.font_sizes["caption"], "bold"),
                         text_color=COLORS["text_muted"],
                     ).pack(anchor="w", padx=8, pady=(8, 3))
 
@@ -10969,19 +10969,19 @@ class WayfinderApp(ctk.CTk):
 
                         ctk.CTkLabel(
                             info_frame, text=name_text,
-                            font=(self.font_body[0], 11, "bold"),
+                            font=(self.font_body[0], self.font_sizes["small"], "bold"),
                             text_color=COLORS["accent"] if is_installed else COLORS["text_primary"],
                         ).pack(anchor="w")
 
                         ctk.CTkLabel(
                             info_frame, text=f"{info['size']} • {info['speed']}",
-                            font=(self.font_body[0], 9), text_color=COLORS["text_muted"],
+                            font=(self.font_body[0], self.font_sizes["caption"]), text_color=COLORS["text_muted"],
                         ).pack(anchor="w")
 
                         if is_installed:
                             ctk.CTkLabel(
                                 row, text="Installed",
-                                font=(self.font_body[0], 10),
+                                font=(self.font_body[0], self.font_sizes["caption"]),
                                 text_color=COLORS["accent_green"],
                             ).pack(side="right", padx=12, pady=6)
                         else:
@@ -10990,7 +10990,7 @@ class WayfinderApp(ctk.CTk):
 
                             ctk.CTkButton(
                                 row, text="Get",
-                                font=(self.font_body[0], 10), width=50, height=24,
+                                font=(self.font_body[0], self.font_sizes["caption"]), width=50, height=24,
                                 corner_radius=5, fg_color=COLORS["bg_elevated"],
                                 hover_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
                                 command=make_handler(),
@@ -11003,13 +11003,13 @@ class WayfinderApp(ctk.CTk):
 
                 ctk.CTkLabel(
                     content_area, text=f"Downloading {info['name']}",
-                    font=(self.font_body[0], 14, "bold"),
+                    font=(self.font_body[0], self.font_sizes["body"], "bold"),
                     text_color=COLORS["text_bright"],
                 ).pack(pady=(20, 4))
 
                 ctk.CTkLabel(
                     content_area, text=f"Size: {info['size']}",
-                    font=(self.font_body[0], 11),
+                    font=(self.font_body[0], self.font_sizes["small"]),
                     text_color=COLORS["text_secondary"],
                 ).pack(pady=(0, 12))
 
@@ -11019,7 +11019,7 @@ class WayfinderApp(ctk.CTk):
 
                 status_lbl = ctk.CTkLabel(
                     content_area, text="Starting...",
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["text_muted"],
                 )
                 status_lbl.pack()
@@ -11072,14 +11072,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Transcription Prompt",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
             text="The prompt helps Whisper understand context and improves accuracy.\nUse domain-specific vocabulary for better results.",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
         ).pack(anchor="w", pady=(0, 20))
@@ -11088,7 +11088,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Preset Prompts:",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         ).pack(anchor="w", pady=(0, 8))
         
@@ -11138,7 +11138,7 @@ class WayfinderApp(ctk.CTk):
             btn = ctk.CTkButton(
                 presets_frame,
                 text=name,
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 height=32,
                 fg_color=COLORS["accent_dim"] if is_selected else COLORS["bg_hover"],
                 hover_color=COLORS["accent_glow"] if is_selected else COLORS["bg_elevated"],
@@ -11153,13 +11153,13 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Custom Prompt:",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         ).pack(anchor="w", pady=(10, 8))
         
         custom_text = ctk.CTkTextbox(
             inner,
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_card"],
             text_color=COLORS["text_primary"],
             corner_radius=10,
@@ -11173,21 +11173,21 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="My Vocabulary:",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         ).pack(anchor="w", pady=(5, 5))
         
         ctk.CTkLabel(
             inner,
             text="Personal terms always added to your prompt (comma-separated)",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
         ).pack(anchor="w", pady=(0, 8))
         
         vocab_locked = not self.feature_gate.has_feature("custom_vocabulary")
         vocab_text = ctk.CTkTextbox(
             inner,
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["body"]),
             fg_color=COLORS["bg_card"],
             text_color=COLORS["text_muted"] if vocab_locked else COLORS["accent"],
             corner_radius=10,
@@ -11211,7 +11211,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             tip_frame,
             text="💡 Vocabulary is appended to your prompt. Add names, jargon,\n    and technical terms (e.g. Bazzite, WRX STI, FSD, whisper.cpp)",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
         ).pack(padx=12, pady=10)
@@ -11240,7 +11240,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Save & Apply",
-            font=(self.font_body[0], 15, "bold"),
+            font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
             corner_radius=12,
             fg_color=COLORS["accent"],
@@ -11252,7 +11252,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
@@ -11276,14 +11276,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="🎤 Select Microphone",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
             text="Choose which audio input device to use for voice recording.",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
         ).pack(anchor="w", pady=(0, 20))
@@ -11313,7 +11313,7 @@ class WayfinderApp(ctk.CTk):
             text="🎤 Auto-detect Microphone",
             variable=selected_device,
             value=-1,
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["accent"],
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_glow"],
@@ -11322,7 +11322,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             auto_frame,
             text="(Recommended)",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["accent_green"],
         ).pack(side="left", padx=(10, 0))
         
@@ -11364,7 +11364,7 @@ class WayfinderApp(ctk.CTk):
             name_label = ctk.CTkLabel(
                 info_frame,
                 text=display_name,
-                font=(self.font_body[0], 12),
+                font=(self.font_body[0], self.font_sizes["body"]),
                 text_color=COLORS["accent"] if device.get("recommended") else COLORS["text_primary"],
                 anchor="w",
             )
@@ -11378,7 +11378,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 info_frame,
                 text=details,
-                font=(self.font_body[0], 10),
+                font=(self.font_body[0], self.font_sizes["caption"]),
                 text_color=COLORS["text_secondary"],
                 anchor="w",
             ).pack(anchor="w")
@@ -11387,7 +11387,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 scroll_frame,
                 text="No audio input devices found!\n\nCheck your audio settings and make sure\na microphone is connected.",
-                font=(self.font_body[0], 13),
+                font=(self.font_body[0], self.font_sizes["body"]),
                 text_color=COLORS["accent_red"],
                 justify="center",
             ).pack(pady=30)
@@ -11424,7 +11424,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Save & Apply",
-            font=(self.font_body[0], 15, "bold"),
+            font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
             corner_radius=12,
             fg_color=COLORS["accent"],
@@ -11436,7 +11436,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
@@ -11489,14 +11489,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Accuracy Mode",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
             text="Choose a preset that balances speed and accuracy.\nHigher accuracy = slower transcription.",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
         ).pack(anchor="w", pady=(0, 20))
@@ -11562,7 +11562,7 @@ class WayfinderApp(ctk.CTk):
             btn = ctk.CTkButton(
                 frame,
                 text=f"{mode_info['label']}\n{mode_info['desc']}",
-                font=(self.font_body[0], 13),
+                font=(self.font_body[0], self.font_sizes["body"]),
                 height=60,
                 fg_color=COLORS["accent_dim"] if is_selected else COLORS["bg_hover"],
                 hover_color=COLORS["accent_glow"] if is_selected else COLORS["bg_elevated"],
@@ -11596,7 +11596,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Apply",
-            font=(self.font_body[0], 15, "bold"),
+            font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
             corner_radius=12,
             fg_color=COLORS["accent"],
@@ -11608,7 +11608,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
@@ -11632,14 +11632,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Beam Search Size",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
             text="Higher values = more accurate but slower.\n\n⏱️ 1 = fastest (-50%) | 5 = baseline | 10 = slowest (+100%)",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
         ).pack(anchor="w", pady=(0, 20))
@@ -11649,7 +11649,7 @@ class WayfinderApp(ctk.CTk):
         value_label = ctk.CTkLabel(
             inner,
             text=str(current),
-            font=(self.font_header[0], 36, "bold"),
+            font=(self.font_header[0], 36, "bold"),  # optical glyph size
             text_color=COLORS["accent"],
         )
         value_label.pack(pady=(0, 15))
@@ -11689,7 +11689,7 @@ class WayfinderApp(ctk.CTk):
                 text=label,
                 width=100,
                 height=30,
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 fg_color=COLORS["bg_hover"],
                 hover_color=COLORS["bg_elevated"],
                 text_color=COLORS["text_primary"],
@@ -11718,7 +11718,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Save",
-            font=(self.font_body[0], 15, "bold"),
+            font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
             corner_radius=12,
             fg_color=COLORS["accent"],
@@ -11730,7 +11730,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
@@ -11754,14 +11754,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Language",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
             text="Force a specific language for better accuracy,\nor use auto-detect for multilingual support.",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
         ).pack(anchor="w", pady=(0, 20))
@@ -11787,7 +11787,7 @@ class WayfinderApp(ctk.CTk):
                 text=label,
                 variable=lang_var,
                 value=code,
-                font=(self.font_body[0], 14),
+                font=(self.font_body[0], self.font_sizes["body"]),
                 text_color=COLORS["text_primary"],
                 fg_color=COLORS["accent"],
                 hover_color=COLORS["accent_glow"],
@@ -11809,7 +11809,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Save",
-            font=(self.font_body[0], 15, "bold"),
+            font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
             corner_radius=12,
             fg_color=COLORS["accent"],
@@ -11821,7 +11821,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
@@ -11845,14 +11845,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Chunk Duration",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
             text="How long each audio segment is during chunked recording.\nShorter = faster feedback | Longer = better context\n\n⏱️ Processing: 10s≈1-2s delay | 30s≈2-4s delay | 60s≈4-8s delay",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
         ).pack(anchor="w", pady=(0, 20))
@@ -11862,7 +11862,7 @@ class WayfinderApp(ctk.CTk):
         value_label = ctk.CTkLabel(
             inner,
             text=f"{current}s",
-            font=(self.font_header[0], 36, "bold"),
+            font=(self.font_header[0], 36, "bold"),  # optical glyph size
             text_color=COLORS["accent"],
         )
         value_label.pack(pady=(0, 15))
@@ -11890,8 +11890,8 @@ class WayfinderApp(ctk.CTk):
         # Labels
         labels_frame = ctk.CTkFrame(inner, fg_color="transparent")
         labels_frame.pack(fill="x", pady=(0, 15))
-        ctk.CTkLabel(labels_frame, text="10s", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="left")
-        ctk.CTkLabel(labels_frame, text="60s", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="right")
+        ctk.CTkLabel(labels_frame, text="10s", font=(self.font_body[0], self.font_sizes["caption"]), text_color=COLORS["text_muted"]).pack(side="left")
+        ctk.CTkLabel(labels_frame, text="60s", font=(self.font_body[0], self.font_sizes["caption"]), text_color=COLORS["text_muted"]).pack(side="right")
         
         # Preset buttons with latency hints
         presets_frame = ctk.CTkFrame(inner, fg_color="transparent")
@@ -11909,7 +11909,7 @@ class WayfinderApp(ctk.CTk):
                 text=label,
                 width=70,
                 height=30,
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 fg_color=COLORS["bg_hover"],
                 hover_color=COLORS["bg_elevated"],
                 text_color=COLORS["text_primary"],
@@ -11927,7 +11927,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Save",
-            font=(self.font_body[0], 15, "bold"),
+            font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
             corner_radius=12,
             fg_color=COLORS["accent"],
@@ -11939,7 +11939,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
@@ -11965,14 +11965,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Select Backend",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
             text="Choose which transcription engine to use.",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
         ).pack(anchor="w", pady=(0, 10))
         
@@ -12005,14 +12005,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             gpu_label_frame,
             text=f"{gpu_icon} {gpu_vendor_text}",
-            font=(self.font_body[0], 13, "bold"),
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         ).pack(anchor="w")
         
         ctk.CTkLabel(
             gpu_label_frame,
             text=gpu_rec,
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["accent"] if gpu_info.is_nvidia or gpu_info.is_amd else COLORS["text_muted"],
         ).pack(anchor="w", pady=(2, 0))
         
@@ -12114,7 +12114,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 name_row,
                 text=backend["name"],
-                font=(self.font_body[0], 14, "bold"),
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 text_color=name_color,
             ).pack(side="left")
             
@@ -12123,7 +12123,7 @@ class WayfinderApp(ctk.CTk):
                 rec_badge = ctk.CTkLabel(
                     name_row,
                     text="★ Recommended",
-                    font=(self.font_body[0], 10, "bold"),
+                    font=(self.font_body[0], self.font_sizes["caption"], "bold"),
                     text_color=COLORS["accent_yellow"],
                 )
                 rec_badge.pack(side="left", padx=8)
@@ -12133,14 +12133,14 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     name_row,
                     text="✓",
-                    font=(self.font_body[0], 11),
+                    font=(self.font_body[0], self.font_sizes["small"]),
                     text_color=COLORS["accent_green"],
                 ).pack(side="left", padx=5)
             else:
                 ctk.CTkLabel(
                     name_row,
                     text="Not installed",
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["accent_red"],
                 ).pack(side="left", padx=5)
             
@@ -12148,7 +12148,7 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(
                     name_row,
                     text="GPU ✓",
-                    font=(self.font_body[0], 10),
+                    font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["accent"],
                 ).pack(side="left", padx=5)
             
@@ -12156,7 +12156,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 info,
                 text=backend["desc"],
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_secondary"],
             ).pack(anchor="w")
         
@@ -12167,7 +12167,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             fw_frame,
             text="Faster-Whisper Model",
-            font=(self.font_body[0], 12, "bold"),
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=15, pady=(10, 5))
         
@@ -12175,7 +12175,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             fw_frame,
             text="⏱️ tiny ~0.5s | base ~1s | small ~1.5s | turbo ⭐~2s | large ~6s",
-            font=(self.font_body[0], 10),
+            font=(self.font_body[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=15, pady=(0, 5))
         
@@ -12204,7 +12204,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             fw_frame,
             text="Compute Type",
-            font=(self.font_body[0], 12, "bold"),
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=15, pady=(5, 5))
         
@@ -12212,7 +12212,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             fw_frame,
             text="⏱️ float16 = fastest (GPU) | int8 = -30% VRAM | int8_float16 = balanced",
-            font=(self.font_body[0], 10),
+            font=(self.font_body[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=15, pady=(0, 5))
         
@@ -12238,7 +12238,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 nvidia_frame,
                 text="🟢 NVIDIA CUDA Setup",
-                font=(self.font_body[0], 12, "bold"),
+                font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 text_color=COLORS["accent_green"],
             ).pack(anchor="w", padx=15, pady=(10, 5))
             
@@ -12251,7 +12251,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkLabel(
                 nvidia_frame,
                 text=setup_text,
-                font=("Consolas", 10) if os.name == "nt" else ("monospace", 10),
+                font=("Consolas", self.font_sizes["caption"]) if os.name == "nt" else ("monospace", self.font_sizes["caption"]),
                 text_color=COLORS["text_secondary"],
                 justify="left",
             ).pack(anchor="w", padx=15, pady=(0, 10))
@@ -12276,7 +12276,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Save",
-            font=(self.font_body[0], 15, "bold"),
+            font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
             corner_radius=12,
             fg_color=COLORS["accent"],
@@ -12288,7 +12288,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
@@ -12312,14 +12312,14 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="GPU Layers",
-            font=(self.font_header[0], 22, "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", pady=(0, 5))
         
         ctk.CTkLabel(
             inner,
             text="Number of model layers to offload to GPU.\n0 = Auto (all layers → maximum speed, more VRAM)\n\n⏱️ More layers = faster | Fewer = saves VRAM",
-            font=(self.font_body[0], 12),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
         ).pack(anchor="w", pady=(0, 20))
@@ -12330,7 +12330,7 @@ class WayfinderApp(ctk.CTk):
         value_label = ctk.CTkLabel(
             inner,
             text=display_text,
-            font=(self.font_header[0], 36, "bold"),
+            font=(self.font_header[0], 36, "bold"),  # optical glyph size
             text_color=COLORS["accent"],
         )
         value_label.pack(pady=(0, 15))
@@ -12362,8 +12362,8 @@ class WayfinderApp(ctk.CTk):
         # Labels
         labels_frame = ctk.CTkFrame(inner, fg_color="transparent")
         labels_frame.pack(fill="x", pady=(0, 15))
-        ctk.CTkLabel(labels_frame, text="Auto", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="left")
-        ctk.CTkLabel(labels_frame, text="64", font=(self.font_body[0], 10), text_color=COLORS["text_muted"]).pack(side="right")
+        ctk.CTkLabel(labels_frame, text="Auto", font=(self.font_body[0], self.font_sizes["caption"]), text_color=COLORS["text_muted"]).pack(side="left")
+        ctk.CTkLabel(labels_frame, text="64", font=(self.font_body[0], self.font_sizes["caption"]), text_color=COLORS["text_muted"]).pack(side="right")
         
         # Preset buttons
         presets_frame = ctk.CTkFrame(inner, fg_color="transparent")
@@ -12375,7 +12375,7 @@ class WayfinderApp(ctk.CTk):
                 text=label,
                 width=60,
                 height=30,
-                font=(self.font_body[0], 11),
+                font=(self.font_body[0], self.font_sizes["small"]),
                 fg_color=COLORS["bg_hover"],
                 hover_color=COLORS["bg_elevated"],
                 text_color=COLORS["text_primary"],
@@ -12387,7 +12387,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkLabel(
             inner,
             text="Note: Only applies when using whisper.cpp backend\nwith GPU acceleration enabled.",
-            font=(self.font_body[0], 11),
+            font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
             justify="center",
         ).pack(pady=(10, 15))
@@ -12403,7 +12403,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Save",
-            font=(self.font_body[0], 15, "bold"),
+            font=(self.font_body[0], self.font_sizes["title"], "bold"),
             height=50,
             corner_radius=12,
             fg_color=COLORS["accent"],
@@ -12415,7 +12415,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner,
             text="Cancel",
-            font=(self.font_body[0], 13),
+            font=(self.font_body[0], self.font_sizes["body"]),
             height=40,
             corner_radius=10,
             fg_color=COLORS["bg_hover"],
