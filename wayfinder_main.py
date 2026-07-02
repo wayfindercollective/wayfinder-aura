@@ -494,19 +494,28 @@ COLORS = {
     "warning_bg": "#2A1A1A",        # Red-tinted banner background (cloud warning)
 }
 
-# Corner radius design tokens for consistent rounded corners
+# Corner radius design tokens for consistent rounded corners.
+# Mirrored in src/wayfinder/ui/theme.py (RADIUS) — keep both in sync.
 RADIUS = {
+    "xs": 6,    # Chips, progress bars, tight inline elements
     "sm": 8,    # Small elements (toggles, chips, badges)
     "md": 12,   # Buttons, inputs, dropdowns
     "lg": 24,   # Bento tiles - 24px for squircle feel
     "xl": 28,   # Hero sections, modals
 }
 
-# Spacing tokens for Bento grid (designer spec)
+# Spacing tokens for Bento grid (designer spec).
+# Mirrored in src/wayfinder/ui/theme.py (SPACING) — keep both in sync.
 SPACING = {
     "gutter": 24,       # Between bento tiles
     "tile_pad": 20,     # Inside tile padding (20px = premium)
     "tile_pad_y": 16,   # Vertical padding inside tiles
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,           # Bento gutter
+    "2xl": 32,
 }
 
 STATE_COLORS = {
@@ -4056,10 +4065,6 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, 'scale_value_label'):
             self.scale_value_label.configure(text=f"{int(self.ui_scale * 100)}%")
     
-    def _scaled_font(self, base_size: int) -> int:
-        """Return a scaled font size."""
-        return int(base_size * self.ui_scale)
-
     def setup_ui(self) -> None:
         # === Premium Typography System (2025) ===
         # Inter & Segoe UI Variable: designed for screen legibility at all weights
@@ -4089,16 +4094,6 @@ class WayfinderApp(ctk.CTk):
             "body": 13,         # Body text, labels
             "small": 11,        # Secondary text
             "caption": 10,      # Captions, hints
-        }
-        
-        # Spacing tokens - 24px gutter for Bento breathing room
-        self.spacing = {
-            "xs": 4,
-            "sm": 8,
-            "md": 12,
-            "lg": 16,
-            "xl": 24,       # Bento gutter
-            "2xl": 32,
         }
         
         # Track last transcription for Dictate tab
@@ -8783,411 +8778,6 @@ class WayfinderApp(ctk.CTk):
         """Rebuild the post-processing section to refresh model list."""
         current_mode = self.config.get("processing_mode", "local")
         self._build_mode_settings(current_mode)
-    
-    def open_postproc_model_settings(self):
-        """Open dialog to select or download llama.cpp GGUF models for post-processing."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("LLM Models for Post-Processing")
-        dialog.configure(fg_color=COLORS["bg_base"])
-        dialog.transient(self)
-        dialog.after(100, dialog.lift)
-        self._setup_dialog(dialog, 680, 780)
-        
-        inner = ctk.CTkFrame(dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        # Title
-        ctk.CTkLabel(
-            inner,
-            text="LLM Models for Post-Processing",
-            font=(self.font_header[0], 20, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(0, 8))
-        
-        ctk.CTkLabel(
-            inner,
-            text="Select a GGUF model or download a recommended one.",
-            font=(self.font_body[0], 11),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", pady=(0, 16))
-        
-        # Models directory
-        models_dir = _get_llm_models_dir()
-        models_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Content container
-        content_container = ctk.CTkFrame(inner, fg_color="transparent")
-        content_container.pack(fill="both", expand=True)
-        
-        # Recommended models scrollable list
-        recommended_scroll = SmoothScrollableFrame(
-            content_container,
-            fg_color=COLORS["bg_surface"],
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
-            height=400,
-        )
-        recommended_scroll.pack(fill="both", expand=True)
-        
-        current_model_path = self.config.get("llama_cpp_model_path", "")
-        
-        # Show recommended models
-        for model_id, model_info in LLM_GGUF_MODELS.items():
-            model_file = models_dir / model_info["filename"]
-            is_installed = model_file.exists()
-            is_selected = str(model_file) == current_model_path if is_installed else False
-            
-            frame = ctk.CTkFrame(
-                recommended_scroll,
-                fg_color=COLORS["bg_card"] if is_selected else COLORS["bg_surface"],
-                corner_radius=RADIUS["sm"],
-            )
-            frame.pack(fill="x", padx=4, pady=4)
-            
-            # Model info
-            info_frame = ctk.CTkFrame(frame, fg_color="transparent")
-            info_frame.pack(fill="x", padx=12, pady=8)
-            
-            name_label = ctk.CTkLabel(
-                info_frame,
-                text=model_info["name"] + (" ⭐" if model_info.get("recommended") else ""),
-                font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                text_color=COLORS["text_bright"],
-            )
-            name_label.pack(anchor="w")
-            
-            desc_label = ctk.CTkLabel(
-                info_frame,
-                text=model_info["description"],
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_secondary"],
-            )
-            desc_label.pack(anchor="w", pady=(2, 0))
-            
-            size_label = ctk.CTkLabel(
-                info_frame,
-                text=f"Size: {model_info['size']}",
-                font=(self.font_mono[0], self.font_sizes["caption"]),
-                text_color=COLORS["text_muted"],
-            )
-            size_label.pack(anchor="w", pady=(2, 0))
-            
-            # Actions
-            actions_frame = ctk.CTkFrame(frame, fg_color="transparent")
-            actions_frame.pack(fill="x", padx=12, pady=(0, 8))
-            
-            if is_installed:
-                if is_selected:
-                    status_btn = ctk.CTkButton(
-                        actions_frame,
-                        text="✓ Selected",
-                        font=(self.font_body[0], self.font_sizes["small"]),
-                        fg_color=COLORS["accent"],
-                        hover_color=COLORS["accent_hover"],
-                        text_color=COLORS["text_bright"],
-                        command=lambda m=model_file: self._select_llm_model(str(m), dialog),
-                    )
-                    status_btn.pack(side="left", padx=(0, 8))
-                else:
-                    select_btn = ctk.CTkButton(
-                        actions_frame,
-                        text="Select",
-                        font=(self.font_body[0], self.font_sizes["small"]),
-                        fg_color=COLORS["bg_hover"],
-                        hover_color=COLORS["bg_elevated"],
-                        text_color=COLORS["text_primary"],
-                        command=lambda m=model_file: self._select_llm_model(str(m), dialog),
-                    )
-                    select_btn.pack(side="left", padx=(0, 8))
-                
-                delete_btn = ctk.CTkButton(
-                    actions_frame,
-                    text="Delete",
-                    font=(self.font_body[0], self.font_sizes["small"]),
-                    fg_color="transparent",
-                    hover_color=COLORS["bg_hover"],
-                    text_color=COLORS["text_secondary"],
-                    command=lambda m=model_file: self._delete_llm_model(m, dialog),
-                )
-                delete_btn.pack(side="left")
-            else:
-                download_btn = ctk.CTkButton(
-                    actions_frame,
-                    text="⬇️ Download",
-                    font=(self.font_body[0], self.font_sizes["small"]),
-                    fg_color=COLORS["accent"],
-                    hover_color=COLORS["accent_hover"],
-                    text_color=COLORS["text_bright"],
-                    command=lambda mid=model_id, info=model_info: self._download_llm_model(mid, info, models_dir, dialog),
-                )
-                download_btn.pack(side="left")
-        
-        # Browse files button
-        browse_files_btn = ctk.CTkButton(
-            inner,
-            text="Browse for GGUF File...",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_primary"],
-            command=lambda: self._browse_llm_file(dialog),
-        )
-        browse_files_btn.pack(fill="x", pady=(12, 8))
-        
-        # Close button
-        close_btn = ctk.CTkButton(
-            inner,
-            text="Close",
-            font=(self.font_body[0], self.font_sizes["body"]),
-            fg_color=COLORS["bg_card"],
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_primary"],
-            command=dialog.destroy,
-        )
-        close_btn.pack(fill="x")
-    
-    def _select_llm_model(self, model_path: str, dialog):
-        """Select an LLM model."""
-        self.config["llama_cpp_model_path"] = model_path
-        save_config(self.config)
-        model_name = Path(model_path).name
-        self.log(f"⚙ Post-processing model: {model_name}")
-        dialog.destroy()
-        # Rebuild settings to refresh UI
-        current_mode = self.config.get("processing_mode", "local")
-        self._build_mode_settings(current_mode)
-    
-    def _delete_llm_model(self, model_path: Path, dialog):
-        """Delete an LLM model file."""
-        try:
-            model_path.unlink()
-            self.log(f"🗑️ Deleted model: {model_path.name}")
-            dialog.destroy()
-            self.open_postproc_model_settings()  # Refresh dialog
-        except Exception as e:
-            self.log(f"⚠️ Failed to delete model: {e}")
-    
-    def _browse_llm_file(self, dialog):
-        """Browse for a GGUF file."""
-        from tkinter import filedialog
-        
-        current_path = self.config.get("llama_cpp_model_path", "")
-        if current_path:
-            initial_dir = str(Path(current_path).parent)
-        else:
-            initial_dir = str(Path.home())
-        
-        file_path = filedialog.askopenfilename(
-            title="Select GGUF Model",
-            initialdir=initial_dir,
-            filetypes=[("GGUF files", "*.gguf"), ("All files", "*.*")],
-        )
-        
-        if file_path:
-            self._select_llm_model(file_path, dialog)
-    
-    def _download_llm_model(self, model_id: str, model_info: dict, models_dir: Path, dialog):
-        """Download an LLM model with detailed progress."""
-        import time as time_module
-        
-        model_file = models_dir / model_info["filename"]
-        model_name = model_info["name"]
-        model_url = model_info["url"]
-        model_filename = model_info["filename"]
-        
-        # Create progress dialog
-        progress_dialog = ctk.CTkToplevel(dialog)
-        progress_dialog.title(f"Downloading {model_name}")
-        progress_dialog.configure(fg_color=COLORS["bg_base"])
-        progress_dialog.transient(dialog)
-        self._setup_dialog(progress_dialog, 500, 320)
-        
-        inner = ctk.CTkFrame(progress_dialog, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        ctk.CTkLabel(
-            inner,
-            text=f"Downloading {model_name}",
-            font=(self.font_header[0], 16, "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(pady=(0, 12))
-        
-        progress_bar = ctk.CTkProgressBar(inner)
-        progress_bar.pack(fill="x", pady=(0, 8))
-        progress_bar.set(0)
-        
-        # Status label (bytes and percentage)
-        status_label = ctk.CTkLabel(
-            inner,
-            text="Connecting...",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_secondary"],
-        )
-        status_label.pack(pady=(0, 4))
-        
-        # Speed and time label
-        speed_label = ctk.CTkLabel(
-            inner,
-            text="",
-            font=(self.font_mono[0], self.font_sizes["caption"]),
-            text_color=COLORS["text_muted"],
-        )
-        speed_label.pack(pady=(0, 12))
-        
-        self._cancel_llm_download = False
-        
-        cancel_btn = ctk.CTkButton(
-            inner,
-            text="Cancel",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            fg_color=COLORS["bg_hover"],
-            hover_color=COLORS["bg_elevated"],
-            text_color=COLORS["text_primary"],
-            command=lambda: setattr(self, '_cancel_llm_download', True),
-        )
-        cancel_btn.pack(pady=(8, 0))
-        
-        # Helper functions (defined outside thread for stability)
-        def format_size(bytes_val):
-            for unit in ['B', 'KB', 'MB', 'GB']:
-                if bytes_val < 1024.0:
-                    return f"{bytes_val:.1f} {unit}"
-                bytes_val /= 1024.0
-            return f"{bytes_val:.1f} TB"
-        
-        def format_speed(bytes_per_sec):
-            if bytes_per_sec < 1024:
-                return f"{bytes_per_sec:.0f} B/s"
-            elif bytes_per_sec < 1024 * 1024:
-                return f"{bytes_per_sec / 1024:.1f} KB/s"
-            else:
-                return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
-        
-        def format_time(seconds):
-            if seconds < 60:
-                return f"{int(seconds)}s"
-            elif seconds < 3600:
-                return f"{int(seconds // 60)}m {int(seconds % 60)}s"
-            else:
-                hours = int(seconds // 3600)
-                minutes = int((seconds % 3600) // 60)
-                return f"{hours}h {minutes}m"
-        
-        def update_progress(prog, status_text, speed_text):
-            """Safe UI update function."""
-            try:
-                if progress_dialog.winfo_exists():
-                    progress_bar.set(prog)
-                    status_label.configure(text=status_text)
-                    if speed_text:
-                        speed_label.configure(text=speed_text)
-            except Exception:
-                pass
-        
-        def download_thread():
-            temp_path = None
-            try:
-                temp_path = models_dir / f"{model_filename}.downloading"
-                
-                request = urllib.request.Request(model_url)
-                request.add_header("User-Agent", "Wayfinder-Voice/1.0")
-                
-                start_time = time_module.time()
-                last_update_time = start_time
-                
-                with urllib.request.urlopen(request, timeout=60) as response:
-                    total_size = int(response.headers.get("Content-Length", 0))
-                    downloaded = 0
-                    chunk_size = 64 * 1024  # 64KB chunks
-                    
-                    with open(temp_path, "wb") as f:
-                        while True:
-                            if self._cancel_llm_download:
-                                try:
-                                    f.close()
-                                    temp_path.unlink(missing_ok=True)
-                                except:
-                                    pass
-                                self.after(0, lambda: progress_dialog.destroy() if progress_dialog.winfo_exists() else None)
-                                return
-                            
-                            chunk = response.read(chunk_size)
-                            if not chunk:
-                                break
-                            
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            
-                            # Update UI every 0.3 seconds
-                            current_time = time_module.time()
-                            if current_time - last_update_time >= 0.3:
-                                elapsed = current_time - start_time
-                                speed = downloaded / elapsed if elapsed > 0 else 0
-                                
-                                if total_size > 0:
-                                    progress = downloaded / total_size
-                                    percentage = progress * 100
-                                    remaining = total_size - downloaded
-                                    eta = remaining / speed if speed > 0 else 0
-                                    
-                                    status_text = f"{format_size(downloaded)} / {format_size(total_size)} ({percentage:.1f}%)"
-                                    speed_text = f"{format_speed(speed)} • {format_time(elapsed)} elapsed"
-                                    if eta > 0 and eta < 86400:
-                                        speed_text += f" • {format_time(eta)} remaining"
-                                    
-                                    self.after(0, lambda p=progress, s=status_text, sp=speed_text: update_progress(p, s, sp))
-                                else:
-                                    status_text = f"{format_size(downloaded)} downloaded"
-                                    speed_text = f"{format_speed(speed)}" if speed > 0 else ""
-                                    self.after(0, lambda s=status_text, sp=speed_text: update_progress(0.5, s, sp))
-                                
-                                last_update_time = current_time
-                    
-                    # Download complete - move temp to final
-                    if temp_path.exists():
-                        if model_file.exists():
-                            model_file.unlink()
-                        temp_path.rename(model_file)
-                        
-                        total_time = time_module.time() - start_time
-                        final_speed = downloaded / total_time if total_time > 0 else 0
-                        
-                        def on_success():
-                            try:
-                                self.log(f"✓ Downloaded: {model_name} ({format_size(downloaded)} in {format_time(total_time)}, avg {format_speed(final_speed)})")
-                                if progress_dialog.winfo_exists():
-                                    progress_dialog.destroy()
-                                self.open_postproc_model_settings()
-                            except Exception as e:
-                                self.log(f"⚠️ Error in success handler: {e}")
-                        
-                        self.after(0, on_success)
-                    else:
-                        raise Exception("Download file missing after completion")
-                    
-            except Exception as e:
-                error_msg = str(e)[:100]  # Truncate long errors
-                self.log(f"⚠️ Download failed: {error_msg}")
-                
-                def on_error():
-                    try:
-                        if progress_dialog.winfo_exists():
-                            status_label.configure(text=f"Error: {error_msg}", text_color=COLORS["error"])
-                            speed_label.configure(text="")
-                            cancel_btn.configure(text="Close")
-                    except:
-                        pass
-                
-                self.after(0, on_error)
-                
-                # Cleanup
-                try:
-                    if temp_path and temp_path.exists():
-                        temp_path.unlink()
-                except:
-                    pass
-        
-        threading.Thread(target=download_thread, daemon=True).start()
     
     def _get_postproc_config_display(self) -> str:
         """Get display text for post-processing configuration button."""

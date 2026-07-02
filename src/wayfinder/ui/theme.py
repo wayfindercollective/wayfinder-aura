@@ -60,7 +60,9 @@ COLORS: dict[str, str] = {
 
 # === Corner Radius Design Tokens ===
 
+# Mirrored in wayfinder_main.py (RADIUS) — keep both in sync.
 RADIUS: dict[str, int] = {
+    "xs": 6,    # Chips, progress bars, tight inline elements
     "sm": 8,    # Small elements (toggles, chips, badges)
     "md": 12,   # Buttons, inputs, dropdowns
     "lg": 24,   # Bento tiles - 24px for squircle feel
