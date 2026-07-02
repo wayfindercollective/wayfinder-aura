@@ -267,10 +267,13 @@ class StateColors:
 
 STATE_PALETTES = {
     OverlayState.READY: StateColors(
-        border_top="#2D333B",      # GitHub Dark elevated
-        border_bottom="#161B22",   # GitHub Dark surface
-        glow="#21262D",            # Muted glow
-        wave="#3D444D",            # Subtle wave
+        # Faint indigo tint (from the app's state_ready #7B8BD9 family) so the
+        # idle overlay reads as the same brand as the main window — the old
+        # flat GitHub-gray idle had no relation to the app palette.
+        border_top="#2F3450",      # Elevated with a whisper of indigo
+        border_bottom="#161B22",   # GitHub Dark surface (deep shadow)
+        glow="#232840",            # Muted indigo glow
+        wave="#4A5578",            # Subtle indigo wave
         text="#8B8B8F",            # Secondary text (2025 accessible)
     ),
     OverlayState.LISTENING: StateColors(
@@ -729,7 +732,11 @@ class GlassmorphicOverlay(QWidget):
     BASE_HEIGHT = 24  # Thinner profile (was 32)
     BASE_PADDING_H = 10
     BASE_WAVE_WIDTH = 50
-    BASE_GLOW_MARGIN = 6  # Base space around squircle for glow effects
+    # Space reserved around the squircle for the glow. Must cover the FULL glow
+    # falloff: at 6 the outer glow layers (up to 12px) were clipped by the widget
+    # bounds, leaving a harsh flat cutoff at the edge (visible as a hard red rim
+    # in the LISTENING state). 14 lets the glow fade to zero inside the widget.
+    BASE_GLOW_MARGIN = 14
     
     # Layout constants
     TASKBAR_GAP = 12  # Gap above taskbar to prevent overlap
@@ -808,7 +815,7 @@ class GlassmorphicOverlay(QWidget):
     @property
     def glow_margin(self):
         """Scaled glow margin - keeps proportions consistent at all scales."""
-        return max(4, int(self.BASE_GLOW_MARGIN * self._scale))  # Min 4px to ensure glow visibility
+        return max(8, int(self.BASE_GLOW_MARGIN * self._scale))  # Min 8px so the falloff has room
     
     @property
     def widget_height(self):
@@ -1520,32 +1527,41 @@ class GlassmorphicOverlay(QWidget):
                 pass
     
     def _draw_outer_glow(self, painter: QPainter, path: QPainterPath, rect: QRectF):
-        """Draw the outer glow effect."""
+        """Draw the outer glow effect.
+
+        Many thin stacked layers whose alphas shrink toward the outer edge, so
+        the composited falloff is smooth and reaches ~zero BEFORE the widget
+        boundary. The old version used 4 chunky layers (visible banding) that
+        extended past glow_margin and got clipped flat by the widget bounds —
+        the harsh red rim users saw in the LISTENING state. Layer extent scales
+        with the overlay scale so proportions hold on any display.
+        """
         intensity = self._glow_intensity.value
         if intensity <= 0:
             return
-        
+
         painter.save()
-        
+
         glow_color = self._glow_color.color
-        
-        # Multiple glow layers for soft effect
-        for i, (expand, alpha) in enumerate([
-            (12, 0.1),
-            (8, 0.15),
-            (4, 0.2),
-            (2, 0.25),
-        ]):
+
+        layers = 8
+        # Fade fully inside the reserved margin (1px of safety for antialiasing)
+        max_extend = self.glow_margin - max(1.0, self._scale)
+        for k in range(1, layers + 1):
+            expand = max_extend * k / layers
+            # Quadratic-ish tail: inner layers stack to ~0.47 total (matches the
+            # old peak brightness); the outermost layer is nearly transparent.
+            alpha = 0.19 * (1 - k / (layers + 1)) ** 1.5
             color = QColor(glow_color)
             color.setAlphaF(alpha * intensity)
-            
+
             expanded_rect = rect.adjusted(-expand, -expand, expand, expand)
             glow_path = create_squircle_path(expanded_rect, n=4.5)
-            
+
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(color))
             painter.drawPath(glow_path)
-        
+
         painter.restore()
     
     def _draw_glass_background(self, painter: QPainter, path: QPainterPath):
@@ -1589,7 +1605,8 @@ class GlassmorphicOverlay(QWidget):
         # Setup font and color
         painter.setFont(self._font)
         
-        text_color = QColor("#FAFAFA")
+        # Match the palette's "off-white, no pure white" principle (#E8E8E8)
+        text_color = QColor("#E8E8E8")
         text_color.setAlphaF(0.92)
         painter.setPen(QPen(text_color))
         
