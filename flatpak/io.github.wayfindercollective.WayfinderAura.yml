@@ -368,7 +368,10 @@ modules:
       
       # Assets
       - install -Dm644 assets/icon.png ${FLATPAK_DEST}/lib/wayfinder-aura/assets/icon.png
-      
+      # Tinted line-icon set (see src/wayfinder/ui/icons.py)
+      - mkdir -p ${FLATPAK_DEST}/lib/wayfinder-aura/assets/icons
+      - install -Dm644 assets/icons/*.png -t ${FLATPAK_DEST}/lib/wayfinder-aura/assets/icons/
+
       # Launcher script
       - install -Dm755 flatpak/wayfinder-aura-launcher.sh ${FLATPAK_DEST}/bin/wayfinder-aura
       

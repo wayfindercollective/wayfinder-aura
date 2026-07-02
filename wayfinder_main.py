@@ -80,6 +80,7 @@ from wayfinder.core.transcriber import transcribe_with_config, TranscriptionErro
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 from wayfinder.utils.audio_ducker import AudioDucker
+from wayfinder.ui.icons import get_icon, STYLE_ICONS
 
 
 # === Configuration ===
@@ -420,12 +421,15 @@ TONE_PROMPTS = {
     "personal": "Natural dictation in the user's personal speaking style.",
 }
 
+# Plain-text style names for logs/labels. Per-style line icons live in
+# wayfinder.ui.icons.STYLE_ICONS and are rendered on the tone cards; the emoji
+# that used to prefix these strings were retired with the icon system.
 STYLE_LABELS = {
-    "minimal": "🎤 Minimal",
-    "professional": "💼 Professional",
-    "casual": "💬 Casual",
-    "dev": "🖥️ Dev",
-    "personal": "✨ Personal",
+    "minimal": "Minimal",
+    "professional": "Professional",
+    "casual": "Casual",
+    "dev": "Dev",
+    "personal": "Personal",
 }
 
 
@@ -4170,13 +4174,12 @@ class WayfinderApp(ctk.CTk):
         # Rescue button (emergency reset) - icon only
         rescue_btn = ctk.CTkButton(
             scale_frame,
-            text="⟲",  # Reset/rescue icon
+            text="",
+            image=get_icon("rotate-ccw", 14, COLORS["text_secondary"]),
             width=24,
             height=24,
             fg_color="transparent",
             hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_muted"],
-            font=(self.font_body[0], 14),  # optical glyph size
             corner_radius=RADIUS["sm"],
             command=self.rescue_window,
         )
@@ -4606,19 +4609,24 @@ class WayfinderApp(ctk.CTk):
         # One accent for active nav (the brand violet) — the old per-tab candy
         # colors (lavender/zinc/pink/mint) read as four unrelated highlights
         # instead of a design system.
+        # Line icons (neutral tint) replace the old unicode glyphs. CTkButton
+        # can't swap image color per active-state, so all four keep the quiet
+        # text_secondary tint; the active tab only recolors its text (violet).
         tabs = [
-            ("dictate", "∿", "Dictate"),
-            ("settings", "⚙", "Settings"),
-            ("style", "✎", "Style"),
-            ("history", "◷", "History"),
+            ("dictate", "audio-waveform", "Dictate"),
+            ("settings", "settings-2", "Settings"),
+            ("style", "pen-line", "Style"),
+            ("history", "history", "History"),
         ]
 
-        for tab_id, icon, label in tabs:
+        for tab_id, icon_name, label in tabs:
             # Fixed-height nav rows (the old expand-to-fill made four huge
             # stretched buttons; compact rows read as deliberate navigation)
             btn = ctk.CTkButton(
                 nav_container,
-                text=f"  {icon}   {label}",
+                text=label,
+                image=get_icon(icon_name, 16, COLORS["text_secondary"]),
+                compound="left",
                 font=(self.font_body[0], self.font_sizes["heading"]),
                 fg_color="transparent",
                 hover_color=COLORS["bg_hover"],
@@ -5114,7 +5122,7 @@ class WayfinderApp(ctk.CTk):
         
         self.benchmark_test_btn = ctk.CTkButton(
             btn_row,
-            text="⏱️ Test Current Model",
+            text="Test Current Model",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=40,
             width=180,
@@ -5551,7 +5559,7 @@ class WayfinderApp(ctk.CTk):
                 # Reset button
                 self.benchmark_test_btn.configure(
                     state="normal",
-                    text="⏱️ Test Current Model",
+                    text="Test Current Model",
                     fg_color=COLORS["accent"],
                 )
                 debug_log("Button reset done")
@@ -6442,16 +6450,18 @@ class WayfinderApp(ctk.CTk):
         self.tone_title_labels = {}  # Store title label references
         current_tone = self.config.get("output_tone", "professional")
         
-        # 5 style presets - each with distinct purpose
+        # 5 style presets - each with distinct purpose. Per-style line icons come
+        # from STYLE_ICONS (wayfinder.ui.icons); the emoji that used to prefix the
+        # titles were retired with the icon system.
         tones = [
-            ("minimal", "🎤", "Minimal", "Just removes um/uh. Your exact words, nothing changed."),
-            ("professional", "💼", "Professional", "Clean + business-appropriate tone"),
-            ("casual", "💬", "Casual", "Clean + relaxed texting style"),
-            ("dev", "🖥️", "Dev", "Developer mode - recognizes git & code terms"),
-            ("personal", "✨", "Personal", "Clean + your learned speech patterns"),
+            ("minimal", "Minimal", "Just removes um/uh. Your exact words, nothing changed."),
+            ("professional", "Professional", "Clean + business-appropriate tone"),
+            ("casual", "Casual", "Clean + relaxed texting style"),
+            ("dev", "Dev", "Developer mode - recognizes git & code terms"),
+            ("personal", "Personal", "Clean + your learned speech patterns"),
         ]
-        
-        for i, (tone_id, icon, label, desc) in enumerate(tones):
+
+        for i, (tone_id, label, desc) in enumerate(tones):
             is_selected = tone_id == current_tone
             
             card = ctk.CTkFrame(
@@ -6473,7 +6483,9 @@ class WayfinderApp(ctk.CTk):
             
             title_label = ctk.CTkLabel(
                 title_row,
-                text=f"{icon}  {label}",
+                text=f"  {label}",
+                image=get_icon(STYLE_ICONS[tone_id], 14, COLORS["text_secondary"]),
+                compound="left",
                 font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
             )
@@ -6629,7 +6641,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             hotkey_content,
-            text="Press this key to cycle: 🎤 → 💼 → 💬 → 🖥️ → ✨",
+            text="Press this key to cycle: Minimal → Professional → Casual → Dev → Personal",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=16, pady=(0, 4))

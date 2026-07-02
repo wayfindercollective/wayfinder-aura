@@ -26,6 +26,7 @@ a = Analysis(
         # Include assets
         ('assets/icon.png', 'assets'),
         ('assets/icon.icns', 'assets'),
+        ('assets/icons', 'assets/icons'),
         # Include the wayfinder package source (needed for overlay subprocess)
         ('src/wayfinder', 'wayfinder'),
         # Include overlay.py at top level of Resources for subprocess access

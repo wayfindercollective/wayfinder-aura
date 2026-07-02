@@ -79,7 +79,7 @@ include = ["wayfinder*"]
 
 [tool.setuptools.package-data]
 "*" = ["py.typed"]
-wayfinder = ["../assets/*"]
+wayfinder = ["../assets/*", "../assets/icons/*.png"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["__pycache__", "*.pyc"]

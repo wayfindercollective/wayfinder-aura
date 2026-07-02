@@ -29,6 +29,7 @@ a = Analysis(
     datas=[
         # Include assets
         ('assets/icon.png', 'assets'),
+        ('assets/icons', 'assets/icons'),
         # Include the wayfinder package
         ('src/wayfinder', 'wayfinder'),
     ],
