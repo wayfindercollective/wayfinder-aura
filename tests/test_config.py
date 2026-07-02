@@ -29,6 +29,13 @@ class TestConfigLoading:
         for key in required_keys:
             assert key in DEFAULT_CONFIG, f"Missing required key: {key}"
 
+    def test_welcome_completed_default(self):
+        """The first-run welcome tour gate is present and defaults to False."""
+        from wayfinder.config import DEFAULT_CONFIG
+
+        assert "welcome_completed" in DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["welcome_completed"] is False
+
     def test_load_config_creates_default(self, temp_config_dir: Path):
         """Test that load_config creates default config if none exists."""
         from wayfinder.config import load_config, CONFIG_FILE
