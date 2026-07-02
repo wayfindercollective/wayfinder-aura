@@ -17,50 +17,34 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# Common English words to exclude from vocabulary extraction
-# This is a minimal set - we want to catch domain-specific terms
-COMMON_WORDS = {
-    # Articles, pronouns, prepositions
-    "a", "an", "the", "i", "me", "my", "we", "us", "our", "you", "your",
-    "he", "him", "his", "she", "her", "it", "its", "they", "them", "their",
-    "this", "that", "these", "those", "who", "what", "which", "where", "when",
-    "why", "how", "all", "each", "every", "both", "few", "more", "most",
-    "other", "some", "such", "no", "not", "only", "same", "so", "than",
-    "too", "very", "just", "also", "now", "here", "there", "then",
-    # Prepositions and conjunctions
-    "of", "in", "to", "for", "with", "on", "at", "by", "from", "up", "about",
-    "into", "over", "after", "beneath", "under", "above", "and", "but", "or",
-    "nor", "yet", "so", "because", "although", "while", "if", "unless",
-    # Common verbs
-    "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
-    "do", "does", "did", "will", "would", "could", "should", "may", "might",
-    "must", "shall", "can", "need", "get", "got", "go", "going", "went",
-    "come", "came", "make", "made", "take", "took", "see", "saw", "know",
-    "knew", "think", "thought", "want", "like", "look", "use", "find",
-    "give", "tell", "say", "said", "let", "put", "try", "leave", "call",
-    "keep", "become", "show", "hear", "play", "run", "move", "live",
-    # Common adjectives and adverbs
-    "good", "new", "first", "last", "long", "great", "little", "own", "old",
-    "right", "big", "high", "different", "small", "large", "next", "early",
-    "young", "important", "few", "public", "bad", "same", "able", "well",
-    "back", "even", "still", "way", "out", "really", "actually", "basically",
-    # Filler words (already removed by transcription but just in case)
-    "um", "uh", "ah", "like", "you know", "i mean", "kind of", "sort of",
-    # Numbers
-    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    # Other common words
-    "thing", "things", "time", "times", "year", "years", "people", "way",
-    "day", "days", "man", "woman", "child", "world", "life", "hand", "part",
-    "place", "case", "week", "company", "system", "program", "question",
-    "work", "government", "number", "night", "point", "home", "water",
-    "room", "mother", "area", "money", "story", "fact", "month", "lot",
-    "study", "book", "eye", "job", "word", "business", "issue", "side",
-    "kind", "head", "house", "service", "friend", "father", "power", "hour",
-    "game", "line", "end", "member", "law", "car", "city", "community",
-    "name", "president", "team", "minute", "idea", "body", "information",
-    "yeah", "yes", "no", "okay", "ok", "sure", "maybe", "please", "thanks",
-    "thank", "sorry", "hello", "hi", "hey", "bye", "goodbye",
-}
+from .wordlist import MID_WORDS, STOP_WORDS
+
+# Vocabulary extraction weighting. The old extractor ranked words by raw
+# frequency, which surfaced only ordinary English ("everything", "something",
+# "looks", "stuff") — the words everyone says most. Instead we weight each term
+# by how *distinctive* it is against a frequency-ranked English corpus (see
+# wordlist.py for provenance):
+#   - STOP_WORDS  (corpus rank <=3000)        : ordinary English, dropped outright.
+#   - MID_WORDS   (rank 3001..20000)          : mid-band, kept but weighted low.
+#   - distinctive tail (rank >20000 or absent): names/jargon/mishearings, high weight.
+MID_WEIGHT = 1          # mid-band English earns 1 point per occurrence.
+DISTINCTIVE_WEIGHT = 4  # the distinctive tail earns 4x — so a name beats a mid-band
+                        # word unless that word recurs more than 4x as often.
+VOCAB_LIMIT = 30        # cap on the learned list (feeds prompt context + the editor).
+MIN_OCCURRENCES = 2     # a term must recur to count — one-offs are noise, not signal.
+
+# Curated supplement to the generated corpus tiers: the corpus is WRITTEN web
+# text, so it systematically underrates SPOKEN English. Contraction left-halves
+# ("doesn't" tokenizes to "doesn" + a too-short "t") mostly land in the
+# distinctive tier — the worst possible place — and universal speech fillers
+# sit mid-band. Neither is personal signal; drop both outright.
+EXTRA_STOP_WORDS = frozenset("""
+doesn didn isn wasn aren weren hasn haven hadn wouldn couldn shouldn mustn
+needn ain
+okay yeah yep nope alright dude guys gonna wanna gotta kinda sorta basically
+literally obviously definitely honestly seriously anyway anyways
+umm uhh hmm huh wow whoa
+""".split())
 
 # Profile generation prompt template
 PROFILE_GENERATION_PROMPT = """Analyze these transcription samples from a single user and create a brief voice profile.
@@ -130,7 +114,16 @@ class VoiceProfile:
         
         # Load existing data
         self._load()
-    
+
+        # Self-heal stale learned lists: profiles built by the old frequency-only
+        # extractor are full of ordinary-English junk ("everything", "stuff",
+        # "cart"). Recompute the vocabulary in memory now (no _save() here — the
+        # next add_transcription()/set_ignored_words() persists it) so the cleaned
+        # list is live the moment the app or the Voice Profile panel constructs
+        # this object. History is required as the recompute source.
+        if self._data["history"]:
+            self._update_vocabulary()
+
     def _load(self) -> None:
         """Load profile data from disk."""
         if self.profile_file.exists():
@@ -230,36 +223,62 @@ class VoiceProfile:
     
     def _update_vocabulary(self) -> None:
         """
-        Extract frequently used uncommon words from history.
-        Called automatically after adding transcriptions.
+        Extract DISTINCTIVE vocabulary from history — names, jargon, product
+        terms — rather than the user's most-frequent ordinary English.
 
-        Words the user permanently deleted (``vocabulary_ignore``) are filtered
-        out here so a bad auto-learn (e.g. whisper mishearing "Daan" as "don")
-        never reappears in the learned list. Extracted words are already
-        lowercase, so the ignore list is compared as a lowercase set.
+        Frequency alone is the wrong signal: the words a person says most
+        ("everything", "something", "looks", "fix") are, unsurprisingly, common
+        English and make for a useless personality profile. So each token is
+        weighted by how *distinctive* it is against a frequency-ranked English
+        corpus (see wordlist.py for provenance — Norvig's Google Web Trillion
+        Word counts):
+
+          - STOP_WORDS (corpus rank <=3000): ordinary English, dropped outright.
+          - MID_WORDS (rank 3001..20000): mid-band, kept but weighted MID_WEIGHT.
+          - the distinctive tail (rank >20000 or absent — names, jargon,
+            mishearings): weighted DISTINCTIVE_WEIGHT, so 'Daan' or 'Flatpak'
+            outranks a mid-band word said just as often.
+
+        Tokens keep their original case so a name is stored as its most common
+        surface form ('Daan', not 'daan'). Words the user permanently deleted
+        (``vocabulary_ignore``, compared casefolded) never re-learn, and a term
+        must recur (>=MIN_OCCURRENCES) to count at all.
         """
-        # Combine all transcription text
+        # Combine all transcription text (case PRESERVED — surface forms matter,
+        # e.g. we want to store the name "Daan", not "daan").
         all_text = " ".join(item["text"] for item in self._data["history"])
 
-        # Extract words (alphanumeric, 3+ characters)
-        words = re.findall(r'\b[a-zA-Z]{3,}\b', all_text.lower())
+        # Tokenize: runs of 3+ ASCII letters, case intact.
+        tokens = re.findall(r"\b[A-Za-z]{3,}\b", all_text)
 
         # Words the user deleted from the editor — never re-learn these.
-        ignored = {w.lower() for w in self._data["profile"].get("vocabulary_ignore", [])}
+        ignored = {w.casefold() for w in self._data["profile"].get("vocabulary_ignore", [])}
 
-        # Count frequencies, excluding common and user-ignored words
-        word_counts = Counter(
-            word for word in words
-            if word not in COMMON_WORDS and word not in ignored
-        )
-        
-        # Get top 50 most frequent uncommon words (appearing 2+ times)
-        frequent_words = [
-            word for word, count in word_counts.most_common(50)
-            if count >= 2
+        # Per casefolded key: a running total and a tally of the surface forms.
+        counts: Counter = Counter()
+        surfaces: Dict[str, Counter] = {}
+        for tok in tokens:
+            key = tok.casefold()
+            if key in STOP_WORDS or key in EXTRA_STOP_WORDS or key in ignored:
+                continue
+            counts[key] += 1
+            surfaces.setdefault(key, Counter())[tok] += 1
+
+        # Score by distinctiveness * frequency; drop one-offs.
+        scored: List[Tuple[int, int, str]] = []
+        for key, count in counts.items():
+            if count < MIN_OCCURRENCES:
+                continue
+            weight = MID_WEIGHT if key in MID_WORDS else DISTINCTIVE_WEIGHT
+            surface = surfaces[key].most_common(1)[0][0]
+            scored.append((count * weight, count, surface))
+
+        # Highest score first, raw count as the tiebreak.
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+
+        self._data["profile"]["vocabulary"] = [
+            surface for _score, _count, surface in scored[:VOCAB_LIMIT]
         ]
-        
-        self._data["profile"]["vocabulary"] = frequent_words
     
     def _regenerate_async(self, llm_callback: Callable[[str], str]) -> None:
         """

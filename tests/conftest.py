@@ -255,18 +255,25 @@ def voice_profile_dir(temp_dir: Path) -> Path:
 
 @pytest.fixture
 def sample_voice_profile_data() -> dict:
-    """Provide sample voice profile data."""
+    """Provide sample voice profile data.
+
+    The history repeats the distinctive terms (``frontend``, ``refactoring``,
+    ``endpoint``, ``TypeScript``) so they survive the distinctiveness extractor
+    (which requires MIN_OCCURRENCES>=2 and is re-run on load to self-heal stale
+    lists). ``branch``/``main`` are ordinary English (STOP_WORDS) and are meant
+    to be filtered out.
+    """
     return {
         "history": [
-            {"text": "I'm working on the frontend code today.", "timestamp": 1700000000, "word_count": 8},
-            {"text": "Let me push this branch to main.", "timestamp": 1700000100, "word_count": 7},
-            {"text": "The API endpoint needs refactoring.", "timestamp": 1700000200, "word_count": 5},
-            {"text": "Can you review my pull request?", "timestamp": 1700000300, "word_count": 6},
-            {"text": "I think we should use TypeScript for this project.", "timestamp": 1700000400, "word_count": 9},
+            {"text": "I'm working on the frontend refactoring today.", "timestamp": 1700000000, "word_count": 7},
+            {"text": "Let me push the frontend branch to main.", "timestamp": 1700000100, "word_count": 8},
+            {"text": "The API endpoint needs refactoring for TypeScript.", "timestamp": 1700000200, "word_count": 7},
+            {"text": "Can you review my TypeScript endpoint changes?", "timestamp": 1700000300, "word_count": 7},
+            {"text": "I should finish the frontend refactoring in TypeScript.", "timestamp": 1700000400, "word_count": 8},
         ],
         "profile": {
             "summary": "Technical speaker who discusses software development, git workflows, and code reviews.",
-            "vocabulary": ["frontend", "branch", "endpoint", "refactoring", "typescript"],
+            "vocabulary": ["frontend", "refactoring", "TypeScript", "endpoint"],
             "generated_at": 1700000500,
             "samples_used": 5,
         },
