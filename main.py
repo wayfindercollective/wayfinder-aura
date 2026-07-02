@@ -304,7 +304,17 @@ def main():
             print(f"[Setup] Warning: Could not show setup wizard: {e}")
             import traceback
             traceback.print_exc()
-        
+
+        # ─── First-run welcome tour (in-window, skippable) ───
+        # Distinct from the dependency wizard above: pure UI, safe on every platform
+        # (no package-manager probing), so no frozen-build skip is needed. Delayed so
+        # the window is mapped before the card is placed over the tab content.
+        try:
+            if not app.config.get("welcome_completed", False):
+                app.after(800, app.show_welcome_pane)
+        except Exception as e:
+            print(f"[Welcome] Could not schedule welcome pane: {e}")
+
         # Try to apply scaling directly if the cached value seems wrong
         try:
             current = app.tk.call('tk', 'scaling')

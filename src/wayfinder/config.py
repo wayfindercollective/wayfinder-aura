@@ -278,6 +278,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
     # Setup wizard
     "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)
+    # In-window welcome tour (distinct from the dependency wizard above); shown once.
+    "welcome_completed": False,  # Set True after the first-run welcome pane finishes/skips
     
     # Benchmark results - populated by running benchmark
     # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}

@@ -3476,6 +3476,8 @@ class WayfinderApp(ctk.CTk):
         self._hotkey_restart_lock = threading.Lock()   # serialize evdev restarts (config change + supervisor)
         self.session_generation = 0                    # bumped per recording / force_reset; discards stale work
         self._finish_injection_job = None              # pending after() id for the delayed overlay reset
+        self._welcome_active = False                   # first-run welcome tour up → suppress text injection
+        self._welcome_pane = None                      # active WelcomePane, or None
 
         # Start the hotkey listeners NOW, before the heavy UI build, so the evdev thread opens the
         # input devices during setup_window/tray/ui rather than after it. A press made while the
@@ -4721,7 +4723,27 @@ class WayfinderApp(ctk.CTk):
                 frame.pack_forget()
         
         self.active_tab = tab_id
-    
+
+    def show_welcome_pane(self) -> None:
+        """Show the first-run welcome tour: a skippable 3-step card placed over the
+        Dictate tab content. While it's up, dictation is routed into the card instead
+        of being injected (see on_transcription_done)."""
+        if getattr(self, "_welcome_active", False):
+            return
+        try:
+            from wayfinder.ui.welcome import WelcomePane
+        except Exception as e:
+            self.log(f"⚠ Welcome pane unavailable: {e}")
+            return
+        try:
+            self._switch_tab("dictate")  # step 3 is a live dictation on this tab
+            self._welcome_pane = WelcomePane(self.tab_content_container, self)
+            self._welcome_active = True
+        except Exception as e:
+            self.log(f"⚠ Could not show welcome pane: {e}")
+            self._welcome_active = False
+            self._welcome_pane = None
+
     def _create_dictate_tab(self) -> None:
         """Create the Dictate tab content."""
         frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
@@ -14237,6 +14259,20 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_primary"],
             )
         
+        # First-run welcome tour: text must NEVER reach inject_text() while it's up,
+        # or a tutorial dictation would type into whatever window has focus. Route the
+        # transcript into the welcome card instead (steps 1-2 fast-forward to step 3),
+        # then reset the overlay via the normal injection-done path — min display time +
+        # →READY — so the overlay doesn't wedge. History/log side-effects above still ran.
+        if getattr(self, "_welcome_active", False) and getattr(self, "_welcome_pane", None) is not None:
+            try:
+                self._welcome_pane.receive_transcript(processed_text)
+            except Exception as e:
+                self.log(f"⚠ Welcome pane transcript error: {e}")
+            g = gen if gen is not None else self.session_generation
+            self.on_injection_done(g)  # reuse the normal state-reset (no inject_text)
+            return
+
         self.update_state(AppState.PASTING)
         g = gen if gen is not None else self.session_generation
         self.executor.submit(self.do_inject, processed_text, g)
