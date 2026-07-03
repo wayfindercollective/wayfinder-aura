@@ -14,6 +14,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+def pytest_configure(config):
+    """Register custom markers not declared in pyproject.toml.
+
+    ``live`` gates the socket smoke tests (test_live_smoke.py): they need a
+    running app instance and are skipped unless WAYFINDER_LIVE=1, so registering
+    the marker here (rather than editing pyproject) keeps the sign-off battery
+    self-contained and silences the unknown-marker warning.
+    """
+    config.addinivalue_line(
+        "markers",
+        "live: requires a running Wayfinder app (skipped unless WAYFINDER_LIVE=1)",
+    )
+
+
 # Add src to path for imports
 project_root = Path(__file__).parent.parent
 src_dir = project_root / "src"
