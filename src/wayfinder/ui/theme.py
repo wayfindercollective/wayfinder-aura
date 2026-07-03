@@ -18,6 +18,7 @@ COLORS: dict[str, str] = {
     "bg_surface": "#161B22",        # Sidebar/panels - slightly elevated
     "bg_card": "#1E1E1F",           # Bento tiles - 7% white on bg
     "bg_hover": "#1E1B26",          # Hover = 10% accent glow (designer spec)
+    "bg_hover_strong": "#3A3758",   # Hover = 25% accent glow — obvious selection (dropdown rows)
     "bg_elevated": "#2D333B",       # Pressed/elevated elements
     "bg_input": "#13171D",          # Input fields - slightly recessed
     
