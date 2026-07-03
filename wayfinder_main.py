@@ -80,7 +80,7 @@ from wayfinder.core.transcriber import transcribe_with_config, TranscriptionErro
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 from wayfinder.utils.audio_ducker import AudioDucker
-from wayfinder.ui.icons import get_icon, STYLE_ICONS
+from wayfinder.ui.icons import get_icon, STYLE_ICONS, tint_icon
 from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
 
 
@@ -4673,14 +4673,18 @@ class WayfinderApp(ctk.CTk):
 
     def _render_mic_button_photo(self, color: str, pressed: bool = False,
                                  is_active: bool = False, pulse: float | None = None):
-        """Render the mic button as a supersampled PIL image (4x, LANCZOS downscale).
+        """Render the quiet-minimal mic button as a supersampled PIL image (4x,
+        LANCZOS downscale).
 
-        Tk canvas ovals/arcs have NO antialiasing, so the old primitive-drawn button
-        had visibly jagged edges — the hero read as "low res" on HiDPI. Rendering the
-        same design in PIL at 4x and blitting ONE image gives crisp edges at zero
-        per-frame cost: results are cached per (color, state, quantized pulse), so a
-        state change renders once and the recording pulse is a dict hit + itemconfig.
-        Pre-composited over bg_card (the canvas bg), same blend the primitives used.
+        Reads as a "pro tool", not a glossy button: at rest a thin state-colour
+        outline + a tinted Lucide `mic` glyph; while recording the circle fills
+        with the state colour and shows a rounded bg_base stop-square (with a
+        subtle expanding breath ring); PROCESSING/PASTING follow the is_active
+        fill. Supersampled 4x then LANCZOS-downscaled for crisp HiDPI edges;
+        results are cached per (color, state, quantized pulse) so a state change
+        renders once and the recording pulse is a dict hit + itemconfig.
+        tint_icon runs only on cache misses (no per-frame I/O). Pre-composited
+        over bg_card (the canvas bg).
         """
         phys = self._mic_button_phys()
         key = (color, bool(pressed), bool(is_active), pulse, phys)
@@ -4717,52 +4721,41 @@ class WayfinderApp(ctk.CTk):
                           cx + radius * k, cy + radius * k], fill=fill)
 
         stroke = max(1, round(2 * k))
+        r_units = 24  # button radius in design units (80px canvas)
+        icon_px = max(1, int(30 * k))  # Lucide glyph box in SS px
+
+        def paste_glyph(hex_color: str) -> None:
+            # tint_icon is pure-PIL and only runs on a cache miss (this whole
+            # render is memoized per key) — no per-frame decode.
+            glyph = tint_icon("mic", hex_color, icon_px)
+            img.paste(glyph, (int(cx - icon_px / 2), int(cy - icon_px / 2)), glyph)
 
         if pulse is not None:
-            # Recording pulse: soft glow + button + stop square (same design as the
-            # old coords/itemconfig path, now antialiased).
-            for radius, intensity in ((38 * pulse, 0.06 * pulse),
-                                      (34 * pulse, 0.12 * pulse),
-                                      (30 * pulse, 0.22 * pulse)):
-                circle(radius, blend(intensity))
-            circle(24 * (0.95 + 0.05 * pulse), color)
-            sq = 8 * k
-            draw.rectangle([cx - sq, cy - sq, cx + sq, cy + sq], fill=COLORS["bg_base"])
+            # Recording: filled circle + rounded bg_base stop-square, with a
+            # subtle expanding breath ring driven by the (quantized) pulse. The
+            # caller's pulse breathes in [0.8,1.0]; map it to a 0..1 expand.
+            expand = min(max((pulse - 0.8) / 0.2, 0.0), 1.0)
+            rr = (r_units + 4 + 8 * expand) * k
+            ring_intensity = 0.05 + 0.28 * (1.0 - expand)  # bright small -> dim wide
+            draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr],
+                         outline=blend(ring_intensity), width=stroke)
+            circle(r_units * (0.98 + 0.02 * expand), color)
+            sq = 9 * k
+            rad = max(1, round(3 * k))
+            draw.rounded_rectangle([cx - sq, cy - sq, cx + sq, cy + sq],
+                                   radius=rad, fill=COLORS["bg_base"])
+        elif is_active:
+            # PROCESSING / PASTING (and the transient first RECORDING frame):
+            # circle fills with the state colour, dark mic glyph on top.
+            circle(r_units, color)
+            paste_glyph(COLORS["bg_base"])
         else:
-            if is_active:
-                # Active state: outer glow (soft ambient light)
-                for radius, intensity in ((38, 0.06), (34, 0.12), (30, 0.20), (27, 0.30)):
-                    circle(radius, blend(intensity))
-
-            # Outer shadow (button sits in a depression), offset down
-            draw.ellipse([cx - 28 * k, cy - 27 * k, cx + 28 * k, cy + 29 * k],
-                         fill="#050506")
-            # Darker bottom edge (3D effect)
-            dark = (max(0, int(r * 0.7)), max(0, int(g * 0.7)), max(0, int(b * 0.7)))
-            draw.ellipse([cx - 26 * k, cy - 24 * k, cx + 26 * k, cy + 28 * k], fill=dark)
-            # Main button face
-            circle(24, color)
-            # Top highlight arc (Tk start=30 extent=120 CCW == PIL 210..330 y-down)
-            hi = (min(255, int(r * 1.2 + 40)), min(255, int(g * 1.2 + 40)),
-                  min(255, int(b * 1.2 + 40)))
-            draw.arc([cx - 18 * k, cy - 22 * k, cx + 18 * k, cy - 6 * k],
-                     210, 330, fill=hi, width=stroke)
-            # Inner shadow ring when pressed/active (concave effect)
-            if pressed or is_active:
-                inner = (max(0, r - 60), max(0, g - 60), max(0, b - 60))
-                draw.ellipse([cx - 21 * k, cy - 21 * k, cx + 21 * k, cy + 21 * k],
-                             outline=inner, width=stroke)
-
-            # Microphone glyph — refined, minimal
-            icon = COLORS["bg_base"]
-            draw.ellipse([cx - 5 * k, cy - 14 * k, cx + 5 * k, cy - 6 * k], fill=icon)
-            draw.rectangle([cx - 5 * k, cy - 10 * k, cx + 5 * k, cy + 2 * k], fill=icon)
-            draw.ellipse([cx - 5 * k, cy - 2 * k, cx + 5 * k, cy + 6 * k], fill=icon)
-            # Cradle arc (Tk start=180 extent=180 == PIL 0..180 y-down)
-            draw.arc([cx - 10 * k, cy - 2 * k, cx + 10 * k, cy + 14 * k],
-                     0, 180, fill=icon, width=stroke)
-            # Stand
-            draw.line([cx, cy + 13 * k, cx, cy + 18 * k], fill=icon, width=stroke)
+            # Idle / hover: thin state-colour outline + muted mic glyph. Hover
+            # brightening of `color` is applied by _draw_mic_button upstream.
+            draw.ellipse([cx - r_units * k, cy - r_units * k,
+                          cx + r_units * k, cy + r_units * k],
+                         outline=color, width=stroke)
+            paste_glyph(COLORS["text_secondary"])
 
         img = img.resize((phys, phys), Image.LANCZOS)
         photo = ImageTk.PhotoImage(img)
