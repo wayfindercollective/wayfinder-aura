@@ -80,7 +80,8 @@ from wayfinder.core.transcriber import transcribe_with_config, TranscriptionErro
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 from wayfinder.utils.audio_ducker import AudioDucker
-from wayfinder.ui.icons import get_icon, STYLE_ICONS
+from wayfinder.ui.icons import get_icon, STYLE_ICONS, tint_icon
+from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
 
 
 # === Configuration ===
@@ -4370,6 +4371,86 @@ class WayfinderApp(ctk.CTk):
         out.alpha_composite(logo, (pad * ss, pad * ss))
         return out, (logical, logical)
 
+    @staticmethod
+    def _draw_sparkle(draw, x, y, size, color, alpha, ss):
+        """A 4-point-star sparkle (cross spikes) + bright core, RGBA. Line width
+        scaled to the supersample factor so it survives the LANCZOS downscale.
+        Ported from scripts/design/hero_mock.py."""
+        a = int(max(0.0, min(1.0, alpha)) * 255)
+        col = color + (a,)
+        lw = max(1, round(ss * 0.5))
+        draw.line([(x - size, y), (x + size, y)], fill=col, width=lw)
+        draw.line([(x, y - size), (x, y + size)], fill=col, width=lw)
+        cr = max(1.0, ss * 0.5)
+        core = color + (min(255, int(a * 1.25)),)
+        draw.ellipse([x - cr, y - cr, x + cr, y + cr], fill=core)
+
+    def _cosmic_header_logo(self, icon_path, logo_size, is_ultra):
+        """The brand arrow "in space": bake a static stardust trail behind the
+        header logo (placement A · visible). Rendered once at 4x like
+        _ultra_glow_logo — no timers, zero runtime cost — and composited BENEATH
+        the logo so the Ultra gold glow (when present) sits on top of the trail.
+        Returns (hi-res RGBA composite, logical display size).
+
+        Ported from scripts/design/hero_mock.render_header_logo (intensity
+        "visible" — the user's pick), sized to a compact header footprint (open
+        trail space to the left of the arrow).
+        """
+        import random
+        from PIL import ImageFilter
+
+        ss, pad = 4, 6
+        trail = 24  # design px of open space left of the logo for the trail
+        logical_w = trail + logo_size + pad * 2
+        logical_h = logo_size + pad * 2
+        Ww, Hh = logical_w * ss, logical_h * ss
+        ls = logo_size * ss
+
+        # Logo sits right-of-center; the trail streams down-left into open space.
+        lx = (trail + pad) * ss
+        ly = pad * ss
+        tip_x = lx + int(ls * 0.32)
+        tip_y = ly + int(ls * 0.44)
+
+        def _rgb(hexs):
+            return (int(hexs[1:3], 16), int(hexs[3:5], 16), int(hexs[5:7], 16))
+        palette = [_rgb(COLORS["accent"]), (255, 255, 255), _rgb(COLORS["state_ready"])]
+
+        canvas = Image.new("RGBA", (Ww, Hh), (0, 0, 0, 0))
+
+        # --- stardust trail (baked once, static) ---
+        star = Image.new("RGBA", (Ww, Hh), (0, 0, 0, 0))
+        sdraw = ImageDraw.Draw(star)
+        rng = random.Random(7)
+        n = 16
+        base_alpha = 0.95  # "visible" intensity from the approved mock
+        for i in range(n):
+            dist = (i + 1) / n
+            spread = rng.uniform(-0.30, 0.30)
+            sx = tip_x - dist * ls * 1.3 + spread * ls * 0.4
+            sy = tip_y + dist * ls * 0.55 + spread * ls * 0.5
+            fade = (1.0 - dist) ** 1.15
+            a = base_alpha * (0.30 + 0.70 * fade) * rng.uniform(0.7, 1.0)
+            sz = (1.4 + rng.random() * 2.8) * ss
+            col = palette[i % 3]
+            self._draw_sparkle(sdraw, sx, sy, sz, col, a, ss)
+            if i % 3 == 0:  # occasional motion streak toward the tip
+                sa = int(a * 130)
+                sdraw.line([(sx, sy), (sx + ls * 0.10, sy - ls * 0.05)],
+                           fill=col + (sa,), width=max(1, round(ss * 0.4)))
+        star = star.filter(ImageFilter.GaussianBlur(0.35 * ss))
+        canvas.alpha_composite(star)
+
+        # --- logo (or Ultra gold-glow composite) on top of the trail ---
+        if is_ultra:
+            glow, _ = self._ultra_glow_logo(icon_path, logo_size)  # (logo_size+2*pad)²·ss
+            canvas.alpha_composite(glow, (trail * ss, 0))
+        else:
+            logo = Image.open(icon_path).convert("RGBA").resize((ls, ls), Image.LANCZOS)
+            canvas.alpha_composite(logo, (lx, ly))
+
+        return canvas, (logical_w, logical_h)
+
     def _create_header(self, parent) -> None:
         """Create the app header with refined, minimal branding and scale controls."""
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -4387,12 +4468,10 @@ class WayfinderApp(ctk.CTk):
         logo_size = 24
         is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         try:
-            if is_ultra:
-                # 😇 Ultra badge — golden glow radiating from the brand mark
-                logo_img, display_size = self._ultra_glow_logo(ICON_PATH, logo_size)
-            else:
-                logo_img = Image.open(ICON_PATH).resize((logo_size, logo_size), Image.LANCZOS)
-                display_size = (logo_size, logo_size)
+            # Cosmic signature: the brand arrow "in space" with a baked, static
+            # stardust trail (placement A · visible). Works for BOTH tiers — the
+            # Ultra gold glow composites on top of the trail inside the helper.
+            logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
             self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
             logo_label = ctk.CTkLabel(
                 title_frame,
@@ -4587,6 +4666,11 @@ class WayfinderApp(ctk.CTk):
         self._hero_audio_level = 0.0
         self._hero_animation_job = None
         self._idle_breath_job = None
+        # Idle<->active morph (0 calm dim breath, 1 energetic bright) eased in
+        # BOTH loops; wave time is advanced delta-based off this timestamp so the
+        # ribbon phase never jumps between the 33ms idle and 66ms active cadences.
+        self._hero_morph = 0.0
+        self._hero_last_frame_ts = time.monotonic()
 
         # PIL-based waveform rendering (single image blit instead of 80+ Tk calls)
         self._hero_wave_items_created = False
@@ -4641,16 +4725,16 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_header[0], self.font_sizes["heading"], "bold"),
             text_color=STATE_COLORS[AppState.IDLE],
         )
-        self.status_label.pack(pady=(12, 0))
-        
+        self.status_label.pack(pady=(SPACING["md"], 0))
+
         # Hotkey hint
         self.hotkey_label = ctk.CTkLabel(
             hero_inner,
             text=f"Press {self.get_hotkey_display()} to toggle",
             font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_muted"],
+            text_color=COLORS["text_secondary"],  # one notch up from text_muted for legibility
         )
-        self.hotkey_label.pack(pady=(4, 0))
+        self.hotkey_label.pack(pady=(SPACING["xs"], 0))
     
     def _on_mic_hover(self, entering: bool) -> None:
         """Redraw the mic button once on Enter/Leave with a brighter glow while hovered.
@@ -4679,14 +4763,18 @@ class WayfinderApp(ctk.CTk):
 
     def _render_mic_button_photo(self, color: str, pressed: bool = False,
                                  is_active: bool = False, pulse: float | None = None):
-        """Render the mic button as a supersampled PIL image (4x, LANCZOS downscale).
+        """Render the quiet-minimal mic button as a supersampled PIL image (4x,
+        LANCZOS downscale).
 
-        Tk canvas ovals/arcs have NO antialiasing, so the old primitive-drawn button
-        had visibly jagged edges — the hero read as "low res" on HiDPI. Rendering the
-        same design in PIL at 4x and blitting ONE image gives crisp edges at zero
-        per-frame cost: results are cached per (color, state, quantized pulse), so a
-        state change renders once and the recording pulse is a dict hit + itemconfig.
-        Pre-composited over bg_card (the canvas bg), same blend the primitives used.
+        Reads as a "pro tool", not a glossy button: at rest a thin state-colour
+        outline + a tinted Lucide `mic` glyph; while recording the circle fills
+        with the state colour and shows a rounded bg_base stop-square (with a
+        subtle expanding breath ring); PROCESSING/PASTING follow the is_active
+        fill. Supersampled 4x then LANCZOS-downscaled for crisp HiDPI edges;
+        results are cached per (color, state, quantized pulse) so a state change
+        renders once and the recording pulse is a dict hit + itemconfig.
+        tint_icon runs only on cache misses (no per-frame I/O). Pre-composited
+        over bg_card (the canvas bg).
         """
         phys = self._mic_button_phys()
         key = (color, bool(pressed), bool(is_active), pulse, phys)
@@ -4723,52 +4811,46 @@ class WayfinderApp(ctk.CTk):
                           cx + radius * k, cy + radius * k], fill=fill)
 
         stroke = max(1, round(2 * k))
+        r_units = 24  # button radius in design units (80px canvas)
+        icon_px = max(1, int(30 * k))  # Lucide glyph box in SS px
+
+        def paste_glyph(hex_color: str) -> None:
+            # tint_icon is pure-PIL and only runs on a cache miss (this whole
+            # render is memoized per key) — no per-frame decode.
+            glyph = tint_icon("mic", hex_color, icon_px)
+            img.paste(glyph, (int(cx - icon_px / 2), int(cy - icon_px / 2)), glyph)
 
         if pulse is not None:
-            # Recording pulse: soft glow + button + stop square (same design as the
-            # old coords/itemconfig path, now antialiased).
-            for radius, intensity in ((38 * pulse, 0.06 * pulse),
-                                      (34 * pulse, 0.12 * pulse),
-                                      (30 * pulse, 0.22 * pulse)):
-                circle(radius, blend(intensity))
-            circle(24 * (0.95 + 0.05 * pulse), color)
-            sq = 8 * k
-            draw.rectangle([cx - sq, cy - sq, cx + sq, cy + sq], fill=COLORS["bg_base"])
+            # Recording: filled circle + rounded bg_base stop-square, with a
+            # subtle expanding breath ring driven by the (quantized) pulse. The
+            # caller's pulse breathes in [0.8,1.0]; map it to a 0..1 expand.
+            # Ring floor/range tuned at real 80px: the first cut (0.05+0.28)
+            # faded to imperceptible in the wide frames, so the breath didn't
+            # read — 0.10+0.45 with a 3-unit stroke tracks visibly through the
+            # whole cycle while staying low-alpha.
+            expand = min(max((pulse - 0.8) / 0.2, 0.0), 1.0)
+            rr = (r_units + 4 + 8 * expand) * k
+            ring_intensity = 0.10 + 0.45 * (1.0 - expand)  # bright small -> dim wide
+            ring_stroke = max(1, round(3 * k))
+            draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr],
+                         outline=blend(ring_intensity), width=ring_stroke)
+            circle(r_units * (0.98 + 0.02 * expand), color)
+            sq = 9 * k
+            rad = max(1, round(3 * k))
+            draw.rounded_rectangle([cx - sq, cy - sq, cx + sq, cy + sq],
+                                   radius=rad, fill=COLORS["bg_base"])
+        elif is_active:
+            # PROCESSING / PASTING (and the transient first RECORDING frame):
+            # circle fills with the state colour, dark mic glyph on top.
+            circle(r_units, color)
+            paste_glyph(COLORS["bg_base"])
         else:
-            if is_active:
-                # Active state: outer glow (soft ambient light)
-                for radius, intensity in ((38, 0.06), (34, 0.12), (30, 0.20), (27, 0.30)):
-                    circle(radius, blend(intensity))
-
-            # Outer shadow (button sits in a depression), offset down
-            draw.ellipse([cx - 28 * k, cy - 27 * k, cx + 28 * k, cy + 29 * k],
-                         fill="#050506")
-            # Darker bottom edge (3D effect)
-            dark = (max(0, int(r * 0.7)), max(0, int(g * 0.7)), max(0, int(b * 0.7)))
-            draw.ellipse([cx - 26 * k, cy - 24 * k, cx + 26 * k, cy + 28 * k], fill=dark)
-            # Main button face
-            circle(24, color)
-            # Top highlight arc (Tk start=30 extent=120 CCW == PIL 210..330 y-down)
-            hi = (min(255, int(r * 1.2 + 40)), min(255, int(g * 1.2 + 40)),
-                  min(255, int(b * 1.2 + 40)))
-            draw.arc([cx - 18 * k, cy - 22 * k, cx + 18 * k, cy - 6 * k],
-                     210, 330, fill=hi, width=stroke)
-            # Inner shadow ring when pressed/active (concave effect)
-            if pressed or is_active:
-                inner = (max(0, r - 60), max(0, g - 60), max(0, b - 60))
-                draw.ellipse([cx - 21 * k, cy - 21 * k, cx + 21 * k, cy + 21 * k],
-                             outline=inner, width=stroke)
-
-            # Microphone glyph — refined, minimal
-            icon = COLORS["bg_base"]
-            draw.ellipse([cx - 5 * k, cy - 14 * k, cx + 5 * k, cy - 6 * k], fill=icon)
-            draw.rectangle([cx - 5 * k, cy - 10 * k, cx + 5 * k, cy + 2 * k], fill=icon)
-            draw.ellipse([cx - 5 * k, cy - 2 * k, cx + 5 * k, cy + 6 * k], fill=icon)
-            # Cradle arc (Tk start=180 extent=180 == PIL 0..180 y-down)
-            draw.arc([cx - 10 * k, cy - 2 * k, cx + 10 * k, cy + 14 * k],
-                     0, 180, fill=icon, width=stroke)
-            # Stand
-            draw.line([cx, cy + 13 * k, cx, cy + 18 * k], fill=icon, width=stroke)
+            # Idle / hover: thin state-colour outline + muted mic glyph. Hover
+            # brightening of `color` is applied by _draw_mic_button upstream.
+            draw.ellipse([cx - r_units * k, cy - r_units * k,
+                          cx + r_units * k, cy + r_units * k],
+                         outline=color, width=stroke)
+            paste_glyph(COLORS["text_secondary"])
 
         img = img.resize((phys, phys), Image.LANCZOS)
         photo = ImageTk.PhotoImage(img)
@@ -4836,12 +4918,15 @@ class WayfinderApp(ctk.CTk):
         # Create a single image item anchored at top-left
         from PIL import ImageTk
         # Create initial blank image
-        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        self._hero_wave_photo = ImageTk.PhotoImage(img)
-        self._hero_wave_image_id = canvas.create_image(
-            0, 0, anchor="nw", image=self._hero_wave_photo
-        )
-        self._hero_wave_items_created = True
+        try:
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            self._hero_wave_photo = ImageTk.PhotoImage(img)
+            self._hero_wave_image_id = canvas.create_image(
+                0, 0, anchor="nw", image=self._hero_wave_photo
+            )
+            self._hero_wave_items_created = True
+        except Exception:
+            pass  # rule 10: canvas ops must never crash the app
     
     def _draw_hero_waveform(self) -> None:
         """Render waveform to PIL Image and blit as single canvas image (1 Tk call)."""
@@ -4854,7 +4939,6 @@ class WayfinderApp(ctk.CTk):
             return
 
         try:
-            import math
             from PIL import ImageTk
 
             canvas = self.hero_canvas
@@ -4864,71 +4948,22 @@ class WayfinderApp(ctk.CTk):
             if w <= 1 or h <= 1:
                 return
 
-            center_y = h // 2
-            max_amp = (h // 2) - 2
-            bar_width = 3
-            bar_gap = 2
-            num_bars = w // (bar_width + bar_gap)
-
-            # Parse colors
+            # Ribbon colour for the current state (parsed to RGB for the pure
+            # renderer; the 1px top highlight is baked inside render_hero_wave).
             color = STATE_COLORS.get(self.app_state, COLORS["accent"])
-            r = int(color[1:3], 16)
-            g = int(color[3:5], 16)
-            b = int(color[5:7], 16)
-
+            color_rgb = (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
             bg_hex = COLORS["bg_card"]
-            bg_r = int(bg_hex[1:3], 16)
-            bg_g = int(bg_hex[3:5], 16)
-            bg_b = int(bg_hex[5:7], 16)
+            bg_rgb = (int(bg_hex[1:3], 16), int(bg_hex[3:5], 16), int(bg_hex[5:7], 16))
 
-            # Amplitude calculation
             audio_level = self._hero_audio_level
             if not isinstance(audio_level, (int, float)) or audio_level != audio_level:
                 audio_level = 0.0
-            base_breath = 0.6 + 0.3 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.3))
-            voice_boost = (audio_level ** 0.4) * 2.0
-            amplitude_factor = min(1.0, base_breath + voice_boost)
 
-            _sin = math.sin
-            t = self._hero_wave_time
-            is_idle = (self.app_state == AppState.IDLE)
-
-            # Pre-compute color palette (10 levels for smooth gradients)
-            color_lut = []
-            for a_idx in range(10):
-                alpha = 0.5 + 0.05 * a_idx  # 0.5 to 0.95
-                cr = int(r * alpha + bg_r * (1 - alpha))
-                cg = int(g * alpha + bg_g * (1 - alpha))
-                cb = int(b * alpha + bg_b * (1 - alpha))
-                color_lut.append((cr, cg, cb))
-
-            # Render to PIL Image (pure C, no Tk bridge calls)
-            img = Image.new("RGB", (w, h), (bg_r, bg_g, bg_b))
-            draw = ImageDraw.Draw(img)
-
-            for i in range(num_bars):
-                x = i * (bar_width + bar_gap) + bar_gap // 2
-
-                phase = t + i * 0.2
-                wave_val = (_sin(phase) * 0.4 +
-                            _sin(phase * 1.7 + 0.5) * 0.35 +
-                            _sin(phase * 0.6 + 1.0) * 0.25)
-                abs_wave = abs(wave_val)
-                bar_height = max(8, (0.3 + abs_wave * 0.7) * max_amp * amplitude_factor)
-
-                bar_color = color_lut[min(9, int(abs_wave * 10))]
-
-                y1 = int(center_y - bar_height)
-                y2 = int(center_y + bar_height)
-                draw.rectangle([x, y1, x + bar_width, y2], fill=bar_color)
-
-            # Bake a 1px inner top-edge highlight into the backdrop (bg_card ~6% toward
-            # white) — a hairline rim light that reads as depth. One extra ImageDraw.line
-            # per frame into the already-fresh PIL image; no new canvas items, no timers.
-            hi_r = int(bg_r + (255 - bg_r) * 0.06)
-            hi_g = int(bg_g + (255 - bg_g) * 0.06)
-            hi_b = int(bg_b + (255 - bg_b) * 0.06)
-            draw.line([(0, 0), (w - 1, 0)], fill=(hi_r, hi_g, hi_b))
+            caches = get_hero_caches(w, h, color_rgb, bg_rgb)
+            img = render_hero_wave(
+                w, h, self._hero_wave_time, audio_level, self._hero_morph,
+                color_rgb, bg_rgb, caches=caches,
+            )
 
             # Single Tk call: update the canvas image
             self._hero_wave_photo = ImageTk.PhotoImage(img)
@@ -12278,11 +12313,16 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
-        # 30fps idle animation (PIL rendering is cheap — single image blit per frame)
-        idle_fps_scale = 2.0  # 60/30
-
-        # Slow, gentle time progression for calm wave motion
-        self._hero_wave_time += 0.04 * idle_fps_scale
+        # Ease the morph toward 0 (calm dim breath) and advance wave time
+        # delta-based so phase is continuous across the idle/active cadence
+        # switch (no pop). idle_rate/active_rate reproduce today's on-screen
+        # speeds (idle ~0.08/33ms, active ~0.6/66ms).
+        now = time.monotonic()
+        dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.1)
+        self._hero_last_frame_ts = now
+        self._hero_morph += (0.0 - self._hero_morph) * 0.25
+        speed = 2.4 + (9.0 - 2.4) * self._hero_morph
+        self._hero_wave_time += dt * speed
         self._hero_audio_level = 0.0
 
         # Redraw waveform (PIL render + single canvas image update)
@@ -12300,10 +12340,17 @@ class WayfinderApp(ctk.CTk):
         
         import math
         hero_fps_scale = 4.0  # 60/15
-        
-        # Update animation time
-        self._hero_wave_time += 0.15 * hero_fps_scale
-        
+
+        # Ease the morph toward 1 (energetic bright) and advance wave time
+        # delta-based (same clock as idle) so the ribbon phase is continuous
+        # when the loop cadence switches — kills the phase pop.
+        now = time.monotonic()
+        dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.1)
+        self._hero_last_frame_ts = now
+        self._hero_morph += (1.0 - self._hero_morph) * 0.25
+        speed = 2.4 + (9.0 - 2.4) * self._hero_morph
+        self._hero_wave_time += dt * speed
+
         # Get current audio level from active recorder
         target_level = 0.0
         try:
