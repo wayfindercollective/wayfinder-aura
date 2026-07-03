@@ -1,29 +1,13 @@
-"""
-Dialog windows for Wayfinder Aura.
+"""Dialog windows for Wayfinder Aura.
 
-Future extraction targets (currently in wayfinder_main.py):
-- settings: Main settings dialog
-- hotkey: Hotkey configuration
-- model_download: Whisper model downloader
-- benchmark: Performance benchmarking
-- license: License activation
+NOTE: the first-run SetupWizard (a modal CTkToplevel) was removed in July 2026 —
+first-run dependency setup is now an in-window pane (``wayfinder.ui.setup_pane``),
+in line with CLAUDE.md rule 2 (no popup dialogs). This package currently exports
+nothing; it remains as a home for any future genuinely-windowed helpers.
 
-To extract a dialog:
-1. Create the module (e.g., settings.py)
-2. Move the relevant class/functions from wayfinder_main.py
-3. Update imports in wayfinder_main.py to use the new module
-4. Add exports to this __init__.py
+Future extraction targets (currently in wayfinder_main.py) would each become an
+inline CTkFrame panel (via ``_show_inline_panel``), not a Toplevel:
+- settings, hotkey, model_download, benchmark, license.
 """
 
-from .setup_wizard import SetupWizard
-
-# Placeholder for future dialog extractions
-# from .settings import SettingsDialog
-# from .hotkey import HotkeyDialog
-# from .model_download import ModelDownloadDialog
-# from .benchmark import BenchmarkDialog
-# from .license import LicenseDialog
-
-__all__ = [
-    "SetupWizard",
-]
+__all__: list[str] = []

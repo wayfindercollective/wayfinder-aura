@@ -3508,6 +3508,8 @@ class WayfinderApp(ctk.CTk):
         self._finish_injection_job = None              # pending after() id for the delayed overlay reset
         self._welcome_active = False                   # first-run welcome tour up → suppress text injection
         self._welcome_pane = None                      # active WelcomePane, or None
+        self._setup_active = False                     # first-run dependency setup pane up
+        self._setup_pane = None                        # active SetupPane, or None
 
         # Start the hotkey listeners NOW, before the heavy UI build, so the evdev thread opens the
         # input devices during setup_window/tray/ui rather than after it. A press made while the
@@ -5015,6 +5017,32 @@ class WayfinderApp(ctk.CTk):
                 frame.pack_forget()
         
         self.active_tab = tab_id
+
+    def show_setup_pane(self, on_done=None) -> None:
+        """Show the first-run dependency setup as an inline pane over the tab
+        content (replaces the old modal SetupWizard Toplevel — CLAUDE.md rule 2:
+        no popup dialogs). Same dependency engine (core.setup), now inline with
+        no grab_set. ``on_done(result)`` fires once when the user completes
+        (result=True) or skips (result=False); main.py uses it to chain the
+        welcome tour."""
+        if getattr(self, "_setup_active", False):
+            return
+        try:
+            from wayfinder.ui.setup_pane import SetupPane
+        except Exception as e:
+            self.log(f"⚠ Setup pane unavailable: {e}")
+            if on_done is not None:
+                on_done(False)
+            return
+        try:
+            self._setup_pane = SetupPane(self.tab_content_container, self, on_done=on_done)
+            self._setup_active = True
+        except Exception as e:
+            self.log(f"⚠ Could not show setup pane: {e}")
+            self._setup_active = False
+            self._setup_pane = None
+            if on_done is not None:
+                on_done(False)
 
     def show_welcome_pane(self) -> None:
         """Show the first-run welcome tour: a skippable 3-step card placed over the

@@ -333,6 +333,37 @@ def test_toplevels_only_in_sanctioned_classes():
     )
 
 
+# The no-Toplevel rule extends to the ENTIRE src/wayfinder package (all new code,
+# CLAUDE.md rule 4). Same allowance as wayfinder_main.py and NOTHING more: the
+# only Toplevels permitted app-wide are the ToolTip hover bubble and the
+# FloatingIndicator overlay (transient chrome that genuinely can't live inline).
+# Any other Toplevel under src/** fails CI — which is what proves the old modal
+# SetupWizard CTkToplevel is gone (July 2026, Item 2): its UI is now the in-window
+# wayfinder.ui.setup_pane pane (mirroring wayfinder.ui.welcome), NOT a Toplevel.
+SRC_PACKAGE = REPO / "src" / "wayfinder"
+
+
+def test_no_toplevels_in_src_package_outside_sanctioned_classes():
+    offenders = []
+    for path in sorted(SRC_PACKAGE.rglob("*.py")):
+        src = path.read_text(encoding="utf-8")
+        if "Toplevel" not in src:
+            continue
+        ranges = _allowed_toplevel_line_ranges(src)  # ToolTip/FloatingIndicator bodies
+        for m in TOPLEVEL_RE.finditer(src):
+            lineno = src.count("\n", 0, m.start()) + 1
+            if not any(start <= lineno <= end for start, end in ranges):
+                line = src.splitlines()[lineno - 1].strip()
+                offenders.append((str(path.relative_to(REPO)), lineno, line))
+
+    assert not offenders, (
+        "Toplevel/CTkToplevel instantiated in src/wayfinder/** outside the "
+        "sanctioned ToolTip/FloatingIndicator hover/overlay chrome (CLAUDE.md "
+        "rule 2: no popup dialogs — build a place()'d inline CTkFrame pane like "
+        f"wayfinder.ui.setup_pane instead). Offenders (file, line, src): {offenders}"
+    )
+
+
 def test_no_grab_set_call_sites():
     hits = [
         (MAIN_SRC.count("\n", 0, m.start()) + 1, _line_of(m.start()).strip())
