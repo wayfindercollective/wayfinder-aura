@@ -65,6 +65,7 @@ REGISTRY = [
     "inbox",
     "timer",
     "x",
+    "gamepad-2",
 ]
 
 # style_id -> icon name, for the Style-tab tone cards (parallel to STYLE_LABELS

@@ -34,6 +34,10 @@ from .platform import (
     is_gnome,
     get_desktop_environment,
     get_session_type,
+    # Steam platform identity
+    is_steamos,
+    get_steam_platform,
+    get_steam_platform_label,
     # Cross-platform directories
     get_config_dir,
     get_data_dir,
@@ -109,6 +113,10 @@ __all__ = [
     "is_gnome",
     "get_desktop_environment",
     "get_session_type",
+    # Platform - Steam identity
+    "is_steamos",
+    "get_steam_platform",
+    "get_steam_platform_label",
     # Platform - Directories
     "get_config_dir",
     "get_data_dir",

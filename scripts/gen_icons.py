@@ -68,6 +68,7 @@ ICONS = [
     "inbox",            # empty states (Phase 8)
     "timer",            # benchmark (optional)
     "x",                # close affordance
+    "gamepad-2",        # Steam-platform "optimized for" badge
 ]
 
 
