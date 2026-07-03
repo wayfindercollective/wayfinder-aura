@@ -4812,11 +4812,16 @@ class WayfinderApp(ctk.CTk):
             # Recording: filled circle + rounded bg_base stop-square, with a
             # subtle expanding breath ring driven by the (quantized) pulse. The
             # caller's pulse breathes in [0.8,1.0]; map it to a 0..1 expand.
+            # Ring floor/range tuned at real 80px: the first cut (0.05+0.28)
+            # faded to imperceptible in the wide frames, so the breath didn't
+            # read — 0.10+0.45 with a 3-unit stroke tracks visibly through the
+            # whole cycle while staying low-alpha.
             expand = min(max((pulse - 0.8) / 0.2, 0.0), 1.0)
             rr = (r_units + 4 + 8 * expand) * k
-            ring_intensity = 0.05 + 0.28 * (1.0 - expand)  # bright small -> dim wide
+            ring_intensity = 0.10 + 0.45 * (1.0 - expand)  # bright small -> dim wide
+            ring_stroke = max(1, round(3 * k))
             draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr],
-                         outline=blend(ring_intensity), width=stroke)
+                         outline=blend(ring_intensity), width=ring_stroke)
             circle(r_units * (0.98 + 0.02 * expand), color)
             sq = 9 * k
             rad = max(1, round(3 * k))
