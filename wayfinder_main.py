@@ -4359,6 +4359,86 @@ class WayfinderApp(ctk.CTk):
         out.alpha_composite(logo, (pad * ss, pad * ss))
         return out, (logical, logical)
 
+    @staticmethod
+    def _draw_sparkle(draw, x, y, size, color, alpha, ss):
+        """A 4-point-star sparkle (cross spikes) + bright core, RGBA. Line width
+        scaled to the supersample factor so it survives the LANCZOS downscale.
+        Ported from scripts/design/hero_mock.py."""
+        a = int(max(0.0, min(1.0, alpha)) * 255)
+        col = color + (a,)
+        lw = max(1, round(ss * 0.5))
+        draw.line([(x - size, y), (x + size, y)], fill=col, width=lw)
+        draw.line([(x, y - size), (x, y + size)], fill=col, width=lw)
+        cr = max(1.0, ss * 0.5)
+        core = color + (min(255, int(a * 1.25)),)
+        draw.ellipse([x - cr, y - cr, x + cr, y + cr], fill=core)
+
+    def _cosmic_header_logo(self, icon_path, logo_size, is_ultra):
+        """The brand arrow "in space": bake a static stardust trail behind the
+        header logo (placement A · visible). Rendered once at 4x like
+        _ultra_glow_logo — no timers, zero runtime cost — and composited BENEATH
+        the logo so the Ultra gold glow (when present) sits on top of the trail.
+        Returns (hi-res RGBA composite, logical display size).
+
+        Ported from scripts/design/hero_mock.render_header_logo (intensity
+        "visible" — the user's pick), sized to a compact header footprint (open
+        trail space to the left of the arrow).
+        """
+        import random
+        from PIL import ImageFilter
+
+        ss, pad = 4, 6
+        trail = 24  # design px of open space left of the logo for the trail
+        logical_w = trail + logo_size + pad * 2
+        logical_h = logo_size + pad * 2
+        Ww, Hh = logical_w * ss, logical_h * ss
+        ls = logo_size * ss
+
+        # Logo sits right-of-center; the trail streams down-left into open space.
+        lx = (trail + pad) * ss
+        ly = pad * ss
+        tip_x = lx + int(ls * 0.32)
+        tip_y = ly + int(ls * 0.44)
+
+        def _rgb(hexs):
+            return (int(hexs[1:3], 16), int(hexs[3:5], 16), int(hexs[5:7], 16))
+        palette = [_rgb(COLORS["accent"]), (255, 255, 255), _rgb(COLORS["state_ready"])]
+
+        canvas = Image.new("RGBA", (Ww, Hh), (0, 0, 0, 0))
+
+        # --- stardust trail (baked once, static) ---
+        star = Image.new("RGBA", (Ww, Hh), (0, 0, 0, 0))
+        sdraw = ImageDraw.Draw(star)
+        rng = random.Random(7)
+        n = 16
+        base_alpha = 0.95  # "visible" intensity from the approved mock
+        for i in range(n):
+            dist = (i + 1) / n
+            spread = rng.uniform(-0.30, 0.30)
+            sx = tip_x - dist * ls * 1.3 + spread * ls * 0.4
+            sy = tip_y + dist * ls * 0.55 + spread * ls * 0.5
+            fade = (1.0 - dist) ** 1.15
+            a = base_alpha * (0.30 + 0.70 * fade) * rng.uniform(0.7, 1.0)
+            sz = (1.4 + rng.random() * 2.8) * ss
+            col = palette[i % 3]
+            self._draw_sparkle(sdraw, sx, sy, sz, col, a, ss)
+            if i % 3 == 0:  # occasional motion streak toward the tip
+                sa = int(a * 130)
+                sdraw.line([(sx, sy), (sx + ls * 0.10, sy - ls * 0.05)],
+                           fill=col + (sa,), width=max(1, round(ss * 0.4)))
+        star = star.filter(ImageFilter.GaussianBlur(0.35 * ss))
+        canvas.alpha_composite(star)
+
+        # --- logo (or Ultra gold-glow composite) on top of the trail ---
+        if is_ultra:
+            glow, _ = self._ultra_glow_logo(icon_path, logo_size)  # (logo_size+2*pad)²·ss
+            canvas.alpha_composite(glow, (trail * ss, 0))
+        else:
+            logo = Image.open(icon_path).convert("RGBA").resize((ls, ls), Image.LANCZOS)
+            canvas.alpha_composite(logo, (lx, ly))
+
+        return canvas, (logical_w, logical_h)
+
     def _create_header(self, parent) -> None:
         """Create the app header with refined, minimal branding and scale controls."""
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -4376,12 +4456,10 @@ class WayfinderApp(ctk.CTk):
         logo_size = 24
         is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         try:
-            if is_ultra:
-                # 😇 Ultra badge — golden glow radiating from the brand mark
-                logo_img, display_size = self._ultra_glow_logo(ICON_PATH, logo_size)
-            else:
-                logo_img = Image.open(ICON_PATH).resize((logo_size, logo_size), Image.LANCZOS)
-                display_size = (logo_size, logo_size)
+            # Cosmic signature: the brand arrow "in space" with a baked, static
+            # stardust trail (placement A · subtle). Works for BOTH tiers — the
+            # Ultra gold glow composites on top of the trail inside the helper.
+            logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
             self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
             logo_label = ctk.CTkLabel(
                 title_frame,
@@ -4635,16 +4713,16 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_header[0], self.font_sizes["heading"], "bold"),
             text_color=STATE_COLORS[AppState.IDLE],
         )
-        self.status_label.pack(pady=(12, 0))
-        
+        self.status_label.pack(pady=(SPACING["md"], 0))
+
         # Hotkey hint
         self.hotkey_label = ctk.CTkLabel(
             hero_inner,
             text=f"Press {self.get_hotkey_display()} to toggle",
             font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_muted"],
+            text_color=COLORS["text_secondary"],  # one notch up from text_muted for legibility
         )
-        self.hotkey_label.pack(pady=(4, 0))
+        self.hotkey_label.pack(pady=(SPACING["xs"], 0))
     
     def _on_mic_hover(self, entering: bool) -> None:
         """Redraw the mic button once on Enter/Leave with a brighter glow while hovered.
