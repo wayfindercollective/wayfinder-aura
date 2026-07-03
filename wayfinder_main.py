@@ -4031,14 +4031,27 @@ class WayfinderApp(ctk.CTk):
 
         # Coordinates in TOPLEVEL-window space, so place() lands correctly no
         # matter how deep the control is inside a scrolled Settings frame.
+        #
+        # winfo_* returns REAL device pixels, but CustomTkinter's place() and the
+        # CTkFrame constructor RE-APPLY the widget-scaling factor to x/y/width/
+        # height (scaling_base_class._apply_argument_scaling). Feeding raw device
+        # pixels would double-scale — at 200% UI scale the panel is built twice as
+        # wide and placed at twice the offset, landing off-screen (invisible). So
+        # convert every measurement to LOGICAL (unscaled) units here; CTk scales
+        # them back to device pixels on the way out. (Synthetic tkinter clicks in
+        # the earlier fix ran at scale 1.0, where ÷1 == ×1 and the bug never showed.)
         self.update_idletasks()
         try:
-            ctrl_x = option_menu.winfo_rootx() - self.winfo_rootx()
-            ctrl_y = option_menu.winfo_rooty() - self.winfo_rooty()
-            ctrl_w = option_menu.winfo_width()
-            ctrl_h = option_menu.winfo_height()
-            win_w = self.winfo_width()
-            win_h = self.winfo_height()
+            scale = float(option_menu._apply_widget_scaling(1.0)) or 1.0
+        except Exception:
+            scale = 1.0
+        try:
+            ctrl_x = (option_menu.winfo_rootx() - self.winfo_rootx()) / scale
+            ctrl_y = (option_menu.winfo_rooty() - self.winfo_rooty()) / scale
+            ctrl_w = option_menu.winfo_width() / scale
+            ctrl_h = option_menu.winfo_height() / scale
+            win_w = self.winfo_width() / scale
+            win_h = self.winfo_height() / scale
         except Exception:
             return
 
