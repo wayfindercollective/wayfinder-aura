@@ -342,3 +342,37 @@ def test_no_grab_set_call_sites():
         "`.grab_set()` is banned (CLAUDE.md rule 2 — modal Toplevels caused the "
         f"Wayland focus/sizing bugs). Hits: {hits}"
     )
+
+
+# ---------------------------------------------------------------------------
+# (g) Mouse-wheel pipeline — Tk 9 compat (probe-verified 2026-07-02)
+# ---------------------------------------------------------------------------
+# Tk 9 on XWayland delivers ONE <MouseWheel> per notch with delta=±120 and no
+# legacy Button-4/5. CTk 5.2.2's own Linux handler scrolls event.delta canvas
+# "units" of 10% viewport each — 12 viewports per notch, i.e. instant
+# top/bottom teleport. _enable_linux_mousewheel neuters that handler at the
+# class level and installs the one correct pixel-based pipeline. These tests
+# keep both halves of the fix from silently regressing.
+
+
+def test_ctk_wheel_shim_present():
+    assert "ctk.CTkScrollableFrame._mouse_wheel_all = lambda" in MAIN_SRC, (
+        "the Tk9-compat shim neutering CTk's broken <MouseWheel> math is gone — "
+        "without it every wheel notch teleports scrollable frames to top/bottom"
+    )
+    assert '"<MouseWheel>"' in MAIN_SRC, (
+        "no root-level <MouseWheel> binding — Tk 9 delivers wheel input ONLY as "
+        "<MouseWheel> (delta=±120); Button-4/5 alone leaves the app wheel-dead"
+    )
+
+
+def test_no_unbind_all_call_sites():
+    hits = [
+        (MAIN_SRC.count("\n", 0, m.start()) + 1, _line_of(m.start()).strip())
+        for m in re.finditer(r"\.unbind_all\s*\(", MAIN_SRC)
+    ]
+    assert not hits, (
+        "unbind_all() removes EVERY root-level binding for that event app-wide "
+        "(the old _trap_scroll killed global wheel scrolling after one hover of "
+        f"the models panel). Scope bindings per-widget instead. Hits: {hits}"
+    )
