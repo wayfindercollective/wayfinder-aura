@@ -18,7 +18,7 @@ import pytest
 
 pytest.importorskip("customtkinter")
 
-from wayfinder_main import dropdown_panel_geometry  # noqa: E402
+from wayfinder_main import clamp_dropdown_width, dropdown_panel_geometry  # noqa: E402
 
 
 def test_panel_sized_via_constructor_not_place():
@@ -197,3 +197,42 @@ def test_margin_respected_below():
     )
     assert opens_up is False
     assert y + h <= 600 - 8
+
+
+# ── clamp_dropdown_width: the panel widens to fit content, capped to the window ──
+
+def test_width_widens_to_content_when_room():
+    # Long value (device name) wants 320px; the control is only 160 and the window
+    # has plenty of room → panel widens to the content so text isn't clipped.
+    w = clamp_dropdown_width(content_w=320, ctrl_w=160, win_w=900, margin=8)
+    assert w == 320
+
+
+def test_width_never_narrower_than_control():
+    # A short list (content < control) must not shrink the panel below the control
+    # it drops from — that would look detached/misaligned.
+    w = clamp_dropdown_width(content_w=90, ctrl_w=160, win_w=900, margin=8)
+    assert w == 160
+
+
+def test_width_capped_to_window_when_scrunched():
+    # Halved window: content wants 320 but only 400-2*8 = 384 fits... still fits.
+    # Quartered window (win_w=260): budget = 260-16 = 244 → panel caps to 244 so it
+    # stays on-screen and clips the long value as little as the space allows.
+    w = clamp_dropdown_width(content_w=320, ctrl_w=160, win_w=260, margin=8)
+    assert w == 244
+    assert w <= 260 - 2 * 8
+
+
+def test_width_control_wins_when_window_narrower_than_control():
+    # Pathological: window minus margins is narrower than the control itself.
+    # The control width wins (can't be narrower than what it drops from), even
+    # though that (briefly) exceeds the window — matches the control's own overflow.
+    w = clamp_dropdown_width(content_w=500, ctrl_w=200, win_w=180, margin=8)
+    assert w == 200
+
+
+def test_width_returns_int():
+    # Feeds the CTkFrame constructor, so it must be an int (no float pixels).
+    w = clamp_dropdown_width(content_w=250.5, ctrl_w=160, win_w=900, margin=8)
+    assert isinstance(w, int)

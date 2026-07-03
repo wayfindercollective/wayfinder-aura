@@ -322,6 +322,7 @@ COLORS = {
     "bg_surface": "#161B22",        # Sidebar/panels - slightly elevated
     "bg_card": "#1E1E1F",           # Bento tiles - 7% white on bg
     "bg_hover": "#1E1B26",          # Hover = 10% accent glow (designer spec)
+    "bg_hover_strong": "#3A3758",   # Hover = 25% accent glow — obvious selection (dropdown rows)
     "bg_elevated": "#2D333B",       # Pressed/elevated elements
     "bg_input": "#13171D",          # Input fields - slightly recessed
     
@@ -3446,6 +3447,24 @@ def dropdown_panel_geometry(ctrl_x, ctrl_y, ctrl_w, ctrl_h, list_h,
     return (x, y, h, opens_up)
 
 
+def clamp_dropdown_width(content_w, ctrl_w, win_w, margin=8):
+    """Width for a dropdown's open panel.
+
+    The panel widens past its (often narrow) closed control to fit the longest
+    value — ``content_w`` — so long entries like device names or model files
+    aren't clipped to the control's width. It never grows past the window
+    (``win_w`` minus ``margin`` on each side), so a halved/quartered window still
+    shows the panel fully; there the longest value clips as little as the space
+    allows. On a window so narrow that even the control is wider than that budget,
+    the control width wins (the panel can't be narrower than what it drops from).
+
+    Pure/headless — the caller feeds LOGICAL (unscaled) pixels; CustomTkinter
+    re-applies widget scaling when the panel is constructed.
+    """
+    budget = max(ctrl_w, win_w - 2 * margin)
+    return int(min(max(ctrl_w, content_w), budget))
+
+
 class InlineOptionMenu(ctk.CTkOptionMenu):
     """A CTkOptionMenu whose OPEN list renders as an in-window panel instead of
     a native tkinter.Menu (``tk_popup``).
@@ -4071,11 +4090,30 @@ class WayfinderApp(ctk.CTk):
         scrollable = n > self.MAX_ROWS_DROPDOWN
         list_h = visible * self.ROW_H_DROPDOWN + pad * 2
 
+        # Widen the panel to fit its longest value so device names / model files
+        # aren't clipped to the (narrow) closed-control width — capped to the
+        # window so it stays fully on-screen when the app is halved/quartered.
+        # Measure in LOGICAL px (tk scaling is ~1; CTk scales the panel on build),
+        # falling back to a char estimate if the font probe fails. Any residual
+        # scaling error is bounded by the window cap in clamp_dropdown_width, so
+        # the panel can never run off-screen.
+        try:
+            import tkinter.font as _tkfont
+            _probe = _tkfont.Font(family=self.font_body[0], size=self.font_sizes["body"])
+            text_w = max(_probe.measure(str(v)) for v in values)
+        except Exception:
+            text_w = int(max((len(str(v)) for v in values), default=0)
+                         * self.font_sizes["body"] * 0.62)
+        # icon(16) + compound gap + row padx + panel pad*2 + border + scrollbar
+        chrome = 16 + 10 + 8 + pad * 2 + 2 + (18 if scrollable else 0)
+        panel_w = clamp_dropdown_width(text_w + chrome, ctrl_w, win_w, margin=8)
+
         x, y, h, _opens_up = dropdown_panel_geometry(
-            ctrl_x, ctrl_y, ctrl_w, ctrl_h, list_h, win_w, win_h, margin=8,
+            ctrl_x, ctrl_y, panel_w, ctrl_h, list_h, win_w, win_h, margin=8,
         )
         self.log(f"[dropdown] open {len(values)} vals ctrl=({ctrl_x},{ctrl_y},{ctrl_w},{ctrl_h}) "
-                 f"win=({win_w},{win_h}) list_h={list_h} scroll={scrollable} -> x={x} y={y} h={h} up={_opens_up}")
+                 f"win=({win_w},{win_h}) list_h={list_h} scroll={scrollable} panel_w={panel_w} "
+                 f"-> x={x} y={y} h={h} up={_opens_up}")
 
         # CustomTkinter's place() override REJECTS width/height (they must go to
         # the constructor — passing them to .place() raises ValueError, which
@@ -4084,7 +4122,7 @@ class WayfinderApp(ctk.CTk):
         # rows can't shrink/grow it away from the computed (x, y, w, h).
         panel = ctk.CTkFrame(
             self,
-            width=ctrl_w,
+            width=panel_w,
             height=h,
             fg_color=COLORS["bg_surface"],
             corner_radius=RADIUS["md"],
@@ -4119,7 +4157,10 @@ class WayfinderApp(ctk.CTk):
                 anchor="w",
                 font=(self.font_body[0], self.font_sizes["body"]),
                 fg_color="transparent",
-                hover_color=COLORS["bg_hover"],
+                # 25% accent glow (2.5x the subtle bg_hover) so the hovered row
+                # reads clearly against the panel's bg_surface — the old bg_hover
+                # was nearly invisible on this background.
+                hover_color=COLORS["bg_hover_strong"],
                 # Selected row echoes the closed control's accent value text
                 # (which already renders in COLORS["accent"]) + a leading check.
                 text_color=COLORS["accent"] if selected else COLORS["text_primary"],
