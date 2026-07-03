@@ -5336,11 +5336,11 @@ class WayfinderApp(ctk.CTk):
         detect_row = ctk.CTkFrame(system_content, fg_color="transparent")
         detect_row.pack(fill="x", padx=16, pady=(0, 6))
         self._detect_btn_record = ctk.CTkButton(
-            detect_row, text="🎯 Detect — press the key you want",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            fg_color=COLORS["bg_card"], hover_color=COLORS["accent_glow"],
-            border_width=1, border_color=COLORS["border_rim"],
-            text_color=COLORS["text_primary"], height=26,
+            detect_row, text=self._DETECT_IDLE_TEXT,
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            fg_color=COLORS["bg_elevated"], hover_color=COLORS["accent_glow"],
+            border_width=1, border_color=COLORS["accent"],
+            text_color=COLORS["accent"], height=32, corner_radius=RADIUS["sm"],
             command=lambda: self._start_hotkey_detect("record"),
         )
         self._detect_btn_record.pack(side="left")
@@ -7138,11 +7138,11 @@ class WayfinderApp(ctk.CTk):
         style_detect_row = ctk.CTkFrame(hotkey_content, fg_color="transparent")
         style_detect_row.pack(fill="x", padx=16, pady=(0, 6))
         self._detect_btn_style = ctk.CTkButton(
-            style_detect_row, text="🎯 Detect — press the key you want",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            fg_color=COLORS["bg_card"], hover_color=COLORS["accent_glow"],
-            border_width=1, border_color=COLORS["border_rim"],
-            text_color=COLORS["text_primary"], height=26,
+            style_detect_row, text=self._DETECT_IDLE_TEXT,
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            fg_color=COLORS["bg_elevated"], hover_color=COLORS["accent_glow"],
+            border_width=1, border_color=COLORS["accent"],
+            text_color=COLORS["accent"], height=32, corner_radius=RADIUS["sm"],
             command=lambda: self._start_hotkey_detect("style"),
         )
         self._detect_btn_style.pack(side="left")
@@ -10510,7 +10510,7 @@ class WayfinderApp(ctk.CTk):
 
     # === Settings "Detect" hotkey capture ===
 
-    _DETECT_IDLE_TEXT = "🎯 Detect — press the key you want"
+    _DETECT_IDLE_TEXT = "Detect — click, then press a key"
 
     def _start_hotkey_detect(self, target: str) -> None:
         """Arm capture: the listener reports the next key press instead of acting on it."""
