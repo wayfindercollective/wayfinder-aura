@@ -4051,14 +4051,22 @@ class WayfinderApp(ctk.CTk):
             ctrl_x, ctrl_y, ctrl_w, ctrl_h, list_h, win_w, win_h, margin=8,
         )
 
+        # CustomTkinter's place() override REJECTS width/height (they must go to
+        # the constructor — passing them to .place() raises ValueError, which
+        # would abort the open and leave the list unclickable). Size the panel
+        # via the constructor and disable geometry propagation so the packed
+        # rows can't shrink/grow it away from the computed (x, y, w, h).
         panel = ctk.CTkFrame(
             self,
+            width=ctrl_w,
+            height=h,
             fg_color=COLORS["bg_surface"],
             corner_radius=RADIUS["md"],
             border_width=1,
             border_color=COLORS["border_subtle"],
         )
-        panel.place(x=x, y=y, width=ctrl_w, height=h)
+        panel.pack_propagate(False)
+        panel.place(x=x, y=y)
         panel.lift()
 
         if scrollable:
