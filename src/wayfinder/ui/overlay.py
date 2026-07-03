@@ -578,7 +578,8 @@ class BorderChaser:
     
     def __init__(self):
         self.position = 0.0  # 0.0 to 1.0 around perimeter
-        self.speed = 1.0 / 1.5  # Complete loop in 1.5 seconds
+        # Slow drift, not a sprint — a calm loop reads as ambient, not "dancing".
+        self.speed = 1.0 / 2.6  # Complete loop in 2.6 seconds
         
     def advance(self, dt: float):
         """Advance the chaser position."""
@@ -595,45 +596,41 @@ class BorderChaser:
         """
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Get total path length and position
-        path_length = path.length()
-        current_pos = self.position * path_length
-        
-        # Get point on path
+
+        # Point on the border at the current position.
         point = path.pointAtPercent(self.position)
-        
-        # Draw gradient glow at position
-        glow_radius = 30
+
+        # A soft, low-alpha glow that drifts the border — deliberately subtle.
+        # No bright white hot-spot (that read as an attention-grabbing "dancing"
+        # light); this is a gentle shimmer in the state colour instead.
+        glow_radius = 22
         gradient = QRadialGradient(point, glow_radius)
-        
+
         bright_color = QColor(color)
-        bright_color.setAlphaF(0.9)
+        bright_color.setAlphaF(0.30)
         gradient.setColorAt(0, bright_color)
-        
+
         mid_color = QColor(color)
-        mid_color.setAlphaF(0.4)
-        gradient.setColorAt(0.4, mid_color)
-        
+        mid_color.setAlphaF(0.12)
+        gradient.setColorAt(0.45, mid_color)
+
         transparent = QColor(color)
         transparent.setAlphaF(0)
         gradient.setColorAt(1.0, transparent)
-        
+
         painter.setBrush(QBrush(gradient))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(point, glow_radius, glow_radius)
-        
-        # Draw bright core
-        core_gradient = QRadialGradient(point, 8)
-        white = QColor("#FFFFFF")
-        white.setAlphaF(0.95)
-        core_gradient.setColorAt(0, white)
-        core_gradient.setColorAt(0.5, bright_color)
+
+        # Faint core in the state colour (NOT white) for a touch of definition.
+        core_gradient = QRadialGradient(point, 5)
+        core = QColor(color)
+        core.setAlphaF(0.45)
+        core_gradient.setColorAt(0, core)
         core_gradient.setColorAt(1.0, transparent)
-        
         painter.setBrush(QBrush(core_gradient))
-        painter.drawEllipse(point, 8, 8)
-        
+        painter.drawEllipse(point, 5, 5)
+
         painter.restore()
 
 
