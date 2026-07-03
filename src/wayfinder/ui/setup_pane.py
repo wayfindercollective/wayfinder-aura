@@ -81,6 +81,133 @@ class SetupFlow:
             self.on_complete()
 
 
+class SetupSequence:
+    """Pure, headless sequencing for the guided auto-install.
+
+    The widget builds an ordered list of step ids (in dependency order) and hands
+    it here. This class owns ONLY the state machine — which step is active, what's
+    still queued / done / skipped, and the transitions between them (advance on
+    success, pause on failure, retry, skip-step, cancel). It runs NO installs and
+    touches NO Tk / core.setup: the widget asks it for the active step, runs the
+    real install for that id off-thread, then reports the outcome back. Keeping
+    the sequencing HERE (not in widget code) is what makes the new auto-advance
+    flow headless-testable — mirroring how ``SetupFlow`` isolates completion.
+
+    Lifecycle::
+
+        seq = SetupSequence(["system_packages", "whisper_cpp", "whisper_model"])
+        sid = seq.start()                 # -> "system_packages" (now ACTIVE)
+        # ... run it ...
+        sid = seq.on_success(sid)         # -> "whisper_cpp"
+        # ... it fails / needs the user ...
+        seq.on_failure(sid)               # pauses HERE; not finished
+        sid = seq.retry()                 # re-activate the paused step
+        # ... or give up on just this step and move on ...
+        sid = seq.skip_step()             # -> "whisper_model"
+        sid = seq.on_success(sid)         # -> None, seq.finished is True
+    """
+
+    QUEUED = "queued"
+    ACTIVE = "active"
+    DONE = "done"
+    PAUSED = "paused"
+    SKIPPED = "skipped"
+
+    def __init__(self, step_ids):
+        self.steps = list(step_ids)
+        self.status = {sid: self.QUEUED for sid in self.steps}
+        self.active = None
+        self.cancelled = False
+
+    # ── queries ──
+    @property
+    def finished(self) -> bool:
+        """True once nothing is active or queued (all done/skipped), or cancelled.
+
+        A PAUSED step is NOT finished — it keeps ``active`` set and awaits
+        ``retry()`` / ``skip_step()``.
+        """
+        if self.cancelled:
+            return True
+        return self.active is None and not any(
+            s == self.QUEUED for s in self.status.values()
+        )
+
+    def position(self, sid) -> tuple:
+        """1-based ``(index, total)`` of ``sid`` — for a "step 2 of 3" label."""
+        try:
+            return (self.steps.index(sid) + 1, len(self.steps))
+        except ValueError:
+            return (0, len(self.steps))
+
+    def remaining(self) -> list:
+        """Step ids still queued (not yet started) — the visual "up next" list."""
+        return [s for s in self.steps if self.status[s] == self.QUEUED]
+
+    # ── transitions ──
+    def start(self):
+        """Activate the first queued step. Returns its id, or None if there's
+        nothing to run (→ immediately ``finished``)."""
+        return self._activate_next()
+
+    def _activate_next(self):
+        if self.cancelled:
+            self.active = None
+            return None
+        for sid in self.steps:
+            if self.status[sid] == self.QUEUED:
+                self.status[sid] = self.ACTIVE
+                self.active = sid
+                return sid
+        self.active = None
+        return None
+
+    def on_success(self, sid):
+        """Mark the active step DONE and activate the next. Returns next id/None."""
+        if self.status.get(sid) == self.ACTIVE:
+            self.status[sid] = self.DONE
+        return self._activate_next()
+
+    def on_failure(self, sid):
+        """Pause on a failed step (or one needing user interaction).
+
+        Leaves ``active`` pointing at the paused step so ``retry()`` re-runs it;
+        the queue does NOT advance. Returns None.
+        """
+        if self.status.get(sid) == self.ACTIVE:
+            self.status[sid] = self.PAUSED
+        self.active = sid
+        return None
+
+    def retry(self, sid=None):
+        """Re-activate the paused step. Returns its id (now ACTIVE again)."""
+        sid = sid or self.active
+        if self.status.get(sid) == self.PAUSED:
+            self.status[sid] = self.ACTIVE
+            self.active = sid
+        return self.active
+
+    def skip_step(self, sid=None):
+        """Give up on just the paused/active step and advance the queue.
+
+        Returns the next step id, or None if that was the last one.
+        """
+        sid = sid or self.active
+        if self.status.get(sid) in (self.PAUSED, self.ACTIVE):
+            self.status[sid] = self.SKIPPED
+        return self._activate_next()
+
+    def cancel(self):
+        """Skip Setup — cancel the whole queue. Every still-queued step becomes
+        SKIPPED and no further step will start. Any in-flight (active/paused) step
+        is abandoned by the widget between steps via the cancelled flag."""
+        self.cancelled = True
+        for sid in self.steps:
+            if self.status[sid] == self.QUEUED:
+                self.status[sid] = self.SKIPPED
+        self.active = None
+
+
 # ─── Pure footer/status logic (headless-testable) ────────────────────────────
 
 
@@ -173,6 +300,8 @@ _STATUS_ICONS = {
     "missing": ("--", COLORS["state_recording"]),    # Rose
     "missing_opt": ("--", COLORS["text_muted"]),     # Dim for optional
     "installing": ("...", COLORS["accent"]),          # Violet
+    "queued": ("··", COLORS["text_muted"]),          # Dim: waiting in the auto-install queue
+    "failed": ("!!", COLORS["state_recording"]),     # Rose: step paused on a failure
 }
 
 
@@ -279,12 +408,31 @@ class _DepRow:
             self._detail_label.configure(
                 text=error_text, text_color=COLORS["state_recording"]
             )
-            if self._dep.can_install or self._dep.id in (
+            # Per-row Install/Download buttons only appear when an ``on_install``
+            # was wired (the old manual mode). The guided auto-install passes
+            # ``on_install=None`` — the queue drives every step, and a paused step
+            # is retried from the footer, not per row — so no button here.
+            if self._on_install is not None and (self._dep.can_install or self._dep.id in (
                 "ydotool", "build_tools", "cuda", "whisper_cpp", "whisper_model",
-            ):
+            )):
                 btn_text = "Download" if self._dep.id == "whisper_model" else "Install"
                 self._action_btn.configure(text=btn_text)
                 self._action_btn.pack(side="right", padx=8, pady=6)
+
+    def set_queued(self):
+        """Waiting in the auto-install queue (not yet its turn)."""
+        self._set_state("queued")
+        self._action_btn.pack_forget()
+        self._detail_label.configure(text="Queued…", text_color=COLORS["text_muted"])
+
+    def set_failed(self, msg: str):
+        """The step for this row paused on a failure."""
+        self._set_state("failed")
+        self._action_btn.pack_forget()
+        self._detail_label.configure(
+            text=msg or "Couldn't finish — see the log below.",
+            text_color=COLORS["state_recording"],
+        )
 
     def set_installing(self):
         self._set_state("installing")
@@ -334,10 +482,16 @@ class SetupPane:
 
         self._config = app.config
         self._msg_queue: queue.Queue = queue.Queue()
-        self._installing = False
         self._alive = True
         self._dep_rows: dict[str, _DepRow] = {}
         self._deps: list[Dependency] = []
+
+        # Guided auto-install state (the sequencing itself lives in the pure,
+        # headless-testable SetupSequence — this widget just drives it).
+        self._seq: Optional[SetupSequence] = None
+        self._cancelled = False        # Skip Setup pressed → abandon the queue
+        self._auto_started = False     # probe→auto-install fires exactly once
+        self._phase = "checking"       # checking | installing | paused | done
 
         # Full-cover dim underlay (CTk has no real alpha; a bg_base frame over
         # the tab content reads as a focused/modal state) — same as WelcomePane.
@@ -385,6 +539,16 @@ class SetupPane:
             text_color=COLORS["text_secondary"],
         ).pack(anchor="w", pady=(2, 0))
 
+        # Live status line — the guided stepper's current phase / active step.
+        self._status_label = ctk.CTkLabel(
+            header,
+            text="Checking your system…",
+            font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
+            text_color=COLORS["accent"],
+            anchor="w",
+        )
+        self._status_label.pack(anchor="w", pady=(SPACING["xs"], 0))
+
         div = ctk.CTkFrame(self.card, height=1, fg_color=COLORS["border_subtle"])
         div.pack(fill="x", padx=pad, pady=(0, SPACING["xs"]))
 
@@ -408,19 +572,24 @@ class SetupPane:
         )
         self._skip_btn.pack(side="left")
 
-        self._install_btn = ctk.CTkButton(
+        # Retry — revealed only when the queue PAUSES on a failed step. Re-runs
+        # that one step (auto-install replaced the old "Install All Missing").
+        self._retry_btn = ctk.CTkButton(
             self._footer,
-            text="Install All Missing",
+            text="Retry",
             font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_hover"],
             text_color=COLORS["bg_base"],
             corner_radius=RADIUS["md"],
-            width=180,
-            command=self._on_install_all,
+            width=110,
+            command=self._retry_active,
         )
-        self._install_btn.pack(side="right")
+        # Not packed yet — revealed on a pause.
 
+        # Continue — dual role, phase-driven (see _on_continue): skip the paused
+        # step and resume the queue, OR proceed past a finished-but-incomplete
+        # setup. Revealed on pause and on a required-still-missing finish.
         self._continue_btn = ctk.CTkButton(
             self._footer,
             text="Continue",
@@ -432,7 +601,7 @@ class SetupPane:
             width=120,
             command=self._on_continue,
         )
-        # Not packed yet — revealed when all required deps are met.
+        # Not packed yet — revealed by phase transitions.
 
         # Log area (collapsible, shown when installation starts).
         self._log_frame = ctk.CTkFrame(
@@ -506,10 +675,9 @@ class SetupPane:
     # ─── Dependency checks ───────────────────────────────────────
 
     def _add_dep_row(self, dep: Dependency):
-        row = _DepRow(
-            self._ctk, self._dep_frame, dep,
-            on_install=lambda d=dep: self._install_single(d),
-        )
+        # on_install=None → no per-row Install button; the guided queue installs
+        # everything and a paused step is retried from the footer.
+        row = _DepRow(self._ctk, self._dep_frame, dep, on_install=None)
         row.pack(fill="x", pady=(0, 4))
         self._dep_rows[dep.id] = row
 
@@ -544,7 +712,7 @@ class SetupPane:
                             self._dep_rows[dep_id].update_status(dep.status)
 
                 elif msg_type == "checks_done":
-                    self._update_footer_state()
+                    self._on_checks_complete()
 
                 elif msg_type == "log":
                     self._append_log(data)
@@ -554,15 +722,9 @@ class SetupPane:
                     if dep_id in self._dep_rows:
                         self._dep_rows[dep_id].update_progress(downloaded, total)
 
-                elif msg_type == "install_done":
-                    dep_id, success, detail = data
-                    self._on_install_done(dep_id, success, detail)
-
-                elif msg_type == "install_sequence_done":
-                    self._installing = False
-                    self._install_btn.configure(text="Install All Missing")
-                    self._skip_btn.configure(state="normal")
-                    self._recheck_all()
+                elif msg_type == "step_done":
+                    sid, success, detail = data
+                    self._on_step_done(sid, success, detail)
 
         except queue.Empty:
             pass
@@ -570,178 +732,242 @@ class SetupPane:
         if self._alive and self.app.winfo_exists():
             self.app.after(100, self._poll_queue)
 
-    # ─── Installation logic ──────────────────────────────────────
+    # ─── Guided auto-install ─────────────────────────────────────
+    # The pane no longer waits for the user to click "Install": after the probe
+    # it AUTO-STARTS installing everything missing, one step at a time, in
+    # dependency order — driving the pure SetupSequence. Skip Setup stays visible
+    # (cancels the queue), and any step that fails PAUSES the queue with Retry /
+    # Continue rather than aborting the whole run.
 
-    def _on_install_all(self):
-        """Full install sequence: system packages -> whisper.cpp -> model."""
-        if self._installing:
+    def _on_checks_complete(self):
+        """A probe (or an in-flight recheck) landed. Refresh the model picker,
+        then — exactly once — kick off the guided auto-install after a short beat
+        so the user actually sees the checklist first."""
+        self._refresh_dynamic_ui()
+        if self._auto_started or self._cancelled:
             return
-        self._installing = True
-        self._install_btn.configure(state="disabled", text="Installing...")
-        self._skip_btn.configure(state="disabled")
+        self._auto_started = True
+        self.app.after(700, self._maybe_autostart)  # brief "here's your system" pause
+
+    def _maybe_autostart(self):
+        """Build the ordered step list and start the queue (or finish straight to
+        the welcome tour when nothing is missing)."""
+        if not self._alive or self._cancelled:
+            return
+        steps = self._build_install_steps()
+        if not steps:
+            self._finish_sequence()   # system already ready → hand off to welcome
+            return
+        self._seq = SetupSequence(steps)
+        self._phase = "installing"
         self._show_log()
+        # Show the whole queue up front: every step's rows read "Queued…".
+        for sid in steps:
+            for rid in self._rows_for_step(sid):
+                if rid in self._dep_rows:
+                    self._dep_rows[rid].set_queued()
+        self._seq.start()
+        self._run_active_step()
 
+    def _build_install_steps(self) -> list:
+        """Ordered ids of every missing, installable step (dependency order):
+        custom-installer deps (macOS pyautogui) → system packages → whisper.cpp →
+        model. Mirrors the old Install-All sequence, minus the bundled skips."""
         is_bundled = IS_APPIMAGE or IS_FLATPAK
-        missing_pkgs = [] if is_bundled else get_missing_system_packages()
-        whisper_missing = not self._dep_ok("whisper_cpp")
-        model_missing = not self._dep_ok("whisper_model")
+        steps: list = []
+        for dep in self._deps:
+            if dep._install is not None and not self._dep_ok(dep.id):
+                steps.append(dep.id)
+        if not is_bundled and get_missing_system_packages():
+            steps.append("system_packages")
+        if not self._dep_ok("whisper_cpp"):
+            steps.append("whisper_cpp")
+        if not self._dep_ok("whisper_model"):
+            steps.append("whisper_model")
+        return steps
 
+    def _rows_for_step(self, sid: str) -> list:
+        """Dep-row ids a step maps to (system_packages spans several rows)."""
+        if sid == "system_packages":
+            return [r for r in ("ydotool", "build_tools", "cuda") if r in self._dep_rows]
+        return [sid]
+
+    def _step_name(self, sid: str) -> str:
+        friendly = {
+            "system_packages": "system packages",
+            "whisper_cpp": "the speech engine (whisper.cpp)",
+            "whisper_model": "the Whisper model",
+        }
+        if sid in friendly:
+            return friendly[sid]
+        dep = next((d for d in self._deps if d.id == sid), None)
+        return dep.name if dep else sid
+
+    def _run_active_step(self):
+        """Kick off the sequence's current active step (or finish if none)."""
+        if not self._alive or self._cancelled or self._seq is None:
+            return
+        sid = self._seq.active
+        if sid is None:
+            self._finish_sequence()
+            return
+        self._phase = "installing"
+        self._hide_pause_buttons()
+        self._skip_btn.configure(state="normal")  # Skip stays live mid-install
+        idx, total = self._seq.position(sid)
+        verb = "Downloading" if sid == "whisper_model" else "Installing"
+        self._set_status(
+            f"{verb} {self._step_name(sid)}…  (step {idx} of {total})",
+            COLORS["accent"],
+        )
+        for rid in self._rows_for_step(sid):
+            if rid in self._dep_rows:
+                self._dep_rows[rid].set_installing()
+        self._dispatch_step(sid)
+
+    def _dispatch_step(self, sid: str):
+        """Run the REAL install for ``sid`` via the (untouched) core.setup engine.
+        Each engine fn threads internally and reports back through ``done_cb`` →
+        the ``step_done`` queue message, drained on the Tk main thread."""
         gpu_vendor = self._detect_vendor_from_deps()
-        use_cuda = gpu_vendor == "nvidia"
-        use_vulkan = gpu_vendor == "amd"
-
-        def _sequence():
-            # Step 0: deps with their own installer (e.g. pyautogui on macOS).
-            for dep in self._deps:
-                if dep._install is not None and not self._dep_ok(dep.id):
-                    self._run_step_sync(dep.id, dep._install)
-                    self._recheck(dep.id)
-
-            # Step 1: system packages (skipped in bundled environments).
-            if missing_pkgs:
-                self._run_step_sync(
-                    "system_packages",
-                    lambda log_cb, done_cb: install_system_packages(log_cb, done_cb, missing_pkgs),
-                )
-                for dep_id in ("ydotool", "build_tools", "cuda"):
-                    self._recheck(dep_id)
-
-            # Step 2: build whisper.cpp.
-            if whisper_missing:
-                self._run_step_sync(
-                    "whisper_cpp",
-                    lambda log_cb, done_cb: build_whisper_cpp(
-                        log_cb, done_cb, use_cuda=use_cuda, use_vulkan=use_vulkan
-                    ),
-                )
-
-            # Step 3: download the model.
-            if model_missing:
-                model_name = self._get_selected_model()
-                self._run_step_sync(
-                    "whisper_model",
-                    lambda log_cb, done_cb: download_whisper_model(
-                        model_name, log_cb, done_cb,
-                        progress=lambda dl, tot: self._msg_queue.put(
-                            ("progress", ("whisper_model", dl, tot))
-                        ),
-                    ),
-                )
-
-            self._msg_queue.put(("install_sequence_done", None))
-
-        threading.Thread(target=_sequence, daemon=True).start()
-
-    def _run_step_sync(self, dep_id: str, install_fn):
-        """Run an install step and BLOCK the calling (background) thread until it
-        finishes. Must be called off the Tk main thread."""
-        done_event = threading.Event()
 
         def log_cb(msg):
             self._msg_queue.put(("log", msg))
 
         def done_cb(success, detail):
-            self._msg_queue.put(("install_done", (dep_id, success, detail)))
-            done_event.set()
+            self._msg_queue.put(("step_done", (sid, success, detail)))
 
-        if dep_id in self._dep_rows:
-            self._msg_queue.put(("status", dep_id))
+        try:
+            if sid == "system_packages":
+                pkgs = get_missing_system_packages()
+                if not pkgs:
+                    done_cb(True, "No system packages needed")
+                    return
+                # install_system_packages uses pkexec — a GUI polkit dialog, NOT a
+                # hidden terminal sudo prompt, so auto-start can't hang on it. If
+                # the user declines (or pkexec is unavailable) it returns
+                # done(False) with copy-paste manual instructions in the log,
+                # which pauses the queue on this step (Retry / Continue).
+                install_system_packages(log_cb, done_cb, pkgs)
+            elif sid == "whisper_cpp":
+                build_whisper_cpp(
+                    log_cb, done_cb,
+                    use_cuda=(gpu_vendor == "nvidia"),
+                    use_vulkan=(gpu_vendor == "amd"),
+                )
+            elif sid == "whisper_model":
+                model_name = self._get_selected_model()
 
-        install_fn(log_cb, done_cb)
-        done_event.wait(timeout=600)  # 10 minute ceiling
+                def progress_cb(dl, tot):
+                    self._msg_queue.put(("progress", ("whisper_model", dl, tot)))
 
-    def _install_single(self, dep: Dependency):
-        """Install a single dependency from its row's action button."""
-        if self._installing:
+                download_whisper_model(model_name, log_cb, done_cb, progress=progress_cb)
+            else:
+                dep = next((d for d in self._deps if d.id == sid), None)
+                if dep is not None and dep._install is not None:
+                    dep._install(log_cb, done_cb)
+                else:
+                    done_cb(False, "No installer available")
+        except Exception as e:  # never leave the queue wedged on a dispatch error
+            done_cb(False, str(e))
+
+    def _on_step_done(self, sid: str, success: bool, detail: str):
+        """A step finished (main thread). Persist paths, advance or pause."""
+        if not self._alive:
+            return
+        if sid == "whisper_cpp" and success and detail:
+            self._config["whisper_binary"] = detail
+        if sid == "whisper_model" and success and detail:
+            self._config["model_path"] = detail
+        if success:
+            for rid in self._rows_for_step(sid):
+                self._recheck(rid)  # flips the row(s) to OK
+
+        # Cancel is honored BETWEEN steps: a Skip during a running step lets the
+        # in-flight worker finish, but no further step starts.
+        if self._cancelled or self._seq is None:
             return
 
-        self._show_log()
-        dep_id = dep.id
-        gpu_vendor = self._detect_vendor_from_deps()
+        if success:
+            nxt = self._seq.on_success(sid)
+            if nxt is not None:
+                self._run_active_step()
+            else:
+                self._finish_sequence()
+        else:
+            self._seq.on_failure(sid)
+            self._pause_on_failure(sid, detail)
 
-        if dep_id in ("ydotool", "build_tools", "cuda"):
-            if IS_APPIMAGE or IS_FLATPAK:
-                self._append_log("Dependencies are bundled — no system install needed.")
-                return
+    def _pause_on_failure(self, sid: str, detail: str):
+        """A step failed / needs interaction — pause the queue on it."""
+        self._phase = "paused"
+        for rid in self._rows_for_step(sid):
+            if rid in self._dep_rows:
+                self._dep_rows[rid].set_failed(detail)
+        self._set_status(
+            f"Couldn't finish {self._step_name(sid)}. Check the log below, then "
+            f"Retry — or Continue to skip it.",
+            COLORS["state_recording"],
+        )
+        self._show_pause_buttons()
 
-            if dep._install is not None:
-                self._installing = True
-                if dep_id in self._dep_rows:
-                    self._dep_rows[dep_id].set_installing()
+    def _retry_active(self):
+        """Re-run the paused step."""
+        if self._seq is None or self._cancelled:
+            return
+        self._seq.retry()
+        self._run_active_step()
 
-                def log_cb(msg):
-                    self._msg_queue.put(("log", msg))
+    def _continue_active(self):
+        """Skip just the paused step and resume the queue."""
+        if self._seq is None or self._cancelled:
+            return
+        nxt = self._seq.skip_step()
+        if nxt is not None:
+            self._run_active_step()
+        else:
+            self._finish_sequence()
 
-                def done_cb(success, detail):
-                    self._msg_queue.put(("install_done", (dep_id, success, detail)))
-                    self._installing = False
-                    self._recheck(dep_id)
-
-                dep._install(log_cb, done_cb)
-                return
-
-            pkgs = get_missing_system_packages()
-            if pkgs:
-                self._installing = True
-                if dep_id in self._dep_rows:
-                    self._dep_rows[dep_id].set_installing()
-
-                def log_cb(msg):
-                    self._msg_queue.put(("log", msg))
-
-                def done_cb(success, detail):
-                    self._msg_queue.put(("install_done", (dep_id, success, detail)))
-                    self._installing = False
-                    for did in ("ydotool", "build_tools", "cuda"):
-                        self._recheck(did)
-
-                install_system_packages(log_cb, done_cb, pkgs)
-
-        elif dep_id == "whisper_cpp":
-            self._installing = True
-            if dep_id in self._dep_rows:
-                self._dep_rows[dep_id].set_installing()
-
-            def log_cb(msg):
-                self._msg_queue.put(("log", msg))
-
-            def done_cb(success, detail):
-                self._msg_queue.put(("install_done", (dep_id, success, detail)))
-                self._installing = False
-
-            build_whisper_cpp(
-                log_cb, done_cb,
-                use_cuda=(gpu_vendor == "nvidia"),
-                use_vulkan=(gpu_vendor == "amd"),
+    def _finish_sequence(self):
+        """The queue drained. Auto-advance to the welcome tour when the required
+        deps are satisfied; otherwise offer a manual Continue / Skip."""
+        if not self._alive or self._cancelled:
+            return
+        self._phase = "done"
+        self._hide_pause_buttons()
+        if all_required_ok(self._deps):
+            self._set_status("All set! Starting Wayfinder…", COLORS["state_typing"])
+            self.app.after(1200, self._auto_advance)  # → on_done → welcome tour
+        else:
+            self._set_status(
+                "Some required components still need attention. "
+                "Continue to proceed anyway, or Skip Setup.",
+                COLORS["state_processing"],
             )
+            self._continue_btn.configure(text="Continue anyway")
+            if not self._continue_btn.winfo_ismapped():
+                self._continue_btn.pack(side="right", padx=(8, 0))
 
-        elif dep_id == "whisper_model":
-            self._installing = True
-            if dep_id in self._dep_rows:
-                self._dep_rows[dep_id].set_installing()
+    def _auto_advance(self):
+        if self._alive and not self._cancelled and not self.flow.is_complete:
+            self.flow.complete()
 
-            model_name = self._get_selected_model()
+    def _show_pause_buttons(self):
+        self._continue_btn.configure(text="Continue")
+        if not self._continue_btn.winfo_ismapped():
+            self._continue_btn.pack(side="right", padx=(8, 0))
+        if not self._retry_btn.winfo_ismapped():
+            self._retry_btn.pack(side="right", padx=(8, 0))
 
-            def log_cb(msg):
-                self._msg_queue.put(("log", msg))
+    def _hide_pause_buttons(self):
+        self._retry_btn.pack_forget()
+        self._continue_btn.pack_forget()
 
-            def done_cb(success, detail):
-                self._msg_queue.put(("install_done", (dep_id, success, detail)))
-                self._installing = False
-
-            def progress_cb(dl, tot):
-                self._msg_queue.put(("progress", ("whisper_model", dl, tot)))
-
-            download_whisper_model(model_name, log_cb, done_cb, progress=progress_cb)
-
-    def _on_install_done(self, dep_id: str, success: bool, detail: str):
-        """Called on the main thread when an install step finishes."""
-        self._recheck(dep_id)
-
-        if dep_id == "whisper_cpp" and success and detail:
-            self._config["whisper_binary"] = detail
-        if dep_id == "whisper_model" and success and detail:
-            self._config["model_path"] = detail
+    def _set_status(self, text: str, color=None):
+        try:
+            self._status_label.configure(text=text, text_color=color or COLORS["accent"])
+        except Exception:
+            pass
 
     # ─── Helpers ─────────────────────────────────────────────────
 
@@ -782,24 +1008,11 @@ class SetupPane:
                 return key
         return get_recommended_model()
 
-    def _update_footer_state(self):
-        """Reveal Continue / toggle Install based on current dependency state."""
-        decision = footer_decision(self._deps, self._installing)
-
-        if decision["show_continue"]:
-            self._continue_btn.pack(side="right", padx=(8, 0))
-        else:
-            self._continue_btn.pack_forget()
-
-        if decision["show_install"]:
-            if not self._install_btn.winfo_ismapped():
-                self._install_btn.pack(side="right")
-            self._install_btn.configure(
-                state="normal" if decision["install_enabled"] else "disabled"
-            )
-        else:
-            self._install_btn.pack_forget()
-
+    def _refresh_dynamic_ui(self):
+        """Keep the (fixed) Whisper-model picker visible while the model is still
+        missing, with its sensible default preselected. The queue auto-downloads
+        whatever's selected when the model step runs, so the user only has to
+        touch it to override the default."""
         if should_show_model_selector(self._deps):
             if not self._model_frame.winfo_ismapped():
                 self._model_frame.pack(fill="x", padx=SPACING["lg"], pady=(0, SPACING["sm"]))
@@ -819,9 +1032,21 @@ class SetupPane:
     # ─── Events / completion ─────────────────────────────────────
 
     def _on_continue(self):
-        self.flow.complete()  # -> _complete_flow (persist + teardown + on_done)
+        # Phase-driven: while PAUSED the button skips just the stuck step and
+        # resumes the queue; otherwise (a finished-but-incomplete run) it proceeds
+        # past setup into the app.
+        if self._phase == "paused" and self._seq is not None:
+            self._continue_active()
+        else:
+            self.flow.complete()  # -> _complete_flow (persist + teardown + on_done)
 
     def _on_skip(self):
+        # Skip Setup — cancel the queue cleanly. The cancelled flag is checked
+        # between steps (workers already in flight finish harmlessly; no new step
+        # starts), then complete the flow as "skipped".
+        self._cancelled = True
+        if self._seq is not None:
+            self._seq.cancel()
         self.flow.skip()      # -> _complete_flow
 
     def _complete_flow(self):

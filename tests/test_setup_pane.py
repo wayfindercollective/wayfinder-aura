@@ -78,6 +78,92 @@ class TestSetupFlow:
         assert flow.is_complete is True
 
 
+# ─── SetupSequence auto-install state machine ────────────────────────────────
+
+
+class TestSetupSequence:
+    """The pure, headless sequencing that drives the guided auto-install — where
+    the step ordering / advance / pause / retry / cancel logic lives (NOT in
+    widget code), so the new auto-advance flow is unit-testable."""
+
+    def _seq(self, *ids):
+        from wayfinder.ui.setup_pane import SetupSequence
+
+        return SetupSequence(list(ids) or ["system_packages", "whisper_cpp", "whisper_model"])
+
+    def test_empty_sequence_is_immediately_finished(self):
+        from wayfinder.ui.setup_pane import SetupSequence
+
+        seq = SetupSequence([])
+        assert seq.start() is None
+        assert seq.finished is True
+
+    def test_starts_queued_then_activates_first(self):
+        seq = self._seq("a", "b", "c")
+        assert seq.finished is False
+        assert seq.start() == "a"
+        assert seq.active == "a"
+        assert seq.status["a"] == "active"
+        assert seq.remaining() == ["b", "c"]  # active not counted as remaining
+
+    def test_advances_through_all_steps_then_finishes(self):
+        seq = self._seq("a", "b", "c")
+        assert seq.start() == "a"
+        assert seq.on_success("a") == "b"
+        assert seq.on_success("b") == "c"
+        assert seq.on_success("c") is None
+        assert seq.finished is True
+        assert all(v == "done" for v in seq.status.values())
+
+    def test_position_is_one_based(self):
+        seq = self._seq("a", "b", "c")
+        assert seq.position("a") == (1, 3)
+        assert seq.position("c") == (3, 3)
+
+    def test_failure_pauses_and_does_not_advance(self):
+        seq = self._seq("a", "b")
+        seq.start()
+        seq.on_failure("a")
+        assert seq.active == "a"          # stays on the failed step
+        assert seq.status["a"] == "paused"
+        assert seq.finished is False      # paused ≠ finished
+
+    def test_retry_reactivates_paused_step(self):
+        seq = self._seq("a", "b")
+        seq.start()
+        seq.on_failure("a")
+        assert seq.retry() == "a"
+        assert seq.status["a"] == "active"
+        assert seq.on_success("a") == "b"  # resumes the queue
+
+    def test_skip_step_advances_past_a_paused_step(self):
+        seq = self._seq("a", "b")
+        seq.start()
+        seq.on_failure("a")
+        assert seq.skip_step() == "b"
+        assert seq.status["a"] == "skipped"
+        assert seq.on_success("b") is None
+        assert seq.finished is True
+
+    def test_skip_last_paused_step_finishes(self):
+        seq = self._seq("a")
+        seq.start()
+        seq.on_failure("a")
+        assert seq.skip_step() is None
+        assert seq.finished is True
+
+    def test_cancel_skips_remaining_and_finishes(self):
+        seq = self._seq("a", "b", "c")
+        seq.start()
+        seq.on_success("a")   # b now active
+        seq.cancel()
+        assert seq.finished is True
+        assert seq.cancelled is True
+        assert seq.status["c"] == "skipped"   # queued → skipped
+        # No further step starts after cancel.
+        assert seq._activate_next() is None
+
+
 # ─── Pure footer / model-selector decisions ──────────────────────────────────
 
 
