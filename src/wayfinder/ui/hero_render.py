@@ -146,10 +146,34 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     top, bottom = 1.0, h - 1.0
 
     # Amplitude: calm gentle breath at idle (ribbon sits ~1/3 height), then morph
-    # + voice open it up to full while recording.
+    # + voice open it up while recording. The energy cap is 0.80 (not 1.0): at
+    # full drive the summed sines would push the soft limiter below deep into
+    # saturation and the peaks plateaued — capping the drive keeps the limiter
+    # in its gentle range so high-level peaks stay rounded and flowing. The
+    # energetic feel comes from motion + brightness, not from slamming bounds.
+    # (Idle is untouched: breath tops out at 0.35, far below the cap.)
     breath = 0.26 + 0.09 * (0.5 + 0.5 * math.sin(t * 0.8))
-    amp = max_amp * min(1.0, breath + 0.20 * morph + (level ** 0.6) * 0.62 * morph)
+    amp = max_amp * min(0.80, breath + 0.20 * morph + (level ** 0.6) * 0.62 * morph)
     fs = FREQ_SCALE
+
+    # Soft amplitude limiter: at high level the summed sines (worst case 1.6*amp
+    # centerline) used to slam the strip bounds and flatten — the ribbon read as
+    # "confined". Budget the usable half-height for the thickest stroke (glow
+    # width thick+4 = 10 -> radius 5) plus a 3px air margin, pass anything above
+    # a knee through tanh so peaks asymptotically approach (never touch) the
+    # bounds. Below the knee it's identity — the approved idle look (max
+    # displacement ~15px at h=64) is untouched.
+    max_stroke_rad = (max(cfg[3] for cfg in WAVE_CONFIGS) + 4) / 2.0
+    a_max = max(4.0, h / 2.0 - max_stroke_rad - 3.0)
+    knee = a_max * 0.7
+    soft_range = a_max - knee
+
+    def soft_limit(dy):
+        ad = dy if dy >= 0.0 else -dy
+        if ad <= knee:
+            return dy
+        lim = knee + soft_range * math.tanh((ad - knee) / soft_range)
+        return lim if dy >= 0.0 else -lim
 
     # Layer brightness: dim & calm at idle, full & bright active.
     brightness = 0.55 + 0.45 * morph
@@ -178,10 +202,10 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
         f = freq * fs
         pts = []
         for x in xs:
-            y = center_y + amp * math.sin(f * x + t + phase)
-            y += (amp * 0.4) * math.sin(f * 2.3 * x + t * 1.6 + phase)
-            y += (amp * 0.2) * math.sin(f * 3.7 * x + t * 2.1 + phase * 0.5)
-            pts.append((x, _clampf(y, top, bottom)))
+            dy = amp * math.sin(f * x + t + phase)
+            dy += (amp * 0.4) * math.sin(f * 2.3 * x + t * 1.6 + phase)
+            dy += (amp * 0.2) * math.sin(f * 3.7 * x + t * 2.1 + phase * 0.5)
+            pts.append((x, _clampf(center_y + soft_limit(dy), top, bottom)))
         draw.line(pts, fill=blend(deltas["glow"], brightness), width=thick + 4)
         draw.line(pts, fill=blend(deltas["core"], brightness), width=thick)
 
@@ -189,9 +213,9 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     hdelt = caches["highlight_deltas"]
     hpts = []
     for x in xs:
-        y = center_y + amp * math.sin(0.13 * fs * x + t * 1.4)
-        y += (amp * 0.5) * math.sin(0.26 * fs * x + t * 2.0 + 0.8)
-        hpts.append((x, _clampf(y, top, bottom)))
+        dy = amp * math.sin(0.13 * fs * x + t * 1.4)
+        dy += (amp * 0.5) * math.sin(0.26 * fs * x + t * 2.0 + 0.8)
+        hpts.append((x, _clampf(center_y + soft_limit(dy), top, bottom)))
     draw.line(hpts, fill=blend(hdelt["glow"], hi_brightness), width=6)
     draw.line(hpts, fill=blend(hdelt["core"], hi_brightness * 0.95), width=2)
 

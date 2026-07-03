@@ -85,6 +85,37 @@ def test_morph_increases_vertical_spread():
     assert spread(1.0) >= spread(0.0)
 
 
+def test_no_hard_clipping_at_max_level():
+    """At full energy (level=1, morph=1) the soft limiter keeps the ribbon off
+    the strip bounds: no non-bg pixel in the top/bottom 2 rows (excluding the
+    intentional row-0 highlight), across several animation phases."""
+    for t in (0.0, 1.3, 2.9, 4.7, 7.1):
+        img = hr.render_hero_wave(W, H, t, 1.0, 1.0, ROSE)
+        px = img.load()
+        for y in (1, 2, H - 2, H - 1):
+            for x in range(W):
+                assert px[x, y] == BG, (
+                    f"t={t}: ink at ({x},{y}) = {px[x, y]} — ribbon touches the "
+                    "strip bounds (hard clipping)"
+                )
+
+
+def test_soft_limit_preserves_idle_shape():
+    """The limiter's knee sits above the idle ribbon's max displacement, so the
+    approved idle look is untouched at low energy — and idle stays well clear of
+    the bounds too."""
+    # At morph=0 the max centerline displacement (~1.6 * 0.35 * 0.42h ≈ 15px at
+    # h=64) is below the knee (~16.8px), so soft_limit is identity there.
+    img = hr.render_hero_wave(W, H, 3.7, 0.0, 0.0, ROSE)
+    px = img.load()
+    # sanity: the idle ribbon still paints (limiter didn't crush it)
+    assert _dist(_col(img, W // 2), BG) > 5.0
+    # and it never reaches the guard rows either
+    for y in (1, 2, H - 2, H - 1):
+        for x in range(W):
+            assert px[x, y] == BG
+
+
 def test_nan_inf_do_not_crash():
     for bad in (float("nan"), float("inf"), float("-inf")):
         img = hr.render_hero_wave(W, H, bad, bad, bad, ROSE)
