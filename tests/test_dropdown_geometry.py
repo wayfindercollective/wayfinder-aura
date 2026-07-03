@@ -61,6 +61,65 @@ def test_panel_sized_via_constructor_not_place():
     )
 
 
+def test_panel_coords_divided_by_widget_scaling():
+    """Regression: the winfo_* measurements fed into the panel's geometry must be
+    converted from REAL device pixels to LOGICAL units (divided by the widget
+    scaling factor) before they reach ``.place()``/the ``CTkFrame`` constructor.
+
+    CustomTkinter's scaling layer (``scaling_base_class._apply_argument_scaling``)
+    RE-MULTIPLIES ``x``/``y``/``width``/``height`` by the widget-scaling factor on
+    the way into ``place()`` and the constructor. ``winfo_rootx()``/
+    ``winfo_width()`` already return device pixels, so passing them raw double-
+    scales the panel: at the user's 200% UI scale the list is built twice as wide
+    and placed at twice the offset — landing **off-screen** (the reported
+    "dropdown buttons not working" — the panel opened where no one could see or
+    click it). The earlier synthetic-click test missed it because it ran at
+    scale 1.0, where ×scale is a no-op.
+
+    Verified headlessly by parsing the method body: a scale factor must be taken
+    from ``_apply_widget_scaling`` (CTk's scaling source of truth), and each of
+    the six geometry inputs (ctrl_x/ctrl_y/ctrl_w/ctrl_h/win_w/win_h) must be
+    assigned a value that divides by it.
+    """
+    from wayfinder_main import WayfinderApp
+
+    src = textwrap.dedent(inspect.getsource(WayfinderApp._open_dropdown_panel))
+    tree = ast.parse(src)
+
+    # 1) The scale factor is derived from CTk's widget scaling, not hardcoded.
+    assert "_apply_widget_scaling" in src, (
+        "panel geometry must read the live widget-scaling factor via "
+        "_apply_widget_scaling so it self-corrects to the user's UI scale"
+    )
+
+    # 2) Every winfo-derived geometry input is scaled DOWN (a Div BinOp), so the
+    #    device-pixel measurements become logical units before CTk re-scales them.
+    required = {"ctrl_x", "ctrl_y", "ctrl_w", "ctrl_h", "win_w", "win_h"}
+    divided: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
+        names = {t for t in targets if t in required}
+        if not names:
+            continue
+        # RHS must contain a division (…/ scale). Walk it to be robust to the
+        # `(rootx - self.rootx) / scale` parenthesised form.
+        has_div = any(
+            isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div)
+            for n in ast.walk(node.value)
+        )
+        if has_div:
+            divided |= names
+
+    missing = required - divided
+    assert not missing, (
+        "these panel-geometry inputs are not divided by the widget-scaling "
+        f"factor (would double-scale the panel off-screen at >100% UI scale): "
+        f"{sorted(missing)}"
+    )
+
+
 def test_fits_below_opens_downward():
     # Plenty of room below → panel opens directly under the control.
     x, y, h, opens_up = dropdown_panel_geometry(
