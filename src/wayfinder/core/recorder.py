@@ -508,6 +508,42 @@ def list_input_devices(exclude_outputs: bool = False) -> list[dict]:
     return result
 
 
+# A healthy mic opens in well under a second; anything past this is a wedged
+# PipeWire/PortAudio node (e.g. a source stuck in a bad state — a default source
+# left in a '(null)' state hangs PortAudio's `pulse`/`default` probe forever).
+# Because the open runs on the Tk main thread, a hang freezes the ENTIRE app
+# (UI, tray, hotkeys). This watchdog caps every attempt so a wedged device falls
+# through the fallback chain instead of taking the app down. (2026-07-03 freeze.)
+_MIC_OPEN_TIMEOUT = 4.0
+
+
+def _run_with_timeout(fn: Callable, timeout_s: float):
+    """Run ``fn()`` on a daemon thread; return its result, or raise
+    ``TimeoutError`` if it doesn't finish within ``timeout_s``.
+
+    A hung PortAudio C call can't be interrupted, so on timeout the worker thread
+    is abandoned (it leaks until/unless the call ever returns) — but the CALLER is
+    freed, which is the whole point: the Tk main thread must never block forever on
+    a wedged audio device. Exceptions raised by ``fn`` propagate to the caller.
+    """
+    box: dict = {}
+
+    def run():
+        try:
+            box["result"] = fn()
+        except BaseException as exc:  # noqa: BLE001 — relay the real failure
+            box["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True, name="mic-open-watchdog")
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        raise TimeoutError(f"audio device open exceeded {timeout_s:.0f}s (wedged node?)")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
 def get_supported_sample_rate(device: int | None = None, target_rate: int = 16000) -> int:
     """
     Find a supported sample rate for the given device.
@@ -732,7 +768,7 @@ class WarmMic:
         fallbacks.append(None)
         last_err = None
         for dev in fallbacks:
-            try:
+            def _probe_and_open(dev=dev):
                 rate = get_supported_sample_rate(device=dev, target_rate=self.target_sample_rate)
                 stream = sd.InputStream(
                     samplerate=rate,
@@ -749,10 +785,21 @@ class WarmMic:
                     latency="high",
                 )
                 stream.start()
+                return stream, rate
+            try:
+                # Cap the probe+open with a watchdog: a wedged device (e.g. a
+                # '(null)'-state default source) hangs PortAudio here, and this runs
+                # on the Tk main thread — uncapped, that hang freezes the whole app.
+                # On timeout we abandon it and fall through to the next fallback.
+                stream, rate = _run_with_timeout(_probe_and_open, _MIC_OPEN_TIMEOUT)
                 self._stream = stream
                 self._recording_sample_rate = rate
                 self.device = dev  # remember the working index — heals a stale/dead cached one
                 return
+            except TimeoutError as e:
+                last_err = e
+                print(f"WarmMic: device {dev} open timed out (>{_MIC_OPEN_TIMEOUT:.0f}s) — "
+                      "likely a wedged PipeWire node; trying next input")
             except Exception as e:
                 last_err = e
                 if dev is not None:
