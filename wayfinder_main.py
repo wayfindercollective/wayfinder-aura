@@ -907,13 +907,18 @@ class ModeSelector(ctk.CTkFrame):
 class SmoothScrollableFrame(ctk.CTkScrollableFrame):
     """
     Scrollable frame wrapper that uses CTk's built-in scrolling.
-    The custom smooth scrolling implementation was incompatible with 
+    The custom smooth scrolling implementation was incompatible with
     the current CustomTkinter version.
     """
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Just use standard CTk scrolling - works reliably
+
+
+# Pixels scrolled per mouse-wheel notch at 1.0 UI scale (~2 settings rows).
+# Applied by _enable_linux_mousewheel, multiplied by the widget's CTk scaling.
+WHEEL_SCROLL_PX = 90
 
 
 # Setting tooltip descriptions with latency indicators
@@ -3757,38 +3762,71 @@ class WayfinderApp(ctk.CTk):
         self._enable_linux_mousewheel()
 
     def _enable_linux_mousewheel(self):
-        """Make the mouse wheel scroll CTkScrollableFrames on Linux.
+        """One sane, pixel-based wheel pipeline for every CTkScrollableFrame.
 
-        CTk 5.2.2 binds only <MouseWheel>, an event X11/XWayland never delivers
-        (Linux wheel input arrives as Button-4/Button-5), so every scrollable
-        frame in the app was wheel-dead. One root-level binding scrolls whichever
-        scrollable frame is under the pointer — covers all current and future
-        frames without subclassing (project rule: standard CTk widgets only).
+        Measured reality (probe, 2026-07-02, Tk 9.0.2 on XWayland): each wheel
+        notch delivers ONE <MouseWheel> event with delta=±120 and NO legacy
+        Button-4/5 events. CTk 5.2.2's Linux handler predates Tk 9 wheel
+        unification (TIP 474): it scrolls `event.delta` canvas "units", and on
+        Linux it never sets yscrollincrement, so a unit is 10% of the viewport —
+        one notch = 12 viewport-heights = pinned to top/bottom instantly.
+
+        Fix: neuter CTk's per-instance handler at the CLASS level (every frame
+        re-arms it via bind_all in __init__, so a one-time unbind can't work)
+        and handle the wheel here with correct math: WHEEL_SCROLL_PX pixels per
+        notch, scale-aware, targeting the innermost scrollable frame under the
+        pointer. Button-4/5 bindings stay as a fallback for pre-Tk9/X11
+        environments (harmless where they never fire; on an exotic setup that
+        delivers both families a notch scrolls 2x — still smooth, never a jump).
         """
         import tkinter as tk
 
-        def _make_handler(direction: int):
-            def _handler(event):
-                try:
-                    widget = self.winfo_containing(event.x_root, event.y_root)
-                except Exception:
-                    return None
-                # Text/entry widgets scroll themselves via Tk class bindings
-                if isinstance(widget, tk.Text):
-                    return None
-                while widget is not None:
-                    if isinstance(widget, ctk.CTkScrollableFrame):
-                        try:
-                            widget._parent_canvas.yview_scroll(direction * 3, "units")
-                        except Exception:
-                            pass
-                        return "break"
-                    widget = getattr(widget, "master", None)
-                return None
-            return _handler
+        # Tk9-compat shim: CTk's own <MouseWheel> math is the teleport bug (see
+        # docstring). Class-level so frames created later stay covered.
+        ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
 
-        self.bind_all("<Button-4>", _make_handler(-1), add="+")
-        self.bind_all("<Button-5>", _make_handler(1), add="+")
+        def _scroll_under_pointer(event, notches: float):
+            try:
+                widget = self.winfo_containing(event.x_root, event.y_root)
+            except Exception:
+                return None
+            # Text/entry widgets scroll themselves via Tk class bindings
+            # (correct on Tk 9), so let the event through.
+            if isinstance(widget, tk.Text):
+                return None
+            while widget is not None:
+                if isinstance(widget, ctk.CTkScrollableFrame):
+                    try:
+                        canvas = widget._parent_canvas
+                        if canvas.yview() != (0.0, 1.0):
+                            # A canvas "unit" defaults to 10% of the viewport;
+                            # pin it to 1px so we can scroll by pixels.
+                            if int(canvas.cget("yscrollincrement")) != 1:
+                                canvas.configure(yscrollincrement=1)
+                            try:
+                                scale = widget._get_widget_scaling()
+                            except Exception:
+                                scale = 1.0
+                            canvas.yview_scroll(
+                                int(notches * WHEEL_SCROLL_PX * scale), "units"
+                            )
+                    except Exception:
+                        pass
+                    return "break"  # innermost frame handled it — stop here
+                widget = getattr(widget, "master", None)
+            return None
+
+        # Tk 9 (and Windows/mac): one <MouseWheel> per notch, delta=±120;
+        # high-resolution wheels report proportional multiples — dividing by
+        # 120 makes those scroll smoothly instead of jumping.
+        self.bind_all(
+            "<MouseWheel>",
+            lambda e: _scroll_under_pointer(e, -e.delta / 120),
+            add="+",
+        )
+        # Legacy X11 (pre-Tk9): one Button-4/5 press per notch.
+        self.bind_all("<Button-4>", lambda e: _scroll_under_pointer(e, -1), add="+")
+        self.bind_all("<Button-5>", lambda e: _scroll_under_pointer(e, 1), add="+")
     
     def _get_recommended_scale(self) -> float:
         """Calculate recommended UI scale based on screen resolution for READABILITY.
@@ -9282,44 +9320,11 @@ class WayfinderApp(ctk.CTk):
 
         build_fn(content, close)
 
-    @staticmethod
-    def _trap_scroll(scrollable_frame):
-        """Prevent mouse wheel events from bubbling to parent scroll containers.
-
-        Uses bind_all with a tag so that any widget inside the scrollable frame
-        has its scroll events handled locally and stopped from propagating.
-        """
-        try:
-            canvas = scrollable_frame._parent_canvas
-        except AttributeError:
-            return
-
-        def _on_enter(event):
-            # When mouse enters, bind scroll to this canvas
-            canvas.bind_all("<Button-4>", _scroll_up)
-            canvas.bind_all("<Button-5>", _scroll_down)
-            canvas.bind_all("<MouseWheel>", _scroll_wheel)
-
-        def _on_leave(event):
-            # When mouse leaves, unbind
-            canvas.unbind_all("<Button-4>")
-            canvas.unbind_all("<Button-5>")
-            canvas.unbind_all("<MouseWheel>")
-
-        def _scroll_up(event):
-            canvas.yview_scroll(-3, "units")
-            return "break"
-
-        def _scroll_down(event):
-            canvas.yview_scroll(3, "units")
-            return "break"
-
-        def _scroll_wheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            return "break"
-
-        scrollable_frame.bind("<Enter>", _on_enter)
-        scrollable_frame.bind("<Leave>", _on_leave)
+    # NOTE: the old _trap_scroll helper (bind Button-4/5 on enter, unbind_all on
+    # leave) is gone: its unbind_all() calls destroyed EVERY root-level wheel
+    # binding app-wide after one hover, and the global handler in
+    # _enable_linux_mousewheel already targets the innermost scrollable frame
+    # under the pointer, so nested frames need no trapping.
 
     def _close_inline_panel(self, container, panel):
         """Close an inline panel and restore the container's original children."""
@@ -11129,7 +11134,6 @@ class WayfinderApp(ctk.CTk):
 
                 scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
                 scroll.pack(fill="both", expand=True, padx=5, pady=5)
-                self._trap_scroll(scroll)
 
                 for model in models:
                     is_current = os.path.expanduser(model["path"]) == current_path
@@ -11189,7 +11193,6 @@ class WayfinderApp(ctk.CTk):
 
                 scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
                 scroll.pack(fill="both", expand=True, padx=5, pady=5)
-                self._trap_scroll(scroll)
 
                 categories = [
                     ("RECOMMENDED", ["large-v3-turbo", "large-v3-turbo-q5_0"]),
