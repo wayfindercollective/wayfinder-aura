@@ -11,6 +11,7 @@ import pytest
 
 from wayfinder.core.voice_profile import (
     MIN_OCCURRENCES,
+    MIN_PHRASE_OCCURRENCES,
     VOCAB_LIMIT,
     VoiceProfile,
     diff_vocab_edit,
@@ -455,6 +456,157 @@ class TestVocabularyExtraction:
 
         # Disk is UNCHANGED — self-heal did not save.
         assert profile_file.read_text() == raw_before
+
+    # -------------------------------------------------------------------------
+    # Two-word phrase extraction (bigrams share the unigram scored pool)
+    # -------------------------------------------------------------------------
+
+    def test_learns_distinctive_phrase_with_capitalization(self, voice_profile_dir: Path):
+        """A distinctive two-word phrase said 3+ times is learned WITH its
+        capitalization, stored as the exact space-joined surface form."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(3):
+            vp.add_transcription("Wayfinder Aura handles the dictation nicely")
+
+        vocab = vp.get_vocabulary()
+        assert "Wayfinder Aura" in vocab
+
+    def test_phrase_needs_min_phrase_occurrences(self, voice_profile_dir: Path):
+        """A phrase said only twice is NOT learned (MIN_PHRASE_OCCURRENCES=3),
+        even though a unigram said twice still is (MIN_OCCURRENCES=2)."""
+        assert MIN_PHRASE_OCCURRENCES == 3
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(2):
+            vp.add_transcription("the kubernetes cluster deploy went fine")
+
+        vocab = vp.get_vocabulary()
+        # Unigram passes the 2x bar; the exact pair does not clear the 3x bar.
+        assert "kubernetes" in vocab
+        assert "kubernetes cluster" not in vocab
+
+    def test_no_cross_entry_phrase(self, voice_profile_dir: Path):
+        """Adjacency is measured per history entry — the last word of one entry
+        never pairs with the first word of the next."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(3):
+            vp.add_transcription("we just fixed the taskbar")      # ends "taskbar"
+        for _ in range(3):
+            vp.add_transcription("Wayfinder needs another quick fix")  # starts "Wayfinder"
+
+        vocab_lower = [w.casefold() for w in vp.get_vocabulary()]
+        assert "taskbar wayfinder" not in vocab_lower
+
+    def test_no_cross_punctuation_phrase(self, voice_profile_dir: Path):
+        """A sentence break inside one entry breaks adjacency too — a pair may
+        not span a punctuation segment boundary."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(4):
+            vp.add_transcription("fixed the taskbar. Wayfinder needs it too")
+
+        vocab_lower = [w.casefold() for w in vp.get_vocabulary()]
+        assert "taskbar wayfinder" not in vocab_lower
+
+    def test_short_word_breaks_phrase_adjacency(self, voice_profile_dir: Path):
+        """A short word occupies an adjacency slot, so it prevents a false pair:
+        "point of sale" must never yield "point sale"."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(4):
+            vp.add_transcription("the point of sale system crashed again")
+
+        vocab_lower = [w.casefold() for w in vp.get_vocabulary()]
+        assert "point sale" not in vocab_lower
+
+    def test_both_stop_phrase_dropped(self, voice_profile_dir: Path):
+        """A pair of two ordinary-English words is never learned as a phrase."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(4):
+            vp.add_transcription("the main window again please now")
+
+        vocab_lower = [w.casefold() for w in vp.get_vocabulary()]
+        assert "main window" not in vocab_lower
+
+    def test_extra_stop_phrase_never_learned(self, voice_profile_dir: Path):
+        """A pair touching a spoken filler (EXTRA_STOP_WORDS) is dropped even if
+        the other word is distinctive — "gonna fix" is never a term."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(4):
+            vp.add_transcription("gonna fix the Flatpak build right now")
+
+        vocab = vp.get_vocabulary()
+        vocab_lower = [w.casefold() for w in vocab]
+        assert "gonna fix" not in vocab_lower
+        # sanity: the distinctive unigram still surfaces
+        assert "Flatpak" in vocab
+
+    def test_one_stop_plus_distinctive_phrase_learnable(self, voice_profile_dir: Path):
+        """RULE-3 CHOICE (base spec, kept): a phrase with ONE stop word — even
+        as the leading word — is learnable, inheriting its distinctive word's
+        weight. "new Flatpak" ("new" is a stop word) is learned given enough
+        repetition. Real-data smoke showed no leading-stop pollution, so the
+        first word is NOT required to be non-stop."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(3):
+            vp.add_transcription("shipped the new Flatpak build today")
+
+        assert "new Flatpak" in vp.get_vocabulary()
+
+    def test_phrase_ignore_round_trip(self, voice_profile_dir: Path):
+        """Ignoring the casefolded phrase drops it and keeps it gone across new
+        transcriptions (a learned phrase round-trips through the editor)."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(3):
+            vp.add_transcription("Wayfinder Aura handles the dictation nicely")
+        assert "Wayfinder Aura" in vp.get_vocabulary()
+
+        vp.set_ignored_words(["wayfinder aura"])  # casefolded phrase
+        assert "Wayfinder Aura" not in vp.get_vocabulary()
+
+        for _ in range(3):
+            vp.add_transcription("Wayfinder Aura handles the dictation nicely")
+        assert "Wayfinder Aura" not in vp.get_vocabulary()
+
+    def test_ignoring_a_phrase_keeps_its_words(self, voice_profile_dir: Path):
+        """Ignoring the phrase itself does NOT ignore its component words —
+        only the exact phrase is filtered."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        for _ in range(3):
+            vp.add_transcription("Wayfinder Aura handles the dictation nicely")
+
+        vp.set_ignored_words(["wayfinder aura"])
+        vocab = vp.get_vocabulary()
+        assert "Wayfinder Aura" not in vocab
+        # The distinctive word "Wayfinder" is unaffected as a unigram.
+        assert "Wayfinder" in vocab
+
+    def test_combined_pool_capped_with_phrases(self, voice_profile_dir: Path):
+        """Words and phrases share ONE pool capped at VOCAB_LIMIT — the total
+        stays within the cap, and a high-scoring phrase competes into it."""
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+
+        # One strong distinctive phrase (score 10*4=40) — outranks the filler
+        # unigrams below, so it earns a slot in the shared, capped pool.
+        for _ in range(10):
+            vp.add_transcription("the kubernetes cluster keeps growing")
+
+        # 40 distinct distinctive unigrams (score 2*4=8 each) overflow the cap.
+        for i in range(40):
+            tok = f"zzq{chr(97 + i // 26)}{chr(97 + i % 26)}"
+            for _ in range(2):
+                vp.add_transcription(f"we mentioned {tok} in passing")
+
+        vocab = vp.get_vocabulary()
+        assert len(vocab) == VOCAB_LIMIT
+        assert "kubernetes cluster" in vocab
 
 
 # =============================================================================

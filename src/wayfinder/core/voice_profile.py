@@ -33,6 +33,28 @@ DISTINCTIVE_WEIGHT = 4  # the distinctive tail earns 4x — so a name beats a mi
 VOCAB_LIMIT = 30        # cap on the learned list (feeds prompt context + the editor).
 MIN_OCCURRENCES = 2     # a term must recur to count — one-offs are noise, not signal.
 
+# Two-word phrases ("Wayfinder Aura", "Steam Deck") are learned alongside single
+# words and compete in the SAME scored pool. They need a higher recurrence bar
+# than unigrams: an exact *pair* repeats far less often than either of its words,
+# and two words landing next to each other once or twice is frequently
+# coincidental rather than a real term — so require more repetitions before we
+# trust a phrase.
+MIN_PHRASE_OCCURRENCES = 3
+
+
+def _word_weight(key: str) -> int:
+    """Distinctiveness weight for a single casefolded word (0 for stop words).
+
+    Unlike the unigram path (which drops stop words outright), a phrase may
+    legitimately contain one stop word ("Steam Deck"), so stop words score 0
+    here and the phrase inherits its *best* word's weight via ``max()``.
+    """
+    if key in STOP_WORDS:
+        return 0
+    if key in MID_WORDS:
+        return MID_WEIGHT
+    return DISTINCTIVE_WEIGHT
+
 # Curated supplement to the generated corpus tiers: the corpus is WRITTEN web
 # text, so it systematically underrates SPOKEN English. Contraction left-halves
 # ("doesn't" tokenizes to "doesn" + a too-short "t") mostly land in the
@@ -224,7 +246,8 @@ class VoiceProfile:
     def _update_vocabulary(self) -> None:
         """
         Extract DISTINCTIVE vocabulary from history — names, jargon, product
-        terms — rather than the user's most-frequent ordinary English.
+        terms, and two-word phrases — rather than the user's most-frequent
+        ordinary English.
 
         Frequency alone is the wrong signal: the words a person says most
         ("everything", "something", "looks", "fix") are, unsurprisingly, common
@@ -239,38 +262,91 @@ class VoiceProfile:
             mishearings): weighted DISTINCTIVE_WEIGHT, so 'Daan' or 'Flatpak'
             outranks a mid-band word said just as often.
 
-        Tokens keep their original case so a name is stored as its most common
-        surface form ('Daan', not 'daan'). Words the user permanently deleted
-        (``vocabulary_ignore``, compared casefolded) never re-learn, and a term
-        must recur (>=MIN_OCCURRENCES) to count at all.
+        **Phrases.** Adjacent two-word phrases ("Wayfinder Aura", "Steam Deck")
+        are learned into the SAME scored pool as single words, so phrases and
+        words compete head-to-head on score. Adjacency is measured *per history
+        entry* and *per segment* (entries are split on sentence punctuation
+        ``[.!?,;:]`` first) — never across two transcriptions or across a
+        punctuation break, which would fabricate pairs at the seams. Segments
+        are tokenized at ALL word lengths so a short word breaks adjacency
+        (``point of sale`` yields no ``point sale``), but a qualifying phrase
+        needs BOTH words >=3 letters. A phrase is dropped if either word is a
+        spoken-filler (EXTRA_STOP_WORDS), if BOTH words are ordinary English
+        (STOP_WORDS), or if the casefolded phrase itself was ignored. A phrase's
+        weight is the *max* of its two words' weights (stop words contribute 0),
+        and it must recur >=MIN_PHRASE_OCCURRENCES times — a stricter bar than
+        unigrams, since exact pairs repeat less and coincidental adjacency is
+        common.
+
+        Tokens keep their original case so a term is stored as its most common
+        surface form ('Daan', not 'daan'; 'Wayfinder Aura', not 'wayfinder
+        aura'). Words/phrases the user permanently deleted (``vocabulary_ignore``,
+        compared casefolded) never re-learn, and a unigram must recur
+        (>=MIN_OCCURRENCES) to count at all.
         """
-        # Combine all transcription text (case PRESERVED — surface forms matter,
-        # e.g. we want to store the name "Daan", not "daan").
-        all_text = " ".join(item["text"] for item in self._data["history"])
-
-        # Tokenize: runs of 3+ ASCII letters, case intact.
-        tokens = re.findall(r"\b[A-Za-z]{3,}\b", all_text)
-
-        # Words the user deleted from the editor — never re-learn these.
+        # Words/phrases the user deleted from the editor — never re-learn these.
         ignored = {w.casefold() for w in self._data["profile"].get("vocabulary_ignore", [])}
 
         # Per casefolded key: a running total and a tally of the surface forms.
-        counts: Counter = Counter()
-        surfaces: Dict[str, Counter] = {}
-        for tok in tokens:
-            key = tok.casefold()
-            if key in STOP_WORDS or key in EXTRA_STOP_WORDS or key in ignored:
-                continue
-            counts[key] += 1
-            surfaces.setdefault(key, Counter())[tok] += 1
+        # Unigrams and bigrams are tallied separately (different recurrence bars
+        # and filters) then merged into one scored pool below.
+        uni_counts: Counter = Counter()
+        uni_surfaces: Dict[str, Counter] = {}
+        bi_counts: Counter = Counter()
+        bi_surfaces: Dict[str, Counter] = {}
 
-        # Score by distinctiveness * frequency; drop one-offs.
+        # Case PRESERVED — surface forms matter (store "Daan", not "daan").
+        # Single pass per entry: split into segments on sentence punctuation so
+        # adjacency can't span a break, then tokenize each segment once.
+        for item in self._data["history"]:
+            for segment in re.split(r"[.!?,;:]", item["text"]):
+                # ALL word lengths — a short word (e.g. "of") must occupy a slot
+                # so it breaks adjacency for the phrase pass.
+                words = re.findall(r"\b[A-Za-z]+\b", segment)
+
+                # Unigrams: 3+ letters, distinctive-tail filtering as before.
+                for tok in words:
+                    if len(tok) < 3:
+                        continue
+                    key = tok.casefold()
+                    if key in STOP_WORDS or key in EXTRA_STOP_WORDS or key in ignored:
+                        continue
+                    uni_counts[key] += 1
+                    uni_surfaces.setdefault(key, Counter())[tok] += 1
+
+                # Bigrams: adjacent within the segment, both words 3+ letters.
+                for first, second in zip(words, words[1:]):
+                    if len(first) < 3 or len(second) < 3:
+                        continue
+                    kfirst, ksecond = first.casefold(), second.casefold()
+                    # Drop if either word is a spoken filler, or both are
+                    # ordinary English. (A single stop word is allowed — the
+                    # phrase inherits its distinctive word's weight.)
+                    if kfirst in EXTRA_STOP_WORDS or ksecond in EXTRA_STOP_WORDS:
+                        continue
+                    if kfirst in STOP_WORDS and ksecond in STOP_WORDS:
+                        continue
+                    phrase_key = f"{kfirst} {ksecond}"
+                    # Only the phrase itself being ignored kills it — an
+                    # individual word in vocabulary_ignore does not.
+                    if phrase_key in ignored:
+                        continue
+                    bi_counts[phrase_key] += 1
+                    bi_surfaces.setdefault(phrase_key, Counter())[f"{first} {second}"] += 1
+
+        # Merge into one pool: score = distinctiveness weight * frequency.
         scored: List[Tuple[int, int, str]] = []
-        for key, count in counts.items():
+        for key, count in uni_counts.items():
             if count < MIN_OCCURRENCES:
                 continue
-            weight = MID_WEIGHT if key in MID_WORDS else DISTINCTIVE_WEIGHT
-            surface = surfaces[key].most_common(1)[0][0]
+            surface = uni_surfaces[key].most_common(1)[0][0]
+            scored.append((count * _word_weight(key), count, surface))
+        for phrase_key, count in bi_counts.items():
+            if count < MIN_PHRASE_OCCURRENCES:
+                continue
+            kfirst, ksecond = phrase_key.split(" ", 1)
+            weight = max(_word_weight(kfirst), _word_weight(ksecond))
+            surface = bi_surfaces[phrase_key].most_common(1)[0][0]
             scored.append((count * weight, count, surface))
 
         # Highest score first, raw count as the tiebreak.
