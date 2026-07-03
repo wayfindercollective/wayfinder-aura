@@ -20,7 +20,7 @@ demos itself without typing into whatever window happens to be focused.
 from __future__ import annotations
 
 from wayfinder.config import save_config
-from wayfinder.ui.theme import COLORS, FONT_SIZES, FONTS, RADIUS
+from wayfinder.ui.theme import COLORS, FONT_SIZES, FONTS, RADIUS, SPACING
 
 
 class WelcomeFlow:
@@ -90,6 +90,13 @@ class WelcomePane:
     the link-hover helper, and config persistence).
     """
 
+    # Per-step card titles (rendered in the fixed header, above the divider).
+    _STEP_TITLES = {
+        "mic": "welcome to wayfinder aura",
+        "hotkey": "your hotkey",
+        "dictate": "try it now",
+    }
+
     def __init__(self, parent, app):
         import customtkinter as ctk  # lazy: keep the module headless-importable
 
@@ -145,7 +152,7 @@ class WelcomePane:
             font=(FONTS["body"][0], FONT_SIZES["body"], "bold"),
             command=command or self._on_continue,
         )
-        btn.pack(pady=(22, 0))
+        btn.pack(anchor="w", pady=(SPACING["xl"], 0))
         return btn
 
     def _title(self, parent, text):
@@ -158,7 +165,7 @@ class WelcomePane:
         )
         lbl.pack(anchor="w")
         div = ctk.CTkFrame(parent, height=1, fg_color=COLORS["border_subtle"])
-        div.pack(fill="x", pady=(10, 14))
+        div.pack(fill="x", pady=(SPACING["sm"], 0))
         return lbl
 
     def _body_label(self, parent, text, muted=False, pady=(0, 0)):
@@ -183,8 +190,26 @@ class WelcomePane:
         for child in self.card.winfo_children():
             child.destroy()
 
-        body = ctk.CTkFrame(self.card, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=28, pady=(28, 6))
+        pad = SPACING["xl"]  # one horizontal margin for header, body AND footer (they used to disagree: 28 vs 22)
+
+        # Title + divider: a fixed header pinned to the top of the card.
+        header = ctk.CTkFrame(self.card, fg_color="transparent")
+        header.pack(side="top", fill="x", padx=pad, pady=(pad, 0))
+        self._title(header, self._STEP_TITLES.get(self.flow.current, ""))
+
+        # Footer (dots + skip) pinned to the bottom — packed BEFORE the body so the
+        # body's expand fills only the band between header and footer.
+        self._render_footer(pad)
+
+        # Step body: a left-aligned copy+button cluster, VERTICALLY CENTERED in the
+        # band between header and footer. expand + fill="x" hands the inner frame the
+        # leftover height and centres it within that cavity — this kills the old
+        # top-cluster-with-dead-space-below look while keeping the copy's left edge
+        # aligned to the title.
+        body_wrap = ctk.CTkFrame(self.card, fg_color="transparent")
+        body_wrap.pack(side="top", fill="both", expand=True, padx=pad)
+        body = ctk.CTkFrame(body_wrap, fg_color="transparent")
+        body.pack(expand=True, fill="x")
 
         step = self.flow.current
         if step == "mic":
@@ -194,10 +219,7 @@ class WelcomePane:
         elif step == "dictate":
             self._render_dictate(body)
 
-        self._render_footer()
-
     def _render_mic(self, body) -> None:
-        self._title(body, "welcome to wayfinder aura")
         self._body_label(body, "let's make sure your mic is live.")
         # Level-meter choice: there is no cheap always-on level source when we
         # aren't recording (the mic level only exists during an active recorder
@@ -207,20 +229,19 @@ class WelcomePane:
             body,
             "speak and watch the hero waveform respond above.",
             muted=True,
-            pady=(10, 0),
+            pady=(SPACING["sm"], 0),
         )
         self._continue_button(body, "continue")
 
     def _render_hotkey(self, body) -> None:
         ctk = self._ctk
-        self._title(body, "your hotkey")
         token = ctk.CTkLabel(
             body,
             text=self._hotkey_text(),
             font=(FONTS["mono"][0], FONT_SIZES["display"] + 8, "bold"),
             text_color=COLORS["accent"],
         )
-        token.pack(anchor="w", pady=(4, 12))
+        token.pack(anchor="w", pady=(0, SPACING["md"]))
         self._body_label(
             body,
             "press it once to start a dictation — press it again to stop.",
@@ -229,7 +250,6 @@ class WelcomePane:
 
     def _render_dictate(self, body) -> None:
         ctk = self._ctk
-        self._title(body, "try it now")
         if self._transcript:
             self._body_label(body, "nice — that's dictation.")
             quote = self._transcript.strip()
@@ -243,7 +263,7 @@ class WelcomePane:
                 wraplength=440,
                 justify="left",
             )
-            heard.pack(anchor="w", pady=(10, 0))
+            heard.pack(anchor="w", pady=(SPACING["sm"], 0))
             self._continue_button(body, "done", gold=True)
         else:
             self._body_label(body, "try it now — dictate a sentence.")
@@ -251,13 +271,13 @@ class WelcomePane:
                 body,
                 "listening for your first dictation…",
                 muted=True,
-                pady=(10, 0),
+                pady=(SPACING["sm"], 0),
             )
 
-    def _render_footer(self) -> None:
+    def _render_footer(self, pad) -> None:
         ctk = self._ctk
         footer = ctk.CTkFrame(self.card, fg_color="transparent")
-        footer.pack(fill="x", side="bottom", padx=22, pady=(0, 18))
+        footer.pack(fill="x", side="bottom", padx=pad, pady=(0, SPACING["xl"]))
 
         # Dot progress.
         dots = ctk.CTkFrame(footer, fg_color="transparent")
@@ -265,7 +285,7 @@ class WelcomePane:
         for i in range(len(self.flow.steps)):
             color = COLORS["accent"] if i == self.flow.index else COLORS["border"]
             dot = ctk.CTkFrame(dots, width=8, height=8, corner_radius=4, fg_color=color)
-            dot.pack(side="left", padx=(0, 6))
+            dot.pack(side="left", padx=(0, SPACING["sm"]))
             dot.pack_propagate(False)
 
         # Skip link (bottom-right), always visible.
