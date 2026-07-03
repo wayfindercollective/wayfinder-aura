@@ -659,8 +659,15 @@ class AnimatedValue(QObject):
             self._value = val
             self.valueChanged.emit(val)
     
-    def animate_to(self, target: float, duration: int = 250):
-        """Animate value to target over duration ms (250ms ease-out = engineered feel)."""
+    def animate_to(self, target: float, duration: int = 250, on_finished=None):
+        """Animate value to target over duration ms (250ms ease-out = engineered feel).
+
+        on_finished (optional) fires when the animation reaches its end. It is NOT
+        called if the animation is superseded (stopped early by a newer animate_to) —
+        only on natural completion, or immediately in the duration<=0 jump case. The
+        overlay opacity fade uses it to defer hide-teardown until fade-out finishes
+        (no extra QTimer — Rule 1).
+        """
         if self._animation:
             self._animation.stop()
 
@@ -668,6 +675,8 @@ class AnimatedValue(QObject):
         # emits valueChanged, so the jump would silently not happen.
         if duration <= 0:
             self.value = target
+            if on_finished is not None:
+                on_finished()
             return
 
         self._animation = QVariantAnimation(self)
@@ -676,6 +685,8 @@ class AnimatedValue(QObject):
         self._animation.setDuration(duration)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)  # 250ms OutCubic = premium
         self._animation.valueChanged.connect(lambda v: setattr(self, 'value', v))
+        if on_finished is not None:
+            self._animation.finished.connect(on_finished)
         self._animation.start()
 
 
@@ -757,6 +768,7 @@ class GlassmorphicOverlay(QWidget):
     # Layout constants
     TASKBAR_GAP = 12  # Gap above taskbar to prevent overlap
     STARTUP_POSITION_RETRIES = 5  # Number of position checks after startup
+    FADE_MS = 200  # window-opacity fade in/out on show/hide (QVariantAnimation, NOT a QTimer — Rule 1 safe)
     
     def __init__(self, scale: float = 0.7, vertical_offset: int = 0, anchor: str = "bottom-center"):
         # Scale factor must be set first (before any property access)
@@ -1214,10 +1226,14 @@ class GlassmorphicOverlay(QWidget):
         self.update()
     
     def _on_opacity_changed(self, opacity: float):
-        """Handle opacity animation updates."""
+        """Handle opacity animation updates — drives the window-level fade in/out.
+
+        Teardown after a fade-OUT (move off-screen / hide) is owned by _finish_hide
+        (mode-aware), NOT here: calling self.hide() when opacity hits 0 would break
+        persistent mode, which must move OFF-SCREEN (never hide()) to avoid stealing
+        focus on the next show.
+        """
         self.setWindowOpacity(opacity)
-        if opacity <= 0 and self._state == OverlayState.HIDDEN:
-            self.hide()
     
     def _calculate_target_width(self, text: str) -> int:
         """Calculate required width for text and wave."""
@@ -1315,15 +1331,15 @@ class GlassmorphicOverlay(QWidget):
         if state == OverlayState.HIDDEN:
             self._render_timer.stop()
             self._raise_timer.stop()
-            
-            # Check overlay mode
-            mode = getattr(self, '_overlay_mode', 'persistent')
-            if mode == "persistent":
-                # Move off-screen instead of hiding (prevents focus stealing on show)
-                self.setGeometry(-9999, -9999, self.width(), self.height())
-            else:
-                # Standard mode: actually hide
-                self.hide()
+
+            # Fade the whole window out, THEN tear down (off-screen move / hide) so it
+            # doesn't pop out. Reuses the _opacity AnimatedValue (QVariantAnimation) and
+            # defers the mode-aware teardown to that animation's finished callback —
+            # adds NO timer (Rule 1). animate=False -> duration 0 -> jump to 0 and tear
+            # down immediately (the finished hook fires synchronously in the jump path).
+            self._opacity.animate_to(
+                0.0, self.FADE_MS if animate else 0, on_finished=self._finish_hide
+            )
             return
         
         # Get colors for new state
@@ -1362,9 +1378,28 @@ class GlassmorphicOverlay(QWidget):
             
             # Delay showing entirely - let KWin script prepare first
             # This completely eliminates the center flash
-            QTimer.singleShot(50, self._delayed_show)
-    
-    def _delayed_show(self):
+            QTimer.singleShot(50, lambda: self._delayed_show(animate))
+
+    def _finish_hide(self):
+        """Complete the hide after the fade-out finishes: move off-screen (persistent)
+        or hide (standard). Guarded so a newer show() that superseded the hide (state is
+        no longer HIDDEN, e.g. rapid record-toggle) does NOT yank a now-visible overlay
+        off-screen. Wrapped defensively — the callback can fire during app teardown.
+        """
+        if self._state != OverlayState.HIDDEN:
+            return
+        try:
+            mode = getattr(self, '_overlay_mode', 'persistent')
+            if mode == "persistent":
+                # Move off-screen instead of hiding (prevents focus stealing on show)
+                self.setGeometry(-9999, -9999, self.width(), self.height())
+            else:
+                # Standard mode: actually hide
+                self.hide()
+        except Exception:
+            pass
+
+    def _delayed_show(self, animate: bool = True):
         """Show or move the overlay on-screen based on mode."""
         # Ensure we're still supposed to be visible
         if self._state == OverlayState.HIDDEN:
@@ -1399,6 +1434,15 @@ class GlassmorphicOverlay(QWidget):
             final_width, final_height
         )
         
+        # Start transparent BEFORE mapping so the first mapped frame is invisible, then
+        # fade up. Force the window to 0 directly (the value-setter guard skips the emit
+        # when _value is already 0, so setWindowOpacity wouldn't be called) and sync
+        # _value so the fade starts from 0. animate=False (boot/instant) skips this and
+        # jumps straight to full opacity — no flash.
+        if animate:
+            self.setWindowOpacity(0.0)
+            self._opacity._value = 0.0
+
         # Check mode for how to show
         mode = getattr(self, '_overlay_mode', 'persistent')
         if mode == "persistent":
@@ -1408,8 +1452,12 @@ class GlassmorphicOverlay(QWidget):
             # Standard mode: show the window
             self.show()
             self.raise_()
-        
+
         self.update()
+
+        # Fade in (reuses _opacity AnimatedValue / QVariantAnimation — no new timer,
+        # Rule 1). duration 0 when animate=False jumps straight to full opacity.
+        self._opacity.animate_to(1.0, self.FADE_MS if animate else 0)
     
     def set_audio_level(self, level: float):
         """Update audio level for wave visualization."""
