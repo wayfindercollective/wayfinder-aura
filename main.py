@@ -266,54 +266,50 @@ def main():
         # Start single-instance listener so future launches signal us
         _instance_server = _start_instance_listener(app)
         
-        # ─── First-run setup wizard ───
-        # Skip in frozen builds — the .app bundle already has all dependencies.
-        # The wizard tries to detect Linux package managers (apt/dnf/pacman)
-        # and crashes on macOS.
+        # ─── First-run flow: dependency setup (inline pane) → welcome tour ───
+        # The dependency setup is now an IN-WINDOW pane (src/wayfinder/ui/setup_pane.py)
+        # placed over the tab content — no more modal SetupWizard CTkToplevel /
+        # grab_set (CLAUDE.md rule 2). All app subsystems (hotkey listener, warm
+        # mic, overlay) already start in WayfinderApp.__init__ regardless of the
+        # wizard, so nothing here gates them — the old wizard only blocked the
+        # mainloop start via wait_window(), which the inline pane doesn't need.
+        #
+        # Frozen (.app) builds bundle every dependency AND crash on the Linux
+        # package-manager probes, so setup is force-completed there; the welcome
+        # tour (pure UI, safe on every platform) still runs.
         try:
-            if getattr(sys, 'frozen', False):
-                app.config["setup_completed"] = True
-            if not app.config.get("setup_completed", False):
-                from wayfinder.ui.dialogs.setup_wizard import SetupWizard
-                
-                # Pause animations during wizard to keep UI responsive
-                # (animations consume CPU in the shared Tk event loop)
-                app._stop_idle_breath()
-                
-                # Don't withdraw the main window - on KDE Wayland, transient
-                # children of withdrawn windows don't appear. The wizard's
-                # grab_set() prevents interaction with the main window anyway.
-                wizard = SetupWizard(app, app.config)
-                app.wait_window(wizard)
-                
-                # Resume animations and ensure main window is visible + focused
-                app._start_idle_breath()
-                app.deiconify()
-                app.lift()
-                app.focus_force()
-                
-                # Sync the flag into WayfinderApp's config so its future
-                # save_config() calls don't overwrite and erase it.
-                app.config["setup_completed"] = True
-                
-                if wizard.result:
-                    print("[Setup] Setup wizard completed successfully")
-                else:
-                    print("[Setup] Setup wizard skipped")
-        except Exception as e:
-            print(f"[Setup] Warning: Could not show setup wizard: {e}")
-            import traceback
-            traceback.print_exc()
+            from wayfinder.ui.setup_pane import first_run_plan, should_chain_welcome
 
-        # ─── First-run welcome tour (in-window, skippable) ───
-        # Distinct from the dependency wizard above: pure UI, safe on every platform
-        # (no package-manager probing), so no frozen-build skip is needed. Delayed so
-        # the window is mapped before the card is placed over the tab content.
-        try:
-            if not app.config.get("welcome_completed", False):
+            frozen = getattr(sys, 'frozen', False)
+            if frozen:
+                # Keep the flag in WayfinderApp's live config so later save_config()
+                # calls persist it (frozen builds never run the setup pane).
+                app.config["setup_completed"] = True
+
+            plan = first_run_plan(
+                setup_completed=app.config.get("setup_completed", False),
+                welcome_completed=app.config.get("welcome_completed", False),
+                frozen=frozen,
+            )
+
+            def _after_setup(result: bool) -> None:
+                # Preserves the old wizard.result logging, then hands off to the
+                # welcome tour (delayed so the setup pane has fully torn down).
+                print("[Setup] Setup completed successfully" if result
+                      else "[Setup] Setup skipped")
+                if should_chain_welcome(app.config.get("welcome_completed", False)):
+                    app.after(400, app.show_welcome_pane)
+
+            if plan["show_setup"]:
+                # Delayed so the window is mapped before the pane is placed over
+                # the tab content (mirrors the welcome-pane trigger).
+                app.after(300, lambda: app.show_setup_pane(on_done=_after_setup))
+            elif plan["show_welcome"]:
                 app.after(800, app.show_welcome_pane)
         except Exception as e:
-            print(f"[Welcome] Could not schedule welcome pane: {e}")
+            print(f"[Setup] Warning: Could not start first-run flow: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Try to apply scaling directly if the cached value seems wrong
         try:

@@ -1,0 +1,206 @@
+"""Tests for the first-run dependency setup pane.
+
+Covers the pure ``SetupFlow`` state machine, the pure footer/model-selector
+decision helpers, and the pure first-run orchestration (``first_run_plan`` /
+``should_chain_welcome``) — the logic that used to live inline in the modal
+``SetupWizard`` and in main.py. Everything here is headless (no Tk / no window);
+customtkinter is imported lazily inside ``SetupPane`` only, mirroring
+``wayfinder.ui.welcome``.
+"""
+
+from dataclasses import dataclass
+
+
+@dataclass
+class _FakeDep:
+    """Minimal stand-in for core.setup.Dependency for the pure footer tests."""
+    id: str
+    required: bool
+    is_ok: bool
+
+
+# ─── SetupFlow state machine ─────────────────────────────────────────────────
+
+
+class TestSetupFlow:
+    def test_starts_incomplete(self):
+        from wayfinder.ui.setup_pane import SetupFlow
+
+        flow = SetupFlow()
+        assert flow.is_complete is False
+        assert flow.result is False
+
+    def test_complete_sets_result_true_and_fires_once(self):
+        from wayfinder.ui.setup_pane import SetupFlow
+
+        seen = []
+        flow = SetupFlow(on_complete=lambda: seen.append("done"))
+        flow.complete()
+        assert flow.is_complete is True
+        assert flow.result is True
+        assert seen == ["done"]
+
+    def test_skip_sets_result_false_and_fires_once(self):
+        from wayfinder.ui.setup_pane import SetupFlow
+
+        seen = []
+        flow = SetupFlow(on_complete=lambda: seen.append(1))
+        flow.skip()
+        assert flow.is_complete is True
+        assert flow.result is False
+        assert seen == [1]
+
+    def test_on_complete_fires_exactly_once(self):
+        from wayfinder.ui.setup_pane import SetupFlow
+
+        calls = []
+        flow = SetupFlow(on_complete=lambda: calls.append(1))
+        flow.complete()
+        flow.complete()   # idempotent
+        flow.skip()       # no-op after complete — result stays True
+        assert calls == [1]
+        assert flow.result is True
+
+    def test_skip_then_complete_keeps_skip_result(self):
+        from wayfinder.ui.setup_pane import SetupFlow
+
+        flow = SetupFlow()
+        flow.skip()
+        flow.complete()   # no-op: first outcome wins
+        assert flow.result is False
+        assert flow.is_complete is True
+
+    def test_no_callback_is_fine(self):
+        from wayfinder.ui.setup_pane import SetupFlow
+
+        flow = SetupFlow()
+        flow.complete()  # must not raise without on_complete
+        assert flow.is_complete is True
+
+
+# ─── Pure footer / model-selector decisions ──────────────────────────────────
+
+
+class TestFooterDecision:
+    def _deps(self, *specs):
+        # spec = (id, required, is_ok)
+        return [_FakeDep(*s) for s in specs]
+
+    def test_all_required_ok_true_when_optionals_missing(self):
+        from wayfinder.ui.setup_pane import all_required_ok
+
+        deps = self._deps(("audio", True, True), ("gpu", False, False))
+        assert all_required_ok(deps) is True
+
+    def test_all_required_ok_false_when_a_required_missing(self):
+        from wayfinder.ui.setup_pane import all_required_ok
+
+        deps = self._deps(("audio", True, False), ("gpu", False, True))
+        assert all_required_ok(deps) is False
+
+    def test_any_missing_counts_optionals(self):
+        from wayfinder.ui.setup_pane import any_missing
+
+        deps = self._deps(("audio", True, True), ("gpu", False, False))
+        assert any_missing(deps) is True
+
+    def test_footer_missing_required_hides_continue_shows_install(self):
+        from wayfinder.ui.setup_pane import footer_decision
+
+        deps = self._deps(("audio", True, False), ("whisper_model", True, False))
+        d = footer_decision(deps, installing=False)
+        assert d == {"show_continue": False, "show_install": True, "install_enabled": True}
+
+    def test_footer_installing_disables_install_button(self):
+        from wayfinder.ui.setup_pane import footer_decision
+
+        deps = self._deps(("audio", True, False))
+        d = footer_decision(deps, installing=True)
+        assert d["show_continue"] is False
+        assert d["show_install"] is True
+        assert d["install_enabled"] is False
+
+    def test_footer_required_ok_but_optional_missing_shows_both(self):
+        from wayfinder.ui.setup_pane import footer_decision
+
+        # All required satisfied; an optional is still missing -> Continue AND a
+        # still-clickable Install button (user may install the optional).
+        deps = self._deps(("audio", True, True), ("gpu", False, False))
+        d = footer_decision(deps, installing=False)
+        assert d == {"show_continue": True, "show_install": True, "install_enabled": True}
+
+    def test_footer_everything_ok_hides_install(self):
+        from wayfinder.ui.setup_pane import footer_decision
+
+        deps = self._deps(("audio", True, True), ("whisper_model", True, True))
+        d = footer_decision(deps, installing=False)
+        assert d == {"show_continue": True, "show_install": False, "install_enabled": False}
+
+    def test_model_selector_visible_until_model_ok(self):
+        from wayfinder.ui.setup_pane import should_show_model_selector
+
+        missing = self._deps(("whisper_model", True, False))
+        present = self._deps(("whisper_model", True, True))
+        no_model = self._deps(("audio", True, True))
+        assert should_show_model_selector(missing) is True
+        assert should_show_model_selector(present) is False
+        assert should_show_model_selector(no_model) is False
+
+
+# ─── Pure first-run orchestration (main.py branching) ────────────────────────
+
+
+class TestFirstRunPlan:
+    def test_fresh_install_shows_setup_first(self):
+        from wayfinder.ui.setup_pane import first_run_plan
+
+        plan = first_run_plan(setup_completed=False, welcome_completed=False, frozen=False)
+        assert plan == {"show_setup": True, "show_welcome": False}
+
+    def test_setup_done_welcome_pending_shows_welcome_directly(self):
+        from wayfinder.ui.setup_pane import first_run_plan
+
+        plan = first_run_plan(setup_completed=True, welcome_completed=False, frozen=False)
+        assert plan == {"show_setup": False, "show_welcome": True}
+
+    def test_all_done_shows_nothing(self):
+        from wayfinder.ui.setup_pane import first_run_plan
+
+        plan = first_run_plan(setup_completed=True, welcome_completed=True, frozen=False)
+        assert plan == {"show_setup": False, "show_welcome": False}
+
+    def test_frozen_skips_setup_but_runs_welcome(self):
+        from wayfinder.ui.setup_pane import first_run_plan
+
+        # Frozen bundles deps + crashes on package-manager probes -> never show
+        # setup; welcome (pure UI) still runs on first launch.
+        plan = first_run_plan(setup_completed=False, welcome_completed=False, frozen=True)
+        assert plan == {"show_setup": False, "show_welcome": True}
+
+    def test_chain_welcome_only_when_pending(self):
+        from wayfinder.ui.setup_pane import should_chain_welcome
+
+        assert should_chain_welcome(welcome_completed=False) is True
+        assert should_chain_welcome(welcome_completed=True) is False
+
+
+# ─── Headless import (no customtkinter) ──────────────────────────────────────
+
+
+class TestSetupPaneModuleImport:
+    """The module must import and its pure logic must work even when
+    customtkinter is unavailable — ctk is imported lazily inside SetupPane."""
+
+    def test_flow_works_without_customtkinter(self, monkeypatch):
+        import importlib
+        import sys
+
+        monkeypatch.setitem(sys.modules, "customtkinter", None)
+        sys.modules.pop("wayfinder.ui.setup_pane", None)
+        mod = importlib.import_module("wayfinder.ui.setup_pane")
+
+        flow = mod.SetupFlow()
+        flow.complete()
+        assert flow.is_complete is True
+        assert flow.result is True
+        assert mod.first_run_plan(False, False, False)["show_setup"] is True
