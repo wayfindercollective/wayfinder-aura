@@ -1645,6 +1645,28 @@ def _is_reasoning_model(model_path: str) -> bool:
 _GPU_PROBE_TIMEOUT = 8.0
 _GPU_PROBE_MAX_SECONDS = 5.0
 
+# A CPU-only llama-cpp-python wheel silently ignores n_gpu_layers, so a resident
+# in-process model pins cleanup to CPU even when a fast GPU llama-simple subprocess
+# is right there. Probe the wheel's offload capability once (cached) so
+# _resident_model can step aside and let the subprocess run on the GPU.
+_WHEEL_GPU_OFFLOAD = None
+
+
+def _wheel_supports_gpu_offload() -> bool:
+    """True if the installed llama-cpp-python wheel can actually offload to GPU.
+
+    A CPU-only wheel returns False even when n_gpu_layers>0 is requested. Result
+    is cached; False (fail-safe) when llama-cpp-python is absent or unintrospectable.
+    """
+    global _WHEEL_GPU_OFFLOAD
+    if _WHEEL_GPU_OFFLOAD is None:
+        try:
+            from llama_cpp import llama_cpp as _C
+            _WHEEL_GPU_OFFLOAD = bool(_C.llama_supports_gpu_offload())
+        except Exception:
+            _WHEEL_GPU_OFFLOAD = False
+    return _WHEEL_GPU_OFFLOAD
+
 
 class LlamaCppCliBackend(PostProcessorBackend):
     """
@@ -1776,6 +1798,13 @@ class LlamaCppCliBackend(PostProcessorBackend):
         if not self.model_path or not Path(self.model_path).exists():
             return None
         ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
+        # A CPU-only wheel ignores n_gpu_layers and would run Gemma on CPU. When
+        # GPU layers are requested, step aside so process() uses the fast GPU
+        # llama-simple subprocess instead (~3x faster on RDNA4 / Mesa 26 than the
+        # CPU wheel). Keep the resident path when the wheel can truly offload
+        # (warm, no per-call spawn) or when CPU is explicitly chosen (ngl == 0).
+        if ngl > 0 and not _wheel_supports_gpu_offload():
+            return None
         key = (self.model_path, self.n_ctx, ngl)
         model = LlamaCppCliBackend._resident_cache.get(key)
         if model is None:

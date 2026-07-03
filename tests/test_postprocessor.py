@@ -782,6 +782,49 @@ class TestResidentLlamaFastPath:
         sub.assert_called_once()
         assert "subprocess cleaned output" in out.lower()
 
+    def _gpu_backend(self, tmp_path):
+        """A backend that REQUESTS GPU layers (n_gpu_layers=-1)."""
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
+        return LlamaCppCliBackend(llama_binary=str(binary), model_path=str(model),
+                                  output_tone="professional", n_gpu_layers=-1)
+
+    def test_resident_steps_aside_when_wheel_cpu_only_and_gpu_requested(self, tmp_path, monkeypatch):
+        """A CPU-only llama-cpp-python wheel must NOT hijack GPU-requested cleanup:
+        _resident_model returns None so process() uses the fast GPU subprocess.
+        (Regression: the CPU-only wheel silently pinned Gemma cleanup to CPU.)"""
+        import sys, types
+        from wayfinder.core import postprocessor
+        b = self._gpu_backend(tmp_path)
+        # Import of llama_cpp succeeds (we return before instantiating Llama)...
+        fake = types.ModuleType("llama_cpp"); fake.Llama = object
+        monkeypatch.setitem(sys.modules, "llama_cpp", fake)
+        # ...but the wheel can't offload to GPU.
+        monkeypatch.setattr(postprocessor, "_wheel_supports_gpu_offload", lambda: False)
+        assert b._resident_model() is None
+
+    def test_resident_used_when_wheel_supports_gpu(self, tmp_path, monkeypatch):
+        """When the wheel CAN offload, keep the warm resident path even for GPU."""
+        import sys, types
+        from wayfinder.core import postprocessor
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        b = self._gpu_backend(tmp_path)
+        sentinel = object()
+        fake = types.ModuleType("llama_cpp"); fake.Llama = lambda **kw: sentinel
+        monkeypatch.setitem(sys.modules, "llama_cpp", fake)
+        monkeypatch.setattr(postprocessor, "_wheel_supports_gpu_offload", lambda: True)
+        LlamaCppCliBackend._resident_cache.clear()
+        assert b._resident_model() is sentinel
+
+    def test_wheel_offload_probe_is_fail_safe(self, monkeypatch):
+        """_wheel_supports_gpu_offload() is False (not raising) when the wheel is absent."""
+        import sys
+        from wayfinder.core import postprocessor
+        monkeypatch.setitem(sys.modules, "llama_cpp", None)  # force ImportError on `from llama_cpp import ...`
+        monkeypatch.setattr(postprocessor, "_WHEEL_GPU_OFFLOAD", None)
+        assert postprocessor._wheel_supports_gpu_offload() is False
+
     def test_warm_up_pokes_resident_model(self, tmp_path):
         from unittest.mock import MagicMock
         b = self._backend(tmp_path)
