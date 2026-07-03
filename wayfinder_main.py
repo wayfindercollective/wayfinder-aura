@@ -81,6 +81,7 @@ from wayfinder.core.postprocessor import process_with_config, get_available_back
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 from wayfinder.utils.audio_ducker import AudioDucker
 from wayfinder.ui.icons import get_icon, STYLE_ICONS
+from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
 
 
 # === Configuration ===
@@ -4575,6 +4576,11 @@ class WayfinderApp(ctk.CTk):
         self._hero_audio_level = 0.0
         self._hero_animation_job = None
         self._idle_breath_job = None
+        # Idle<->active morph (0 calm dim breath, 1 energetic bright) eased in
+        # BOTH loops; wave time is advanced delta-based off this timestamp so the
+        # ribbon phase never jumps between the 33ms idle and 66ms active cadences.
+        self._hero_morph = 0.0
+        self._hero_last_frame_ts = time.monotonic()
 
         # PIL-based waveform rendering (single image blit instead of 80+ Tk calls)
         self._hero_wave_items_created = False
@@ -4824,12 +4830,15 @@ class WayfinderApp(ctk.CTk):
         # Create a single image item anchored at top-left
         from PIL import ImageTk
         # Create initial blank image
-        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        self._hero_wave_photo = ImageTk.PhotoImage(img)
-        self._hero_wave_image_id = canvas.create_image(
-            0, 0, anchor="nw", image=self._hero_wave_photo
-        )
-        self._hero_wave_items_created = True
+        try:
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            self._hero_wave_photo = ImageTk.PhotoImage(img)
+            self._hero_wave_image_id = canvas.create_image(
+                0, 0, anchor="nw", image=self._hero_wave_photo
+            )
+            self._hero_wave_items_created = True
+        except Exception:
+            pass  # rule 10: canvas ops must never crash the app
     
     def _draw_hero_waveform(self) -> None:
         """Render waveform to PIL Image and blit as single canvas image (1 Tk call)."""
@@ -4842,7 +4851,6 @@ class WayfinderApp(ctk.CTk):
             return
 
         try:
-            import math
             from PIL import ImageTk
 
             canvas = self.hero_canvas
@@ -4852,71 +4860,22 @@ class WayfinderApp(ctk.CTk):
             if w <= 1 or h <= 1:
                 return
 
-            center_y = h // 2
-            max_amp = (h // 2) - 2
-            bar_width = 3
-            bar_gap = 2
-            num_bars = w // (bar_width + bar_gap)
-
-            # Parse colors
+            # Ribbon colour for the current state (parsed to RGB for the pure
+            # renderer; the 1px top highlight is baked inside render_hero_wave).
             color = STATE_COLORS.get(self.app_state, COLORS["accent"])
-            r = int(color[1:3], 16)
-            g = int(color[3:5], 16)
-            b = int(color[5:7], 16)
-
+            color_rgb = (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
             bg_hex = COLORS["bg_card"]
-            bg_r = int(bg_hex[1:3], 16)
-            bg_g = int(bg_hex[3:5], 16)
-            bg_b = int(bg_hex[5:7], 16)
+            bg_rgb = (int(bg_hex[1:3], 16), int(bg_hex[3:5], 16), int(bg_hex[5:7], 16))
 
-            # Amplitude calculation
             audio_level = self._hero_audio_level
             if not isinstance(audio_level, (int, float)) or audio_level != audio_level:
                 audio_level = 0.0
-            base_breath = 0.6 + 0.3 * (0.5 + 0.5 * math.sin(self._hero_wave_time * 0.3))
-            voice_boost = (audio_level ** 0.4) * 2.0
-            amplitude_factor = min(1.0, base_breath + voice_boost)
 
-            _sin = math.sin
-            t = self._hero_wave_time
-            is_idle = (self.app_state == AppState.IDLE)
-
-            # Pre-compute color palette (10 levels for smooth gradients)
-            color_lut = []
-            for a_idx in range(10):
-                alpha = 0.5 + 0.05 * a_idx  # 0.5 to 0.95
-                cr = int(r * alpha + bg_r * (1 - alpha))
-                cg = int(g * alpha + bg_g * (1 - alpha))
-                cb = int(b * alpha + bg_b * (1 - alpha))
-                color_lut.append((cr, cg, cb))
-
-            # Render to PIL Image (pure C, no Tk bridge calls)
-            img = Image.new("RGB", (w, h), (bg_r, bg_g, bg_b))
-            draw = ImageDraw.Draw(img)
-
-            for i in range(num_bars):
-                x = i * (bar_width + bar_gap) + bar_gap // 2
-
-                phase = t + i * 0.2
-                wave_val = (_sin(phase) * 0.4 +
-                            _sin(phase * 1.7 + 0.5) * 0.35 +
-                            _sin(phase * 0.6 + 1.0) * 0.25)
-                abs_wave = abs(wave_val)
-                bar_height = max(8, (0.3 + abs_wave * 0.7) * max_amp * amplitude_factor)
-
-                bar_color = color_lut[min(9, int(abs_wave * 10))]
-
-                y1 = int(center_y - bar_height)
-                y2 = int(center_y + bar_height)
-                draw.rectangle([x, y1, x + bar_width, y2], fill=bar_color)
-
-            # Bake a 1px inner top-edge highlight into the backdrop (bg_card ~6% toward
-            # white) — a hairline rim light that reads as depth. One extra ImageDraw.line
-            # per frame into the already-fresh PIL image; no new canvas items, no timers.
-            hi_r = int(bg_r + (255 - bg_r) * 0.06)
-            hi_g = int(bg_g + (255 - bg_g) * 0.06)
-            hi_b = int(bg_b + (255 - bg_b) * 0.06)
-            draw.line([(0, 0), (w - 1, 0)], fill=(hi_r, hi_g, hi_b))
+            caches = get_hero_caches(w, h, color_rgb, bg_rgb)
+            img = render_hero_wave(
+                w, h, self._hero_wave_time, audio_level, self._hero_morph,
+                color_rgb, bg_rgb, caches=caches,
+            )
 
             # Single Tk call: update the canvas image
             self._hero_wave_photo = ImageTk.PhotoImage(img)
@@ -12244,11 +12203,16 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
-        # 30fps idle animation (PIL rendering is cheap — single image blit per frame)
-        idle_fps_scale = 2.0  # 60/30
-
-        # Slow, gentle time progression for calm wave motion
-        self._hero_wave_time += 0.04 * idle_fps_scale
+        # Ease the morph toward 0 (calm dim breath) and advance wave time
+        # delta-based so phase is continuous across the idle/active cadence
+        # switch (no pop). idle_rate/active_rate reproduce today's on-screen
+        # speeds (idle ~0.08/33ms, active ~0.6/66ms).
+        now = time.monotonic()
+        dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.1)
+        self._hero_last_frame_ts = now
+        self._hero_morph += (0.0 - self._hero_morph) * 0.25
+        speed = 2.4 + (9.0 - 2.4) * self._hero_morph
+        self._hero_wave_time += dt * speed
         self._hero_audio_level = 0.0
 
         # Redraw waveform (PIL render + single canvas image update)
@@ -12266,10 +12230,17 @@ class WayfinderApp(ctk.CTk):
         
         import math
         hero_fps_scale = 4.0  # 60/15
-        
-        # Update animation time
-        self._hero_wave_time += 0.15 * hero_fps_scale
-        
+
+        # Ease the morph toward 1 (energetic bright) and advance wave time
+        # delta-based (same clock as idle) so the ribbon phase is continuous
+        # when the loop cadence switches — kills the phase pop.
+        now = time.monotonic()
+        dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.1)
+        self._hero_last_frame_ts = now
+        self._hero_morph += (1.0 - self._hero_morph) * 0.25
+        speed = 2.4 + (9.0 - 2.4) * self._hero_morph
+        self._hero_wave_time += dt * speed
+
         # Get current audio level from active recorder
         target_level = 0.0
         try:
