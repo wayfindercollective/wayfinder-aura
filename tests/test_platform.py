@@ -40,6 +40,14 @@ from wayfinder.utils.platform import (
     is_ydotool_available,
 )
 
+import wayfinder.utils.platform as platform_mod
+from wayfinder.utils.platform import (
+    _detect_steam_platform,
+    get_steam_platform,
+    get_steam_platform_label,
+    is_steamos,
+)
+
 
 # =============================================================================
 # Platform Detection
@@ -345,3 +353,163 @@ class TestPlatformInfo:
             for key in ["is_wayland", "is_x11", "is_flatpak", "is_appimage",
                          "desktop_environment", "session_type"]:
                 assert key in info, f"Missing Linux key: {key}"
+
+
+# =============================================================================
+# Steam Platform Identity (Steam Deck / Steam Machine / SteamOS)
+# =============================================================================
+
+
+def _dmi(**fields):
+    """Build a fake _read_dmi that returns `fields[field]` (default '')."""
+    return lambda field: fields.get(field, "")
+
+
+class TestSteamPlatform:
+    """Tests for get_steam_platform() / get_steam_platform_label() / is_steamos().
+
+    The AMD gate (branding only shows on AMD) lives in the Benchmark-tile UI,
+    which needs full Tk and isn't unit-tested here; these cover the identity
+    logic the UI depends on.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_steam(self, monkeypatch):
+        """Drop the module-level cache + any override before/after each test so
+        detection is recomputed hermetically."""
+        platform_mod._steam_platform_cache = None
+        monkeypatch.delenv("WAYFINDER_STEAM_PLATFORM", raising=False)
+        monkeypatch.setattr(sys, "platform", "linux")
+        yield
+        platform_mod._steam_platform_cache = None
+
+    # --- env override ------------------------------------------------------
+
+    @pytest.mark.parametrize("value,expected", [
+        ("deck", "deck"), ("machine", "machine"), ("steamos", "steamos"),
+        ("DECK", "deck"), ("  machine  ", "machine"),
+    ])
+    def test_override_forces_value(self, monkeypatch, value, expected):
+        monkeypatch.setenv("WAYFINDER_STEAM_PLATFORM", value)
+        assert _detect_steam_platform() == expected
+
+    @pytest.mark.parametrize("value", ["", "nonsense", "windows"])
+    def test_override_garbage_is_none(self, monkeypatch, value):
+        monkeypatch.setenv("WAYFINDER_STEAM_PLATFORM", value)
+        assert _detect_steam_platform() is None
+
+    def test_override_wins_over_hardware(self, monkeypatch):
+        """An explicit override ignores real DMI (so previews work on any box)."""
+        monkeypatch.setenv("WAYFINDER_STEAM_PLATFORM", "steamos")
+        monkeypatch.setattr(platform_mod, "_read_dmi", _dmi(product_name="Jupiter"))
+        assert _detect_steam_platform() == "steamos"
+
+    # --- hardware (DMI) ----------------------------------------------------
+
+    @pytest.mark.parametrize("product", ["Jupiter", "Galileo", "jupiter", "GALILEO"])
+    def test_steam_deck_hardware(self, monkeypatch, product):
+        monkeypatch.setattr(platform_mod, "_read_dmi", _dmi(product_name=product))
+        monkeypatch.setattr(platform_mod, "is_steamos", lambda: False)
+        assert _detect_steam_platform() == "deck"
+
+    def test_valve_non_deck_hardware_is_machine(self, monkeypatch):
+        """Valve hardware that isn't a known Deck board → Steam Machine (future-proof)."""
+        monkeypatch.setattr(
+            platform_mod, "_read_dmi",
+            _dmi(sys_vendor="Valve", product_name="Fremont"),
+        )
+        monkeypatch.setattr(platform_mod, "is_steamos", lambda: False)
+        assert _detect_steam_platform() == "machine"
+
+    def test_deck_board_wins_over_valve_vendor(self, monkeypatch):
+        """A real Deck reports sys_vendor=Valve AND product=Jupiter → 'deck', not 'machine'."""
+        monkeypatch.setattr(
+            platform_mod, "_read_dmi", _dmi(sys_vendor="Valve", product_name="Jupiter"),
+        )
+        monkeypatch.setattr(platform_mod, "is_steamos", lambda: False)
+        assert _detect_steam_platform() == "deck"
+
+    def test_hardware_wins_over_steamos(self, monkeypatch):
+        """Steam Machine running SteamOS reads as 'machine' (hardware beats OS)."""
+        monkeypatch.setattr(platform_mod, "_read_dmi", _dmi(sys_vendor="Valve"))
+        monkeypatch.setattr(platform_mod, "is_steamos", lambda: True)
+        assert _detect_steam_platform() == "machine"
+
+    # --- OS (SteamOS on non-Valve hardware) --------------------------------
+
+    def test_steamos_on_generic_hardware(self, monkeypatch):
+        monkeypatch.setattr(platform_mod, "_read_dmi", _dmi(sys_vendor="ASUS", product_name="ROG"))
+        monkeypatch.setattr(platform_mod, "is_steamos", lambda: True)
+        assert _detect_steam_platform() == "steamos"
+
+    def test_plain_amd_desktop_is_none(self, monkeypatch):
+        """A generic AMD box (not Valve, not SteamOS) gets no branding."""
+        monkeypatch.setattr(platform_mod, "_read_dmi", _dmi(sys_vendor="ASUS", product_name="TUF"))
+        monkeypatch.setattr(platform_mod, "is_steamos", lambda: False)
+        assert _detect_steam_platform() is None
+
+    def test_non_linux_is_none(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(platform_mod, "_read_dmi", _dmi(product_name="Jupiter"))
+        assert _detect_steam_platform() is None
+
+    # --- is_steamos parsing (/etc/os-release) ------------------------------
+
+    def _patch_os_release(self, monkeypatch, content):
+        real = platform_mod.Path.read_text
+
+        def fake(self, *a, **k):
+            if str(self) == "/etc/os-release":
+                return content
+            return real(self, *a, **k)
+
+        monkeypatch.setattr(platform_mod.Path, "read_text", fake)
+
+    @pytest.mark.parametrize("content", [
+        'ID=steamos\n',
+        'ID="steamos"\n',
+        'NAME="SteamOS"\nID=steamos\nID_LIKE=arch\n',
+        'ID=arch\nID_LIKE="archarm steamos"\n',
+        'ID=holo\nVARIANT_ID=steamos\n',
+    ])
+    def test_is_steamos_true(self, monkeypatch, content):
+        self._patch_os_release(monkeypatch, content)
+        assert is_steamos() is True
+
+    @pytest.mark.parametrize("content", [
+        'ID=bazzite\nID_LIKE="fedora"\n',
+        'ID=fedora\n',
+        'ID=arch\nID_LIKE=arch\n',
+        '',
+    ])
+    def test_is_steamos_false(self, monkeypatch, content):
+        self._patch_os_release(monkeypatch, content)
+        assert is_steamos() is False
+
+    def test_is_steamos_missing_file_is_false(self, monkeypatch):
+        def boom(self, *a, **k):
+            raise OSError("no such file")
+        monkeypatch.setattr(platform_mod.Path, "read_text", boom)
+        assert is_steamos() is False
+
+    # --- label mapping + caching -------------------------------------------
+
+    @pytest.mark.parametrize("key,label", [
+        ("deck", "Steam Deck"), ("machine", "Steam Machine"), ("steamos", "SteamOS"),
+    ])
+    def test_label_mapping(self, monkeypatch, key, label):
+        monkeypatch.setenv("WAYFINDER_STEAM_PLATFORM", key)
+        assert get_steam_platform_label() == label
+
+    def test_label_is_none_when_not_steam(self, monkeypatch):
+        monkeypatch.setattr(platform_mod, "_read_dmi", _dmi())
+        monkeypatch.setattr(platform_mod, "is_steamos", lambda: False)
+        assert get_steam_platform_label() is None
+
+    def test_result_is_cached(self, monkeypatch):
+        monkeypatch.setattr(platform_mod, "_read_dmi", _dmi(product_name="Jupiter"))
+        monkeypatch.setattr(platform_mod, "is_steamos", lambda: False)
+        assert get_steam_platform() == "deck"
+        # Underlying hardware "changes" — cached result must not.
+        monkeypatch.setattr(platform_mod, "_read_dmi", _dmi())
+        assert get_steam_platform() == "deck"

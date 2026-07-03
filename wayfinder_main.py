@@ -3960,8 +3960,14 @@ class WayfinderApp(ctk.CTk):
         w = event.widget
         # Clicks inside the open list, or on the owning control (which re-opens
         # via its own handler), must NOT dismiss.
-        if self._widget_within(w, self._active_dropdown_panel) or \
-                self._widget_within(w, getattr(self, "_active_dropdown_owner", None)):
+        in_panel = self._widget_within(w, self._active_dropdown_panel)
+        in_owner = self._widget_within(w, getattr(self, "_active_dropdown_owner", None))
+        try:
+            wcls = w.winfo_class()
+        except Exception:
+            wcls = "?"
+        self.log(f"[dropdown] click target={w!s} class={wcls} in_panel={in_panel} in_owner={in_owner}")
+        if in_panel or in_owner:
             return
         self._close_dropdown_panel()
 
@@ -4000,16 +4006,18 @@ class WayfinderApp(ctk.CTk):
         self._active_dropdown_owner = None
 
     def _dropdown_row_selected(self, option_menu, value):
+        self.log(f"[dropdown] row clicked: {value!r}")
         self._close_dropdown_panel()
         try:
             # Exact CTk selection path: updates the label, sets the bound
             # variable (with the internal callback block), and fires command.
             option_menu._dropdown_callback(value)
-        except Exception:
+        except Exception as e:
+            self.log(f"[dropdown] _dropdown_callback failed: {e!r}; falling back to set()")
             try:
                 option_menu.set(value)
-            except Exception:
-                pass
+            except Exception as e2:
+                self.log(f"[dropdown] set() also failed: {e2!r}")
 
     def _open_dropdown_panel(self, option_menu):
         """Render `option_menu`'s open list as a place()'d rounded panel on this
@@ -4021,6 +4029,7 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             values = []
         if not values:
+            self.log("[dropdown] open aborted: option menu has no values")
             return
 
         try:
@@ -4038,7 +4047,8 @@ class WayfinderApp(ctk.CTk):
             ctrl_h = option_menu.winfo_height()
             win_w = self.winfo_width()
             win_h = self.winfo_height()
-        except Exception:
+        except Exception as e:
+            self.log(f"[dropdown] geometry read failed: {e!r}")
             return
 
         pad = self.PAD_DROPDOWN
@@ -4050,6 +4060,8 @@ class WayfinderApp(ctk.CTk):
         x, y, h, _opens_up = dropdown_panel_geometry(
             ctrl_x, ctrl_y, ctrl_w, ctrl_h, list_h, win_w, win_h, margin=8,
         )
+        self.log(f"[dropdown] open {len(values)} vals ctrl=({ctrl_x},{ctrl_y},{ctrl_w},{ctrl_h}) "
+                 f"win=({win_w},{win_h}) list_h={list_h} scroll={scrollable} -> x={x} y={y} h={h} up={_opens_up}")
 
         # CustomTkinter's place() override REJECTS width/height (they must go to
         # the constructor — passing them to .place() raises ValueError, which
@@ -5497,6 +5509,28 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
+
+        # Steam-platform badge — "Optimized for <device>" on Valve hardware /
+        # SteamOS, sitting opposite the heading. AMD-gated for now: all shipping
+        # Steam hardware is AMD and the NVIDIA path is unvalidated, so we only
+        # make the claim on AMD. Absent otherwise. Identity + the
+        # WAYFINDER_STEAM_PLATFORM preview override live in wayfinder.utils.platform.
+        from wayfinder.utils.platform import get_steam_platform_label
+        _steam_label = get_steam_platform_label()
+        if _steam_label and get_gpu_info().is_amd:
+            steam_badge = ctk.CTkFrame(
+                benchmark_header, fg_color=COLORS["accent_glow"],
+                corner_radius=RADIUS["sm"],
+            )
+            steam_badge.pack(side="right")
+            ctk.CTkLabel(
+                steam_badge,
+                text=f"Optimized for {_steam_label}",
+                image=get_icon("gamepad-2", 13, COLORS["accent"]),
+                compound="left",
+                font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+                text_color=COLORS["accent"],
+            ).pack(padx=10, pady=4)
 
         # Clarify what the number means — users (rightly) read "2.0s" as their
         # dictation latency, but it's a 10s clip transcribed from a COLD start

@@ -208,6 +208,108 @@ def write_game_mode_marker(enabled: bool) -> None:
 
 
 # =============================================================================
+# Steam Platform Identity (Steam Deck / Steam Machine / SteamOS)
+# =============================================================================
+#
+# Powers the "Optimized for <device>" branding in the Benchmark tile. We report
+# the most specific identity available: Valve *hardware* (via DMI) wins over the
+# OS, so a Steam Machine running SteamOS reads as "Steam Machine", not "SteamOS".
+#
+# Steam Machine detection is deliberately future-proof: we don't hard-code its
+# (still-unknown) DMI product string. Instead, once the product isn't a known
+# Deck board (Jupiter/Galileo) but sys_vendor is Valve, we treat it as a Steam
+# Machine. Refine the product match when real hardware is in hand.
+#
+# WAYFINDER_STEAM_PLATFORM overrides detection entirely (values: deck | machine
+# | steamos | anything-else-for-off) so the branding can be previewed on a
+# non-Steam dev machine.
+
+# Deck board DMI product_name values (LCD 'Jupiter', OLED 'Galileo').
+_STEAM_DECK_PRODUCTS = ("jupiter", "galileo")
+
+_STEAM_PLATFORM_LABELS = {
+    "deck": "Steam Deck",
+    "machine": "Steam Machine",
+    "steamos": "SteamOS",
+}
+
+# Cached identity: None means "not computed yet"; a 1-tuple holds the (possibly
+# None) result so a genuine None doesn't force re-detection each call.
+_steam_platform_cache: tuple[str | None] | None = None
+
+
+def _read_dmi(field: str) -> str:
+    """Read a /sys/class/dmi/id/<field>, stripped; '' on any failure.
+
+    Returns '' off Linux and inside sandboxes that don't expose DMI.
+    """
+    try:
+        return (Path("/sys/class/dmi/id") / field).read_text().strip()
+    except OSError:
+        return ""
+
+
+def is_steamos() -> bool:
+    """True when the running OS identifies as SteamOS.
+
+    Reads /etc/os-release and matches 'steamos' in ID / ID_LIKE / VARIANT_ID.
+    This catches SteamOS on generic hardware; Valve hardware is identified
+    separately (and takes priority) via :func:`get_steam_platform`.
+    """
+    try:
+        text = Path("/etc/os-release").read_text()
+    except OSError:
+        return False
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        if key.strip().lower() in ("id", "id_like", "variant_id"):
+            if "steamos" in value.strip().strip('"').lower():
+                return True
+    return False
+
+
+def _detect_steam_platform() -> str | None:
+    """Uncached identity detection — see :func:`get_steam_platform`."""
+    override = os.environ.get("WAYFINDER_STEAM_PLATFORM")
+    if override is not None:
+        value = override.strip().lower()
+        return value if value in _STEAM_PLATFORM_LABELS else None
+    if not is_linux():
+        return None
+    product = _read_dmi("product_name").lower()
+    if any(name in product for name in _STEAM_DECK_PRODUCTS):
+        return "deck"
+    if "valve" in _read_dmi("sys_vendor").lower():
+        # Valve hardware that isn't a recognized Deck board → Steam Machine.
+        return "machine"
+    if is_steamos():
+        return "steamos"
+    return None
+
+
+def get_steam_platform() -> str | None:
+    """Identify the Steam gaming platform, or None.
+
+    Returns 'deck' (Steam Deck hardware), 'machine' (other Valve hardware, e.g.
+    the Steam Machine), or 'steamos' (SteamOS on non-Valve hardware). Hardware
+    identity takes priority over the OS. Cached (DMI/os-release never change at
+    runtime); the WAYFINDER_STEAM_PLATFORM env var overrides it for previews.
+    """
+    global _steam_platform_cache
+    if _steam_platform_cache is None:
+        _steam_platform_cache = (_detect_steam_platform(),)
+    return _steam_platform_cache[0]
+
+
+def get_steam_platform_label() -> str | None:
+    """Human-facing device name for the branding line ('Steam Deck', 'Steam
+    Machine', 'SteamOS'), or None when this isn't a Steam platform."""
+    return _STEAM_PLATFORM_LABELS.get(get_steam_platform())
+
+
+# =============================================================================
 # Cross-Platform Directory Paths
 # =============================================================================
 
