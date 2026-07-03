@@ -3392,6 +3392,81 @@ class OverlayController:
         return True
 
 
+# === In-window dropdown panel (replaces CTk's native tk.Menu open list) ======
+#
+# CustomTkinter opens a CTkOptionMenu's list as a native tkinter.Menu via
+# tk_popup (see customtkinter .../core_widget_classes/dropdown_menu.py). A
+# tk.Menu can NEVER have rounded corners or a shadow, and on KDE/Wayland its
+# stacking is window-manager-owned — the proven root cause of the long-standing
+# mic-dropdown z-order bug (the list renders behind the window / detached). The
+# fix keeps every CLOSED control pixel-identical and renders the OPEN list as a
+# place()'d rounded CTkFrame INSIDE the Tk toplevel, where we own z-order and
+# styling. Positioning is a pure function (below) so it is unit-testable
+# headless; the panel itself is built by WayfinderApp._open_dropdown_panel.
+
+
+def dropdown_panel_geometry(ctrl_x, ctrl_y, ctrl_w, ctrl_h, list_h,
+                            win_w, win_h, margin=8):
+    """Place a dropdown's open panel relative to its closed control.
+
+    All inputs are in TOPLEVEL-window pixel coords: the control's x/y/w/h, the
+    desired list height, and the window w/h. Returns ``(x, y, h, opens_up)``:
+
+    * default — the panel opens directly BELOW the control;
+    * it flips ABOVE when there isn't room below AND there is more room above;
+    * ``h`` is capped to the available space so a long list never spills past
+      the window ``margin``;
+    * ``x`` aligns with the control's left edge, clamped within
+      ``[margin, win_w - margin]`` so it can't run off the right/left edge.
+
+    Pure and headless (no Tk). Panel width is the caller's — the control width.
+    """
+    gap = 2  # hairline gap between the control and the panel
+    # Available heights already discount the gap AND the far margin, so a capped
+    # panel's far edge lands exactly on the margin (never past it).
+    avail_below = win_h - margin - (ctrl_y + ctrl_h + gap)
+    avail_above = (ctrl_y - gap) - margin
+
+    opens_up = list_h > avail_below and avail_above > avail_below
+
+    if opens_up:
+        h = min(list_h, max(0, avail_above))
+        y = ctrl_y - gap - h
+    else:
+        h = min(list_h, max(0, avail_below))
+        y = ctrl_y + ctrl_h + gap
+
+    x = ctrl_x
+    if x + ctrl_w > win_w - margin:
+        x = win_w - margin - ctrl_w
+    if x < margin:
+        x = margin
+
+    return (x, y, h, opens_up)
+
+
+class InlineOptionMenu(ctk.CTkOptionMenu):
+    """A CTkOptionMenu whose OPEN list renders as an in-window panel instead of
+    a native tkinter.Menu (``tk_popup``).
+
+    The closed control is inherited UNCHANGED — pixel-identical to a stock
+    CTkOptionMenu, so every caller's ``.set()``/``.get()``/``.configure()``/
+    ``.master``/``.pack()``/``.grid()`` keeps working. ONLY ``_open_dropdown_menu``
+    (the single method that calls ``tk_popup``) is overridden, routing the open
+    through the toplevel's ``_open_dropdown_panel``. This kills the KDE/Wayland
+    z-order bug at its root: the list can no longer be a WM-stacked tk.Menu.
+    """
+
+    def _open_dropdown_menu(self):
+        opener = getattr(self.winfo_toplevel(), "_open_dropdown_panel", None)
+        if opener is None:
+            # Defensive: no in-window host (e.g. re-parented outside WayfinderApp)
+            # — fall back to CTk's native menu rather than becoming unclickable.
+            super()._open_dropdown_menu()
+            return
+        opener(self)
+
+
 # === Main Application ===
 
 class WayfinderApp(ctk.CTk):
@@ -3827,7 +3902,201 @@ class WayfinderApp(ctk.CTk):
         # Legacy X11 (pre-Tk9): one Button-4/5 press per notch.
         self.bind_all("<Button-4>", lambda e: _scroll_under_pointer(e, -1), add="+")
         self.bind_all("<Button-5>", lambda e: _scroll_under_pointer(e, 1), add="+")
-    
+
+    # --- In-window dropdown panel -------------------------------------------
+    # InlineOptionMenu routes its open list here instead of a native tk.Menu
+    # (see the module-level classes above and dropdown_panel_geometry). The
+    # panel is a place()'d rounded CTkFrame on this toplevel — we own its
+    # z-order and styling, which the KDE/Wayland tk_popup path never allowed.
+
+    ROW_H_DROPDOWN = 34      # per-row height in the open panel
+    MAX_ROWS_DROPDOWN = 8    # rows shown before the list scrolls
+    PAD_DROPDOWN = 4         # inner padding of the panel frame
+
+    def _dropdown_blank_icon(self):
+        """A transparent 16px CTkImage reused as the leading slot on unselected
+        rows so their text lines up with the selected row's check glyph."""
+        img = getattr(self, "_dd_blank_icon", None)
+        if img is None:
+            from PIL import Image
+            blank = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            img = ctk.CTkImage(light_image=blank, dark_image=blank, size=(16, 16))
+            self._dd_blank_icon = img
+        return img
+
+    def _ensure_dropdown_dismiss_bindings(self):
+        """Bind the panel-dismissal handlers ONCE (not per open). These live on
+        the toplevel (self) bindtag, which precedes the bind_all("all") wheel
+        pipeline in every child's bindtags — so a wheel over another frame both
+        scrolls it AND dismisses the panel. Handlers no-op while no panel is
+        open. Per CLAUDE.md we never unbind_all; these stay bound for the app's
+        life and gate on _active_dropdown_panel."""
+        if getattr(self, "_dropdown_dismiss_bound", False):
+            return
+        self.bind("<Button-1>", self._dropdown_on_click, add="+")
+        self.bind("<Escape>", lambda e: self._close_dropdown_panel(), add="+")
+        self.bind("<Configure>", self._dropdown_on_configure, add="+")
+        self.bind("<MouseWheel>", self._dropdown_on_wheel, add="+")
+        self.bind("<Button-4>", self._dropdown_on_wheel, add="+")
+        self.bind("<Button-5>", self._dropdown_on_wheel, add="+")
+        self._dropdown_dismiss_bound = True
+
+    @staticmethod
+    def _widget_within(widget, ancestor):
+        """True if `widget` is `ancestor` or a descendant of it (walks .master)."""
+        if ancestor is None:
+            return False
+        while widget is not None:
+            if widget is ancestor:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _dropdown_on_click(self, event):
+        if getattr(self, "_active_dropdown_panel", None) is None:
+            return
+        w = event.widget
+        # Clicks inside the open list, or on the owning control (which re-opens
+        # via its own handler), must NOT dismiss.
+        if self._widget_within(w, self._active_dropdown_panel) or \
+                self._widget_within(w, getattr(self, "_active_dropdown_owner", None)):
+            return
+        self._close_dropdown_panel()
+
+    def _dropdown_on_configure(self, event):
+        # Only the toplevel resizing/moving dismisses; child <Configure> events
+        # (which also fire this binding via the toplevel bindtag) are ignored.
+        if getattr(self, "_active_dropdown_panel", None) is None:
+            return
+        if event.widget is self:
+            self._close_dropdown_panel()
+
+    def _dropdown_on_wheel(self, event):
+        if getattr(self, "_active_dropdown_panel", None) is None:
+            return
+        # Scrolling inside the panel scrolls its list (handled by the global
+        # wheel pipeline); scrolling anywhere else dismisses. Return None either
+        # way so the underlying scroll still happens.
+        try:
+            w = self.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            w = None
+        if self._widget_within(w, self._active_dropdown_panel):
+            return
+        self._close_dropdown_panel()
+
+    def _close_dropdown_panel(self):
+        """Tear down the open panel, if any. Idempotent."""
+        panel = getattr(self, "_active_dropdown_panel", None)
+        if panel is not None:
+            try:
+                panel.place_forget()
+                panel.destroy()
+            except Exception:
+                pass
+        self._active_dropdown_panel = None
+        self._active_dropdown_owner = None
+
+    def _dropdown_row_selected(self, option_menu, value):
+        self._close_dropdown_panel()
+        try:
+            # Exact CTk selection path: updates the label, sets the bound
+            # variable (with the internal callback block), and fires command.
+            option_menu._dropdown_callback(value)
+        except Exception:
+            try:
+                option_menu.set(value)
+            except Exception:
+                pass
+
+    def _open_dropdown_panel(self, option_menu):
+        """Render `option_menu`'s open list as a place()'d rounded panel on this
+        toplevel (never a tk.Menu). Called by InlineOptionMenu._open_dropdown_menu."""
+        self._close_dropdown_panel()  # one panel at a time
+
+        try:
+            values = list(option_menu.cget("values"))
+        except Exception:
+            values = []
+        if not values:
+            return
+
+        try:
+            current = option_menu.get()
+        except Exception:
+            current = None
+
+        # Coordinates in TOPLEVEL-window space, so place() lands correctly no
+        # matter how deep the control is inside a scrolled Settings frame.
+        self.update_idletasks()
+        try:
+            ctrl_x = option_menu.winfo_rootx() - self.winfo_rootx()
+            ctrl_y = option_menu.winfo_rooty() - self.winfo_rooty()
+            ctrl_w = option_menu.winfo_width()
+            ctrl_h = option_menu.winfo_height()
+            win_w = self.winfo_width()
+            win_h = self.winfo_height()
+        except Exception:
+            return
+
+        pad = self.PAD_DROPDOWN
+        n = len(values)
+        visible = min(n, self.MAX_ROWS_DROPDOWN)
+        scrollable = n > self.MAX_ROWS_DROPDOWN
+        list_h = visible * self.ROW_H_DROPDOWN + pad * 2
+
+        x, y, h, _opens_up = dropdown_panel_geometry(
+            ctrl_x, ctrl_y, ctrl_w, ctrl_h, list_h, win_w, win_h, margin=8,
+        )
+
+        panel = ctk.CTkFrame(
+            self,
+            fg_color=COLORS["bg_surface"],
+            corner_radius=RADIUS["md"],
+            border_width=1,
+            border_color=COLORS["border_subtle"],
+        )
+        panel.place(x=x, y=y, width=ctrl_w, height=h)
+        panel.lift()
+
+        if scrollable:
+            rows_parent = ctk.CTkScrollableFrame(
+                panel,
+                fg_color="transparent",
+                scrollbar_button_color=COLORS["bg_hover"],
+                scrollbar_button_hover_color=COLORS["accent_dim"],
+                corner_radius=RADIUS["sm"],
+            )
+        else:
+            rows_parent = ctk.CTkFrame(panel, fg_color="transparent")
+        rows_parent.pack(fill="both", expand=True, padx=pad, pady=pad)
+
+        check_img = get_icon("check", 16, COLORS["accent"])
+        blank_img = self._dropdown_blank_icon()
+        for val in values:
+            selected = (val == current)
+            btn = ctk.CTkButton(
+                rows_parent,
+                text=val,
+                image=check_img if selected else blank_img,
+                compound="left",
+                anchor="w",
+                font=(self.font_body[0], self.font_sizes["body"]),
+                fg_color="transparent",
+                hover_color=COLORS["bg_hover"],
+                # Selected row echoes the closed control's accent value text
+                # (which already renders in COLORS["accent"]) + a leading check.
+                text_color=COLORS["accent"] if selected else COLORS["text_primary"],
+                corner_radius=RADIUS["sm"],
+                height=self.ROW_H_DROPDOWN - 2,
+                command=lambda v=val: self._dropdown_row_selected(option_menu, v),
+            )
+            btn.pack(fill="x", padx=2, pady=1)
+
+        self._active_dropdown_panel = panel
+        self._active_dropdown_owner = option_menu
+        self._ensure_dropdown_dismiss_bindings()
+
     def _get_recommended_scale(self) -> float:
         """Calculate recommended UI scale based on screen resolution for READABILITY.
         
@@ -8254,7 +8523,7 @@ class WayfinderApp(ctk.CTk):
         self._llamacpp_model_var = ctk.StringVar(value=current_display or "Select model")
         self._llamacpp_model_data = model_data
         
-        model_dropdown = ctk.CTkOptionMenu(
+        model_dropdown = InlineOptionMenu(
             right_frame,
             values=model_options if model_options else ["No models available"],
             variable=self._llamacpp_model_var,
@@ -9080,7 +9349,7 @@ class WayfinderApp(ctk.CTk):
                     text_color=COLORS["text_secondary"],
                 ).pack(anchor="w", padx=16, pady=(0, 4))
                 
-                ctk.CTkOptionMenu(
+                InlineOptionMenu(
                     api_frame,
                     variable=form_data["openai_model"],
                     values=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
@@ -9163,7 +9432,7 @@ class WayfinderApp(ctk.CTk):
                     text_color=COLORS["text_secondary"],
                 ).pack(anchor="w", padx=16, pady=(0, 4))
                 
-                ctk.CTkOptionMenu(
+                InlineOptionMenu(
                     api_frame,
                     variable=form_data["anthropic_model"],
                     values=[
@@ -9798,8 +10067,10 @@ class WayfinderApp(ctk.CTk):
                     self.dynamic_tooltips[tooltip_key] = []
                 self.dynamic_tooltips[tooltip_key].extend([tt1, tt2])
         
-        # Premium dropdown with thin border
-        dropdown = ctk.CTkOptionMenu(
+        # Premium dropdown with thin border. InlineOptionMenu renders the OPEN
+        # list as an in-window panel (no tk.Menu / tk_popup) — the closed control
+        # is pixel-identical to a stock CTkOptionMenu.
+        dropdown = InlineOptionMenu(
             row,
             values=values,
             variable=variable,
