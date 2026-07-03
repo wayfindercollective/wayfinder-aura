@@ -4457,7 +4457,7 @@ class WayfinderApp(ctk.CTk):
         is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         try:
             # Cosmic signature: the brand arrow "in space" with a baked, static
-            # stardust trail (placement A · subtle). Works for BOTH tiers — the
+            # stardust trail (placement A · visible). Works for BOTH tiers — the
             # Ultra gold glow composites on top of the trail inside the helper.
             logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
             self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
