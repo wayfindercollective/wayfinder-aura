@@ -376,3 +376,52 @@ def test_no_unbind_all_call_sites():
         "(the old _trap_scroll killed global wheel scrolling after one hover of "
         f"the models panel). Scope bindings per-widget instead. Hits: {hits}"
     )
+
+
+# ---------------------------------------------------------------------------
+# (h) In-window dropdown panel — no tk.Menu / tk_popup open list
+# ---------------------------------------------------------------------------
+# CustomTkinter opens a CTkOptionMenu's list as a native tkinter.Menu via
+# tk_popup. That list can never be rounded/shadowed and on KDE/Wayland its
+# stacking is WM-owned — the proven root cause of the mic-dropdown z-order bug.
+# Item 1 (July 2026) replaced every open list with an in-window place()'d
+# CTkFrame: InlineOptionMenu (a CTkOptionMenu subclass) overrides the ONLY
+# method that calls tk_popup (_open_dropdown_menu) and routes it to
+# WayfinderApp._open_dropdown_panel. These tests keep the tk_popup path from
+# ever coming back.
+#
+# `CTkOptionMenu\s*\(` matches only INSTANTIATIONS: the subclass base reference
+# `class InlineOptionMenu(ctk.CTkOptionMenu):` reads `CTkOptionMenu)` (no `(`),
+# so it is not matched — exactly what we want (base ref allowed, construction
+# banned).
+CTK_OPTIONMENU_CTOR_RE = re.compile(r"CTkOptionMenu\s*\(")
+
+
+def test_no_ctk_optionmenu_construction():
+    hits = [
+        (MAIN_SRC.count("\n", 0, m.start()) + 1, _line_of(m.start()).strip())
+        for m in CTK_OPTIONMENU_CTOR_RE.finditer(MAIN_SRC)
+    ]
+    assert not hits, (
+        "A stock CTkOptionMenu was constructed — its open list is a native "
+        "tk.Menu (tk_popup) that can't be styled and mis-stacks on KDE/Wayland "
+        "(the mic-dropdown z-order bug). Use InlineOptionMenu, whose open list is "
+        f"the in-window _open_dropdown_panel. Hits: {hits}"
+    )
+
+
+def test_inline_dropdown_panel_wiring_present():
+    # The routing subclass exists and overrides the tk_popup entry point...
+    assert re.search(r"class InlineOptionMenu\(ctk\.CTkOptionMenu\)", MAIN_SRC), (
+        "InlineOptionMenu subclass is gone — the closed control would fall back "
+        "to CTk's native tk.Menu open list (the KDE z-order bug returns)."
+    )
+    # ...and it overrides _open_dropdown_menu (the sole tk_popup caller).
+    assert "def _open_dropdown_menu(self):" in MAIN_SRC, (
+        "InlineOptionMenu no longer overrides _open_dropdown_menu — CTk's native "
+        "tk_popup path is reachable again."
+    )
+    # ...routing into the in-window panel renderer on the toplevel.
+    assert "def _open_dropdown_panel(self, option_menu):" in MAIN_SRC, (
+        "the in-window dropdown panel renderer _open_dropdown_panel is gone."
+    )
