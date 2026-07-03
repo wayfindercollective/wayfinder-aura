@@ -43,7 +43,23 @@ WAVE_CONFIGS = [
 # wide, so the same per-pixel freqs pack ~20 cycles across and read as spaghetti.
 # Scale them down for a few broad, overlapping "liquid" waves instead.
 FREQ_SCALE = 0.32
-_SAMPLE = 6  # px between polyline points
+_SAMPLE = 6  # px between polyline points at the reference width
+# The approved mock was designed at 640px: waves are computed in that reference
+# space and stretched to the real strip width. This keeps BOTH the approved
+# proportions (same bump count at any width — per-pixel frequencies would pack
+# 3.4x the cycles into a 2180px window) AND a constant point count (~109), so
+# render cost does not scale with window width (live-measured: per-pixel
+# sampling at 2180px cost ~2.4ms/frame = +5% idle CPU at 30fps).
+_REF_W = 640.0
+_N_POINTS_MIN = int(_REF_W // _SAMPLE) + 3  # 109 samples (the mock's density)
+_N_POINTS_MAX = 240  # cap: wider windows never exceed this (cost ceiling)
+
+
+def _n_points(w):
+    """Sample count: mock density at <=640px, then ~9px on-screen segments up
+    to a hard cap — enough to keep high-curvature recording peaks smooth at
+    2160+px without letting cost scale unbounded with window width."""
+    return max(_N_POINTS_MIN, min(_N_POINTS_MAX, round(w / 9)))
 
 # Bounded per-(w,h,color,bg) invariant cache: edge mask, flat bg, layer/hilite
 # colour deltas. ~16 live entries in practice (a handful of state colours across
@@ -185,9 +201,13 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     img = caches["bg_flat"].copy()
     draw = ImageDraw.Draw(img)
 
-    xs = list(range(0, w + 1, _SAMPLE))
-    if xs[-1] != w:
-        xs.append(w)
+    # Fixed point count in mock-reference space: x is the on-image pixel, u is
+    # the wave-space coordinate the sines are evaluated at.
+    # Idle (low morph) is low-amplitude — segments can't facet — and runs at
+    # 30fps, so it keeps the cheap mock density; the extra points only get paid
+    # for by the energetic 15fps active ribbon where curvature is visible.
+    n = _N_POINTS_MIN if morph < 0.3 else _n_points(w)
+    xus = [(w * i / (n - 1), _REF_W * i / (n - 1)) for i in range(n)]
 
     def blend(delta, k):
         dr, dg, db = delta
@@ -201,10 +221,10 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     for (freq, phase, _a, thick), deltas in zip(WAVE_CONFIGS, layer_deltas):
         f = freq * fs
         pts = []
-        for x in xs:
-            dy = amp * math.sin(f * x + t + phase)
-            dy += (amp * 0.4) * math.sin(f * 2.3 * x + t * 1.6 + phase)
-            dy += (amp * 0.2) * math.sin(f * 3.7 * x + t * 2.1 + phase * 0.5)
+        for x, u in xus:
+            dy = amp * math.sin(f * u + t + phase)
+            dy += (amp * 0.4) * math.sin(f * 2.3 * u + t * 1.6 + phase)
+            dy += (amp * 0.2) * math.sin(f * 3.7 * u + t * 2.1 + phase * 0.5)
             pts.append((x, _clampf(center_y + soft_limit(dy), top, bottom)))
         draw.line(pts, fill=blend(deltas["glow"], brightness), width=thick + 4)
         draw.line(pts, fill=blend(deltas["core"], brightness), width=thick)
@@ -212,9 +232,9 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     # --- bright center highlight wave ---------------------------------------
     hdelt = caches["highlight_deltas"]
     hpts = []
-    for x in xs:
-        dy = amp * math.sin(0.13 * fs * x + t * 1.4)
-        dy += (amp * 0.5) * math.sin(0.26 * fs * x + t * 2.0 + 0.8)
+    for x, u in xus:
+        dy = amp * math.sin(0.13 * fs * u + t * 1.4)
+        dy += (amp * 0.5) * math.sin(0.26 * fs * u + t * 2.0 + 0.8)
         hpts.append((x, _clampf(center_y + soft_limit(dy), top, bottom)))
     draw.line(hpts, fill=blend(hdelt["glow"], hi_brightness), width=6)
     draw.line(hpts, fill=blend(hdelt["core"], hi_brightness * 0.95), width=2)

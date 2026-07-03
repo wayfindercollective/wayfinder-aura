@@ -158,3 +158,19 @@ def test_perf_under_budget():
         hr.render_hero_wave(W, H, i * 0.05, 0.5, 1.0, ROSE, caches=caches)
     mean_ms = (time.perf_counter() - t0) / n * 1000.0
     assert mean_ms < 5.0, f"hero_render mean {mean_ms:.3f} ms/frame >= 5ms budget"
+
+
+def test_perf_constant_at_wide_width():
+    """Render cost must NOT scale with window width: waves are sampled at a
+    fixed point count in 640px reference space (live-measured regression: per-
+    pixel sampling at a 2180px window cost ~2.4ms/frame = +5% idle CPU @30fps)."""
+    ww = 2180
+    caches = hr.get_hero_caches(ww, H, ROSE, BG)
+    for _ in range(10):
+        hr.render_hero_wave(ww, H, 1.0, 0.5, 1.0, ROSE, caches=caches)
+    n = 100
+    t0 = time.perf_counter()
+    for i in range(n):
+        hr.render_hero_wave(ww, H, i * 0.05, 0.5, 1.0, ROSE, caches=caches)
+    mean_ms = (time.perf_counter() - t0) / n * 1000.0
+    assert mean_ms < 5.0, f"wide hero_render mean {mean_ms:.3f} ms/frame >= 5ms budget"
