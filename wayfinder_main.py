@@ -5298,7 +5298,7 @@ class WayfinderApp(ctk.CTk):
         self.mic_var = ctk.StringVar(value=mic_current)
         self.mic_dropdown = self.create_dropdown_row(
             audio_content, "Microphone", mic_options, self.mic_var,
-            self._on_microphone_selected, tooltip=SETTING_TOOLTIPS["microphone"], width=180,
+            self._on_microphone_selected, tooltip=SETTING_TOOLTIPS["microphone"], width=160,
         )
         
         # Audio Processing dropdown
@@ -5307,7 +5307,7 @@ class WayfinderApp(ctk.CTk):
         self.preprocess_var = ctk.StringVar(value=current_preprocess)
         self.preprocess_dropdown = self.create_dropdown_row(
             audio_content, "Audio Processing", preprocess_options, self.preprocess_var,
-            self._on_audio_processing_selected, tooltip=SETTING_TOOLTIPS["audio_preprocessing"], width=180,
+            self._on_audio_processing_selected, tooltip=SETTING_TOOLTIPS["audio_preprocessing"], width=160,
         )
         
         # Audio Calibration inline section
@@ -10209,7 +10209,11 @@ class WayfinderApp(ctk.CTk):
             height=36,
             corner_radius=RADIUS["sm"],
         )
-        dropdown.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        # East-pinned, so this padx is the *minimum* gap before the label column;
+        # a tighter gap only lowers the row's collapse threshold (wide layout is
+        # unchanged — the dropdown stays flush right). Was 16 — 8px per row of
+        # free headroom before things start clipping on a scrunched window.
+        dropdown.grid(row=0, column=1, sticky="e", padx=(SPACING["sm"], 0))
         return dropdown
 
     def toggle_start_minimized(self):
@@ -10904,7 +10908,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_bright"],
             corner_radius=RADIUS["sm"],
             height=32,
-            width=70,
+            width=62,
             command=self._toggle_playback,
             state="disabled",
         )
@@ -10919,7 +10923,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_bright"],
             corner_radius=RADIUS["sm"],
             height=32,
-            width=80,
+            width=74,
             command=self._toggle_mic_test,
         )
         self._mic_test_btn.pack(side="left")
