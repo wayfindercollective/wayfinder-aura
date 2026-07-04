@@ -1870,6 +1870,34 @@ def _keycode_display(code: int) -> str:
     return f"Key {code}"
 
 
+def kde_record_shortcut_active(kglobalshortcutsrc_text: str,
+                               desktop_group: str = "wayfinder-aura.desktop",
+                               action: str = "toggle-recording") -> bool:
+    """True if KDE binds `action` (default the record toggle) to a real key.
+
+    kglobalshortcutsrc stores it as ``toggle-recording=F3,none,Toggle Recording``
+    under ``[wayfinder-aura.desktop]`` — the FIRST comma-field is the ACTIVE
+    shortcut ("none"/empty = unbound). When it's a real key, KWin grabs that key
+    at the compositor level, so the app must NOT also read it via the passive
+    evdev listener: evdev can't *consume* the key, so a shared binding leaks it
+    into the focused window (F3 → the browser's Find bar, which then eats the
+    dictation). Reading KDE's own config — never touched by save_config — makes
+    this immune to the in-app hotkey setting being reset. Pure/headless.
+    """
+    in_group = False
+    target = f"[{desktop_group}]"
+    prefix = f"{action}="
+    for raw in kglobalshortcutsrc_text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_group = (line == target)
+            continue
+        if in_group and line.startswith(prefix):
+            active = line[len(prefix):].split(",", 1)[0].strip().lower()
+            return active not in ("", "none")
+    return False
+
+
 def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabled_devices=None, log_callback=None,
                     style_toggle_key=None, style_toggle_modifiers=None, grabbed_devices=None):
     import select
@@ -9261,7 +9289,12 @@ class WayfinderApp(ctk.CTk):
                 # but /dev/input is inaccessible (0 devices), so a "restart" only creates a
                 # useless thread. The portal (below) is the Flatpak hotkey path; evdev
                 # supervision is for non-sandboxed installs that actually use it.
-                if HAS_EVDEV and not IS_FLATPAK and (self._hotkey_thread is None or not self._hotkey_thread.is_alive()):
+                # ...but NOT when KDE owns the hotkey: there the evdev thread is
+                # intentionally absent (deferred to the compositor to stop the
+                # F3→Find-bar leak), so `_hotkey_thread is None` is the correct
+                # steady state — restarting would spam a defer-and-return every 10s.
+                if (HAS_EVDEV and not IS_FLATPAK and not self._compositor_owns_hotkeys()
+                        and (self._hotkey_thread is None or not self._hotkey_thread.is_alive())):
                     self.log("🔄 Hotkey listener not running - restarting...")
                     self.restart_evdev_listener("supervisor: listener was not alive")
                 # The socket listener can die on a transient bind failure; bring it back if so.
@@ -12680,10 +12713,48 @@ class WayfinderApp(ctk.CTk):
 
         threading.Thread(target=_portal_wrapper, daemon=True).start()
 
+    def _compositor_owns_hotkeys(self) -> bool:
+        """True when KDE has a global shortcut bound to our record action.
+
+        In that case KWin grabs the key (e.g. F3) at the compositor level and
+        trigger_record.py drives us over the socket — so the evdev listener must
+        NOT also bind it. A passive evdev read can't consume the key, so a shared
+        binding both double-fires AND leaks F3 into the focused app (Brave's Find
+        bar, which then captures the dictation). We read KDE's own config, which
+        save_config never rewrites, so this can't be clobbered by the in-app
+        hotkey setting being reset back to F3."""
+        if sys.platform != "linux":
+            return False
+        try:
+            path = os.path.join(
+                os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                "kglobalshortcutsrc",
+            )
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            return False
+        return kde_record_shortcut_active(text)
+
     def _start_evdev_listener(self):
         """Start (or restart) the evdev hotkey listener thread, cleanly stopping any prior one."""
         if not HAS_EVDEV:
             self.log("⚠️ evdev not installed — hotkeys limited to socket/D-Bus methods")
+            return
+
+        # Defer to the compositor when KDE owns the record hotkey: binding it here
+        # too would double-fire and, worse, leak the key (F3) to the focused window
+        # because a passive evdev read can't consume it — that's the dictation
+        # landing in the browser's Find bar. The always-on socket listener stays up,
+        # so KDE's F3 → trigger_record.py → socket trigger still records.
+        if self._compositor_owns_hotkeys():
+            self.log("⌨️ Record hotkey handled by KDE global shortcut — evdev binding skipped "
+                     "(prevents the F3→browser-Find leak); socket trigger active")
+            old_thread = self._hotkey_thread
+            if old_thread is not None and old_thread.is_alive():
+                self._evdev_stop_event.set()
+                old_thread.join(timeout=2.5)
+                self._hotkey_thread = None
             return
 
         hotkey_key = self.config.get("hotkey_key", 67)
