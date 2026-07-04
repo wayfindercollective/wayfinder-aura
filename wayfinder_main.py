@@ -1898,6 +1898,37 @@ def kde_record_shortcut_active(kglobalshortcutsrc_text: str,
     return False
 
 
+def resolve_hotkey_backend(platform: str, is_flatpak: bool, dbus_available: bool,
+                           session_type: str) -> str:
+    """Pick the global-hotkey backend for the current environment.
+
+    Pure mirror of start_hotkey_listener's top-level dispatch, so the
+    cross-desktop behavior is provable without every environment on hand:
+
+      "pynput"      — macOS, OR Flatpak-on-X11 without dbus (XRecord global grab)
+      "portal"      — Flatpak with dbus-python: the XDG GlobalShortcuts portal,
+                      the cross-desktop standard (works on KDE *and* GNOME)
+      "evdev"       — native (non-Flatpak) Linux, reading /dev/input directly.
+                      IDENTICAL on X11 and Wayland — the session type only changes
+                      a log line. _start_evdev_listener then decides bind-vs-defer
+                      (it defers when KDE owns the shortcut; see
+                      _compositor_owns_hotkeys).
+      "unavailable" — Flatpak-on-Wayland without dbus: no portal, no uinput; only
+                      the socket trigger works.
+
+    `session_type` is $XDG_SESSION_TYPE (case-insensitive; anything other than
+    "wayland" — "x11", "tty", "" — is treated as not-Wayland). Pure/headless.
+    """
+    if platform == "darwin":
+        return "pynput"
+    is_wayland = session_type.lower() == "wayland"
+    if is_flatpak:
+        if dbus_available:
+            return "portal"
+        return "unavailable" if is_wayland else "pynput"
+    return "evdev"
+
+
 def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabled_devices=None, log_callback=None,
                     style_toggle_key=None, style_toggle_modifiers=None, grabbed_devices=None):
     import select
@@ -12536,37 +12567,38 @@ class WayfinderApp(ctk.CTk):
         if sys.platform.startswith("linux"):
             self._ensure_gamemode_listener()
 
-        if sys.platform == "darwin":
-            # macOS: pynput global listener reads config live — no evdev, no restart.
-            self._start_pynput_listener()
-            return
-
-        # Inside a Flatpak sandbox: evdev can't read /dev/input, so hotkeys ride the
+        # Single source of truth for the environment→backend decision (mirrored,
+        # and matrix-tested, in resolve_hotkey_backend). Rationale kept below:
+        # inside a Flatpak sandbox evdev can't read /dev/input, so hotkeys ride the
         # GlobalShortcuts portal — BUT the portal needs dbus-python, which the bundle
-        # may not ship. On X11, pynput's XRecord listener works fine through the shared
-        # X socket, so fall back to it rather than dying silently: a missing import must
-        # not take the advertised hotkey down with one invisible UI-log line (exactly
-        # what shipped — F3 was dead in every Flatpak build while the socket path
-        # masked it). Non-sandboxed installs keep using evdev + the 'input' group.
-        if IS_FLATPAK:
-            is_x11 = os.environ.get("XDG_SESSION_TYPE", "").lower() != "wayland"
-            if DBUS_AVAILABLE:
-                self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
-                self._start_portal_listener()
-                return
-            if is_x11:
+        # may not ship; on X11 pynput's XRecord listener works through the shared X
+        # socket, so fall back to it rather than dying silently (F3 was dead in every
+        # Flatpak build while the socket path masked it). Non-sandboxed installs use
+        # evdev + the 'input' group, identically on X11 and Wayland.
+        backend = resolve_hotkey_backend(
+            sys.platform, IS_FLATPAK, DBUS_AVAILABLE,
+            os.environ.get("XDG_SESSION_TYPE", ""),
+        )
+        if backend == "portal":
+            self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
+            self._start_portal_listener()
+            return
+        if backend == "pynput":
+            if IS_FLATPAK:  # macOS uses pynput silently; the Flatpak-X11 fallback logs why
                 msg = "Flatpak X11 — dbus-python missing, portal unavailable; using pynput global listener"
                 self.log(f"🖥️ {msg}")
                 print(f"[Hotkeys] {msg}", flush=True)
-                self._start_pynput_listener()
-                return
+            self._start_pynput_listener()
+            return
+        if backend == "unavailable":
             msg = ("Flatpak Wayland without dbus-python — global hotkeys UNAVAILABLE "
                    "(socket trigger still works)")
             self.log(f"⚠️ {msg}")
             print(f"[Hotkeys] {msg}", flush=True)
             return
-        is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
-        if is_wayland:
+        # backend == "evdev": native Linux. Same mechanism on X11 and Wayland; the
+        # session type only tunes the log line.
+        if os.environ.get("XDG_SESSION_TYPE") == "wayland":
             self.log("🖥️ Wayland detected - using evdev (requires 'input' group)")
         else:
             self.log("🖥️ X11 detected - using evdev")
