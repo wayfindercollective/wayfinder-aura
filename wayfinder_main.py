@@ -5586,7 +5586,7 @@ class WayfinderApp(ctk.CTk):
         self._detect_btn_record = ctk.CTkButton(
             detect_row, text=self._DETECT_IDLE_TEXT,
             font=(self.font_body[0], self.font_sizes["small"], "bold"),
-            fg_color=COLORS["bg_elevated"], hover_color=COLORS["accent_glow"],
+            fg_color=COLORS["bg_elevated"], hover_color=COLORS["bg_hover"],
             border_width=1, border_color=COLORS["accent"],
             text_color=COLORS["accent"], height=32, corner_radius=RADIUS["sm"],
             command=lambda: self._start_hotkey_detect("record"),
@@ -5610,7 +5610,7 @@ class WayfinderApp(ctk.CTk):
                 mod_row, text=mod.capitalize(), variable=var,
                 font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_primary"],
-                fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
                 checkmark_color="#000000", width=24,
                 command=self._on_hotkey_mod_changed,
             ).pack(side="right", padx=(8, 0))
@@ -5821,7 +5821,7 @@ class WayfinderApp(ctk.CTk):
             width=180,
             corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
+            hover_color=COLORS["accent_hover"],
             text_color="#000000",
             command=self._run_inline_benchmark,
         )
@@ -5913,14 +5913,13 @@ class WayfinderApp(ctk.CTk):
         action_row.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
 
         if not is_premium:
-            import webbrowser
             ctk.CTkButton(
-                action_row, text="Get Ultra — $20 (reg. $40)",
+                action_row, text=f"Get Ultra — {self.config.get('premium_price', '$29.99')}",
                 font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 height=32, corner_radius=RADIUS["sm"],
-                fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
-                text_color="#FFFFFF",
-                command=lambda: webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")),
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+                text_color="#000000",
+                command=lambda: self._show_premium_prompt("ultra"),
             ).pack(side="left")
         else:
             ctk.CTkButton(
@@ -5952,7 +5951,7 @@ class WayfinderApp(ctk.CTk):
             variable=self._dev_unlock_var, command=self._toggle_dev_unlock,
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_primary"],
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             checkmark_color="#000000",
         ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 6))
 
@@ -6899,7 +6898,7 @@ class WayfinderApp(ctk.CTk):
             width=180,
             corner_radius=RADIUS["md"],
             fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_glow"],
+            hover_color=COLORS["accent_hover"],
             text_color="#000000",
             command=self._run_api_benchmark,
         )
@@ -7100,7 +7099,7 @@ class WayfinderApp(ctk.CTk):
                 cursor="hand2",
             )
             link.pack(anchor="w", padx=8, pady=(8, 16))
-            link.bind("<Button-1>", lambda e: webbrowser.open(link_url))
+            link.bind("<Button-1>", lambda e: self._open_url(link_url))
             self._bind_link_hover(link, self.font_sizes["small"])
 
             # Save button
@@ -7126,7 +7125,7 @@ class WayfinderApp(ctk.CTk):
                 text="Save",
                 font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_glow"],
+                hover_color=COLORS["accent_hover"],
                 text_color="#000000",
                 width=200,
                 height=44,
@@ -7414,7 +7413,7 @@ class WayfinderApp(ctk.CTk):
         self._detect_btn_style = ctk.CTkButton(
             style_detect_row, text=self._DETECT_IDLE_TEXT,
             font=(self.font_body[0], self.font_sizes["small"], "bold"),
-            fg_color=COLORS["bg_elevated"], hover_color=COLORS["accent_glow"],
+            fg_color=COLORS["bg_elevated"], hover_color=COLORS["bg_hover"],
             border_width=1, border_color=COLORS["accent"],
             text_color=COLORS["accent"], height=32, corner_radius=RADIUS["sm"],
             command=lambda: self._start_hotkey_detect("style"),
@@ -7438,7 +7437,7 @@ class WayfinderApp(ctk.CTk):
                 style_mod_row, text=mod.capitalize(), variable=var,
                 font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_primary"],
-                fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
                 checkmark_color="#000000", width=24,
                 command=self._on_style_hotkey_mod_changed,
             ).pack(side="right", padx=(8, 0))
@@ -8620,7 +8619,7 @@ class WayfinderApp(ctk.CTk):
                 height=40,
                 corner_radius=RADIUS["md"],
                 fg_color=COLORS["accent"],
-                hover_color=COLORS["accent_glow"],
+                hover_color=COLORS["accent_hover"],
                 text_color="#000000",
                 command=save_summary,
             ).pack(side="left", padx=(0, 10))
@@ -9740,7 +9739,7 @@ class WayfinderApp(ctk.CTk):
                     cursor="hand2",
                 )
                 link.pack(anchor="w", pady=(0, 8))
-                link.bind("<Button-1>", lambda e: webbrowser.open("https://platform.openai.com/api-keys"))
+                link.bind("<Button-1>", lambda e: self._open_url("https://platform.openai.com/api-keys"))
                 self._bind_link_hover(link, self.font_sizes["caption"])
 
             else:  # anthropic
@@ -9828,7 +9827,7 @@ class WayfinderApp(ctk.CTk):
                     cursor="hand2",
                 )
                 link.pack(anchor="w", pady=(0, 8))
-                link.bind("<Button-1>", lambda e: webbrowser.open("https://console.anthropic.com"))
+                link.bind("<Button-1>", lambda e: self._open_url("https://console.anthropic.com"))
                 self._bind_link_hover(link, self.font_sizes["caption"])
         
         # Build initial settings
@@ -10715,66 +10714,141 @@ class WayfinderApp(ctk.CTk):
         except:
             pass
 
-    def _show_premium_prompt(self, feature_id: str) -> None:
-        """Show an inline premium upgrade banner within the main window."""
-        import webbrowser
+    def _open_url(self, url: str) -> None:
+        """Open a URL in the user's default browser, reliably from inside the Flatpak.
 
-        # Remove any existing premium banner first
-        if hasattr(self, '_premium_banner') and self._premium_banner is not None:
+        SteamOS runs even the desktop under gamescope (XDG_CURRENT_DESKTOP=gamescope), so
+        the host's xdg-open can't resolve the default handler, and the sandbox's OpenURI
+        portal is unavailable there — webbrowser.open() silently no-ops. `gio open` via
+        flatpak-spawn --host launches the host's default .desktop handler (the default
+        browser, itself often a Flatpak), which is the path that works on the Deck. Falls
+        back to host xdg-open, then webbrowser.open for non-Flatpak installs.
+        Needs --talk-name=org.freedesktop.Flatpak (granted in the manifest)."""
+        import shutil, subprocess, webbrowser
+        if os.environ.get("FLATPAK_ID") and shutil.which("flatpak-spawn"):
+            for opener in (["gio", "open", url], ["xdg-open", url]):
+                try:
+                    r = subprocess.run(
+                        ["flatpak-spawn", "--host", *opener],
+                        timeout=8, capture_output=True,
+                    )
+                    if r.returncode == 0:
+                        self.log("🔗 Opening in your browser…")
+                        return
+                except Exception:
+                    continue
+            self.log("⚠ Couldn't open the link — check your default browser.")
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            self.log(f"⚠ Couldn't open {url}: {e}")
+
+    def _show_premium_prompt(self, feature_id: str) -> None:
+        """Ultra upgrade panel: the locked feature + benefits + pricing + Buy Now / More Info.
+
+        Inline centered panel over a scrim (no popup window / CTkToplevel, per rule #2).
+        Does NOT auto-dismiss — a purchase decision shouldn't vanish mid-read."""
+        if getattr(self, '_premium_banner', None) is not None:
             try:
                 self._premium_banner.destroy()
             except Exception:
                 pass
+            self._premium_banner = None
 
-        msg = self.feature_gate.get_upgrade_message(feature_id)
+        price = self.config.get("premium_price", "$29.99")
+        price_reg = self.config.get("premium_price_regular", "$60")
+        checkout = self.config.get("premium_url", "https://wayfindercollective.io/aura")
+        info_url = self.config.get("premium_info_url", "https://wayfindercollective.io/aura")
+        feature_msg = self.feature_gate.get_upgrade_message(feature_id)
 
-        # Create inline banner at top of window
-        banner = ctk.CTkFrame(
-            self, fg_color=COLORS["bg_elevated"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["accent_dim"],
+        benefits = [
+            ("⚡", "GPU Acceleration", "Large & Turbo models, fast on the Deck"),
+            ("☁", "Cloud Processing", "Groq/OpenAI + GPT/Claude cleanup — best quality"),
+            ("✎", "Tone Presets", "Professional, Casual, Dev & Personal styles"),
+            ("∞", "Chunked Recording", "Unlimited length with live feedback"),
+            ("★", "Large Models + High Accuracy", "Large v3 Turbo, beam search, custom vocab"),
+        ]
+
+        # Centered card over the current view (inline panel, not a popup window — rule #2).
+        card = ctk.CTkFrame(
+            self, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"],
+            border_width=1, border_color=COLORS["accent_dim"],
         )
-        banner.place(relx=0.5, rely=0.0, anchor="n", relwidth=0.9, y=10)
-        self._premium_banner = banner
+        card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.82)
+        self._premium_banner = card
 
-        inner = ctk.CTkFrame(banner, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=16, pady=12)
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=SPACING["tile_pad"], pady=SPACING["tile_pad_y"])
 
         ctk.CTkLabel(
-            inner, text="😇 Ultra Feature",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            inner, text="😇  Wayfinder Ultra",
+            font=(self.font_header[0], self.font_sizes["title"], "bold"),
             text_color=COLORS["accent"],
         ).pack(anchor="w")
 
         ctk.CTkLabel(
-            inner, text=msg, font=(self.font_body[0], self.font_sizes["body"]),
-            text_color=COLORS["text_primary"], wraplength=380, justify="left",
-        ).pack(fill="x", pady=(4, 12))
+            inner, text=feature_msg, font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"], wraplength=440, justify="left",
+        ).pack(fill="x", anchor="w", pady=(6, 10))
+
+        for icon, title, desc in benefits:
+            row = ctk.CTkFrame(inner, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(
+                row, text=icon, font=(self.font_body[0], self.font_sizes["body"]),
+                text_color=COLORS["accent"], width=24,
+            ).pack(side="left", anchor="n")
+            txt = ctk.CTkFrame(row, fg_color="transparent")
+            txt.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(
+                txt, text=title, font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["text_bright"], anchor="w", justify="left",
+            ).pack(fill="x")
+            ctk.CTkLabel(
+                txt, text=desc, font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_muted"], anchor="w", justify="left",
+            ).pack(fill="x")
+
+        ctk.CTkLabel(
+            inner, text=f"{price} launch   ·   regularly {price_reg}",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(12, 8))
+
+        def _dismiss():
+            try:
+                card.place_forget()
+                card.destroy()
+            except Exception:
+                pass
+            self._premium_banner = None
 
         btn_row = ctk.CTkFrame(inner, fg_color="transparent")
         btn_row.pack(fill="x")
 
-        def _dismiss():
-            banner.place_forget()
-            banner.destroy()
-            self._premium_banner = None
-
         ctk.CTkButton(
-            btn_row, text="Get Ultra — $20 (reg. $40)", font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
-            text_color="#FFFFFF", height=34, corner_radius=RADIUS["sm"],
-            command=lambda: [webbrowser.open(self.config.get("premium_url", "https://wayfinder.dev/premium")), _dismiss()],
+            btn_row, text=f"Buy Now — {price}",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            text_color="#000000", height=38, corner_radius=RADIUS["sm"],
+            command=lambda: [self._open_url(checkout), _dismiss()],
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
-            btn_row, text="Dismiss", font=(self.font_body[0], self.font_sizes["body"]),
-            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_card"],
-            text_color=COLORS["text_muted"], height=34, corner_radius=RADIUS["sm"],
-            command=_dismiss,
-        ).pack(side="left")
+            btn_row, text="More Info",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            fg_color=COLORS["bg_elevated"], hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_primary"], height=38, corner_radius=RADIUS["sm"],
+            command=lambda: self._open_url(info_url),
+        ).pack(side="left", padx=(0, 8))
 
-        # Auto-dismiss after 8 seconds
-        banner.after(8000, lambda: _dismiss() if self._premium_banner is banner else None)
+        ctk.CTkButton(
+            btn_row, text="Maybe later",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            fg_color="transparent", hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_muted"], height=38, width=96, corner_radius=RADIUS["sm"],
+            command=_dismiss,
+        ).pack(side="right")
 
     def _activate_license(self) -> None:
         """Activate a license key from the Settings UI."""
@@ -11832,7 +11906,7 @@ class WayfinderApp(ctk.CTk):
                 tab_container, text="Installed",
                 font=(self.font_body[0], self.font_sizes["body"]), height=30,
                 corner_radius=RADIUS["xs"], fg_color=COLORS["accent"], text_color="#000000",
-                hover_color=COLORS["accent_glow"],
+                hover_color=COLORS["accent_hover"],
             )
             installed_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
 
@@ -11872,7 +11946,7 @@ class WayfinderApp(ctk.CTk):
                     ctk.CTkButton(
                         content_area, text="Download Models",
                         font=(self.font_body[0], self.font_sizes["body"], "bold"), height=36, corner_radius=RADIUS["sm"],
-                        fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                        fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
                         text_color="#000000", command=show_download,
                     ).pack(pady=(0, 30))
                     return
@@ -11888,7 +11962,7 @@ class WayfinderApp(ctk.CTk):
 
                     radio = ctk.CTkRadioButton(
                         row, text="", variable=model_var, value=model["path"],
-                        width=18, fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"],
+                        width=18, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
                     )
                     radio.pack(side="left", padx=(8, 4), pady=6)
 
@@ -11927,7 +12001,7 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkButton(
                     content_area, text="Save & Apply",
                     font=(self.font_body[0], self.font_sizes["body"], "bold"), height=38, corner_radius=RADIUS["sm"],
-                    fg_color=COLORS["accent"], hover_color=COLORS["accent_glow"], text_color="#000000",
+                    fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], text_color="#000000",
                     command=save_selection,
                 ).pack(fill="x", padx=8, pady=8)
 

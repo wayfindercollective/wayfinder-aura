@@ -35,6 +35,11 @@ finish-args:
   - --talk-name=org.freedesktop.portal.RemoteDesktop
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
+  # Lets the app open external URLs (Ultra checkout / info pages) via
+  # `flatpak-spawn --host xdg-open`. The OpenURI portal is unavailable on some
+  # SteamOS sessions, so webbrowser.open() silently no-ops there; host-spawn is
+  # the reliable path. See WayfinderApp._open_url.
+  - --talk-name=org.freedesktop.Flatpak
 
   # App config and cache storage
   - --filesystem=xdg-config/wayfinder-aura:create
