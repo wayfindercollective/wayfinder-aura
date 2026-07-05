@@ -34,6 +34,9 @@ class TestTranscriptionBackends:
         """Test getting Groq backend."""
         from wayfinder.core.transcriber import get_backend, GroqWhisperBackend
 
+        # Licensed: cloud backends need the 'cloud_backends' feature (F1 gate); license it so
+        # this exercises backend SELECTION, not the unlicensed downgrade to whisper.cpp.
+        monkeypatch.setattr("wayfinder.license.FeatureGate.has_feature", lambda self, f: True)
         monkeypatch.setenv("GROQ_API_KEY", "test_key")
         sample_config["transcription_backend"] = "groq_whisper"
         sample_config["groq_api_key"] = "test_key"
@@ -45,12 +48,46 @@ class TestTranscriptionBackends:
         """Test getting OpenAI backend."""
         from wayfinder.core.transcriber import get_backend, OpenAIWhisperBackend
 
+        # Licensed (see test_get_backend_groq) so the F1 cloud gate doesn't downgrade.
+        monkeypatch.setattr("wayfinder.license.FeatureGate.has_feature", lambda self, f: True)
         monkeypatch.setenv("OPENAI_API_KEY", "test_key")
         sample_config["transcription_backend"] = "openai_whisper"
         sample_config["openai_api_key"] = "test_key"
         backend = get_backend(sample_config)
 
         assert isinstance(backend, OpenAIWhisperBackend)
+
+    def test_large_model_downgrade_never_points_at_missing_path(self, sample_config, tmp_path, monkeypatch):
+        """Regression: unlicensed + a large local model must downgrade to a free model that
+        EXISTS in the same dir — never a hardcoded missing path. The old code set
+        ~/whisper.cpp/models/ggml-small.bin, which doesn't exist in the Flatpak, so
+        transcription failed and the user's words were lost."""
+        import os
+        from wayfinder.core.transcriber import get_backend
+        # Force unlicensed so the large_models gate fires.
+        monkeypatch.setattr("wayfinder.license.FeatureGate.has_feature", lambda self, f: False)
+        # A large model beside a free model in a tmp dir.
+        (tmp_path / "ggml-large-v3-turbo-q5_0.bin").write_bytes(b"x")
+        (tmp_path / "ggml-base.en.bin").write_bytes(b"x")
+        sample_config["transcription_backend"] = "whisper_cpp"
+        sample_config["model_path"] = str(tmp_path / "ggml-large-v3-turbo-q5_0.bin")
+        backend = get_backend(sample_config)
+        resolved = os.path.expanduser(getattr(backend, "model_path", ""))
+        assert os.path.exists(resolved), f"downgrade produced a missing model_path: {resolved!r}"
+        assert os.path.basename(resolved) == "ggml-base.en.bin"
+
+    def test_large_model_downgrade_keeps_model_when_no_free_alternative(self, sample_config, tmp_path, monkeypatch):
+        """Fail-safe: if no free model exists to fall back to, keep the configured model
+        rather than break transcription with a missing path."""
+        import os
+        from wayfinder.core.transcriber import get_backend
+        monkeypatch.setattr("wayfinder.license.FeatureGate.has_feature", lambda self, f: False)
+        large = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+        large.write_bytes(b"x")  # only a large model present, no free alternative
+        sample_config["transcription_backend"] = "whisper_cpp"
+        sample_config["model_path"] = str(large)
+        backend = get_backend(sample_config)
+        assert os.path.expanduser(getattr(backend, "model_path", "")) == str(large)
 
 
 class TestWhisperCppBackend:
@@ -231,10 +268,13 @@ class TestFasterWhisperBackend:
         assert "Base prompt here." not in result
         assert "Bazzite" in result
 
-    def test_get_backend_faster_whisper(self, sample_config: dict):
+    def test_get_backend_faster_whisper(self, sample_config: dict, monkeypatch: pytest.MonkeyPatch):
         """Test factory creates FasterWhisperBackend with all params."""
         from wayfinder.core.transcriber import get_backend, FasterWhisperBackend
 
+        # Licensed: faster_whisper is a premium backend (F1 gate) — license so this tests
+        # selection, not the unlicensed downgrade.
+        monkeypatch.setattr("wayfinder.license.FeatureGate.has_feature", lambda self, f: True)
         sample_config["transcription_backend"] = "faster_whisper"
         sample_config["no_speech_threshold"] = 0.4
         sample_config["faster_whisper_vad_enabled"] = False
