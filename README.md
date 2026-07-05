@@ -2,17 +2,20 @@
 
 **Press a key. Speak. Your words appear wherever your cursor is.**
 
-Wayfinder Aura is local voice dictation for Linux. Transcription runs on *your*
-machine with whisper.cpp — GPU-accelerated, working offline, in any app. Your
-voice never leaves your computer.
+Wayfinder Aura is local-first voice dictation for Linux. By default,
+transcription runs on *your* machine with whisper.cpp — GPU-accelerated, working
+offline, in any app. In local mode your voice never leaves your computer;
+optional cloud backends are there if you choose them.
 
 ![Wayfinder Aura UI](assets/icon.png)
 
 ## Why Wayfinder Aura
 
-- **Actually private.** No cloud account, no audio uploads, no telemetry.
-  Speech-to-text and AI cleanup both run locally. Cloud backends exist, but
-  they're opt-in and off by default.
+- **Local by default.** Out of the box, speech-to-text and AI cleanup both run
+  locally — no audio uploads. Optional cloud transcription backends
+  (OpenAI/Groq/Anthropic) are opt-in and off by default. The app checks online
+  for model updates weekly (toggleable), and activating a license contacts the
+  activation server.
 - **Fast where it counts.** Vulkan GPU acceleration on AMD, Intel, and NVIDIA,
   with automatic CPU fallback on machines where GPU inference isn't available —
   dictation works everywhere, it's just faster where it can be.

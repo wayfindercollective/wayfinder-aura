@@ -136,7 +136,7 @@ class ModeSelector(ctk.CTkFrame):
         
         # Display labels and icons for each mode
         self.display_info = {
-            "local": {"label": "Local", "icon": "🔒", "desc": "100% Private"},
+            "local": {"label": "Local", "icon": "🔒", "desc": "Private local mode"},
             "remote": {"label": "Remote", "icon": "☁️", "desc": "Cloud Processing"},
         }
         

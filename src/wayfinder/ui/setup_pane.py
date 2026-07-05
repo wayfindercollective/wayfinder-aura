@@ -26,6 +26,7 @@ wizard used.
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 from typing import Optional
 
@@ -212,8 +213,18 @@ class SetupSequence:
 
 
 def all_required_ok(deps) -> bool:
-    """True when every REQUIRED dependency is satisfied."""
-    return all(d.is_ok for d in deps if d.required)
+    """True when every REQUIRED dependency is satisfied.
+
+    A required dep whose status carries a *blocking* warning (e.g. the ydotool
+    binary is installed but its daemon is down, so text injection will actually
+    fail) does NOT count as OK — otherwise Setup would declare "All set!" while
+    typing is silently broken (Codex review F11). The row still shows its gold
+    warning badge; only the top-level gate treats it as not-ok.
+    """
+    return all(
+        d.is_ok and not (d.status is not None and d.status.blocking_warning)
+        for d in deps if d.required
+    )
 
 
 def any_missing(deps) -> bool:
@@ -680,6 +691,22 @@ class SetupPane:
         row = _DepRow(self._ctk, self._dep_frame, dep, on_install=None)
         row.pack(fill="x", pady=(0, 4))
         self._dep_rows[dep.id] = row
+
+        # One-line Wayland approval hint under the text-injection row: on
+        # KDE/Wayland the compositor gates synthetic input behind a one-time
+        # "allow input control" prompt that must be approved or typing fails.
+        if dep.id == 'ydotool' and sys.platform != 'darwin':
+            hint = self._ctk.CTkLabel(
+                self._dep_frame,
+                text="On Wayland, approve the one-time 'allow input control' "
+                     "prompt so Aura can type for you.",
+                font=(FONTS['body'][0], FONT_SIZES['caption']),
+                text_color=COLORS['text_muted'],
+                anchor='w',
+                justify='left',
+                wraplength=360,
+            )
+            hint.pack(fill='x', anchor='w', padx=(SPACING['md'], 0), pady=(0, SPACING['xs']))
 
     def _start_checks(self):
         """Run all dependency checks in a background thread."""

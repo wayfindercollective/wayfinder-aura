@@ -1166,6 +1166,46 @@ class FasterWhisperBackend(TranscriptionBackend):
             raise TranscriptionError(f"Faster-Whisper transcription failed: {e}")
 
 
+def _friendly_cloud_error(e: Exception) -> str:
+    """
+    Map a raw cloud-backend exception to a plain-language, user-facing message.
+
+    Inspects an HTTP status code on the exception where the SDK exposes one, and
+    otherwise falls back to string-matching str(e). Returns a friendly string —
+    the caller still raises TranscriptionError(...) with it.
+    """
+    status = getattr(e, "status_code", None) or getattr(e, "status", None)
+    concise = ' '.join(str(e).split())[:200]
+    msg = concise.lower()
+
+    is_auth = (
+        status == 401
+        or "401" in msg
+        or "unauthorized" in msg
+        or "api key" in msg
+        or "authentication" in msg
+    )
+    is_rate = status == 429 or "429" in msg or "rate limit" in msg
+    is_network = (
+        "connection" in msg
+        or "timeout" in msg
+        or "timed out" in msg
+        or "dns" in msg
+        or "getaddrinfo" in msg
+        or "network" in msg
+        or "name resolution" in msg
+        or "unreachable" in msg
+    )
+
+    if is_auth:
+        return "Cloud API key was rejected — check it in Settings."
+    if is_rate:
+        return "Cloud service is rate-limited — try again in a moment."
+    if is_network:
+        return "Couldn't reach the cloud service — check your internet."
+    return f"Cloud transcription failed: {concise}"
+
+
 class GroqWhisperBackend(TranscriptionBackend):
     """
     Groq Whisper API backend for ultra-fast cloud transcription.
@@ -1337,7 +1377,7 @@ class GroqWhisperBackend(TranscriptionBackend):
             
         except Exception as e:
             print(f"[Groq Whisper] ✗ Error: {e}")
-            raise TranscriptionError(f"Groq Whisper API call failed: {e}")
+            raise TranscriptionError(_friendly_cloud_error(e))
 
 
 class OpenAIWhisperBackend(TranscriptionBackend):
@@ -1478,7 +1518,7 @@ class OpenAIWhisperBackend(TranscriptionBackend):
             
         except Exception as e:
             print(f"[OpenAI Whisper] ✗ Error: {e}")
-            raise TranscriptionError(f"OpenAI Whisper API call failed: {e}")
+            raise TranscriptionError(_friendly_cloud_error(e))
 
 
 def warm_up_transcription(config: dict) -> None:
@@ -1510,6 +1550,60 @@ def get_backend(config: dict) -> TranscriptionBackend:
         A TranscriptionBackend instance
     """
     backend_type = config.get("transcription_backend", "whisper_cpp")
+
+    # License gating (F1): a hand-edited config.json must not unlock a premium backend
+    # (Groq/OpenAI cloud, Faster-Whisper) or a large model without a license. When the
+    # selected backend/model needs a premium feature the gate doesn't grant, fall back
+    # to the free local whisper.cpp backend (with a small model) and log one line. The
+    # licensed path and the separate GPU gate below are untouched.
+    try:
+        from wayfinder.license import get_feature_gate
+        _gate = get_feature_gate()
+    except Exception:
+        _gate = None
+
+    def _has_feature(feature: str) -> bool:
+        try:
+            return bool(_gate.has_feature(feature)) if _gate is not None else False
+        except Exception:
+            return False
+
+    def _is_large_model(name: str) -> bool:
+        n = (name or "").lower()
+        return "large" in n or "medium" in n or "turbo" in n
+
+    _premium_backend_feature = {
+        "groq_whisper": "cloud_backends",
+        "openai_whisper": "cloud_backends",
+        "faster_whisper": "faster_whisper",
+    }.get(backend_type)
+
+    # The local model that would be loaded (cloud backends don't gate on large_models —
+    # their "whisper-large-v3" is the standard cloud model, not the premium local tier).
+    _local_model = (
+        config.get("faster_whisper_model", "small")
+        if backend_type == "faster_whisper"
+        else config.get("model_path", "")
+    )
+
+    _gate_reason = None
+    if _premium_backend_feature and not _has_feature(_premium_backend_feature):
+        _gate_reason = (f"backend '{backend_type}' requires the "
+                        f"'{_premium_backend_feature}' license feature")
+    elif (backend_type not in ("groq_whisper", "openai_whisper")
+          and _is_large_model(_local_model) and not _has_feature("large_models")):
+        _gate_reason = (f"model '{_local_model}' requires the "
+                        f"'large_models' license feature")
+
+    if _gate_reason:
+        print(f"[Transcription] {_gate_reason} — falling back to free local "
+              f"whisper.cpp (small model).")
+        backend_type = "whisper_cpp"
+        config = dict(config)
+        config["transcription_backend"] = "whisper_cpp"
+        # Don't honor a hand-edited large model_path on the fallback path.
+        if _is_large_model(config.get("model_path", "")):
+            config["model_path"] = "~/whisper.cpp/models/ggml-small.bin"
 
     # GPU acceleration is a PREMIUM feature — enforce here (the backend factory), not
     # only in the UI, so editing config.json can't unlock GPU without a license. Every
@@ -1694,10 +1788,26 @@ def _collapse_whisper_repetitions(text: str) -> str:
     return " ".join(words)
 
 
+# Known Whisper phrase-hallucinations: on silence/noise Whisper often emits one of
+# these stock YouTube-caption phrases. Only ever matched against the ENTIRE cleaned
+# output (never stripped mid-sentence) — a real utterance that merely contains one of
+# these is left untouched.
+_WHISPER_PHRASE_HALLUCINATIONS = frozenset({
+    'thank you for watching',
+    'thanks for watching',
+    'thank you',
+    'thank you.',
+    'please subscribe',
+    'like and subscribe',
+    'subtitles by the amara.org community',
+    'you',
+})
+
+
 def clean_whisper_artifacts(text: str) -> str:
     """
     Clean up common Whisper transcription artifacts.
-    
+
     This runs on ALL transcriptions regardless of post-processing settings.
     Removes known Whisper hallucination patterns:
     - Repeated dots/periods (. . . . . or .........)
@@ -1781,12 +1891,20 @@ def clean_whisper_artifacts(text: str) -> str:
 
     text = text.strip()
 
+    # Drop the whole thing if the entire cleaned output is a known Whisper
+    # phrase-hallucination (the stock YouTube-caption strings it emits on silence).
+    # Only the ENTIRE output is checked — never a mid-sentence substring.
+    _phrase_key = text.lower().rstrip('.!?,;: ').strip()
+    if _phrase_key in _WHISPER_PHRASE_HALLUCINATIONS:
+        print(f"[Transcription] Dropped Whisper phrase-hallucination: {text!r}")
+        return ""
+
     # Log if we cleaned something
     if text != original.strip():
         removed_chars = len(original.strip()) - len(text)
         if removed_chars > 5:  # Only log if we removed substantial artifacts
             print(f"[Transcription] Cleaned {removed_chars} chars of Whisper artifacts")
-    
+
     return text
 
 

@@ -45,8 +45,10 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 mkdir -p "${XDG_CONFIG_HOME}/wayfinder-aura"
 mkdir -p "${XDG_CACHE_HOME}/wayfinder-aura"
 
-# GPU environment hints for Vulkan
-export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/radeon_icd.x86_64.json:/usr/share/vulkan/icd.d/intel_icd.x86_64.json}"
+# GPU environment for Vulkan: do NOT pin VK_ICD_FILENAMES. Pinning it to only the
+# radeon+intel ICDs hid the NVIDIA ICD and silently disabled GPU accel on NVIDIA
+# hosts. The freedesktop GL extension (finish-args --device=dri) supplies every
+# host ICD, so let the Vulkan loader auto-discover them (AMD/Deck path unaffected).
 
 # Launch the application
 exec python3 /app/lib/wayfinder-aura/main.py "$@"

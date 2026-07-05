@@ -304,8 +304,11 @@ OUTPUT_NAME="Wayfinder_Aura-${VERSION}-${ARCH}.AppImage"
 ABS_APPDIR="$(cd "$APPDIR" && pwd)"
 ABS_OUTPUT="$(pwd)/$OUTPUT_NAME"
 
-ARCH="$ARCH" "$APPIMAGETOOL" --no-appstream "$ABS_APPDIR" "$ABS_OUTPUT" || {
-    ARCH="$ARCH" "$APPIMAGETOOL" --appimage-extract-and-run --no-appstream "$ABS_APPDIR" "$ABS_OUTPUT"
+# AppImageUpdate self-update info (-u embeds update info + emits a .zsync alongside the AppImage)
+UPDATE_INFO="gh-releases-zsync|wayfindercollective|wayfinder-aura|latest|Wayfinder_Aura-*${ARCH}.AppImage.zsync"
+
+ARCH="$ARCH" "$APPIMAGETOOL" --no-appstream -u "$UPDATE_INFO" "$ABS_APPDIR" "$ABS_OUTPUT" || {
+    ARCH="$ARCH" "$APPIMAGETOOL" --appimage-extract-and-run --no-appstream -u "$UPDATE_INFO" "$ABS_APPDIR" "$ABS_OUTPUT"
 }
 
 # Cleanup

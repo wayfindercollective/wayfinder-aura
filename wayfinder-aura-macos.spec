@@ -15,7 +15,7 @@ block_cipher = None
 PROJECT_ROOT = Path(SPECPATH)
 SRC_DIR = PROJECT_ROOT / 'src'
 
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 BUILD_DATE = datetime.now().strftime('%Y-%m-%d')
 
 a = Analysis(

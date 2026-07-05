@@ -19,6 +19,7 @@ from wayfinder.core.injector import (
     prime_wayland_injection,
     _get_ydotool_binary,
     _get_ydotool_env,
+    _inject_text_xdotool,
 )
 
 
@@ -326,3 +327,156 @@ class TestInjectionError:
     def test_message_preserved(self):
         err = InjectionError("custom message")
         assert str(err) == "custom message"
+
+
+# =============================================================================
+# _inject_text_xdotool — the PREFERRED X11 path + drift-refocus logic
+# =============================================================================
+
+
+def _xdotool_dispatcher(active_window="win-1", type_result=None):
+    """Build a subprocess.run side_effect that routes by xdotool subcommand.
+
+    getactivewindow -> returns `active_window` on stdout; windowactivate/type ->
+    return `type_result` (default success). Any windowactivate/type call is also
+    recorded so tests can assert whether the drift-refocus fired.
+    """
+    if type_result is None:
+        type_result = MagicMock(returncode=0, stdout="", stderr="")
+
+    def side_effect(cmd, *args, **kwargs):
+        subcmd = cmd[1] if len(cmd) > 1 else ""
+        if subcmd == "getactivewindow":
+            return MagicMock(returncode=0, stdout=f"{active_window}\n", stderr="")
+        return type_result
+
+    return side_effect
+
+
+class TestInjectTextXdotool:
+    """Tests for _inject_text_xdotool: the reliable X11 XTEST path and its
+    getactivewindow -> windowactivate --sync -> 60ms-settle drift-refocus guard
+    (a redundant activate before typing previously dropped whole injections)."""
+
+    def test_already_focused_skips_windowactivate(self):
+        # getactivewindow == target_window -> type straight away, NO windowactivate.
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher(active_window="win-42")) as mock_run, \
+             patch("time.sleep") as mock_sleep:
+            _inject_text_xdotool("hello", "instant", target_window="win-42")
+
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        assert not any("windowactivate" in cmd for cmd in calls)
+        # No settle sleep when we didn't activate.
+        mock_sleep.assert_not_called()
+        # getactivewindow then type — two calls.
+        assert calls[0] == ["xdotool", "getactivewindow"]
+        assert calls[-1][1] == "type"
+
+    def test_drift_activates_target_before_typing(self):
+        # getactivewindow != target_window -> windowactivate --sync <target> then settle then type.
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher(active_window="other-win")) as mock_run, \
+             patch("time.sleep") as mock_sleep:
+            _inject_text_xdotool("hello", "instant", target_window="win-42")
+
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        activate = ["xdotool", "windowactivate", "--sync", "win-42"]
+        assert activate in calls
+        # windowactivate must precede the type call.
+        activate_idx = calls.index(activate)
+        type_idx = next(i for i, cmd in enumerate(calls) if cmd[1] == "type")
+        assert activate_idx < type_idx
+        # Settle so the focus-in completes before synthetic keys.
+        mock_sleep.assert_called_once_with(0.06)
+
+    def test_no_target_window_skips_focus_check(self):
+        # Without a target_window there's no getactivewindow/windowactivate — just type.
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep") as mock_sleep:
+            _inject_text_xdotool("hello", "instant")
+
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        assert len(calls) == 1
+        assert calls[0][1] == "type"
+        mock_sleep.assert_not_called()
+
+    def test_type_command_passes_text_as_trailing_arg(self):
+        # Text is a trailing argv element after `--` — no shell, no injection surface.
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("rm -rf ~; echo pwned", "instant")
+
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        assert type_cmd[0] == "xdotool"
+        assert "--" in type_cmd
+        assert type_cmd[-1] == "rm -rf ~; echo pwned"
+        # The text sits after the `--` guard so it can never be read as a flag.
+        assert type_cmd.index("--") == len(type_cmd) - 2
+
+    def test_typing_speed_maps_to_delay(self):
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("hi", "normal")
+
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        delay_idx = type_cmd.index("--delay") + 1
+        assert type_cmd[delay_idx] == "12"
+
+    def test_unknown_speed_uses_safe_default_delay(self):
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("hi", "warp_speed")
+
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        delay_idx = type_cmd.index("--delay") + 1
+        assert type_cmd[delay_idx] == "2"
+
+    def test_nonzero_exit_raises_injection_error(self):
+        failure = MagicMock(returncode=1, stdout="", stderr="X connection refused")
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher(type_result=failure)), \
+             patch("time.sleep"):
+            with pytest.raises(InjectionError, match="xdotool failed"):
+                _inject_text_xdotool("hello", "instant")
+
+    def test_missing_binary_raises_injection_error(self):
+        # xdotool absent from PATH -> FileNotFoundError -> graceful InjectionError.
+        def side_effect(cmd, *args, **kwargs):
+            raise FileNotFoundError("xdotool")
+
+        with patch("wayfinder.core.injector.subprocess.run", side_effect=side_effect), \
+             patch("time.sleep"):
+            with pytest.raises(InjectionError, match="xdotool not found"):
+                _inject_text_xdotool("hello", "instant")
+
+    def test_timeout_raises_injection_error(self):
+        def side_effect(cmd, *args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="xdotool", timeout=120)
+
+        with patch("wayfinder.core.injector.subprocess.run", side_effect=side_effect), \
+             patch("time.sleep"):
+            with pytest.raises(InjectionError, match="timed out"):
+                _inject_text_xdotool("hello", "instant")
+
+    def test_focus_check_failure_falls_through_to_type(self):
+        # If getactivewindow itself raises, already_focused is False but the activate
+        # is best-effort (swallowed) — typing must still happen (no crash).
+        def side_effect(cmd, *args, **kwargs):
+            if cmd[1] == "getactivewindow":
+                raise OSError("display gone")
+            if cmd[1] == "windowactivate":
+                raise OSError("display gone")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=side_effect) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("hello", "instant", target_window="win-42")
+
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        assert type_cmd[-1] == "hello"

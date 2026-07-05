@@ -145,6 +145,157 @@ class TestLicenseStorage:
         assert "No license" in loaded.error_message
 
 
+class TestVerifyToken:
+    """Real Ed25519 crypto coverage for _verify_token (the paid offline gate).
+
+    These tests deliberately do NOT use the mock_online_license fixture (which
+    stubs _verify_token out); they generate a throwaway Ed25519 keypair, point
+    the module's public key at it via monkeypatch, and sign real tokens so the
+    actual verify/expiry/machine-binding branches run.
+    """
+
+    @staticmethod
+    def _make_token(private_key, payload: dict) -> str:
+        """Build a token exactly as the licensing service does: base64url(JSON
+        payload) '.' base64url(Ed25519 sig over the payload_b64 ASCII bytes)."""
+        import base64
+        import json
+
+        payload_b64 = (
+            base64.urlsafe_b64encode(json.dumps(payload).encode())
+            .rstrip(b"=")
+            .decode()
+        )
+        sig = private_key.sign(payload_b64.encode())
+        sig_b64 = base64.urlsafe_b64encode(sig).rstrip(b"=").decode()
+        return f"{payload_b64}.{sig_b64}"
+
+    @pytest.fixture
+    def signing_key(self, monkeypatch: pytest.MonkeyPatch):
+        """Generate a test keypair and trust its public key in the module."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+
+        private_key = Ed25519PrivateKey.generate()
+        pub_hex = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        ).hex()
+        monkeypatch.setattr("wayfinder.license.LICENSE_PUBLIC_KEY_HEX", pub_hex)
+        return private_key
+
+    def test_valid_token_returns_payload(self, signing_key):
+        """A correctly-signed, unexpired, machine-matched token verifies."""
+        import time
+        from wayfinder.license import _verify_token
+
+        now = int(time.time())
+        payload = {"plan": "pro", "machineId": "MACHINE123", "iat": now, "exp": now + 3600, "v": 1}
+        token = self._make_token(signing_key, payload)
+
+        result = _verify_token(token, machine_id="MACHINE123")
+
+        assert result is not None
+        assert result["plan"] == "pro"
+        assert result["machineId"] == "MACHINE123"
+
+    def test_valid_token_without_machine_id(self, signing_key):
+        """When no machine_id is supplied, binding is not enforced."""
+        import time
+        from wayfinder.license import _verify_token
+
+        now = int(time.time())
+        payload = {"plan": "pro", "machineId": "MACHINE123", "iat": now, "exp": now + 3600}
+        token = self._make_token(signing_key, payload)
+
+        result = _verify_token(token)
+
+        assert result is not None
+        assert result["machineId"] == "MACHINE123"
+
+    def test_tampered_signature_rejected(self, signing_key):
+        """A token whose signature is corrupted fails verification."""
+        import time
+        from wayfinder.license import _verify_token
+
+        now = int(time.time())
+        payload = {"plan": "pro", "machineId": "MACHINE123", "iat": now, "exp": now + 3600}
+        token = self._make_token(signing_key, payload)
+
+        payload_b64, sig_b64 = token.split(".", 1)
+        # Flip a character in the signature segment.
+        tampered_sig = ("A" if sig_b64[0] != "A" else "B") + sig_b64[1:]
+        tampered = f"{payload_b64}.{tampered_sig}"
+
+        assert _verify_token(tampered, machine_id="MACHINE123") is None
+
+    def test_tampered_payload_rejected(self, signing_key):
+        """Editing the payload after signing invalidates the signature."""
+        import base64
+        import json
+        import time
+        from wayfinder.license import _verify_token
+
+        now = int(time.time())
+        payload = {"plan": "free", "machineId": "MACHINE123", "iat": now, "exp": now + 3600}
+        token = self._make_token(signing_key, payload)
+        _, sig_b64 = token.split(".", 1)
+
+        # Attacker swaps in an upgraded payload but keeps the original signature.
+        forged_payload = {"plan": "pro", "machineId": "MACHINE123", "iat": now, "exp": now + 3600}
+        forged_b64 = (
+            base64.urlsafe_b64encode(json.dumps(forged_payload).encode())
+            .rstrip(b"=")
+            .decode()
+        )
+        forged = f"{forged_b64}.{sig_b64}"
+
+        assert _verify_token(forged, machine_id="MACHINE123") is None
+
+    def test_expired_token_rejected(self, signing_key):
+        """A validly-signed token past its exp is rejected (grace elapsed)."""
+        import time
+        from wayfinder.license import _verify_token
+
+        now = int(time.time())
+        payload = {"plan": "pro", "machineId": "MACHINE123", "iat": now - 7200, "exp": now - 3600}
+        token = self._make_token(signing_key, payload)
+
+        assert _verify_token(token, machine_id="MACHINE123") is None
+
+    def test_wrong_machine_id_rejected(self, signing_key):
+        """A token bound to a different machine is rejected."""
+        import time
+        from wayfinder.license import _verify_token
+
+        now = int(time.time())
+        payload = {"plan": "pro", "machineId": "MACHINE123", "iat": now, "exp": now + 3600}
+        token = self._make_token(signing_key, payload)
+
+        assert _verify_token(token, machine_id="OTHERMACHINE") is None
+
+    def test_malformed_token_rejected(self, signing_key):
+        """Empty / dot-less tokens are rejected without raising."""
+        from wayfinder.license import _verify_token
+
+        assert _verify_token("") is None
+        assert _verify_token("no-dot-here") is None
+
+    def test_wrong_public_key_rejected(self, signing_key):
+        """A token signed by a different key does not verify against the trusted key."""
+        import time
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from wayfinder.license import _verify_token
+
+        now = int(time.time())
+        payload = {"plan": "pro", "machineId": "MACHINE123", "iat": now, "exp": now + 3600}
+        # Sign with an untrusted key (signing_key fixture trusts a different pubkey).
+        attacker_key = Ed25519PrivateKey.generate()
+        token = self._make_token(attacker_key, payload)
+
+        assert _verify_token(token, machine_id="MACHINE123") is None
+
+
 class TestFeatureGate:
     """Test feature gating functionality."""
 
