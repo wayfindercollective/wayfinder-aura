@@ -1601,9 +1601,25 @@ def get_backend(config: dict) -> TranscriptionBackend:
         backend_type = "whisper_cpp"
         config = dict(config)
         config["transcription_backend"] = "whisper_cpp"
-        # Don't honor a hand-edited large model_path on the fallback path.
+        # Downgrade a large model to a FREE model that actually EXISTS — never point at a
+        # missing path (that fails transcription and loses the user's words). Prefer a free
+        # model in the same directory, then the bundled Flatpak base.en; if none is found,
+        # KEEP the configured model (fail-safe) rather than break dictation.
         if _is_large_model(config.get("model_path", "")):
-            config["model_path"] = "~/whisper.cpp/models/ggml-small.bin"
+            import os as _os
+            _cur = _os.path.expanduser(config.get("model_path", ""))
+            _dir = _os.path.dirname(_cur)
+            _free = None
+            for _name in ("ggml-base.en.bin", "ggml-small.en.bin", "ggml-tiny.en.bin",
+                          "ggml-base.bin", "ggml-small.bin", "ggml-tiny.bin"):
+                _cand = _os.path.join(_dir, _name) if _dir else _name
+                if _os.path.exists(_cand):
+                    _free = _cand
+                    break
+            if _free is None and _os.path.exists("/app/share/whisper-models/ggml-base.en.bin"):
+                _free = "/app/share/whisper-models/ggml-base.en.bin"  # bundled (Flatpak)
+            if _free is not None:
+                config["model_path"] = _free
 
     # GPU acceleration is a PREMIUM feature — enforce here (the backend factory), not
     # only in the UI, so editing config.json can't unlock GPU without a license. Every
