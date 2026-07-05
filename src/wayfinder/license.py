@@ -551,13 +551,12 @@ class FeatureGate:
         return self.is_premium
     
     def get_upgrade_message(self, feature_id: str) -> str:
-        """Get upgrade prompt for a locked feature."""
+        """Short description of the locked feature. Pricing + the buy/info CTAs live in the
+        upgrade prompt UI (see WayfinderApp._show_premium_prompt), not in this string."""
         if feature_id in PREMIUM_FEATURES:
             name, desc = PREMIUM_FEATURES[feature_id]
-            return (f"🔒 {name} requires Wayfinder Aura Ultra.\n\n{desc}\n\n"
-                    f"Support the project — get Ultra for $20 (launch price, reg. $40) "
-                    f"at wayfinder.dev/premium and earn your halo 😇")
-        return "This feature requires Wayfinder Aura Ultra."
+            return f"🔒 {name} is a Wayfinder Ultra feature.\n\n{desc}"
+        return "This is a Wayfinder Ultra feature."
     
     def activate(self, key: str) -> LicenseInfo:
         """

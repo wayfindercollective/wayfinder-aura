@@ -278,7 +278,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "dismissed_updates": [],  # List of update keys the user dismissed
 
     # License / Premium
-    "premium_url": "https://wayfinder.dev/premium",  # URL for premium purchase page
+    # "Buy Now" goes straight to the Ultra checkout; "More Info" goes to the landing page.
+    # Both live in config so they're a one-line change without a rebuild.
+    "premium_url": "https://wayfindercollective.io/checkout/m97bzwd3j9d0628vakzf94mggd8824n9",  # Buy Now / checkout
+    "premium_info_url": "https://wayfindercollective.io/aura",  # More Info / landing page
+    "premium_price": "$29.99",        # launch price
+    "premium_price_regular": "$60",   # regular price (shown struck-through / as "reg.")
 
     # Setup wizard
     "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)
