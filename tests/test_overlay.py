@@ -57,6 +57,13 @@ class TestIPCCommandFormat:
         assert parsed["cmd"] == "style"
         assert parsed["value"] in ("minimal", "professional", "casual", "dev", "personal")
 
+    def test_quality_command_format(self):
+        """'quality' command carries 'high' or 'performance' (live overlay-quality toggle)."""
+        cmd = {"cmd": "quality", "value": "high"}
+        parsed = json.loads(json.dumps(cmd))
+        assert parsed["cmd"] == "quality"
+        assert parsed["value"] in ("high", "performance")
+
     def test_quit_command_format(self):
         cmd = {"cmd": "quit"}
         parsed = json.loads(json.dumps(cmd))

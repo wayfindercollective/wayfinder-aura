@@ -3151,9 +3151,11 @@ class OverlayController:
                     scale = self._config_ref.get("overlay_scale", 0.7)
                     offset = self._config_ref.get("overlay_vertical_offset", 0)
                     anchor = self._config_ref.get("overlay_anchor", "bottom-center")
+                    quality = self._config_ref.get("overlay_quality", "high")
                     cmd_args.append(f"--scale={scale}")
                     cmd_args.append(f"--offset={offset}")
                     cmd_args.append(f"--anchor={anchor}")
+                    cmd_args.append(f"--quality={quality}")
                 self._process = subprocess.Popen(
                     cmd_args,
                     stdin=subprocess.PIPE,
@@ -3317,6 +3319,10 @@ class OverlayController:
     def set_anchor(self, anchor: str):
         """Set the overlay corner/edge anchor (e.g. 'bottom-center', 'top-right')."""
         self._send_command({"cmd": "anchor", "value": anchor})
+
+    def set_quality(self, quality: str):
+        """Set the overlay render quality live ('high' | 'performance')."""
+        self._send_command({"cmd": "quality", "value": quality})
 
     def quit(self):
         """Shut down the overlay subprocess."""
@@ -5400,7 +5406,28 @@ class WayfinderApp(ctk.CTk):
             audio_content, "Microphone", mic_options, self.mic_var,
             self._on_microphone_selected, tooltip=SETTING_TOOLTIPS["microphone"], width=160,
         )
-        
+
+        # Refresh-devices affordance: rescan PortAudio so a mic plugged in AFTER launch (e.g. a
+        # USB mic) appears here without restarting the app. PortAudio snapshots devices at init,
+        # so a hotplugged mic is otherwise invisible to this process until restart.
+        _mic_refresh_row = ctk.CTkFrame(audio_content, fg_color="transparent")
+        _mic_refresh_row.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkButton(
+            _mic_refresh_row, text="Refresh devices",
+            image=get_icon("rotate-ccw", 14, COLORS["text_secondary"]),
+            compound="left",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            height=28, width=150, corner_radius=RADIUS["sm"],
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=self._refresh_mic_devices,
+        ).pack(side="right")
+        ToolTip(
+            _mic_refresh_row,
+            "Rescan audio inputs. Use this after plugging in a mic while the app is running —\n"
+            "it shows up here without a restart.",
+        )
+
         # Audio Processing dropdown
         preprocess_options = ["Off", "Light", "Medium", "Heavy"]
         current_preprocess = self.config.get("audio_preprocessing", "light").capitalize()
@@ -5633,6 +5660,10 @@ class WayfinderApp(ctk.CTk):
 
         # Overlay Position slider (fine-tunes the chosen anchor)
         self._create_overlay_position_slider_row(overlay_content)
+
+        # Overlay Quality toggle — High (default) animates the ambient wave; Performance holds
+        # the overlay still when idle to save CPU/battery. Applies live (no restart).
+        self._create_overlay_quality_toggle_row(overlay_content)
 
         # Game Mode dictation toggle (SteamOS / Steam Deck only): in Game Mode the overlay
         # can't render over a fullscreen game, so this swaps it for audio cues and keeps the
@@ -7763,6 +7794,48 @@ class WayfinderApp(ctk.CTk):
 
         # Update compatibility check
         self._update_compatibility_banner()
+
+    def _create_overlay_quality_toggle_row(self, parent) -> None:
+        """Inline toggle row for overlay render quality (label + CTkSwitch). On = High."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=(2, 6))
+        ctk.CTkLabel(
+            row, text="Overlay Quality",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        # On = High (default, ambient wave animates); Off = Performance (still when idle).
+        self.overlay_quality_var = ctk.BooleanVar(
+            value=self.config.get("overlay_quality", "high") != "performance"
+        )
+        toggle = ctk.CTkSwitch(
+            row, text="",
+            variable=self.overlay_quality_var,
+            command=self._on_overlay_quality_toggled,
+            width=40, height=22, switch_width=36, switch_height=18, corner_radius=9,  # pill: height/2, intentional off-token
+            fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"], button_hover_color=COLORS["text_bright"],
+        )
+        toggle.pack(side="right")
+        ToolTip(
+            row,
+            "Overlay Quality — High: the corner waveform animates continuously for the\n"
+            "smoothest look. Performance: when you're not dictating, the overlay collapses to a\n"
+            "compact static pill showing just your style — no waveform — to save CPU and battery\n"
+            "on the Deck. The waveform still animates while you dictate.",
+        )
+
+    def _on_overlay_quality_toggled(self) -> None:
+        """Persist the Overlay Quality toggle and apply it to the live overlay immediately."""
+        quality = "high" if self.overlay_quality_var.get() else "performance"
+        self.config["overlay_quality"] = quality
+        save_config(self.config)
+        if getattr(self, "overlay_controller", None) is not None:
+            try:
+                self.overlay_controller.set_quality(quality)
+            except Exception as e:
+                self.log(f"⚠ Could not apply overlay quality live: {e}")
+        self.log(f"🎯 Overlay quality: {quality}")
 
     def _create_game_mode_toggle_row(self, parent) -> None:
         """Inline toggle row for SteamOS Game Mode dictation (label + CTkSwitch)."""
@@ -10859,6 +10932,29 @@ class WayfinderApp(ctk.CTk):
             pass
         
         return f"Device {device_id}  ▼"
+
+    def _refresh_mic_devices(self) -> None:
+        """Rescan PortAudio (picks up a hotplugged mic) and repopulate the Microphone dropdown."""
+        try:
+            if getattr(self, "warm_mic", None) is not None:
+                if self.warm_mic.in_use:
+                    self.log("⚠ Finish the current dictation before refreshing devices")
+                    return
+                self.warm_mic.rescan()
+            else:
+                from wayfinder.core.recorder import _pa_rescan
+                _pa_rescan()
+        except Exception as e:
+            self.log(f"⚠ Device rescan failed: {e}")
+        # Repopulate the dropdown from the fresh device table.
+        try:
+            options, current = self._get_microphone_dropdown_options()
+            self.mic_dropdown.configure(values=options)
+            self.mic_var.set(current)
+        except Exception as e:
+            self.log(f"⚠ Could not refresh the mic list: {e}")
+        n = max(0, len(getattr(self, "_mic_device_map", {}) or {}))
+        self.log(f"🎤 Rescanned audio devices — {n} input{'s' if n != 1 else ''} found")
 
     def _get_microphone_dropdown_options(self) -> tuple[list[str], str]:
         """
