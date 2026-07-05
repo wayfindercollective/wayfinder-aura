@@ -3960,7 +3960,16 @@ class WayfinderApp(ctk.CTk):
                 if isinstance(widget, ctk.CTkScrollableFrame):
                     try:
                         canvas = widget._parent_canvas
-                        if canvas.yview() != (0.0, 1.0):
+                        view = canvas.yview()
+                        if view != (0.0, 1.0):
+                            # Don't overscroll past the top/bottom: yview_scroll at the
+                            # boundary still forces a canvas redraw, which shows as a
+                            # glitchy flash (reported scrolling UP at the top of Settings).
+                            # Skipping the no-op scroll keeps the edge steady.
+                            at_top = view[0] <= 1e-6
+                            at_bottom = view[1] >= 1.0 - 1e-6
+                            if (notches < 0 and at_top) or (notches > 0 and at_bottom):
+                                return "break"
                             # A canvas "unit" defaults to 10% of the viewport;
                             # pin it to 1px so we can scroll by pixels.
                             if int(canvas.cget("yscrollincrement")) != 1:
