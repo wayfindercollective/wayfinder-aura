@@ -17,6 +17,7 @@ class _FakeDep:
     id: str
     required: bool
     is_ok: bool
+    status: object = None  # DependencyStatus in prod; None here = no blocking warning
 
 
 # ─── SetupFlow state machine ─────────────────────────────────────────────────
@@ -221,6 +222,23 @@ class TestFooterDecision:
         deps = self._deps(("audio", True, True), ("whisper_model", True, True))
         d = footer_decision(deps, installing=False)
         assert d == {"show_continue": True, "show_install": False, "install_enabled": False}
+
+    def test_required_dep_with_blocking_warning_is_not_ok(self):
+        # F11: a required dep that's "installed" but carries a blocking warning
+        # (e.g. the ydotool binary is present but its daemon is down, so typing
+        # will actually fail) must NOT satisfy the gate — otherwise Setup declares
+        # "All set!" while injection is silently broken.
+        from types import SimpleNamespace
+        from wayfinder.ui.setup_pane import all_required_ok
+
+        ok_dep = _FakeDep("audio", True, True)
+        blocked = _FakeDep("injection", True, True,
+                           status=SimpleNamespace(blocking_warning=True))
+        assert all_required_ok([ok_dep, blocked]) is False
+        # The same dep without the blocking warning -> gate passes.
+        unblocked = _FakeDep("injection", True, True,
+                             status=SimpleNamespace(blocking_warning=False))
+        assert all_required_ok([ok_dep, unblocked]) is True
 
     def test_model_selector_visible_until_model_ok(self):
         from wayfinder.ui.setup_pane import should_show_model_selector

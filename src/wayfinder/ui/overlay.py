@@ -253,6 +253,7 @@ class OverlayState(Enum):
     READY = auto()
     LISTENING = auto()
     PROCESSING = auto()
+    ERROR = auto()
 
 
 # === Color Palettes ===
@@ -296,12 +297,19 @@ STATE_PALETTES = {
         glow="#E5AC2A",            # Muted gold glow (app state_processing)
         wave="#E5AC2A",            # Muted gold wave (app state_processing)
     ),
+    OverlayState.ERROR: StateColors(
+        border_top="#5A2A2E",      # Muted danger highlight (app error red family)
+        border_bottom="#3A1E22",   # Deep danger shadow
+        glow="#E5484D",            # Danger red glow (app error/danger)
+        wave="#F16A6F",            # Danger red wave (app error/danger)
+    ),
 }
 
 STATE_LABELS = {
     OverlayState.READY: "",
     OverlayState.LISTENING: "Listening...",
     OverlayState.PROCESSING: "Processing...",
+    OverlayState.ERROR: "",
 }
 
 
@@ -1342,7 +1350,33 @@ class GlassmorphicOverlay(QWidget):
         if state == OverlayState.PROCESSING:
             import time
             self._processing_start_time = time.time()
-        
+
+        # ERROR is a transient banner state: show the red pill, then auto-return to READY
+        # after ~2s via a single-shot QTimer (NOT a self-rearming sub-100ms loop — Rule 1
+        # safe). Parented to the widget so it survives until it fires; guarded so it only
+        # applies if we're STILL in ERROR. Any newer state change cancels our prior error
+        # timer here, so a real transition (e.g. next dictation) always wins.
+        existing_error = getattr(self, '_error_return_timer', None)
+        if existing_error is not None:
+            try:
+                existing_error.stop()
+            except Exception:
+                pass
+            self._error_return_timer = None
+        if state == OverlayState.ERROR:
+            self._error_return_timer = QTimer(self)
+            self._error_return_timer.setSingleShot(True)
+
+            def _do_error_return():
+                try:
+                    if self._state == OverlayState.ERROR:
+                        self.set_state(OverlayState.READY, animate)
+                except Exception as exc:
+                    _log(f"set_state: error auto-return failed: {exc}")
+
+            self._error_return_timer.timeout.connect(_do_error_return)
+            self._error_return_timer.start(2000)  # ~2s error display
+
         _log(f"set_state: CHANGED to {self._state}")
         
         duration = 250 if animate else 0  # 250ms ease-out = engineered, not vibe-coded
@@ -1381,6 +1415,8 @@ class GlassmorphicOverlay(QWidget):
             if state == OverlayState.LISTENING:
                 self._glow_intensity.animate_to(1.0, duration)
             elif state == OverlayState.PROCESSING:
+                self._glow_intensity.animate_to(0.8, duration)
+            elif state == OverlayState.ERROR:
                 self._glow_intensity.animate_to(0.8, duration)
             else:
                 self._glow_intensity.animate_to(0.3, duration)
@@ -2103,6 +2139,7 @@ def run_overlay():
                 "ready": OverlayState.READY,
                 "listening": OverlayState.LISTENING,
                 "processing": OverlayState.PROCESSING,
+                "error": OverlayState.ERROR,
             }
             state = state_map.get(state_name, OverlayState.LISTENING)
             _debug_log(f"SHOW state_name={state_name} -> enum={state} current={overlay._state}")

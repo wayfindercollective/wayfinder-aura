@@ -173,7 +173,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wayfinder-aura-appimage
-          path: Wayfinder_Aura-*.AppImage
+          path: |
+            Wayfinder_Aura-*.AppImage
+            Wayfinder_Aura-*.AppImage.zsync
           retention-days: 14
 
   # Flatpak build (optional, requires flatpak-builder)
@@ -181,7 +183,7 @@ jobs:
     name: Build (Flatpak)
     runs-on: ubuntu-latest
     needs: [lint]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
@@ -202,14 +204,27 @@ jobs:
       - name: Build Flatpak
         run: |
           cd flatpak
-          flatpak-builder --user --force-clean build-dir io.github.wayfindercollective.WayfinderAura.yml
-        continue-on-error: true
+          flatpak-builder --user --force-clean --repo=repo build-dir io.github.wayfindercollective.WayfinderAura.yml
+
+      - name: Build single-file bundle
+        run: |
+          cd flatpak
+          flatpak build-bundle repo io.github.wayfindercollective.WayfinderAura.flatpak \
+            io.github.wayfindercollective.WayfinderAura master \
+            --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wayfinder-aura-flatpak
+          path: flatpak/io.github.wayfindercollective.WayfinderAura.flatpak
+          retention-days: 14
 
   # Release job (only on tags)
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [lint, test, build-pyinstaller, build-appimage]
+    needs: [lint, test, build-pyinstaller, build-appimage, build-flatpak]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -228,12 +243,20 @@ jobs:
           name: wayfinder-aura-appimage
           path: dist/
 
+      - name: Download Flatpak artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wayfinder-aura-flatpak
+          path: dist/
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             dist/wayfinder-aura
             dist/Wayfinder_Aura-*.AppImage
+            dist/Wayfinder_Aura-*.AppImage.zsync
+            dist/io.github.wayfindercollective.WayfinderAura.flatpak
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}

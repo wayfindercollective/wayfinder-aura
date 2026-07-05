@@ -5251,7 +5251,7 @@ class WayfinderApp(ctk.CTk):
             scrollbar_button_hover_color=COLORS["accent_dim"],
         )
         scroll.pack(fill="both", expand=True)
-        
+
         # Last transcription card
         trans_card = ctk.CTkFrame(
             scroll,
@@ -5261,6 +5261,61 @@ class WayfinderApp(ctk.CTk):
             border_color=COLORS["border_subtle"],
         )
         trans_card.pack(fill="x", pady=(0, 12))
+
+        # Inline banners live at the top of the Dictate tab so runtime problems are
+        # visible on the main screen (not just buried in the History/Activity log).
+        # Built now, hidden until _show_error_banner()/_maybe_show_setup_cue() pack
+        # them (see CLAUDE.md rule 2: inline CTkFrame panels, never popups).
+        self._dictate_banner_anchor = trans_card
+
+        # (A) Dismissible runtime-error banner.
+        self.dictate_error_banner = ctk.CTkFrame(
+            scroll, fg_color=COLORS["warning_bg"], corner_radius=RADIUS["sm"],
+        )
+        _eb_inner = ctk.CTkFrame(self.dictate_error_banner, fg_color="transparent")
+        _eb_inner.pack(fill="x", padx=SPACING["md"], pady=SPACING["sm"])
+        self.dictate_error_label = ctk.CTkLabel(
+            _eb_inner,
+            text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["error"],
+            wraplength=340,
+            justify="left",
+            anchor="w",
+        )
+        self.dictate_error_label.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            _eb_inner, text="Dismiss",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            height=28, width=80, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=self._hide_error_banner,
+        ).pack(side="right", padx=(SPACING["sm"], 0))
+
+        # (D) Persistent "finish setup — download a model" cue.
+        self.setup_cue_banner = ctk.CTkFrame(
+            scroll, fg_color=COLORS["warning_bg"], corner_radius=RADIUS["sm"],
+        )
+        _sc_inner = ctk.CTkFrame(self.setup_cue_banner, fg_color="transparent")
+        _sc_inner.pack(fill="x", padx=SPACING["md"], pady=SPACING["sm"])
+        ctk.CTkLabel(
+            _sc_inner,
+            text="No speech model yet — finish setup to download one before dictating.",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["accent_yellow"],
+            wraplength=320,
+            justify="left",
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            _sc_inner, text="Finish Setup",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            height=28, width=110, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color=COLORS["bg_base"],
+            command=self._open_setup_from_cue,
+        ).pack(side="right", padx=(SPACING["sm"], 0))
         
         # Card header
         header = ctk.CTkFrame(trans_card, fg_color="transparent")
@@ -5331,7 +5386,13 @@ class WayfinderApp(ctk.CTk):
                 font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_secondary"],
             ).pack(anchor="w", pady=(4, 0))
-    
+
+        # (D) Surface the "download a model" cue at startup once the tab exists.
+        try:
+            self._maybe_show_setup_cue()
+        except Exception as e:
+            self.log(f"⚠ Setup cue check error: {e}")
+
     def _copy_last_transcription(self) -> None:
         """Copy the last transcription to clipboard."""
         if self.last_transcription:
@@ -10456,6 +10517,93 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
 
+    # === Dictate-tab runtime error banner (A) ===
+    def _show_error_banner(self, text: str) -> None:
+        """Show the dismissible runtime-error banner on the Dictate tab.
+
+        Best-effort — falls back silently if the banner isn't built yet (the tab
+        hasn't been created). Idempotent: a fresh message just updates the label."""
+        banner = getattr(self, "dictate_error_banner", None)
+        label = getattr(self, "dictate_error_label", None)
+        anchor = getattr(self, "_dictate_banner_anchor", None)
+        if banner is None or label is None:
+            return
+        try:
+            label.configure(text=text)
+            if not banner.winfo_manager():
+                if anchor is not None:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+                else:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
+    def _hide_error_banner(self) -> None:
+        """Hide the Dictate-tab runtime-error banner (Dismiss button / new dictation)."""
+        banner = getattr(self, "dictate_error_banner", None)
+        if banner is not None:
+            try:
+                banner.pack_forget()
+            except Exception:
+                pass
+
+    # === Dictate-tab "finish setup — download a model" cue (D) ===
+    def _has_usable_whisper_model(self) -> bool:
+        """True if dictation can run without a local-model download.
+
+        Cloud backends need no local model. For the local whisper.cpp path, the
+        configured model (or any known GGML model) must resolve on disk via the
+        shared resolver."""
+        backend = self.config.get("transcription_backend", "whisper_cpp")
+        if backend in ("groq_whisper", "openai_whisper", "faster_whisper"):
+            return True
+        model_path_config = self.config.get("model_path", "")
+        if model_path_config:
+            name = Path(os.path.expanduser(model_path_config)).name
+            if name and _resolve_whisper_model(name) is not None:
+                return True
+        for meta in WHISPER_CPP_MODELS.values():
+            if _resolve_whisper_model(meta.get("filename", "")) is not None:
+                return True
+        return False
+
+    def _maybe_show_setup_cue(self) -> None:
+        """Show the persistent setup cue when setup is done but no model exists."""
+        if not self.config.get("setup_completed", False):
+            return  # first-run wizard still owns model download
+        if self._has_usable_whisper_model():
+            self._hide_setup_cue()
+            return
+        banner = getattr(self, "setup_cue_banner", None)
+        anchor = getattr(self, "_dictate_banner_anchor", None)
+        if banner is None:
+            return
+        try:
+            if not banner.winfo_manager():
+                if anchor is not None:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+                else:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
+    def _hide_setup_cue(self) -> None:
+        """Hide the setup cue (a model became available)."""
+        banner = getattr(self, "setup_cue_banner", None)
+        if banner is not None:
+            try:
+                banner.pack_forget()
+            except Exception:
+                pass
+
+    def _open_setup_from_cue(self) -> None:
+        """Jump from the setup cue into the whisper-model download settings."""
+        try:
+            self._switch_tab("settings")
+            self.open_model_settings()
+        except Exception as e:
+            self.log(f"⚠ Could not open model settings: {e}")
+
     def _restart_for_overlay_change(self):
         """Kill the overlay and re-exec the app to apply a status-indicator change."""
         # Kill overlay and restart
@@ -10542,6 +10690,9 @@ class WayfinderApp(ctk.CTk):
                     path.write_text("")  # cap unbounded growth across sessions
                 with open(path, "a", encoding="utf-8") as f:
                     f.write(f"\n===== session start {datetime.now():%Y-%m-%d %H:%M:%S} =====\n")
+                # Owner-only: the log can echo transcribed text / config, mirror the
+                # 0600 that config.py/license.py apply. Once per session (not per line).
+                os.chmod(path, 0o600)
             except OSError:
                 pass
             self._activity_log_path = path
@@ -13040,6 +13191,11 @@ class WayfinderApp(ctk.CTk):
     def start_recording(self):
         try:
             self.log("🎤 Listening...")
+            # A new dictation clears any stale runtime-error banner from the last run.
+            try:
+                self._hide_error_banner()
+            except Exception:
+                pass
 
             # Capture the window focused RIGHT NOW (record-start) so we can target it at inject
             # time. With a global-hotkey trigger the user's terminal/chat is focused here; a long
@@ -13625,8 +13781,13 @@ class WayfinderApp(ctk.CTk):
 
         self._finish_injection(gen)
 
-    def _finish_injection(self, gen=None, _retries=0):
-        """Complete the injection and return overlay to ready state."""
+    def _finish_injection(self, gen=None, _retries=0, error=False):
+        """Complete the injection and return the overlay to its resting state.
+
+        On the error path (``error=True``) we do NOT force the overlay back to
+        "ready": the overlay was just switched to its ERROR state and returns to
+        READY on its own ~2s auto-timer, so re-sending "ready" here would wipe the
+        error flash the user needs to see. App state still resets to IDLE."""
         self._finish_injection_job = None
         # A newer session already took over — don't reset it back to idle.
         if gen is not None and gen != self.session_generation:
@@ -13635,16 +13796,43 @@ class WayfinderApp(ctk.CTk):
         # Return overlay to ready state, and verify the command actually reached the overlay
         # (a dropped critical command would otherwise leave the overlay stuck visually).
         if self._use_pyqt_overlay and self.overlay_controller:
-            ok = self.overlay_controller.show("ready")  # Return to grey ready state
-            if ok is False and _retries < 3:
-                self.log("⚠ Overlay reset command failed to send — retrying")
-                self._finish_injection_job = self.after(150, lambda: self._finish_injection(gen, _retries + 1))
-                return
-            # After a few failed retries, fall through and reset app state anyway — the overlay's
-            # own watchdog / the health-check supervisor will recover the overlay separately.
+            if not error:
+                ok = self.overlay_controller.show("ready")  # Return to grey ready state
+                if ok is False and _retries < 3:
+                    self.log("⚠ Overlay reset command failed to send — retrying")
+                    self._finish_injection_job = self.after(
+                        150, lambda: self._finish_injection(gen, _retries + 1, error))
+                    return
+                # After a few failed retries, fall through and reset app state anyway — the overlay's
+                # own watchdog / the health-check supervisor will recover the overlay separately.
         elif self.indicator:
             self.indicator.hide()
         self.update_state(AppState.IDLE)
+
+    def _error_guidance(self, message: str) -> str:
+        """Map a raw error string to plain-language guidance for the error banner.
+
+        Case-insensitive substring match; falls back to the trimmed raw message so
+        the user always sees *something* actionable (the remote backends already
+        raise friendly TranscriptionError text — this is the fallback layer)."""
+        m = (message or "").lower()
+
+        def has(*needles: str) -> bool:
+            return any(n in m for n in needles)
+
+        if has("inject", "ydotool", "wtype", "type"):
+            return "Couldn't type the text — check input permissions (Settings) or install ydotool."
+        if has("api key", "401", "unauthorized"):
+            return "Cloud API key issue — re-check it in Settings."
+        if has("rate", "429"):
+            return "Cloud service is rate-limited — try again shortly."
+        if has("network", "connection", "timeout", "internet"):
+            return "No internet — can't reach the cloud service."
+        if has("no speech"):
+            return "No speech detected — try again, a bit closer to the mic."
+        if has("model", "not found"):
+            return "No speech model yet — finish setup to download one."
+        return (message or "").strip()
 
     def on_error(self, message, gen=None):
         # Ignore errors from a superseded session.
@@ -13652,6 +13840,20 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⏭ Ignoring stale error (session changed): {message}")
             return
         self.log(f"⚠ {message}")
+        # Surface the failure on the main (Dictate) screen — the activity log is a
+        # separate tab, so on_error() was previously invisible on the home screen.
+        try:
+            self._show_error_banner(self._error_guidance(message))
+        except Exception:
+            pass
+        # Flash the overlay's ERROR state (red). Skip in Game Mode (the overlay is
+        # off there and an audio error cue already plays below) and when there is
+        # no overlay controller.
+        if not getattr(self, "_game_mode", False) and getattr(self, "overlay_controller", None) is not None:
+            try:
+                self.overlay_controller.show("error")
+            except Exception:
+                pass
         # Game Mode: distinct failure cue so the user can tell a failed dictation (nothing
         # landed) from a successful one without the overlay.
         if getattr(self, "_game_mode", False):
@@ -13668,10 +13870,11 @@ class WayfinderApp(ctk.CTk):
             min_display_ms = 800
             if elapsed_ms < min_display_ms:
                 remaining_ms = int(min_display_ms - elapsed_ms)
-                self._finish_injection_job = self.after(remaining_ms, lambda: self._finish_injection(gen))
+                self._finish_injection_job = self.after(
+                    remaining_ms, lambda: self._finish_injection(gen, error=True))
                 return
 
-        self._finish_injection(gen)
+        self._finish_injection(gen, error=True)
 
     def force_reset(self):
         """Explicit recovery: abandon any in-flight dictation and return to a clean IDLE state.
@@ -13910,7 +14113,15 @@ def main():
                         pass
         except:
             pass
-        
+
+        # Shut down the whisper server too — SIGTERM/SIGINT would otherwise orphan it
+        # and leak ~1.5GB VRAM (the tray-Quit path already does this).
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+            WhisperServerBackend.shutdown()
+        except:
+            pass
+
         # Force kill any overlay processes as safety net
         try:
             subprocess.run(["pkill", "-9", "-f", "overlay.py"], 

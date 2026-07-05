@@ -99,6 +99,7 @@ class DependencyStatus:
     detail: str = ""          # e.g. "v1.2.3" or path
     warning: str = ""         # Non-blocking issue
     error: str = ""           # Blocking issue description
+    blocking_warning: bool = False  # warning that still blocks the "All set!" gate
 
 
 @dataclass
@@ -185,7 +186,11 @@ def check_text_injection() -> DependencyStatus:
                 pass
         if daemon_running:
             return DependencyStatus(True, detail="ydotool + daemon running")
-        return DependencyStatus(True, detail="ydotool installed", warning="ydotoold daemon not running")
+        # Binary present but the daemon is down -> injection will actually fail.
+        # Keep the gold warning badge, but flag it blocking so Setup won't claim
+        # "All set!" while typing is broken (Codex review F11).
+        return DependencyStatus(True, detail="ydotool installed",
+                                warning="ydotoold daemon not running", blocking_warning=True)
     return DependencyStatus(False, error="No text injection backend (install wtype or xdotool)")
 
 

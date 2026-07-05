@@ -189,6 +189,9 @@ def test_all_state_palette_hexes_are_tokens_or_documented():
         # source tokens named in the READY derivation comment
         COLORS["state_ready"].upper(),   # #7B8BD9
         "#0D1117",                       # app bg_base
+        # ERROR state (red/danger family) — documented for F10 error-surfacing (2026-07)
+        "#E5484D", "#F16A6F",            # error glow / wave (red)
+        "#5A2A2E", "#3A1E22",            # error border top / bottom (deep red)
     }
     assert found <= allowed, f"unexpected STATE_PALETTES hexes: {found - allowed}"
 

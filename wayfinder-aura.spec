@@ -18,8 +18,8 @@ PROJECT_ROOT = Path(SPECPATH)
 SRC_DIR = PROJECT_ROOT / 'src'
 
 # Version info - update this for releases
-VERSION = '1.0.0'
-VERSION_TUPLE = (1, 0, 0, 0)  # (major, minor, patch, build)
+VERSION = '1.1.0'
+VERSION_TUPLE = (1, 1, 0, 0)  # (major, minor, patch, build)
 BUILD_DATE = datetime.now().strftime('%Y-%m-%d')
 
 a = Analysis(

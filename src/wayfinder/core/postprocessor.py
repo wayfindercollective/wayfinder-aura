@@ -2516,7 +2516,36 @@ def get_backend(config: dict) -> PostProcessorBackend:
         A PostProcessorBackend instance
     """
     backend_type = config.get("post_processing_backend", "llama_cpp")
-    
+    output_tone = config.get("output_tone", "professional")
+
+    # === License gating (audit F1) ===
+    # Cloud cleanup (OpenAI/Anthropic) and the styled tone presets are premium
+    # features. When the feature gate lacks the licence, fall back to the free
+    # local path instead of quietly using an unlicensed cloud backend or premium
+    # tone. Fail safe: any error here leaves the configured path untouched so a
+    # gate hiccup never blocks post-processing.
+    try:
+        from ..license import get_feature_gate
+        gate = get_feature_gate()
+
+        # Cloud backends require the "cloud_backends" feature — downgrade to the
+        # free local llama.cpp path when unlicensed (never send text to cloud).
+        if backend_type in CLOUD_BACKENDS and not gate.has_feature("cloud_backends"):
+            print("[Post-processing] ⚠ Cloud cleanup is a premium feature — "
+                  "falling back to local llama.cpp (unlicensed)")
+            backend_type = "llama_cpp"
+
+        # The styled tone presets require the "tone_system" feature. Only
+        # "minimal" is free, so downgrade any styled tone to minimal when
+        # unlicensed rather than applying a premium preset.
+        if output_tone != "minimal" and not gate.has_feature("tone_system"):
+            print("[Post-processing] ⚠ Tone presets are a premium feature — "
+                  "using minimal cleanup (unlicensed)")
+            output_tone = "minimal"
+    except Exception as e:
+        # Fail safe: keep the configured backend/tone if gating can't run.
+        print(f"[Post-processing] ⚠ License gate unavailable ({e}) — keeping configured backend")
+
     if backend_type == "anthropic":
         # API key is read from environment variable only (secure)
         return AnthropicBackend(
@@ -2562,7 +2591,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 n_gpu_layers=config.get("llama_cpp_n_gpu_layers", -1),
                 max_tokens=config.get("post_processing_max_tokens", 1024),
                 temperature=config.get("post_processing_temperature", 0.1),
-                output_tone=config.get("output_tone", "professional"),
+                output_tone=output_tone,
                 strong_mode=config.get("strong_mode", False),
                 caricature_mode=config.get("caricature_mode", False),
                 force_subprocess=config.get("post_processing_force_subprocess", False),

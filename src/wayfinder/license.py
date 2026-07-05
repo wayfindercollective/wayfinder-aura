@@ -303,7 +303,11 @@ def _verify_token(token: str, machine_id: Optional[str] = None) -> Optional[dict
     try:
         import base64
         import time as _time
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        try:
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        except ImportError:
+            print("[license] cryptography not installed — cannot verify license offline")
+            return None
 
         payload_b64, sig_b64 = token.split(".", 1)
 

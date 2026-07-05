@@ -18,13 +18,15 @@
 
   <description>
     <p>
-      Wayfinder Aura is a local voice dictation application for Linux. Press a hotkey,
-      speak, and your words are typed wherever your cursor is. All processing happens
-      on your machine using whisper.cpp — your voice never leaves your computer.
+      Wayfinder Aura is a local-first voice dictation application for Linux. Press a hotkey,
+      speak, and your words are typed wherever your cursor is. By default, transcription runs
+      on your device with whisper.cpp — in local mode your voice never leaves your computer.
+      Optional cloud transcription backends are available if you choose to enable them, and the
+      app checks online for model updates (toggleable).
     </p>
     <p>Features:</p>
     <ul>
-      <li>100% Local &amp; Private — No cloud services, no data collection</li>
+      <li>Local-first &amp; Private — transcribed on your device by default; optional cloud backends if you choose them</li>
       <li>Hotkey Triggered — Press a key to start/stop recording</li>
       <li>Wayland &amp; X11 Support — Works on modern Linux desktops</li>
       <li>System Tray Integration — Runs quietly in the background</li>

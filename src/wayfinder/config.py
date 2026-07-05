@@ -388,7 +388,15 @@ def load_config() -> dict:
                 config["audio_device"] = None
 
             return config
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, IOError) as e:
+            # Don't silently wipe a corrupt config — preserve it for recovery.
+            # Best-effort rename to .bak, warn, then fall back to defaults.
+            backup = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".bak")
+            try:
+                os.replace(CONFIG_FILE, backup)
+                print(f"WARNING: config file was corrupt ({e}); backed up to {backup} and loaded defaults")
+            except OSError as rename_err:
+                print(f"WARNING: config file was corrupt ({e}) and could not be backed up ({rename_err}); loaded defaults")
             return DEFAULT_CONFIG.copy()
     else:
         # First run - save defaults
@@ -404,13 +412,23 @@ def save_config(config: dict) -> None:
         config: Configuration dictionary to save.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
+    # Atomic write: dump to a temp file, then os.replace() onto the real path so a
+    # crash mid-write can never truncate/corrupt the existing config.
+    tmp_file = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
+    with open(tmp_file, "w") as f:
         json.dump(config, f, indent=2)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
     # Config holds API keys + the license token in plaintext — restrict to owner-only.
+    # Apply before the replace so the mode is in place atomically with the content.
     try:
-        os.chmod(CONFIG_FILE, 0o600)
+        os.chmod(tmp_file, 0o600)
     except OSError:
         pass
+    os.replace(tmp_file, CONFIG_FILE)
 
 
 def load_api_keys_to_env(config: dict) -> None:

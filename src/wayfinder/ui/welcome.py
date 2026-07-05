@@ -81,6 +81,10 @@ class WelcomeFlow:
 # Max characters of a transcript we echo back inside the card.
 _TRANSCRIPT_MAX = 140
 
+# How long the final "try it now" step waits for a first transcript before it
+# surfaces a troubleshooting line + skip button. Single-shot (see rule #1).
+_HELP_DELAY_MS = 13000
+
 
 class WelcomePane:
     """Renders ``WelcomeFlow`` as a centered card over the tab content area.
@@ -105,6 +109,10 @@ class WelcomePane:
         self.app = app
         self.flow = WelcomeFlow(on_complete=self._complete_flow)
         self._transcript = None
+        # Final-step recovery: if the first dictation never lands, a single-shot
+        # timer swaps the calm "listening…" line for a troubleshooting affordance.
+        self._help_after_id = None
+        self._help_shown = False
 
         # Full-size dim underlay. CTk has no real alpha; a plain bg_base frame
         # covering the tab content reads as a focused/modal state.
@@ -265,6 +273,8 @@ class WelcomePane:
             )
             heard.pack(anchor="w", pady=(SPACING["sm"], 0))
             self._continue_button(body, "done", gold=True)
+        elif self._help_shown:
+            self._render_dictate_help(body)
         else:
             self._body_label(body, "try it now — dictate a sentence.")
             self._body_label(
@@ -273,6 +283,51 @@ class WelcomePane:
                 muted=True,
                 pady=(SPACING["sm"], 0),
             )
+            self._schedule_help()
+
+    def _render_dictate_help(self, body) -> None:
+        """The recovery variant of the dictate step, shown once the wait elapses
+        without a transcript. Re-shows the hotkey token and offers a clear exit."""
+        ctk = self._ctk
+        self._body_label(body, "try it now — dictate a sentence.")
+        token = ctk.CTkLabel(
+            body,
+            text=self._hotkey_text(),
+            font=(FONTS["mono"][0], FONT_SIZES["title"], "bold"),
+            text_color=COLORS["accent"],
+        )
+        token.pack(anchor="w", pady=(SPACING["sm"], 0))
+        self._body_label(
+            body,
+            "having trouble? check your mic and press your hotkey — or skip for now.",
+            muted=True,
+            pady=(SPACING["sm"], 0),
+        )
+        self._continue_button(body, "skip for now", command=self._on_skip)
+
+    def _schedule_help(self) -> None:
+        """Arm the single-shot recovery timer (idempotent)."""
+        if self._help_after_id is not None or self._help_shown:
+            return
+        try:
+            self._help_after_id = self.card.after(_HELP_DELAY_MS, self._on_help_timeout)
+        except Exception:
+            self._help_after_id = None
+
+    def _cancel_help(self) -> None:
+        if self._help_after_id is not None:
+            try:
+                self.card.after_cancel(self._help_after_id)
+            except Exception:
+                pass
+            self._help_after_id = None
+
+    def _on_help_timeout(self) -> None:
+        self._help_after_id = None
+        if self._transcript or self.flow.is_complete:
+            return
+        self._help_shown = True
+        self._render_step()
 
     def _render_footer(self, pad) -> None:
         ctk = self._ctk
@@ -322,6 +377,7 @@ class WelcomePane:
         """
         if self.flow.is_complete:
             return
+        self._cancel_help()
         self._transcript = text or ""
         if self.flow.current != "dictate":
             self.flow.goto("dictate")
@@ -339,6 +395,7 @@ class WelcomePane:
         self._teardown()
 
     def _teardown(self) -> None:
+        self._cancel_help()
         # Clear the app-side flag so normal injection resumes.
         try:
             self.app._welcome_active = False

@@ -15,6 +15,8 @@ VERSION="1.1.0"
 APP_NAME="Wayfinder_Aura"
 ARCH="x86_64"
 APPIMAGE_NAME="${APP_NAME}-${VERSION}-${ARCH}.AppImage"
+# AppImageUpdate self-update info (emits a .zsync alongside the AppImage)
+UPDATE_INFO="gh-releases-zsync|wayfindercollective|wayfinder-aura|latest|Wayfinder_Aura-*${ARCH}.AppImage.zsync"
 APPDIR="${SCRIPT_DIR}/AppDir"
 APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
 APPIMAGETOOL="${SCRIPT_DIR}/appimagetool-x86_64.AppImage"
@@ -223,8 +225,8 @@ echo ""
 # Remove old AppImage if it exists
 rm -f "$SCRIPT_DIR/$APPIMAGE_NAME"
 
-# Build! (--no-appstream skips metadata validation)
-ARCH="$ARCH" "$APPIMAGETOOL" --no-appstream "$APPDIR" "$SCRIPT_DIR/$APPIMAGE_NAME"
+# Build! (--no-appstream skips metadata validation; -u embeds update info + emits .zsync)
+ARCH="$ARCH" "$APPIMAGETOOL" --no-appstream -u "$UPDATE_INFO" "$APPDIR" "$SCRIPT_DIR/$APPIMAGE_NAME"
 
 echo ""
 

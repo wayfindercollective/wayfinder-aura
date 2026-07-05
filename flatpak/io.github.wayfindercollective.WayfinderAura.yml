@@ -35,8 +35,7 @@ finish-args:
   - --talk-name=org.freedesktop.portal.RemoteDesktop
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
-  - --talk-name=org.gnome.SessionManager
-  
+
   # App config and cache storage
   - --filesystem=xdg-config/wayfinder-aura:create
   - --filesystem=xdg-cache/wayfinder-aura:create
@@ -48,14 +47,10 @@ finish-args:
   # old /tmp socket was unreachable from the host — this is the R4-dictation fix.
   - --filesystem=xdg-run/wayfinder-aura:create
   
-  # Whisper model access (user's existing models, read-only)
-  - --filesystem=~/.local/share/whisper.cpp:ro
-  - --filesystem=~/whisper.cpp/models:ro
-
-  # In-app whisper model downloads land here (writable). The two dirs above are
-  # mounted read-only, so the "Download" button can't write to them — without this
-  # grant a download fails with "Read-only file system". Mirrors the llm-models
-  # grant below; _get_whisper_models_dir() in wayfinder_main.py targets this path.
+  # In-app whisper model downloads land here (writable). The app resolves whisper
+  # models from this XDG path (_get_whisper_models_dir() in wayfinder_main.py).
+  # Non-XDG home grants (~/whisper.cpp, ~/.local/share/whisper.cpp) were removed —
+  # Flathub rejects arbitrary home access. Mirrors the llm-models grant below.
   - --filesystem=~/.local/share/wayfinder-aura/whisper-models:create
 
   # LLM model access (user's downloaded models for post-processing)
