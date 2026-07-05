@@ -11036,6 +11036,24 @@ class WayfinderApp(ctk.CTk):
         if modifiers:
             display = "+".join(m.capitalize() for m in modifiers) + "+" + display
 
+        # "Already bound" guard: don't silently rebind to a key that's already in use —
+        # tell the user instead (their request). Compare (code, modifier-set).
+        captured = (code, set(modifiers))
+        cur_record = (self.config.get("hotkey_key"), set(self.config.get("hotkey_modifiers", [])))
+        cur_style = (self.config.get("style_toggle_key"), set(self.config.get("style_toggle_modifiers", [])))
+        same_action = cur_record if target == "record" else cur_style
+        other_action = cur_style if target == "record" else cur_record
+        this_name = "Record" if target == "record" else "Style toggle"
+        other_name = "Style toggle" if target == "record" else "Record"
+        if captured == same_action:
+            self._reset_detect_button(target)
+            self.log(f"🎯 {display} is already your {this_name} hotkey — no change.")
+            return
+        if captured == other_action:
+            self._reset_detect_button(target)
+            self.log(f"🎯 {display} is already bound to {other_name} — pick another key.")
+            return
+
         if target == "record":
             self.config["hotkey_key"] = code
             self.config["hotkey_modifiers"] = modifiers
@@ -13032,6 +13050,7 @@ class WayfinderApp(ctk.CTk):
                     self.stop_event, self.log,
                     style_toggle_key, style_toggle_modifiers,
                     config_ref=self.config,
+                    capture_state=_HOTKEY_CAPTURE,
                 )
             except Exception as e:
                 print(f"[Hotkey] pynput listener crashed: {e}", flush=True)

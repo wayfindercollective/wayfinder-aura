@@ -87,6 +87,10 @@ _raw_evdev_map = {
 }
 EVDEV_TO_PYNPUT = {k: v for k, v in _raw_evdev_map.items() if v is not None}
 
+# Reverse map for the Settings "Detect" capture (pynput key -> evdev code). Function/special
+# keys are 1:1; modifier codes are skipped during capture (see _ALL_MODIFIER_KEYS below).
+PYNPUT_TO_EVDEV = {v: k for k, v in EVDEV_TO_PYNPUT.items()}
+
 # Reverse mapping for display purposes — built dynamically to avoid missing keys
 PYNPUT_TO_NAME = {}
 for _names, _label in [
@@ -123,6 +127,9 @@ for _mod, _key_names in [
     _key = _k(*_key_names)
     if _key is not None:
         MODIFIER_KEYS.setdefault(_mod, set()).add(_key)
+
+# Flat set of every modifier key — Detect skips pure modifier presses and waits for a real key.
+_ALL_MODIFIER_KEYS = {k for ks in MODIFIER_KEYS.values() for k in ks}
 
 
 def evdev_code_to_pynput(evdev_code: int) -> Optional[Key | KeyCode]:
@@ -184,6 +191,7 @@ def pynput_hotkey_listener(
     style_toggle_key: Optional[int] = None,
     style_toggle_modifiers: Optional[list[str]] = None,
     config_ref: Optional[dict] = None,
+    capture_state: Optional[dict] = None,
 ):
     """
     Cross-platform hotkey listener using pynput.
@@ -264,6 +272,21 @@ def pynput_hotkey_listener(
         for mod_name, mod_keys in MODIFIER_KEYS.items():
             if key in mod_keys:
                 pressed_modifiers.add(mod_name)
+
+        # Settings "Detect": while armed, report the next non-modifier key to the app and
+        # SUPPRESS the normal hotkey action (don't record/toggle while detecting). Mouse side
+        # buttons grabbed by the host trigger daemon never reach here — this is keyboard keys.
+        if capture_state is not None and capture_state.get("armed"):
+            if key in _ALL_MODIFIER_KEYS:
+                return  # wait for a real (non-modifier) key
+            code = PYNPUT_TO_EVDEV.get(key)
+            if code is None:
+                return  # unmapped key (e.g. a letter) — keep waiting; Detect times out otherwise
+            capture_state["armed"] = False
+            event_queue.put((EventType.HOTKEY_CAPTURED,
+                             {"code": code, "modifiers": sorted(pressed_modifiers),
+                              "device": "keyboard"}))
+            return
 
         # Read live config for hotkey changes
         _get_current_keys()
