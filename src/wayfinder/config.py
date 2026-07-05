@@ -347,6 +347,17 @@ def load_config() -> dict:
             if config.get("prompt") == _old_prompt:
                 config["prompt"] = DEFAULT_CONFIG["prompt"]
 
+            # Migrate: stale premium/checkout URLs must always follow the current default.
+            # A config saved by an old build pins the dead wayfinder.dev URL, so "Buy Now"
+            # would open the wrong page after updating. Force any known-old value forward.
+            _stale_premium_urls = {
+                "https://wayfinder.dev/premium",
+                "https://wayfinder.dev/ultra",
+                "http://wayfinder.dev/premium",
+            }
+            if config.get("premium_url") in _stale_premium_urls:
+                config["premium_url"] = DEFAULT_CONFIG["premium_url"]
+
             # Hotkey defaults changed for NEW installs (bare F3/F10 → Super+F2/F3,
             # to dodge in-game F-key collisions; the GameMode pause covers games).
             # In an EXISTING config, every hotkey field the user never explicitly

@@ -10778,13 +10778,20 @@ class WayfinderApp(ctk.CTk):
             ("★", "Large Models + High Accuracy", "Large v3 Turbo, beam search, custom vocab"),
         ]
 
-        # Centered card over the current view (inline panel, not a popup window — rule #2).
+        # Dim scrim behind the panel so it clearly separates from the app (inline panel,
+        # not a popup window — rule #2). No corner_radius arg — the theme default keeps this
+        # ratchet-clean (a bare zero radius would be an unsanctioned literal).
+        scrim = ctk.CTkFrame(self, fg_color=COLORS["bg_base"])
+        scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._premium_banner = scrim
+
+        # Elevated surface + bright accent border so the card's edges read clearly against
+        # the (previously same-colored) background.
         card = ctk.CTkFrame(
-            self, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"],
-            border_width=1, border_color=COLORS["accent_dim"],
+            scrim, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["lg"],
+            border_width=2, border_color=COLORS["accent"],
         )
         card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.82)
-        self._premium_banner = card
 
         inner = ctk.CTkFrame(card, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=SPACING["tile_pad"], pady=SPACING["tile_pad_y"])
@@ -10826,8 +10833,8 @@ class WayfinderApp(ctk.CTk):
 
         def _dismiss():
             try:
-                card.place_forget()
-                card.destroy()
+                scrim.place_forget()
+                scrim.destroy()
             except Exception:
                 pass
             self._premium_banner = None
