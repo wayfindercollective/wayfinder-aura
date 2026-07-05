@@ -867,6 +867,27 @@ class WarmMic:
             self.device = device
             self._close_stream()
 
+    @property
+    def in_use(self) -> bool:
+        """True while a recorder currently holds the mic (a sink is attached)."""
+        return self._sink is not None
+
+    def rescan(self) -> bool:
+        """Rebuild PortAudio's device table so a hotplugged mic becomes visible.
+
+        PortAudio snapshots devices at init and never updates the table, so a mic plugged in
+        after the app started is invisible until a re-init. A rescan invalidates open streams,
+        so the warm stream is closed first; the next acquire() re-opens against the fresh table
+        (via resolve_device). Serialized on the same lock as open/close. Refuses (returns False)
+        while a recording holds the mic — call it between recordings. Returns True on success.
+        """
+        with self._lock:
+            if self._sink is not None:
+                return False  # a recording is active — don't yank its stream
+            self._cancel_idle_timer()
+            self._close_stream()
+            return _pa_rescan()
+
 
 class AudioRecorder:
     """Records audio to a temporary WAV file for transcription."""

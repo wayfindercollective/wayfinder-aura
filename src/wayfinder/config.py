@@ -229,7 +229,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
     "overlay_vertical_offset": 0,  # Vertical offset in pixels (negative = higher, positive = lower)
     "overlay_anchor": "bottom-center",  # {top,bottom}-{left,center,right}
-    
+    # Overlay render quality: "high" = the ambient corner wave animates continuously (smoothest
+    # look); "performance" = the overlay holds still when idle to save CPU/battery on handhelds.
+    # Visual quality is identical in both — only whether the idle wave keeps moving.
+    "overlay_quality": "high",
+
     # Audio ducking settings (reduce other audio while recording)
     "audio_ducking_enabled": True,  # Enable automatic volume reduction during recording
     "audio_ducking_percent": 30,  # How much to lower other audio (0-50, higher = quieter)

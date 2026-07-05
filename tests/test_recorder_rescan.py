@@ -81,3 +81,37 @@ def test_open_without_resolver_still_retries_after_rescan(monkeypatch):
 
     wm._open()
     assert calls["chain"] == 2
+
+
+# --- Explicit rescan() (the settings "Refresh devices" action) -----------------
+# Distinct from the automatic heal above: this is a user-triggered rescan to pick up
+# a mic hotplugged AFTER launch, without restarting the app.
+
+def test_rescan_reinits_portaudio_when_idle(monkeypatch):
+    """rescan() drops the warm stream and rebuilds PortAudio's table when nothing holds the mic."""
+    wm = rec.WarmMic(device=42)
+    closed = {"n": 0}
+    monkeypatch.setattr(rec.WarmMic, "_close_stream",
+                        lambda self: closed.__setitem__("n", closed["n"] + 1))
+    monkeypatch.setattr(rec, "_pa_rescan", lambda: True)
+
+    assert wm.in_use is False
+    assert wm.rescan() is True
+    assert closed["n"] == 1, "the warm stream must be dropped before the re-init"
+
+
+def test_rescan_refuses_while_recording(monkeypatch):
+    """rescan() must NOT yank the stream while a recorder holds the mic (a sink is attached)."""
+    wm = rec.WarmMic(device=42)
+    wm._sink = lambda *a, **k: None  # simulate an active recording holding the mic
+    rescanned = {"n": 0}
+    closed = {"n": 0}
+    monkeypatch.setattr(rec, "_pa_rescan",
+                        lambda: (rescanned.__setitem__("n", rescanned["n"] + 1), True)[1])
+    monkeypatch.setattr(rec.WarmMic, "_close_stream",
+                        lambda self: closed.__setitem__("n", closed["n"] + 1))
+
+    assert wm.in_use is True
+    assert wm.rescan() is False, "must refuse while a recording is active"
+    assert rescanned["n"] == 0, "must not re-init PortAudio under an open recording stream"
+    assert closed["n"] == 0, "must not close the stream out from under a recording"
