@@ -284,6 +284,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "premium_info_url": "https://wayfindercollective.io/aura",  # More Info / landing page
     "premium_price": "$29.99",        # launch price
     "premium_price_regular": "$60",   # regular price (shown struck-through / as "reg.")
+    # Free-tier GPU upsell nudge: set True once the user dismisses it for good.
+    "gpu_nudge_dismissed": False,
 
     # Setup wizard
     "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)

@@ -1845,6 +1845,11 @@ def _gamemode_hotkeys_paused() -> bool:
 # mouse's side grid — deliver events ONLY to the listener's fds.
 _HOTKEY_CAPTURE = {"armed": False}
 
+# Free-tier GPU upsell: after a dictation this long (seconds) on the CPU/free path,
+# gently surface that GPU acceleration is much faster. Long enough that it never
+# fires on ordinary short dictations — only when the CPU path actually hurt.
+_GPU_NUDGE_MIN_DURATION_S = 45.0
+
 
 def _keycode_display(code: int) -> str:
     """Human label for an evdev keycode — covers keys no dropdown lists (F13+, keypad,
@@ -3658,7 +3663,10 @@ class WayfinderApp(ctk.CTk):
         # Recording duration tracking
         self._recording_start_time: float | None = None
         self._duration_update_job: str | None = None
-        
+        # Free-tier GPU upsell nudge: shown at most once per session (and never once
+        # the user has dismissed it — persisted as config["gpu_nudge_dismissed"]).
+        self._gpu_nudge_shown = False
+
         # Floating status indicator (legacy CTk fallback)
         self.indicator: FloatingIndicator | None = None
         
@@ -5325,7 +5333,41 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["bg_base"],
             command=self._open_setup_from_cue,
         ).pack(side="right", padx=(SPACING["sm"], 0))
-        
+
+        # (E) Free-tier GPU upsell nudge — shown after a long dictation on the CPU
+        # path (see _maybe_show_gpu_nudge). Inviting, not alarming: elevated surface,
+        # accent action. Upgrade opens the full premium prompt; Dismiss = never again.
+        self.gpu_nudge_banner = ctk.CTkFrame(
+            scroll, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"],
+        )
+        _gn_inner = ctk.CTkFrame(self.gpu_nudge_banner, fg_color="transparent")
+        _gn_inner.pack(fill="x", padx=SPACING["md"], pady=SPACING["sm"])
+        ctk.CTkLabel(
+            _gn_inner,
+            text="That was a long one. Long dictations are much faster with GPU acceleration.",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_primary"],
+            wraplength=300,
+            justify="left",
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            _gn_inner, text="Dismiss",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            height=28, width=80, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=self._dismiss_gpu_nudge,
+        ).pack(side="right", padx=(SPACING["sm"], 0))
+        ctk.CTkButton(
+            _gn_inner, text="Upgrade",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            height=28, width=100, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color=COLORS["bg_base"],
+            command=self._upgrade_from_gpu_nudge,
+        ).pack(side="right", padx=(SPACING["sm"], 0))
+
         # Card header
         header = ctk.CTkFrame(trans_card, fg_color="transparent")
         header.pack(fill="x", padx=16, pady=(12, 8))
@@ -10612,6 +10654,63 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self.log(f"⚠ Could not open model settings: {e}")
 
+    # === Dictate-tab free-tier GPU upsell nudge (E) ===
+    def _maybe_show_gpu_nudge(self, duration: float) -> None:
+        """After a long dictation on the free/CPU path, gently surface GPU acceleration.
+
+        Fires only when: GPU is actually locked for this user (premium/dev-unlock users
+        already have it), the dictation ran long enough that CPU speed hurt, it hasn't
+        already shown this session, and the user hasn't dismissed it for good. Must run
+        on the Tk thread (both finalize call sites do)."""
+        try:
+            if self._gpu_nudge_shown:
+                return
+            if self.config.get("gpu_nudge_dismissed", False):
+                return
+            if duration < _GPU_NUDGE_MIN_DURATION_S:
+                return
+            gate = getattr(self, "feature_gate", None)
+            if gate is None or gate.has_feature("gpu_acceleration"):
+                return  # already has GPU (premium / dev-unlock) — nothing to upsell
+            banner = getattr(self, "gpu_nudge_banner", None)
+            anchor = getattr(self, "_dictate_banner_anchor", None)
+            if banner is None:
+                return
+            if not banner.winfo_manager():
+                if anchor is not None:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+                else:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]))
+            self._gpu_nudge_shown = True
+        except Exception:
+            pass  # a cosmetic upsell must never break the dictation flow
+
+    def _hide_gpu_nudge(self) -> None:
+        """Hide the GPU nudge banner without persisting a dismissal."""
+        banner = getattr(self, "gpu_nudge_banner", None)
+        if banner is not None:
+            try:
+                banner.pack_forget()
+            except Exception:
+                pass
+
+    def _dismiss_gpu_nudge(self) -> None:
+        """Dismiss button: hide the nudge and never show it again."""
+        self._hide_gpu_nudge()
+        try:
+            self.config["gpu_nudge_dismissed"] = True
+            save_config(self.config)
+        except Exception as e:
+            self.log(f"⚠ Could not persist nudge dismissal: {e}")
+
+    def _upgrade_from_gpu_nudge(self) -> None:
+        """Upgrade button: open the full premium prompt for GPU acceleration."""
+        self._hide_gpu_nudge()
+        try:
+            self._show_premium_prompt("gpu_acceleration")
+        except Exception as e:
+            self.log(f"⚠ Could not open upgrade: {e}")
+
     def _restart_for_overlay_change(self):
         """Kill the overlay and re-exec the app to apply a status-indicator change."""
         # Kill overlay and restart
@@ -13506,6 +13605,7 @@ class WayfinderApp(ctk.CTk):
             self.on_error(self._silence_error_message(), gen)
             return
 
+        self._maybe_show_gpu_nudge(duration)
         self.executor.submit(self.transcribe_and_inject, audio_path, gen)
 
     def _silence_error_message(self) -> str:
@@ -13552,6 +13652,8 @@ class WayfinderApp(ctk.CTk):
                 self.chunked_recorder = None
             self.on_error(self._silence_error_message(), gen)
             return
+
+        self._maybe_show_gpu_nudge(duration)
 
         # Submit final chunk for transcription if exists
         if final_path:
