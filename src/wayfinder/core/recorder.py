@@ -1190,7 +1190,12 @@ class ChunkedRecorder:
         self._chunk_thread: threading.Thread | None = None
         self._temp_files: list[str] = []
         self.last_peak: float = 0.0
-        
+        # Count of chunks that failed to save (resample/preprocess/WAV-write error).
+        # A nonzero count means a section of audio was dropped; the app layer reads
+        # this after stop() and surfaces it to the activity log so a mid-dictation
+        # hole is traceable instead of silently vanishing.
+        self.dropped_chunk_count: int = 0
+
         # Calculate samples (will be updated based on actual recording rate)
         self._chunk_samples = int(chunk_duration * sample_rate)
         self._overlap_samples = int(chunk_overlap * sample_rate)
@@ -1311,6 +1316,10 @@ class ChunkedRecorder:
             
             return temp_path
         except Exception as e:
+            # A dropped chunk is a hole in the transcript. Count it so the app layer
+            # can surface the loss to the activity log (the recorder stays UI-agnostic
+            # — it does not know about the log file, only that a chunk was lost).
+            self.dropped_chunk_count += 1
             print(f"Error saving chunk: {e}")
             return None
 
@@ -1321,6 +1330,7 @@ class ChunkedRecorder:
         self._last_chunk_end = 0
         self._temp_files = []
         self.last_peak = 0.0
+        self.dropped_chunk_count = 0
         self._stop_event.clear()
         
         # Clear queue

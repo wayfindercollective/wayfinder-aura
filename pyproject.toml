@@ -124,6 +124,7 @@ markers = [
     "ui: Tests requiring a display/Tk (skip in headless CI)",
     "slow: Slow tests like GPU benchmarks or model downloads",
     "network: Tests requiring network access (cloud APIs)",
+    "perf: Wall-clock timing budgets (load-sensitive; run locally/nightly, excluded from the gating run)",
 ]
 
 # Mypy configuration

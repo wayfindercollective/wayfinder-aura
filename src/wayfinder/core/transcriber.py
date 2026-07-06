@@ -109,6 +109,12 @@ _GPU_RETRY_CAP_SECONDS = 1800.0
 _gpu_probe_lock = threading.Lock()
 _gpu_probe_inflight = False
 
+# Serializes read-modify-write on _gpu_retry_state / _CPU_FALLBACK_ACTIVE. These
+# globals are mutated from both chunk-transcription workers (transcription_executor
+# has 2 workers) and the background GPU-probe thread; without this lock, concurrent
+# GPU failures can lose failure-count increments and mis-time the retry backoff.
+_gpu_state_lock = threading.Lock()
+
 # Optional app-level logger (the UI activity log). The transcriber works fine
 # without one — events still go to stdout.
 _gpu_event_logger: Optional[Callable[[str], None]] = None
@@ -140,12 +146,17 @@ def _fmt_delay(seconds: float) -> str:
 
 def _schedule_gpu_retry(binary: str) -> float:
     """Record a GPU failure and compute the next retry time. Returns the delay."""
-    state = _gpu_retry_state.setdefault(binary, {"failures": 0, "next_retry": 0.0})
-    state["failures"] += 1
-    delay = min(_GPU_RETRY_BASE_SECONDS * (2 ** (state["failures"] - 1)),
-                _GPU_RETRY_CAP_SECONDS)
-    state["next_retry"] = time.time() + delay
-    return delay
+    with _gpu_state_lock:
+        state = _gpu_retry_state.setdefault(binary, {"failures": 0, "next_retry": 0.0})
+        state["failures"] += 1
+        # Clamp the exponent: the delay saturates at _GPU_RETRY_CAP_SECONDS by ~6
+        # failures (60 * 2**5 > cap), and an unbounded left-shift overflows float on
+        # a pathologically flapping GPU (OverflowError past ~1000 failures in one
+        # session). Clamping past-cap exponents leaves normal backoff unchanged.
+        exp = min(state["failures"] - 1, 32)
+        delay = min(_GPU_RETRY_BASE_SECONDS * (2 ** exp), _GPU_RETRY_CAP_SECONDS)
+        state["next_retry"] = time.time() + delay
+        return delay
 
 
 def _cpu_fallback_binary(binary: str) -> Optional[str]:
@@ -491,13 +502,14 @@ class WhisperCppBackend(TranscriptionBackend):
         global _gpu_probe_inflight
         try:
             if self._gpu_probe_succeeds():
-                _CPU_FALLBACK_ACTIVE.pop(self.whisper_binary, None)
-                # Keep (halved) failure history so a flapping GPU climbs the
-                # backoff ladder instead of crash-looping the user's dictations.
-                state = _gpu_retry_state.get(self.whisper_binary)
-                if state is not None:
-                    state["failures"] = state["failures"] // 2
-                    state["next_retry"] = 0.0
+                with _gpu_state_lock:
+                    _CPU_FALLBACK_ACTIVE.pop(self.whisper_binary, None)
+                    # Keep (halved) failure history so a flapping GPU climbs the
+                    # backoff ladder instead of crash-looping the user's dictations.
+                    state = _gpu_retry_state.get(self.whisper_binary)
+                    if state is not None:
+                        state["failures"] = state["failures"] // 2
+                        state["next_retry"] = 0.0
                 _log_gpu_event("✅ GPU transcription restored — back on the GPU binary")
             else:
                 delay = _schedule_gpu_retry(self.whisper_binary)
@@ -798,6 +810,34 @@ class WhisperServerBackend(TranscriptionBackend):
         except Exception as e:
             print(f"[Whisper Server] Warm-up skipped: {e}")
 
+    def _resolve_cli_binary(self) -> str:
+        """Find a whisper-cli binary that ACTUALLY EXISTS for the salvage fallback.
+
+        This used to be a blind string-replace of 'whisper-server'->'whisper-cli'.
+        On a from-source install that built only the server, that derived sibling
+        doesn't exist, so the salvage backend raised 'binary not found' and the
+        chunk's words were dropped — the exact failure salvage exists to prevent.
+        Resolve to a real binary instead: the derived sibling, then its CPU twin,
+        then the bundled Flatpak paths, then PATH. Falls back to the derived path
+        (a clear not-found error) only if nothing resolves — honest, not silent.
+        """
+        import shutil
+        derived = self.whisper_server_binary.replace("whisper-server", "whisper-cli")
+        candidates = [
+            derived,
+            derived.replace("whisper-cli", "whisper-cli-cpu"),  # CPU twin, same dir
+            "/app/bin/whisper-cli",       # Flatpak bundle (Vulkan)
+            "/app/bin/whisper-cli-cpu",   # Flatpak bundle (CPU baseline)
+        ]
+        for cand in candidates:
+            if cand and Path(cand).exists():
+                return cand
+        for name in ("whisper-cli", "whisper-cli-cpu"):
+            found = shutil.which(name)
+            if found:
+                return found
+        return derived
+
     def _cli_fallback(self) -> "WhisperCppBackend":
         """Per-call whisper-cli backend used when the server can't run here.
 
@@ -807,7 +847,7 @@ class WhisperServerBackend(TranscriptionBackend):
         """
         if getattr(self, "_cli_backend", None) is None:
             self._cli_backend = WhisperCppBackend(
-                whisper_binary=self.whisper_server_binary.replace("whisper-server", "whisper-cli"),
+                whisper_binary=self._resolve_cli_binary(),
                 model_path=self.model_path,
                 prompt=self.prompt,
                 threads=self.threads,

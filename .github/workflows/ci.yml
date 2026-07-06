@@ -77,7 +77,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest tests/ -v --tb=short --cov=src/wayfinder --cov-report=xml -m "not ui and not slow and not network"
+          pytest tests/ -v --tb=short --cov=src/wayfinder --cov-report=xml -m "not ui and not slow and not network and not perf"
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4

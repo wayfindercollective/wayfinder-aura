@@ -10672,6 +10672,13 @@ class WayfinderApp(ctk.CTk):
             gate = getattr(self, "feature_gate", None)
             if gate is None or gate.has_feature("gpu_acceleration"):
                 return  # already has GPU (premium / dev-unlock) — nothing to upsell
+            # Don't upsell GPU acceleration to a machine with no usable GPU — the nudge
+            # would promise a speedup the hardware can't deliver. Cheap, cached,
+            # lspci/sysfs-based detector: model-independent (no whisper probe) and
+            # correctly still fires on the Deck's integrated AMD, suppressing only
+            # truly GPU-less boxes.
+            if not get_gpu_info().has_gpu:
+                return
             banner = getattr(self, "gpu_nudge_banner", None)
             anchor = getattr(self, "_dictate_banner_anchor", None)
             if banner is None:
@@ -13637,6 +13644,17 @@ class WayfinderApp(ctk.CTk):
         duration = recorder.get_duration()
         chunk_count = recorder.get_chunk_count()
         self.log(f"⏱ Duration: {duration:.1f}s ({chunk_count} chunks)")
+
+        # Surface any dropped chunks (resample/preprocess/WAV-write failures). Without
+        # this a failed chunk is an invisible hole in the middle of the transcript;
+        # logging it to the persisted activity.log makes the loss traceable after the
+        # fact. stop() has joined the monitor thread, so the count is final here.
+        dropped = getattr(recorder, "dropped_chunk_count", 0)
+        if dropped:
+            self.log(
+                f"⚠ {dropped} audio chunk(s) failed to save and were dropped — "
+                "the transcript may be missing a section (see activity.log)."
+            )
 
         if duration < self.config["min_recording_duration"]:
             recorder.cleanup()

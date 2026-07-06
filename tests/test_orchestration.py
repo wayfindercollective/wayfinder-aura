@@ -727,6 +727,30 @@ class TestStopChunkedPath:
         assert app.chunked_recorder is None
         assert any("Too short" in m for m in app.logs)
 
+    def test_stop_chunked_logs_dropped_chunks(self, app):
+        """M4: a chunk that failed to save must be surfaced to the activity log at
+        stop time, not silently dropped. (duration below min → the recording is
+        then rejected, but the drop must already have been logged.)"""
+        app.config["chunked_mode"] = True
+        rec = FakeChunkedRecorder(duration=0.1)
+        rec.dropped_chunk_count = 3  # three chunks failed to save this session
+        app.chunked_recorder = rec
+        rec.started = True
+        app.app_state = AppState.RECORDING
+        app.stop_recording_and_process()
+        assert any("failed to save" in m and "dropped" in m for m in app.logs), \
+            "dropped chunks must be logged (traceable), not a silent transcript hole"
+
+    def test_stop_chunked_no_drop_no_noise(self, app):
+        """The drop warning appears ONLY when chunks were actually lost."""
+        app.config["chunked_mode"] = True
+        rec = FakeChunkedRecorder(duration=0.1)  # dropped_chunk_count defaults to 0
+        app.chunked_recorder = rec
+        rec.started = True
+        app.app_state = AppState.RECORDING
+        app.stop_recording_and_process()
+        assert not any("failed to save" in m for m in app.logs)
+
 
 class TestGpuNudge:
     """Free-tier GPU upsell nudge gating (WayfinderApp._maybe_show_gpu_nudge).
@@ -749,6 +773,16 @@ class TestGpuNudge:
 
         def pack_forget(self):
             self._packed = False
+
+    @pytest.fixture(autouse=True)
+    def _gpu_hardware_present(self, monkeypatch):
+        """Default: a GPU IS present, so these tests exercise the OTHER gates
+        (duration/license/session/dismissal) regardless of the host — CI runners
+        have no GPU, and the new hardware gate would otherwise suppress the nudge."""
+        monkeypatch.setattr(
+            wayfinder_main, "get_gpu_info",
+            lambda: wayfinder_main.GPUInfo("amd", "AMD GPU", "amdgpu"),
+        )
 
     def _make_self(self, *, shown=False, dismissed=False, has_gpu=False):
         ns = SimpleNamespace(
@@ -781,6 +815,26 @@ class TestGpuNudge:
         fake = self._make_self(has_gpu=True)  # already has GPU acceleration
         self._show(fake, 120.0)
         assert fake.gpu_nudge_banner._packed is False
+
+    def test_no_gpu_hardware_stays_silent(self, monkeypatch):
+        """M3: a free user on a machine with NO usable GPU must NOT be upsold GPU
+        acceleration — the nudge would promise a speedup the hardware can't deliver.
+        (Overrides the autouse 'GPU present' default with an unknown/absent GPU.)"""
+        monkeypatch.setattr(
+            wayfinder_main, "get_gpu_info",
+            lambda: wayfinder_main.GPUInfo("unknown", "Unknown GPU", ""),
+        )
+        fake = self._make_self(has_gpu=False)   # GPU locked (free tier)
+        self._show(fake, 120.0)                 # long dictation
+        assert fake.gpu_nudge_banner._packed is False, \
+            "must not upsell GPU acceleration on a GPU-less machine"
+
+    def test_gpu_present_free_user_is_nudged(self):
+        """Complement: with a real GPU present (the autouse default) a long free
+        dictation DOES surface the upsell."""
+        fake = self._make_self(has_gpu=False)
+        self._show(fake, 60.0)
+        assert fake.gpu_nudge_banner._packed is True
 
     def test_dismissed_for_good_stays_silent(self):
         fake = self._make_self(has_gpu=False, dismissed=True)
