@@ -6,6 +6,7 @@ Supports multiple backends: whisper.cpp (with Vulkan GPU) and Faster-Whisper (wi
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -60,6 +61,52 @@ CASUAL_VOCABULARY = [
 class TranscriptionError(Exception):
     """Raised when transcription fails."""
     pass
+
+
+def _expand_path(value: object) -> str:
+    """Expand a config path without letting None/blank masquerade as cwd."""
+    if value is None:
+        return ""
+    return os.path.expanduser(str(value).strip())
+
+
+def _existing_file(value: object) -> bool:
+    path = _expand_path(value)
+    if not path:
+        return False
+    p = Path(path)
+    return p.exists() and not p.is_dir()
+
+
+def _first_existing_file(candidates: list[object]) -> str | None:
+    for candidate in candidates:
+        path = _expand_path(candidate)
+        if _existing_file(path):
+            return path
+    return None
+
+
+def _resolve_whisper_cli_binary(configured: object) -> str:
+    """Return a real whisper-cli when possible, even if config saved a blank path."""
+    found = _first_existing_file([
+        configured,
+        "~/whisper.cpp/build/bin/whisper-cli",
+        "/app/bin/whisper-cli",
+        "/usr/bin/whisper-cli",
+        "/usr/local/bin/whisper-cli",
+        "/opt/homebrew/bin/whisper-cli",
+        shutil.which("whisper-cli"),
+    ])
+    if found:
+        return found
+    configured_path = _expand_path(configured)
+    return configured_path or os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli")
+
+
+def _derive_whisper_server_binary(cli_binary: str) -> str:
+    if cli_binary and "whisper-cli" in cli_binary:
+        return cli_binary.replace("whisper-cli", "whisper-server")
+    return os.path.expanduser("~/whisper.cpp/build/bin/whisper-server")
 
 
 class TranscriptionBackend(ABC):
@@ -165,11 +212,11 @@ def _cpu_fallback_binary(binary: str) -> Optional[str]:
     The Flatpak ships whisper-cli (Vulkan) + whisper-cli-cpu (CPU baseline); from-source
     installs usually have only one binary, so this returns None there.
     """
-    if binary.endswith("-cpu"):
+    if not binary or binary.endswith("-cpu"):
         return None
     p = Path(binary)
     candidate = p.with_name(p.name + "-cpu")
-    return str(candidate) if candidate.exists() else None
+    return str(candidate) if candidate.is_file() else None
 
 
 class WhisperCppBackend(TranscriptionBackend):
@@ -199,8 +246,8 @@ class WhisperCppBackend(TranscriptionBackend):
         custom_vocabulary: list = None,
         suppress_nst: bool = False,  # Suppress non-speech tokens (can drop words if True)
     ):
-        self.whisper_binary = os.path.expanduser(whisper_binary)
-        self.model_path = os.path.expanduser(model_path)
+        self.whisper_binary = _expand_path(whisper_binary)
+        self.model_path = _expand_path(model_path)
         self.prompt = prompt
         self.threads = threads
         self.timeout = timeout
@@ -252,7 +299,7 @@ class WhisperCppBackend(TranscriptionBackend):
     
     def is_available(self) -> bool:
         """Check if whisper.cpp binary exists."""
-        return Path(self.whisper_binary).exists()
+        return _existing_file(self.whisper_binary)
     
     def supports_gpu(self) -> bool:
         """
@@ -329,7 +376,7 @@ class WhisperCppBackend(TranscriptionBackend):
             TranscriptionError: If transcription fails
         """
         # Validate paths
-        if not Path(self.whisper_binary).exists():
+        if not _existing_file(self.whisper_binary):
             raise TranscriptionError(f"whisper.cpp binary not found: {self.whisper_binary}")
         if not Path(self.model_path).exists():
             raise TranscriptionError(f"Model file not found: {self.model_path}")
@@ -588,8 +635,8 @@ class WhisperServerBackend(TranscriptionBackend):
         temperature_fallback: float = 0.0,
         gpu_layers: int = 0,
     ):
-        self.whisper_server_binary = os.path.expanduser(whisper_server_binary)
-        self.model_path = os.path.expanduser(model_path)
+        self.whisper_server_binary = _expand_path(whisper_server_binary)
+        self.model_path = _expand_path(model_path)
         self.port = port
         self.threads = threads
         self.timeout = timeout
@@ -688,12 +735,17 @@ class WhisperServerBackend(TranscriptionBackend):
         # ships a separate CPU-only server binary for exactly this; try it last
         # so instant (model-resident) transcription survives broken Vulkan.
         cpu_server = self.whisper_server_binary.replace("whisper-server", "whisper-server-cpu")
-        if cpu_server != self.whisper_server_binary and Path(cpu_server).exists():
+        if cpu_server != self.whisper_server_binary and _existing_file(cpu_server):
             attempts.append([cpu_server] + base[1:])
         return attempts
 
     def _start_server(self) -> None:
         """Start the whisper-server process if not already running."""
+        if not self.is_available():
+            WhisperServerBackend._server_disabled = True
+            raise TranscriptionError(
+                f"whisper-server binary not found: {self.whisper_server_binary or '<empty>'}"
+            )
         with WhisperServerBackend._server_lock:
             # Check if already running with matching model
             if (WhisperServerBackend._server_process is not None
@@ -788,7 +840,7 @@ class WhisperServerBackend(TranscriptionBackend):
 
     def is_available(self) -> bool:
         """Check if the whisper-server binary exists."""
-        return Path(self.whisper_server_binary).exists() and Path(self.model_path).exists()
+        return _existing_file(self.whisper_server_binary) and Path(self.model_path).exists()
 
     def get_name(self) -> str:
         return "whisper.cpp (server)"
@@ -830,7 +882,7 @@ class WhisperServerBackend(TranscriptionBackend):
             "/app/bin/whisper-cli-cpu",   # Flatpak bundle (CPU baseline)
         ]
         for cand in candidates:
-            if cand and Path(cand).exists():
+            if _existing_file(cand):
                 return cand
         for name in ("whisper-cli", "whisper-cli-cpu"):
             found = shutil.which(name)
@@ -1750,10 +1802,11 @@ def get_backend(config: dict) -> TranscriptionBackend:
         # whisper-server binary: the Flatpak bundles it, and a from-source install may
         # only have whisper-cli built. So fall back to the per-invocation CLI backend
         # whenever the server binary is absent — instant where possible, always working.
+        cli_binary = _resolve_whisper_cli_binary(
+            config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
+        )
         if config.get("whisper_server_mode", True):
-            server_binary = config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
-            # Derive server binary path from CLI binary path
-            server_binary = server_binary.replace("whisper-cli", "whisper-server")
+            server_binary = _derive_whisper_server_binary(cli_binary)
             server_backend = WhisperServerBackend(
                 whisper_server_binary=server_binary,
                 model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),
@@ -1778,7 +1831,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             print("[Transcription] whisper-server binary not found — using whisper-cli "
                   "(per-dictation model load). Build whisper-server for instant mode.")
         return WhisperCppBackend(
-            whisper_binary=config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli"),
+            whisper_binary=cli_binary,
             model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),
             prompt=config.get("prompt", "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next."),
             threads=config.get("threads", 6),

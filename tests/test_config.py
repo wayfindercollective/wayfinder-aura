@@ -121,6 +121,26 @@ class TestStalePathRepair:
         config = cfg.load_config()
         assert config["llama_cpp_binary"] == str(user_binary)
 
+    def test_blank_whisper_binary_repaired_to_existing_host_candidate(
+        self, temp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A saved empty whisper_binary must not survive as ''. Path('') is cwd,
+        which made the transcriber think an empty server binary was available."""
+        from wayfinder import config as cfg
+
+        home = temp_config_dir.parents[1]
+        host_cli = home / "whisper.cpp" / "build" / "bin" / "whisper-cli"
+        host_cli.parent.mkdir(parents=True, exist_ok=True)
+        host_cli.write_text("#!/bin/sh\n")
+        monkeypatch.setitem(cfg.DEFAULT_CONFIG, "whisper_binary", "/missing/default/whisper-cli")
+
+        cfg.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(cfg.CONFIG_FILE, "w") as f:
+            json.dump({"whisper_binary": ""}, f)
+
+        config = cfg.load_config()
+        assert config["whisper_binary"] == str(host_cli)
+
 
 class TestKeyCodeMappings:
     """Test key code utilities."""
