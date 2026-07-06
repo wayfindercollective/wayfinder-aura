@@ -6,6 +6,7 @@ Handles loading, saving, and defaults for all application settings.
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -332,6 +333,62 @@ MODIFIER_CODES: dict[str, list[int]] = {
 }
 
 
+def _path_exists(value: object) -> bool:
+    if value is None:
+        return False
+    path = os.path.expanduser(str(value).strip())
+    return bool(path) and os.path.exists(path)
+
+
+def _first_existing_path(candidates: list[object]) -> str | None:
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        path = os.path.expanduser(str(candidate).strip())
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _repair_config_path(key: str, saved: object) -> object:
+    """Repair blank/stale critical paths without treating '' as cwd."""
+    if _path_exists(saved):
+        return saved
+
+    default = DEFAULT_CONFIG.get(key, "")
+    candidates: list[object] = [default]
+    if key == "whisper_binary":
+        candidates.extend([
+            "~/whisper.cpp/build/bin/whisper-cli",
+            "/app/bin/whisper-cli",
+            "/usr/bin/whisper-cli",
+            "/usr/local/bin/whisper-cli",
+            "/opt/homebrew/bin/whisper-cli",
+            shutil.which("whisper-cli"),
+        ])
+    elif key == "llama_cpp_binary":
+        candidates.extend([
+            "~/llama.cpp/build/bin/llama-cli",
+            "/app/bin/llama-simple",
+            "/app/bin/llama-cli",
+            "/usr/bin/llama-cli",
+            "/usr/local/bin/llama-cli",
+            "/opt/homebrew/bin/llama-cli",
+            shutil.which("llama-cli"),
+            shutil.which("llama-simple"),
+        ])
+
+    repaired = _first_existing_path(candidates)
+    if repaired:
+        return repaired
+
+    # Blank paths are dangerous because Path("") points at cwd and can make
+    # availability checks lie; a concrete default gives later checks a clear path.
+    if saved is None or not str(saved).strip():
+        return default
+    return saved
+
+
 def load_config() -> dict:
     """
     Load configuration from file, merging with defaults.
@@ -389,18 +446,14 @@ def load_config() -> dict:
                 config["style_toggle_key"] = 68
                 config["style_toggle_modifiers"] = []
 
-            # Validate critical paths — if saved path doesn't exist, fall back
-            # to auto-detected default. Prevents stale paths from a previous
-            # environment (e.g. Flatpak /app/bin path after switching to venv,
+            # Validate critical paths — if saved path is blank or doesn't exist,
+            # fall back to an existing auto-detected path/default. Prevents stale
+            # paths from a previous environment (e.g. Flatpak /app/bin after switching to venv,
             # or a saved host ~/llama.cpp path inside the sandbox where only
             # the bundled /app/bin/llama-simple exists).
             _path_keys = ("whisper_binary", "model_path", "llama_cpp_model_path", "llama_cpp_binary")
             for key in _path_keys:
-                saved = config.get(key, "")
-                if saved and not os.path.exists(os.path.expanduser(saved)):
-                    default = DEFAULT_CONFIG.get(key, "")
-                    if default and os.path.exists(os.path.expanduser(default)):
-                        config[key] = default
+                config[key] = _repair_config_path(key, config.get(key, ""))
 
             # Audio device: a saved bare INDEX with no matching device name is unreliable.
             # PortAudio/PipeWire renumber devices between sessions (and on PipeWire restart),
@@ -528,6 +581,3 @@ def get_modifier_name(modifier: str) -> str:
         "super": "Super",
     }
     return names.get(modifier, modifier.title())
-
-
-

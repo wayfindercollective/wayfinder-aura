@@ -108,6 +108,15 @@ class TestWhisperCppBackend:
         assert backend.whisper_binary == sample_config["whisper_binary"]
         assert backend.model_path == sample_config["model_path"]
 
+    def test_blank_binary_is_not_available(self):
+        """Regression: Path('') is cwd, not a whisper executable."""
+        from wayfinder.core.transcriber import WhisperCppBackend
+
+        backend = WhisperCppBackend(whisper_binary="")
+
+        assert backend.whisper_binary == ""
+        assert backend.is_available() is False
+
     @patch("subprocess.run")
     def test_transcribe_calls_whisper_cli(self, mock_run, sample_config: dict, sample_audio_file: Path):
         """Test that transcribe calls whisper-cli correctly."""
@@ -847,6 +856,19 @@ class TestWhisperServerWarmup:
             b.warm_up()
             start.assert_not_called()
 
+    def test_blank_server_binary_is_not_available(self, tmp_path):
+        """Regression for live crash: Path('') used to make cwd look like a server."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        model = tmp_path / "m.bin"
+        model.write_bytes(b"\x00")
+        b = WhisperServerBackend(whisper_server_binary="", model_path=str(model))
+
+        assert b.is_available() is False
+        with patch.object(b, "_start_server") as start:
+            b.warm_up()
+            start.assert_not_called()
+
     def test_warm_up_starts_server_when_available(self, tmp_path):
         from wayfinder.core.transcriber import WhisperServerBackend
         binary = tmp_path / "whisper-server"
@@ -944,6 +966,51 @@ class TestServerModeDefaultAndFallback:
         backend = get_backend(cfg)
         assert isinstance(backend, WhisperCppBackend)
         assert not hasattr(backend, "whisper_server_binary")
+
+    def test_blank_whisper_binary_does_not_select_empty_server(
+        self, tmp_path, monkeypatch
+    ):
+        """The live config had whisper_binary='', which must not become Popen([''])."""
+        from wayfinder.core import transcriber
+        from wayfinder.core.transcriber import get_backend, WhisperCppBackend
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(transcriber.shutil, "which", lambda name: None)
+        model = tmp_path / "m.bin"
+        model.write_bytes(b"\x00")
+
+        backend = get_backend({
+            "whisper_server_mode": True,
+            "whisper_binary": "",
+            "model_path": str(model),
+        })
+
+        assert isinstance(backend, WhisperCppBackend)
+        assert backend.whisper_binary
+        assert backend.whisper_binary != ""
+
+    def test_blank_whisper_binary_resolves_existing_home_cli(
+        self, tmp_path, monkeypatch
+    ):
+        from wayfinder.core import transcriber
+        from wayfinder.core.transcriber import get_backend, WhisperCppBackend
+
+        home_cli = tmp_path / "whisper.cpp" / "build" / "bin" / "whisper-cli"
+        home_cli.parent.mkdir(parents=True)
+        home_cli.write_text("#!/bin/sh\n")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(transcriber.shutil, "which", lambda name: None)
+        model = tmp_path / "m.bin"
+        model.write_bytes(b"\x00")
+
+        backend = get_backend({
+            "whisper_server_mode": True,
+            "whisper_binary": "",
+            "model_path": str(model),
+        })
+
+        assert isinstance(backend, WhisperCppBackend)
+        assert backend.whisper_binary == str(home_cli)
 
 
 class TestServerFlagLadderAndCliDelegation:
