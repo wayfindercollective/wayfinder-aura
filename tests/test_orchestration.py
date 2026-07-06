@@ -177,6 +177,7 @@ class FakeApp:
     _deduplicate_overlap_text = WApp._deduplicate_overlap_text
     _find_text_overlap = WApp._find_text_overlap
     _silence_error_message = WApp._silence_error_message
+    _maybe_show_gpu_nudge = WApp._maybe_show_gpu_nudge
     transcribe_and_inject = WApp.transcribe_and_inject
     on_transcription_done = WApp.on_transcription_done
     do_inject = WApp.do_inject
@@ -200,6 +201,7 @@ class FakeApp:
         self._duration_update_job = None
         self._recording_start_time = None
         self._processing_start_time = None
+        self._gpu_nudge_shown = False  # GPU-nudge gate reads this; no feature_gate → no-op
         self._after_calls = []     # list[(delay, fn)] recorded, not auto-run
         self._after_cancelled = set()
         self._after_token = 0
@@ -724,3 +726,79 @@ class TestStopChunkedPath:
         assert rec.cleaned is True
         assert app.chunked_recorder is None
         assert any("Too short" in m for m in app.logs)
+
+
+class TestGpuNudge:
+    """Free-tier GPU upsell nudge gating (WayfinderApp._maybe_show_gpu_nudge).
+
+    Real unbound methods driven against a minimal stub self — same approach as the
+    orchestration tests above. Verifies the nudge fires ONLY on a long free-tier
+    dictation, stays silent for premium/dev-unlock users, short clips, an already-
+    shown session, and a persisted dismissal; and that Dismiss persists 'never again'.
+    """
+
+    class _FakeBanner:
+        def __init__(self):
+            self._packed = False
+
+        def winfo_manager(self):
+            return "pack" if self._packed else ""
+
+        def pack(self, **_k):
+            self._packed = True
+
+        def pack_forget(self):
+            self._packed = False
+
+    def _make_self(self, *, shown=False, dismissed=False, has_gpu=False):
+        ns = SimpleNamespace(
+            _gpu_nudge_shown=shown,
+            config={"gpu_nudge_dismissed": dismissed},
+            feature_gate=SimpleNamespace(has_feature=lambda _fid: has_gpu),
+            gpu_nudge_banner=self._FakeBanner(),
+            _dictate_banner_anchor=None,
+            log=lambda _m: None,
+        )
+        # Bind the real _hide_gpu_nudge so _dismiss_gpu_nudge exercises production code.
+        ns._hide_gpu_nudge = wayfinder_main.WayfinderApp._hide_gpu_nudge.__get__(ns)
+        return ns
+
+    def _show(self, fake, dur):
+        wayfinder_main.WayfinderApp._maybe_show_gpu_nudge(fake, dur)
+
+    def test_long_free_dictation_shows_nudge(self):
+        fake = self._make_self(has_gpu=False)
+        self._show(fake, 60.0)
+        assert fake.gpu_nudge_banner._packed
+        assert fake._gpu_nudge_shown is True
+
+    def test_short_dictation_stays_silent(self):
+        fake = self._make_self(has_gpu=False)
+        self._show(fake, 20.0)  # < _GPU_NUDGE_MIN_DURATION_S
+        assert fake.gpu_nudge_banner._packed is False
+
+    def test_premium_user_never_nudged(self):
+        fake = self._make_self(has_gpu=True)  # already has GPU acceleration
+        self._show(fake, 120.0)
+        assert fake.gpu_nudge_banner._packed is False
+
+    def test_dismissed_for_good_stays_silent(self):
+        fake = self._make_self(has_gpu=False, dismissed=True)
+        self._show(fake, 120.0)
+        assert fake.gpu_nudge_banner._packed is False
+
+    def test_at_most_once_per_session(self):
+        fake = self._make_self(has_gpu=False, shown=True)
+        self._show(fake, 120.0)
+        assert fake.gpu_nudge_banner._packed is False
+
+    def test_dismiss_persists_never_again(self, monkeypatch):
+        saved = {}
+        monkeypatch.setattr(wayfinder_main, "save_config", lambda c: saved.update(c))
+        fake = self._make_self(has_gpu=False)
+        self._show(fake, 60.0)
+        assert fake.gpu_nudge_banner._packed is True
+        wayfinder_main.WayfinderApp._dismiss_gpu_nudge(fake)
+        assert fake.gpu_nudge_banner._packed is False
+        assert fake.config["gpu_nudge_dismissed"] is True
+        assert saved.get("gpu_nudge_dismissed") is True
