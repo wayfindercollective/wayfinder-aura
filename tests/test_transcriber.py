@@ -194,6 +194,78 @@ class TestWhisperServerBackend:
         assert mock_start.call_count == 2
         assert urlopen.call_count == 2
 
+    def test_retry_failure_salvages_words_via_cli(self, sample_audio_file: Path):
+        """Regression: a chunk whose request fails even after restart+retry must be
+        salvaged through the per-call whisper-cli backend, not dropped. Dropping it
+        stores "[error]" upstream and silently loses the user's words — observed on
+        the free/CPU path when a long multi-chunk dictation wedged the server.
+        """
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        backend = WhisperServerBackend(use_gpu=False, timeout=1)
+
+        def fake_start():
+            WhisperServerBackend._server_port = 8178
+
+        # Initial request AND post-restart retry both fail — the server is gone.
+        urlopen = MagicMock(side_effect=[TimeoutError("timed out"),
+                                         TimeoutError("still wedged")])
+        cli = MagicMock()
+        cli.transcribe.return_value = "salvaged words"
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch.object(WhisperServerBackend, "_stop_server_internal"), \
+             patch.object(WhisperServerBackend, "_cli_fallback", return_value=cli), \
+             patch("urllib.request.urlopen", urlopen):
+            result = backend.transcribe(str(sample_audio_file))
+
+        assert result == "salvaged words"
+        assert cli.transcribe.called, "words must be salvaged via whisper-cli, not dropped"
+
+    def test_cpu_path_keeps_full_request_timeout(self, sample_audio_file: Path):
+        """On the CPU path the adaptive request-timeout shrink (which assumes GPU
+        speed) must NOT apply. The 1s fixture would otherwise shrink to the 8s floor,
+        which a cold restart + base.en load can exceed — timing out and dropping the
+        final chunk's words. CPU keeps the full configured budget.
+        """
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        backend = WhisperServerBackend(use_gpu=False, timeout=30)
+
+        def fake_start():
+            WhisperServerBackend._server_port = 8178
+
+        urlopen = MagicMock(return_value=self._make_resp("ok"))
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch("urllib.request.urlopen", urlopen):
+            backend.transcribe(str(sample_audio_file))
+
+        assert urlopen.call_args.kwargs.get("timeout") == 30, \
+            "CPU path must use the full timeout, not the GPU-optimistic shrink"
+
+    def test_gpu_path_still_shrinks_request_timeout(self, sample_audio_file: Path):
+        """Guard the inverse: on GPU the adaptive shrink is still applied, so a short
+        clip self-heals fast on a contention wedge. The 1s fixture shrinks to the 8s
+        floor (max(8, min(30, 1*2+4))).
+        """
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        backend = WhisperServerBackend(use_gpu=True, timeout=30)
+
+        def fake_start():
+            WhisperServerBackend._server_port = 8178
+
+        urlopen = MagicMock(return_value=self._make_resp("ok"))
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch("urllib.request.urlopen", urlopen):
+            backend.transcribe(str(sample_audio_file))
+
+        assert urlopen.call_args.kwargs.get("timeout") == 8.0, \
+            "GPU path should keep the adaptive shrink (8s floor for the 1s fixture)"
+
 
 class TestFasterWhisperBackend:
     """Test Faster-Whisper backend."""

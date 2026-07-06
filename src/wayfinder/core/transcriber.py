@@ -850,13 +850,20 @@ class WhisperServerBackend(TranscriptionBackend):
         # length means an intermittent GPU-contention wedge on a short dictation self-heals
         # in a few seconds (restart+retry) instead of stalling the full 30s. Floor 8s covers
         # cold starts; capped at self.timeout so long chunks keep their headroom.
+        #
+        # CPU path (free tier): the shrink assumes GPU speed, which does NOT hold on CPU —
+        # base.en runs slower than realtime, and a cold restart + model load can itself
+        # exceed the 8s floor. That starved a short *final* chunk into a retry timeout and
+        # dropped its words. There is no fast self-heal to win on CPU, so keep the FULL
+        # budget there: waiting beats timing out and losing speech.
         req_timeout = self.timeout
-        try:
-            with contextlib.closing(wave.open(audio_path, "rb")) as _wf:
-                _dur = _wf.getnframes() / float(_wf.getframerate() or 16000)
-            req_timeout = max(8.0, min(float(self.timeout), _dur * 2.0 + 4.0))
-        except Exception:
-            pass  # unreadable header → fall back to the full configured timeout
+        if self.use_gpu:
+            try:
+                with contextlib.closing(wave.open(audio_path, "rb")) as _wf:
+                    _dur = _wf.getnframes() / float(_wf.getframerate() or 16000)
+                req_timeout = max(8.0, min(float(self.timeout), _dur * 2.0 + 4.0))
+            except Exception:
+                pass  # unreadable header → fall back to the full configured timeout
 
         try:
             import urllib.request
@@ -924,7 +931,20 @@ class WhisperServerBackend(TranscriptionBackend):
                 result = json.loads(resp.read().decode("utf-8"))
                 return result.get("text", "").strip()
             except Exception as retry_err:
-                raise TranscriptionError(f"whisper-server failed after restart: {retry_err}")
+                # The server won't come back for this chunk. Dropping it here means the
+                # caller stores "[error]" and those words are lost from the final text
+                # (observed on the free/CPU path: a long multi-chunk dictation wedged the
+                # server and the final chunk vanished). Salvage the words with the per-call
+                # whisper-cli backend — it loads the model itself and does not depend on the
+                # wedged server. Slower, but no lost speech.
+                print(f"[Whisper Server] retry failed ({retry_err}); "
+                      "salvaging this chunk via whisper-cli.")
+                try:
+                    return self._cli_fallback().transcribe(audio_path, context)
+                except Exception as cli_err:
+                    raise TranscriptionError(
+                        f"whisper-server failed after restart ({retry_err}); "
+                        f"whisper-cli salvage also failed: {cli_err}")
 
         except Exception as e:
             raise TranscriptionError(f"whisper-server transcription failed: {e}")
