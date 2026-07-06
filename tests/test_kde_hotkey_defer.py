@@ -20,12 +20,31 @@ pytest.importorskip("customtkinter")
 from wayfinder_main import kde_record_shortcut_active  # noqa: E402
 
 
+# Plasma 6 real-world format: a [services]-prefixed group and a BARE value.
+PLASMA6_BOUND = (
+    "[services][wayfinder-aura.desktop]\n"
+    "cycle-style=F2\n"
+    "toggle-recording=F3\n"
+)
+
+# Legacy / comma-list writers (still accepted).
 BOUND = (
     "[wayfinder-aura.desktop]\n"
     "_k_friendly_name=Wayfinder Aura\n"
     "cycle-style=F2,none,Cycle Output Style\n"
     "toggle-recording=F3,none,Toggle Recording\n"
 )
+
+
+def test_active_plasma6_services_prefixed_group():
+    # The real Plasma 6 layout that d2daf7b's exact-match parser missed → why the
+    # deferral never fired and F3 both leaked to Find AND double-triggered.
+    assert kde_record_shortcut_active(PLASMA6_BOUND) is True
+
+
+def test_inactive_plasma6_unbound():
+    text = "[services][wayfinder-aura.desktop]\ntoggle-recording=none\n"
+    assert kde_record_shortcut_active(text) is False
 
 
 def test_active_when_bound_to_a_real_key():

@@ -1880,22 +1880,33 @@ def kde_record_shortcut_active(kglobalshortcutsrc_text: str,
                                action: str = "toggle-recording") -> bool:
     """True if KDE binds `action` (default the record toggle) to a real key.
 
-    kglobalshortcutsrc stores it as ``toggle-recording=F3,none,Toggle Recording``
-    under ``[wayfinder-aura.desktop]`` — the FIRST comma-field is the ACTIVE
-    shortcut ("none"/empty = unbound). When it's a real key, KWin grabs that key
-    at the compositor level, so the app must NOT also read it via the passive
-    evdev listener: evdev can't *consume* the key, so a shared binding leaks it
-    into the focused window (F3 → the browser's Find bar, which then eats the
-    dictation). Reading KDE's own config — never touched by save_config — makes
-    this immune to the in-app hotkey setting being reset. Pure/headless.
+    Plasma 6 stores .desktop-action shortcuts under a ``[services]``-prefixed
+    group and a bare value::
+
+        [services][wayfinder-aura.desktop]
+        toggle-recording=F3
+
+    (older/other writers used ``[wayfinder-aura.desktop]`` with a comma-list
+    ``F3,none,Toggle Recording`` — the FIRST field is the active key). We accept
+    both: the group is matched by SUFFIX so the ``[services]`` prefix doesn't hide
+    it, and the value takes the first comma-field ("none"/empty = unbound). When
+    it's a real key, KWin grabs it at the compositor level, so the app must NOT
+    also read it via the passive evdev listener: evdev can't *consume* the key, so
+    a shared binding both leaks F3 into the focused window (→ the browser's Find
+    bar, which eats the dictation) AND double-fires (evdev + KDE→socket → record
+    toggles on then straight off → 0.0s "too short"). Reading KDE's own config —
+    never touched by save_config — makes this immune to the in-app hotkey setting
+    being reset. Pure/headless.
     """
     in_group = False
-    target = f"[{desktop_group}]"
+    # Suffix match so BOTH "[wayfinder-aura.desktop]" and Plasma 6's
+    # "[services][wayfinder-aura.desktop]" count as our group.
+    suffix = f"[{desktop_group}]"
     prefix = f"{action}="
     for raw in kglobalshortcutsrc_text.splitlines():
         line = raw.strip()
         if line.startswith("[") and line.endswith("]"):
-            in_group = (line == target)
+            in_group = line.endswith(suffix)
             continue
         if in_group and line.startswith(prefix):
             active = line[len(prefix):].split(",", 1)[0].strip().lower()
@@ -1932,6 +1943,27 @@ def resolve_hotkey_backend(platform: str, is_flatpak: bool, dbus_available: bool
             return "portal"
         return "unavailable" if is_wayland else "pynput"
     return "evdev"
+
+
+def should_host_qt_tray(platform: str, has_pystray: bool, enable_tray_icon: bool) -> bool:
+    """Whether to host the native Qt StatusNotifier tray in the overlay subprocess
+    (vs. the in-process pystray tray).
+
+    Linux uses the Qt tray on both desktop and Flatpak: it is the native
+    StatusNotifierItem KDE Plasma and GNOME (with the AppIndicator extension)
+    surface reliably. pystray's libappindicator backend renders a menu on Plasma 6
+    but its DBusMenu *activations don't dispatch* — the menu shows yet every click
+    is a no-op (verified: the app stayed alive after "Quit" was clicked). macOS
+    keeps pystray, which works there, and only falls back to the Qt tray if pystray
+    is unavailable. `enable_tray_icon` is the user's "show tray icon" setting.
+
+    Kept pure so the desktop-vs-Flatpak-vs-macOS matrix is provable headlessly.
+    """
+    if not enable_tray_icon:
+        return False
+    if platform == "darwin":
+        return not has_pystray
+    return True
 
 
 def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabled_devices=None, log_callback=None,
@@ -3737,10 +3769,13 @@ class WayfinderApp(ctk.CTk):
                     initial_style=initial_style,
                     config=self.config,
                     log_callback=self.log,
-                    # Host the tray in the overlay subprocess only when there's no in-process
-                    # pystray tray (the Flatpak case) and the user hasn't disabled it — avoids
-                    # a double tray on desktop Linux where pystray works.
-                    want_tray=(not HAS_PYSTRAY and self.config.get("enable_tray_icon", True)),
+                    # Host the native Qt StatusNotifier tray in the overlay subprocess on
+                    # Linux (desktop AND Flatpak) — reliable on KDE Plasma / GNOME. pystray's
+                    # libappindicator menu renders but its clicks don't dispatch on Plasma 6,
+                    # so we retire it on Linux (setup_tray mirrors this). macOS keeps pystray.
+                    want_tray=should_host_qt_tray(
+                        sys.platform, HAS_PYSTRAY,
+                        self.config.get("enable_tray_icon", True)),
                 )
                 self._use_pyqt_overlay = True
                 self.log(f"✨ Using Always On indicator (PyQt6)")
@@ -12429,6 +12464,14 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ Model not found: {model_name}")
     
     def setup_tray(self):
+        # Linux hosts the native Qt StatusNotifier tray in the overlay subprocess instead
+        # (see OverlayController above): pystray's libappindicator backend renders a menu on
+        # KDE Plasma 6 but its click activations don't dispatch, so every menu item is a
+        # no-op. Skip pystray there so there's exactly one, working tray. macOS keeps pystray.
+        if should_host_qt_tray(sys.platform, HAS_PYSTRAY,
+                               self.config.get("enable_tray_icon", True)):
+            self.tray_icon = None
+            return
         # Skip entirely if pystray couldn't import its tray backend (sandbox / no AppIndicator).
         if not HAS_PYSTRAY:
             self.tray_icon = None
