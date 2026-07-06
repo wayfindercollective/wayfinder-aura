@@ -168,6 +168,28 @@ class TestAudioProcessing:
         level = recorder.get_audio_level()
         assert 0.0 <= level <= 1.0
 
+    def test_save_chunk_failure_is_counted(self, monkeypatch):
+        """M4: a chunk that fails to save (resample/preprocess/WAV-write error) must
+        be COUNTED so the app layer can surface the dropped section to the activity
+        log — instead of vanishing as a silent hole in the middle of the transcript."""
+        import numpy as np
+        import wave as _wave
+        from wayfinder.core.recorder import ChunkedRecorder
+
+        recorder = ChunkedRecorder(sample_rate=16000)
+        assert recorder.dropped_chunk_count == 0
+
+        # Force the WAV write to blow up (disk full / bad audio / resample error).
+        monkeypatch.setattr(
+            _wave, "open",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        result = recorder._save_chunk(np.zeros(1600, dtype=np.float32))
+
+        assert result is None, "a failed save returns None"
+        assert recorder.dropped_chunk_count == 1, "the drop must be counted, not silent"
+
 
 class TestSilenceDetection:
     """Peak tracking feeds the silence guard that replaces 'no output' confusion."""

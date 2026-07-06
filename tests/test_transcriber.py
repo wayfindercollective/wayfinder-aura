@@ -223,6 +223,70 @@ class TestWhisperServerBackend:
         assert result == "salvaged words"
         assert cli.transcribe.called, "words must be salvaged via whisper-cli, not dropped"
 
+    def test_cli_fallback_resolves_existing_binary_when_sibling_missing(self, tmp_path):
+        """H2 regression: on a server-only install the derived whisper-cli sibling
+        is absent. The salvage backend must still point at a whisper-cli that
+        EXISTS (here the CPU twin) — not a missing path that raises 'binary not
+        found' and drops the chunk's words. (The old code blindly used the derived
+        sibling; this exercises the resolver, which that path never did.)"""
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        server = tmp_path / "whisper-server"
+        server.write_text("#!/bin/sh\n")            # server binary present
+        cpu_cli = tmp_path / "whisper-cli-cpu"      # only the CPU twin is present
+        cpu_cli.write_text("#!/bin/sh\n")
+        # tmp_path/"whisper-cli" (the derived sibling) is deliberately absent.
+
+        backend = WhisperServerBackend(whisper_server_binary=str(server), use_gpu=False)
+        resolved = backend._cli_fallback().whisper_binary
+        assert Path(resolved).exists(), "salvage backend must point at an existing binary"
+        assert resolved == str(cpu_cli)
+
+    def test_cli_fallback_uses_derived_sibling_when_present(self, tmp_path):
+        """When the normal whisper-cli sibling IS present, resolve to it (not the
+        CPU twin or PATH) — the common from-source layout stays unchanged."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        server = tmp_path / "whisper-server"
+        server.write_text("#!/bin/sh\n")
+        cli = tmp_path / "whisper-cli"
+        cli.write_text("#!/bin/sh\n")
+
+        backend = WhisperServerBackend(whisper_server_binary=str(server), use_gpu=False)
+        assert backend._cli_fallback().whisper_binary == str(cli)
+
+    def test_salvage_missing_cli_everywhere_raises_clear_error(
+        self, tmp_path, sample_audio_file, monkeypatch
+    ):
+        """When NO whisper-cli exists anywhere (no sibling, no CPU twin, no bundle,
+        nothing on PATH), a wedged server that also fails its retry must raise a
+        CLEAR combined error — never a silent drop."""
+        from wayfinder.core.transcriber import WhisperServerBackend, TranscriptionError
+
+        server = tmp_path / "whisper-server"
+        server.write_text("#!/bin/sh\n")
+        model = tmp_path / "model.bin"
+        model.write_text("x")
+        monkeypatch.setattr("shutil.which", lambda *a, **k: None)  # nothing on PATH
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(
+            whisper_server_binary=str(server), model_path=str(model),
+            use_gpu=False, timeout=1,
+        )
+
+        def fake_start():
+            WhisperServerBackend._server_port = 8178
+
+        urlopen = MagicMock(side_effect=[TimeoutError("wedged"),
+                                         TimeoutError("still wedged")])
+        with patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch.object(WhisperServerBackend, "_stop_server_internal"), \
+             patch("urllib.request.urlopen", urlopen):
+            with pytest.raises(TranscriptionError) as exc:
+                backend.transcribe(str(sample_audio_file))
+        assert "salvage also failed" in str(exc.value)
+
     def test_cpu_path_keeps_full_request_timeout(self, sample_audio_file: Path):
         """On the CPU path the adaptive request-timeout shrink (which assumes GPU
         speed) must NOT apply. The 1s fixture would otherwise shrink to the 8s floor,
@@ -265,6 +329,72 @@ class TestWhisperServerBackend:
 
         assert urlopen.call_args.kwargs.get("timeout") == 8.0, \
             "GPU path should keep the adaptive shrink (8s floor for the 1s fixture)"
+
+    @pytest.mark.parametrize("dur_s,expected_timeout", [
+        (1.0, 8.0),    # below floor: 1*2+4=6 -> clamped up to the 8s floor
+        (2.0, 8.0),    # floor knee: 2*2+4=8 == floor
+        (3.0, 10.0),   # interior: 3*2+4=10
+        (13.0, 30.0),  # cap knee: 13*2+4=30 == self.timeout
+        (20.0, 30.0),  # above cap: 20*2+4=44 -> capped at self.timeout (30)
+    ])
+    def test_gpu_adaptive_timeout_knees(self, tmp_path, dur_s, expected_timeout):
+        """M2: GPU request timeout = max(8, min(self.timeout, dur*2+4)). Exercise
+        the floor, the floor knee, the interior, and the cap knee so a change to the
+        adaptive formula can't silently over-shrink (needless restarts) or
+        under-shrink (slow self-heal). Characterization guard — passes today."""
+        import wave as _wave
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        wav = tmp_path / f"clip_{dur_s}.wav"
+        with _wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * int(16000 * dur_s))
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=True, timeout=30)
+
+        def fake_start():
+            WhisperServerBackend._server_port = 8178
+
+        urlopen = MagicMock(return_value=self._make_resp("ok"))
+        with patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch("urllib.request.urlopen", urlopen):
+            backend.transcribe(str(wav))
+
+        assert urlopen.call_args.kwargs.get("timeout") == expected_timeout
+
+    def test_gpu_retry_state_is_thread_safe(self):
+        """M1: _schedule_gpu_retry mutates the module-global _gpu_retry_state, which
+        is touched by both chunk-transcription workers and the background GPU-probe
+        thread. The read-modify-write must be serialized so concurrent GPU failures
+        don't lose failure-count increments (which would mis-time the retry backoff)."""
+        import threading as _t
+        from wayfinder.core import transcriber as _T
+
+        binary = "/fake/whisper-cli-m1"
+        _T._gpu_retry_state.pop(binary, None)
+
+        n_threads, per_thread = 8, 250
+        barrier = _t.Barrier(n_threads)
+
+        def hammer():
+            barrier.wait()  # release all threads together to maximize contention
+            for _ in range(per_thread):
+                _T._schedule_gpu_retry(binary)
+
+        threads = [_t.Thread(target=hammer) for _ in range(n_threads)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        try:
+            assert _T._gpu_retry_state[binary]["failures"] == n_threads * per_thread, \
+                "concurrent GPU failures lost increments — the RMW is not serialized"
+        finally:
+            _T._gpu_retry_state.pop(binary, None)  # don't leak into other tests
 
 
 class TestFasterWhisperBackend:

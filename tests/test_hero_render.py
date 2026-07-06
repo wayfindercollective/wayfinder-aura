@@ -145,9 +145,37 @@ def test_cache_memoization_and_mask_size():
     assert c1["bg_flat"].size == (W, H)
 
 
+def test_point_count_is_bounded_and_capped():
+    """Structural non-scaling invariant (the ship-safe replacement for the old
+    wall-clock ``test_perf_constant_at_wide_width``, which flaked under CI/Deck
+    load). Render cost is dominated by the polyline sample count; the renderer
+    holds it at the 640px mock density for narrow windows and caps it for wide
+    ones, so cost never scales unbounded with width. Asserting the count directly
+    catches a per-pixel-sampling regression without a load-sensitive timing budget."""
+    # At/under the 640px reference width the count is the constant mock density.
+    assert hr._N_POINTS_MIN == 109
+    assert hr._n_points(640) == hr._N_POINTS_MIN
+    assert hr._n_points(320) == hr._N_POINTS_MIN  # never below the mock density
+    # Wide windows raise the count but never past the hard cap.
+    assert hr._N_POINTS_MAX == 240
+    assert hr._n_points(2180) == hr._N_POINTS_MAX
+    assert hr._n_points(10000) == hr._N_POINTS_MAX  # ceiling holds at any width
+    # Monotonic non-decreasing in width, always within [MIN, MAX].
+    prev = 0
+    for w in range(160, 4000, 37):
+        n = hr._n_points(w)
+        assert hr._N_POINTS_MIN <= n <= hr._N_POINTS_MAX
+        assert n >= prev
+        prev = n
+
+
+@pytest.mark.perf
 def test_perf_under_budget():
     """100 renders at 640x64 must average < 5ms/frame (generous CI margin over
-    the ~1.5ms target — catches a joint='curve'-class regression)."""
+    the ~1.5ms target — catches a joint='curve'-class regression).
+
+    ``perf``-marked: wall-clock, load-sensitive — excluded from the gating run,
+    run locally/nightly. The structural guard above covers CI."""
     caches = hr.get_hero_caches(W, H, ROSE, BG)
     # warmup
     for _ in range(10):
@@ -160,10 +188,14 @@ def test_perf_under_budget():
     assert mean_ms < 5.0, f"hero_render mean {mean_ms:.3f} ms/frame >= 5ms budget"
 
 
+@pytest.mark.perf
 def test_perf_constant_at_wide_width():
     """Render cost must NOT scale with window width: waves are sampled at a
     fixed point count in 640px reference space (live-measured regression: per-
-    pixel sampling at a 2180px window cost ~2.4ms/frame = +5% idle CPU @30fps)."""
+    pixel sampling at a 2180px window cost ~2.4ms/frame = +5% idle CPU @30fps).
+
+    ``perf``-marked: wall-clock, load-sensitive — excluded from the gating run.
+    ``test_point_count_is_bounded_and_capped`` is the structural CI guard."""
     ww = 2180
     caches = hr.get_hero_caches(ww, H, ROSE, BG)
     for _ in range(10):
