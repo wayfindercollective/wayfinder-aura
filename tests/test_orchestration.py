@@ -856,3 +856,37 @@ class TestGpuNudge:
         assert fake.gpu_nudge_banner._packed is False
         assert fake.config["gpu_nudge_dismissed"] is True
         assert saved.get("gpu_nudge_dismissed") is True
+
+
+class TestStatusBreadcrumb:
+    """The status.json breadcrumb (WayfinderApp._write_status_breadcrumb) that lets
+    the live smoke test verify a tab/state change actually happened."""
+
+    def test_writes_atomic_json_with_expected_fields(self, tmp_path, monkeypatch):
+        import json
+        import os
+        status = tmp_path / "runtime" / "status.json"
+        monkeypatch.setattr("wayfinder.config.STATUS_PATH", str(status))
+
+        ns = SimpleNamespace(
+            app_state=AppState.RECORDING, active_tab="settings", session_generation=7,
+        )
+        wayfinder_main.WayfinderApp._write_status_breadcrumb(ns)
+
+        assert status.exists(), "breadcrumb file must be created (dirs auto-made)"
+        data = json.loads(status.read_text())
+        assert data["state"] == "RECORDING"
+        assert data["tab"] == "settings"
+        assert data["generation"] == 7
+        assert data["pid"] == os.getpid()
+        assert isinstance(data["ts"], (int, float))
+        # No leftover temp files from the atomic write.
+        assert not list(status.parent.glob("*.tmp"))
+
+    def test_breadcrumb_never_raises_on_bad_path(self, monkeypatch):
+        # A write failure (unwritable dir) must be swallowed — a diagnostic
+        # breadcrumb must never break a state transition.
+        monkeypatch.setattr("wayfinder.config.STATUS_PATH", "/proc/nonexistent/status.json")
+        ns = SimpleNamespace(app_state=AppState.IDLE, active_tab="dictate",
+                             session_generation=0)
+        wayfinder_main.WayfinderApp._write_status_breadcrumb(ns)  # must not raise

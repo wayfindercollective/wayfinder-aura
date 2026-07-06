@@ -5208,6 +5208,7 @@ class WayfinderApp(ctk.CTk):
                 frame.pack_forget()
         
         self.active_tab = tab_id
+        self._write_status_breadcrumb()
 
     def show_setup_pane(self, on_done=None) -> None:
         """Show the first-run dependency setup as an inline pane over the tab
@@ -12727,9 +12728,45 @@ class WayfinderApp(ctk.CTk):
 
     # === State Management ===
     
+    def _write_status_breadcrumb(self) -> None:
+        """Persist a tiny status file (pid/tab/state/generation) so an external
+        harness can verify the app actually acted on a control-socket command — the
+        socket is fire-and-forget with no reply. Atomic (tmp + os.replace),
+        best-effort; a diagnostic breadcrumb must never break the UI."""
+        try:
+            import json as _json
+            import os as _os
+            import tempfile as _tempfile
+            from wayfinder.config import STATUS_PATH
+            state = getattr(self, "app_state", None)
+            payload = {
+                "pid": _os.getpid(),
+                "ts": time.time(),
+                "state": state.name if hasattr(state, "name") else str(state),
+                "tab": getattr(self, "active_tab", None),
+                "generation": getattr(self, "session_generation", 0),
+            }
+            d = _os.path.dirname(STATUS_PATH)
+            if d:
+                _os.makedirs(d, exist_ok=True)
+            fd, tmp = _tempfile.mkstemp(dir=d or None, suffix=".tmp")
+            try:
+                with _os.fdopen(fd, "w") as f:
+                    _json.dump(payload, f)
+                _os.replace(tmp, STATUS_PATH)  # atomic swap; no torn reads
+            except Exception:
+                try:
+                    _os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except Exception:
+            pass  # never let a breadcrumb break state transitions
+
     def update_state(self, new_state: AppState):
         old_state = self.app_state
         self.app_state = new_state
+        self._write_status_breadcrumb()
         color = STATE_COLORS[new_state]
 
         # Diagnostics: trace state transitions (goes to journal/stderr, not the UI log) so a
