@@ -19,6 +19,19 @@ import os
 import subprocess
 import sys
 
+# When launched as a bare-script subprocess on the desktop source run (the parent does
+# `python .../src/wayfinder/ui/overlay.py`), only ui/ is on sys.path — so `import wayfinder`
+# fails and the QSystemTrayIcon tray block (which needs wayfinder.config / wayfinder.ui.
+# tray_icon) dies with "No module named 'wayfinder'", killing the tray on the first state
+# change. Put src/ on the path so every `from wayfinder…` import resolves. The Flatpak
+# installs wayfinder as a real package, so `import wayfinder` already works there → no-op.
+try:
+    import wayfinder  # noqa: F401
+except ImportError:
+    _SRC_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if _SRC_ROOT not in sys.path:
+        sys.path.insert(0, _SRC_ROOT)
+
 # Pure positioning math (Qt-free; unit-tested in tests/test_overlay_geometry.py). Works
 # whether this file is imported as wayfinder.ui.overlay or run as a bare-script subprocess.
 try:
@@ -1985,6 +1998,24 @@ def run_overlay():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
+    # Give KDE's StatusNotifier host the identity it needs to render our tray item.
+    # Without an app name / desktop-file name / window icon, Plasma's systemtray reads
+    # the item's Id/Title/Icon as null and spams "Cannot read property 'name' of null"
+    # from BackgroundAppItem.qml — the icon renders broken ("notification icon crashed").
+    try:
+        from PyQt6.QtGui import QIcon as _QIcon
+        app.setApplicationName("Wayfinder Aura")
+        app.setApplicationDisplayName("Wayfinder Aura")
+        app.setDesktopFileName(os.environ.get("FLATPAK_ID") or "wayfinder-aura")
+        try:
+            from wayfinder.config import ICON_PATH as _APP_ICON
+            if _APP_ICON and os.path.exists(str(_APP_ICON)):
+                app.setWindowIcon(_QIcon(str(_APP_ICON)))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     overlay = GlassmorphicOverlay(scale=initial_scale, vertical_offset=initial_offset,
                                   anchor=initial_anchor, quality=initial_quality)
     overlay._overlay_mode = mode  # Store mode for later use
@@ -2231,10 +2262,14 @@ def run_overlay():
                 _wfa_anim_timer.timeout.connect(_wfa_tray_anim)
                 tray_icon._wfa_anim_timer = _wfa_anim_timer
                 tray_icon.setToolTip("Wayfinder Aura")
+                # Essential menu, mirroring the (retired) pystray layout the user knows.
+                # Every action routes over the Unix socket — the same channel the F3/R4
+                # shortcut uses — so it dispatches reliably (unlike pystray's dead clicks).
                 _tray_menu = QMenu()
-                _tray_menu.addAction("Open Wayfinder Aura").triggered.connect(lambda: _tray_send("show"))
                 _tray_menu.addAction("Toggle Recording").triggered.connect(lambda: _tray_send("toggle"))
                 _tray_menu.addAction("Reset (unstick overlay)").triggered.connect(lambda: _tray_send("reset"))
+                _tray_menu.addSeparator()
+                _tray_menu.addAction("Open Settings").triggered.connect(lambda: _tray_send("show"))
                 _tray_menu.addSeparator()
                 _tray_menu.addAction("Quit").triggered.connect(lambda: _tray_send("quit"))
                 tray_icon.setContextMenu(_tray_menu)
