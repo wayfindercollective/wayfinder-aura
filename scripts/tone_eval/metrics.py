@@ -127,6 +127,45 @@ def sentence_start_caps_ratio(text: str) -> float:
     return caps / len(sents)
 
 
+def wer(reference: str, hypothesis: str) -> float:
+    """Word Error Rate = (substitutions + deletions + insertions) / |reference words|.
+
+    Token-level Levenshtein over lowercased alphanumeric tokens (the same
+    normalization intent as the app's inject path). 0.0 == perfect; can exceed 1.0
+    when the hypothesis is much longer than the reference. Used by the golden-audio
+    ASR accuracy test to assert transcription quality against known speech.
+    """
+    ref = _tokens(reference)
+    hyp = _tokens(hypothesis)
+    if not ref:
+        return 0.0 if not hyp else 1.0
+    prev = list(range(len(hyp) + 1))
+    for i, r in enumerate(ref, 1):
+        cur = [i]
+        for j, h in enumerate(hyp, 1):
+            cost = 0 if r == h else 1
+            cur.append(min(prev[j] + 1,        # deletion
+                           cur[j - 1] + 1,     # insertion
+                           prev[j - 1] + cost))  # match / substitution
+        prev = cur
+    return prev[-1] / len(ref)
+
+
+def phrase_hits(text: str, phrases: list[str]) -> list[str]:
+    """Key phrases present in ``text`` (normalized whole-token substring match).
+
+    Robust to trailing-word ASR errors — the real 'did it understand the sentence'
+    check that complements WER in the golden-audio test.
+    """
+    norm = " ".join(_tokens(text))
+    hits = []
+    for p in phrases or []:
+        pn = " ".join(_tokens(p))
+        if pn and pn in norm:
+            hits.append(p)
+    return hits
+
+
 def dev_term_preservation(out: str, dev_terms: list[str]) -> float:
     if not dev_terms:
         return 1.0
