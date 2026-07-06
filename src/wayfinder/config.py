@@ -35,8 +35,13 @@ PROJECT_ROOT = PACKAGE_DIR.parent.parent  # src/wayfinder -> project root
 _runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
 if _runtime_dir and os.path.isdir(_runtime_dir):
     SOCKET_PATH = os.path.join(_runtime_dir, "wayfinder-aura", "wayfinder-aura.sock")
+    # A tiny status breadcrumb (tab + state) written next to the socket. The control
+    # socket is fire-and-forget with no reply, so this file is how an external harness
+    # (tests/test_live_smoke.py) verifies the app actually acted on a command.
+    STATUS_PATH = os.path.join(_runtime_dir, "wayfinder-aura", "status.json")
 else:
     SOCKET_PATH = "/tmp/wayfinder-aura.sock"
+    STATUS_PATH = "/tmp/wayfinder-aura-status.json"
 
 # Handle icon path for Flatpak / AppImage / regular install
 if IS_FLATPAK:

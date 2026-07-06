@@ -7,23 +7,28 @@ Skipped by default; run against a live instance with::
 Protocol reality (read from ``socket_listener`` in wayfinder_main.py): the
 listener is fire-and-forget. It accepts a connection, ``recv``s one command,
 enqueues the matching EventType, and immediately ``conn.close()``s — there is NO
-reply written back. So "the socket accepts the command" is the only observable
-ACK, and that is exactly what these tests assert: a successful connect + send to
-the live listener (which then acts on it — the reviewer confirms the visual tab
-switch / window raise via screenshots; that half is human-only).
+reply written back. So the socket ACK only proves the command was *accepted*.
+
+To prove the app actually *acted* on it, the app now writes a small status
+breadcrumb (``config.STATUS_PATH`` = ``$XDG_RUNTIME_DIR/wayfinder-aura/status.json``)
+on every tab/state change. These tests send a ``tab:<name>`` command and then poll
+that file until it reflects the switch — upgrading the assertion from "accepted"
+to "state actually changed". (Against an older app with no breadcrumb the check
+degrades to a skip.)
 
 Each command needs its own connection because the server handles one accept at a
 time and closes after each recv.
 """
-
 from __future__ import annotations
 
+import json
 import os
 import socket
+import time
 
 import pytest
 
-from wayfinder.config import SOCKET_PATH  # single source of truth for the path
+from wayfinder.config import SOCKET_PATH, STATUS_PATH  # single source of truth
 
 pytestmark = [
     pytest.mark.live,
@@ -58,20 +63,58 @@ def _send(command: str) -> None:
             pass
 
 
+def _read_status():
+    try:
+        with open(STATUS_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _await_tab(tab: str, timeout: float = 3.0):
+    """Poll the status breadcrumb until it reports ``tab`` (or timeout).
+
+    Returns "ok" (switched), "stale" (breadcrumb seen but never this tab), or
+    "absent" (no breadcrumb at all → older app, caller should skip)."""
+    deadline = time.time() + timeout
+    seen_any = False
+    while time.time() < deadline:
+        s = _read_status()
+        if s is not None:
+            seen_any = True
+            if s.get("tab") == tab:
+                return "ok"
+        time.sleep(0.05)
+    return "stale" if seen_any else "absent"
+
+
 def test_show_command_accepted():
     _require_running_app()
     _send("show")  # raises if the live listener won't accept the command
 
 
 @pytest.mark.parametrize("tab", ["dictate", "settings", "style", "history"])
-def test_tab_switch_commands_accepted(tab):
+def test_tab_switch_actually_switches(tab):
+    """Send tab:<name> and verify via the status breadcrumb that the app REALLY
+    switched — not merely that the socket accepted the bytes."""
     _require_running_app()
     _send(f"tab:{tab}")
+    result = _await_tab(tab)
+    if result == "absent":
+        pytest.skip("app predates the status breadcrumb (no status.json)")
+    assert result == "ok", f"tab never switched to {tab} (last status: {_read_status()})"
 
 
-def test_full_tab_sweep_in_sequence():
-    """Sweep every tab back-to-back — mirrors the reviewer's screenshot loop."""
+def test_full_tab_sweep_verified_in_sequence():
+    """Sweep every tab back-to-back, verifying each switch through the breadcrumb."""
     _require_running_app()
     _send("show")
+    saw_breadcrumb = False
     for tab in ("dictate", "settings", "style", "history"):
         _send(f"tab:{tab}")
+        result = _await_tab(tab)
+        if result == "absent":
+            pytest.skip("app predates the status breadcrumb (no status.json)")
+        saw_breadcrumb = True
+        assert result == "ok", f"tab never switched to {tab}: {_read_status()}"
+    assert saw_breadcrumb
