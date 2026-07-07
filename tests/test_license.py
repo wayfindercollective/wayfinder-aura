@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
+SAMPLE_LICENSE_KEY = "WF-TEST-ONLINE-ACTIVATION"
+
 
 class TestMachineId:
     """Test machine ID generation."""
@@ -41,65 +43,6 @@ class TestMachineId:
         assert all(c in "0123456789ABCDEF" for c in machine_id)
 
 
-class TestLicenseKeyValidation:
-    """Test license key validation."""
-
-    def test_valid_key_format(self):
-        """Test validation of key format."""
-        from wayfinder.license import validate_license_key
-
-        # Invalid format
-        result = validate_license_key("invalid-key")
-
-        assert not result.is_valid
-        assert "format" in result.error_message.lower()
-
-    def test_key_format_pattern(self):
-        """Test that key must match WV-XXXX-XXXX-XXXX-XXXX pattern."""
-        from wayfinder.license import validate_license_key
-
-        # Too short
-        result = validate_license_key("WV-AAAA-BBBB-CCCC")
-        assert not result.is_valid
-
-        # Wrong prefix
-        result = validate_license_key("XX-AAAA-BBBB-CCCC-DDDD")
-        assert not result.is_valid
-
-    def test_generate_and_validate_key(self):
-        """Test that generated keys validate correctly."""
-        from wayfinder.license import generate_license_key, validate_license_key
-
-        key = generate_license_key()
-        result = validate_license_key(key)
-
-        assert result.is_valid
-        assert result.is_premium
-        assert result.license_key == key
-
-    def test_generate_bound_key(self):
-        """Test machine-bound license key generation."""
-        from wayfinder.license import generate_license_key, validate_license_key, get_machine_id
-
-        machine_id = get_machine_id()
-        key = generate_license_key(machine_id)
-
-        # Should validate with correct machine ID
-        result = validate_license_key(key, machine_id)
-        assert result.is_valid
-
-    def test_invalid_checksum(self):
-        """Test that tampered keys are rejected."""
-        from wayfinder.license import generate_license_key, validate_license_key
-
-        key = generate_license_key()
-        # Tamper with the key
-        tampered = key[:-1] + ("A" if key[-1] != "A" else "B")
-
-        result = validate_license_key(tampered)
-        assert not result.is_valid
-
-
 class TestLicenseStorage:
     """Test license storage functionality."""
 
@@ -114,9 +57,9 @@ class TestLicenseStorage:
 
     def test_store_and_load_license(self, temp_config_dir: Path, mock_online_license):
         """Test storing and loading a license."""
-        from wayfinder.license import generate_license_key, store_license, load_stored_license
+        from wayfinder.license import store_license, load_stored_license
 
-        key = generate_license_key()
+        key = SAMPLE_LICENSE_KEY
         store_result = store_license(key)
 
         assert store_result.is_valid
@@ -126,16 +69,35 @@ class TestLicenseStorage:
         assert loaded.is_valid
         assert loaded.license_key == key
 
+    def test_existing_license_permissions_are_repaired(self, temp_config_dir: Path, mock_online_license):
+        """Existing token files are tightened to owner-only permissions on load."""
+        import json
+        import os
+        from wayfinder.license import get_license_path, load_stored_license
+
+        path = get_license_path()
+        path.write_text(json.dumps({
+            "license_key": SAMPLE_LICENSE_KEY,
+            "machine_id": "MACHINE123",
+            "token": "TEST.TOKEN",
+            "activated_date": "2026-07-06T00:00:00",
+        }))
+        os.chmod(path, 0o644)
+
+        loaded = load_stored_license()
+
+        assert loaded.is_valid
+        assert (path.stat().st_mode & 0o777) == 0o600
+
     def test_remove_license(self, temp_config_dir: Path, mock_online_license):
         """Test removing a stored license."""
         from wayfinder.license import (
-            generate_license_key,
             store_license,
             remove_license,
             load_stored_license,
         )
 
-        key = generate_license_key()
+        key = SAMPLE_LICENSE_KEY
         store_license(key)
         remove_license()
 
@@ -329,10 +291,10 @@ class TestFeatureGate:
 
     def test_activate_license(self, temp_config_dir: Path, mock_online_license):
         """Test activating a license."""
-        from wayfinder.license import FeatureGate, generate_license_key, PREMIUM_FEATURES
+        from wayfinder.license import FeatureGate, PREMIUM_FEATURES
 
         gate = FeatureGate()
-        key = generate_license_key()
+        key = SAMPLE_LICENSE_KEY
 
         result = gate.activate(key)
 
@@ -345,10 +307,10 @@ class TestFeatureGate:
 
     def test_deactivate_license(self, temp_config_dir: Path, mock_online_license):
         """Test deactivating a license."""
-        from wayfinder.license import FeatureGate, generate_license_key
+        from wayfinder.license import FeatureGate
 
         gate = FeatureGate()
-        key = generate_license_key()
+        key = SAMPLE_LICENSE_KEY
         gate.activate(key)
         gate.deactivate()
 
@@ -383,10 +345,10 @@ class TestFeatureGate:
 
     def test_premium_user_has_all_features(self, temp_config_dir: Path, mock_online_license):
         """Test that premium user can access all premium features."""
-        from wayfinder.license import FeatureGate, PREMIUM_FEATURES, generate_license_key
+        from wayfinder.license import FeatureGate, PREMIUM_FEATURES
 
         gate = FeatureGate()
-        key = generate_license_key()
+        key = SAMPLE_LICENSE_KEY
         gate.activate(key)
 
         for feat_id in PREMIUM_FEATURES:
@@ -405,7 +367,7 @@ class TestFeatureGate:
     def test_force_refresh_feature_gate(self, temp_config_dir: Path, mock_online_license):
         """Test that force_refresh creates a new FeatureGate instance."""
         import wayfinder.license as lic
-        from wayfinder.license import get_feature_gate, generate_license_key, store_license
+        from wayfinder.license import get_feature_gate, store_license
 
         # Establish a clean non-premium baseline against the (empty) temp config dir. The module
         # -level _feature_gate singleton persists across tests, so without force_refresh here a
@@ -413,7 +375,7 @@ class TestFeatureGate:
         gate1 = get_feature_gate(force_refresh=True)
         assert not gate1.is_premium
 
-        key = generate_license_key()
+        key = SAMPLE_LICENSE_KEY
         store_license(key)
 
         # Without force_refresh, should return cached instance

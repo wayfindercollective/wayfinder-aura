@@ -13,6 +13,7 @@ import sys
 import os
 import json
 import signal
+import importlib
 from pathlib import Path
 
 # macOS: Suppress SIGTRAP before any imports that touch pynput/CGEventTap.
@@ -174,18 +175,37 @@ def _start_instance_listener(app):
     return server
 
 
-def _check_venv_health():
+VENV_SMOKE_IMPORTS = ("customtkinter", "PIL", "numpy")
+
+
+def _missing_venv_smoke_imports(modules: tuple[str, ...] = VENV_SMOKE_IMPORTS) -> list[str]:
+    missing: list[str] = []
+    for module in modules:
+        try:
+            importlib.import_module(module)
+        except Exception as exc:
+            missing.append(f"{module} ({exc})")
+    return missing
+
+
+def _has_tkinter_failure(missing_imports: list[str]) -> bool:
+    return any("tkinter" in item for item in missing_imports)
+
+
+def _check_venv_health(venv_dir: Path | None = None, smoke_imports: tuple[str, ...] = VENV_SMOKE_IMPORTS):
     """Check that the virtual environment matches the running Python version.
 
     System updates (e.g. Fedora/Bazzite) can change the system Python version,
     leaving the venv pointing at a version that no longer exists. This causes
-    cryptic ModuleNotFoundError crashes on launch.
+    cryptic ModuleNotFoundError crashes on launch. pyvenv.cfg can also be stale
+    even when the interpreter and imports are usable, so version metadata alone
+    is only a warning after smoke imports pass.
     """
     from wayfinder.config import IS_APPIMAGE
     if IS_APPIMAGE:
         return  # AppImage bundles its own Python — no venv to check
 
-    venv_dir = Path(__file__).parent / "venv-gpu"
+    venv_dir = venv_dir or Path(__file__).parent / "venv-gpu"
     pyvenv_cfg = venv_dir / "pyvenv.cfg"
     if not pyvenv_cfg.exists():
         return  # No venv to check
@@ -205,16 +225,33 @@ def _check_venv_health():
         running_major_minor = f"{sys.version_info.major}.{sys.version_info.minor}"
 
         if venv_major_minor and venv_major_minor != running_major_minor:
+            missing_imports = _missing_venv_smoke_imports(smoke_imports)
+            if not missing_imports:
+                print(
+                    f"[Launcher] Warning: pyvenv.cfg says Python {venv_version}, "
+                    f"but running Python {running_version}; smoke imports passed, continuing."
+                )
+                return
+
             print(f"\n{'='*60}")
             print(f"  VENV MISMATCH: venv was built with Python {venv_version}")
             print(f"  but the system is now running Python {running_version}.")
             print(f"  This usually happens after a system update + reboot.")
+            print("")
+            print("  Failed smoke imports:")
+            for item in missing_imports:
+                print(f"    - {item}")
             print(f"")
             print(f"  Fix: rebuild the venv:")
             print(f"    rm -rf venv-gpu")
             print(f"    python3 -m venv venv-gpu")
             print(f"    source venv-gpu/bin/activate")
             print(f"    pip install -r requirements.txt")
+            if _has_tkinter_failure(missing_imports):
+                print("")
+                print("  If tkinter is missing, install the OS Tk package first:")
+                print("    Fedora/Bazzite: sudo dnf install python3-tkinter")
+                print("    Debian/Ubuntu: sudo apt install python3-tk")
             print(f"{'='*60}\n")
             sys.exit(1)
     except Exception:

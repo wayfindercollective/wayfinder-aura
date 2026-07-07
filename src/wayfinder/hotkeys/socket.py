@@ -30,6 +30,10 @@ def socket_listener(
     echo "toggle"    | nc -U "$SOCK"   # Toggle recording
     echo "style"     | nc -U "$SOCK"   # Cycle styles
     echo "style:dev" | nc -U "$SOCK"   # Set a specific style
+    echo "show"      | nc -U "$SOCK"   # Raise the main window
+    echo "reset"     | nc -U "$SOCK"   # Abort stuck work and return to idle
+    echo "quit"      | nc -U "$SOCK"   # Quit cleanly
+    echo "ping"      | nc -U "$SOCK"   # Health probe, replies "pong"
     ```
     
     Args:
@@ -67,12 +71,15 @@ def socket_listener(
         log(f"📡 Socket listener ready: {SOCKET_PATH}")
         
         while not stop_event.is_set():
+            conn = None
             try:
                 conn, _ = server.accept()
                 data = conn.recv(64)
                 data_str = data.decode("utf-8").strip() if data else ""
                 
-                if data_str == "toggle":
+                if data_str == "ping":
+                    conn.sendall(b"pong")
+                elif data_str == "toggle":
                     log("🎯 Toggle received via socket")
                     event_queue.put((EventType.HOTKEY_PRESSED, None))
                 elif data_str == "style":
@@ -84,12 +91,33 @@ def socket_listener(
                     style = data_str.split(":", 1)[1]
                     log(f"✎ Style set to '{style}' via socket")
                     event_queue.put((EventType.STYLE_TOGGLE, style))
-                conn.close()
+                elif data_str == "show":
+                    # Tray "Open" — raise/restore the main window.
+                    log("🪟 Show window received via socket")
+                    event_queue.put((EventType.SHOW_WINDOW, None))
+                elif data_str == "reset":
+                    # Tray "Reset" — abort stuck/in-flight dictation, return to idle.
+                    log("🔄 Reset received via socket")
+                    event_queue.put((EventType.FORCE_RESET, None))
+                elif data_str == "quit":
+                    # Tray "Quit" — clean full shutdown.
+                    log("👋 Quit received via socket")
+                    event_queue.put((EventType.QUIT_APP, None))
+                elif data_str.startswith("tab:"):
+                    # Live verification: switch the main-window tab deterministically.
+                    tab_id = data_str.split(":", 1)[1]
+                    event_queue.put((EventType.SWITCH_TAB, tab_id))
             except socket.timeout:
                 continue
             except Exception as e:
                 if not stop_event.is_set():
                     log(f"⚠️ Socket error: {e}")
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
         
         server.close()
         try:
@@ -141,7 +169,5 @@ def send_style(style: Optional[str] = None):
         return True
     except Exception:
         return False
-
-
 
 

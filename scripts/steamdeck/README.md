@@ -15,8 +15,8 @@ for disaster recovery — if the Deck is wiped, this directory plus
 | `systemd/wayfinder-aura.service` | `~/.config/systemd/user/wayfinder-aura.service` |
 | `systemd/wayfinder-aura.service.d-flatpak.conf` | `~/.config/systemd/user/wayfinder-aura.service.d/flatpak.conf` |
 | `systemd/wayfinder-aura-failed.service` | `~/.config/systemd/user/wayfinder-aura-failed.service` |
-| `r4-f3-bridge.py` (superseded) | `~/.local/bin/r4-f3-bridge.py` |
-| `systemd/r4-f3-bridge.service` (superseded) | `~/.config/systemd/user/r4-f3-bridge.service` |
+| `r4-f3-bridge.py` (historical only; not installed) | `~/.local/bin/r4-f3-bridge.py` |
+| `systemd/r4-f3-bridge.service` (historical only; disabled) | `~/.config/systemd/user/r4-f3-bridge.service` |
 
 Enable with:
 
@@ -29,11 +29,11 @@ systemctl --user enable  --now wayfinder-aura.service wayfinder-trigger.service 
 
 ## How dictation gets triggered
 
-The app itself listens for **F3** (its default record hotkey). In the Flatpak
-that runs via the pynput XRecord listener on X11 (the GlobalShortcuts portal
-once `dbus-python` is bundled). That covers a plain keyboard F3 in Desktop
-Mode. The host-side daemon below covers everything the in-sandbox listener
-can't reach.
+Fresh app installs use **Super+F2** for record toggle and **Super+F3** for
+style cycle. Existing legacy configs may still keep bare F3/F10, but the Steam
+Deck path should not depend on any in-sandbox keyboard listener. Controller
+and side-grid triggers go through the host-side daemon below, which sends
+commands directly to the app's Unix socket.
 
 ### `wayfinder-trigger-daemon.py` — the primary, mode-agnostic path
 
@@ -48,7 +48,7 @@ It watches two devices:
 * **Corsair Scimitar "Keyboard" HID interface** — *grabbed exclusively*. The
   side grid is programmed (iCUE Hardware Actions, onboard memory) to emit
   F3/F2. The grab means those presses reach ONLY the daemon: they can't
-  double-fire with the app's own F3 listener in Desktop Mode, and they can't
+  double-fire with the app's own hotkey listener in Desktop Mode, and they can't
   leak F3/F2 into whatever window has focus.
     * `F3 → socket "toggle"` (start/stop dictation)
     * `F2 → socket "style"` (cycle dictation style)
@@ -57,9 +57,9 @@ It watches two devices:
   own it). `BTN_THUMBR` (right-stick click) `→ "toggle"`. Dormant unless the
   Steam Desktop Layout binds R4 → Right Joystick Click.
 
-Survives USB hotplug: on `device lost` it rescans every 3s and re-grabs when
-the device returns (validated across the Deck's flaky hub dropping mid-session
-and an overnight suspend — the daemon reattached and re-grabbed each time).
+Designed to survive USB hotplug: on `device lost` it rescans every 3s and
+re-grabs when the device returns. Final release signoff should still include a
+fresh Deck hotplug/suspend check after packaging changes.
 
 ## Game Mode lifecycle
 
@@ -76,9 +76,11 @@ Mode. A host-side `systemd --user` daemon reconciles this every 5s. Logs to
   a clean inactive/failed → Desktop), with an exact-match `ps -eo comm`
   scan for `gamescope` as a fallback. It does **not** depend on the
   compositor, which swaps out underneath it on every Desktop↔Game transition.
-* **A user toggle** at `~/.config/wayfinder-aura/game-mode-dictation` decides
-  the Game-Mode behaviour: file content `1` = keep dictation on in Game Mode;
-  anything else (missing/empty/`0`) = off.
+* **A user toggle** at
+  `~/.var/app/io.wayfindercollective.WayfinderAura/config/wayfinder-aura/game-mode-dictation`
+  decides the Game-Mode behaviour: file content `1` = keep dictation on in Game
+  Mode; anything else (missing/empty/`0`) = off. The supervisor still reads the
+  legacy `~/.config/wayfinder-aura/game-mode-dictation` path as a fallback.
 * **Lifecycle:**
     * **OFF in Game Mode** → the supervisor `stop`s `wayfinder-aura.service`,
       freeing the RAM its servers held.
@@ -134,7 +136,8 @@ daemon:
   depended on an X listener downstream, so it too died wherever X listening
   dies. The daemon's pad watch replaces it, writing to the socket directly.
   Do not run `r4-f3-bridge.service` alongside `wayfinder-trigger.service`
-  (the unit declares `Conflicts=` to enforce this).
+  (both units declare `Conflicts=` to enforce this). The script is disabled by
+  default and exits unless `WAYFINDER_ALLOW_LEGACY_R4_F3=1` is set explicitly.
 
 ## Known failure mode: USB hotplug wedges Steam Input
 

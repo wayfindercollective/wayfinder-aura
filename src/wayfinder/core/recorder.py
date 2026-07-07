@@ -16,7 +16,41 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
-import sounddevice as sd
+
+try:
+    import sounddevice as sd
+except (ImportError, OSError) as _sounddevice_error:
+    _SOUNDDEVICE_IMPORT_ERROR = str(_sounddevice_error)
+
+    class _MissingInputStream:
+        def __init__(self, *args, **kwargs):
+            raise OSError(f"sounddevice unavailable: {_SOUNDDEVICE_IMPORT_ERROR}")
+
+    class _MissingDefault:
+        device = [None, None]
+
+    class _MissingSoundDevice:
+        PortAudioError = OSError
+        InputStream = _MissingInputStream
+        default = _MissingDefault()
+
+        def query_devices(self, *args, **kwargs):
+            raise OSError(f"sounddevice unavailable: {_SOUNDDEVICE_IMPORT_ERROR}")
+
+        def query_hostapis(self, *args, **kwargs):
+            raise OSError(f"sounddevice unavailable: {_SOUNDDEVICE_IMPORT_ERROR}")
+
+        def check_input_settings(self, *args, **kwargs):
+            raise OSError(f"sounddevice unavailable: {_SOUNDDEVICE_IMPORT_ERROR}")
+
+        def _terminate(self):
+            raise OSError(f"sounddevice unavailable: {_SOUNDDEVICE_IMPORT_ERROR}")
+
+        def _initialize(self):
+            raise OSError(f"sounddevice unavailable: {_SOUNDDEVICE_IMPORT_ERROR}")
+
+    sd = _MissingSoundDevice()
+    sys.modules.setdefault("sounddevice", sd)
 
 # Try to import scipy for audio filtering and resampling
 try:

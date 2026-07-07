@@ -12,7 +12,11 @@ PyQt6-dependent tests are guarded with importorskip.
 """
 
 import json
+import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -106,6 +110,52 @@ HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 def overlay_module():
     """Try to import the overlay module; skip entire class if PyQt6 is missing."""
     return pytest.importorskip("wayfinder.ui.overlay")
+
+
+def test_overlay_bare_script_import_bootstraps_wayfinder_package():
+    """Desktop source mode launches ``overlay.py`` as a bare script.
+
+    In that mode only ``src/wayfinder/ui`` is on ``sys.path``; without the
+    bootstrap near the top of overlay.py, the Qt tray setup later fails with
+    ``No module named 'wayfinder'`` and the notification tray dies on state
+    changes. Run this in a child process so the current test runner's imported
+    packages and ``PYTHONPATH=src`` cannot mask the failure.
+    """
+    pytest.importorskip("PyQt6")
+    repo = Path(__file__).resolve().parent.parent
+    overlay = repo / "src" / "wayfinder" / "ui" / "overlay.py"
+    code = f"""
+import importlib.util
+import sys
+from pathlib import Path
+
+overlay = Path({str(overlay)!r})
+src_root = overlay.parents[2]
+repo_root = overlay.parents[3]
+sys.path = [
+    p for p in sys.path
+    if p not in ('', str(src_root), str(repo_root))
+]
+sys.path.insert(0, str(overlay.parent))
+spec = importlib.util.spec_from_file_location('wayfinder_overlay_bare', overlay)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+import wayfinder
+import wayfinder.config
+import wayfinder.ui.tray_icon
+assert str(src_root) in sys.path
+"""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 class TestStylePalettes:

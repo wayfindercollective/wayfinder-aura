@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   AppStream metadata for Wayfinder Aura
-  Validate with: appstreamcli validate io.github.wayfindercollective.WayfinderAura.metainfo.xml
+  Validate with: appstreamcli validate io.wayfindercollective.WayfinderAura.metainfo.xml
 -->
 <component type="desktop-application">
-  <id>io.github.wayfindercollective.WayfinderAura</id>
+  <id>io.wayfindercollective.WayfinderAura</id>
 
   <name>Wayfinder Aura</name>
   <summary>Local, private voice dictation</summary>
@@ -12,7 +12,7 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Elastic-2.0</project_license>
 
-  <developer id="io.github.wayfindercollective">
+  <developer id="io.wayfindercollective">
     <name>Wayfinder Collective</name>
   </developer>
 
@@ -41,7 +41,7 @@
     </p>
   </description>
 
-  <launchable type="desktop-id">io.github.wayfindercollective.WayfinderAura.desktop</launchable>
+  <launchable type="desktop-id">io.wayfindercollective.WayfinderAura.desktop</launchable>
 
   <screenshots>
     <screenshot type="default">
@@ -94,12 +94,12 @@
   </supports>
 
   <releases>
-    <release version="1.1.0" date="2026-06-10">
+    <release version="1.1.0" date="2026-07-07">
       <description>
         <p>First public release of Wayfinder Aura</p>
         <ul>
-          <li>Local voice dictation with whisper.cpp — hotkey-triggered, Wayland and X11</li>
-          <li>Steam Deck support: SIGILL-safe CPU build, R4 trigger socket, tray, font and scaling fixes</li>
+          <li>Local voice dictation with whisper.cpp — hotkey-triggered for Wayland and X11 desktops</li>
+          <li>Steam Deck workflow groundwork: SIGILL-safe CPU build, R4 trigger socket, tray, font and scaling fixes</li>
           <li>Stable microphone selection by device name — survives PipeWire device renumbering</li>
           <li>Game-aware hotkeys: dictation keys pause while a GameMode game is running</li>
           <li>Default hotkeys Super+F2 / Super+F3 (avoid in-game F-key collisions)</li>

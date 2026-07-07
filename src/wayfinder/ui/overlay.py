@@ -2006,7 +2006,8 @@ def run_overlay():
         from PyQt6.QtGui import QIcon as _QIcon
         app.setApplicationName("Wayfinder Aura")
         app.setApplicationDisplayName("Wayfinder Aura")
-        app.setDesktopFileName(os.environ.get("FLATPAK_ID") or "wayfinder-aura")
+        from wayfinder.utils.platform import get_portal_app_id
+        app.setDesktopFileName(get_portal_app_id())
         try:
             from wayfinder.config import ICON_PATH as _APP_ICON
             if _APP_ICON and os.path.exists(str(_APP_ICON)):
@@ -2338,4 +2339,3 @@ if __name__ == "__main__":
         test_overlay()
     else:
         run_overlay()
-

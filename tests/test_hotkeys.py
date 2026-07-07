@@ -292,6 +292,76 @@ class TestSocketListener:
 
     @patch("wayfinder.hotkeys.socket.os.unlink")
     @patch("wayfinder.hotkeys.socket.socket.socket")
+    def test_socket_handles_ping_without_event(self, mock_socket_cls, mock_unlink):
+        """Receiving 'ping' replies with pong and does not enqueue an app event."""
+        from wayfinder.hotkeys.socket import socket_listener
+
+        event_queue = Queue()
+        stop_event = Event()
+
+        mock_conn = MagicMock()
+        mock_conn.recv.return_value = b"ping"
+
+        mock_server = MagicMock()
+        call_count = [0]
+
+        def accept_side_effect():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return (mock_conn, None)
+            stop_event.set()
+            import socket as s
+            raise s.timeout()
+
+        mock_server.accept.side_effect = accept_side_effect
+        mock_socket_cls.return_value = mock_server
+
+        socket_listener(event_queue, stop_event)
+
+        mock_conn.sendall.assert_called_once_with(b"pong")
+        assert event_queue.empty()
+
+    def test_socket_handles_tray_commands(self):
+        """Tray verbs map to the same app-loop events as the live Qt tray."""
+        from wayfinder.hotkeys.socket import socket_listener
+        from wayfinder.hotkeys import EventType
+
+        cases = [
+            (b"show", EventType.SHOW_WINDOW, None),
+            (b"reset", EventType.FORCE_RESET, None),
+            (b"quit", EventType.QUIT_APP, None),
+            (b"tab:settings", EventType.SWITCH_TAB, "settings"),
+        ]
+
+        for payload, expected_type, expected_data in cases:
+            event_queue = Queue()
+            stop_event = Event()
+            mock_conn = MagicMock()
+            mock_conn.recv.return_value = payload
+            mock_server = MagicMock()
+            call_count = [0]
+
+            def accept_side_effect():
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return (mock_conn, None)
+                stop_event.set()
+                import socket as s
+                raise s.timeout()
+
+            mock_server.accept.side_effect = accept_side_effect
+            with patch("wayfinder.hotkeys.socket.os.unlink"), patch(
+                "wayfinder.hotkeys.socket.socket.socket", return_value=mock_server
+            ):
+                socket_listener(event_queue, stop_event)
+
+            assert not event_queue.empty(), payload
+            event_type, event_data = event_queue.get_nowait()
+            assert event_type == expected_type
+            assert event_data == expected_data
+
+    @patch("wayfinder.hotkeys.socket.os.unlink")
+    @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_socket_timeout_continues_loop(self, mock_socket_cls, mock_unlink):
         """Socket timeouts are handled and the loop continues."""
         from wayfinder.hotkeys.socket import socket_listener

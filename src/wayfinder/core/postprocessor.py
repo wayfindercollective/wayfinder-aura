@@ -1799,10 +1799,10 @@ class LlamaCppCliBackend(PostProcessorBackend):
             return None
         ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
         # A CPU-only wheel ignores n_gpu_layers and would run Gemma on CPU. When
-        # GPU layers are requested, step aside so process() uses the fast GPU
-        # llama-simple subprocess instead (~3x faster on RDNA4 / Mesa 26 than the
-        # CPU wheel). Keep the resident path when the wheel can truly offload
-        # (warm, no per-call spawn) or when CPU is explicitly chosen (ngl == 0).
+        # GPU layers are requested, step aside so process() uses the GPU-capable
+        # llama-simple subprocess instead of forcing a CPU wheel. Keep the
+        # resident path when the wheel can truly offload (warm, no per-call
+        # spawn) or when CPU is explicitly chosen (ngl == 0).
         if ngl > 0 and not _wheel_supports_gpu_offload():
             return None
         key = (self.model_path, self.n_ctx, ngl)
@@ -2989,4 +2989,3 @@ def get_model_recommendation_for_style(style: str, strong_mode: bool = False) ->
             "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
             "message": "Personal mode preserves your speaking style. qwen3.5:2b recommended.",
         }
-

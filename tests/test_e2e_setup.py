@@ -598,9 +598,10 @@ class TestGetMissingSystemPackages:
 class TestInstallSystemPackages:
     """Test the system package installation flow (all mocked)."""
 
+    @patch("wayfinder.core.setup._detect_package_manager", return_value="dnf")
     @patch("subprocess.run")
     @patch("subprocess.Popen")
-    def test_install_calls_pkexec_success(self, mock_popen, mock_run):
+    def test_install_calls_pkexec_success(self, mock_popen, mock_run, mock_pkg_mgr):
         mock_popen.return_value = _mock_popen_success(["Reading...\n", "Done\n"])
         mock_run.return_value = MagicMock(returncode=0)
 
@@ -635,8 +636,9 @@ class TestInstallSystemPackages:
 
         assert done_result["success"] is False
 
+    @patch("wayfinder.core.setup._detect_package_manager", return_value="dnf")
     @patch("subprocess.Popen", side_effect=FileNotFoundError)
-    def test_install_pkexec_not_found(self, mock_popen):
+    def test_install_pkexec_not_found(self, mock_popen, mock_pkg_mgr):
         done_result = {}
         done_event = threading.Event()
 

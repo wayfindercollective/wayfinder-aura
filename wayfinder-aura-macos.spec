@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+# ruff: noqa: F821
 """
 PyInstaller spec file for Wayfinder Aura — macOS .app bundle
 
@@ -184,14 +185,14 @@ app = BUNDLE(
     coll,
     name='Wayfinder Aura.app',
     icon='assets/icon.icns',
-    bundle_identifier='io.github.wayfindercollective.wayfinder-aura',
+    bundle_identifier='io.wayfindercollective.WayfinderAura',
     info_plist={
         'CFBundleName': 'Wayfinder Aura',
         'CFBundleDisplayName': 'Wayfinder Aura',
         'CFBundleVersion': VERSION,
         'CFBundleShortVersionString': VERSION,
         'CFBundleExecutable': 'Wayfinder Aura',
-        'CFBundleIdentifier': 'io.github.wayfindercollective.wayfinder-aura',
+        'CFBundleIdentifier': 'io.wayfindercollective.WayfinderAura',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
         'NSPrincipalClass': 'NSApplication',

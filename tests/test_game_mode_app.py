@@ -104,9 +104,10 @@ def test_is_game_mode_wait_for_marker(runtime_dir):
 
 @pytest.fixture
 def config_dir(temp_dir, monkeypatch):
-    # write_game_mode_marker uses Path.home()/.config (NOT XDG_CONFIG_HOME) so it
-    # matches the host supervisor's read path through the Flatpak bind mount.
+    # With XDG_CONFIG_HOME unset, write_game_mode_marker uses the normal Linux
+    # ~/.config path. Flatpak sets XDG_CONFIG_HOME to the sandbox-private config dir.
     monkeypatch.setenv("HOME", str(temp_dir))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setattr(sys, "platform", "linux")
     return temp_dir / ".config" / "wayfinder-aura"
 

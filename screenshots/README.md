@@ -1,1 +1,11 @@
-# Screenshots\n\nAdd screenshots here for the Flathub listing.\n\nRequired:\n- At least one screenshot showing the main UI\n- Recommended size: 1920x1080 or 1280x720\n- Format: PNG\n\nName them:\n- main-window.png\n- settings.png\n- recording.png
+# Screenshots
+
+Screenshots for AppStream/Flathub and release listings.
+
+Current tracked captures:
+
+- `main-window.png` - Dictate tab, clean free-tier profile
+- `settings.png` - Settings tab, clean free-tier profile
+
+Both images are 1920x1080 PNGs captured from the current UI on KDE Wayland with
+a clean temporary free-tier profile.

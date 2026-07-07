@@ -4,7 +4,7 @@ Name=Wayfinder Aura
 GenericName=Voice Dictation
 Comment=Local voice dictation using whisper.cpp - speak and your words are typed
 Exec=wayfinder-aura
-Icon=io.github.wayfindercollective.WayfinderAura
+Icon=io.wayfindercollective.WayfinderAura
 Terminal=false
 Categories=Utility;Accessibility;
 Keywords=voice;dictation;speech;whisper;transcription;speech-to-text;
@@ -15,10 +15,10 @@ Actions=toggle-recording;cycle-style;
 [Desktop Action toggle-recording]
 Name=Toggle Recording
 Exec=wayfinder-aura --toggle
-Icon=io.github.wayfindercollective.WayfinderAura
+Icon=io.wayfindercollective.WayfinderAura
 
 [Desktop Action cycle-style]
 Name=Cycle Output Style
 Exec=wayfinder-aura --cycle-style
-Icon=io.github.wayfindercollective.WayfinderAura
+Icon=io.wayfindercollective.WayfinderAura
 

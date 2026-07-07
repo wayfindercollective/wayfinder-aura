@@ -98,7 +98,7 @@ Done. Installed and enabled the Wayfinder Aura Steam Deck services.
 
 Next steps:
   * Make sure the Flatpak app is installed:
-      flatpak run io.github.wayfindercollective.WayfinderAura
+      flatpak run io.wayfindercollective.WayfinderAura
     (the wayfinder-aura.service drop-in launches it via 'flatpak run').
 
   * Check service status:
@@ -114,7 +114,8 @@ Next steps:
 
   * Game Mode: dictation is stopped in Game Mode by default to free RAM. To keep
     it running in Game Mode:
-      echo 1 > ~/.config/wayfinder-aura/game-mode-dictation
+      mkdir -p ~/.var/app/io.wayfindercollective.WayfinderAura/config/wayfinder-aura
+      echo 1 > ~/.var/app/io.wayfindercollective.WayfinderAura/config/wayfinder-aura/game-mode-dictation
 
 To remove everything: scripts/steamdeck/uninstall-steamdeck.sh
 EOF

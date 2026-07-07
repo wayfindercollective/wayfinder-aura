@@ -8,6 +8,8 @@ Build optimized: pyinstaller wayfinder-aura.spec --clean --noconfirm
 
 import sys
 import os
+import importlib.util
+import importlib.metadata
 from pathlib import Path
 from datetime import datetime
 
@@ -21,6 +23,45 @@ SRC_DIR = PROJECT_ROOT / 'src'
 VERSION = '1.1.0'
 VERSION_TUPLE = (1, 1, 0, 0)  # (major, minor, patch, build)
 BUILD_DATE = datetime.now().strftime('%Y-%m-%d')
+
+def _module_available(name):
+    return importlib.util.find_spec(name) is not None
+
+def _distribution_available(name):
+    try:
+        importlib.metadata.version(name)
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
+OPTIONAL_HIDDENIMPORTS = []
+OPTIONAL_EXCLUDES = []
+
+# dbus-python and PyGObject are optional runtime integrations. PyInstaller's
+# gi hook requires PyGObject package metadata; some system Python installs expose
+# a partial `gi` module without that metadata, which makes the build fail.
+HAS_GLIB_DBUS = (
+    _module_available('dbus')
+    and _module_available('gi')
+    and _distribution_available('pygobject')
+)
+if HAS_GLIB_DBUS:
+    OPTIONAL_HIDDENIMPORTS += [
+        'dbus',
+        'dbus.mainloop.glib',
+        'gi',
+        'gi.repository.GLib',
+    ]
+else:
+    OPTIONAL_EXCLUDES += ['dbus', 'gi']
+
+# Linux uses the Qt StatusNotifier tray. Keep pystray for non-Linux builds only;
+# on Linux its AppIndicator backend can import a partial gi module and break
+# PyInstaller in otherwise valid build environments.
+if sys.platform.startswith('linux'):
+    OPTIONAL_EXCLUDES.append('pystray')
+elif _module_available('pystray'):
+    OPTIONAL_HIDDENIMPORTS.append('pystray')
 
 a = Analysis(
     ['main.py'],
@@ -72,11 +113,6 @@ a = Analysis(
         'scipy.io.wavfile',
         # System integration
         'evdev',
-        'pystray',
-        # D-Bus for Wayland GlobalShortcuts
-        'dbus',
-        'gi',
-        'gi.repository.GLib',
         # PyQt6 for overlay
         'PyQt6',
         'PyQt6.QtCore',
@@ -85,7 +121,7 @@ a = Analysis(
         # HTTP clients
         'requests',
         'httpx',
-    ],
+    ] + OPTIONAL_HIDDENIMPORTS,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -106,7 +142,7 @@ a = Analysis(
         'IPython',
         'notebook',
         'jupyter',
-    ],
+    ] + OPTIONAL_EXCLUDES,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

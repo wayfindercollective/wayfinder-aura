@@ -71,9 +71,12 @@ from wayfinder.config import (
     CONFIG_DIR,
     CONFIG_FILE,
     DEFAULT_CONFIG,
+    FLATPAK_APP_ID,
+    IS_FLATPAK,
     load_config,
     save_config,
 )
+from wayfinder.utils.platform import get_portal_app_id
 from wayfinder.core.injector import inject_text, InjectionError
 from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, SILENCE_PEAK_THRESHOLD
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
@@ -86,15 +89,12 @@ from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
 
 # === Configuration ===
 
-# Detect Flatpak environment
-IS_FLATPAK = os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
-
 # CONFIG_DIR / CONFIG_FILE are imported from wayfinder.config (single source).
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # Handle icon path for Flatpak vs regular install
 if IS_FLATPAK:
-    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.wayfindercollective.WayfinderAura')}.png"
+    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{FLATPAK_APP_ID}.png"
     if not ICON_PATH.exists():
         ICON_PATH = SCRIPT_DIR / "assets" / "icon.png"
 else:
@@ -132,7 +132,7 @@ def _get_whisper_models_dir() -> Path:
     into them fails with EROFS ("Read-only file system"). Downloads must target a
     granted, writable location that mirrors the llm-models layout — see the
     matching `--filesystem=~/.local/share/wayfinder-aura/whisper-models:create`
-    grant in flatpak/io.github.wayfindercollective.WayfinderAura.yml. Outside a
+    grant in flatpak/io.wayfindercollective.WayfinderAura.yml. Outside a
     Flatpak the long-standing ~/whisper.cpp/models location is kept (existing
     installs, docs and from-source builds all use it).
     """
@@ -2253,12 +2253,15 @@ def socket_listener(event_queue, stop_event, log_callback=None):
         log(f"📡 Socket listener ready: {SOCKET_PATH}")
         
         while not stop_event.is_set():
+            conn = None
             try:
                 conn, _ = server.accept()
                 data = conn.recv(64)
                 data_str = data.decode("utf-8").strip() if data else ""
                 
-                if data_str == "toggle":
+                if data_str == "ping":
+                    conn.sendall(b"pong")
+                elif data_str == "toggle":
                     log("🎯 Toggle received via socket")
                     event_queue.put((EventType.HOTKEY_PRESSED, None))
                 elif data_str == "style":
@@ -2287,12 +2290,17 @@ def socket_listener(event_queue, stop_event, log_callback=None):
                     # (used by the screenshot verification loop; harmless in production)
                     tab_id = data_str.split(":", 1)[1]
                     event_queue.put((EventType.SWITCH_TAB, tab_id))
-                conn.close()
             except socket.timeout:
                 continue
             except Exception as e:
                 if not stop_event.is_set():
                     log(f"⚠️ Socket error: {e}")
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
         
         server.close()
         os.unlink(SOCKET_PATH)
@@ -2329,7 +2337,7 @@ def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callbac
         log("⚠️ D-Bus/GLib not available — portal hotkeys disabled")
         return False
 
-    app_id = os.environ.get("FLATPAK_ID", "wayfinder-aura")
+    app_id = get_portal_app_id()
 
     try:
         DBusGMainLoop(set_as_default=True)
@@ -6018,36 +6026,6 @@ class WayfinderApp(ctk.CTk):
                 command=self._deactivate_license,
             ).pack(side="left")
 
-        # === DEV-UNLOCK (remove before GA) ==================================
-        # Developer toggle: force-unlock all premium features for testing without
-        # a license key. Persists via "dev_unlock_all" in config (read by
-        # FeatureGate). Remove this block + _toggle_dev_unlock/_render_dev_feature_list
-        # + the override in src/wayfinder/license.py before shipping (grep: DEV-UNLOCK).
-        dev_tile = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
-        dev_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
-
-        ctk.CTkLabel(
-            dev_tile, text="🛠 Developer",
-            font=(self.font_header[0], self.font_sizes["caption"], "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 4))
-
-        self._dev_unlock_var = ctk.BooleanVar(value=bool(self.config.get("dev_unlock_all", False)))
-        ctk.CTkCheckBox(
-            dev_tile, text="Unlock all premium features (testing)",
-            variable=self._dev_unlock_var, command=self._toggle_dev_unlock,
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_primary"],
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-            checkmark_color="#000000",
-        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 6))
-
-        # Live readout: each premium feature with ✓ (unlocked) / 🔒 (locked); refreshes on toggle.
-        self._dev_feature_frame = ctk.CTkFrame(dev_tile, fg_color="transparent")
-        self._dev_feature_frame.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
-        self._render_dev_feature_list()
-        # === end DEV-UNLOCK ================================================
-
         # === Version signature (quiet footer, bottom of the scroll) =========
         try:
             from wayfinder import __version__ as _wf_version
@@ -9507,7 +9485,8 @@ class WayfinderApp(ctk.CTk):
                 loop.run()
                 
             except Exception as e:
-                self.after(0, lambda: self.log(f"⚠️ Wake listener failed: {e}"))
+                error = str(e)
+                self.after(0, lambda error=error: self.log(f"⚠️ Wake listener failed: {error}"))
         
         # Start listener in background thread
         wake_thread = threading.Thread(target=listen_for_wake, daemon=True, name="WakeListener")
@@ -9548,10 +9527,15 @@ class WayfinderApp(ctk.CTk):
                         and (self._hotkey_thread is None or not self._hotkey_thread.is_alive())):
                     self.log("🔄 Hotkey listener not running - restarting...")
                     self.restart_evdev_listener("supervisor: listener was not alive")
-                # The socket listener can die on a transient bind failure; bring it back if so.
+                # The socket listener can die on a transient bind failure, or wedge after
+                # binding/listening so the thread remains alive but the KDE/tray command
+                # socket refuses clients. Verify a real ping response, not just thread liveness.
                 if self._socket_thread is None or not self._socket_thread.is_alive():
                     self.log("🔄 Socket listener not running - restarting...")
                     self._ensure_socket_listener()
+                elif not self._socket_listener_healthy():
+                    self.log("🔄 Socket listener unreachable - restarting...")
+                    self._ensure_socket_listener(force_restart=True)
                 # In a Flatpak the in-app global-hotkey path is the GlobalShortcuts portal when
                 # dbus-python is bundled, else the pynput X11 fallback (see start_hotkey_listener).
                 # Supervise whichever the app ACTUALLY chose — NOT the portal unconditionally, or
@@ -10694,7 +10678,7 @@ class WayfinderApp(ctk.CTk):
     def _maybe_show_gpu_nudge(self, duration: float) -> None:
         """After a long dictation on the free/CPU path, gently surface GPU acceleration.
 
-        Fires only when: GPU is actually locked for this user (premium/dev-unlock users
+        Fires only when: GPU is actually locked for this user (Ultra users
         already have it), the dictation ran long enough that CPU speed hurt, it hasn't
         already shown this session, and the user hasn't dismissed it for good. Must run
         on the Tk thread (both finalize call sites do)."""
@@ -10707,7 +10691,7 @@ class WayfinderApp(ctk.CTk):
                 return
             gate = getattr(self, "feature_gate", None)
             if gate is None or gate.has_feature("gpu_acceleration"):
-                return  # already has GPU (premium / dev-unlock) — nothing to upsell
+                return  # already has GPU — nothing to upsell
             # Don't upsell GPU acceleration to a machine with no usable GPU — the nudge
             # would promise a speedup the hardware can't deliver. Cheap, cached,
             # lspci/sysfs-based detector: model-independent (no whisper probe) and
@@ -10827,13 +10811,13 @@ class WayfinderApp(ctk.CTk):
     def _append_activity_log(self, log_line: str) -> None:
         """Append one line to the persistent activity log. Best-effort; never raises.
 
-        Lives in Path.home()/.cache (host-visible in the Flatpak via the xdg-cache grant —
-        NOT get_cache_dir()/XDG_CACHE_HOME, which is the sandbox-private dir). Truncates once
-        per session if it has grown past ~5 MB so it can't grow without bound.
+        Lives in the XDG cache dir (sandbox-private in the Flatpak). Truncates once per
+        session if it has grown past ~5 MB so it can't grow without bound.
         """
         path = getattr(self, "_activity_log_path", None)
         if path is None:
-            path = Path.home() / ".cache" / "wayfinder-aura" / "activity.log"
+            cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+            path = cache_home / "wayfinder-aura" / "activity.log"
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
@@ -10866,31 +10850,28 @@ class WayfinderApp(ctk.CTk):
             pass
 
     def _open_url(self, url: str) -> None:
-        """Open a URL in the user's default browser, reliably from inside the Flatpak.
+        """Open a URL in the user's default browser.
 
-        SteamOS runs even the desktop under gamescope (XDG_CURRENT_DESKTOP=gamescope), so
-        the host's xdg-open can't resolve the default handler, and the sandbox's OpenURI
-        portal is unavailable there — webbrowser.open() silently no-ops. `gio open` via
-        flatpak-spawn --host launches the host's default .desktop handler (the default
-        browser, itself often a Flatpak), which is the path that works on the Deck. Falls
-        back to host xdg-open, then webbrowser.open for non-Flatpak installs.
-        Needs --talk-name=org.freedesktop.Flatpak (granted in the manifest)."""
+        In the Flatpak, prefer portal-aware openers inside the sandbox. Avoid
+        `flatpak-spawn --host`: Flathub flags host-spawn access and the portal is the
+        acceptable path for checkout/info links.
+        """
         import shutil, subprocess, webbrowser
-        if os.environ.get("FLATPAK_ID") and shutil.which("flatpak-spawn"):
+        if IS_FLATPAK:
             for opener in (["gio", "open", url], ["xdg-open", url]):
+                if not shutil.which(opener[0]):
+                    continue
                 try:
-                    r = subprocess.run(
-                        ["flatpak-spawn", "--host", *opener],
-                        timeout=8, capture_output=True,
-                    )
+                    r = subprocess.run(opener, timeout=8, capture_output=True)
                     if r.returncode == 0:
                         self.log("🔗 Opening in your browser…")
                         return
                 except Exception:
                     continue
-            self.log("⚠ Couldn't open the link — check your default browser.")
         try:
-            webbrowser.open(url)
+            if webbrowser.open(url):
+                return
+            self.log("⚠ Couldn't open the link — check your default browser.")
         except Exception as e:
             self.log(f"⚠ Couldn't open {url}: {e}")
 
@@ -10908,7 +10889,7 @@ class WayfinderApp(ctk.CTk):
 
         price = self.config.get("premium_price", "$29.99")
         price_reg = self.config.get("premium_price_regular", "$60")
-        checkout = self.config.get("premium_url", "https://wayfindercollective.io/aura")
+        checkout = self.config.get("premium_url", "https://wayfindercollective.io/checkout/m97bzwd3j9d0628vakzf94mggd8824n9")
         info_url = self.config.get("premium_info_url", "https://wayfindercollective.io/aura")
         feature_msg = self.feature_gate.get_upgrade_message(feature_id)
 
@@ -11016,9 +10997,7 @@ class WayfinderApp(ctk.CTk):
             return
 
         # store_license() is the authoritative activation: it validates the key against the
-        # licensing service (Convex) and writes the signed offline token on success. We deliberately
-        # DO NOT pre-gate on validate_license_key() — that's the legacy offline-HMAC scheme, which
-        # real (randomly-minted) Convex keys can't satisfy, so it would reject valid purchased keys.
+        # licensing service and writes the signed offline token on success.
         from wayfinder.license import store_license, get_feature_gate
         self._license_feedback.configure(text="Activating…", text_color=COLORS["text_muted"])
         self.update_idletasks()  # paint the feedback before the blocking network call
@@ -11093,46 +11072,6 @@ class WayfinderApp(ctk.CTk):
                 pass
             self._ultra_banner = None
         self._rebuild_header()
-
-    # === DEV-UNLOCK (remove before GA) ===
-    def _toggle_dev_unlock(self) -> None:
-        """DEV: persist the unlock flag, refresh the gate, update badge + readout."""
-        from wayfinder.license import get_feature_gate
-        on = bool(self._dev_unlock_var.get())
-        self.config["dev_unlock_all"] = on
-        save_config(self.config)
-        self.feature_gate = get_feature_gate(force_refresh=True)
-        prem = self.feature_gate.is_premium
-        if hasattr(self, "_license_status_label"):
-            try:
-                self._license_status_label.configure(
-                    text="Ultra 😇" if prem else "Free",
-                    text_color=COLORS["accent"] if prem else COLORS["text_muted"],
-                )
-            except Exception:
-                pass
-        self._render_dev_feature_list()
-        self.log(
-            "🛠 DEV unlock ON — all premium features enabled (reopen panels / restart for full effect)"
-            if on else "🛠 DEV unlock OFF — premium gating restored"
-        )
-
-    def _render_dev_feature_list(self) -> None:
-        """DEV: show each premium feature with ✓ (unlocked) / 🔒 (locked)."""
-        from wayfinder.license import PREMIUM_FEATURES
-        frame = getattr(self, "_dev_feature_frame", None)
-        if frame is None:
-            return
-        for w in frame.winfo_children():
-            w.destroy()
-        for fid, (name, _desc) in PREMIUM_FEATURES.items():
-            unlocked = self.feature_gate.has_feature(fid)
-            ctk.CTkLabel(
-                frame, text=f"{'✓' if unlocked else '🔒'}  {name}",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["accent"] if unlocked else COLORS["text_muted"],
-            ).pack(anchor="w")
-    # === end DEV-UNLOCK ===
 
     def get_hotkey_display(self) -> str:
         hotkey_key = self.config.get("hotkey_key", 67)
@@ -11878,7 +11817,8 @@ class WayfinderApp(ctk.CTk):
                     self.after(0, self._on_playback_done)
                 
             except Exception as e:
-                self.after(0, lambda: self._on_playback_error(str(e)))
+                error = str(e)
+                self.after(0, lambda error=error: self._on_playback_error(error))
         
         thread = threading.Thread(target=play_audio, daemon=True)
         thread.start()
@@ -12913,7 +12853,7 @@ class WayfinderApp(ctk.CTk):
         self.session_generation += 1
         self.on_error(
             f"Processing exceeded {timeout_s:.0f}s — likely a stuck transcription or "
-            f"post-processing step. Reset to idle (see ~/.cache/wayfinder-aura/activity.log).",
+            "post-processing step. Reset to idle; see the activity log for details.",
             self.session_generation,
         )
 
@@ -13184,7 +13124,18 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"⚠️ Injection pre-arm skipped: {e}")
         threading.Thread(target=_warm, daemon=True, name="wayfinder-model-warmup").start()
 
-    def _ensure_socket_listener(self):
+    def _socket_listener_healthy(self, timeout: float = 0.35) -> bool:
+        """Return True only when the command socket accepts and answers a ping."""
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(timeout)
+                client.connect(SOCKET_PATH)
+                client.sendall(b"ping")
+                return client.recv(16) == b"pong"
+        except OSError:
+            return False
+
+    def _ensure_socket_listener(self, force_restart: bool = False):
         """Start the socket listener if it isn't already running. Idempotent.
 
         Liveness-based (not a one-shot flag): if the listener ever dies — e.g. a transient
@@ -13192,7 +13143,7 @@ class WayfinderApp(ctk.CTk):
         the socket trigger being dead until an app restart.
         """
         existing = self._socket_thread
-        if existing is not None and existing.is_alive():
+        if not force_restart and existing is not None and existing.is_alive():
             return
         self._socket_thread = threading.Thread(
             target=socket_listener,

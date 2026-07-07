@@ -2,69 +2,19 @@
 Wayfinder Aura - License Management System
 
 Offline-first license validation for premium features.
-No phone home, no tracking, privacy-respecting.
-
-License Key Format: WV-XXXX-XXXX-XXXX-XXXX
-Where each X is alphanumeric (0-9, A-Z excluding confusing chars)
+Activation happens through the licensing service; successful activations store a
+signed Ed25519 token so premium features keep working offline during the token's
+grace window.
 """
 
 import hashlib
-import hmac
 import json
 import os
 import platform
-import re
-import subprocess
-import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-
-# Characters that aren't confusing (no 0/O, 1/I/L, etc.)
-LICENSE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
-
-
-def _get_license_secret() -> str:
-    """
-    Get the license signing secret from environment variable.
-    
-    SECURITY: The license secret MUST be set via WAYFINDER_LICENSE_SECRET environment
-    variable in production. For development/testing, a deterministic fallback is used.
-    
-    For production deployment:
-    1. Generate a secret: python -c "import secrets; print(secrets.token_hex(32))"
-    2. Set environment variable: export WAYFINDER_LICENSE_SECRET="your_64_char_hex_secret"
-    3. For Flatpak/systemd: add to environment configuration
-    
-    Returns:
-        The license secret string (64 hex characters recommended)
-    """
-    import os
-    import warnings
-    
-    secret = os.environ.get("WAYFINDER_LICENSE_SECRET")
-    
-    if secret:
-        return secret
-    
-    # Development fallback - generates deterministic secret from machine ID
-    # This allows testing without setting env var, but is NOT secure for production
-    warnings.warn(
-        "WAYFINDER_LICENSE_SECRET not set. Using development fallback. "
-        "Set WAYFINDER_LICENSE_SECRET environment variable for production.",
-        RuntimeWarning,
-        stacklevel=2
-    )
-    
-    # Generate a deterministic but unique-per-machine development secret
-    # This is NOT cryptographically secure but allows local testing
-    machine_data = f"{platform.node()}:{platform.machine()}:wayfinder-dev-secret"
-    return hashlib.sha256(machine_data.encode()).hexdigest()
-
-
-# License secret - loaded from environment for security (legacy offline HMAC path)
-LICENSE_SECRET = _get_license_secret()
 
 
 # === Online activation (Convex licensing service) ===
@@ -113,7 +63,7 @@ PREMIUM_FEATURES = {
 }
 
 FREE_FEATURES = {
-    "basic_transcription": ("Basic Transcription", "whisper.cpp transcription with GPU support"),
+    "basic_transcription": ("Basic Transcription", "Local whisper.cpp transcription on CPU"),
     "small_models": ("Standard Models", "Tiny.en, Base.en, Small.en"),
     "standard_recording": ("Standard Recording", "Single-session recording"),
     "light_preprocessing": ("Light Audio Processing", "Gain normalization"),
@@ -158,137 +108,22 @@ def get_machine_id() -> str:
     return hashlib.sha256(combined.encode()).hexdigest()[:16].upper()
 
 
-# === License Key Generation (for your backend/admin tool) ===
-
-def generate_license_key(machine_id: Optional[str] = None) -> str:
-    """
-    Generate a valid license key.
-    
-    This function should be used in your admin/sales backend,
-    NOT distributed with the app.
-    
-    Args:
-        machine_id: Optional machine ID for bound licenses
-    
-    Returns:
-        License key in format WV-XXXX-XXXX-XXXX-XXXX
-    """
-    # Generate random base
-    import secrets
-    random_part = ''.join(secrets.choice(LICENSE_CHARS) for _ in range(12))
-    
-    # Create payload
-    payload = random_part
-    if machine_id:
-        payload += f":{machine_id}"
-    
-    # Generate checksum (last 4 chars)
-    signature = hmac.new(
-        LICENSE_SECRET.encode(),
-        payload.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    
-    # Convert signature to license chars
-    checksum = ""
-    for i in range(4):
-        idx = int(signature[i*2:i*2+2], 16) % len(LICENSE_CHARS)
-        checksum += LICENSE_CHARS[idx]
-    
-    # Format: WV-XXXX-XXXX-XXXX-XXXX
-    full_key = random_part + checksum
-    formatted = f"WV-{full_key[0:4]}-{full_key[4:8]}-{full_key[8:12]}-{full_key[12:16]}"
-    
-    return formatted
-
-
-def validate_license_key(key: str, machine_id: Optional[str] = None) -> LicenseInfo:
-    """
-    Validate a license key offline.
-    
-    Args:
-        key: License key to validate
-        machine_id: Optional machine ID for bound license check
-    
-    Returns:
-        LicenseInfo with validation result
-    """
-    # Clean up key
-    key = key.upper().strip()
-    
-    # Check format
-    pattern = r'^WV-([A-Z0-9]{4})-([A-Z0-9]{4})-([A-Z0-9]{4})-([A-Z0-9]{4})$'
-    match = re.match(pattern, key)
-    
-    if not match:
-        return LicenseInfo(
-            is_valid=False,
-            is_premium=False,
-            error_message="Invalid license key format"
-        )
-    
-    # Extract parts
-    parts = ''.join(match.groups())
-    random_part = parts[:12]
-    provided_checksum = parts[12:16]
-    
-    # Verify checksum
-    payload = random_part
-    signature = hmac.new(
-        LICENSE_SECRET.encode(),
-        payload.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    
-    expected_checksum = ""
-    for i in range(4):
-        idx = int(signature[i*2:i*2+2], 16) % len(LICENSE_CHARS)
-        expected_checksum += LICENSE_CHARS[idx]
-    
-    if provided_checksum != expected_checksum:
-        # Try with machine ID binding
-        if machine_id:
-            payload_with_machine = f"{random_part}:{machine_id}"
-            signature = hmac.new(
-                LICENSE_SECRET.encode(),
-                payload_with_machine.encode(),
-                hashlib.sha256
-            ).hexdigest()
-            
-            expected_checksum = ""
-            for i in range(4):
-                idx = int(signature[i*2:i*2+2], 16) % len(LICENSE_CHARS)
-                expected_checksum += LICENSE_CHARS[idx]
-            
-            if provided_checksum != expected_checksum:
-                return LicenseInfo(
-                    is_valid=False,
-                    is_premium=False,
-                    error_message="Invalid license key"
-                )
-        else:
-            return LicenseInfo(
-                is_valid=False,
-                is_premium=False,
-                error_message="Invalid license key"
-            )
-    
-    return LicenseInfo(
-        is_valid=True,
-        is_premium=True,
-        license_key=key,
-        machine_id=machine_id,
-        activated_date=datetime.now().isoformat()
-    )
-
-
 # === License Storage ===
 
 def get_license_path() -> Path:
     """Get path to license storage file."""
-    config_dir = Path.home() / ".config" / "wayfinder-aura"
+    from wayfinder import config as _config
+    config_dir = _config.CONFIG_DIR
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir / "license.json"
+
+
+def _restrict_owner_only(path: Path) -> None:
+    """Best-effort chmod for bearer-token files."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _verify_token(token: str, machine_id: Optional[str] = None) -> Optional[dict]:
@@ -380,6 +215,7 @@ def load_stored_license() -> LicenseInfo:
     license_path = get_license_path()
     if not license_path.exists():
         return LicenseInfo(is_valid=False, is_premium=False, error_message="No license found")
+    _restrict_owner_only(license_path)
 
     try:
         data = json.loads(license_path.read_text())
@@ -411,6 +247,7 @@ def load_stored_license() -> LicenseInfo:
                 data["machine_id"] = machine_id
                 try:
                     license_path.write_text(json.dumps(data, indent=2))
+                    _restrict_owner_only(license_path)
                 except Exception:
                     pass
                 info.activated_date = data.get("activated_date")
@@ -449,10 +286,7 @@ def store_license(key: str) -> LicenseInfo:
         }
         license_path.write_text(json.dumps(data, indent=2))
         # The license token is a bearer credential — restrict to owner-only.
-        try:
-            os.chmod(license_path, 0o600)
-        except OSError:
-            pass
+        _restrict_owner_only(license_path)
         info.activated_date = data["activated_date"]
 
     return info
@@ -466,32 +300,6 @@ def remove_license() -> None:
 
 
 # === Feature Gating ===
-
-
-# === DEV-UNLOCK (remove before GA) =========================================
-# Developer-only override that forces every premium feature ON so licensing can
-# be exercised without a real key. Enabled by the "DEV — Unlock all premium
-# features" checkbox (writes "dev_unlock_all": true to config.json) or by the
-# WAYFINDER_DEV_UNLOCK=1 environment variable (handy for headless tests). To
-# remove before shipping real licensing: delete this block and the two
-# `_dev_unlock` lines in FeatureGate, plus the checkbox in wayfinder_main.py
-# (grep the tree for: DEV-UNLOCK).
-def _dev_unlock_enabled() -> bool:
-    env = os.environ.get("WAYFINDER_DEV_UNLOCK", "").strip().lower()
-    if env in ("1", "true", "yes", "on"):
-        return True
-    try:
-        import wayfinder.config as _wc
-        cfg_path = Path(_wc.CONFIG_FILE)
-    except Exception:
-        cfg_path = Path.home() / ".config" / "wayfinder-aura" / "config.json"
-    try:
-        if cfg_path.exists():
-            return bool(json.loads(cfg_path.read_text()).get("dev_unlock_all", False))
-    except Exception:
-        pass
-    return False
-# === end DEV-UNLOCK ========================================================
 
 
 class FeatureGate:
@@ -517,13 +325,10 @@ class FeatureGate:
     def refresh(self) -> None:
         """Reload license status."""
         self._license_info = load_stored_license()
-        self._dev_unlock = _dev_unlock_enabled()  # DEV-UNLOCK (remove before GA)
     
     @property
     def is_premium(self) -> bool:
         """Check if user has premium license."""
-        if getattr(self, "_dev_unlock", False):  # DEV-UNLOCK (remove before GA)
-            return True
         return self._license_info.is_valid and self._license_info.is_premium
     
     @property
@@ -591,7 +396,7 @@ def get_feature_gate(force_refresh: bool = False) -> FeatureGate:
     return _feature_gate
 
 
-# === CLI for testing ===
+# === CLI for diagnostics ===
 
 if __name__ == "__main__":
     import sys
@@ -599,30 +404,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         cmd = sys.argv[1]
         
-        if cmd == "generate":
-            # Generate a new license key (admin only!)
-            key = generate_license_key()
-            print(f"Generated license key: {key}")
-            
-        elif cmd == "generate-bound":
-            # Generate machine-bound key
-            machine_id = get_machine_id()
-            key = generate_license_key(machine_id)
-            print(f"Machine ID: {machine_id}")
-            print(f"Bound license key: {key}")
-            
-        elif cmd == "validate":
-            if len(sys.argv) > 2:
-                key = sys.argv[2]
-                result = validate_license_key(key)
-                print(f"Valid: {result.is_valid}")
-                print(f"Premium: {result.is_premium}")
-                if result.error_message:
-                    print(f"Error: {result.error_message}")
-            else:
-                print("Usage: python license.py validate <KEY>")
-                
-        elif cmd == "activate":
+        if cmd == "activate":
             if len(sys.argv) > 2:
                 key = sys.argv[2]
                 result = store_license(key)
@@ -652,8 +434,7 @@ if __name__ == "__main__":
             
         else:
             print(f"Unknown command: {cmd}")
-            print("Commands: generate, generate-bound, validate, activate, status, machine-id")
+            print("Commands: activate, status, machine-id")
     else:
         print("Wayfinder Aura License Manager")
-        print("Commands: generate, generate-bound, validate <KEY>, activate <KEY>, status, machine-id")
-
+        print("Commands: activate <KEY>, status, machine-id")

@@ -1,165 +1,105 @@
 # Wayfinder Aura - Flatpak & Monetization Strategy
 
-## Part 1: Flatpak Distribution
+> Status note: this is a strategy snapshot, not the release gate. Current
+> readiness and verification status lives in `SHIPPING.md` and
+> `docs/SHIP-READINESS.md`.
 
-### Option A: Flathub (Free/Open)
-- **Pros**: Massive reach, automatic updates, trusted by users
-- **Cons**: Must be open source, can't easily monetize
-- **Best for**: Free tier, building user base
+## Distribution Plan
 
-### Option B: Self-Hosted Flatpak Repo
-- **Pros**: Full control, can include license checks, premium features
-- **Cons**: Users must add your repo manually, less discovery
-- **Best for**: Premium version
+### Flathub
 
-### Option C: Direct Download (.flatpak bundle)
-- **Pros**: Simple, works anywhere, no repo needed
-- **Cons**: No auto-updates, manual install
-- **Best for**: One-time purchase model
+- Broadest Linux reach and automatic updates.
+- Ships the same application with a useful free tier.
+- Requires a public repository tag and Flathub review before submission.
 
-### Recommended Approach: Hybrid
-1. **Flathub**: Free version with basic features (builds your brand)
-2. **Your website**: Premium license for $40 one-time ($20 launch price)
-3. **License key**: Unlocks premium features in both versions
+### Direct Downloads
 
----
+- AppImage and `.flatpak` bundle can be used for non-Flathub distribution.
+- Useful for launch-day fallbacks, private testers, and users who do not want to
+  add Flathub.
+- AppImage support is secondary to the Flatpak release path.
 
-## Part 2: Free vs Premium Features
+### Recommended Approach
 
-### 🆓 FREE TIER (Flathub)
+1. Publish the free tier on Flathub.
+2. Sell an Ultra license through the storefront.
+3. Unlock Ultra features in the same app build after license activation.
+
+## Free vs Ultra
+
+### Free Tier
+
 | Feature | Details |
 |---------|---------|
-| Basic Transcription | whisper.cpp CPU only |
-| Models | Tiny.en, Base.en, Small.en |
-| Recording | Standard (non-chunked) |
-| Audio Processing | Light only |
-| Beam Search | 1-3 (fast mode) |
-| Typing Speed | Instant only |
-| UI | Full UI, all settings visible |
+| Basic Transcription | Local whisper.cpp CPU mode |
+| Bundled Model | Base.en |
+| Hotkeys | Wayland socket path and X11 support |
+| Text Injection | Local desktop injection helpers |
+| UI | Full settings UI with locked Ultra controls visible |
 
-### 💎 PREMIUM TIER ($40 one-time — $20 launch price)
-| Feature | Value Proposition |
-|---------|-------------------|
-| **GPU Acceleration** | 3-10x faster transcription |
-| **Faster-Whisper Backend** | Best GPU utilization |
-| **Large Models** | Medium.en, Large v3 Turbo |
-| **Chunked Recording** | Unlimited duration |
-| **Advanced Audio** | Medium & Heavy preprocessing |
-| **High Beam Search** | 4-10 (accuracy mode) |
-| **All Typing Speeds** | Fast, Normal, Slow, Very Slow |
-| **Custom Vocabulary** | Add your own terms |
-| **Priority Support** | Email support for 1 year |
+### Ultra Tier
 
-### Why This Split Works
-- Free tier is **genuinely useful** (not crippled)
-- Premium features are **professional/power-user** focused
-- GPU acceleration alone justifies $20 (saves hours of waiting)
-- One-time purchase matches your "no subscription" brand
+Regular price is **$60 one-time**. Launch price is **$29.99 one-time**.
 
----
+| Feature | Value |
+|---------|-------|
+| GPU Acceleration | Faster transcription on supported dedicated and integrated GPUs |
+| Faster-Whisper Backend | Alternative backend for GPU-heavy setups |
+| Larger Models | Better accuracy when the user installs or selects larger models |
+| Chunked Recording | Longer dictation sessions |
+| Advanced Audio | Medium and heavy preprocessing |
+| Higher Beam Search | Accuracy-focused transcription settings |
+| Typing Speeds | Fast, normal, slow, and very slow simulated typing |
+| Custom Vocabulary | User-defined terms and names |
 
-## Part 3: License Key Implementation
+## License Flow
 
-### Architecture
-```
-┌─────────────────────────────────────────────────────────┐
-│                    License System                        │
-├─────────────────────────────────────────────────────────┤
-│  1. User purchases on website (Gumroad/LemonSqueezy)    │
-│  2. Receives license key: WV-XXXX-XXXX-XXXX-XXXX        │
-│  3. Enters key in app → stored in config                │
-│  4. App validates key cryptographically (offline!)      │
-│  5. Premium features unlocked                           │
-└─────────────────────────────────────────────────────────┘
-```
+1. User purchases a license through the storefront.
+2. User enters the license key in Settings.
+3. App activates online against the production license endpoint.
+4. Server response includes a signed offline token.
+5. App verifies the Ed25519 signature locally after activation and falls back to
+   the free tier if no valid token is present.
 
-### Key Features
-- **Offline validation** - No phone home (matches privacy brand)
-- **Machine binding** - Optional, prevents casual sharing
-- **Cryptographic** - Can't easily generate fake keys
-- **Graceful degradation** - Invalid key = free tier, not broken app
+The current app intentionally does not include a local key generator, HMAC dev
+unlock path, or hard-coded test license bypass. Production release still needs
+the final license server URL and public key.
 
-### Payment Platforms for One-Time Purchases
-1. **Gumroad** - Simple, handles taxes, 10% fee
-2. **LemonSqueezy** - Modern, EU-friendly, 5% + $0.50
-3. **Paddle** - Enterprise, handles everything, 5-10%
-4. **Ko-fi Shop** - Creator-friendly, 0% on paid plans
+## Implementation Status
 
----
+### Flatpak
 
-## Part 4: Implementation Checklist
+- [x] Generate offline Python dependency sources in `flatpak/python-deps.json`
+- [x] Build and install the local Flatpak
+- [x] Use the final app ID: `io.wayfindercollective.WayfinderAura`
+- [x] Capture current UI screenshots for AppStream
+- [x] Validate AppStream metadata with `appstreamcli validate --no-net`
+- [ ] Publish public repository tag
+- [ ] Generate the release manifest from that tag
+- [ ] Submit to Flathub
 
-### Phase 1: Flatpak Working (This Week)
-- [ ] Fix python-deps to use offline sources
-- [ ] Test local Flatpak build
-- [ ] Create proper App ID (io.github.YOURUSERNAME.WayfinderVoice)
-- [ ] Take screenshots for listing
-- [ ] Submit free version to Flathub
+### License System
 
-### Phase 2: License System (Next Week)
-- [ ] Create license.py module
-- [ ] Add license key entry in Settings
-- [ ] Gate premium features behind license check
-- [ ] Create premium build with all features
-- [ ] Test license validation
+- [x] Add license module
+- [x] Add license entry and status UI
+- [x] Gate Ultra features behind license state
+- [x] Remove legacy dev unlock behavior
+- [ ] Configure production license endpoint
+- [ ] Configure production Ed25519 public key
+- [ ] Verify production activation and offline-token reuse
 
-### Phase 3: Sales Infrastructure
-- [ ] Set up payment platform (Gumroad recommended to start)
-- [ ] Create landing page with purchase button
-- [ ] Set up license key delivery (automatic email)
-- [ ] Create premium Flatpak bundle
+### Sales Infrastructure
 
-### Phase 4: Launch
-- [ ] Announce free version on Flathub
-- [ ] Blog post / Reddit / Hacker News
-- [ ] Offer launch discount ($15 first week)
-- [ ] Collect testimonials
+- [ ] Select and configure storefront
+- [ ] Configure license delivery
+- [ ] Publish support and refund policy
+- [ ] Connect storefront fulfillment to the license service
 
----
+## Launch Positioning
 
-## Part 5: Pricing Psychology
-
-### Pricing (updated 2026-06): $40 list, $20 launch discount
-List price is $40 one-time; launch promotion sells at $20 (50% off). The
-launch price keeps the original "sweet spot" psychology below while the $40
-anchor signals real product value and leaves room to end the promotion later
-without a price *increase* announcement.
-
-### Why ~$20 at launch is the Sweet Spot
-- **Below impulse threshold** - Many devs will pay without much thought
-- **Above "throwaway"** - Signals quality, not abandonware
-- **One hour of work** - Easy ROI justification for professionals
-- **Matches market** - Similar to other premium Linux tools
-
-### Alternative Pricing Models
-| Model | Price | Pros | Cons |
-|-------|-------|------|------|
-| One-time | $20 | Simple, matches brand | No recurring revenue |
-| Yearly | $12/yr | Recurring revenue | Contradicts "no subscription" |
-| Pay-what-you-want | $5-50 | Good PR | Lower average |
-| Donations only | $0+ | Maximum reach | Minimal income |
-
-**Recommendation**: One-time pricing, no subscription — $40 list / $20 launch. It matches the "no subscription" messaging perfectly.
-
----
-
-## Part 6: Marketing Angles
-
-### For Premium Pitch
-> "The free version is great for quick notes. But if you're dictating all day—blog posts, documentation, emails—GPU acceleration pays for itself in the first hour."
-
-### Trust Builders
-- "100% offline license validation"
-- "No DRM, no phone home"
-- "Works forever, even if we disappear"
-- "30-day money-back guarantee"
-
-### Comparison Hook
-> "Otter.ai: $100/year. Google Cloud Speech: $0.006/15 seconds. Wayfinder Aura Premium: one payment, forever, private — $20 during launch."
-
-
-
-
-
-
-
+- Free tier is usable for local CPU dictation.
+- Ultra is for users who dictate heavily and want GPU acceleration, larger
+  models, longer recordings, and higher-accuracy settings.
+- Messaging should stay precise: local mode keeps audio on device; optional
+  cloud backends and online activation use network when explicitly configured or
+  required.

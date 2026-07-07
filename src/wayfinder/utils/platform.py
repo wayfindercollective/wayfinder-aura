@@ -11,6 +11,42 @@ import subprocess
 import sys
 from pathlib import Path
 
+WAYFINDER_FLATPAK_ID = "io.wayfindercollective.WayfinderAura"
+SOURCE_PORTAL_APP_ID = "wayfinder-aura"
+WAYFINDER_APPIMAGE_BINARY = Path("usr") / "bin" / "wayfinder-aura"
+
+
+def is_wayfinder_flatpak_env(env: dict[str, str] | None = None) -> bool:
+    """True only for Wayfinder's own Flatpak environment.
+
+    `FLATPAK_ID` can leak from a parent Flatpak-hosted editor or terminal
+    (for example VS Code). Treating any value as "we are the Wayfinder Flatpak"
+    makes source/test runs pick `/app` binaries and register portals as the
+    parent app. `WAYFINDER_FLATPAK=1` remains an explicit test/build override.
+    """
+    environ = os.environ if env is None else env
+    return (
+        environ.get("FLATPAK_ID") == WAYFINDER_FLATPAK_ID
+        or environ.get("WAYFINDER_FLATPAK") is not None
+    )
+
+
+def get_portal_app_id(env: dict[str, str] | None = None) -> str:
+    """Return the desktop/portal app id for this runtime."""
+    return WAYFINDER_FLATPAK_ID if is_wayfinder_flatpak_env(env) else SOURCE_PORTAL_APP_ID
+
+
+def get_wayfinder_appimage_dir(env: dict[str, str] | None = None) -> Path | None:
+    """Return APPDIR only when it is Wayfinder's mounted AppDir."""
+    environ = os.environ if env is None else env
+    appdir = environ.get("APPDIR")
+    if not appdir:
+        return None
+    path = Path(appdir)
+    if (path / WAYFINDER_APPIMAGE_BINARY).exists():
+        return path
+    return None
+
 
 # =============================================================================
 # Platform Detection
@@ -51,33 +87,30 @@ def is_windows() -> bool:
 # =============================================================================
 
 def is_flatpak() -> bool:
-    """Check if running in a Flatpak environment (Linux only)."""
+    """Check if running as Wayfinder's Flatpak (Linux only)."""
     if not is_linux():
         return False
-    return os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
+    return is_wayfinder_flatpak_env()
 
 
 def is_appimage() -> bool:
     """
-    Check if running from an AppImage.
+    Check if running from Wayfinder's AppImage.
     
-    The AppImage runtime sets the APPIMAGE and APPDIR environment variables.
-    APPIMAGE points to the AppImage file path, APPDIR points to the mounted directory.
+    APPIMAGE/APPDIR can leak from parent AppImage-hosted tools, so APPDIR must
+    contain Wayfinder's own executable before we use bundled paths.
     """
-    return os.environ.get("APPIMAGE") is not None or os.environ.get("APPDIR") is not None
+    return get_wayfinder_appimage_dir() is not None
 
 
 def get_appimage_dir() -> Path | None:
     """
-    Get the mounted AppImage directory (APPDIR).
+    Get Wayfinder's mounted AppImage directory (APPDIR).
     
     Returns:
         Path to the AppDir mount point, or None if not running from an AppImage.
     """
-    appdir = os.environ.get("APPDIR")
-    if appdir:
-        return Path(appdir)
-    return None
+    return get_wayfinder_appimage_dir()
 
 
 def is_wayland() -> bool:
@@ -187,17 +220,13 @@ def is_game_mode(wait_secs: float = 0.0) -> bool:
 def write_game_mode_marker(enabled: bool) -> None:
     """Write the toggle marker the host supervisor polls.
 
-    Path is ``~/.config/wayfinder-aura/game-mode-dictation`` ("1"/"0"). We use
-    ``Path.home()/.config`` (NOT get_config_dir(), which honors XDG_CONFIG_HOME)
-    on purpose: inside the Flatpak, XDG_CONFIG_HOME points at the sandbox-private
-    ``~/.var/app/<id>/config`` which the host supervisor can't see, whereas
-    ``~/.config/wayfinder-aura`` is bind-mounted to the real host dir
-    (--filesystem=xdg-config/wayfinder-aura). This also matches both the host
-    supervisor's read path and the app's own CONFIG_DIR, so all three agree on
-    one host-visible file. Atomic (temp + replace); never raises.
+    Path is the app config dir's ``game-mode-dictation`` file. In the Flatpak,
+    this is ``~/.var/app/<id>/config/wayfinder-aura/game-mode-dictation``; the
+    Steam Deck host supervisor reads that path directly, with a legacy fallback
+    for older installs. Atomic (temp + replace); never raises.
     """
     try:
-        d = Path.home() / ".config" / "wayfinder-aura"
+        d = get_config_dir()
         d.mkdir(parents=True, exist_ok=True)
         target = d / "game-mode-dictation"
         tmp = d / ".game-mode-dictation.tmp"

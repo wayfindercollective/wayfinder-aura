@@ -86,6 +86,30 @@ _needs_free = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _preserve_flatpak_runtime_for_golden(monkeypatch):
+    """The global test fixture clears Flatpak env vars for deterministic host tests.
+
+    Golden ASR is different: when it is explicitly enabled inside the installed
+    Flatpak runtime, it must exercise `/app/bin/whisper-cli` and `/app/share/*`.
+    Preserve that runtime identity only for this opt-in golden run.
+    """
+    if not (_GOLDEN_ENABLED and Path("/app/bin/whisper-cli").exists()):
+        return
+
+    monkeypatch.setenv("FLATPAK_ID", "io.wayfindercollective.WayfinderAura")
+    monkeypatch.setenv("WAYFINDER_FLATPAK", "1")
+
+    import wayfinder.config as config
+
+    monkeypatch.setattr(config, "IS_FLATPAK", True)
+    try:
+        import wayfinder.core.transcriber as transcriber
+        monkeypatch.setattr(transcriber, "IS_FLATPAK", True)
+    except Exception:
+        pass
+
+
 def _asr(model, wav, use_gpu):
     """Raw transcription through the real backend + the app's standard artifact
     cleanup (NO LLM post-processing)."""

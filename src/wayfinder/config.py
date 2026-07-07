@@ -11,17 +11,32 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Detect runtime environment
-IS_FLATPAK = os.environ.get("FLATPAK_ID") is not None or os.environ.get("WAYFINDER_FLATPAK") is not None
+from wayfinder.utils.platform import (
+    WAYFINDER_FLATPAK_ID,
+    get_wayfinder_appimage_dir,
+    is_wayfinder_flatpak_env,
+)
 
-# APPIMAGE/APPDIR env vars can leak from parent AppImage processes (e.g. Cursor IDE),
-# so verify the APPDIR actually contains our binary before treating it as our AppImage.
-_appdir = os.environ.get("APPDIR", "")
-IS_APPIMAGE = bool(_appdir) and os.path.exists(os.path.join(_appdir, "usr", "bin", "wayfinder-aura"))
-APPDIR = _appdir if IS_APPIMAGE else ""
+# Detect runtime environment
+FLATPAK_APP_ID = WAYFINDER_FLATPAK_ID
+IS_FLATPAK = is_wayfinder_flatpak_env()
+
+_appimage_dir = get_wayfinder_appimage_dir()
+IS_APPIMAGE = _appimage_dir is not None
+APPDIR = str(_appimage_dir) if _appimage_dir else ""
+
+def _default_config_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "wayfinder-aura"
+    if sys.platform.startswith("win"):
+        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        return Path(appdata) / "wayfinder-aura"
+    xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    return Path(xdg_config) / "wayfinder-aura"
+
 
 # Configuration paths
-CONFIG_DIR = Path.home() / ".config" / "wayfinder-aura"
+CONFIG_DIR = _default_config_dir()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # Get the package directory (for assets, etc.)
@@ -46,7 +61,7 @@ else:
 
 # Handle icon path for Flatpak / AppImage / regular install
 if IS_FLATPAK:
-    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{os.environ.get('FLATPAK_ID', 'io.github.wayfindercollective.WayfinderAura')}.png"
+    ICON_PATH = Path("/app/share/icons/hicolor/256x256/apps") / f"{FLATPAK_APP_ID}.png"
     if not ICON_PATH.exists():
         ICON_PATH = PROJECT_ROOT / "assets" / "icon.png"
 elif IS_APPIMAGE and APPDIR:
@@ -337,7 +352,14 @@ def _path_exists(value: object) -> bool:
     if value is None:
         return False
     path = os.path.expanduser(str(value).strip())
+    if path.startswith("/app/") and not IS_FLATPAK:
+        return False
     return bool(path) and os.path.exists(path)
+
+
+def _runtime_path_allowed(path: str) -> bool:
+    """Flatpak bundle paths are meaningful only in the Flatpak runtime."""
+    return IS_FLATPAK or not path.startswith("/app/")
 
 
 def _first_existing_path(candidates: list[object]) -> str | None:
@@ -345,8 +367,16 @@ def _first_existing_path(candidates: list[object]) -> str | None:
         if candidate is None:
             continue
         path = os.path.expanduser(str(candidate).strip())
-        if path and os.path.exists(path):
+        if path and _runtime_path_allowed(path) and os.path.exists(path):
             return path
+    return None
+
+
+def _which_runtime_path(name: str) -> str | None:
+    """Return a PATH lookup result, ignoring Flatpak-bundled paths outside Flatpak."""
+    found = shutil.which(name)
+    if found and (IS_FLATPAK or not found.startswith("/app/")):
+        return found
     return None
 
 
@@ -360,23 +390,24 @@ def _repair_config_path(key: str, saved: object) -> object:
     if key == "whisper_binary":
         candidates.extend([
             "~/whisper.cpp/build/bin/whisper-cli",
-            "/app/bin/whisper-cli",
             "/usr/bin/whisper-cli",
             "/usr/local/bin/whisper-cli",
             "/opt/homebrew/bin/whisper-cli",
-            shutil.which("whisper-cli"),
+            _which_runtime_path("whisper-cli"),
         ])
+        if IS_FLATPAK:
+            candidates.insert(1, "/app/bin/whisper-cli")
     elif key == "llama_cpp_binary":
         candidates.extend([
             "~/llama.cpp/build/bin/llama-cli",
-            "/app/bin/llama-simple",
-            "/app/bin/llama-cli",
             "/usr/bin/llama-cli",
             "/usr/local/bin/llama-cli",
             "/opt/homebrew/bin/llama-cli",
-            shutil.which("llama-cli"),
-            shutil.which("llama-simple"),
+            _which_runtime_path("llama-cli"),
+            _which_runtime_path("llama-simple"),
         ])
+        if IS_FLATPAK:
+            candidates[1:1] = ["/app/bin/llama-simple", "/app/bin/llama-cli"]
 
     repaired = _first_existing_path(candidates)
     if repaired:
@@ -384,7 +415,8 @@ def _repair_config_path(key: str, saved: object) -> object:
 
     # Blank paths are dangerous because Path("") points at cwd and can make
     # availability checks lie; a concrete default gives later checks a clear path.
-    if saved is None or not str(saved).strip():
+    saved_path = os.path.expanduser(str(saved).strip()) if saved is not None else ""
+    if saved is None or not str(saved).strip() or not _runtime_path_allowed(saved_path):
         return default
     return saved
 

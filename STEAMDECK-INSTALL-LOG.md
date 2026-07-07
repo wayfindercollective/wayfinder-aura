@@ -606,7 +606,7 @@ systemctl --user start wayfinder-aura.service
 | Filtered rebuild | ✅ Succeeds | 28 wheels installed cleanly (PyQt6, numpy, scipy, customtkinter, pystray, openai, groq, etc.) — all manylinux prebuilt, no source builds |
 | Launcher smoke test (with `PYSTRAY_BACKEND=gtk`) | ✅ `smoke OK` | matches the env systemd injects |
 | `wayfinder-aura.service` | ✅ `active (running)` | main `python main.py` + persistent overlay subprocess up; no restart-counter increment |
-| `/tmp/wfa-stderr.log` | ✅ clean | only the benign `WAYFINDER_LICENSE_SECRET not set` dev-mode warning |
+| `/tmp/wfa-stderr.log` | ✅ clean | no actionable startup errors |
 
 **Still pending:** end-to-end dictation test (F3 hold → speak → R4 release → text injected into focused field). The service is up; the trigger chain needs a human keypress to validate.
 

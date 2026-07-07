@@ -22,6 +22,7 @@ from wayfinder.utils.platform import (
     get_default_whisper_binary,
     get_default_ydotool_binary,
     get_desktop_environment,
+    get_portal_app_id,
     get_platform,
     get_platform_info,
     get_session_type,
@@ -29,6 +30,8 @@ from wayfinder.utils.platform import (
     ensure_directories,
     is_appimage,
     is_flatpak,
+    get_wayfinder_appimage_dir,
+    is_wayfinder_flatpak_env,
     is_gnome,
     is_kde,
     is_linux,
@@ -96,6 +99,15 @@ class TestFlatpakDetection:
         # clean_environment autouse fixture already clears FLATPAK_ID
         assert is_flatpak() is False
 
+    def test_foreign_parent_flatpak_id_is_not_wayfinder_flatpak(self, monkeypatch):
+        """A Flatpak-hosted editor should not make source runs use /app defaults."""
+        monkeypatch.setenv("FLATPAK_ID", "com.visualstudio.code")
+        monkeypatch.delenv("WAYFINDER_FLATPAK", raising=False)
+
+        assert is_wayfinder_flatpak_env() is False
+        assert is_flatpak() is False
+        assert get_portal_app_id() == "wayfinder-aura"
+
 
 class TestAppImageDetection:
     """Tests for AppImage environment detection."""
@@ -117,6 +129,18 @@ class TestAppImageDetection:
 
     def test_get_appimage_dir_returns_none_otherwise(self):
         """get_appimage_dir() returns None when not in AppImage."""
+        assert get_appimage_dir() is None
+
+    def test_foreign_parent_appdir_is_not_wayfinder_appimage(self, monkeypatch, tmp_path):
+        """APPDIR must contain Wayfinder's executable before bundled paths are trusted."""
+        appdir = tmp_path / "Foreign.AppDir"
+        (appdir / "usr" / "bin").mkdir(parents=True)
+        (appdir / "usr" / "bin" / "ydotool").write_text("#!/bin/sh\n")
+        monkeypatch.setenv("APPIMAGE", str(tmp_path / "Foreign.AppImage"))
+        monkeypatch.setenv("APPDIR", str(appdir))
+
+        assert get_wayfinder_appimage_dir() is None
+        assert is_appimage() is False
         assert get_appimage_dir() is None
 
 

@@ -113,19 +113,14 @@ class TestLicenseIntegration:
 
     def test_license_activation_flow(self, temp_config_dir: Path, mock_online_license):
         """Test complete license activation flow."""
-        from wayfinder.license import (
-            generate_license_key,
-            get_feature_gate,
-            PREMIUM_FEATURES,
-        )
+        from wayfinder.license import get_feature_gate, PREMIUM_FEATURES
 
         gate = get_feature_gate()
 
         # Initially not premium
         initial_premium = gate.is_premium
 
-        # Generate and activate key
-        key = generate_license_key()
+        key = "WF-TEST-ONLINE-ACTIVATION"
         result = gate.activate(key)
 
         assert result.is_valid

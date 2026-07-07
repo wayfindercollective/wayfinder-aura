@@ -106,12 +106,16 @@ class VoiceProfile:
         Initialize the voice profile manager.
         
         Args:
-            config_dir: Directory to store profile data (defaults to ~/.config/wayfinder-aura)
+            config_dir: Directory to store profile data (defaults to the app config dir)
             history_limit: Maximum number of transcriptions to keep in history
             regen_interval: Regenerate profile every N new transcriptions
             min_samples_for_profile: Minimum samples needed before generating profile
         """
-        self.config_dir = Path(config_dir) if config_dir else Path.home() / ".config" / "wayfinder-aura"
+        if config_dir:
+            self.config_dir = Path(config_dir)
+        else:
+            from wayfinder.utils.platform import get_config_dir
+            self.config_dir = get_config_dir()
         self.profile_file = self.config_dir / "voice_profile.json"
         self.history_limit = history_limit
         self.regen_interval = regen_interval

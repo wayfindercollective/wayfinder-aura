@@ -563,6 +563,39 @@ class TestTranscriptionPostProcessing:
         assert result.endswith("?")
 
 
+class TestWhisperArtifactCleanup:
+    """Regression coverage for stock Whisper silence/noise hallucinations."""
+
+    @pytest.mark.parametrize("text", [
+        "I'll see you next time.",
+        "We'll see you next time.",
+        "We'll be right back.",
+        "I'm going to talk to you about what's going on today.",
+        (
+            "I'm going to talk to you about what's going on today. "
+            "I'm going to talk to you about what's going on today."
+        ),
+    ])
+    def test_drops_known_whole_output_silence_hallucinations(self, text):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        assert clean_whisper_artifacts(text) == ""
+
+    def test_keeps_known_phrase_inside_real_sentence(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        text = "I'll see you next time after the build finishes."
+
+        assert clean_whisper_artifacts(text) == text
+
+    def test_keeps_legitimate_repeated_sentence(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        text = "Ship it today. Ship it today."
+
+        assert clean_whisper_artifacts(text) == text
+
+
 class TestTranscribeWithConfig:
     """Test the high-level transcribe_with_config function."""
 
@@ -1011,6 +1044,43 @@ class TestServerModeDefaultAndFallback:
 
         assert isinstance(backend, WhisperCppBackend)
         assert backend.whisper_binary == str(home_cli)
+
+    def test_source_mode_ignores_flatpak_path_candidates(
+        self, tmp_path, monkeypatch
+    ):
+        """Source/test runs must not silently select bundled /app binaries."""
+        from wayfinder.core import transcriber
+        from wayfinder.core.transcriber import get_backend, WhisperCppBackend
+
+        home_cli = tmp_path / "whisper.cpp" / "build" / "bin" / "whisper-cli"
+        home_cli.parent.mkdir(parents=True)
+        home_cli.write_text("#!/bin/sh\n")
+        model = tmp_path / "m.bin"
+        model.write_bytes(b"\x00")
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(transcriber, "IS_FLATPAK", False)
+        monkeypatch.setattr(transcriber.shutil, "which", lambda name: f"/app/bin/{name}")
+
+        backend = get_backend({
+            "whisper_server_mode": True,
+            "whisper_binary": "/app/bin/whisper-cli",
+            "model_path": str(model),
+        })
+
+        assert isinstance(backend, WhisperCppBackend)
+        assert backend.whisper_binary == str(home_cli)
+
+    def test_flatpak_mode_allows_flatpak_path_candidates(
+        self, tmp_path, monkeypatch
+    ):
+        """The source-mode guard must not disable real Flatpak bundled binaries."""
+        from wayfinder.core import transcriber
+
+        monkeypatch.setattr(transcriber, "IS_FLATPAK", True)
+        monkeypatch.setattr(transcriber, "_existing_file", lambda path: path == "/app/bin/whisper-cli")
+
+        assert transcriber._resolve_whisper_cli_binary("") == "/app/bin/whisper-cli"
 
 
 class TestServerFlagLadderAndCliDelegation:

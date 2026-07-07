@@ -16,6 +16,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable, Optional
 
+from wayfinder.config import IS_FLATPAK
+
 
 # Developer vocabulary - common terms that Whisper often mishears
 # These get added to the prompt when output_tone is "dev" to improve recognition
@@ -74,6 +76,8 @@ def _existing_file(value: object) -> bool:
     path = _expand_path(value)
     if not path:
         return False
+    if path.startswith("/app/") and not IS_FLATPAK:
+        return False
     p = Path(path)
     return p.exists() and not p.is_dir()
 
@@ -86,21 +90,33 @@ def _first_existing_file(candidates: list[object]) -> str | None:
     return None
 
 
+def _which_runtime_file(name: str) -> str | None:
+    """Return a PATH lookup result, ignoring Flatpak-bundled paths outside Flatpak."""
+    found = shutil.which(name)
+    if found and (IS_FLATPAK or not found.startswith("/app/")):
+        return found
+    return None
+
+
 def _resolve_whisper_cli_binary(configured: object) -> str:
     """Return a real whisper-cli when possible, even if config saved a blank path."""
-    found = _first_existing_file([
+    candidates: list[object] = [
         configured,
         "~/whisper.cpp/build/bin/whisper-cli",
-        "/app/bin/whisper-cli",
         "/usr/bin/whisper-cli",
         "/usr/local/bin/whisper-cli",
         "/opt/homebrew/bin/whisper-cli",
-        shutil.which("whisper-cli"),
-    ])
+        _which_runtime_file("whisper-cli"),
+    ]
+    if IS_FLATPAK:
+        candidates.insert(2, "/app/bin/whisper-cli")
+    found = _first_existing_file(candidates)
     if found:
         return found
     configured_path = _expand_path(configured)
-    return configured_path or os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli")
+    if configured_path and (IS_FLATPAK or not configured_path.startswith("/app/")):
+        return configured_path
+    return os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli")
 
 
 def _derive_whisper_server_binary(cli_binary: str) -> str:
@@ -870,7 +886,7 @@ class WhisperServerBackend(TranscriptionBackend):
         doesn't exist, so the salvage backend raised 'binary not found' and the
         chunk's words were dropped — the exact failure salvage exists to prevent.
         Resolve to a real binary instead: the derived sibling, then its CPU twin,
-        then the bundled Flatpak paths, then PATH. Falls back to the derived path
+        then bundled Flatpak paths when running in Flatpak, then PATH. Falls back to the derived path
         (a clear not-found error) only if nothing resolves — honest, not silent.
         """
         import shutil
@@ -878,14 +894,17 @@ class WhisperServerBackend(TranscriptionBackend):
         candidates = [
             derived,
             derived.replace("whisper-cli", "whisper-cli-cpu"),  # CPU twin, same dir
-            "/app/bin/whisper-cli",       # Flatpak bundle (Vulkan)
-            "/app/bin/whisper-cli-cpu",   # Flatpak bundle (CPU baseline)
         ]
+        if IS_FLATPAK:
+            candidates.extend([
+                "/app/bin/whisper-cli",       # Flatpak bundle (Vulkan)
+                "/app/bin/whisper-cli-cpu",   # Flatpak bundle (CPU baseline)
+            ])
         for cand in candidates:
             if _existing_file(cand):
                 return cand
         for name in ("whisper-cli", "whisper-cli-cpu"):
-            found = shutil.which(name)
+            found = _which_runtime_file(name)
             if found:
                 return found
         return derived
@@ -1728,7 +1747,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 if _os.path.exists(_cand):
                     _free = _cand
                     break
-            if _free is None and _os.path.exists("/app/share/whisper-models/ggml-base.en.bin"):
+            if (IS_FLATPAK and _free is None
+                    and _os.path.exists("/app/share/whisper-models/ggml-base.en.bin")):
                 _free = "/app/share/whisper-models/ggml-base.en.bin"  # bundled (Flatpak)
             if _free is not None:
                 config["model_path"] = _free
@@ -1917,6 +1937,23 @@ def _collapse_whisper_repetitions(text: str) -> str:
     return " ".join(words)
 
 
+def _collapse_repeated_sentences_for_phrase_match(text: str) -> str:
+    """Return one sentence for exact repeats, only for hallucination matching."""
+    import re
+
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
+    if len(sentences) < 2:
+        return text
+
+    def key(sentence: str) -> str:
+        return re.sub(r'[^a-z0-9]+', ' ', sentence.lower()).strip()
+
+    first = key(sentences[0])
+    if first and all(key(s) == first for s in sentences[1:]):
+        return sentences[0]
+    return text
+
+
 # Known Whisper phrase-hallucinations: on silence/noise Whisper often emits one of
 # these stock YouTube-caption phrases. Only ever matched against the ENTIRE cleaned
 # output (never stripped mid-sentence) — a real utterance that merely contains one of
@@ -1926,6 +1963,10 @@ _WHISPER_PHRASE_HALLUCINATIONS = frozenset({
     'thanks for watching',
     'thank you',
     'thank you.',
+    "i'll see you next time",
+    "we'll see you next time",
+    "we'll be right back",
+    "i'm going to talk to you about what's going on today",
     'please subscribe',
     'like and subscribe',
     'subtitles by the amara.org community',
@@ -2023,7 +2064,8 @@ def clean_whisper_artifacts(text: str) -> str:
     # Drop the whole thing if the entire cleaned output is a known Whisper
     # phrase-hallucination (the stock YouTube-caption strings it emits on silence).
     # Only the ENTIRE output is checked — never a mid-sentence substring.
-    _phrase_key = text.lower().rstrip('.!?,;: ').strip()
+    _phrase_candidate = _collapse_repeated_sentences_for_phrase_match(text)
+    _phrase_key = _phrase_candidate.lower().rstrip('.!?,;: ').strip()
     if _phrase_key in _WHISPER_PHRASE_HALLUCINATIONS:
         print(f"[Transcription] Dropped Whisper phrase-hallucination: {text!r}")
         return ""

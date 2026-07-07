@@ -20,16 +20,27 @@ from .theme import (
     scaled_font_size,
 )
 
-from .components import (
-    ToolTip,
-    ModeSelector,
-    SmoothScrollableFrame,
-    SETTING_TOOLTIPS,
-    get_dynamic_tooltip,
-    create_section_header,
-    create_body_label,
-    CompatibilityBanner,
-)
+_COMPONENT_EXPORTS = {
+    "ToolTip",
+    "ModeSelector",
+    "SmoothScrollableFrame",
+    "SETTING_TOOLTIPS",
+    "get_dynamic_tooltip",
+    "create_section_header",
+    "create_body_label",
+    "CompatibilityBanner",
+}
+
+
+def __getattr__(name: str):
+    """Lazy-load CustomTkinter-backed widgets so pure UI helpers stay headless."""
+    if name in _COMPONENT_EXPORTS:
+        from . import components
+
+        value = getattr(components, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # Theme

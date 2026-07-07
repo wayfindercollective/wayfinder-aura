@@ -3,6 +3,9 @@ Tests for the configuration module.
 """
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -80,6 +83,58 @@ class TestConfigLoading:
         # Should have default for missing keys
         assert config["sample_rate"] == DEFAULT_CONFIG["sample_rate"]
 
+    def test_foreign_parent_flatpak_id_does_not_select_flatpak_defaults(self):
+        """Import-time config must ignore FLATPAK_ID leaked by another Flatpak app."""
+        repo = Path(__file__).resolve().parent.parent
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(repo / "src")
+        env["FLATPAK_ID"] = "com.visualstudio.code"
+        env.pop("WAYFINDER_FLATPAK", None)
+
+        code = """
+from wayfinder import config
+assert config.IS_FLATPAK is False
+assert not config.DEFAULT_CONFIG["whisper_binary"].startswith("/app/")
+assert not config.DEFAULT_CONFIG["model_path"].startswith("/app/")
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+
+    def test_foreign_parent_appdir_does_not_select_appimage_defaults(self, tmp_path: Path):
+        """Import-time config must ignore APPDIR leaked by another AppImage app."""
+        repo = Path(__file__).resolve().parent.parent
+        foreign_appdir = tmp_path / "Foreign.AppDir"
+        (foreign_appdir / "usr" / "bin").mkdir(parents=True)
+        (foreign_appdir / "usr" / "bin" / "whisper-cli").write_text("#!/bin/sh\n")
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(repo / "src")
+        env["APPIMAGE"] = str(tmp_path / "Foreign.AppImage")
+        env["APPDIR"] = str(foreign_appdir)
+
+        code = f"""
+from wayfinder import config
+assert config.IS_APPIMAGE is False
+assert config.APPDIR == ""
+assert {str(foreign_appdir)!r} not in config.DEFAULT_CONFIG["whisper_binary"]
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+
 
 class TestStalePathRepair:
     """load_config heals saved paths that no longer exist on this machine by
@@ -140,6 +195,46 @@ class TestStalePathRepair:
 
         config = cfg.load_config()
         assert config["whisper_binary"] == str(host_cli)
+
+    def test_source_mode_ignores_existing_flatpak_app_path(
+        self, temp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A stale Flatpak /app path must not win after moving back to source mode."""
+        from wayfinder import config as cfg
+
+        home = temp_config_dir.parents[1]
+        host_cli = home / "whisper.cpp" / "build" / "bin" / "whisper-cli"
+        host_cli.parent.mkdir(parents=True, exist_ok=True)
+        host_cli.write_text("#!/bin/sh\n")
+
+        monkeypatch.setattr(cfg, "IS_FLATPAK", False)
+        monkeypatch.setitem(cfg.DEFAULT_CONFIG, "whisper_binary", "/missing/default/whisper-cli")
+        monkeypatch.setattr(cfg.shutil, "which", lambda name: "/app/bin/whisper-cli")
+
+        cfg.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(cfg.CONFIG_FILE, "w") as f:
+            json.dump({"whisper_binary": "/app/bin/whisper-cli"}, f)
+
+        config = cfg.load_config()
+        assert config["whisper_binary"] == str(host_cli)
+
+    def test_flatpak_mode_allows_bundled_app_path(
+        self, temp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The /app guard must not break real Flatpak defaults."""
+        from wayfinder import config as cfg
+
+        monkeypatch.setattr(cfg, "IS_FLATPAK", True)
+        monkeypatch.setitem(cfg.DEFAULT_CONFIG, "whisper_binary", "/missing/default/whisper-cli")
+        monkeypatch.setattr(cfg.os.path, "exists", lambda path: path == "/app/bin/whisper-cli")
+        monkeypatch.setattr(cfg.shutil, "which", lambda name: "/app/bin/whisper-cli")
+
+        cfg.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(cfg.CONFIG_FILE, "w") as f:
+            json.dump({"whisper_binary": "/app/bin/whisper-cli"}, f)
+
+        config = cfg.load_config()
+        assert config["whisper_binary"] == "/app/bin/whisper-cli"
 
 
 class TestKeyCodeMappings:

@@ -47,3 +47,13 @@ def test_metainfo_release_matches_pyproject():
         f"version drift: metainfo <release> ({_metainfo_version()}) != pyproject "
         f"[project] version ({_pyproject_version()}). Bump the metainfo release."
     )
+
+
+def test_pyproject_urls_point_to_real_repo():
+    """Package metadata should not ship with cookiecutter placeholder URLs."""
+    data = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    urls = data["project"]["urls"]
+    expected = "https://github.com/wayfindercollective/wayfinder-aura"
+    assert urls["Homepage"] == expected
+    assert urls["Repository"] == expected
+    assert urls["Issues"] == f"{expected}/issues"

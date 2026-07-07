@@ -105,6 +105,32 @@ class TestReadToggle:
         self._point_toggle_at(monkeypatch, tmp_path, "11")
         assert sup.read_toggle() is False
 
+    def test_default_path_falls_back_to_legacy_toggle(self, monkeypatch, tmp_path):
+        flatpak_toggle = tmp_path / "flatpak" / "game-mode-dictation"
+        legacy_toggle = tmp_path / "legacy" / "game-mode-dictation"
+        legacy_toggle.parent.mkdir(parents=True)
+        legacy_toggle.write_text("1")
+
+        monkeypatch.setattr(sup, "_DEFAULT_TOGGLE_PATH", str(flatpak_toggle))
+        monkeypatch.setattr(sup, "TOGGLE_PATH", str(flatpak_toggle))
+        monkeypatch.setattr(sup, "LEGACY_TOGGLE_PATH", str(legacy_toggle))
+
+        assert sup.read_toggle() is True
+
+    def test_default_path_prefers_flatpak_toggle_over_legacy(self, monkeypatch, tmp_path):
+        flatpak_toggle = tmp_path / "flatpak" / "game-mode-dictation"
+        legacy_toggle = tmp_path / "legacy" / "game-mode-dictation"
+        flatpak_toggle.parent.mkdir(parents=True)
+        legacy_toggle.parent.mkdir(parents=True)
+        flatpak_toggle.write_text("0")
+        legacy_toggle.write_text("1")
+
+        monkeypatch.setattr(sup, "_DEFAULT_TOGGLE_PATH", str(flatpak_toggle))
+        monkeypatch.setattr(sup, "TOGGLE_PATH", str(flatpak_toggle))
+        monkeypatch.setattr(sup, "LEGACY_TOGGLE_PATH", str(legacy_toggle))
+
+        assert sup.read_toggle() is False
+
 
 # ---------------------------------------------------------------------------
 # write_mode_marker()

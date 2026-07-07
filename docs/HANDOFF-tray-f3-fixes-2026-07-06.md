@@ -19,7 +19,7 @@ live restart + click/dictate test** (can't be done from this environment — see
 | 2 | **Broken tray** — retire pystray on Linux, use native Qt `QSystemTrayIcon` | ⚠️ Code done; needs live click test |
 | 3 | **"Notification icon crashed"** — give the Qt tray SNI metadata | ⚠️ Applied; needs live check |
 | 4 | **Tray dies on dictate** — overlay couldn't `import wayfinder` standalone | ✅ Verified headlessly; needs restart to confirm live |
-| — | **OPEN BUG:** `Chunk 1 error: [Errno 13] Permission denied: ''` → "No speech detected" | ❌ **Not diagnosed** — see Open Issues |
+| — | **Chunk blank-binary regression** — `Chunk 1 error: [Errno 13] Permission denied: ''` | ✅ **Covered headlessly** (2026-07-07 regression test); live dictation retest still part of final QA |
 
 ---
 
@@ -94,8 +94,11 @@ broken.
 **Cause:** the overlay's `QApplication` set no app name / desktop-file name / window icon, so the
 StatusNotifierItem had null Id/Title/Icon.
 **Fix** (`overlay.py:2007`, right after `QApplication(...)`): set `setApplicationName`,
-`setApplicationDisplayName`, `setDesktopFileName(FLATPAK_ID or "wayfinder-aura")`, and
-`setWindowIcon(ICON_PATH)`. **Not yet visually verified** (needs a display).
+`setApplicationDisplayName`, `setDesktopFileName(get_portal_app_id())`, and
+`setWindowIcon(ICON_PATH)`. `get_portal_app_id()` uses Wayfinder's real Flatpak ID only
+inside Wayfinder's own Flatpak; source runs from another Flatpak-hosted editor keep
+`wayfinder-aura` instead of inheriting the parent app ID. **Not yet visually verified**
+(needs a display).
 
 ### 4. Tray dies on dictate — overlay `import wayfinder` failed standalone (verified headlessly)
 **Symptom:** after fixes 2–3, the tray still died the moment you dictated. Log:
@@ -113,21 +116,28 @@ mimicking the bare-script path, `import wayfinder`, `wayfinder.config`, and
 
 ---
 
-## OPEN ISSUES for the next agent
+## Follow-up Status
+
+> 2026-07-07 update: the blank-binary/chunk regression and overlay bare-script
+> import regression now have automated coverage. Live tray click verification is
+> still a real-desktop task.
+
+### Covered Headlessly
 
 1. **`Chunk 1 error: [Errno 13] Permission denied: ''` → "No speech detected" / `0 chunks`.**
-   In the 16:58 run, dictation recorded 2.2s but wrote **0 chunks** — something in the chunked
-   transcription path tried to open an **empty path** (`''`) for writing. This is why no text was
-   produced. **Not investigated.** Likely a chunk temp-file path resolving to `''` (config/temp-dir
-   or the chunked recorder). Unrelated to the tray/parser work. Start at the chunked recorder /
-   `transcriber.py` chunk-writing code; grep for where a chunk filename is built. Reproduce by
-   dictating and watching `~/.cache/wayfinder-aura/activity.log`.
+   In the 16:58 run, dictation recorded 2.2s but wrote **0 chunks**. Follow-up
+   showed the error shape matches executing a blank `whisper_binary`, not a blank
+   chunk WAV path. Current code repairs stale `whisper_binary=""` through the
+   backend resolver, and `tests/test_orchestration.py` now covers the real
+   `_transcribe_chunk` wrapper with a blank saved binary.
 
-2. **Live tray verification.** Confirm on a real relaunch: (a) one tray icon, rendered correctly,
+### Still Needs Live Verification
+
+1. **Live tray verification.** Confirm on a real relaunch: (a) one tray icon, rendered correctly,
    no `BackgroundAppItem` spam in `journalctl --user`; (b) Toggle/Reset/Open Settings/Quit each
    work; (c) the icon survives a dictation (state change) — this is the fix-#4 check.
 
-3. **Then commit + push** all uncommitted changes to `main` (and mirror `feat/premium-feel-polish`
+2. **Then commit + push** all uncommitted changes to `main` (and mirror `feat/premium-feel-polish`
    per the repo's branch-sync habit), once the user confirms.
 
 ---
@@ -140,7 +150,10 @@ mimicking the bare-script path, `import wayfinder`, `wayfinder.config`, and
   installed) → always override `addopts` as shown.
 - **Diagnostics on the host:** `flatpak-spawn --host …` (the sandbox can't see host processes,
   `/run/user`, or the real session). `py-spy` via `venv-gpu/bin/py-spy dump --pid <pid>`.
-- **Logs:** `~/.cache/wayfinder-aura/activity.log` (app) and `overlay-debug.log` (overlay subprocess,
+- **Logs:** Flatpak app log is under
+  `~/.var/app/io.wayfindercollective.WayfinderAura/cache/wayfinder-aura/activity.log`;
+  source builds use `$XDG_CACHE_HOME/wayfinder-aura/activity.log`, defaulting
+  to `~/.cache/wayfinder-aura/activity.log`. The overlay subprocess also writes `overlay-debug.log`,
   where `tray: …` lines go). KDE tray errors show in `journalctl --user`.
 - **Do NOT** run `printenv` / `echo $VAR` (a Bash hook rejects env-value echoing).
 - **Do NOT** broad-`pkill -f main.py`/`overlay.py` or aggressively restart — it can kill other

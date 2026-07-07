@@ -1,12 +1,12 @@
 # Ship Plan — July 2026 polish/ship round
 
-Status snapshot (2026-07-02, HEAD `bcb5dc6`, **972 tests green**): grey-overlay
+Status snapshot (2026-07-02, HEAD `bcb5dc6`, historical **972 tests green**): grey-overlay
 boot fix, dead-popup purge (+dropdown token normalization), all 5 in-app popups
 converted to inline UI (CI-ratcheted: no Toplevels outside ToolTip/
 FloatingIndicator, no grab_set), editable + distinctiveness-scored + phrase-aware
 vocabulary, wheel-scroll teleport fixed (Tk 9 compat shim, ratcheted).
 The license UI Activate bug from June notes is ALREADY FIXED in current code
-(`_activate_license` relies on online `store_license`, no HMAC pre-check).
+(`_activate_license` relies on online `store_license`, with no local pre-check).
 
 ## Ground rules (every item)
 
@@ -15,9 +15,12 @@ The license UI Activate bug from June notes is ALREADY FIXED in current code
   new `CTkToplevel`/`grab_set` (CI-enforced), no repeating timers <100ms, no
   `unbind_all` in wayfinder_main.py (CI-enforced), standard CTk widgets,
   wrap Tk canvas ops in try/except.
-- Tests run on the HOST python:
+- Current pre-ship verification baseline (2026-07-07): host test venv
+  **1126 collected; 1110 passed; 16 skipped**; installed Flatpak runtime
+  **1269 collected; 1256 passed; 13 skipped**. Tests normally run on the host Python:
   `flatpak-spawn --host sh -c 'cd /var/home/bazzite/Dev/wayfinder-aura && python3 -m pytest tests/ -o "addopts=-q --tb=short -p no:cacheprovider"'`
-  Baseline 972 passed — never fewer.
+  On hosts whose Python lacks Tk/PortAudio, use the Flatpak-runtime command in
+  `docs/SIGNOFF.md`.
 - Line numbers in this doc drift; locate by symbol.
 - One reviewed commit per item. Do not push without review sign-off.
 - Do not restart the user's running app; the reviewer handles live verification

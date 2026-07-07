@@ -33,10 +33,16 @@ import tempfile
 import time
 
 SERVICE = "wayfinder-aura.service"
+APP_ID = "io.wayfindercollective.WayfinderAura"
 
-TOGGLE_PATH = os.path.join(
+_DEFAULT_TOGGLE_PATH = os.path.join(
+    os.path.expanduser("~"),
+    ".var", "app", APP_ID, "config", "wayfinder-aura", "game-mode-dictation",
+)
+LEGACY_TOGGLE_PATH = os.path.join(
     os.path.expanduser("~"), ".config", "wayfinder-aura", "game-mode-dictation",
 )
+TOGGLE_PATH = _DEFAULT_TOGGLE_PATH
 
 MODE_MARKER_PATH = os.path.join(
     os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
@@ -111,11 +117,19 @@ def read_toggle() -> bool:
     Missing / empty / garbage / any error -> False (default: no dictation in
     Game Mode).
     """
-    try:
-        with open(TOGGLE_PATH, encoding="utf-8") as f:
-            return f.read().strip() == "1"
-    except Exception:  # noqa: BLE001 — missing or unreadable -> off
-        return False
+    if TOGGLE_PATH != _DEFAULT_TOGGLE_PATH:
+        paths = (TOGGLE_PATH,)
+    else:
+        paths = (TOGGLE_PATH, LEGACY_TOGGLE_PATH)
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read().strip() == "1"
+        except FileNotFoundError:
+            continue
+        except Exception:  # noqa: BLE001 — unreadable -> off
+            return False
+    return False
 
 
 def write_mode_marker(mode: "str | None") -> None:

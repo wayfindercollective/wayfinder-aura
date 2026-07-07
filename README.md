@@ -3,9 +3,9 @@
 **Press a key. Speak. Your words appear wherever your cursor is.**
 
 Wayfinder Aura is local-first voice dictation for Linux. By default,
-transcription runs on *your* machine with whisper.cpp — GPU-accelerated, working
-offline, in any app. In local mode your voice never leaves your computer;
-optional cloud backends are there if you choose them.
+transcription runs on *your* machine with whisper.cpp, offline, in any app.
+In local mode your voice never leaves your computer; optional GPU and cloud
+backends are there if you choose them.
 
 ![Wayfinder Aura UI](assets/icon.png)
 
@@ -16,15 +16,15 @@ optional cloud backends are there if you choose them.
   (OpenAI/Groq/Anthropic) are opt-in and off by default. The app checks online
   for model updates weekly (toggleable), and activating a license contacts the
   activation server.
-- **Fast where it counts.** Vulkan GPU acceleration on AMD, Intel, and NVIDIA,
-  with automatic CPU fallback on machines where GPU inference isn't available —
-  dictation works everywhere, it's just faster where it can be.
+- **Fast where it counts.** Ultra adds Vulkan GPU acceleration on supported AMD,
+  Intel, and NVIDIA systems, with automatic CPU fallback when GPU inference
+  isn't available.
 - **Writes like you, only cleaner.** A small local LLM (Gemma 3 1B by default)
   strips the "um"s, fixes punctuation, and matches your chosen tone — from
   boardroom-professional to commit-message-dev.
-- **Made for Linux, including the weird parts.** Wayland and X11. KDE and
-  GNOME. Desktop and Steam Deck. Hotkeys that pause automatically while a
-  game is running so your push-to-talk key stays yours.
+- **Made for Linux, including the weird parts.** Targets Wayland and X11, KDE
+  and GNOME, desktop PCs and Steam Deck workflows. Hotkeys pause automatically
+  while a game is running so your push-to-talk key stays yours.
 
 ## Features
 
@@ -32,22 +32,22 @@ optional cloud backends are there if you choose them.
 |---|---|
 | 🎙️ **Hotkey dictation** | Super+F2 to start/stop (configurable), text lands at your cursor in any app |
 | 🔒 **100% local pipeline** | whisper.cpp transcription + llama.cpp cleanup, both on-device |
-| ⚡ **GPU acceleration** | Vulkan with per-machine CPU auto-fallback |
+| ⚡ **Ultra GPU acceleration** | Vulkan with per-machine CPU auto-fallback |
 | 🎨 **Tone presets** | Minimal, Professional, Casual, Dev, Personal — cycle with Super+F3 |
 | 🎮 **Game-aware** | Hotkeys pause while a GameMode game is registered (Lutris/Steam) |
 | 🖥️ **Glassmorphic overlay** | Always-visible recording status, designed for Wayland |
 | 🎧 **Smart mic handling** | Picker shows exactly the mics your OS sees; selections survive device renumbering |
-| 🕹️ **Steam Deck ready** | Trigger dictation from a back button; validated on SteamOS |
+| 🕹️ **Steam Deck workflow** | Trigger dictation from a back button with the bundled host helper |
 | 📋 **Flexible output** | Instant paste or simulated typing at your preferred speed |
 
 ## Free vs Premium
 
 The free tier is the full dictation experience — not a demo.
 
-| | Free | Premium ($40 one-time — **$20 launch price**) |
+| | Free | Premium ($60 one-time — **$29.99 launch price**) |
 |---|---|---|
 | Local transcription (whisper.cpp) | ✅ | ✅ |
-| GPU acceleration | ✅ | ✅ |
+| GPU acceleration | — | ✅ |
 | Standard models (tiny/base/small) | ✅ | ✅ |
 | Local LLM cleanup | ✅ | ✅ |
 | Status overlay & tray | ✅ | ✅ |
@@ -59,8 +59,8 @@ The free tier is the full dictation experience — not a demo.
 | Custom vocabulary | — | ✅ |
 | High-accuracy beam search & audio preprocessing | — | ✅ |
 
-Premium is a one-time purchase — no subscription, ever. It's $40, and **$20
-during launch**. Hit **Get Premium** in the app, enter your license key, done.
+Premium is a one-time purchase — no subscription, ever. It's $60, and **$29.99
+during launch**. Hit **Get Ultra** in the app, enter your license key, done.
 Keys activate online once and keep working offline.
 
 ## Install
@@ -72,8 +72,8 @@ model, and text-injection tools. No dependencies to install.
 
 ```bash
 flatpak-builder --user --install --force-clean build-dir \
-  flatpak/io.github.wayfindercollective.WayfinderAura.yml
-flatpak run io.github.wayfindercollective.WayfinderAura
+  flatpak/io.wayfindercollective.WayfinderAura.yml
+flatpak run io.wayfindercollective.WayfinderAura
 ```
 
 ### From source

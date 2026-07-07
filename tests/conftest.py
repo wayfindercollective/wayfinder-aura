@@ -311,9 +311,6 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch):
     for key in ["APPIMAGE", "APPDIR", "FLATPAK_ID", "WAYFINDER_FLATPAK"]:
         monkeypatch.delenv(key, raising=False)
 
-    # Set a development license secret for tests
-    monkeypatch.setenv("WAYFINDER_LICENSE_SECRET", "test_secret_for_unit_tests_only")
-
 
 @pytest.fixture
 def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
@@ -324,6 +321,7 @@ def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
     (appdir / "usr" / "lib").mkdir(parents=True)
     (appdir / "usr" / "share" / "whisper-models").mkdir(parents=True)
     (appdir / "usr" / "share" / "llm-models").mkdir(parents=True)
+    (appdir / "usr" / "bin" / "wayfinder-aura").write_text("#!/bin/sh\n")
 
     monkeypatch.setenv("APPIMAGE", str(temp_dir / "WayfinderAura.AppImage"))
     monkeypatch.setenv("APPDIR", str(appdir))
@@ -335,7 +333,7 @@ def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
 def flatpak_env(monkeypatch: pytest.MonkeyPatch):
     """Set up environment variables to simulate running in Flatpak."""
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setenv("FLATPAK_ID", "io.github.wayfindercollective.WayfinderAura")
+    monkeypatch.setenv("FLATPAK_ID", "io.wayfindercollective.WayfinderAura")
     monkeypatch.setenv("WAYFINDER_FLATPAK", "1")
 
 
@@ -366,5 +364,5 @@ def reset_voice_profile():
     try:
         from wayfinder.core.voice_profile import reset_voice_profile
         reset_voice_profile()
-    except ImportError:
+    except (ImportError, OSError):
         pass

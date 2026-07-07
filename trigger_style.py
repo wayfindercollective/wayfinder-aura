@@ -8,9 +8,11 @@ Cycles through: Professional → AI Prompt → Casual → Personal
 Tries the $XDG_RUNTIME_DIR socket first (where the Flatpak binds it — that dir is shared
 host<->sandbox) and falls back to /tmp (from-source build), so one shortcut works for
 whichever build is the live instance. Mirrors trigger_record.py's socket resolution.
+Fires a desktop notification on failure so global-shortcut failures are visible.
 """
 import os
 import socket
+import subprocess
 import sys
 
 
@@ -20,6 +22,18 @@ def candidate_sockets():
         os.path.join(runtime_dir, "wayfinder-aura", "wayfinder-aura.sock"),
         "/tmp/wayfinder-aura.sock",
     ]
+
+
+def notify(message: str, urgency: str = "critical") -> None:
+    icon = "dialog-error" if urgency == "critical" else "preferences-desktop-keyboard-shortcuts"
+    try:
+        subprocess.run(
+            ["notify-send", "-u", urgency, "-i", icon, "Wayfinder Aura", message],
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        pass
 
 
 def send_style(path: str) -> None:
@@ -45,5 +59,7 @@ for sock_path in paths:
         last_error = e
         continue
 
+msg = "Service not running. Start with: systemctl --user start wayfinder-aura.service"
+notify(msg)
 print(f"Wayfinder Aura not reachable (tried: {', '.join(paths)}; last error: {last_error})")
 sys.exit(1)

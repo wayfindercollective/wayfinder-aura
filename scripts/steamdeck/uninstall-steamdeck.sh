@@ -67,13 +67,17 @@ cat <<EOF
 Done. The Wayfinder Aura Steam Deck services are stopped, disabled, and removed.
 
 Your user data was LEFT IN PLACE (settings, license, cache, downloaded models):
-  ~/.config/wayfinder-aura        (config.json, license.json)
-  ~/.cache/wayfinder-aura         (activity.log and other caches)
+  ~/.var/app/io.wayfindercollective.WayfinderAura/config/wayfinder-aura
+                                   (config.json, license.json, Game Mode toggle)
+  ~/.var/app/io.wayfindercollective.WayfinderAura/cache/wayfinder-aura
+                                   (activity.log and other caches)
   ~/.local/share/wayfinder-aura   (downloaded LLM models, etc.)
 
 To remove those too:
-  rm -rf ~/.config/wayfinder-aura ~/.cache/wayfinder-aura ~/.local/share/wayfinder-aura
+  rm -rf ~/.var/app/io.wayfindercollective.WayfinderAura/config/wayfinder-aura \
+         ~/.var/app/io.wayfindercollective.WayfinderAura/cache/wayfinder-aura \
+         ~/.local/share/wayfinder-aura
 
 The Flatpak app itself (if installed) is separate. To remove it:
-  flatpak uninstall io.github.wayfindercollective.WayfinderAura
+  flatpak uninstall io.wayfindercollective.WayfinderAura
 EOF

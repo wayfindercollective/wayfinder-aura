@@ -1,5 +1,7 @@
 [Unit]
-Description=R4 -> F3 bridge (Steam Input keyboard-injection workaround)
+Description=DEPRECATED Wayfinder Aura R4 -> F3 bridge (legacy xdotool workaround)
+# Superseded by wayfinder-trigger.service. Do not enable both.
+Conflicts=wayfinder-trigger.service
 After=graphical-session.target
 PartOf=graphical-session.target
 StartLimitIntervalSec=60

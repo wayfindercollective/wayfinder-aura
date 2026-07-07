@@ -4,10 +4,10 @@ Skipped by default; run against a live instance with::
 
     WAYFINDER_LIVE=1 python3 -m pytest tests/test_live_smoke.py -v
 
-Protocol reality (read from ``socket_listener`` in wayfinder_main.py): the
-listener is fire-and-forget. It accepts a connection, ``recv``s one command,
-enqueues the matching EventType, and immediately ``conn.close()``s — there is NO
-reply written back. So the socket ACK only proves the command was *accepted*.
+Protocol reality (read from ``socket_listener`` in wayfinder_main.py): ``ping``
+is the health-check command and replies ``pong``. User commands are
+fire-and-forget: the listener accepts a connection, ``recv``s one command,
+enqueues the matching EventType, and immediately ``conn.close()``s.
 
 To prove the app actually *acted* on it, the app now writes a small status
 breadcrumb (``config.STATUS_PATH`` = ``$XDG_RUNTIME_DIR/wayfinder-aura/status.json``)
@@ -63,6 +63,14 @@ def _send(command: str) -> None:
             pass
 
 
+def _ping() -> bytes:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(3.0)
+        sock.connect(str(SOCKET_PATH))
+        sock.sendall(b"ping")
+        return sock.recv(16)
+
+
 def _read_status():
     try:
         with open(STATUS_PATH) as f:
@@ -91,6 +99,11 @@ def _await_tab(tab: str, timeout: float = 3.0):
 def test_show_command_accepted():
     _require_running_app()
     _send("show")  # raises if the live listener won't accept the command
+
+
+def test_ping_replies_pong():
+    _require_running_app()
+    assert _ping() == b"pong"
 
 
 @pytest.mark.parametrize("tab", ["dictate", "settings", "style", "history"])

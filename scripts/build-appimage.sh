@@ -10,7 +10,8 @@
 #   - PyInstaller (pip install pyinstaller)
 #   - appimagetool (auto-downloaded if missing)
 #   For --full mode:
-#   - cmake, make, vulkan-headers/vulkan-devel (for building whisper.cpp/llama.cpp)
+#   - cmake, make
+#   - optional: vulkan-headers/vulkan-devel + glslc for GPU-native whisper.cpp/llama.cpp
 #   - ydotool and wtype installed on the build system
 #
 # Usage:
@@ -26,9 +27,47 @@ cd "$PROJECT_ROOT"
 
 VERSION="1.1.0"
 APP_NAME="WayfinderAura"
+APP_ID="io.wayfindercollective.WayfinderAura"
 APPDIR="AppDir"
 ARCH=$(uname -m)
-BUILD_MODE="${1:---lite}"
+BUILD_MODE="--lite"
+SKIP_BUILD=0
+SOURCE_DESKTOP="flatpak/${APP_ID}.desktop"
+SOURCE_METAINFO="flatpak/${APP_ID}.metainfo.xml"
+WHISPER_REPO="https://github.com/ggerganov/whisper.cpp.git"
+WHISPER_TAG="v1.9.1"
+WHISPER_COMMIT="f049fff95a089aa9969deb009cdd4892b3e74916"
+LLAMA_REPO="https://github.com/ggml-org/llama.cpp.git"
+LLAMA_TAG="b9608"
+LLAMA_COMMIT="70b54e140c90a92285ba699d77e1e32e0868a0e2"
+BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
+
+# ─── Parse arguments ─────────────────────────────────────────────────────────
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --full|--lite)
+            BUILD_MODE="$1"
+            ;;
+        --skip-build)
+            SKIP_BUILD=1
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--lite|--full] [--skip-build]"
+            echo ""
+            echo "  --lite        Bundle only the Python app (default)"
+            echo "  --full        Bundle native inference binaries and optional models"
+            echo "  --skip-build  Reuse dist/wayfinder-aura instead of running PyInstaller"
+            exit 0
+            ;;
+        *)
+            echo "❌ Unknown argument: $1" >&2
+            echo "Usage: $0 [--lite|--full] [--skip-build]" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 echo "╔════════════════════════════════════════════════════════════╗"
 echo "║           Wayfinder Aura - AppImage Builder               ║"
@@ -52,6 +91,26 @@ if ! command -v pyinstaller &> /dev/null; then
     exit 1
 fi
 
+if ! python3 - <<'PY' &> /dev/null
+import tkinter
+PY
+then
+    echo "❌ python3 tkinter support not found. Install the system Tk package first:"
+    echo "   Fedora/Bazzite: sudo dnf install python3-tkinter"
+    echo "   Ubuntu/Debian:  sudo apt install python3-tk"
+    exit 1
+fi
+
+if [ ! -f "$SOURCE_DESKTOP" ]; then
+    echo "❌ Desktop metadata not found: $SOURCE_DESKTOP"
+    exit 1
+fi
+
+if [ ! -f "$SOURCE_METAINFO" ]; then
+    echo "❌ AppStream metadata not found: $SOURCE_METAINFO"
+    exit 1
+fi
+
 # ─── Get appimagetool ─────────────────────────────────────────────────────────
 
 if ! command -v appimagetool &> /dev/null; then
@@ -63,13 +122,57 @@ else
     APPIMAGETOOL="appimagetool"
 fi
 
+clone_pinned_repo() {
+    local name="$1"
+    local url="$2"
+    local tag="$3"
+    local commit="$4"
+    local dest="$5"
+
+    if [ ! -d "$dest/.git" ]; then
+        echo "   📥 Cloning $name ($tag)..."
+        rm -rf "$dest"
+        git clone --depth 1 --branch "$tag" "$url" "$dest"
+    fi
+
+    local actual
+    actual="$(git -C "$dest" rev-parse HEAD)"
+    if [ "$actual" != "$commit" ]; then
+        echo "   📌 Pinning $name to $commit..."
+        git -C "$dest" fetch --depth 1 origin "$commit"
+        git -C "$dest" checkout --detach "$commit"
+    fi
+}
+
+cmake_native_build() {
+    local name="$1"
+    local src="$2"
+    local build_dir="$3"
+    local vulkan="$4"
+
+    rm -rf "$build_dir"
+    if cmake -S "$src" -B "$build_dir" \
+        -DGGML_VULKAN="$vulkan" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF; then
+        cmake --build "$build_dir" --config Release -j"$BUILD_JOBS"
+        return $?
+    fi
+    echo "   ⚠ $name configure failed with GGML_VULKAN=$vulkan"
+    return 1
+}
+
 # ─── Step 1: Build with PyInstaller ──────────────────────────────────────────
 
-echo "🔨 Step 1: Building with PyInstaller..."
-pyinstaller wayfinder-aura.spec --clean --noconfirm --log-level WARN
+if [ "$SKIP_BUILD" = "1" ]; then
+    echo "🔨 Step 1: Reusing existing PyInstaller output (--skip-build)..."
+else
+    echo "🔨 Step 1: Building with PyInstaller..."
+    pyinstaller wayfinder-aura.spec --clean --noconfirm --log-level WARN
+fi
 
 if [ ! -f "dist/wayfinder-aura" ]; then
-    echo "❌ PyInstaller build failed!"
+    echo "❌ dist/wayfinder-aura not found. Run without --skip-build first."
     exit 1
 fi
 echo "   ✓ PyInstaller binary built"
@@ -94,65 +197,18 @@ echo "📦 Step 3: Populating AppDir..."
 cp dist/wayfinder-aura "$APPDIR/usr/bin/"
 
 # Copy icons
-cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/wayfinder-aura.png"
-cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/128x128/apps/wayfinder-aura.png"
-cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/64x64/apps/wayfinder-aura.png"
+cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_ID}.png"
+cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/128x128/apps/${APP_ID}.png"
+cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/64x64/apps/${APP_ID}.png"
+cp assets/icon.png "$APPDIR/${APP_ID}.png"
+# Keep the legacy icon name for older desktop integrations and user scripts.
 cp assets/icon.png "$APPDIR/wayfinder-aura.png"
 
-# ─── Desktop file ────────────────────────────────────────────────────────────
+# ─── Desktop file and AppStream metadata ─────────────────────────────────────
 
-cat > "$APPDIR/wayfinder-aura.desktop" << EOF
-[Desktop Entry]
-Type=Application
-Name=Wayfinder Aura
-Comment=Local voice dictation using whisper.cpp
-Exec=wayfinder-aura
-Icon=wayfinder-aura
-Categories=AudioVideo;Audio;Utility;Accessibility;
-Keywords=voice;dictation;speech;transcription;whisper;
-Terminal=false
-StartupNotify=true
-EOF
-
-cp "$APPDIR/wayfinder-aura.desktop" "$APPDIR/usr/share/applications/"
-
-# ─── AppStream metadata ─────────────────────────────────────────────────────
-
-cat > "$APPDIR/usr/share/metainfo/io.github.wayfinder.Aura.appdata.xml" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<component type="desktop-application">
-  <id>io.github.wayfinder.Aura</id>
-  <metadata_license>MIT</metadata_license>
-  <project_license>MIT</project_license>
-  <name>Wayfinder Aura</name>
-  <summary>Local voice dictation using whisper.cpp</summary>
-  <developer id="io.github.wayfinder">
-    <name>Wayfinder</name>
-  </developer>
-  <description>
-    <p>
-      Wayfinder Aura is a privacy-focused voice dictation application for Linux
-      that uses whisper.cpp for local speech-to-text transcription.
-    </p>
-    <p>Features:</p>
-    <ul>
-      <li>100% local transcription — your audio never leaves your computer</li>
-      <li>Hotkey triggered recording (default: F9)</li>
-      <li>Wayland and X11 support</li>
-      <li>GPU acceleration with Vulkan</li>
-      <li>Optional LLM post-processing for text cleanup</li>
-    </ul>
-  </description>
-  <launchable type="desktop-id">wayfinder-aura.desktop</launchable>
-  <provides>
-    <binary>wayfinder-aura</binary>
-  </provides>
-  <content_rating type="oars-1.1" />
-  <releases>
-    <release version="${VERSION}" date="$(date '+%Y-%m-%d')"/>
-  </releases>
-</component>
-EOF
+cp "$SOURCE_DESKTOP" "$APPDIR/${APP_ID}.desktop"
+cp "$SOURCE_DESKTOP" "$APPDIR/usr/share/applications/${APP_ID}.desktop"
+cp "$SOURCE_METAINFO" "$APPDIR/usr/share/metainfo/${APP_ID}.metainfo.xml"
 
 # ─── Full build: Bundle native dependencies ──────────────────────────────────
 
@@ -162,41 +218,35 @@ if [ "$BUILD_MODE" = "--full" ]; then
 
     # ── whisper.cpp ──
     WHISPER_DIR="/tmp/whisper.cpp-appimage"
-    if [ ! -d "$WHISPER_DIR" ]; then
-        echo "   📥 Cloning whisper.cpp (v1.9.1, pinned to match the Flatpak)..."
-        git clone --depth 1 --branch v1.9.1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
+    clone_pinned_repo "whisper.cpp" "$WHISPER_REPO" "$WHISPER_TAG" "$WHISPER_COMMIT" "$WHISPER_DIR"
+    echo "   🔨 Building whisper.cpp (Vulkan, CPU fallback)..."
+    WHISPER_BUILD="$WHISPER_DIR/build-vulkan"
+    if ! cmake_native_build "whisper.cpp" "$WHISPER_DIR" "$WHISPER_BUILD" ON; then
+        echo "   ↳ Falling back to CPU-only whisper.cpp"
+        WHISPER_BUILD="$WHISPER_DIR/build-cpu"
+        cmake_native_build "whisper.cpp" "$WHISPER_DIR" "$WHISPER_BUILD" OFF
     fi
-    echo "   🔨 Building whisper.cpp (Vulkan)..."
-    cmake -S "$WHISPER_DIR" -B "$WHISPER_DIR/build" \
-        -DGGML_VULKAN=ON \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=OFF \
-        2>/dev/null
-    cmake --build "$WHISPER_DIR/build" --config Release -j$(nproc) 2>/dev/null
-    if [ -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
-        cp "$WHISPER_DIR/build/bin/whisper-cli" "$APPDIR/usr/bin/"
-        echo "   ✓ whisper-cli bundled"
+    if [ -f "$WHISPER_BUILD/bin/whisper-cli" ]; then
+        cp "$WHISPER_BUILD/bin/whisper-cli" "$APPDIR/usr/bin/"
+        echo "   ✓ whisper-cli bundled ($(basename "$WHISPER_BUILD"))"
     else
         echo "   ⚠ whisper-cli build failed, skipping"
     fi
 
     # ── llama.cpp ──
     LLAMA_DIR="/tmp/llama.cpp-appimage"
-    if [ ! -d "$LLAMA_DIR" ]; then
-        echo "   📥 Cloning llama.cpp (b9608, pinned to match the Flatpak)..."
-        git clone --depth 1 --branch b9608 https://github.com/ggerganov/llama.cpp.git "$LLAMA_DIR"
+    clone_pinned_repo "llama.cpp" "$LLAMA_REPO" "$LLAMA_TAG" "$LLAMA_COMMIT" "$LLAMA_DIR"
+    echo "   🔨 Building llama.cpp (Vulkan, CPU fallback)..."
+    LLAMA_BUILD="$LLAMA_DIR/build-vulkan"
+    if ! cmake_native_build "llama.cpp" "$LLAMA_DIR" "$LLAMA_BUILD" ON; then
+        echo "   ↳ Falling back to CPU-only llama.cpp"
+        LLAMA_BUILD="$LLAMA_DIR/build-cpu"
+        cmake_native_build "llama.cpp" "$LLAMA_DIR" "$LLAMA_BUILD" OFF
     fi
-    echo "   🔨 Building llama.cpp (Vulkan)..."
-    cmake -S "$LLAMA_DIR" -B "$LLAMA_DIR/build" \
-        -DGGML_VULKAN=ON \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=OFF \
-        2>/dev/null
-    cmake --build "$LLAMA_DIR/build" --config Release -j$(nproc) 2>/dev/null
     for binary in llama-cli llama-simple; do
-        if [ -f "$LLAMA_DIR/build/bin/$binary" ]; then
-            cp "$LLAMA_DIR/build/bin/$binary" "$APPDIR/usr/bin/"
-            echo "   ✓ $binary bundled"
+        if [ -f "$LLAMA_BUILD/bin/$binary" ]; then
+            cp "$LLAMA_BUILD/bin/$binary" "$APPDIR/usr/bin/"
+            echo "   ✓ $binary bundled ($(basename "$LLAMA_BUILD"))"
         fi
     done
 

@@ -14,7 +14,7 @@ import sys
 from PIL import Image
 
 dest = sys.argv[1] if len(sys.argv) > 1 else os.environ["FLATPAK_DEST"]
-app_id = "io.github.wayfindercollective.WayfinderAura"
+app_id = "io.wayfindercollective.WayfinderAura"
 src = Image.open("assets/icon.png").convert("RGBA")
 
 for size in (256, 128, 64, 48):

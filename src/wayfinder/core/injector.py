@@ -33,7 +33,9 @@ def _get_ydotool_binary() -> str:
         Path to ydotool binary, defaults to "ydotool" (relies on PATH).
     """
     # Check AppImage bundle
-    appdir = os.environ.get("APPDIR")
+    from wayfinder.utils.platform import get_appimage_dir
+
+    appdir = get_appimage_dir()
     if appdir:
         bundled = Path(appdir) / "usr" / "bin" / "ydotool"
         if bundled.exists():

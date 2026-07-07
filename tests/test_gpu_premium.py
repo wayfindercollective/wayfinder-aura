@@ -14,10 +14,9 @@ BASE_CFG = {
 
 @pytest.fixture(autouse=True)
 def _free_license(monkeypatch):
-    # Real license = non-premium; only the dev-unlock env can grant premium in tests.
+    # Real license = non-premium unless a test overrides load_stored_license.
     monkeypatch.setattr("wayfinder.license.load_stored_license",
                         lambda: LicenseInfo(is_valid=False, is_premium=False))
-    monkeypatch.delenv("WAYFINDER_DEV_UNLOCK", raising=False)
     import wayfinder.license as L
     L._feature_gate = None  # force gate rebuild per test
 
@@ -33,13 +32,15 @@ def test_free_user_gpu_forced_off(monkeypatch, tmp_path):
     assert b.use_gpu is False  # config asked for GPU, but free tier is gated to CPU
 
 def test_premium_user_gpu_respected(monkeypatch):
-    monkeypatch.setenv("WAYFINDER_DEV_UNLOCK", "1")  # premium (via dev-unlock)
+    monkeypatch.setattr("wayfinder.license.load_stored_license",
+                        lambda: LicenseInfo(is_valid=True, is_premium=True))
     _reset_gate()
     b = get_backend(dict(BASE_CFG))
     assert b.use_gpu is True
 
 def test_premium_user_can_still_choose_cpu(monkeypatch):
-    monkeypatch.setenv("WAYFINDER_DEV_UNLOCK", "1")
+    monkeypatch.setattr("wayfinder.license.load_stored_license",
+                        lambda: LicenseInfo(is_valid=True, is_premium=True))
     _reset_gate()
     cfg = dict(BASE_CFG); cfg["use_gpu"] = False
     b = get_backend(cfg)

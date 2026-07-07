@@ -260,6 +260,16 @@ class TestGetYdotoolBinary:
 
         assert _get_ydotool_binary() == "ydotool"
 
+    def test_ignores_foreign_appdir_with_ydotool(self, monkeypatch, temp_dir):
+        """Do not use another AppImage app's bundled ydotool."""
+        appdir = temp_dir / "ForeignAppDir"
+        bundled = appdir / "usr" / "bin" / "ydotool"
+        bundled.parent.mkdir(parents=True)
+        bundled.write_text("#!/bin/sh\n")
+        monkeypatch.setenv("APPDIR", str(appdir))
+
+        assert _get_ydotool_binary() == "ydotool"
+
 
 # =============================================================================
 # _get_ydotool_env

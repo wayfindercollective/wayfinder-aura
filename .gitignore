@@ -31,6 +31,8 @@ recordings/
 
 # Large binaries
 *.AppImage
+*.AppImage.zsync
+squashfs-root/
 
 
 
@@ -42,9 +44,11 @@ scripts/tone_eval/results/
 .claude/
 flatpak/repo/
 flatpak/build-dir/
+flatpak/build-verify-dir/
 flatpak/.flatpak-builder/
 flatpak/*.flatpak
-flatpak/python-deps.json
+flatpak/release/
 
 # Flatpak/ostree build repo
 repo/
+.tmp-flatpak-repo/

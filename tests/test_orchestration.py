@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import wave
 from types import SimpleNamespace
 
 import pytest
@@ -716,6 +717,59 @@ class TestStopChunkedPath:
         types = {et for et, _ in seen}
         assert wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE in types
 
+    def test_chunk_transcription_repairs_blank_whisper_binary(self, app, tmp_path, monkeypatch):
+        """Handoff regression: a live chunk logged
+        ``Chunk 1 error: [Errno 13] Permission denied: ''`` when the saved
+        whisper binary was blank. Exercise the real chunk wrapper and backend
+        resolver so a stale ``whisper_binary=""`` still transcribes via the
+        discovered home whisper-cli instead of trying to execute ``""``.
+        """
+        from wayfinder.core import transcriber
+
+        home_cli = tmp_path / "whisper.cpp" / "build" / "bin" / "whisper-cli"
+        home_cli.parent.mkdir(parents=True)
+        home_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+        model = tmp_path / "ggml-base.en.bin"
+        model.write_bytes(b"\x00")
+        chunk = tmp_path / "chunk.wav"
+        with wave.open(str(chunk), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b"\x00\x01" * 1600)
+
+        app.config.update({
+            "whisper_binary": "",
+            "model_path": str(model),
+            "whisper_server_mode": True,
+            "post_processing_enabled": False,
+            "use_gpu": False,
+        })
+        calls = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(list(cmd))
+            if "--help" in cmd:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="--no-gpu --beam-size --best-of --temperature --temperature-inc",
+                    stderr="",
+                )
+            return SimpleNamespace(returncode=0, stdout="resolved chunk words", stderr="")
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(transcriber, "IS_FLATPAK", False)
+        monkeypatch.setattr(transcriber.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(transcriber.subprocess, "run", fake_run)
+
+        store = []
+        app._transcribe_chunk(str(chunk), 0, app.session_generation, store)
+
+        assert store == ["resolved chunk words"]
+        assert calls, "whisper-cli should have been invoked"
+        assert all(call[0] == str(home_cli) for call in calls)
+        assert not any("Permission denied: ''" in msg for msg in app.logs)
+
     def test_stop_chunked_too_short_errors(self, app):
         app.config["chunked_mode"] = True
         rec = FakeChunkedRecorder(duration=0.1)
@@ -757,7 +811,7 @@ class TestGpuNudge:
 
     Real unbound methods driven against a minimal stub self — same approach as the
     orchestration tests above. Verifies the nudge fires ONLY on a long free-tier
-    dictation, stays silent for premium/dev-unlock users, short clips, an already-
+    dictation, stays silent for Ultra users, short clips, an already-
     shown session, and a persisted dismissal; and that Dismiss persists 'never again'.
     """
 

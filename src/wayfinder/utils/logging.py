@@ -23,12 +23,8 @@ from typing import Optional
 def _get_log_dir() -> Path:
     """Get the log directory following XDG spec."""
     import os
-    
-    # Check if running in Flatpak
-    if os.environ.get("FLATPAK_ID") or os.environ.get("WAYFINDER_FLATPAK"):
-        cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    else:
-        cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
     
     log_dir = cache_home / "wayfinder-aura" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)

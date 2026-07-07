@@ -10,6 +10,7 @@ from queue import Queue
 from threading import Event
 from typing import Callable, Optional
 
+from wayfinder.utils.platform import get_portal_app_id
 from .types import EventType
 
 # Check if D-Bus is available
@@ -23,7 +24,7 @@ except ImportError:
 
 # Application ID for portal registration
 # This must match the desktop file name (without .desktop extension)
-APP_ID = os.environ.get("FLATPAK_ID", "wayfinder-aura")
+APP_ID = get_portal_app_id()
 
 
 def is_dbus_available() -> bool:
@@ -160,7 +161,6 @@ def wayland_hotkey_listener(
     except Exception as e:
         log(f"⚠️ Wayland hotkey setup failed: {e}")
         return False
-
 
 
 

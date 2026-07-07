@@ -1,24 +1,34 @@
 # Flatpak manifest for Wayfinder Aura
 # 
 # Quick test build:
-#   flatpak-builder --user --install --force-clean build-dir io.github.wayfindercollective.WayfinderAura.yml
+#   flatpak-builder --user --install --force-clean --jobs=2 build-dir io.wayfindercollective.WayfinderAura.yml
 #
 # For Flathub submission:
-#   1. Fork this repo and update app-id to your organization
-#   2. Generate python-deps.json with flatpak-pip-generator
-#   3. Verify all SHA256 hashes match
-#   4. Submit PR to flathub/flathub
+#   1. Push and tag a public release commit
+#   2. Generate release/io.wayfindercollective.WayfinderAura.yml with
+#      flatpak/prepare-release-manifest.py --tag vX.Y.Z
+#   3. Build the release manifest with --force-clean
+#   4. Submit the release manifest plus generated python-deps.json to Flathub
 #
 # App ID Guidelines:
 #   - For personal projects: io.github.YOURUSERNAME.WayfinderAura
 #   - For organization: com.yourorg.WayfinderAura
 #   - Update all references below when changing
 
-app-id: io.github.wayfindercollective.WayfinderAura
-runtime: org.freedesktop.Platform
-runtime-version: '24.08'
-sdk: org.freedesktop.Sdk
+app-id: io.wayfindercollective.WayfinderAura
+runtime: org.kde.Platform
+runtime-version: '6.10'
+sdk: org.kde.Sdk
+base: com.riverbankcomputing.PyQt.BaseApp
+base-version: '6.10'
 command: wayfinder-aura
+
+cleanup-commands:
+  - /app/cleanup-BaseApp.sh
+
+build-options:
+  env:
+    BASEAPP_REMOVE_WEBENGINE: '1'
 
 finish-args:
   # Display - Wayland preferred, X11 fallback
@@ -30,20 +40,8 @@ finish-args:
   - --socket=pulseaudio
   
   # D-Bus for system integration
-  - --talk-name=org.freedesktop.portal.Desktop
-  - --talk-name=org.freedesktop.portal.GlobalShortcuts
-  - --talk-name=org.freedesktop.portal.RemoteDesktop
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
-  # Lets the app open external URLs (Ultra checkout / info pages) via
-  # `flatpak-spawn --host xdg-open`. The OpenURI portal is unavailable on some
-  # SteamOS sessions, so webbrowser.open() silently no-ops there; host-spawn is
-  # the reliable path. See WayfinderApp._open_url.
-  - --talk-name=org.freedesktop.Flatpak
-
-  # App config and cache storage
-  - --filesystem=xdg-config/wayfinder-aura:create
-  - --filesystem=xdg-cache/wayfinder-aura:create
 
   # IPC socket shared with the host-side trigger (KDE shortcut / Steam-Deck R4 button).
   # xdg-run ($XDG_RUNTIME_DIR) is bind-mounted host<->sandbox, so a non-Flatpak host
@@ -88,12 +86,14 @@ modules:
     buildsystem: cmake-ninja
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     sources:
       # git source, not GitHub's auto-generated tarball — that tarball's sha256 is unstable
       # and broke the build (manifest had ...8c405c8d64db, GitHub served ...40c3e1b83174fa0).
       - type: git
         url: https://github.com/PortAudio/portaudio.git
         tag: v19.7.0
+        commit: 147dd722548358763a8b649b3e4b41dfffbcfbb6
 
   # SPIRV-Headers — build-only dep of ggml-vulkan's shader generator
   # (find_package(SPIRV-Headers)) in whisper.cpp v1.8+ AND llama.cpp b9608. Must
@@ -107,6 +107,7 @@ modules:
       - type: git
         url: https://github.com/KhronosGroup/SPIRV-Headers.git
         tag: vulkan-sdk-1.3.290.0
+        commit: 2acb319af38d43be3ea76bfabf3998e5281d8d12
 
   # whisper.cpp — GPU (Vulkan) transcription engine, the default binary.
   # GGML_VULKAN=ON initializes Vulkan at startup; on hardware/driver combos where
@@ -115,7 +116,7 @@ modules:
   # retries with the CPU binary below (transcriber.py auto-fallback, memoized per
   # session). Broken Vulkan on a given machine degrades to CPU silently instead
   # of producing "no output". --device=dri in finish-args exposes the GPU; the
-  # freedesktop GL extension supplies the Vulkan ICDs at runtime.
+  # runtime GL extensions supply the Vulkan ICDs at runtime.
   - name: whisper-cpp
     buildsystem: cmake-ninja
     # v1.9.x's `ninja install` installs the example binaries (whisper-cli/server)
@@ -145,6 +146,7 @@ modules:
       - type: git
         url: https://github.com/ggerganov/whisper.cpp.git
         tag: v1.9.1
+        commit: f049fff95a089aa9969deb009cdd4892b3e74916
     post-install:
       # whisper.cpp v1.7.2 builds the transcription CLI as bin/main (renamed to whisper-cli
       # only in later releases). Install it under the whisper-cli name the app/config expects.
@@ -158,7 +160,7 @@ modules:
       # silently skipped and the Flatpak fell back to per-call CLI reloads.
       - if [ -f bin/whisper-server ]; then install -Dm755 bin/whisper-server ${FLATPAK_DEST}/bin/whisper-server; elif [ -f bin/server ]; then install -Dm755 bin/server ${FLATPAK_DEST}/bin/whisper-server; fi
 
-  # whisper.cpp — CPU-only fallback binary (the Deck-validated configuration).
+  # whisper.cpp — CPU-only fallback binary for systems where Vulkan is unavailable or unstable.
   # Same source/version as the Vulkan build, installed as whisper-cli-cpu. The app
   # switches to it automatically when the Vulkan binary dies on this machine.
   # base.en on the Deck's Zen 2 CPU is ~2x real-time — an acceptable worst case.
@@ -186,6 +188,7 @@ modules:
       - type: git
         url: https://github.com/ggerganov/whisper.cpp.git
         tag: v1.9.1
+        commit: f049fff95a089aa9969deb009cdd4892b3e74916
     post-install:
       - if [ -f bin/whisper-cli ]; then install -Dm755 bin/whisper-cli ${FLATPAK_DEST}/bin/whisper-cli-cpu; else install -Dm755 bin/main ${FLATPAK_DEST}/bin/whisper-cli-cpu; fi
       # CPU whisper-server: the Vulkan-built server crashes at ggml-vulkan
@@ -215,6 +218,7 @@ modules:
       - type: git
         url: https://github.com/atx/wtype.git
         tag: v0.4
+        commit: 1c00e68adb202ba3987f60f37451a7201c61005d
 
   # NOTE: ydotool is intentionally NOT bundled. It injects via /dev/uinput, which a Flatpak
   # sandbox doesn't expose — so it can't work here anyway. Wayland uses wtype, X11 uses
@@ -232,42 +236,26 @@ modules:
       - type: git
         url: https://github.com/jordansissel/xdotool.git
         tag: v3.20211022.1
+        commit: eb489de1b4fb3fd0cd935d68ae16ecd4c653ac7d
 
-  # Python dependencies — installed from PyPI at build time (local build uses --share=network).
-  # Reads the repo's requirements.txt (PyQt6, pynput, numpy, scipy, customtkinter, sounddevice,
-  # requests, openai, groq). evdev lives in requirements-optional and is excluded here
-  # (the sandbox can't read /dev/input anyway — hotkeys come via the host-side trigger);
-  # llama-cpp-python is deliberately excluded too — post-processing runs through the
-  # bundled llama-simple subprocess (see the llama-cpp module for the measured why).
-  # For a reproducible Flathub submission, regenerate hashed sources with
-  # flatpak-pip-generator instead.
-  - name: python-deps
-    buildsystem: simple
-    build-options:
-      build-args:
-        - --share=network
-    build-commands:
-      - pip3 install --prefix=${FLATPAK_DEST} -r requirements.txt
-    sources:
-      - type: file
-        path: ../requirements.txt
+  # Python dependencies, installed from generated SHA256-pinned sources. PyQt6 itself comes
+  # from com.riverbankcomputing.PyQt.BaseApp above; regenerate with generate-pip-sources.sh.
+  - python-deps.json
 
-  # Tcl/Tk 8.6.14 built WITH Xft. The freedesktop runtime's own Tk 8.6 is compiled WITHOUT
-  # Xft (ldd libtk8.6.so shows no libXft/libfontconfig), so it can't use any of the system's
-  # fontconfig fonts and falls back to the X core "fixed" bitmap font — rendering every
-  # symbol/emoji glyph in the UI (sidebar ∿ ⚓ ✎ ◷, section headers) as a literal \uXXXX
-  # escape. We build the EXACT same version (8.6.14 — ABI-compatible with the runtime's
-  # _tkinter.so) with Xft enabled, and the launcher puts /app/lib first on LD_LIBRARY_PATH so
-  # tkinter loads this libtcl/libtk instead. Then Tk renders real fonts + all glyphs.
+  # Tcl/Tk 8.6.14 built WITH Xft. The runtime does not ship Python's tkinter
+  # binding, and the Tk available in lean runtimes is commonly built without Xft.
+  # Without Xft, Tk falls back to the X core "fixed" bitmap font and renders UI
+  # symbols as literal \uXXXX escapes. Build Xft-enabled Tcl/Tk first; the next
+  # module adds CPython's tkinter package and links _tkinter against these libs.
   - name: tcl
     buildsystem: simple
-    # Tcl/Tk install their .so as mode 555 (read-only), which makes flatpak-builder's
-    # post-install eu-strip fail with "Permission denied". We don't need Tcl/Tk debuginfo,
-    # so skip debuginfo extraction for these two modules.
+    # Tcl/Tk install their .so files read-only. flatpak-builder may still revisit
+    # those files during later module strip passes, so make them user-writable
+    # after install while also skipping Tcl/Tk debuginfo extraction here.
     build-options:
       no-debuginfo: true
     build-commands:
-      - cd unix && ./configure --prefix=/app --enable-threads && make -j$(nproc) && make install
+      - cd unix && ./configure --prefix=/app --enable-threads && make -j${FLATPAK_BUILDER_N_JOBS:-2} && make install && find ${FLATPAK_DEST}/lib -type f \( -name 'libtcl*.so*' -o -name 'libitcl*.so*' -o -name 'libtdbc*.so*' -o -name 'libsqlite*.so*' -o -name 'libthread*.so*' \) -exec chmod u+w {} +
     sources:
       - type: archive
         url: https://prdownloads.sourceforge.net/tcl/tcl8.6.14-src.tar.gz
@@ -279,11 +267,35 @@ modules:
       no-debuginfo: true
     build-commands:
       # --enable-xft is the whole point (SDK ships Xft 2.3.9 / fontconfig 2.15.0 / Xrender).
-      - cd unix && ./configure --prefix=/app --with-tcl=/app/lib --enable-threads --enable-xft && make -j$(nproc) && make install
+      - cd unix && ./configure --prefix=/app --with-tcl=/app/lib --enable-threads --enable-xft && make -j${FLATPAK_BUILDER_N_JOBS:-2} && make install && find ${FLATPAK_DEST}/lib -type f -name 'libtk*.so*' -exec chmod u+w {} +
     sources:
       - type: archive
         url: https://prdownloads.sourceforge.net/tcl/tk8.6.14-src.tar.gz
         sha256: 8ffdb720f47a6ca6107eac2dd877e30b0ef7fac14f3a84ebbd0b3612cee41a94
+
+  # CPython's tkinter stdlib package plus the _tkinter extension. The KDE/PyQt
+  # runtime Python does not include tkinter, but customtkinter imports it at
+  # startup. Build only the small binding layer against the Tcl/Tk module above.
+  - name: python-tkinter
+    buildsystem: simple
+    build-commands:
+      - |
+        set -e
+        PYVER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+        SITE="${FLATPAK_DEST}/lib/python${PYVER}/site-packages"
+        EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"
+        mkdir -p "${SITE}"
+        cp -r Lib/tkinter "${SITE}/"
+        gcc -shared -fPIC Modules/_tkinter.c \
+          -o "${SITE}/_tkinter${EXT_SUFFIX}" \
+          $(python3-config --includes) \
+          -DPy_BUILD_CORE_MODULE \
+          -I./Include -I./Include/internal -I./Modules -I/app/include \
+          -L/app/lib -Wl,-rpath,/app/lib -ltk8.6 -ltcl8.6
+    sources:
+      - type: archive
+        url: https://www.python.org/ftp/python/3.13.14/Python-3.13.14.tar.xz
+        sha256: 639e43243c620a308f968213df9e00f2f8f62332f7adbaa7a7eeb9783057c690
 
   # llama.cpp — local LLM post-processing (tone cleanup) via the llama-simple
   # subprocess. GPU (Vulkan) build with a CPU twin + runtime GPU->CPU fallback
@@ -320,7 +332,7 @@ modules:
     buildsystem: simple
     build-commands:
       - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
-      - cmake --build build --target llama-simple -j$(nproc)
+      - cmake --build build --target llama-simple --parallel ${FLATPAK_BUILDER_N_JOBS:-2}
       # The app's CLI backend prefers llama-simple (stable echo+generation stdout
       # format its extraction is built around); config defaults to /app/bin/llama-simple
       # inside the sandbox (config.py IS_FLATPAK branch). This is the Vulkan build —
@@ -330,6 +342,7 @@ modules:
       - type: git
         url: https://github.com/ggml-org/llama.cpp.git
         tag: b9608
+        commit: 70b54e140c90a92285ba699d77e1e32e0868a0e2
 
   # CPU twin of llama-cpp — the GPU->CPU fallback target (postprocessor.py
   # _subprocess_target). Same source/SIMD flags, Vulkan OFF, installed as
@@ -339,12 +352,13 @@ modules:
     buildsystem: simple
     build-commands:
       - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
-      - cmake --build build --target llama-simple -j$(nproc)
+      - cmake --build build --target llama-simple --parallel ${FLATPAK_BUILDER_N_JOBS:-2}
       - install -Dm755 build/bin/llama-simple ${FLATPAK_DEST}/bin/llama-simple-cpu
     sources:
       - type: git
         url: https://github.com/ggml-org/llama.cpp.git
         tag: b9608
+        commit: 70b54e140c90a92285ba699d77e1e32e0868a0e2
 
 
   # Main application
@@ -381,10 +395,10 @@ modules:
       - PYTHONPATH="$(ls -d ${FLATPAK_DEST}/lib/python3*/site-packages | head -1)" python3 flatpak/resize-icons.py ${FLATPAK_DEST}
       
       # Desktop file
-      - install -Dm644 flatpak/io.github.wayfindercollective.WayfinderAura.desktop ${FLATPAK_DEST}/share/applications/io.github.wayfindercollective.WayfinderAura.desktop
+      - install -Dm644 flatpak/io.wayfindercollective.WayfinderAura.desktop ${FLATPAK_DEST}/share/applications/io.wayfindercollective.WayfinderAura.desktop
       
       # AppStream metadata for software centers
-      - install -Dm644 flatpak/io.github.wayfindercollective.WayfinderAura.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.wayfindercollective.WayfinderAura.metainfo.xml
+      - install -Dm644 flatpak/io.wayfindercollective.WayfinderAura.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.wayfindercollective.WayfinderAura.metainfo.xml
     sources:
       - type: dir
         path: ..
