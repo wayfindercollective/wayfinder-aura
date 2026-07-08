@@ -585,6 +585,50 @@ def test_metainfo_screenshots_are_local_pngs_with_release_sized_dimensions():
         assert height >= 702
 
 
+
+def test_metainfo_branding_is_violet_not_cyan():
+    """Store brand primary must match UI soft-violet (not legacy cyan)."""
+    root = ET.parse(FLATPAK_METAINFO).getroot()
+    colors = [c.text for c in root.findall(".//branding/color") if c.text]
+    assert colors, "AppStream branding colors required"
+    banned = {"#00D4FF", "#0099CC", "#00d4ff", "#0099cc"}
+    for color in colors:
+        assert color not in banned, f"cyan branding regression: {color}"
+    # Prefer the UI accent family for dark scheme
+    dark = root.find('.//branding/color[@scheme_preference="dark"]')
+    assert dark is not None and dark.text
+    assert dark.text.upper() == "#A78BFA"
+
+
+def test_public_docs_use_ultra_not_premium_tier_name():
+    """Public product tier is Ultra; internal premium_* API names stay."""
+    docs = [
+        REPO / "README.md",
+        REPO / "PRIVACY.md",
+        REPO / "SUPPORT.md",
+        REPO / "WEBSITE_COPY_BRIEF.md",
+    ]
+    # Word "Premium" as a product tier (not substrings of premium_url etc. — those
+    # files should not contain the bare marketing word).
+    for path in docs:
+        text = path.read_text(encoding="utf-8")
+        assert "Premium" not in text, f"{path.name} still uses public tier name Premium"
+
+
+def test_metainfo_summary_is_outcome_led():
+    summary = ET.parse(FLATPAK_METAINFO).getroot().findtext("summary") or ""
+    assert "cursor" in summary.lower() or "dictat" in summary.lower()
+    assert len(summary) >= 20
+
+
+def test_screenshot_capture_recipe_documents_welcome_profile_split():
+    readme = (REPO / "screenshots" / "README.md").read_text(encoding="utf-8")
+    assert "welcome_completed" in readme
+    assert "overlay.png" in readme
+    assert "base.en" in readme or "ggml-base.en" in readme
+    assert "false" in readme.lower()
+
+
 def test_metainfo_release_date_is_iso8601():
     release = ET.parse(FLATPAK_METAINFO).getroot().find("releases/release")
     assert release is not None

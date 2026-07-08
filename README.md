@@ -40,11 +40,11 @@ backends are there if you choose them.
 | 🕹️ **Steam Deck workflow** | Trigger dictation from a back button with the bundled host helper |
 | 📋 **Flexible output** | Instant paste or simulated typing at your preferred speed |
 
-## Free vs Premium
+## Free vs Ultra
 
 The free tier is the full dictation experience — not a demo.
 
-| | Free | Premium ($60 one-time — **$29.99 launch price**) |
+| | Free | Ultra ($60 one-time — **$29.99 launch price**) |
 |---|---|---|
 | Local transcription (whisper.cpp) | ✅ | ✅ |
 | GPU acceleration | — | ✅ |
@@ -59,7 +59,7 @@ The free tier is the full dictation experience — not a demo.
 | Custom vocabulary | — | ✅ |
 | High-accuracy beam search & audio preprocessing | — | ✅ |
 
-Premium is a one-time purchase — no subscription, ever. It's $60, and **$29.99
+Ultra is a one-time purchase — no subscription, ever. It's $60, and **$29.99
 during launch**. Hit **Get Ultra** in the app, enter your license key, done.
 Keys activate online once and keep working offline.
 
@@ -160,7 +160,7 @@ Settings live in the app; the file is `~/.config/wayfinder-aura/config.json`.
 Wayfinder Aura is **source-available** under the
 [Elastic License 2.0](LICENSE). In short: you're free to use, read, and build
 the software; you may not remove or circumvent the license-key functionality,
-or resell it as a hosted service. Premium features support continued
+or resell it as a hosted service. Ultra features support continued
 development.
 
 ## Credits

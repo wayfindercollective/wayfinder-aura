@@ -392,6 +392,12 @@ class WelcomePane:
             save_config(self.app.config)
         except Exception:
             pass
+        # Collapse first-session Dictate tips once the tour is done.
+        try:
+            if hasattr(self.app, "_hide_dictate_tips"):
+                self.app._hide_dictate_tips()
+        except Exception:
+            pass
         self._teardown()
 
     def _teardown(self) -> None:

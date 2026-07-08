@@ -922,6 +922,22 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
 # Applied by _enable_linux_mousewheel, multiplied by the widget's CTk scaling.
 WHEEL_SCROLL_PX = 90
 
+# Neuter CustomTkinter's own <MouseWheel> handler at import time — BEFORE any
+# CTkScrollableFrame is ever instantiated. Each frame's __init__ runs
+# `self.bind_all("<MouseWheel>", self._mouse_wheel_all)`, which FREEZES a bound
+# method at bind time. The old code neutered the class attribute later (from
+# _enable_linux_mousewheel, which runs AFTER setup_ui builds the frames), so the
+# frames had already captured CTk's real handler — its Linux math scrolls
+# `event.delta` canvas units (~10% of the viewport each) => ~12 viewport-heights
+# per notch => the view teleports to the top/bottom edge. Reassigning the class
+# attribute can't retroactively change an already-registered binding, which is
+# why Settings scrolled "all the way to the bottom" in one notch. Doing it here,
+# before instantiation, makes every frame bind the no-op; the real pixel-based
+# scrolling is installed by _enable_linux_mousewheel. Verified with a synthetic
+# <MouseWheel> on CTk 5.2.2: neuter-after => yview 0.00->0.90 (teleport),
+# neuter-before => no jump.
+ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
+
 
 # Setting tooltip descriptions with latency indicators
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3994,8 +4010,11 @@ class WayfinderApp(ctk.CTk):
         """
         import tkinter as tk
 
-        # Tk9-compat shim: CTk's own <MouseWheel> math is the teleport bug (see
-        # docstring). Class-level so frames created later stay covered.
+        # CTk's own <MouseWheel> math is the teleport bug (see docstring). The
+        # authoritative neuter happens at MODULE IMPORT (above WHEEL_SCROLL_PX),
+        # before any frame is created — doing it here is too late for frames
+        # setup_ui() already built, since bind_all froze the real handler. This
+        # reassert is a harmless belt-and-suspenders (idempotent).
         ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
 
         def _scroll_under_pointer(event, notches: float):
@@ -4029,8 +4048,20 @@ class WayfinderApp(ctk.CTk):
                                 scale = widget._get_widget_scaling()
                             except Exception:
                                 scale = 1.0
+                            # Floor a sub-notch delta to one full step. The wheel
+                            # magnitude is input-stack-dependent: Tk 9 reports
+                            # |delta|==120 per notch, but libinput high-resolution
+                            # scrolling (and some mice) report a much smaller value
+                            # (e.g. ±1). Dividing by a fixed 120 then int()-
+                            # truncating collapsed those to a 0–1px no-op — the
+                            # "scroll stopped working in Settings" bug. Sign is
+                            # preserved, so the top/bottom guard above is unaffected;
+                            # a true |delta|>=120 notch keeps its proportional value.
+                            step = notches
+                            if 0 < abs(step) < 1:
+                                step = 1.0 if step > 0 else -1.0
                             canvas.yview_scroll(
-                                int(notches * WHEEL_SCROLL_PX * scale), "units"
+                                int(step * WHEEL_SCROLL_PX * scale), "units"
                             )
                     except Exception:
                         pass
@@ -4488,15 +4519,19 @@ class WayfinderApp(ctk.CTk):
         
         # Create tab frames
         self.tab_frames = {}
-        self.active_tab = "settings"
+        # Returning users (setup + welcome done) open ready-to-speak on Dictate.
+        # First-run setup still lands on Settings so the setup cue/settings
+        # path is visible; welcome switches to Dictate when it opens.
+        _setup_done = bool(self.config.get("setup_completed", False))
+        _welcome_done = bool(self.config.get("welcome_completed", False))
+        self.active_tab = "dictate" if (_setup_done and _welcome_done) else "settings"
         
         self._create_dictate_tab()
         self._create_settings_tab()
         self._create_style_tab()
         self._create_history_tab()
         
-        # Show initial tab (Settings shows content, Dictate is clean)
-        self._switch_tab("settings")
+        self._switch_tab(self.active_tab)
         
         # Initial log entries
         self.log("✓ Wayfinder Aura started")
@@ -4806,13 +4841,18 @@ class WayfinderApp(ctk.CTk):
 
         # Re-sync the sidebar tier label (badge/glow already rebuilt above).
         tier_label = getattr(self, "_sidebar_tier_label", None)
+        tier_pill = getattr(self, "_sidebar_tier_pill", None)
         if tier_label is not None:
             is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
             try:
                 tier_label.configure(
-                    text="😇 ultra" if is_ultra else "free",
-                    text_color=COLORS["accent_yellow"] if is_ultra else COLORS["text_muted"],
+                    text="Ultra 😇" if is_ultra else "Free",
+                    text_color=COLORS["accent_yellow"] if is_ultra else COLORS["text_secondary"],
                 )
+                if tier_pill is not None:
+                    tier_pill.configure(
+                        border_color=COLORS["accent_yellow"] if is_ultra else COLORS["border_subtle"],
+                    )
             except Exception:
                 pass
 
@@ -4906,14 +4946,20 @@ class WayfinderApp(ctk.CTk):
         )
         self.status_label.pack(pady=(SPACING["md"], 0))
 
-        # Hotkey hint
+        # Hotkey as primary CTA (mono token, mirrors welcome step 2).
         self.hotkey_label = ctk.CTkLabel(
             hero_inner,
-            text=f"Press {self.get_hotkey_display()} to toggle",
-            font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["text_secondary"],  # one notch up from text_muted for legibility
+            text=self.get_hotkey_display(),
+            font=(self.font_mono[0], self.font_sizes["title"], "bold"),
+            text_color=COLORS["accent"],
         )
-        self.hotkey_label.pack(pady=(SPACING["xs"], 0))
+        self.hotkey_label.pack(pady=(SPACING["sm"], 0))
+        ctk.CTkLabel(
+            hero_inner,
+            text="press to start/stop  ·  words appear at your cursor",
+            font=(self.font_body[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+        ).pack(pady=(SPACING["xs"], 0))
     
     def _on_mic_hover(self, entering: bool) -> None:
         """Redraw the mic button once on Enter/Leave with a brighter glow while hovered.
@@ -5207,18 +5253,26 @@ class WayfinderApp(ctk.CTk):
             self.tab_buttons[tab_id] = btn
             self.tab_colors[tab_id] = COLORS["accent"]
 
-        # Footer pinned to the sidebar bottom: tier badge grounds the column
-        # and ties the Ultra branding into the chrome.
+        # Footer pinned to the sidebar bottom: intentional Free pill or Ultra badge.
         is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
-        footer = ctk.CTkLabel(
+        footer_pill = ctk.CTkFrame(
             nav_container,
-            text="😇 ultra" if is_ultra else "free",
-            font=(self.font_mono[0], self.font_sizes["caption"]),
-            text_color=COLORS["accent_yellow"] if is_ultra else COLORS["text_muted"],
+            fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["sm"],
+            border_width=1,
+            border_color=COLORS["accent_yellow"] if is_ultra else COLORS["border_subtle"],
         )
-        footer.pack(side="bottom", pady=(0, 4))
+        footer_pill.pack(side="bottom", fill="x", pady=(0, 4))
+        footer = ctk.CTkLabel(
+            footer_pill,
+            text="Ultra 😇" if is_ultra else "Free",
+            font=(self.font_mono[0], self.font_sizes["caption"], "bold"),
+            text_color=COLORS["accent_yellow"] if is_ultra else COLORS["text_secondary"],
+        )
+        footer.pack(padx=SPACING["sm"], pady=SPACING["xs"])
         # Stored so _rebuild_header can re-color/re-text it live when the tier flips.
         self._sidebar_tier_label = footer
+        self._sidebar_tier_pill = footer_pill
         if is_ultra:
             ToolTip(footer, "Ultra 😇 — thanks for supporting Wayfinder")
     
@@ -5448,32 +5502,43 @@ class WayfinderApp(ctk.CTk):
             justify="left",
             anchor="w",
         )
-        self.transcription_label.pack(fill="x", padx=16, pady=(0, 16))
-        
-        # Quick tips card
+        self.transcription_label.pack(fill="x", padx=16, pady=(0, 8))
+
+        # Compact setup row: model · Local/Remote · hotkey (always useful, no dead void).
+        setup_row = ctk.CTkFrame(trans_card, fg_color="transparent")
+        setup_row.pack(fill="x", padx=16, pady=(0, 12))
+        self._dictate_setup_label = ctk.CTkLabel(
+            setup_row,
+            text=self._dictate_setup_chip_text(),
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+            anchor="w",
+        )
+        self._dictate_setup_label.pack(side="left")
+
+        # Quick tips — only for pre-welcome / first session; hidden after welcome
+        # completes or the first successful dictation (see _hide_dictate_tips).
         tips_card = ctk.CTkFrame(
             scroll,
             fg_color=COLORS["bg_surface"],
             corner_radius=RADIUS["lg"],
         )
-        tips_card.pack(fill="x")
-        
+        self._dictate_tips_card = tips_card
         tips_inner = ctk.CTkFrame(tips_card, fg_color="transparent")
         tips_inner.pack(fill="x", padx=16, pady=12)
-        
+
         ctk.CTkLabel(
             tips_inner,
-            text="💡 Quick Tips",
+            text="Quick tips",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             text_color=COLORS["text_primary"],
         ).pack(anchor="w")
-        
+
         tips = [
-            f"• Press {self.get_hotkey_display()} to start/stop recording",
-            "• Speak clearly and pause at punctuation",
-            "• Text is automatically typed into any focused field",
+            f"Press {self.get_hotkey_display()} to start/stop recording",
+            "Speak clearly and pause at punctuation",
+            "Text is typed into any focused field",
         ]
-        
         for tip in tips:
             ctk.CTkLabel(
                 tips_inner,
@@ -5482,11 +5547,66 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_secondary"],
             ).pack(anchor="w", pady=(4, 0))
 
+        if not self.config.get("welcome_completed", False):
+            tips_card.pack(fill="x")
+        # else: stay unpacked — returning users skip the tips filler
+
+        # Screenshot / store-capture seed (env only; no-op in normal use).
+        # WAYFINDER_DEMO_TRANSCRIPT populates Last Transcription for marketing stills.
+        demo_tx = os.environ.get("WAYFINDER_DEMO_TRANSCRIPT", "").strip()
+        if demo_tx:
+            self.last_transcription = demo_tx
+            try:
+                self.transcription_label.configure(
+                    text=demo_tx, text_color=COLORS["text_primary"],
+                )
+                self._hide_dictate_tips()
+            except Exception:
+                pass
+
         # (D) Surface the "download a model" cue at startup once the tab exists.
         try:
             self._maybe_show_setup_cue()
         except Exception as e:
             self.log(f"⚠ Setup cue check error: {e}")
+
+    def _dictate_setup_chip_text(self) -> str:
+        """One-line current setup for the Dictate empty state (model · mode · hotkey)."""
+        model_path = str(self.config.get("model_path", "") or "")
+        model = "auto"
+        for key in (
+            "large-v3-turbo-q5", "large-v3-turbo", "large-v3",
+            "medium.en", "small.en", "base.en", "tiny.en",
+            "medium", "small", "base", "tiny",
+        ):
+            if key in model_path:
+                model = key
+                break
+        mode = "Local" if self.config.get("processing_mode", "local") == "local" else "Remote"
+        try:
+            hotkey = self.get_hotkey_display()
+        except Exception:
+            hotkey = "hotkey"
+        return f"{model}  ·  {mode}  ·  {hotkey}"
+
+    def _refresh_dictate_setup_chip(self) -> None:
+        label = getattr(self, "_dictate_setup_label", None)
+        if label is None:
+            return
+        try:
+            label.configure(text=self._dictate_setup_chip_text())
+        except Exception:
+            pass
+
+    def _hide_dictate_tips(self) -> None:
+        """Collapse the first-session tips card so empty Dictate is not tip-dominated."""
+        card = getattr(self, "_dictate_tips_card", None)
+        if card is None:
+            return
+        try:
+            card.pack_forget()
+        except Exception:
+            pass
 
     def _copy_last_transcription(self) -> None:
         """Copy the last transcription to clipboard."""
@@ -6032,7 +6152,7 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             _wf_version = "1.1.0"
         _is_premium = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
-        _tier = "ultra 😇" if _is_premium else "free"
+        _tier = "Ultra 😇" if _is_premium else "Free"
         ctk.CTkLabel(
             scroll,
             text=f"wayfinder aura v{_wf_version} · {_tier}",
@@ -10893,12 +11013,13 @@ class WayfinderApp(ctk.CTk):
         info_url = self.config.get("premium_info_url", "https://wayfindercollective.io/aura")
         feature_msg = self.feature_gate.get_upgrade_message(feature_id)
 
+        # Lucide row markers (CLAUDE.md: no decorative emoji as UI chrome).
         benefits = [
-            ("⚡", "GPU Acceleration", "Large & Turbo models, fast on the Deck"),
-            ("☁", "Cloud Processing", "Groq/OpenAI + GPT/Claude cleanup — best quality"),
-            ("✎", "Tone Presets", "Professional, Casual, Dev & Personal styles"),
-            ("∞", "Chunked Recording", "Unlimited length with live feedback"),
-            ("★", "Large Models + High Accuracy", "Large v3 Turbo, beam search, custom vocab"),
+            ("sparkles", "GPU Acceleration", "Faster GPU transcription, including Steam Deck"),
+            ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),
+            ("pen-line", "Tone Presets", "Professional, Casual, Dev and Personal styles"),
+            ("audio-waveform", "Chunked Recording", "Unlimited length with live feedback"),
+            ("check", "Higher Accuracy", "Large models, beam search, and custom vocabulary"),
         ]
 
         # Dim scrim behind the panel so it clearly separates from the app (inline panel,
@@ -10930,13 +11051,19 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_primary"], wraplength=440, justify="left",
         ).pack(fill="x", anchor="w", pady=(6, 10))
 
-        for icon, title, desc in benefits:
+        for icon_name, title, desc in benefits:
             row = ctk.CTkFrame(inner, fg_color="transparent")
             row.pack(fill="x", pady=2)
-            ctk.CTkLabel(
-                row, text=icon, font=(self.font_body[0], self.font_sizes["body"]),
-                text_color=COLORS["accent"], width=24,
-            ).pack(side="left", anchor="n")
+            try:
+                ctk.CTkLabel(
+                    row, text="", image=get_icon(icon_name, 16, COLORS["accent"]),
+                    width=24,
+                ).pack(side="left", anchor="n", padx=(0, 4))
+            except Exception:
+                ctk.CTkLabel(
+                    row, text="·", font=(self.font_body[0], self.font_sizes["body"]),
+                    text_color=COLORS["accent"], width=24,
+                ).pack(side="left", anchor="n")
             txt = ctk.CTkFrame(row, fg_color="transparent")
             txt.pack(side="left", fill="x", expand=True)
             ctk.CTkLabel(
@@ -11180,7 +11307,11 @@ class WayfinderApp(ctk.CTk):
         """Apply hotkey config change and update the listener."""
         new_hotkey = self.get_hotkey_display()
         if hasattr(self, 'hotkey_label'):
-            self.hotkey_label.configure(text=f"Press {new_hotkey} to toggle")
+            self.hotkey_label.configure(text=new_hotkey)
+        try:
+            self._refresh_dictate_setup_chip()
+        except Exception:
+            pass
         self.log(f"⚙ Hotkey: {new_hotkey}")
         if sys.platform == "darwin":
             # macOS: pynput reads config live — nothing to restart.
@@ -13948,6 +14079,11 @@ class WayfinderApp(ctk.CTk):
                 text=self.last_transcription,
                 text_color=COLORS["text_primary"],
             )
+        try:
+            self._hide_dictate_tips()
+            self._refresh_dictate_setup_chip()
+        except Exception:
+            pass
         
         # First-run welcome tour: text must NEVER reach inject_text() while it's up,
         # or a tutorial dictation would type into whatever window has focus. Route the

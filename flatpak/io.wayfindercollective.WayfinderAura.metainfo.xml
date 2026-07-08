@@ -7,7 +7,7 @@
   <id>io.wayfindercollective.WayfinderAura</id>
 
   <name>Wayfinder Aura</name>
-  <summary>Local, private voice dictation</summary>
+  <summary>Local-first voice dictation — speak, text appears at your cursor</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Elastic-2.0</project_license>
@@ -45,13 +45,15 @@
 
   <screenshots>
     <screenshot type="default">
-      <caption>Wayfinder Aura main interface showing recording status</caption>
+      <caption>Dictate into any app — hotkey recording with live waveform feedback</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/main-window.png</image>
     </screenshot>
     <screenshot>
-      <caption>Settings panel with model selection and hotkey configuration</caption>
+      <caption>Private local processing — microphone, model, and Local mode</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/settings.png</image>
     </screenshot>
+    <!-- Planned store captures (capture recipe: screenshots/README.md):
+         overlay.png, style.png, welcome.png — add when recaptured for Flathub. -->
   </screenshots>
 
   <url type="homepage">https://github.com/wayfindercollective/wayfinder-aura</url>
@@ -61,8 +63,8 @@
   <content_rating type="oars-1.1" />
 
   <branding>
-    <color type="primary" scheme_preference="dark">#00D4FF</color>
-    <color type="primary" scheme_preference="light">#0099CC</color>
+    <color type="primary" scheme_preference="dark">#A78BFA</color>
+    <color type="primary" scheme_preference="light">#6D28D9</color>
   </branding>
 
   <categories>
@@ -98,12 +100,11 @@
       <description>
         <p>First public release of Wayfinder Aura</p>
         <ul>
-          <li>Local voice dictation with whisper.cpp — hotkey-triggered for Wayland and X11 desktops</li>
-          <li>Steam Deck workflow groundwork: SIGILL-safe CPU build, R4 trigger socket, tray, font and scaling fixes</li>
-          <li>Stable microphone selection by device name — survives PipeWire device renumbering</li>
-          <li>Game-aware hotkeys: dictation keys pause while a GameMode game is running</li>
-          <li>Default hotkeys Super+F2 / Super+F3 (avoid in-game F-key collisions)</li>
-          <li>Tone-aware local post-processing with Gemma 3 1B as the default model</li>
+          <li>Press Super+F2 to dictate — your words appear at the cursor in any app</li>
+          <li>Local-first transcription with whisper.cpp; optional tone cleanup on-device</li>
+          <li>Works on Wayland and X11, including KDE and GNOME</li>
+          <li>Game-aware hotkeys pause while a GameMode game is running</li>
+          <li>Steam Deck workflow: bind a back button and dictate from Game Mode</li>
           <li>System tray integration and configurable typing speeds</li>
         </ul>
       </description>

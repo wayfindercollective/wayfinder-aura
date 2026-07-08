@@ -1,256 +1,105 @@
-# Wayfinder Aura - Website Copy Brief
+# Wayfinder Aura — Website Copy Brief
+
+_Source of truth for public product copy. Keep in sync with `README.md` Free vs Ultra table and in-app Ultra prompts. Last aligned: presentation launch plan v3._
 
 ## Product Summary
 
-**Wayfinder Aura** is a premium, local-first voice dictation application for Linux that transforms spoken words into typed text anywhere on your screen. Unlike cloud-based alternatives, everything runs locally on your machine using state-of-the-art AI models.
+**Wayfinder Aura** is local-first voice dictation for Linux. Press a hotkey, speak, and your words are typed wherever your cursor is. By default, transcription runs on *your* machine with whisper.cpp — offline, in any app. Optional GPU and cloud backends are opt-in.
 
----
+## Hero statements (pick one)
 
-## Core Value Propositions
-
-### 1. 🔒 100% Private & Local
-- **Zero cloud dependency** - All AI processing happens on your machine
-- **No internet required** - Works offline, no data ever leaves your computer
-- **No subscription fees** - One-time setup, runs forever
-- Your voice data is never uploaded, stored, or analyzed by third parties
-
-### 2. ⚡ Performance Optimized
-- **GPU acceleration** - Vulkan, CUDA, and ROCm support for 3-10x faster transcription
-- **Monitor-synced animations** - Silky smooth 60Hz/144Hz/240Hz visual feedback
-- **Chunked recording** - Unlimited recording duration with real-time transcription
-- **Intelligent audio preprocessing** - Gain normalization, high-pass filtering, noise gating
-
-### 3. 🎯 Works Everywhere
-- **Universal text injection** - Types directly into any app (browser, IDE, chat, documents)
-- **Wayland & X11 native** - Full support for modern Linux desktops
-- **Multiple input devices** - Trigger from keyboard, gaming mouse, keypad, or foot pedal
-- **System tray integration** - Runs silently in background until needed
-
----
-
-## Key Features Breakdown
-
-### Voice Recording & Transcription
-
-| Feature | Description | Benefit |
-|---------|-------------|---------|
-| **Hotkey Triggered** | Press F3 (or any key combo) to start/stop | Instant access from any application |
-| **Real-time Audio Levels** | Voice-reactive waveform visualization | Visual confirmation you're being heard |
-| **Chunked Recording** | 30-second segments with overlap | Unlimited recording duration, faster feedback |
-| **Auto-Preprocessing** | Light/Medium/Heavy audio cleanup | Better accuracy in noisy environments |
-| **16kHz Resampling** | Automatic conversion from any mic | Optimal quality for Whisper AI |
-
-### AI Transcription Engine
-
-| Feature | Description | Performance |
-|---------|-------------|-------------|
-| **whisper.cpp Backend** | C++ optimized Whisper implementation | Low memory, fast CPU inference |
-| **Faster-Whisper Backend** | CTranslate2 optimized inference | Best GPU utilization |
-| **Model Selection** | Tiny → Large v3 Turbo | 0.5s to 6s per transcription |
-| **Beam Search Tuning** | 1-10 beam width | Speed vs accuracy tradeoff |
-| **Custom Vocabulary** | Add names, jargon, terms | Better recognition of your words |
-| **Context Continuity** | Previous chunk feeds next | Coherent long-form dictation |
-
-### Text Output
-
-| Feature | Description | Options |
-|---------|-------------|---------|
-| **Instant Paste** | Clipboard injection | 0ms latency |
-| **Simulated Typing** | Character-by-character | Fast/Normal/Slow speeds |
-| **Auto-Punctuation** | Capitalizes, adds periods | Clean, ready-to-use text |
-| **Universal Injection** | ydotool/xdotool/wtype | Works in any Linux app |
-
----
-
-## Visual Feedback System
-
-### Floating Indicator (During Recording)
-- **Pulsing status dot** - Breathing animation shows recording state
-- **Voice-reactive waveform** - Multi-layer sine wave responds to your voice
-- **Color-coded states** - Red=Recording, Cyan=Processing, Green=Ready
-- **Monitor refresh sync** - Buttery smooth at any refresh rate (60-240Hz)
-
-### Main Window Waveform
-- **Hero visualization** - Large, dramatic waveform in the dictate tab
-- **Idle breathing** - Gentle animation when ready
-- **Audio-reactive amplitude** - Responds instantly to voice input
-- **Premium easing** - Smooth sinusoidal motion, no jitter
-
-### Smooth Scrolling
-- **Momentum physics** - Mac-like scroll inertia
-- **Elastic bounce** - Rubber-band effect at scroll boundaries
-- **60fps+ rendering** - Matches monitor refresh rate
-
----
-
-## Performance Specifications
-
-### Transcription Speed (30 seconds of audio)
-
-| Model | GPU Time | CPU Time | Accuracy |
-|-------|----------|----------|----------|
-| Tiny.en | ~0.5s | ~2s | Good |
-| Base.en | ~1s | ~4s | Better |
-| Small.en | ~1.5s | ~6s | Great |
-| Medium.en | ~3s | ~12s | Excellent |
-| **Large v3 Turbo** ⭐ | **~2s** | **~8s** | **Best** |
-
-### Latency Breakdown
-
-| Component | Impact | Notes |
-|-----------|--------|-------|
-| Audio preprocessing | +2-10ms | Configurable levels |
-| Chunked mode overhead | +50-100ms | Per segment boundary |
-| Beam search (5) | Baseline | Good balance |
-| Beam search (1) | -50% time | Fast mode |
-| GPU acceleration | -70-90% time | Massive speedup |
-
----
-
-## Technical Differentiators
-
-### Why whisper.cpp?
-- Written in C/C++ for maximum performance
-- Vulkan GPU support works on AMD, NVIDIA, Intel
-- Quantized models (Q5) for smaller downloads
-- Active development, latest Whisper features
-
-### Why Local Processing?
-- **Privacy**: Medical, legal, personal content stays private
-- **Reliability**: No internet? No problem
-- **Speed**: No upload/download latency
-- **Cost**: No per-minute charges
-
-### Why Linux Native?
-- First-class Wayland support (including KDE Plasma)
-- Direct evdev hotkey detection
-- Native system tray integration
-- Works with PipeWire, PulseAudio, ALSA
-
----
-
-## User Experience Highlights
-
-### Onboarding
-- One-click model downloads from Hugging Face
-- Auto-detection of GPU capabilities
-- Smart defaults that "just work"
-- Comprehensive tooltips with latency indicators
-
-### Daily Use
-- Start minimized to tray
-- Global hotkey works from any app
-- Visual feedback confirms recording
-- Text appears where your cursor is
-
-### Customization
-- UI scaling (70% - 250%) for any display
-- Adjustable typing speed
-- Custom prompts and vocabulary
-- Multiple transcription backends
-
----
-
-## Target Audiences
-
-### Power Users
-- Developers dictating code comments/documentation
-- Writers doing first drafts
-- Researchers transcribing interviews
-
-### Privacy-Conscious Users
-- Medical professionals (HIPAA considerations)
-- Legal professionals (confidential notes)
-- Anyone who values data sovereignty
-
-### Linux Enthusiasts
-- KDE Plasma users wanting native feel
-- Wayland early adopters
-- Users tired of cloud-dependent tools
-
----
-
-## Competitive Advantages
-
-| vs Cloud Services | vs Other Local Tools |
-|-------------------|---------------------|
-| ✅ No subscription | ✅ Modern UI (CustomTkinter) |
-| ✅ Works offline | ✅ Wayland native support |
-| ✅ Zero latency upload | ✅ GPU acceleration |
-| ✅ Complete privacy | ✅ Monitor-synced animations |
-| ✅ No usage limits | ✅ Chunked unlimited recording |
-| ✅ One-time setup | ✅ Premium visual feedback |
-
----
-
-## Technical Stack
-
-- **UI Framework**: CustomTkinter (modern dark theme)
-- **Audio**: sounddevice + scipy (real-time capture & processing)
-- **AI**: whisper.cpp / Faster-Whisper (state-of-the-art speech recognition)
-- **Text Injection**: ydotool/xdotool/wtype (universal compatibility)
-- **System**: pystray (tray), evdev (hotkeys), dbus (Wayland portals)
-
----
-
-## Messaging Themes
-
-### Hero Statement Options
 1. "Your voice, your machine, your privacy."
 2. "Local AI dictation that feels instant."
 3. "Type with your voice. No cloud required."
-4. "Premium voice dictation for Linux power users."
+4. "Press a key. Speak. Your words appear wherever your cursor is."
 
-### Key Phrases
-- "Buttery smooth animations"
-- "Monitor-synced refresh rates"
-- "Zero-latency local processing"
-- "Privacy by design"
+## Core value propositions
+
+### 1. Local by default
+- Speech-to-text and AI cleanup both run locally out of the box
+- No audio uploads unless you enable cloud backends and supply your own keys
+- Weekly model-update checks are toggleable; license activation contacts the server once
+
+### 2. Fast where it counts
+- Ultra unlocks Vulkan GPU acceleration (AMD / Intel / NVIDIA) with CPU auto-fallback
+- Chunked recording (Ultra) for long dictations with live feedback
+
+### 3. Writes like you, only cleaner
+- Local LLM cleanup (Gemma 3 1B by default): strip ums, fix punctuation, match tone
+- Output styles: Minimal, Professional, Casual, Dev, Personal
+- Cycle styles with Super+F3
+
+### 4. Made for Linux
+- Wayland and X11, KDE and GNOME
+- Steam Deck workflow (back-button trigger, Game Mode–aware hotkeys)
+- System tray; hotkeys pause while a GameMode game is running
+
+## Free vs Ultra
+
+Public product name for the paid tier: **Ultra** only.
+
+| | Free | Ultra ($60 one-time — **$29.99 launch**) |
+|---|---|---|
+| Local transcription (whisper.cpp) | ✅ | ✅ |
+| GPU acceleration | — | ✅ |
+| Standard models (tiny/base/small) | ✅ | ✅ |
+| Local LLM cleanup | ✅ | ✅ |
+| Status overlay & tray | ✅ | ✅ |
+| Large models (medium, large-v3-turbo) | — | ✅ |
+| Faster-Whisper backend | — | ✅ |
+| Cloud transcription (your keys) | — | ✅ |
+| Unlimited-length chunked recording | — | ✅ |
+| Tone presets & voice profiles | — | ✅ |
+| Custom vocabulary | — | ✅ |
+| High-accuracy beam search & audio preprocessing | — | ✅ |
+
+Ultra is one-time — no subscription. Activate a key in-app; works offline after activation.
+
+## Defaults to advertise
+
+- Hotkey: **Super+F2** (start/stop)
+- Style cycle: **Super+F3**
+- Free default model (Flatpak): **base.en**
+- Processing: **Local** by default
+
+## Landing page requirements (`/aura`)
+
+Must prove the product in ~5 seconds:
+
+1. Hero still or GIF: record → process → text at cursor  
+2. Privacy claim with honest caveats (local default; optional cloud; model-update check; license activation)  
+3. Price: one-time Ultra, launch vs regular if claimed  
+4. Install path (Flatpak when ready)  
+5. Screenshots from `screenshots/` (recording + overlay preferred)
+
+Checkout copy must not claim UI elements the storefront does not show (confirm fee treatment vs `$60` regular price).
+
+## AppStream summary
+
+`Local-first voice dictation — speak, text appears at your cursor`
+
+## Key phrases
+
+- "Local-first & private"
 - "Works everywhere you type"
-- "Unlimited recording duration"
-- "GPU-accelerated transcription"
+- "GPU-accelerated Ultra"
+- "Game-aware hotkeys"
+- "Steam Deck ready"
+- "One-time Ultra — no subscription"
 
-### Pain Points Addressed
-- "Tired of cloud subscriptions eating your budget?"
-- "Worried about sensitive voice data leaving your machine?"
-- "Frustrated by dictation tools that don't work on Linux?"
-- "Want visual feedback that doesn't feel like 1999?"
+## Pain points
 
----
+- Cloud dictation subscriptions and usage limits  
+- Sensitive voice data leaving the machine  
+- Linux / Wayland tools that feel second-class  
+- Dictation UI that looks abandoned  
 
-## Call-to-Action Ideas
+## Call to action
 
-- "Download and dictate in minutes"
-- "Get started with one command"
-- "Try the Large v3 Turbo model - best accuracy, great speed"
-- "Join the privacy-first voice revolution"
+- "Download and dictate in minutes"  
+- "Get Ultra — one-time license"  
+- "Try Free; upgrade when you need GPU and large models"  
 
----
+## Assets
 
-## Assets Needed for Website
-
-1. **Screenshots**
-   - Main dictate view with waveform
-   - Settings panel
-   - Model download dialog
-   - Floating indicator during recording
-
-2. **Animations/GIFs**
-   - Voice-reactive waveform demo
-   - Smooth scrolling showcase
-   - Recording → Processing → Typing flow
-
-3. **Comparison Charts**
-   - Model speed/accuracy table
-   - vs cloud services feature matrix
-
-4. **Code Snippets**
-   - Installation commands
-   - Configuration examples
-
-
-
-
-
-
-
+See `screenshots/README.md` for the five-shot capture recipe (main-window, settings, overlay, style, welcome).

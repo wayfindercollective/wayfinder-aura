@@ -46,7 +46,7 @@ transcription or cleanup service.
 ## Secrets stored on your machine
 
 Your settings — including any cloud API keys — live in
-`~/.config/wayfinder-aura/config.json`. Your license token (if you buy Premium)
+`~/.config/wayfinder-aura/config.json`. Your license token (if you buy Ultra)
 lives in `~/.config/wayfinder-aura/license.json`.
 
 These files are stored **in plaintext**, but both are written with file
@@ -56,7 +56,7 @@ can read them, so treat them like any other local credential file.
 
 ## License activation
 
-Activating a Premium license contacts the licensing server. When it does, the
+Activating an Ultra license contacts the licensing server. When it does, the
 app sends **only two fields**: your license `key` and a `machineId`.
 
 The `machineId` is **not** your raw machine identity. It is a SHA-256 hash of a
@@ -97,7 +97,7 @@ each of which you control:
 
 1. The weekly model-update check (toggleable).
 2. Cloud transcription/cleanup backends (off by default; your own keys).
-3. License activation (only if you activate a Premium license).
+3. License activation (only if you activate an Ultra license).
 
 ## Questions
 

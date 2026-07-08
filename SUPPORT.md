@@ -106,8 +106,8 @@ Try these before filing an issue — they cover the most common problems.
 - A GPU→CPU fallback (and the reason) is recorded in
   `~/.cache/wayfinder-aura/activity.log`. Check there if transcription is
   unexpectedly slow.
-- GPU acceleration and the large models are Premium features; the free tier
-  runs the standard models on CPU or GPU.
+- GPU acceleration and the large models are Ultra features; the free tier
+  runs the standard models on CPU.
 
 ### UI is too small (e.g. 4K)
 
