@@ -1668,6 +1668,22 @@ def _wheel_supports_gpu_offload() -> bool:
     return _WHEEL_GPU_OFFLOAD
 
 
+# Phi-3 restatement headers: the model re-words them every time ("- Response:",
+# "- [Response]:", "*Rewritten text with over-the-top corporate buzzword
+# overload:*"), so match the shape — an anchored header word with optional
+# markdown/bracket dressing and up to ~80 chars of paraphrase before the colon —
+# or the "------" horizontal rule it draws above the restatement. Anchoring to a
+# line start or a dash keeps a mid-sentence "…a response: yes" intact.
+_RESTATEMENT_RE = re.compile(
+    r"(?:(?:^|\n)[ \t]*|[-–—]\s+)"                # line start, or after a dash
+    r"[*\[#>\-\s]{0,6}"                           # markdown/bracket dressing
+    r"(?:re-?written|response|revised|rewrite)\b"
+    r"[^:\n]{0,80}:"                              # paraphrased tail, then colon
+    r"|(?:^|\n)[ \t]*[-_=]{6,}",                  # or a horizontal-rule divider
+    re.IGNORECASE,
+)
+
+
 class LlamaCppCliBackend(PostProcessorBackend):
     """
     Local LLM backend using llama.cpp CLI binary (llama-simple).
@@ -2127,12 +2143,7 @@ Cleaned text:"""
             "\nGuide:", "\nStyle:", "Output ONLY",
             # Gemma sometimes appends a trailing meta line after the cleaned text.
             "Final Answer:", "\nFinal Answer",
-            # Phi-3 sometimes restates its answer after a chat-format bleed marker,
-            # doubling the output (which then trips the fabrication guard).
-            # Both casings appear ("- response:" / "- Response:") — find() is
-            # case-sensitive, so list each.
-            "- response:", "- Response:", "\nResponse:", "\nresponse:",
-            "<|", "Rewritten text:", "\nRewritten",
+            "<|",
         ]
         if not rewrite_mode:
             cut_markers += ["\n\n**", "\n\n- ", "\n\n* ", "\n\nHere"]
@@ -2140,6 +2151,16 @@ Cleaned text:"""
             j = gen.find(mk)
             if j != -1:
                 gen = gen[:j]
+
+        # Phi-3 sometimes restates its whole answer under a header it re-words
+        # freshly each time — "- Response:", "- [Response]:", "*Rewritten text
+        # with over-the-top corporate buzzword overload:*" — sometimes above a
+        # "------" divider, doubling the output (and leaking prompt wording).
+        # Exact substrings can't keep up with the paraphrasing, so cut at any
+        # anchored restatement header or horizontal rule instead.
+        m = _RESTATEMENT_RE.search(gen)
+        if m:
+            gen = gen[:m.start()]
 
         if not rewrite_mode:
             # Keep the first paragraph; collapse internal newlines to a single block.
@@ -2173,12 +2194,22 @@ Cleaned text:"""
 
         if rewrite_mode and gen:
             # Greedy decoding (llama-simple has no sampling flags) makes rewrite
-            # modes loop: the model re-emits its own opening and riffs forever.
-            # If the first 60 chars reappear verbatim, keep only the first copy.
+            # modes loop: the model re-emits its own opening and riffs forever —
+            # usually with tiny punctuation drift ("Um so," vs "Um, so,") that
+            # defeats a verbatim check. Compare punctuation-normalized words:
+            # if the first 8 reappear later in sequence, keep only the first copy.
             if len(gen) > 120:
-                j = gen.find(gen[:60], 60)
-                if j != -1:
-                    gen = gen[:j].strip()
+                toks = [
+                    (re.sub(r"[^a-z0-9]+", "", m.group(0).lower()), m.start())
+                    for m in re.finditer(r"\S+", gen)
+                ]
+                toks = [t for t in toks if t[0]]
+                key = [w for w, _ in toks[:8]]
+                if len(key) == 8:
+                    for i in range(8, len(toks) - 7):
+                        if [w for w, _ in toks[i:i + 8]] == key:
+                            gen = gen[:toks[i][1]].strip()
+                            break
             # If generation hit the token cap mid-sentence ("...But fear"), trim
             # back to the last sentence-terminal punctuation or emoji — but only
             # when that keeps most of the text.

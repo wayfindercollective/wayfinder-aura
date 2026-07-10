@@ -1075,6 +1075,7 @@ class TestExtractorIntensity:
     extractor must not truncate it at the first paragraph like standard mode."""
 
     CAPABLE = "/x/Phi-3-mini-4k-instruct-q4.gguf"
+    SMALL = "/x/google_gemma-3-1b-it-Q4_K_M.gguf"
 
     def test_caricature_output_keeps_later_paragraphs(self):
         b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="professional",
@@ -1108,3 +1109,81 @@ class TestExtractorIntensity:
         out = b._extract_cli_output(stdout, prompt)
         assert "decoded" not in out
         assert "fr fr" in out
+
+    # Phi-3 restatement headers are re-worded every generation, so the cut is a
+    # shape-matching regex (_RESTATEMENT_RE), not substrings. Both fixtures
+    # below are trimmed from real field failures (2026-07-09, dev + professional
+    # caricature on Phi-3 Mini).
+
+    def test_caricature_cuts_bracketed_response_restatement(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="dev",
+                               caricature_mode=True)
+        prompt = b.build_cli_prompt("input", "dev", "caricature")
+        stdout = prompt + (
+            "[CRITICAL] EVERY TINY ERROR A CATASTROPHIC EDGE CASE! "
+            "My career depends on this.\n- [Response]: [CRITICAL] A STATUS OF "
+            "SHOCKING DEV-O-CRISIS! EVERY SMALL OOPSIE!"
+        )
+        out = b._extract_cli_output(stdout, prompt)
+        assert "career depends" in out
+        assert "OOPSIE" not in out
+
+    def test_caricature_cuts_paraphrased_rewritten_header(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="professional",
+                               caricature_mode=True)
+        prompt = b.build_cli_prompt("input", "professional", "caricature")
+        stdout = prompt + (
+            "Esteemed Colleagues, pure SYNERGY.\n\nThoughts? Best, A Certified "
+            "Thought Leader ☕\n\n------------------------\n*Rewritten text with "
+            "over-the-top corporate buzzword overload:* Esteemed Colleagues, "
+            "I'm scouting for synergistic opportunities."
+        )
+        out = b._extract_cli_output(stdout, prompt)
+        assert "Thoughts? Best" in out          # multi-paragraph body survives
+        assert "scouting" not in out            # restated copy is gone
+        assert "buzzword overload" not in out   # leaked prompt wording is gone
+        assert "---" not in out
+
+    def test_caricature_cuts_bare_divider_restatement(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="professional",
+                               caricature_mode=True)
+        prompt = b.build_cli_prompt("input", "professional", "caricature")
+        stdout = prompt + "The real answer.\n________\nThe restated answer."
+        out = b._extract_cli_output(stdout, prompt)
+        assert out == "The real answer."
+
+    def test_standard_still_cuts_plain_response_marker(self):
+        # The old substring markers ("\nResponse:" etc.) are gone; the regex
+        # must still cover the plain forms they handled.
+        b = LlamaCppCliBackend(model_path=self.SMALL, output_tone="professional")
+        prompt = b.build_cli_prompt("input", "professional", "standard")
+        stdout = prompt + "The cleaned text.\nResponse: The cleaned text again."
+        out = b._extract_cli_output(stdout, prompt)
+        assert out == "The cleaned text."
+
+    def test_caricature_collapses_drifted_greedy_loop(self):
+        # Greedy looping re-emits the opening with punctuation drift ("Um so,"
+        # vs "Um, so,"), which a verbatim first-60-chars check misses (live
+        # minimal/caricature field case, 2026-07-09: output looped ~3x to the
+        # token cap). The normalized-word collapse must keep only copy one.
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="minimal",
+                               caricature_mode=True)
+        prompt = b.build_cli_prompt("input", "minimal", "caricature")
+        copy1 = ("[clears throat] Um so, I was thinking... [nervous laughter] "
+                 "uh, we should... probably refactor the login code before "
+                 "the demo on Friday... [sweating]")
+        copy2 = ("[clears throat] Um, so, I was thinking... [nervous laughter] "
+                 "uh, we should... probably refactor the login code before "
+                 "the demo on Friday... [sweating]")
+        out = b._extract_cli_output(prompt + copy1 + " " + copy2, prompt)
+        assert out.count("refactor the login code") == 1
+
+    def test_mid_sentence_response_word_is_kept(self):
+        b = LlamaCppCliBackend(model_path=self.CAPABLE, output_tone="professional",
+                               caricature_mode=True)
+        prompt = b.build_cli_prompt("input", "professional", "caricature")
+        stdout = prompt + ("Awaiting your MISSION-CRITICAL response: kindly "
+                           "revert with a rewritten proposal at your earliest.")
+        out = b._extract_cli_output(stdout, prompt)
+        assert "kindly revert" in out
+        assert "rewritten proposal" in out
