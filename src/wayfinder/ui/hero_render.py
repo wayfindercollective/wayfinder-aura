@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 
 # --- palette defaults (mirror of wayfinder_main.COLORS, only what we need) ----
 BG_CARD = (0x1E, 0x1E, 0x1F)      # #1E1E1F bento tile (hero canvas bg)
-STATE_READY = (0x7B, 0x8B, 0xD9)  # #7B8BD9 indigo
+STATE_READY = (0x5B, 0x8F, 0xD4)  # #5B8FD4 soft brand blue
 WHITE = (255, 255, 255)
 
 # Wave layers ported from overlay.LiquidWaveRenderer wave_configs:

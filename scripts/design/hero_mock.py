@@ -35,9 +35,9 @@ from wayfinder.ui.icons import tint_icon  # noqa: E402
 # --- palette (mirror of wayfinder_main.COLORS, only what we need) ------------
 BG_BASE = (0x0D, 0x11, 0x17)      # #0D1117 deep ink page
 BG_CARD = (0x1E, 0x1E, 0x1F)      # #1E1E1F bento tile
-BORDER_RIM = (0x1E, 0x1B, 0x26)   # #1E1B26 10% violet rim
-ACCENT = (0xA7, 0x8B, 0xFA)       # #A78BFA soft violet
-STATE_READY = (0x7B, 0x8B, 0xD9)  # #7B8BD9 indigo
+BORDER_RIM = (0x13, 0x1C, 0x2B)   # #131C2B 10% blue rim
+ACCENT = (0x46, 0x82, 0xDC)       # #4682DC brand blue
+STATE_READY = (0x5B, 0x8F, 0xD4)  # #5B8FD4 soft brand blue
 STATE_REC = (0xE8, 0x70, 0x7F)    # #E8707F rose
 STATE_PROC = (0xE5, 0xAC, 0x2A)   # #E5AC2A gold
 STATE_TYPE = (0x5D, 0xD4, 0xA8)   # #5DD4A8 mint
@@ -618,12 +618,12 @@ def build_gallery(out: Path, bench_ms):
     color:#E8E8E8; padding:32px; max-width:1000px; margin:0 auto; }}
   .gallery h1 {{ font-weight:700; font-size:26px; margin-bottom:4px; }}
   .gallery .sub {{ color:#8B8B8F; margin-bottom:28px; }}
-  .gallery h2 {{ font-size:18px; margin:36px 0 6px; color:#A78BFA; }}
+  .gallery h2 {{ font-size:18px; margin:36px 0 6px; color:#4682DC; }}
   .gallery p.note {{ color:#8B8B8F; font-size:14px; margin:0 0 16px; }}
   .gallery figure {{ margin:0 0 20px; }}
   .gallery img {{ max-width:100%; border-radius:10px; display:block; }}
   .gallery figcaption {{ color:#8B8B8F; font-size:13px; margin-top:6px; }}
-  .bench {{ display:inline-block; background:#1E1E1F; border:1px solid #1E1B26;
+  .bench {{ display:inline-block; background:#1E1E1F; border:1px solid #131C2B;
     border-radius:8px; padding:6px 12px; color:#5DD4A8; font-family:monospace; }}
 </style>
 <div class="gallery">
@@ -636,7 +636,7 @@ Pure-PIL prototypes of the future <code>hero_render.py</code>.</div>
 <p class="note">The hybrid: one layered ribbon that breathes calmly at idle and
 gets bright &amp; reactive while recording (single morph, no pop).</p>
 {fig("card_current", "BEFORE — today's flat 3px bars (for comparison)")}
-{fig("card_idle", "AFTER · IDLE — calm dim breath, indigo, morph 0")}
+{fig("card_idle", "AFTER · IDLE — calm dim breath, soft blue, morph 0")}
 {fig("card_rec_low", "RECORDING · low level — rose, morph 1, level 0.25")}
 {fig("card_rec_high", "RECORDING · high level — level 0.8, energetic")}
 {fig("card_proc", "PROCESSING — gold")}

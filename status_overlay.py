@@ -897,12 +897,9 @@ class GlassmorphicOverlay(QWidget):
             if self.windowHandle():
                 # For X11/XWayland, try to set blur property
                 # This is KDE-specific
-                import subprocess
-                # Check if we're on KDE
-                desktop = subprocess.run(
-                    ["echo", "$XDG_CURRENT_DESKTOP"],
-                    capture_output=True, text=True, shell=True
-                )
+                # Desktop probe — env only (no shell=True subprocess).
+                import os as _os
+                _ = _os.environ.get("XDG_CURRENT_DESKTOP", "")
                 # Blur will be handled by compositor if available
         except Exception:
             pass  # Blur not available, fallback to semi-transparent

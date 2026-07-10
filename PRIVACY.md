@@ -51,8 +51,11 @@ lives in `~/.config/wayfinder-aura/license.json`.
 
 These files are stored **in plaintext**, but both are written with file
 permissions `0600` (`os.chmod(..., 0o600)`), meaning only your user account can
-read them. They are not encrypted; anyone with access to your logged-in account
-can read them, so treat them like any other local credential file.
+read them. The same owner-only mode is applied to `voice_profile.json`
+(transcription history used for Personal tone learning), structured app logs
+under the cache directory, and config backups matching `config.json*`. They are
+not encrypted; anyone with access to your logged-in account can read them, so
+treat them like any other local credential file.
 
 ## License activation
 

@@ -85,7 +85,7 @@ Model: qwen3.5-397b-a17b                               # Change to your loaded m
 ```yaml
 Endpoint: https://api.openai.com/v1/responses          # Don't change
 API Key: from $OPENAI_API_KEY env var                   # Set in shell profile
-Model: gpt-5.4                                          # Or gpt-4o, o3, etc.
+Model: gpt-5.6                                          # Or gpt-4o, o3, etc.
 ```
 
 ### Project-specific rules

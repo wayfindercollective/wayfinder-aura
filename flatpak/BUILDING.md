@@ -122,7 +122,7 @@ Detailed instructions: https://docs.flathub.org/docs/for-app-authors/submission
 - [x] Valid AppStream metainfo.xml
 - [x] Desktop file with correct categories
 - [x] Icon in PNG format at 128px and larger
-- [x] Current screenshots in `screenshots/`
+- [x] Current screenshots in `screenshots/` (recaptured 2026-07-09)
 - [x] OARS content rating
 - [x] Passes `appstreamcli validate --no-net`
 - [x] No build-time network for bundled Python dependencies
@@ -130,7 +130,10 @@ Detailed instructions: https://docs.flathub.org/docs/for-app-authors/submission
 - [x] Passes official `flatpak-builder-lint manifest`
 - [ ] Production license endpoint and Ed25519 public key are set
 - [ ] Public GitHub tag exists and matches the release manifest commit
-- [ ] Flathub reviewer signoff on final permissions
+- [ ] Screenshot raw.githubusercontent.com URLs return HTTP 200 on the public default branch
+- [ ] Flathub submission PR opened + reviewer signoff on final permissions
+
+Step-by-step owner actions: **`docs/FLATHUB-HANDOFF.md`**.
 
 ### 4. Validate Before Submitting
 

@@ -30,7 +30,7 @@ Reviews PLANS only. Cost: ~$0.80 per full 3-round review.
 ### GPT (OpenAI)
 - **Endpoint:** https://api.openai.com/v1/responses
 - **API Key:** from $OPENAI_API_KEY env var
-- **Model:** gpt-5.4 (or gpt-4o, o3, etc.)
+- **Model:** gpt-5.6 (or gpt-4o, o3, etc.)
 
 ## Important: thinking mode (Qwen/DeepSeek models)
 
@@ -255,7 +255,7 @@ output = ''
 
 for tool_round in range(MAX_TOOL_ROUNDS):
     body = {
-        'model': 'gpt-5.4',  # EDIT: or gpt-4o, o3, etc.
+        'model': 'gpt-5.6',  # EDIT: or gpt-4o, o3, etc.
         'tools': tools_responses_api,
         'temperature': 0.3,
         'max_output_tokens': 8192

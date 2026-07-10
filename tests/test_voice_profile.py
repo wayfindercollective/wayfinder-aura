@@ -75,6 +75,31 @@ class TestVoiceProfileInit:
         assert new_dir.exists()
         assert (new_dir / "voice_profile.json").exists()
 
+    def test_save_creates_owner_only_file(self, voice_profile_dir: Path):
+        """voice_profile.json is written 0600 (transcript history is sensitive)."""
+        import os
+        vp = VoiceProfile(config_dir=voice_profile_dir)
+        vp.add_transcription("Sensitive dictation sample with enough words here")
+        path = voice_profile_dir / "voice_profile.json"
+        assert path.exists()
+        assert (path.stat().st_mode & 0o777) == 0o600
+
+    def test_load_repairs_world_readable_mode(self, voice_profile_dir: Path):
+        """Existing 0644 profile files are tightened to 0600 on load."""
+        import json
+        import os
+        path = voice_profile_dir / "voice_profile.json"
+        path.write_text(json.dumps({
+            "history": [{"text": "old sample transcription here", "ts": 0}],
+            "profile": {"summary": "", "vocabulary": [], "vocabulary_ignore": [],
+                        "generated_at": 0, "samples_used": 0},
+            "transcriptions_since_regen": 0,
+        }))
+        os.chmod(path, 0o644)
+        assert (path.stat().st_mode & 0o777) == 0o644
+        VoiceProfile(config_dir=voice_profile_dir)  # _load repairs
+        assert (path.stat().st_mode & 0o777) == 0o600
+
 
 # =============================================================================
 # add_transcription

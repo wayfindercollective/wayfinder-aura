@@ -49,11 +49,21 @@
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/main-window.png</image>
     </screenshot>
     <screenshot>
-      <caption>Private local processing — microphone, model, and Local mode</caption>
+      <caption>Private local processing — microphone and audio settings on free tier</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/settings.png</image>
     </screenshot>
-    <!-- Planned store captures (capture recipe: screenshots/README.md):
-         overlay.png, style.png, welcome.png — add when recaptured for Flathub. -->
+    <screenshot>
+      <caption>Live recording status with reactive waveform while you speak</caption>
+      <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/overlay.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Tone-aware cleanup — Minimal, Professional, Casual, Dev, and more</caption>
+      <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/style.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Guided first run — calm three-step welcome tour</caption>
+      <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/welcome.png</image>
+    </screenshot>
   </screenshots>
 
   <url type="homepage">https://github.com/wayfindercollective/wayfinder-aura</url>
@@ -63,8 +73,8 @@
   <content_rating type="oars-1.1" />
 
   <branding>
-    <color type="primary" scheme_preference="dark">#A78BFA</color>
-    <color type="primary" scheme_preference="light">#6D28D9</color>
+    <color type="primary" scheme_preference="dark">#4682DC</color>
+    <color type="primary" scheme_preference="light">#2F6BC4</color>
   </branding>
 
   <categories>

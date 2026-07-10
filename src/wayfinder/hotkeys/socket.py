@@ -51,8 +51,18 @@ def socket_listener(
     # Ensure the socket's parent dir exists (e.g. $XDG_RUNTIME_DIR/wayfinder-aura). The
     # Flatpak manifest also creates it via --filesystem=xdg-run/...:create, but do it here
     # too so a freshly-booted runtime dir and the non-Flatpak path both work.
+    # Same-user host triggers (KDE / Deck R4) connect without a token by design; we only
+    # tighten modes so group/other cannot connect when the parent is more open than 0700.
+    parent = os.path.dirname(SOCKET_PATH)
     try:
-        os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+            # Only chmod the app-owned subdir — never /tmp or raw $XDG_RUNTIME_DIR.
+            if os.path.basename(parent) == "wayfinder-aura":
+                try:
+                    os.chmod(parent, 0o700)
+                except OSError:
+                    pass
     except Exception:
         pass
 
@@ -65,6 +75,12 @@ def socket_listener(
     try:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(SOCKET_PATH)
+        # Owner-only: any same-UID process can still connect (required for host triggers /
+        # Flatpak xdg-run bridge); other UIDs cannot when the parent dir allows traversal.
+        try:
+            os.chmod(SOCKET_PATH, 0o600)
+        except OSError:
+            pass
         server.listen(1)
         server.settimeout(1.0)
         

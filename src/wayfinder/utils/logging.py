@@ -14,21 +14,55 @@ Usage:
 """
 
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
+from wayfinder.utils.fs_security import (
+    ensure_private_dir,
+    owner_only_opener,
+    restrict_owner_only,
+)
+
+
+class OwnerOnlyRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that creates and keeps log files owner-only (0600)."""
+
+    def _open(self):
+        # Create with 0600 at open time (not create-then-chmod race).
+        # Mirror FileHandler._open kwargs + opener=.
+        stream = open(
+            self.baseFilename,
+            self.mode,
+            encoding=self.encoding,
+            errors=self.errors,
+            opener=owner_only_opener,
+        )
+        restrict_owner_only(self.baseFilename)
+        return stream
+
+    def doRollover(self):
+        super().doRollover()
+        # Rollover renames the current file and opens a new one; re-assert modes.
+        try:
+            restrict_owner_only(self.baseFilename)
+            # Rotated sibling: wayfinder.log.1 etc.
+            for i in range(1, (self.backupCount or 0) + 1):
+                rotated = f"{self.baseFilename}.{i}"
+                if os.path.exists(rotated):
+                    restrict_owner_only(rotated)
+        except OSError:
+            pass
+
+
 # XDG Base Directory Specification
 def _get_log_dir() -> Path:
-    """Get the log directory following XDG spec."""
-    import os
-
+    """Get the log directory following XDG spec (owner-only 0700)."""
     cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    
     log_dir = cache_home / "wayfinder-aura" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return log_dir
+    return ensure_private_dir(log_dir)
 
 
 # Default configuration
@@ -84,12 +118,13 @@ def configure_logging(
             log_dir = _get_log_dir()
             log_file = log_dir / "wayfinder.log"
             
-            file_handler = RotatingFileHandler(
+            file_handler = OwnerOnlyRotatingFileHandler(
                 log_file,
                 maxBytes=MAX_LOG_SIZE,
                 backupCount=BACKUP_COUNT,
                 encoding="utf-8",
             )
+            restrict_owner_only(log_file)
             file_handler.setLevel(level)
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)

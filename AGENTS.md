@@ -94,7 +94,7 @@ IDLE ──[hotkey]──► RECORDING ──[hotkey]──► PROCESSING ──
 
 | State | Description | UI Color |
 |-------|-------------|----------|
-| IDLE | Waiting for hotkey | Indigo (#7B8BD9) |
+| IDLE | Waiting for hotkey | Soft brand blue (#5B8FD4) |
 | RECORDING | Capturing audio | Rose (#E8707F) |
 | PROCESSING | Transcribing + LLM | Gold (#E5AC2A) |
 | PASTING | Injecting text | Mint (#5DD4A8) |

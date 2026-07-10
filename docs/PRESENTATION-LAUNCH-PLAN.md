@@ -1,6 +1,6 @@
 # Plan: Wayfinder Aura Pre-Launch Presentation Refinement (v3 — post-Codex R2)
 
-**Status:** Implemented in-tree (2026-07-08) except **live store screenshot recapture** (still manual — recipe in `screenshots/README.md`). Codex review: APPROVED.
+**Status:** Implemented in-tree (2026-07-08), including **5 store screenshots** via `scripts/capture_store_screenshots.py`. Codex review: APPROVED. Web `/aura` + checkout left to product owner.
 
 **Project:** `/var/home/bazzite/Dev/wayfinder-aura`  
 **Goal:** Refine how the app *presents* itself before paid public launch — store surfaces, first-open UX, brand consistency, and conversion copy.  

@@ -114,7 +114,7 @@ class TestConfigDefaultsForUI:
 
         ui_keys = [
             "typing_speed", "output_tone", "strong_mode",
-            "overlay_type", "overlay_scale", "start_minimized",
+            "overlay_type", "overlay_enabled", "overlay_scale", "start_minimized",
             "hotkey_key", "hotkey_modifiers",
             "style_toggle_key", "style_toggle_modifiers",
             "post_processing_enabled", "post_processing_backend",

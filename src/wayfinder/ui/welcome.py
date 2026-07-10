@@ -11,7 +11,7 @@ Two layers:
 
 Design brief: the first five minutes feel guided and calm. One card, three steps,
 dot progress, always skippable, max restraint — matched to the app's design
-language (theme tokens, caps + divider aesthetic, violet accent).
+language (theme tokens, caps + divider aesthetic, blue brand accent).
 
 Injection safety: while the pane is active the app suppresses text injection and
 routes each dictation transcript here via ``receive_transcript`` — the product
@@ -145,17 +145,17 @@ class WelcomePane:
         return "your hotkey"
 
     def _continue_button(self, parent, text, gold=False, command=None):
+        # Primary CTAs use brand blue. ``gold`` kept for call-site compatibility
+        # but no longer switches palette — Ultra gold stays on the paid badge only.
         ctk = self._ctk
-        fg = COLORS["accent_yellow"] if gold else COLORS["accent"]
-        hover = "#F0C04A" if gold else COLORS["accent_hover"]
         btn = ctk.CTkButton(
             parent,
             text=text,
             width=150,
             height=38,
             corner_radius=RADIUS["md"],
-            fg_color=fg,
-            hover_color=hover,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
             text_color=COLORS["bg_base"],
             font=(FONTS["body"][0], FONT_SIZES["body"], "bold"),
             command=command or self._on_continue,

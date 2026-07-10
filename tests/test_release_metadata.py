@@ -568,12 +568,16 @@ def test_metainfo_screenshots_are_local_pngs_with_release_sized_dimensions():
     urls = [image.text or "" for image in metainfo.findall(".//image")]
 
     assert urls, "AppStream metainfo must include screenshots"
+    assert len(urls) == 5, f"expected 5 store screenshots, found {len(urls)}"
+
+    basenames = set()
     for url in urls:
         prefix = "https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/"
         assert url.startswith(prefix)
 
         rel_path = Path(url.removeprefix(prefix))
         assert rel_path.parts[0] == "screenshots"
+        basenames.add(rel_path.name)
         screenshot = REPO / rel_path
         assert screenshot.exists(), f"missing screenshot referenced by metainfo: {rel_path}"
 
@@ -584,20 +588,31 @@ def test_metainfo_screenshots_are_local_pngs_with_release_sized_dimensions():
         assert width >= 1248
         assert height >= 702
 
+    required = {
+        "main-window.png",
+        "settings.png",
+        "overlay.png",
+        "style.png",
+        "welcome.png",
+    }
+    assert required <= basenames, f"missing required screenshots: {required - basenames}"
 
 
-def test_metainfo_branding_is_violet_not_cyan():
-    """Store brand primary must match UI soft-violet (not legacy cyan)."""
+
+def test_metainfo_branding_matches_icon_blue():
+    """Store brand primary must match tray/icon blue (not violet or cyan)."""
     root = ET.parse(FLATPAK_METAINFO).getroot()
     colors = [c.text for c in root.findall(".//branding/color") if c.text]
     assert colors, "AppStream branding colors required"
-    banned = {"#00D4FF", "#0099CC", "#00d4ff", "#0099cc"}
+    banned = {
+        "#00D4FF", "#0099CC", "#00d4ff", "#0099cc",  # legacy cyan
+        "#A78BFA", "#6D28D9", "#a78bfa", "#6d28d9",  # short-lived violet
+    }
     for color in colors:
-        assert color not in banned, f"cyan branding regression: {color}"
-    # Prefer the UI accent family for dark scheme
+        assert color not in banned, f"branding color regression: {color}"
     dark = root.find('.//branding/color[@scheme_preference="dark"]')
     assert dark is not None and dark.text
-    assert dark.text.upper() == "#A78BFA"
+    assert dark.text.upper() == "#4682DC"
 
 
 def test_public_docs_use_ultra_not_premium_tier_name():

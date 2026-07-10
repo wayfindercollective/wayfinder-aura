@@ -2543,8 +2543,13 @@ def get_backend(config: dict) -> PostProcessorBackend:
                   "using minimal cleanup (unlicensed)")
             output_tone = "minimal"
     except Exception as e:
-        # Fail safe: keep the configured backend/tone if gating can't run.
-        print(f"[Post-processing] ⚠ License gate unavailable ({e}) — keeping configured backend")
+        # Fail closed for cloud: never send text to a remote backend when the
+        # license gate cannot run. Local llama.cpp + minimal tone stay available.
+        print(f"[Post-processing] ⚠ License gate unavailable ({e}) — failing closed to local/minimal")
+        if backend_type in CLOUD_BACKENDS:
+            backend_type = "llama_cpp"
+        if output_tone != "minimal":
+            output_tone = "minimal"
 
     if backend_type == "anthropic":
         # API key is read from environment variable only (secure)

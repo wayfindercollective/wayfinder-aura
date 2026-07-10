@@ -66,6 +66,42 @@ class TestConfigLoading:
         assert loaded["threads"] == sample_config["threads"]
         assert loaded["timeout"] == sample_config["timeout"]
 
+    def test_overlay_enabled_is_sticky_across_reload(self, temp_config_dir: Path):
+        """Show Overlay off survives save → next-launch load (sticky preference)."""
+        from wayfinder.config import save_config, load_config, DEFAULT_CONFIG
+
+        cfg = DEFAULT_CONFIG.copy()
+        cfg["overlay_enabled"] = False
+        save_config(cfg)
+
+        reloaded = load_config()
+        assert reloaded["overlay_enabled"] is False
+
+        reloaded["overlay_enabled"] = True
+        save_config(reloaded)
+        assert load_config()["overlay_enabled"] is True
+
+    def test_save_config_is_owner_only(self, temp_config_dir: Path, sample_config: dict):
+        """config.json is written 0600 (may hold API keys)."""
+        from wayfinder.config import save_config, CONFIG_FILE
+
+        save_config(sample_config)
+        assert CONFIG_FILE.exists()
+        assert (CONFIG_FILE.stat().st_mode & 0o777) == 0o600
+
+    def test_load_repairs_config_backup_modes(self, temp_config_dir: Path):
+        """Existing config.json* backups are tightened to 0600 on load."""
+        import json
+        import os
+        from wayfinder.config import load_config, CONFIG_FILE, CONFIG_DIR
+
+        CONFIG_FILE.write_text(json.dumps({"threads": 2}))
+        bak = CONFIG_DIR / "config.json.bak-test"
+        bak.write_text(json.dumps({"groq_api_key": "secret"}))
+        os.chmod(bak, 0o644)
+        load_config()
+        assert (bak.stat().st_mode & 0o777) == 0o600
+
     def test_config_merges_with_defaults(self, temp_config_dir: Path):
         """Test that partial configs merge with defaults."""
         from wayfinder.config import load_config, save_config, DEFAULT_CONFIG, CONFIG_FILE
@@ -226,7 +262,19 @@ class TestStalePathRepair:
 
         monkeypatch.setattr(cfg, "IS_FLATPAK", True)
         monkeypatch.setitem(cfg.DEFAULT_CONFIG, "whisper_binary", "/missing/default/whisper-cli")
-        monkeypatch.setattr(cfg.os.path, "exists", lambda path: path == "/app/bin/whisper-cli")
+        # Path.exists() passes Path objects into os.path.exists — compare as str,
+        # and keep real exists for config/temp paths used by load_config.
+        _real_exists = cfg.os.path.exists
+
+        def _exists(path):
+            s = str(path)
+            if s == "/app/bin/whisper-cli":
+                return True
+            if s.startswith("/app/"):
+                return False
+            return _real_exists(path)
+
+        monkeypatch.setattr(cfg.os.path, "exists", _exists)
         monkeypatch.setattr(cfg.shutil, "which", lambda name: "/app/bin/whisper-cli")
 
         cfg.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)

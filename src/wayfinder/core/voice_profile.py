@@ -153,6 +153,12 @@ class VoiceProfile:
     def _load(self) -> None:
         """Load profile data from disk."""
         if self.profile_file.exists():
+            # Transcript history is sensitive — repair legacy world-readable modes.
+            try:
+                from wayfinder.utils.fs_security import restrict_owner_only
+                restrict_owner_only(self.profile_file)
+            except Exception:
+                pass
             try:
                 with open(self.profile_file, "r") as f:
                     loaded = json.load(f)
@@ -180,12 +186,12 @@ class VoiceProfile:
                     pass
     
     def _save(self) -> None:
-        """Save profile data to disk."""
+        """Save profile data to disk (atomic, owner-only 0600)."""
         try:
+            from wayfinder.utils.fs_security import atomic_write_json
             self.config_dir.mkdir(parents=True, exist_ok=True)
-            with open(self.profile_file, "w") as f:
-                json.dump(self._data, f, indent=2)
-        except IOError as e:
+            atomic_write_json(self.profile_file, self._data, mode=0o600)
+        except (IOError, OSError) as e:
             print(f"[Voice Profile] Warning: Could not save profile: {e}")
     
     def add_transcription(

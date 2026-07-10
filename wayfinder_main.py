@@ -321,24 +321,24 @@ COLORS = {
     "bg_dark": "#0D1117",           # Alias for compatibility
     "bg_surface": "#161B22",        # Sidebar/panels - slightly elevated
     "bg_card": "#1E1E1F",           # Bento tiles - 7% white on bg
-    "bg_hover": "#1E1B26",          # Hover = 10% accent glow (designer spec)
-    "bg_hover_strong": "#3A3758",   # Hover = 25% accent glow — obvious selection (dropdown rows)
+    "bg_hover": "#131C2B",          # Hover = 10% accent glow (blue on deep ink)
+    "bg_hover_strong": "#1B2D48",   # Hover = 25% accent glow — obvious selection (dropdown rows)
     "bg_elevated": "#2D333B",       # Pressed/elevated elements
     "bg_input": "#13171D",          # Input fields - slightly recessed
     
-    # Accent - Soft Violet (desaturated to avoid "vibration")
-    "accent": "#A78BFA",            # Soft Violet - primary accent
-    "accent_cyan": "#A78BFA",       # Alias for compatibility  
-    "accent_glow": "#1E1B26",       # Pre-blended: bg + (A78BFA - bg) * 0.10
-    "accent_hover": "#BEA6FF",      # Lighter on hover
-    "accent_dim": "#9580E8",        # Pressed/active state
-    "accent_bright": "#C4AAFF",     # Bright version for active toggles
+    # Accent - brand blue (matches tray / app icon arrow)
+    "accent": "#4682DC",            # Primary accent — same family as assets/icon.png
+    "accent_cyan": "#4682DC",       # Alias for compatibility
+    "accent_glow": "#131C2B",       # Pre-blended: bg + (4682DC - bg) * 0.10
+    "accent_hover": "#6B9FE8",      # Lighter on hover
+    "accent_dim": "#3A6FC0",        # Pressed/active state
+    "accent_bright": "#7FB0F0",     # Bright version for active toggles
     
-    # Rim light border - 10% violet pre-blended
-    "border_rim": "#1E1B26",        # bg + (A78BFA - bg) * 0.10
+    # Rim light border - 10% blue pre-blended
+    "border_rim": "#131C2B",        # bg + (4682DC - bg) * 0.10
     
     # State colors - muted, sophisticated palette
-    "state_ready": "#7B8BD9",       # Muted indigo - calm ready state
+    "state_ready": "#5B8FD4",       # Soft brand blue — idle/ready (same family as accent)
     "state_recording": "#E8707F",   # Muted rose - warm but not aggressive
     "state_processing": "#E5AC2A",  # Muted gold - warm processing
     "state_typing": "#5DD4A8",      # Muted mint - success/typing
@@ -347,7 +347,7 @@ COLORS = {
     "accent_green": "#5DD4A8",      # Muted mint - success
     "accent_red": "#E8707F",        # Muted rose - recording
     "accent_yellow": "#E5AC2A",     # Muted gold - processing
-    "accent_blue": "#7B8BD9",       # Muted indigo
+    "accent_blue": "#4682DC",       # Brand blue (same as primary accent)
     
     # Text hierarchy - calculated for dark bg readability
     "text_bright": "#F0F0F0",       # Maximum contrast (app title only)
@@ -359,14 +359,14 @@ COLORS = {
     "border": "#2D333B",            # Standard borders
     "border_subtle": "#21262D",     # Subtle borders
     "border_light": "#1A1D24",      # Pre-blended 5% white
-    "border_glow": "#1E1B26",       # Pre-blended 10% violet
+    "border_glow": "#131C2B",       # Pre-blended 10% blue
 
     # Feedback colors (previously scattered as hardcoded one-offs)
     "error": "#CF7B7B",             # Inline error/warning text
     "danger": "#8B3030",            # Destructive buttons (Clear Data, Cancel download)
     "danger_hover": "#A03030",      # Destructive button hover
     "danger_bg_hover": "#3A2020",   # Reddish row-hover tint
-    "success_bg": "#1A2A1A",        # Green-tinted banner background (privacy)
+    "success_bg": "#121A28",        # Soft blue wash for privacy/local banner
     "warning_bg": "#2A1A1A",        # Red-tinted banner background (cloud warning)
 }
 
@@ -395,7 +395,7 @@ SPACING = {
 }
 
 STATE_COLORS = {
-    AppState.IDLE: COLORS["state_ready"],        # Cyan when ready
+    AppState.IDLE: COLORS["state_ready"],        # Soft brand blue when ready
     AppState.RECORDING: COLORS["state_recording"], # Rose when recording
     AppState.PROCESSING: COLORS["state_processing"], # Amber when processing
     AppState.PASTING: COLORS["state_typing"],    # Emerald when typing
@@ -558,7 +558,7 @@ class ConfettiOverlay(ctk.CTkFrame):
             fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["md"],
             border_width=1,
-            border_color=COLORS["accent"],  # brand violet rim
+            border_color=COLORS["accent"],  # brand blue rim
         )
 
         self._destroyed = False
@@ -566,7 +566,7 @@ class ConfettiOverlay(ctk.CTkFrame):
         # Top-center of the main container.
         self.place(relx=0.5, rely=0.06, anchor="n")
 
-        # Title — brand violet
+        # Title — brand blue
         ctk.CTkLabel(
             self,
             text="🎭 caricature mode unlocked",
@@ -825,8 +825,8 @@ class ModeSelector(ctk.CTkFrame):
         
         # Display labels and icons for each mode
         self.display_info = {
-            "local": {"label": "Local", "icon": "🔒", "desc": "100% Private"},
-            "remote": {"label": "Remote", "icon": "☁️", "desc": "Cloud Processing"},
+            "local": {"label": "Local", "icon": "", "desc": "100% Private"},
+            "remote": {"label": "Remote", "icon": "", "desc": "Cloud Processing"},
         }
         
         # Create container with pill background
@@ -851,7 +851,7 @@ class ModeSelector(ctk.CTkFrame):
         # Create buttons
         for i, value in enumerate(self.values):
             info = self.display_info.get(value, {"label": value.title(), "icon": "", "desc": ""})
-            text = f"{info['icon']}  {info['label']}"
+            text = f"{info['icon']}  {info['label']}".strip() if info.get("icon") else info["label"]
             
             is_selected = value == self.current_value
             btn = ctk.CTkButton(
@@ -952,8 +952,9 @@ SETTING_TOOLTIPS = {
     "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
     "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
     "overlay_type": "Choose the status indicator style:\n• Always On: Stays visible, never steals focus (PyQt6)\n• Disappearing: Shows only during recording (CTk)\n⚠️ Requires restart to take effect.",
+    "overlay_enabled": "Show the floating status pill (Listening / Processing / Ready).\nOff = no on-screen pill; system tray + dictation still work.\n⚡ Latency: None",
     "overlay_scale": "Adjust the size of the status overlay.\nSeparate from the main UI scale.\n⚡ Latency: None",
-    "overlay_position": "Slide the overlay up or down on screen.\nNegative = higher, Positive = lower.\n⚡ Latency: None",
+    "overlay_position": "Slide the overlay up or down on screen.\nNegative = higher (up to ~full height), Positive = lower (near/over the panel).\n⚡ Latency: None",
     "prompt": "Initial text that guides transcription style.\n⚡ Latency: None (processed at model load)",
     "language": "The language for transcription. English is most optimized.\n⚡ Latency: None",
     
@@ -1961,7 +1962,12 @@ def resolve_hotkey_backend(platform: str, is_flatpak: bool, dbus_available: bool
     return "evdev"
 
 
-def should_host_qt_tray(platform: str, has_pystray: bool, enable_tray_icon: bool) -> bool:
+def should_host_qt_tray(
+    platform: str,
+    has_pystray: bool,
+    enable_tray_icon: bool,
+    overlay_enabled: bool = True,
+) -> bool:
     """Whether to host the native Qt StatusNotifier tray in the overlay subprocess
     (vs. the in-process pystray tray).
 
@@ -1973,10 +1979,17 @@ def should_host_qt_tray(platform: str, has_pystray: bool, enable_tray_icon: bool
     keeps pystray, which works there, and only falls back to the Qt tray if pystray
     is unavailable. `enable_tray_icon` is the user's "show tray icon" setting.
 
+    When the on-screen pill is off (``overlay_enabled=False``), the main process
+    still starts a **tray-only** overlay subprocess (``--tray-only``) so the Qt
+    tray keeps working. This flag therefore means "prefer Qt tray over pystray",
+    not "visual overlay must be on". The ``overlay_enabled`` argument is kept for
+    call-site compatibility and is not used to suppress the tray.
+
     Kept pure so the desktop-vs-Flatpak-vs-macOS matrix is provable headlessly.
     """
     if not enable_tray_icon:
         return False
+    del overlay_enabled  # reserved; tray-only process covers overlay-off
     if platform == "darwin":
         return not has_pystray
     return True
@@ -2233,95 +2246,13 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
 
 
 def socket_listener(event_queue, stop_event, log_callback=None):
-    """
-    Listen for toggle commands on a Unix socket.
-    This allows KDE shortcuts to trigger recording via a simple script.
-    """
-    def log(msg):
-        if log_callback:
-            try:
-                log_callback(msg)
-            except:
-                pass
-    
-    print("[DEBUG] Socket listener thread starting...", flush=True)
-    
-    # Ensure the socket's parent dir exists (e.g. $XDG_RUNTIME_DIR/wayfinder-aura). The
-    # Flatpak manifest also creates it via --filesystem=xdg-run/...:create, but do it here
-    # too so a freshly-booted runtime dir and the non-Flatpak path both work.
-    try:
-        os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
-    except Exception:
-        pass
+    """Delegate to the package socket listener (single hardened implementation).
 
-    # Remove old socket if exists
-    try:
-        os.unlink(SOCKET_PATH)
-    except FileNotFoundError:
-        pass
-    
-    try:
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(SOCKET_PATH)
-        server.listen(1)
-        server.settimeout(1.0)
-        
-        log(f"📡 Socket listener ready: {SOCKET_PATH}")
-        
-        while not stop_event.is_set():
-            conn = None
-            try:
-                conn, _ = server.accept()
-                data = conn.recv(64)
-                data_str = data.decode("utf-8").strip() if data else ""
-                
-                if data_str == "ping":
-                    conn.sendall(b"pong")
-                elif data_str == "toggle":
-                    log("🎯 Toggle received via socket")
-                    event_queue.put((EventType.HOTKEY_PRESSED, None))
-                elif data_str == "style":
-                    # Cycle to next style
-                    log("✎ Style toggle received via socket")
-                    event_queue.put((EventType.STYLE_TOGGLE, None))
-                elif data_str.startswith("style:"):
-                    # Set specific style (style:professional, style:dev, style:casual, style:personal)
-                    style = data_str.split(":", 1)[1]
-                    log(f"✎ Style set to '{style}' via socket")
-                    event_queue.put((EventType.STYLE_TOGGLE, style))
-                elif data_str == "show":
-                    # Tray "Open" — raise/restore the main window
-                    log("🪟 Show window received via socket")
-                    event_queue.put((EventType.SHOW_WINDOW, None))
-                elif data_str == "reset":
-                    # Tray "Reset" — abort any stuck/in-flight dictation, return to idle
-                    log("🔄 Reset received via socket")
-                    event_queue.put((EventType.FORCE_RESET, None))
-                elif data_str == "quit":
-                    # Tray "Quit" — clean full shutdown
-                    log("👋 Quit received via socket")
-                    event_queue.put((EventType.QUIT_APP, None))
-                elif data_str.startswith("tab:"):
-                    # Dev/verification: switch the main-window tab deterministically
-                    # (used by the screenshot verification loop; harmless in production)
-                    tab_id = data_str.split(":", 1)[1]
-                    event_queue.put((EventType.SWITCH_TAB, tab_id))
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if not stop_event.is_set():
-                    log(f"⚠️ Socket error: {e}")
-            finally:
-                if conn is not None:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-        
-        server.close()
-        os.unlink(SOCKET_PATH)
-    except Exception as e:
-        log(f"⚠️ Socket listener failed: {e}")
+    Legacy body lived here; control-plane chmod / command handling lives in
+    ``wayfinder.hotkeys.socket`` so tests and the live app share one path.
+    """
+    from wayfinder.hotkeys.socket import socket_listener as _package_socket_listener
+    return _package_socket_listener(event_queue, stop_event, log_callback)
 
 
 def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callback=None):
@@ -2642,13 +2573,13 @@ class FloatingIndicator:
         
         self.window.configure(fg_color=shadow_color)
         
-        # Outer frame with violet rim light (pre-blended, no alpha)
+        # Outer frame with blue rim light (pre-blended, no alpha)
         self.glow_frame = ctk.CTkFrame(
             self.window,
             fg_color=shadow_color,
             corner_radius=RADIUS["lg"],  # Squircle feel
             border_width=1,
-            border_color=COLORS["border_rim"],  # Pre-blended 10% violet
+            border_color=COLORS["border_rim"],  # Pre-blended 10% blue
         )
         self.glow_frame.pack(padx=0, pady=0)
         
@@ -3137,12 +3068,23 @@ class OverlayController:
     messages over stdin/stdout.
     """
     
-    def __init__(self, audio_level_callback=None, mode: str = "persistent", initial_style: str = "professional", config: dict | None = None, log_callback=None, want_tray: bool = False):
+    def __init__(
+        self,
+        audio_level_callback=None,
+        mode: str = "persistent",
+        initial_style: str = "professional",
+        config: dict | None = None,
+        log_callback=None,
+        want_tray: bool = False,
+        tray_only: bool = False,
+    ):
         self._process: subprocess.Popen | None = None
         # When True, the overlay subprocess hosts a QSystemTrayIcon (used when the main
         # process has no in-process pystray tray — the Flatpak). tray_available is re-set
         # live from the overlay's ready handshake on each (re)start, so it never goes stale.
-        self.want_tray = want_tray
+        self.want_tray = want_tray or tray_only
+        # tray_only: no on-screen pill — subprocess still runs for StatusNotifier tray.
+        self.tray_only = tray_only
         self.tray_available = False
         self._audio_level_callback = audio_level_callback
         self._audio_poll_thread: threading.Thread | None = None
@@ -3174,11 +3116,11 @@ class OverlayController:
             # handshake below, so it can't go stale across a refresh()/health-check restart.
             self.tray_available = False
 
-            # Clean up any stale overlay processes before starting a new one
+            # Clean up any stale overlay we previously tracked (pidfile + uid/path check).
             try:
-                subprocess.run(["pkill", "-9", "-f", "overlay.py"], 
-                              capture_output=True, timeout=1)
-            except:
+                from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
+                kill_stale_overlay_from_pidfile()
+            except Exception:
                 pass
             
             try:
@@ -3208,7 +3150,9 @@ class OverlayController:
                 ]
                 if self.want_tray:
                     cmd_args.append("--tray")
-                if self._config_ref:
+                if self.tray_only:
+                    cmd_args.append("--tray-only")
+                if self._config_ref and not self.tray_only:
                     scale = self._config_ref.get("overlay_scale", 0.7)
                     offset = self._config_ref.get("overlay_vertical_offset", 0)
                     anchor = self._config_ref.get("overlay_anchor", "bottom-center")
@@ -3225,6 +3169,11 @@ class OverlayController:
                     text=True,
                     bufsize=1,  # Line buffered
                 )
+                try:
+                    from wayfinder.utils.overlay_process import write_overlay_pidfile
+                    write_overlay_pidfile(self._process.pid)
+                except Exception:
+                    pass
                 
                 # Wait for ready signal with timeout
                 import select
@@ -3393,8 +3342,17 @@ class OverlayController:
         # Use timeout on lock to avoid deadlock
         acquired = self._lock.acquire(timeout=1.0)
         if not acquired:
-            # Lock stuck - force kill via pkill
-            subprocess.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
+            # Lock stuck — kill tracked process / verified pidfile only (never pattern pkill).
+            try:
+                from wayfinder.utils.overlay_process import (
+                    kill_stale_overlay_from_pidfile,
+                    kill_tracked_process,
+                )
+                kill_tracked_process(self._process)
+                kill_stale_overlay_from_pidfile()
+            except Exception:
+                pass
+            self._process = None
             return
         
         try:
@@ -3405,9 +3363,14 @@ class OverlayController:
                     self._process.kill()
                     try:
                         self._process.wait(timeout=0.5)
-                    except:
+                    except Exception:
                         pass
                 self._process = None
+            try:
+                from wayfinder.utils.overlay_process import clear_overlay_pidfile
+                clear_overlay_pidfile()
+            except Exception:
+                pass
         finally:
             self._lock.release()
     
@@ -3418,8 +3381,16 @@ class OverlayController:
         # Use timeout on lock to avoid deadlock
         acquired = self._lock.acquire(timeout=0.5)
         if not acquired:
-            # Lock stuck - force kill via pkill
-            subprocess.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
+            try:
+                from wayfinder.utils.overlay_process import (
+                    kill_stale_overlay_from_pidfile,
+                    kill_tracked_process,
+                )
+                kill_tracked_process(self._process)
+                kill_stale_overlay_from_pidfile()
+            except Exception:
+                pass
+            self._process = None
             return
         
         try:
@@ -3434,14 +3405,17 @@ class OverlayController:
                     try:
                         self._process.kill()
                         self._process.wait(timeout=0.3)
-                    except:
-                        # Last resort: use pkill
-                        import os
+                    except Exception:
                         try:
                             os.kill(pid, 9)
-                        except:
+                        except OSError:
                             pass
                 self._process = None
+            try:
+                from wayfinder.utils.overlay_process import clear_overlay_pidfile
+                clear_overlay_pidfile()
+            except Exception:
+                pass
         finally:
             self._lock.release()
     
@@ -3491,8 +3465,17 @@ class OverlayController:
             finally:
                 self._lock.release()
         else:
-            # Lock stuck - force kill via pkill
-            subprocess.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
+            # Lock stuck — kill tracked process / verified pidfile only.
+            try:
+                from wayfinder.utils.overlay_process import (
+                    kill_stale_overlay_from_pidfile,
+                    kill_tracked_process,
+                )
+                kill_tracked_process(self._process)
+                kill_stale_overlay_from_pidfile()
+            except Exception:
+                pass
+            self._process = None
         
         # Give compositor a moment to clean up the old window
         time.sleep(0.2)
@@ -3769,6 +3752,7 @@ class WayfinderApp(ctk.CTk):
         
         # Check which overlay type to use
         overlay_type = self.config.get("overlay_type", "always_on")
+        overlay_enabled = bool(self.config.get("overlay_enabled", True))
 
         # In frozen builds, sys.executable is the app binary, not Python —
         # launching overlay.py this way would relaunch the entire app.
@@ -3776,60 +3760,72 @@ class WayfinderApp(ctk.CTk):
         if getattr(sys, 'frozen', False):
             overlay_type = "disappearing"
 
-        if getattr(self, "_game_mode", False):
-            # Game Mode: neither the PyQt overlay nor the CTk indicator can render over a
-            # fullscreen gamescope game — feedback is audio cues only (feedback/audio.py).
-            self._use_pyqt_overlay = False
-            self.overlay_controller = None
-            self.log("🎮 Game Mode: visual overlay disabled (audio cues only)")
-        elif overlay_type == "always_on":
-            # Use PyQt6 overlay (always on, no focus steal)
+        self._use_pyqt_overlay = False
+        self.overlay_controller = None
+        self.indicator = None
+        want_tray = should_host_qt_tray(
+            sys.platform,
+            HAS_PYSTRAY,
+            self.config.get("enable_tray_icon", True),
+        )
+        want_visual = overlay_enabled and not getattr(self, "_game_mode", False)
+        initial_style = self.config.get("output_tone", "professional")
+
+        def _start_overlay_controller(*, tray_only: bool) -> bool:
+            """Start Always On / tray-only subprocess. Returns True on success."""
             try:
-                import PyQt6
-                initial_style = self.config.get("output_tone", "professional")
-                self.overlay_controller = OverlayController(
-                    audio_level_callback=get_audio_level,
-                    mode="persistent",  # Always use persistent mode for always_on
-                    initial_style=initial_style,
-                    config=self.config,
-                    log_callback=self.log,
-                    # Host the native Qt StatusNotifier tray in the overlay subprocess on
-                    # Linux (desktop AND Flatpak) — reliable on KDE Plasma / GNOME. pystray's
-                    # libappindicator menu renders but its clicks don't dispatch on Plasma 6,
-                    # so we retire it on Linux (setup_tray mirrors this). macOS keeps pystray.
-                    want_tray=should_host_qt_tray(
-                        sys.platform, HAS_PYSTRAY,
-                        self.config.get("enable_tray_icon", True)),
-                )
-                self._use_pyqt_overlay = True
-                self.log(f"✨ Using Always On indicator (PyQt6)")
-                # Pre-start the subprocess to avoid focus steal
-                self.overlay_controller._start_process()
-                # Apply saved overlay scale and position
+                import PyQt6  # noqa: F401
+            except ImportError:
+                return False
+            self.overlay_controller = OverlayController(
+                audio_level_callback=get_audio_level,
+                mode="persistent",
+                initial_style=initial_style,
+                config=self.config,
+                log_callback=self.log,
+                want_tray=want_tray or tray_only,
+                tray_only=tray_only,
+            )
+            self.overlay_controller._start_process()
+            if not tray_only:
                 overlay_scale = self.config.get("overlay_scale", 1.0)
                 if overlay_scale != 1.0:
                     self.overlay_controller.set_scale(overlay_scale)
                 overlay_offset = self.config.get("overlay_vertical_offset", 0)
                 if overlay_offset != 0:
                     self.overlay_controller.set_vertical_offset(overlay_offset)
-            except ImportError:
-                self._use_pyqt_overlay = False
+            return True
+
+        if getattr(self, "_game_mode", False):
+            # Game Mode: neither the PyQt overlay nor the CTk indicator can render over a
+            # fullscreen gamescope game — feedback is audio cues only (feedback/audio.py).
+            self.log("🎮 Game Mode: visual overlay disabled (audio cues only)")
+        elif want_visual and overlay_type == "always_on":
+            if _start_overlay_controller(tray_only=False):
+                self._use_pyqt_overlay = True
+                self.log("✨ Using Always On indicator (PyQt6)")
+            else:
                 self.log("⚠ PyQt6 not available, using Disappearing indicator")
+        elif want_visual:
+            self.log("✨ Using Disappearing indicator (CTk)")
         else:
-            # Use CTk FloatingIndicator (disappearing)
-            self._use_pyqt_overlay = False
-            self.log(f"✨ Using Disappearing indicator (CTk)")
-        
-        # Only create CTk indicator if NOT using PyQt overlay AND not in Game Mode
-        # (the CTk indicator also can't render over a fullscreen game).
-        if not self._use_pyqt_overlay and not getattr(self, "_game_mode", False):
+            self.log("🙈 Status overlay off (no on-screen pill)")
+
+        # No visual Always On pill, but Linux still needs the Qt tray process.
+        if want_tray and self.overlay_controller is None:
+            if _start_overlay_controller(tray_only=True):
+                self.log("📌 System tray active (no on-screen overlay)")
+            else:
+                self.log("⚠ Could not start tray-only process — falling back if pystray works")
+
+        # CTk floating pill only when we want a visual overlay and aren't using PyQt.
+        if want_visual and not self._use_pyqt_overlay:
             self.indicator = FloatingIndicator(
                 self,
                 target_fps=self.config.get("indicator_fps", 0),
-                audio_level_callback=get_audio_level
+                audio_level_callback=get_audio_level,
             )
-        else:
-            self.indicator = None
+
         self.setup_tray()
         self.setup_ui()
         self.setup_scaling_shortcuts()
@@ -3842,6 +3838,8 @@ class WayfinderApp(ctk.CTk):
             self.log("🎯 Overlay: PyQt6 glassmorphic (60 Hz)")
         elif self.indicator:
             self.log(f"🎯 Indicator refresh: {self.indicator.get_fps_info()}")
+        elif not overlay_enabled:
+            self.log("🎯 Overlay: off")
         self.log(f"🎬 Animation refresh: {self._target_fps} Hz (monitor sync)")
         
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
@@ -3919,10 +3917,22 @@ class WayfinderApp(ctk.CTk):
             window_x = screen_w // 2
             window_y = top_panel
         
-        # Clamp to usable area
-        window_h = min(window_h, usable_h)
-        window_w = min(window_w, screen_w - 40)
-        
+        # Clamp to usable area. A previous session can save multi-monitor /
+        # oversize geometry (e.g. 3800×2016) that leaves the window unusable on
+        # the current display — reset to a sane default if so.
+        max_w = max(360, screen_w - 40)
+        max_h = max(500, usable_h)
+        if window_w > max_w * 1.05 or window_h > max_h * 1.05 or window_w < 300 or window_h < 400:
+            window_w = min(max(520, screen_w // 2), max_w)
+            window_h = min(max(720, int(usable_h * 0.85)), max_h)
+            window_x = max(0, (screen_w - window_w) // 2)
+            window_y = top_panel + max(0, (usable_h - window_h) // 2)
+        else:
+            window_h = min(window_h, max_h)
+            window_w = min(window_w, max_w)
+            window_x = max(0, min(window_x if window_x is not None else 0, screen_w - 80))
+            window_y = max(0, min(window_y if window_y is not None else top_panel, screen_h - 80))
+
         # Apply geometry
         self.geometry(f"{window_w}x{window_h}+{window_x}+{window_y}")
         
@@ -4864,7 +4874,7 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"],
             border_width=1,
-            border_color=COLORS["border_rim"],  # pre-blended 10% violet rim (resting depth)
+            border_color=COLORS["border_rim"],  # pre-blended 10% blue rim (resting depth)
         )
         self.hero_frame.pack(fill="x", pady=(0, 12))
         
@@ -5218,12 +5228,12 @@ class WayfinderApp(ctk.CTk):
         self.tab_buttons = {}
         self.tab_colors = {}
 
-        # One accent for active nav (the brand violet) — the old per-tab candy
+        # One accent for active nav (the brand blue) — the old per-tab candy
         # colors (lavender/zinc/pink/mint) read as four unrelated highlights
         # instead of a design system.
         # Line icons (neutral tint) replace the old unicode glyphs. CTkButton
         # can't swap image color per active-state, so all four keep the quiet
-        # text_secondary tint; the active tab only recolors its text (violet).
+        # text_secondary tint; the active tab only recolors its text (blue).
         tabs = [
             ("dictate", "audio-waveform", "Dictate"),
             ("settings", "settings-2", "Settings"),
@@ -5472,7 +5482,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             header,
-            text="✎   L A S T   T R A N S C R I P T I O N",
+            text="LAST TRANSCRIPTION",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -5668,7 +5678,7 @@ class WayfinderApp(ctk.CTk):
         audio_header = ctk.CTkFrame(audio_tile, fg_color="transparent")
         audio_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            audio_header, text="🎤   A U D I O",
+            audio_header, text="AUDIO",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -5730,7 +5740,7 @@ class WayfinderApp(ctk.CTk):
         mode_header = ctk.CTkFrame(mode_tile, fg_color="transparent")
         mode_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            mode_header, text="🧠   P R O C E S S I N G   M O D E",
+            mode_header, text="PROCESSING MODE",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -5766,7 +5776,7 @@ class WayfinderApp(ctk.CTk):
         system_header = ctk.CTkFrame(system_tile, fg_color="transparent")
         system_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            system_header, text="⚙️   S Y S T E M",
+            system_header, text="SYSTEM",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -5872,13 +5882,16 @@ class WayfinderApp(ctk.CTk):
         overlay_header = ctk.CTkFrame(overlay_tile, fg_color="transparent")
         overlay_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            overlay_header, text="🔔   S T A T U S   O V E R L A Y",
+            overlay_header, text="STATUS OVERLAY",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
         
         overlay_content = ctk.CTkFrame(overlay_tile, fg_color="transparent")
         overlay_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
+
+        # Master on/off for the floating status pill (applies live).
+        self._create_overlay_enabled_toggle_row(overlay_content)
         
         # Overlay Type dropdown
         overlay_type = self.config.get("overlay_type", "always_on")
@@ -5960,7 +5973,7 @@ class WayfinderApp(ctk.CTk):
         benchmark_header = ctk.CTkFrame(benchmark_tile, fg_color="transparent")
         benchmark_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            benchmark_header, text="⏱️   B E N C H M A R K",
+            benchmark_header, text="BENCHMARK",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -6742,7 +6755,7 @@ class WayfinderApp(ctk.CTk):
                 if hasattr(self, 'api_benchmark_btn') and self.api_benchmark_btn.winfo_exists():
                     self.api_benchmark_btn.configure(
                         state="normal",
-                        text="☁️ Test API Latency",
+                        text="Test API Latency",
                         fg_color=COLORS["accent"],
                     )
             except Exception as e:
@@ -6891,9 +6904,9 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             privacy_frame,
-            text="🔒  100% Private — All processing happens on your device",
+            text="100% Private — All processing happens on your device",
             font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["accent_green"],
+            text_color=COLORS["state_ready"],
         ).pack(padx=12, pady=8)
         
         # Whisper Model
@@ -6990,7 +7003,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             warning_frame,
-            text="☁️  Audio recordings will be sent to cloud for transcription",
+            text="Audio recordings will be sent to cloud for transcription",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["error"],
         ).pack(padx=12, pady=8)
@@ -7002,18 +7015,18 @@ class WayfinderApp(ctk.CTk):
         
         # Map backend IDs to display names
         self._remote_provider_map = {
-            "⚡ Groq (Fast)": "groq_whisper",
-            "☁️ OpenAI": "openai_whisper",
+            "Groq (Fast)": "groq_whisper",
+            "OpenAI": "openai_whisper",
         }
         self._remote_provider_reverse = {v: k for k, v in self._remote_provider_map.items()}
-        display_value = self._remote_provider_reverse.get(current_backend, "⚡ Groq (Fast)")
+        display_value = self._remote_provider_reverse.get(current_backend, "Groq (Fast)")
         
         self.remote_provider_var = ctk.StringVar(value=display_value)
         self.remote_provider_dropdown = self.create_dropdown_row(
             parent, "Provider",
-            ["⚡ Groq (Fast)", "☁️ OpenAI"],
+            ["Groq (Fast)", "OpenAI"],
             self.remote_provider_var, self._on_remote_provider_changed,
-            tooltip="⚡ Groq: Ultra-fast (~0.3s for 10s audio), free tier available\n☁️ OpenAI: Reliable, per-minute billing",
+            tooltip="Groq: Ultra-fast (~0.3s for 10s audio), free tier available\nOpenAI: Reliable, per-minute billing",
             width=160,
         )
         
@@ -7051,7 +7064,7 @@ class WayfinderApp(ctk.CTk):
         provider_name = "Groq" if current_backend == "groq_whisper" else "OpenAI"
         self.remote_info_label = ctk.CTkLabel(
             self.remote_info_frame,
-            text=f"ℹ️  No local model needed — transcription runs on {provider_name} servers",
+            text=f"No local model needed — transcription runs on {provider_name} servers",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         )
@@ -7061,7 +7074,7 @@ class WayfinderApp(ctk.CTk):
         benchmark_header = ctk.CTkFrame(parent, fg_color="transparent")
         benchmark_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(16, 8))
         ctk.CTkLabel(
-            benchmark_header, text="⏱️   B E N C H M A R K",
+            benchmark_header, text="BENCHMARK",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -7077,7 +7090,7 @@ class WayfinderApp(ctk.CTk):
         
         self.api_benchmark_btn = ctk.CTkButton(
             btn_row,
-            text="☁️ Test API Latency",
+            text="Test API Latency",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=40,
             width=180,
@@ -7101,7 +7114,7 @@ class WayfinderApp(ctk.CTk):
         postproc_header = ctk.CTkFrame(parent, fg_color="transparent")
         postproc_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(16, 8))
         ctk.CTkLabel(
-            postproc_header, text="🎨   P O S T - P R O C E S S I N G",
+            postproc_header, text="POST-PROCESSING",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -7177,7 +7190,7 @@ class WayfinderApp(ctk.CTk):
         provider_name = "Groq" if backend_id == "groq_whisper" else "OpenAI"
         if hasattr(self, "remote_info_label"):
             self.remote_info_label.configure(
-                text=f"ℹ️  No local model needed — transcription runs on {provider_name} servers"
+                text=f"No local model needed — transcription runs on {provider_name} servers"
             )
         
         # Update API status
@@ -7354,7 +7367,7 @@ class WayfinderApp(ctk.CTk):
         tone_header = ctk.CTkFrame(tone_tile, fg_color="transparent")
         tone_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            tone_header, text="✎   O U T P U T   S T Y L E",
+            tone_header, text="OUTPUT STYLE",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -7567,7 +7580,7 @@ class WayfinderApp(ctk.CTk):
         hotkey_header = ctk.CTkFrame(hotkey_tile, fg_color="transparent")
         hotkey_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
         ctk.CTkLabel(
-            hotkey_header, text="⌨   S T Y L E   T O G G L E   H O T K E Y",
+            hotkey_header, text="STYLE TOGGLE HOTKEY",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -7973,7 +7986,7 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         # Update the floating always-on overlay pill (send_command already swallows errors).
-        if getattr(self, "_use_pyqt_overlay", False) and getattr(self, "overlay_controller", None):
+        if getattr(self, "overlay_controller", None) and (getattr(self, "_use_pyqt_overlay", False) or getattr(getattr(self, "overlay_controller", None), "tray_only", False)):
             self.overlay_controller.send_command({"cmd": "style", "value": tone_id})
 
     def _set_output_style(self, tone_id: str) -> None:
@@ -8039,6 +8052,165 @@ class WayfinderApp(ctk.CTk):
 
         # Update compatibility check
         self._update_compatibility_banner()
+
+    def _create_overlay_enabled_toggle_row(self, parent) -> None:
+        """Master switch for the floating status pill. On = show overlay (default)."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=(2, 6))
+        ctk.CTkLabel(
+            row, text="Show Overlay",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        self.overlay_enabled_var = ctk.BooleanVar(
+            value=bool(self.config.get("overlay_enabled", True))
+        )
+        toggle = ctk.CTkSwitch(
+            row, text="",
+            variable=self.overlay_enabled_var,
+            command=self._on_overlay_enabled_toggled,
+            width=40, height=22, switch_width=36, switch_height=18, corner_radius=9,  # pill: height/2, intentional off-token
+            fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"], button_hover_color=COLORS["text_bright"],
+        )
+        toggle.pack(side="right")
+        ToolTip(
+            row,
+            SETTING_TOOLTIPS.get(
+                "overlay_enabled",
+                "Show the floating status pill. Off = no on-screen overlay.",
+            ),
+        )
+
+    def _audio_level_for_overlay(self):
+        """Shared audio-level callback for the Always On overlay (live or startup)."""
+        try:
+            if hasattr(self, "chunked_recorder") and self.chunked_recorder and self.chunked_recorder.is_recording():
+                return self.chunked_recorder.get_audio_level()
+            if hasattr(self, "recorder") and self.recorder and self.recorder.is_recording():
+                return self.recorder.get_audio_level()
+        except Exception:
+            pass
+        return 0.0
+
+    def _stop_overlay_process(self) -> bool:
+        """Stop CTk indicator + PyQt overlay/tray process. Returns prior want_tray."""
+        want_tray = False
+        try:
+            if getattr(self, "indicator", None) is not None:
+                self.indicator.hide()
+                self.indicator = None
+        except Exception:
+            pass
+        try:
+            if getattr(self, "overlay_controller", None) is not None:
+                want_tray = bool(self.overlay_controller.want_tray)
+                self.overlay_controller.stop()
+                self.overlay_controller = None
+        except Exception as e:
+            self.log(f"⚠ Could not stop overlay: {e}")
+        self._use_pyqt_overlay = False
+        return want_tray
+
+    def _start_live_overlay_controller(self, *, tray_only: bool, want_tray: bool) -> bool:
+        """Start Always On / tray-only subprocess mid-session. Returns True on success."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            return False
+        try:
+            self.overlay_controller = OverlayController(
+                audio_level_callback=None if tray_only else self._audio_level_for_overlay,
+                mode="persistent",
+                initial_style=self.config.get("output_tone", "professional"),
+                config=self.config,
+                log_callback=self.log,
+                want_tray=want_tray or tray_only,
+                tray_only=tray_only,
+            )
+            if not self.overlay_controller._start_process():
+                self.overlay_controller = None
+                return False
+            if not tray_only:
+                self._use_pyqt_overlay = True
+                scale = self.config.get("overlay_scale", 1.0)
+                if scale != 1.0:
+                    self.overlay_controller.set_scale(scale)
+                offset = self.config.get("overlay_vertical_offset", 0)
+                if offset != 0:
+                    self.overlay_controller.set_vertical_offset(offset)
+                anchor = self.config.get("overlay_anchor", "bottom-center")
+                if anchor and anchor != "bottom-center":
+                    self.overlay_controller.set_anchor(anchor)
+                quality = self.config.get("overlay_quality", "high")
+                if quality:
+                    self.overlay_controller.set_quality(quality)
+                # Match current dictation state so the pill isn't stuck "Ready".
+                try:
+                    st = getattr(self, "app_state", None)
+                    if st is not None and hasattr(st, "name"):
+                        name = st.name
+                        if name == "RECORDING":
+                            self.overlay_controller.show("listening")
+                        elif name == "PROCESSING":
+                            self.overlay_controller.show("processing")
+                        else:
+                            self.overlay_controller.show("ready")
+                    else:
+                        self.overlay_controller.show("ready")
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            self.log(f"⚠ Overlay start failed: {e}")
+            self.overlay_controller = None
+            self._use_pyqt_overlay = False
+            return False
+
+    def _on_overlay_enabled_toggled(self) -> None:
+        """Persist Show Overlay and apply immediately — no app restart required.
+
+        Off: stop the visual pill, keep a tray-only process for the system tray.
+        On: stop tray-only (if any), start the full Always On pill + tray (or CTk pill).
+        """
+        enabled = bool(self.overlay_enabled_var.get())
+        self.config["overlay_enabled"] = enabled
+        save_config(self.config)
+
+        want_tray = should_host_qt_tray(
+            sys.platform, HAS_PYSTRAY, self.config.get("enable_tray_icon", True)
+        )
+        # Stop whatever is running first so StatusNotifier tray ownership stays single.
+        prior_tray = self._stop_overlay_process()
+        want_tray = want_tray or prior_tray
+        overlay_type = self.config.get("overlay_type", "always_on")
+
+        if not enabled:
+            if want_tray and self._start_live_overlay_controller(tray_only=True, want_tray=True):
+                self.log("🙈 Status overlay off — system tray still active")
+            else:
+                self.log("🙈 Status overlay off")
+            return
+
+        # Visual on — Always On (PyQt) preferred; CTk disappearing otherwise.
+        if overlay_type == "always_on":
+            if self._start_live_overlay_controller(tray_only=False, want_tray=want_tray):
+                self.log("✨ Status overlay on")
+                return
+            self.log("⚠ PyQt6 unavailable — using Disappearing indicator")
+
+        # Disappearing CTk pill (+ optional tray-only process for Linux tray).
+        try:
+            self.indicator = FloatingIndicator(
+                self,
+                target_fps=self.config.get("indicator_fps", 0),
+                audio_level_callback=self._audio_level_for_overlay,
+            )
+        except Exception as e:
+            self.log(f"⚠ Could not start Disappearing indicator: {e}")
+        if want_tray and self.overlay_controller is None:
+            self._start_live_overlay_controller(tray_only=True, want_tray=True)
+        self.log("✨ Status overlay on (Disappearing)")
 
     def _create_overlay_quality_toggle_row(self, parent) -> None:
         """Inline toggle row for overlay render quality (label + CTkSwitch). On = High."""
@@ -8161,7 +8333,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             header,
-            text="📜   A C T I V I T Y   L O G",
+            text="ACTIVITY LOG",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -8226,7 +8398,7 @@ class WayfinderApp(ctk.CTk):
         # Do NOT overwrite them here!
     
     def _draw_gradient_bg(self, event=None):
-        """Draw ambient gradient - GitHub Dark base with violet warmth."""
+        """Draw ambient gradient - GitHub Dark base with blue warmth."""
         # Skip when window is not visible
         try:
             if self.state() in ("iconic", "withdrawn"):
@@ -8247,7 +8419,7 @@ class WayfinderApp(ctk.CTk):
             # Base color - GitHub Dark (#0D1117)
             base_r, base_g, base_b = 13, 17, 23
 
-            # Subtle violet glow - 10% accent blend for depth
+            # Subtle blue glow - 10% accent blend for depth
             glow_r, glow_g, glow_b = 25, 22, 35
 
             # Create ultra-subtle radial gradient (ambient light, not spotlight)
@@ -9615,7 +9787,7 @@ class WayfinderApp(ctk.CTk):
     def _start_overlay_health_check(self) -> None:
         """Start periodic health check for the overlay subprocess."""
         def check_health():
-            if self._use_pyqt_overlay and self.overlay_controller:
+            if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
                 if not self.overlay_controller.is_healthy():
                     self.log("🔄 Overlay process died - restarting...")
                     self.overlay_controller.refresh()
@@ -9682,7 +9854,7 @@ class WayfinderApp(ctk.CTk):
         
         Refreshes the overlay to ensure it's visible and properly positioned.
         """
-        if self._use_pyqt_overlay and self.overlay_controller:
+        if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
             self.log("🌅 Display woke up - refreshing overlay...")
             if self.overlay_controller.refresh():
                 self.log("✓ Overlay refreshed successfully")
@@ -10484,10 +10656,14 @@ class WayfinderApp(ctk.CTk):
                 150, lambda: self._apply_overlay_position(value)
             )
 
+        # Asymmetric range: negative moves the pill up the screen (needs hundreds of
+        # px to reach the middle/top on 1080p+), positive only has ~panel-height of
+        # useful travel before the screen-bottom clamp (old ±200 left a huge dead
+        # zone above +60 and barely climbed at −200).
         self.overlay_position_slider = ctk.CTkSlider(
             row,
-            from_=-200,
-            to=200,
+            from_=-900,
+            to=120,
             variable=self.overlay_position_slider_var,
             command=on_position_slider_change,
             height=18,
@@ -10664,12 +10840,13 @@ class WayfinderApp(ctk.CTk):
         if value == old_value:
             return  # No change
         
-        # Kill any running overlay processes
-        import subprocess as sp
+        # Kill tracked overlay (pidfile / controller) — never pattern pkill.
         try:
-            sp.run(["pkill", "-9", "-f", "overlay.py"], 
-                   capture_output=True, timeout=2)
-        except:
+            if getattr(self, "overlay_controller", None):
+                self.overlay_controller.stop()
+            from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
+            kill_stale_overlay_from_pidfile()
+        except Exception:
             pass
         
         self.log("  ℹ️ Restart the app to apply the change")
@@ -10860,15 +11037,14 @@ class WayfinderApp(ctk.CTk):
 
     def _restart_for_overlay_change(self):
         """Kill the overlay and re-exec the app to apply a status-indicator change."""
-        # Kill overlay and restart
-        import subprocess as sp
         import sys
         try:
-            sp.run(["pkill", "-9", "-f", "overlay.py"], capture_output=True, timeout=1)
-        except:
+            if getattr(self, "overlay_controller", None):
+                self.overlay_controller.stop()
+            from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
+            kill_stale_overlay_from_pidfile()
+        except Exception:
             pass
-        # Restart the app
-        import os
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def clear_log(self):
@@ -12539,8 +12715,18 @@ class WayfinderApp(ctk.CTk):
         # (see OverlayController above): pystray's libappindicator backend renders a menu on
         # KDE Plasma 6 but its click activations don't dispatch, so every menu item is a
         # no-op. Skip pystray there so there's exactly one, working tray. macOS keeps pystray.
-        if should_host_qt_tray(sys.platform, HAS_PYSTRAY,
-                               self.config.get("enable_tray_icon", True)):
+        # Prefer the Qt StatusNotifier tray hosted by OverlayController (visual or
+        # tray-only). Only fall through to pystray when that process is not running.
+        ctrl = getattr(self, "overlay_controller", None)
+        if (
+            ctrl is not None
+            and getattr(ctrl, "want_tray", False)
+            and should_host_qt_tray(
+                sys.platform,
+                HAS_PYSTRAY,
+                self.config.get("enable_tray_icon", True),
+            )
+        ):
             self.tray_icon = None
             return
         # Skip entirely if pystray couldn't import its tray backend (sandbox / no AppIndicator).
@@ -12607,21 +12793,27 @@ class WayfinderApp(ctk.CTk):
         Clean cursor/pointer arrow shape. Color indicates state.
         Recording state has a "drawing" animation that traces the arrow outline.
         """
-        size = 64
-        
+        # 128px @ 2× the 64 design grid — larger/sharper on HiDPI trays (matches tray_icon.py).
+        size = 128
+        design = 64
+        sc = size / float(design)
+
         # Create transparent background
         icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(icon)
-        
-        # Arrow points (30° rotated symmetric arrow)
-        arrow_points = [
-            (42, 15),   # 0: Tip (upper-right)
-            (34, 56),   # 1: Right corner
-            (30, 44),   # 2: Inner right (notch start)
-            (24, 46),   # 3: Notch bottom
-            (23, 40),   # 4: Inner left (notch end)
-            (10, 42),   # 5: Left corner
+
+        # Arrow points on the 64 design grid, scaled up (glyph fills ~90% of the slot).
+        # Keep index order identical to tray_icon._ARROW / recording trace.
+        _arrow_design = [
+            (55, 3),    # 0: Tip (upper-right)
+            (43, 61),   # 1: Right corner
+            (38, 44),   # 2: Inner right (notch start)
+            (29, 47),   # 3: Notch bottom
+            (28, 38),   # 4: Inner left (notch end)
+            (9, 41),    # 5: Left corner
         ]
+        arrow_points = [(int(x * sc), int(y * sc)) for x, y in _arrow_design]
+        stroke_w = max(3, int(5 * sc))
         
         if state == AppState.RECORDING:
             # Red color for recording
@@ -12649,7 +12841,7 @@ class WayfinderApp(ctk.CTk):
                 for i, (start, end) in enumerate(segments):
                     if i < int(segments_to_draw):
                         # Draw complete segment
-                        draw.line([start, end], fill=glyph_color, width=4)
+                        draw.line([start, end], fill=glyph_color, width=stroke_w)
                     elif i < segments_to_draw:
                         # Partial segment - interpolate endpoint
                         frac = segments_to_draw - int(segments_to_draw)
@@ -12657,7 +12849,7 @@ class WayfinderApp(ctk.CTk):
                             int(start[0] + (end[0] - start[0]) * frac),
                             int(start[1] + (end[1] - start[1]) * frac)
                         )
-                        draw.line([start, partial_end], fill=glyph_color, width=4)
+                        draw.line([start, partial_end], fill=glyph_color, width=stroke_w)
             else:
                 # Fill phase: show complete filled arrow
                 draw.polygon(arrow_points, fill=glyph_color)
@@ -12669,8 +12861,7 @@ class WayfinderApp(ctk.CTk):
             glyph_color = (93, 212, 168, 255)
             draw.polygon(arrow_points, fill=glyph_color)
         else:  # IDLE
-            # Idle arrow keeps the LOGO BLUE — user's call (2026-07-02): the tray
-            # indicator should match the blue taskbar/app icon, not the in-app violet.
+            # Idle arrow = brand blue (#4682DC) — matches tray, app icon, and UI accent.
             # It flips red while recording / gold while processing / green while
             # pasting (those states unchanged). Kept identical to
             # src/wayfinder/ui/tray_icon.py so both tray renderers match.
@@ -12748,9 +12939,26 @@ class WayfinderApp(ctk.CTk):
         self.after(0, self._show_window)
 
     def _show_window(self):
-        self.deiconify()
-        self.lift()
-        self.focus_force()
+        """Raise the main window (tray Open / second-launch SHOW).
+
+        Wayland often ignores a bare lift(); flash topmost + focus_force so the
+        user actually sees the window when they re-launch from the app menu.
+        """
+        try:
+            self.deiconify()
+        except Exception:
+            pass
+        try:
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+        # Brief topmost pulse — helps on KDE/Wayland when the window was withdrawn.
+        try:
+            self.attributes("-topmost", True)
+            self.after(200, lambda: self.attributes("-topmost", False))
+        except Exception:
+            pass
 
     def hide_to_tray(self):
         # Only withdraw (fully hide) if there's a tray surface to restore the window from —
@@ -12815,11 +13023,11 @@ class WayfinderApp(ctk.CTk):
         # Give a moment for cleanup to complete
         time.sleep(0.2)
         
-        # Force kill any remaining overlay processes as safety net
+        # Safety net: only the verified overlay pidfile / tracked process
         try:
-            subprocess.run(["pkill", "-9", "-f", "overlay.py"], 
-                          capture_output=True, timeout=1)
-        except:
+            from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
+            kill_stale_overlay_from_pidfile()
+        except Exception:
             pass
         
         os._exit(0)  # Clean exit
@@ -12934,7 +13142,7 @@ class WayfinderApp(ctk.CTk):
             # Update hero frame border for subtle glow effect
             if hasattr(self, 'hero_frame'):
                 if new_state == AppState.IDLE:
-                    self.hero_frame.configure(border_color=COLORS["border_rim"])  # resting violet rim
+                    self.hero_frame.configure(border_color=COLORS["border_rim"])  # resting blue rim
                     self._stop_hero_animation()
                 else:
                     self.hero_frame.configure(border_color=color)
@@ -13272,12 +13480,15 @@ class WayfinderApp(ctk.CTk):
         Liveness-based (not a one-shot flag): if the listener ever dies — e.g. a transient
         SOCKET_PATH bind failure — the supervisor calls this again to bring it back, instead of
         the socket trigger being dead until an app restart.
+
+        Always uses the package listener (import here so a local legacy name cannot shadow it).
         """
         existing = self._socket_thread
         if not force_restart and existing is not None and existing.is_alive():
             return
+        from wayfinder.hotkeys.socket import socket_listener as _pkg_socket_listener
         self._socket_thread = threading.Thread(
-            target=socket_listener,
+            target=_pkg_socket_listener,
             args=(self.event_queue, self.stop_event, self.log),
             daemon=True,
         )
@@ -13600,7 +13811,7 @@ class WayfinderApp(ctk.CTk):
             
             # Show floating indicator / overlay
             try:
-                if self._use_pyqt_overlay and self.overlay_controller:
+                if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
                     self.overlay_controller.show("listening")
                 elif self.indicator:
                     self.indicator.show("Listening...", COLORS["state_recording"])
@@ -13736,7 +13947,7 @@ class WayfinderApp(ctk.CTk):
         self._processing_start_time = time_module.time()
         
         # Update floating indicator / overlay to processing FIRST
-        if self._use_pyqt_overlay and self.overlay_controller:
+        if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
             self.overlay_controller.update("processing")
         elif self.indicator:
             self.indicator.update("Processing...", COLORS["accent_yellow"])
@@ -14191,7 +14402,7 @@ class WayfinderApp(ctk.CTk):
         self._processing_start_time = None
         # Return overlay to ready state, and verify the command actually reached the overlay
         # (a dropped critical command would otherwise leave the overlay stuck visually).
-        if self._use_pyqt_overlay and self.overlay_controller:
+        if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
             if not error:
                 ok = self.overlay_controller.show("ready")  # Return to grey ready state
                 if ok is False and _retries < 3:
@@ -14335,7 +14546,7 @@ class WayfinderApp(ctk.CTk):
         # stops audio polling when leaving the listening state — this is what unsticks a frozen
         # "Listening…" overlay.
         try:
-            if self._use_pyqt_overlay and self.overlay_controller:
+            if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
                 self.overlay_controller.update("ready")
             elif self.indicator:
                 self.indicator.hide()
@@ -14468,13 +14679,17 @@ def main():
     if not _check_single_instance():
         print("Use 'pkill -f wayfinder' to stop existing instances.")
         return
-    
-    # === STARTUP CLEANUP: Kill any ghost overlay processes from previous runs ===
+
+    # After we hold the single-instance lock: clean app-owned temp dir + stale overlay pidfile.
     try:
-        # Kill any leftover overlay processes
-        subprocess.run(["pkill", "-9", "-f", "overlay.py"], 
-                      capture_output=True, timeout=2)
-    except:
+        from wayfinder.utils.fs_security import cleanup_app_temp_dir
+        cleanup_app_temp_dir()
+    except Exception:
+        pass
+    try:
+        from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
+        kill_stale_overlay_from_pidfile()
+    except Exception:
         pass
     
     app = None
@@ -14518,11 +14733,10 @@ def main():
         except:
             pass
 
-        # Force kill any overlay processes as safety net
         try:
-            subprocess.run(["pkill", "-9", "-f", "overlay.py"], 
-                          capture_output=True, timeout=1)
-        except:
+            from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
+            kill_stale_overlay_from_pidfile()
+        except Exception:
             pass
         
         # Remove the lock file

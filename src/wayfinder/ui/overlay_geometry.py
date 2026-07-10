@@ -45,33 +45,39 @@ def clamp_overlay_y(
     gap: int = 12,
     min_taskbar: int = 48,
     vertical: str = "bottom",
+    visual_inset: int = 0,
 ) -> int:
     """Return the Y for the overlay's *top* edge.
 
-    The overlay sits at the bottom of the usable screen area: its bottom edge rests
-    ``gap`` pixels above the taskbar, then the user's vertical ``offset`` is applied, then
-    the result is clamped so the *whole* widget stays on the usable area (it can never run
-    off the top of the screen, nor disappear behind the taskbar).
+    Rest position (offset=0, bottom anchor): the widget's *visual* bottom (excluding
+    transparent glow below the pill when ``visual_inset`` is set) sits ``gap`` pixels
+    above the usable work-area bottom (above the taskbar).
+
+    Offset semantics (both anchors):
+      - positive → move down the screen (toward / into the panel zone)
+      - negative → move up
+
+    Historical bug: the lower clamp was ``usable_bottom - widget_h``, so a positive
+    offset could only travel through the ``gap`` (~12px). The settings slider goes to
+    +200, so anything past ~gap looked "stuck" with a permanent gap above the panel.
+    The lower clamp is now the **physical screen bottom**, so the slider can pull the
+    overlay down over the reserved panel strip when the user asks for it.
 
     Args:
-        avail_y, avail_h: top and height of ``QScreen.availableGeometry()`` (excludes
-            panels/taskbars that reserve space).
-        full_y, full_h: top and height of ``QScreen.geometry()`` (the whole screen).
-        widget_h: the overlay widget's full height (glow margins included). The clamp
-            subtracts this so the entire widget stays visible — i.e. it is size-aware.
-        offset: the user's ``overlay_vertical_offset`` (negative = higher, positive = lower).
-        gap: resting gap between the widget's bottom and the taskbar (default 12px).
-        min_taskbar: heuristic taskbar height used ONLY in the dock/overlay case below.
-
-    Why ``min_taskbar`` exists: normally ``availableGeometry()`` already excludes the
-    taskbar, so ``usable_bottom == avail_bottom`` is the real usable edge. But some panels
-    (auto-hide docks, certain KDE/Wayland setups) do *not* reserve space, so
-    ``availableGeometry()`` spans (nearly) the full screen. There is no reliable cross-DE
-    API for such a panel's height, so in that case only we fall back to assuming
-    ``min_taskbar`` pixels at the bottom. This is a heuristic, not the true edge.
+        avail_y, avail_h: ``QScreen.availableGeometry()`` (excludes reserved panels).
+        full_y, full_h: ``QScreen.geometry()`` (full screen).
+        widget_h: full widget height including glow margins.
+        offset: user fine-tune (negative = higher, positive = lower).
+        gap: rest gap between the visual bottom and the usable bottom (default 12).
+        min_taskbar: heuristic panel height when availableGeometry ≈ full geometry.
+        vertical: ``top`` or ``bottom`` anchor.
+        visual_inset: bottom glow (or similar) that may hang past the visible pill.
+            Rest/clamp treat the content bottom as ``y + widget_h - visual_inset`` so
+            transparent glow does not invent a permanent empty gap above the panel.
     """
     screen_bottom = full_y + full_h
     avail_bottom = avail_y + avail_h
+    inset = max(0, int(visual_inset))
 
     if avail_bottom >= screen_bottom - 10:
         # availableGeometry didn't reserve the panel — fall back to the heuristic.
@@ -79,16 +85,21 @@ def clamp_overlay_y(
     else:
         usable_bottom = avail_bottom
 
-    # Base position from the anchored edge, then apply the user's fine-tune offset (positive =
-    # lower on screen for both anchors).
+    # Base position from the anchored edge, then apply the user's fine-tune offset
+    # (positive = lower on screen for both anchors).
     if vertical == "top":
         y = avail_y + gap + offset
     else:  # bottom
-        y = usable_bottom - gap - widget_h + offset
+        # Content bottom at rest = usable_bottom - gap; top of widget is content height
+        # above that (widget_h - inset of that height is content+top glow).
+        y = usable_bottom - gap - (widget_h - inset) + offset
 
-    # Clamp so the WHOLE widget stays on the usable area: never off the top, never below the
-    # taskbar edge. (KWin also clamps native X11 positioning to the work area, so the overlay
-    # rests above the taskbar — placing it OVER the taskbar would need KWin frameGeometry
-    # scripting, which we deliberately don't use on X11 to avoid the reposition-freeze.)
-    lower_bound = usable_bottom - widget_h
-    return max(avail_y, min(y, lower_bound))
+    # Keep the whole widget on the physical screen (never fully off the top or bottom).
+    # Deliberately allow y large enough that the widget covers the panel strip — that is
+    # what the positive half of the overlay-position slider is for.
+    upper_bound = avail_y
+    lower_bound = screen_bottom - widget_h
+    if lower_bound < upper_bound:
+        # Tiny screen / huge widget — pin to the top of the usable area.
+        return upper_bound
+    return max(upper_bound, min(y, lower_bound))

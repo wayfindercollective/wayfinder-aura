@@ -1,6 +1,6 @@
 ---
 name: check
-description: Hybrid plan review using local Qwen 3.5 397B and GPT 5.4. Models get file-reading tools to explore the codebase themselves. Qwen R1 (free) finds issues, GPT 5.4 R2 (~$0.80) validates, Qwen R3 (free) verifies. 3 rounds max.
+description: Hybrid plan review using local Qwen 3.5 397B and GPT (model from ~/.codex/config.toml, currently 5.6). Models get file-reading tools to explore the codebase themselves. Qwen R1 (free) finds issues, GPT R2 (~$0.80) validates, Qwen R3 (free) verifies. 3 rounds max.
 ---
 
 ## Scope
@@ -32,7 +32,7 @@ Cost: ~$0.80 per full 3-round review (1 GPT round + 2 local Qwen rounds).
 ### GPT 5.4 (OpenAI)
 - **Endpoint:** https://api.openai.com/v1/responses
 - **API Key:** from $OPENAI_API_KEY env var (set in ~/.zshrc)
-- **Model:** gpt-5.4
+- **Model:** gpt-5.6
 
 ## Important: Qwen thinking mode
 
@@ -389,7 +389,7 @@ for tool_round in range(MAX_TOOL_ROUNDS):
         break
 
     body = {
-        'model': 'gpt-5.4',
+        "model": __import__('subprocess').check_output(['python3', __import__('os').path.expanduser('~/.codex/resolve_review_model.py')], text=True).strip(),
         'tools': tools_responses_api,
         'temperature': 0.3,
         'max_output_tokens': 8192
@@ -442,7 +442,7 @@ for tool_round in range(MAX_TOOL_ROUNDS):
 # If loop exhausted all tool rounds, make one more call WITHOUT tools
 if not got_final and not output and previous_response_id:
     body = {
-        'model': 'gpt-5.4',
+        "model": __import__('subprocess').check_output(['python3', __import__('os').path.expanduser('~/.codex/resolve_review_model.py')], text=True).strip(),
         'previous_response_id': previous_response_id,
         'input': [{'role': 'user', 'content': 'You have gathered enough context. Now provide your final review with VERDICT: APPROVED or VERDICT: REVISE. Do not make any more tool calls.'}],
         'temperature': 0.3,

@@ -629,6 +629,35 @@ class TestDevToneGuidance:
         backend = get_backend(config)
         assert isinstance(backend, OpenAIBackend)
 
+    def test_gate_failure_fails_closed_for_cloud(self, tmp_path, monkeypatch):
+        """When get_feature_gate raises, cloud backends must not be selected."""
+        from wayfinder.core import postprocessor as pp
+
+        def boom():
+            raise RuntimeError("gate broken")
+
+        monkeypatch.setattr(pp, "get_feature_gate", boom, raising=False)
+        # Patch the import site used inside get_backend
+        import wayfinder.license as lic
+
+        monkeypatch.setattr(lic, "get_feature_gate", boom)
+
+        fake_binary = tmp_path / "llama-cli"
+        fake_binary.write_text("#!/bin/sh\n")
+        fake_binary.chmod(0o755)
+        config = {
+            "post_processing_backend": "openai",
+            "output_tone": "professional",
+            "llama_cpp_use_cli": True,
+            "llama_cpp_binary": str(fake_binary),
+            "llama_cpp_model_path": str(tmp_path / "m.gguf"),
+        }
+        backend = get_backend(config)
+        assert not isinstance(backend, OpenAIBackend)
+        assert not isinstance(backend, AnthropicBackend)
+        # Local path selected
+        assert isinstance(backend, (LlamaCppBackend, LlamaCppCliBackend))
+
 
 # =============================================================================
 # process_with_config

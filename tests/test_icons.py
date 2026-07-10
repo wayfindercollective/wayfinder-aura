@@ -58,7 +58,7 @@ def test_source_pngs_are_white_on_transparent_96px():
 
 def test_tint_icon_renders_every_registered_icon():
     for name in REGISTRY:
-        im = tint_icon(name, "#A78BFA", 32)
+        im = tint_icon(name, "#4682DC", 32)
         assert im.mode == "RGBA"
         assert im.size == (32, 32)
 
@@ -71,7 +71,7 @@ def test_tint_icon_output_size_matches_request_including_4x():
 
 def test_tint_applies_requested_color_and_preserves_alpha():
     name = "mic"
-    color = "#A78BFA"  # (167, 139, 250)
+    color = "#4682DC"  # brand blue (70, 130, 220)
     src = Image.open(ICON_DIR / f"{name}.png").convert("RGBA").resize((64, 64), Image.LANCZOS)
     tinted = tint_icon(name, color, 64)
 
@@ -83,7 +83,7 @@ def test_tint_applies_requested_color_and_preserves_alpha():
     max_a = max(alpha.getdata())
     for (r, g, b, a) in tinted.getdata():
         if a == max_a:
-            assert (r, g, b) == (0xA7, 0x8B, 0xFA)
+            assert (r, g, b) == (0x46, 0x82, 0xDC)
             break
     else:  # pragma: no cover
         pytest.fail("no opaque stroke pixel found")
@@ -108,17 +108,17 @@ def test_short_hex_and_case_insensitive():
 def test_get_icon_caches_by_name_size_color():
     pytest.importorskip("customtkinter")
     icons._CACHE.clear()
-    a = icons.get_icon("mic", 16, "#A78BFA")
-    b = icons.get_icon("mic", 16, "#A78BFA")
+    a = icons.get_icon("mic", 16, "#4682DC")
+    b = icons.get_icon("mic", 16, "#4682DC")
     assert a is b, "identical (name,size,color) must return the cached CTkImage"
 
     c = icons.get_icon("mic", 16, "#FFFFFF")
     assert c is not a, "different color must not hit the same cache entry"
 
-    d = icons.get_icon("mic", 20, "#A78BFA")
+    d = icons.get_icon("mic", 20, "#4682DC")
     assert d is not a, "different size must not hit the same cache entry"
 
-    assert ("mic", 16, "#A78BFA") in icons._CACHE
+    assert ("mic", 16, "#4682DC") in icons._CACHE
 
 
 def test_get_icon_logical_size_matches_request():

@@ -54,7 +54,7 @@ def test_style_palette_hexes_are_exactly_the_five_tokens():
     found = _hexes(_block(src, "STYLE_PALETTES = {"))
     expected = {COLORS[k].upper() for k in STYLE_TOKEN_KEYS}
     # The documented five brand hues, and nothing else.
-    assert expected == {"#8B8B8F", "#7B8BD9", "#5DD4A8", "#E5AC2A", "#A78BFA"}
+    assert expected == {"#8B8B8F", "#5B8FD4", "#5DD4A8", "#E5AC2A", "#4682DC"}
     assert found == expected, (
         f"overlay STYLE_PALETTES hues {found} != app tokens {expected}"
     )
@@ -106,9 +106,10 @@ READY_BLENDS = {
 
 
 def test_ready_blend_helper_matches_chosen_hexes():
-    assert READY_BLENDS["border_top"].upper() == "#2D344F"
-    assert READY_BLENDS["glow"].upper() == "#23293E"
-    assert READY_BLENDS["wave"].upper() == "#4A5482"
+    # Soft brand-blue state_ready (#5B8FD4) blends toward bg_base.
+    assert READY_BLENDS["border_top"].upper() == "#24364E"
+    assert READY_BLENDS["glow"].upper() == "#1D2A3D"
+    assert READY_BLENDS["wave"].upper() == "#38567F"
 
 
 def _relative_luminance(hex_color: str) -> float:
@@ -187,7 +188,7 @@ def test_all_state_palette_hexes_are_tokens_or_documented():
         READY_BLENDS["wave"].upper(),
         "#161B22",
         # source tokens named in the READY derivation comment
-        COLORS["state_ready"].upper(),   # #7B8BD9
+        COLORS["state_ready"].upper(),   # #5B8FD4
         "#0D1117",                       # app bg_base
         # ERROR state (red/danger family) — documented for F10 error-surfacing (2026-07)
         "#E5484D", "#F16A6F",            # error glow / wave (red)
@@ -230,7 +231,7 @@ def test_overlay_animators_apply_zero_duration_immediately():
 
 # =============================================================================
 # Tray idle color — LOGO BLUE in BOTH renderers (user's call, 2026-07-02):
-# the tray indicator matches the blue taskbar/app icon, not the in-app violet.
+# the tray indicator matches the blue taskbar/app icon and brand accent.
 # =============================================================================
 
 LOGO_BLUE_RGB = (70, 130, 220)  # matches assets/icon.png's arrow

@@ -26,9 +26,17 @@ from wayfinder_main import should_host_qt_tray  # noqa: E402
 
 @pytest.mark.parametrize("has_pystray", [True, False])
 def test_linux_always_uses_qt_tray(has_pystray):
-    # Desktop (pystray importable) AND Flatpak (no pystray) both host the Qt tray.
+    # Desktop (pystray importable) AND Flatpak (no pystray) both host the Qt tray
+    # when the on-screen overlay (which hosts that tray process) is enabled.
     assert should_host_qt_tray("linux", has_pystray=has_pystray,
-                               enable_tray_icon=True) is True
+                               enable_tray_icon=True, overlay_enabled=True) is True
+
+
+def test_linux_still_prefers_qt_tray_when_visual_overlay_disabled():
+    # Visual pill can be off; main process starts a --tray-only overlay host so the
+    # Qt StatusNotifier tray still works. Prefer Qt over pystray on Linux either way.
+    assert should_host_qt_tray("linux", has_pystray=True,
+                               enable_tray_icon=True, overlay_enabled=False) is True
 
 
 # ── macOS: keep pystray (it works there); Qt tray only if pystray is missing ──

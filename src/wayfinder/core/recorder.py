@@ -1095,8 +1095,11 @@ class AudioRecorder:
         # Convert float32 [-1.0, 1.0] to int16
         audio_int16 = (audio_data * 32767).astype(np.int16)
 
-        # Create temporary WAV file
-        self._temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        # Create temporary WAV file under the app-owned private temp dir (0700).
+        from wayfinder.utils.fs_security import get_app_temp_dir
+        self._temp_file = tempfile.NamedTemporaryFile(
+            suffix=".wav", delete=False, dir=str(get_app_temp_dir())
+        )
         temp_path = self._temp_file.name
 
         # Write WAV file at target sample rate (16kHz for Whisper)
@@ -1333,10 +1336,12 @@ class ChunkedRecorder:
             # Convert float32 to int16
             audio_int16 = (audio_data * 32767).astype(np.int16)
             
-            # Create temp file
+            # Create temp file under app-owned private temp dir (0700).
+            from wayfinder.utils.fs_security import get_app_temp_dir
             temp_file = tempfile.NamedTemporaryFile(
                 suffix=f"_chunk{self._chunk_index}.wav",
-                delete=False
+                delete=False,
+                dir=str(get_app_temp_dir()),
             )
             temp_path = temp_file.name
             self._temp_files.append(temp_path)

@@ -304,32 +304,74 @@ def _portal_fullscreen() -> Path:
     return src
 
 
+def _refine_window_bbox(full: Image.Image, geom: tuple[int, int, int, int] | None) -> tuple[int, int, int, int]:
+    """Expand/shift wmctrl geom so the full CTk chrome (incl. left sidebar) is inside.
+
+    On KDE HiDPI + XWayland, wmctrl's frame sometimes sits a bit right of the
+    painted client, clipping the sidebar. Prefer a content-aware bbox: find the
+    darkest UI card near the reported geom and expand to a tight pad.
+    """
+    fw, fh = full.size
+    if geom is None:
+        # Center fallback
+        w, h = int(fw * 0.45), int(fh * 0.70)
+        return (fw - w) // 2, (fh - h) // 2, w, h
+
+    x, y, w, h = geom
+    # Generous pad to absorb frame/client mismatch (left bias — sidebar).
+    pad_l, pad_r, pad_t, pad_b = int(w * 0.38), int(w * 0.10), int(h * 0.14), int(h * 0.12)
+    x0 = max(0, x - pad_l)
+    y0 = max(0, y - pad_t)
+    x1 = min(fw, x + w + pad_r)
+    y1 = min(fh, y + h + pad_b)
+
+    # Optional: tighten to non-bg pixels inside the padded region so we don't
+    # keep empty brand backdrop (bg is #0D1117 ≈ (13,17,23)).
+    region = full.crop((x0, y0, x1, y1))
+    px = region.load()
+    rw, rh = region.size
+    min_x, min_y, max_x, max_y = rw, rh, 0, 0
+    found = False
+    for yy in range(0, rh, 2):
+        for xx in range(0, rw, 2):
+            r, g, b = px[xx, yy][:3]
+            # UI surfaces are lighter than pure bg_base; skip pure black backdrop.
+            if r + g + b > 55:
+                found = True
+                if xx < min_x:
+                    min_x = xx
+                if yy < min_y:
+                    min_y = yy
+                if xx > max_x:
+                    max_x = xx
+                if yy > max_y:
+                    max_y = yy
+    if found and max_x > min_x and max_y > min_y:
+        margin = 28
+        return (
+            max(0, x0 + min_x - margin),
+            max(0, y0 + min_y - margin),
+            min(fw - (x0 + min_x - margin), max_x - min_x + 2 * margin),
+            min(fh - (y0 + min_y - margin), max_y - min_y + 2 * margin),
+        )
+    return x0, y0, x1 - x0, y1 - y0
+
+
 def _composite_window(full: Image.Image, geom: tuple[int, int, int, int] | None) -> Image.Image:
-    """Crop the app window (or center crop) onto a brand-color 1920×1080 canvas."""
+    """Crop the app window onto a brand-color 1920×1080 canvas."""
     fw, fh = full.size
     canvas = Image.new("RGB", (TARGET_W, TARGET_H), BG)
 
-    if geom is not None:
-        x, y, w, h = geom
-        # Clamp to image bounds (wmctrl coords usually match portal pixels on KDE).
-        x = max(0, min(x, fw - 1))
-        y = max(0, min(y, fh - 1))
-        w = max(1, min(w, fw - x))
-        h = max(1, min(h, fh - y))
-        crop = full.crop((x, y, x + w, y + h))
-    else:
-        # Fallback: center 55% of the frame.
-        w, h = int(fw * 0.55), int(fh * 0.75)
-        x, y = (fw - w) // 2, (fh - h) // 2
-        crop = full.crop((x, y, x + w, y + h))
+    x, y, w, h = _refine_window_bbox(full, geom)
+    x = max(0, min(x, fw - 1))
+    y = max(0, min(y, fh - 1))
+    w = max(1, min(w, fw - x))
+    h = max(1, min(h, fh - y))
+    crop = full.crop((x, y, x + w, y + h))
 
-    # Scale crop to fit with padding, keep aspect.
-    pad = 64
+    pad = 48
     max_w, max_h = TARGET_W - pad * 2, TARGET_H - pad * 2
-    scale = min(max_w / crop.width, max_h / crop.height, 1.0)
-    # Prefer filling more of the canvas on HiDPI crops of a modest window.
-    if scale < 1.0 or crop.width < max_w:
-        scale = min(max_w / crop.width, max_h / crop.height)
+    scale = min(max_w / crop.width, max_h / crop.height)
     nw, nh = max(1, int(crop.width * scale)), max(1, int(crop.height * scale))
     crop = crop.resize((nw, nh), Image.Resampling.LANCZOS)
     ox, oy = (TARGET_W - nw) // 2, (TARGET_H - nh) // 2

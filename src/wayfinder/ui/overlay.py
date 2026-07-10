@@ -290,13 +290,13 @@ class StateColors:
 STATE_PALETTES = {
     OverlayState.READY: StateColors(
         # Idle overlay reads as the same brand as the main window: hues are
-        # exact blends of the app's state_ready indigo (#7B8BD9) toward the
-        # app bg (#0D1117), luminance-matched to the previous idle colors so
-        # the overlay stays quiet. blend(f) = round(bg + (state_ready-bg)*f).
-        border_top="#2D344F",      # 29% state_ready→bg (luminance -1.7% vs old)
+        # exact blends of the app's state_ready soft blue (#5B8FD4) toward the
+        # app bg (#0D1117), luminance-matched so the overlay stays quiet.
+        # blend(f) = round(bg + (state_ready-bg)*f).
+        border_top="#24364E",      # 29% state_ready→bg
         border_bottom="#161B22",   # GitHub Dark surface (deep shadow, unchanged)
-        glow="#23293E",            # 20% state_ready→bg (luminance +2.0% vs old)
-        wave="#4A5482",            # 55% state_ready→bg (luminance +1.1% vs old)
+        glow="#1D2A3D",            # 20% state_ready→bg
+        wave="#38567F",            # 55% state_ready→bg
     ),
     OverlayState.LISTENING: StateColors(
         border_top="#E8A0A8",      # Muted rose highlight
@@ -347,7 +347,7 @@ STYLE_PALETTES = {
     ),
     "professional": StyleColors(
         letter="Pro",
-        color="#7B8BD9",    # app state_ready (indigo)
+        color="#5B8FD4",    # app state_ready (soft brand blue)
     ),
     "casual": StyleColors(
         letter="Chat",      # Conversational, friendly
@@ -359,7 +359,7 @@ STYLE_PALETTES = {
     ),
     "personal": StyleColors(
         letter="You",       # Your personal voice — wears the brand color
-        color="#A78BFA",    # app accent (violet)
+        color="#4682DC",    # app accent (brand blue — matches tray/icon)
     ),
 }
 
@@ -924,9 +924,13 @@ class GlassmorphicOverlay(QWidget):
         # keep the math testable. The vertical edge also takes the user's fine-tune offset.
         vertical, horizontal = parse_anchor(self._anchor)
         x = anchor_x(avail.x(), avail.width(), widget_width, horizontal, self.TASKBAR_GAP)
+        # visual_inset = bottom glow: transparent falloff may hang into the panel strip
+        # so the *pill* can sit closer without inventing a permanent empty gap. Positive
+        # offset can travel past the old ~12px ceiling (was clamped at usable bottom).
         y = clamp_overlay_y(
             avail.y(), avail.height(), full.y(), full.height(),
-            widget_height, self._vertical_offset, self.TASKBAR_GAP, vertical=vertical,
+            widget_height, self._vertical_offset, self.TASKBAR_GAP,
+            vertical=vertical, visual_inset=self.glow_margin,
         )
 
         return (x, y)
@@ -1120,12 +1124,8 @@ class GlassmorphicOverlay(QWidget):
             if self.windowHandle():
                 # For X11/XWayland, try to set blur property
                 # This is KDE-specific
-                import subprocess
-                # Check if we're on KDE
-                desktop = subprocess.run(
-                    ["echo", "$XDG_CURRENT_DESKTOP"],
-                    capture_output=True, text=True, shell=True
-                )
+                # Desktop probe — env only (no shell=True subprocess).
+                _ = os.environ.get("XDG_CURRENT_DESKTOP", "")
                 # Blur will be handled by compositor if available
         except Exception:
             pass  # Blur not available, fallback to semi-transparent
@@ -1187,7 +1187,8 @@ class GlassmorphicOverlay(QWidget):
                     x = anchor_x(avail.x(), avail.width(), estimated_width, horizontal, self.TASKBAR_GAP)
                     y = clamp_overlay_y(
                         avail.y(), avail.height(), full.y(), full.height(),
-                        estimated_height, self._vertical_offset, self.TASKBAR_GAP, vertical=vertical,
+                        estimated_height, self._vertical_offset, self.TASKBAR_GAP,
+                        vertical=vertical, visual_inset=self.glow_margin,
                     )
                     _setup_kwin_window_rule(x, y, estimated_width, estimated_height)
         except Exception as e:
@@ -1304,10 +1305,19 @@ class GlassmorphicOverlay(QWidget):
         def _log(msg):
             try:
                 _xdg_cache = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-                _log_path = os.path.join(_xdg_cache, "wayfinder-aura", "overlay-debug.log")
-                with open(_log_path, "a") as f:
+                _log_dir = os.path.join(_xdg_cache, "wayfinder-aura")
+                os.makedirs(_log_dir, mode=0o700, exist_ok=True)
+                _log_path = os.path.join(_log_dir, "overlay-debug.log")
+                # Owner-only create/open (no create-then-chmod race for new files).
+                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                fd = os.open(_log_path, flags, 0o600)
+                with os.fdopen(fd, "a") as f:
                     f.write(f"{time.time():.3f}: {msg}\n")
-            except:
+                try:
+                    os.chmod(_log_path, 0o600)
+                except OSError:
+                    pass
+            except Exception:
                 pass
         
         _log(f"set_state: current={self._state} -> new={state}")
@@ -1973,6 +1983,7 @@ def run_overlay():
     initial_anchor = "bottom-center"
     initial_quality = "high"  # high = ambient wave always animates; performance = freeze when idle
     enable_tray = False  # --tray: host a QSystemTrayIcon in this subprocess (Flatpak/KDE)
+    tray_only = False  # --tray-only: no on-screen pill; tray icon + menu only
     for arg in sys.argv:
         if arg.startswith("--mode="):
             mode = arg.split("=", 1)[1]
@@ -1994,6 +2005,9 @@ def run_overlay():
             initial_quality = arg.split("=", 1)[1]
         elif arg == "--tray":
             enable_tray = True
+        elif arg == "--tray-only":
+            tray_only = True
+            enable_tray = True  # tray-only implies StatusNotifier tray
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -2020,10 +2034,15 @@ def run_overlay():
     overlay = GlassmorphicOverlay(scale=initial_scale, vertical_offset=initial_offset,
                                   anchor=initial_anchor, quality=initial_quality)
     overlay._overlay_mode = mode  # Store mode for later use
+    overlay._tray_only = tray_only
     overlay.set_style_indicator(initial_style, animate=False)  # Set initial style
     
-    if mode == "persistent":
-        # Start in READY state (visible, indigo READY palette)
+    if tray_only:
+        # No on-screen pill: window stays HIDDEN; StatusNotifier tray still runs below.
+        overlay._overlay_mode = mode
+        overlay.hide()
+    elif mode == "persistent":
+        # Start in READY state (visible, soft brand-blue READY palette)
         overlay._overlay_mode = mode
         
         # Calculate initial size for "Ready" text
@@ -2175,14 +2194,23 @@ def run_overlay():
             }
             state = state_map.get(state_name, OverlayState.LISTENING)
             _debug_log(f"SHOW state_name={state_name} -> enum={state} current={overlay._state}")
-            overlay.set_state(state)
-            _update_tray(state)
+            if tray_only:
+                # Drive tray icon/tooltip only — never map the floating pill.
+                _update_tray(state)
+            else:
+                overlay.set_state(state)
+                _update_tray(state)
 
         elif command == "hide":
-            overlay.set_state(OverlayState.HIDDEN)
-            _update_tray(OverlayState.READY)
+            if tray_only:
+                _update_tray(OverlayState.READY)
+            else:
+                overlay.set_state(OverlayState.HIDDEN)
+                _update_tray(OverlayState.READY)
         
         elif command == "level":
+            if tray_only:
+                return  # no visual waveform to drive
             level = cmd.get("value", 0.0)
             overlay.set_audio_level(level)
         

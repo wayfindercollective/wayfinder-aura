@@ -136,8 +136,8 @@ class ModeSelector(ctk.CTkFrame):
         
         # Display labels and icons for each mode
         self.display_info = {
-            "local": {"label": "Local", "icon": "🔒", "desc": "Private local mode"},
-            "remote": {"label": "Remote", "icon": "☁️", "desc": "Cloud Processing"},
+            "local": {"label": "Local", "icon": "", "desc": "Private local mode"},
+            "remote": {"label": "Remote", "icon": "", "desc": "Cloud Processing"},
         }
         
         # Create container with pill background
@@ -162,13 +162,17 @@ class ModeSelector(ctk.CTkFrame):
         # Create buttons
         for i, value in enumerate(self.values):
             info = self.display_info.get(value, {"label": value.title(), "icon": "", "desc": ""})
-            text = f"{info['icon']}  {info['label']}"
+            text = (
+                f"{info['icon']}  {info['label']}".strip()
+                if info.get("icon")
+                else info["label"]
+            )
             
             is_selected = value == self.current_value
             btn = ctk.CTkButton(
                 inner,
                 text=text,
-                font=("Inter", 13, "bold" if is_selected else "normal"),
+                font=("Inter", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
                 fg_color=COLORS["bg_card"] if is_selected else "transparent",
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],

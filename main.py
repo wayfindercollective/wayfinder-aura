@@ -115,64 +115,84 @@ def schedule_scaling_detection(app, delay_ms: int = 5000) -> None:
     app.after(delay_ms, check_scaling)
 
 
-LOCK_SOCKET_PATH = "/tmp/wayfinder-aura.lock"
+# Single-instance: fcntl flock on a regular file (survives crashes without
+# leaving a half-open Unix socket path that blocks later launches). SHOW is
+# delivered via the control socket the tray already uses.
+_INSTANCE_LOCK_FD = None  # keep open for process lifetime
 
 
-def _signal_existing_instance() -> bool:
-    """Try to signal an already-running instance to show its window.
-    
-    Uses a Unix socket to communicate with the existing instance.
-    Returns True if we successfully signaled another instance (so we should exit).
-    """
-    import socket
-    
+def _instance_lock_path() -> Path:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    return Path(runtime) / "wayfinder-aura" / "instance.lock"
+
+
+def _control_socket_path() -> str:
     try:
-        # Try to connect to existing instance's lock socket
+        from wayfinder.config import SOCKET_PATH
+        return str(SOCKET_PATH)
+    except Exception:
+        runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+        return str(Path(runtime) / "wayfinder-aura" / "wayfinder-aura.sock")
+
+
+def _try_control_show() -> bool:
+    """Ask a live instance to raise its window via the control socket."""
+    import socket
+
+    path = _control_socket_path()
+    try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(2)
-        sock.connect(LOCK_SOCKET_PATH)
-        sock.sendall(b"SHOW\n")
+        sock.connect(path)
+        sock.sendall(b"show")
+        try:
+            sock.recv(16)
+        except socket.timeout:
+            pass
         sock.close()
-        print("[Instance] Signaled existing instance to show window")
         return True
     except (ConnectionRefusedError, FileNotFoundError, OSError):
-        # No existing instance running
         return False
 
 
-def _start_instance_listener(app):
-    """Start a background listener that receives signals from new launch attempts."""
-    import socket
-    import threading
-    
-    # Clean up stale socket
+def _acquire_instance_lock() -> bool:
+    """Exclusive flock. True = we are the primary instance. False = another holds it."""
+    import fcntl
+
+    global _INSTANCE_LOCK_FD
+    path = _instance_lock_path()
     try:
-        os.unlink(LOCK_SOCKET_PATH)
-    except OSError:
-        pass
-    
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(LOCK_SOCKET_PATH)
-    server.listen(1)
-    server.settimeout(1)
-    
-    def listener():
-        while True:
-            try:
-                conn, _ = server.accept()
-                data = conn.recv(64).decode().strip()
-                conn.close()
-                if data == "SHOW":
-                    # Show the window from the main thread
-                    app.after(0, app.show_from_tray)
-            except socket.timeout:
-                continue
-            except Exception:
-                break
-    
-    t = threading.Thread(target=listener, daemon=True, name="InstanceListener")
-    t.start()
-    return server
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = open(path, "w", encoding="utf-8")
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fd.seek(0)
+        fd.truncate()
+        fd.write(str(os.getpid()))
+        fd.flush()
+        _INSTANCE_LOCK_FD = fd  # keep open so the lock is held
+        return True
+    except BlockingIOError:
+        try:
+            fd.close()
+        except Exception:
+            pass
+        return False
+    except OSError as e:
+        print(f"[Instance] Warning: could not acquire lock ({e}); continuing")
+        return True  # fail open — better a second instance than no launch
+
+
+def _signal_existing_instance() -> bool:
+    """If another instance holds the lock, ask it to show and return True (caller exits)."""
+    if _acquire_instance_lock():
+        return False  # we own the lock — continue startup
+
+    if _try_control_show():
+        print("[Instance] Signaled existing instance to show window")
+        return True
+
+    print("[Instance] Another instance holds the lock but is not responding")
+    return True  # still exit — don't stack a second half-dead UI
 
 
 VENV_SMOKE_IMPORTS = ("customtkinter", "PIL", "numpy")
@@ -264,7 +284,7 @@ def main():
     _check_venv_health()
 
     # === Single-instance check ===
-    # If another instance is already running, signal it to show and exit
+    # flock-based: if another instance holds the lock, signal show and exit
     if _signal_existing_instance():
         sys.exit(0)
     
@@ -299,9 +319,6 @@ def main():
         ctk.set_default_color_theme("dark-blue")
         
         app = WayfinderApp()
-        
-        # Start single-instance listener so future launches signal us
-        _instance_server = _start_instance_listener(app)
         
         # ─── First-run flow: dependency setup (inline pane) → welcome tour ───
         # The dependency setup is now an IN-WINDOW pane (src/wayfinder/ui/setup_pane.py)
@@ -366,12 +383,6 @@ def main():
         
         app.mainloop()
         
-        # Clean up lock socket on normal exit
-        try:
-            os.unlink(LOCK_SOCKET_PATH)
-        except OSError:
-            pass
-        
     except Exception as e:
         error_msg = str(e)
         
@@ -408,16 +419,7 @@ def main():
             raise
 
 
-import atexit
-
-def _cleanup_lock_socket():
-    """Remove the lock socket on exit."""
-    try:
-        os.unlink(LOCK_SOCKET_PATH)
-    except OSError:
-        pass
-
-atexit.register(_cleanup_lock_socket)
+# flock is released automatically when _INSTANCE_LOCK_FD is closed on process exit.
 
 
 if __name__ == "__main__":

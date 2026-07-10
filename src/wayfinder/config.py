@@ -242,13 +242,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
     "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
+    # Master switch for the on-screen status pill. Off = no visual overlay; a
+    # tray-only overlay subprocess still hosts the Qt StatusNotifier tray on Linux.
+    "overlay_enabled": True,
     # SteamOS Game Mode dictation (audio cues, no overlay). This module is the single
     # source of DEFAULT_CONFIG — wayfinder_main.py imports it (no mirror to keep in sync).
     "game_mode_dictation": False,
     # Watchdog timeout (s) for a hung PROCESSING state; 0 disables.
     "processing_timeout_secs": 120,
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0
-    "overlay_vertical_offset": 0,  # Vertical offset in pixels (negative = higher, positive = lower)
+    # Negative = higher on screen, positive = lower (can sit near/over the panel).
+    # UI slider spans roughly -900..+120 (asymmetric: upward travel needs more range).
+    "overlay_vertical_offset": 0,
     "overlay_anchor": "bottom-center",  # {top,bottom}-{left,center,right}
     # Overlay render quality: "high" = the ambient corner wave animates continuously (smoothest
     # look); "performance" = the overlay holds still when idle to save CPU/battery on handhelds.
@@ -432,6 +437,14 @@ def load_config() -> dict:
     
     if CONFIG_FILE.exists():
         try:
+            # Secrets may live in config and backups — repair world-readable modes.
+            try:
+                from wayfinder.utils.fs_security import restrict_owner_only
+                for _p in CONFIG_DIR.glob("config.json*"):
+                    if _p.is_file():
+                        restrict_owner_only(_p)
+            except Exception:
+                pass
             with open(CONFIG_FILE, "r") as f:
                 user_config = json.load(f)
             # Merge with defaults (user config overrides defaults)
@@ -502,6 +515,11 @@ def load_config() -> dict:
             backup = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".bak")
             try:
                 os.replace(CONFIG_FILE, backup)
+                try:
+                    from wayfinder.utils.fs_security import restrict_owner_only
+                    restrict_owner_only(backup)
+                except Exception:
+                    pass
                 print(f"WARNING: config file was corrupt ({e}); backed up to {backup} and loaded defaults")
             except OSError as rename_err:
                 print(f"WARNING: config file was corrupt ({e}) and could not be backed up ({rename_err}); loaded defaults")

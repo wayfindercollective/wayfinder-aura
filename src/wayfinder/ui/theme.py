@@ -17,24 +17,24 @@ COLORS: dict[str, str] = {
     "bg_dark": "#0D1117",           # Alias for compatibility
     "bg_surface": "#161B22",        # Sidebar/panels - slightly elevated
     "bg_card": "#1E1E1F",           # Bento tiles - 7% white on bg
-    "bg_hover": "#1E1B26",          # Hover = 10% accent glow (designer spec)
-    "bg_hover_strong": "#3A3758",   # Hover = 25% accent glow — obvious selection (dropdown rows)
+    "bg_hover": "#131C2B",          # Hover = 10% accent glow (blue on deep ink)
+    "bg_hover_strong": "#1B2D48",   # Hover = 25% accent glow — obvious selection (dropdown rows)
     "bg_elevated": "#2D333B",       # Pressed/elevated elements
     "bg_input": "#13171D",          # Input fields - slightly recessed
     
-    # Accent - Soft Violet (desaturated to avoid "vibration")
-    "accent": "#A78BFA",            # Soft Violet - primary accent
-    "accent_cyan": "#A78BFA",       # Alias for compatibility  
-    "accent_glow": "#1E1B26",       # Pre-blended: bg + (A78BFA - bg) * 0.10
-    "accent_hover": "#BEA6FF",      # Lighter on hover
-    "accent_dim": "#9580E8",        # Pressed/active state
-    "accent_bright": "#C4AAFF",     # Bright version for active toggles
+    # Accent - brand blue (matches tray / app icon arrow)
+    "accent": "#4682DC",            # Primary accent — same family as assets/icon.png
+    "accent_cyan": "#4682DC",       # Alias for compatibility
+    "accent_glow": "#131C2B",       # Pre-blended: bg + (4682DC - bg) * 0.10
+    "accent_hover": "#6B9FE8",      # Lighter on hover
+    "accent_dim": "#3A6FC0",        # Pressed/active state
+    "accent_bright": "#7FB0F0",     # Bright version for active toggles
     
-    # Rim light border - 10% violet pre-blended
-    "border_rim": "#1E1B26",        # bg + (A78BFA - bg) * 0.10
+    # Rim light border - 10% blue pre-blended
+    "border_rim": "#131C2B",        # bg + (4682DC - bg) * 0.10
     
     # State colors - muted, sophisticated palette
-    "state_ready": "#7B8BD9",       # Muted indigo - calm ready state
+    "state_ready": "#5B8FD4",       # Soft brand blue — idle/ready (same family as accent)
     "state_recording": "#E8707F",   # Muted rose - warm but not aggressive
     "state_processing": "#E5AC2A",  # Muted gold - warm processing
     "state_typing": "#5DD4A8",      # Muted mint - success/typing
@@ -43,7 +43,7 @@ COLORS: dict[str, str] = {
     "accent_green": "#5DD4A8",      # Muted mint - success
     "accent_red": "#E8707F",        # Muted rose - recording
     "accent_yellow": "#E5AC2A",     # Muted gold - processing
-    "accent_blue": "#7B8BD9",       # Muted indigo
+    "accent_blue": "#4682DC",       # Brand blue (same as primary accent)
     
     # Text hierarchy - calculated for dark bg readability
     "text_bright": "#F0F0F0",       # Maximum contrast (app title only)
@@ -55,7 +55,7 @@ COLORS: dict[str, str] = {
     "border": "#2D333B",            # Standard borders
     "border_subtle": "#21262D",     # Subtle borders
     "border_light": "#1A1D24",      # Pre-blended 5% white
-    "border_glow": "#1E1B26",       # Pre-blended 10% violet
+    "border_glow": "#131C2B",       # Pre-blended 10% blue
 }
 
 
@@ -90,7 +90,7 @@ SPACING: dict[str, int] = {
 # === State-Specific Colors ===
 
 STATE_COLORS: dict[AppState, str] = {
-    AppState.IDLE: COLORS["state_ready"],        # Cyan when ready
+    AppState.IDLE: COLORS["state_ready"],        # Soft brand blue when ready
     AppState.RECORDING: COLORS["state_recording"], # Rose when recording
     AppState.PROCESSING: COLORS["state_processing"], # Amber when processing
     AppState.PASTING: COLORS["state_typing"],    # Emerald when typing
