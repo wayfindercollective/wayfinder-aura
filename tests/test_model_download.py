@@ -55,6 +55,20 @@ class FakeUrlResponse:
         return False
 
 
+def _patch_urllib_opener(monkeypatch, open_fn):
+    """Production download uses urllib.request.build_opener(...).open(...)."""
+
+    class _Opener:
+        def open(self, req, timeout=0):
+            return open_fn(req, timeout=timeout)
+
+    monkeypatch.setattr(
+        wayfinder_main.urllib.request,
+        "build_opener",
+        lambda *handlers: _Opener(),
+    )
+
+
 class TestModelDownloader:
     def test_unknown_model_errors_synchronously(self, tmp_path):
         dl = wayfinder_main.ModelDownloader(models_dir=tmp_path)
@@ -66,9 +80,8 @@ class TestModelDownloader:
     def test_successful_download_reports_progress_and_completes(self, tmp_path, monkeypatch):
         total = 3 * 1024 * 1024
         chunks = [b"\x00" * (1024 * 1024)] * 3
-        monkeypatch.setattr(
-            wayfinder_main.urllib.request, "urlopen",
-            lambda req, timeout=0: FakeUrlResponse(chunks, total),
+        _patch_urllib_opener(
+            monkeypatch, lambda req, timeout=0: FakeUrlResponse(chunks, total)
         )
         dl = wayfinder_main.ModelDownloader(models_dir=tmp_path)
 
@@ -95,9 +108,8 @@ class TestModelDownloader:
     def test_cancel_midstream_stops_and_removes_partial(self, tmp_path, monkeypatch):
         total = 10 * 1024 * 1024
         chunks = [b"\x00" * (1024 * 1024)] * 10
-        monkeypatch.setattr(
-            wayfinder_main.urllib.request, "urlopen",
-            lambda req, timeout=0: FakeUrlResponse(chunks, total),
+        _patch_urllib_opener(
+            monkeypatch, lambda req, timeout=0: FakeUrlResponse(chunks, total)
         )
         dl = wayfinder_main.ModelDownloader(models_dir=tmp_path)
         done = threading.Event()
@@ -126,7 +138,7 @@ class TestModelDownloader:
         def boom(req, timeout=0):
             raise urllib.error.URLError("name resolution failed")
 
-        monkeypatch.setattr(wayfinder_main.urllib.request, "urlopen", boom)
+        _patch_urllib_opener(monkeypatch, boom)
         dl = wayfinder_main.ModelDownloader(models_dir=tmp_path)
         done, errors = threading.Event(), []
         dl.download_model(
@@ -144,8 +156,8 @@ class TestModelDownloader:
         dl = wayfinder_main.ModelDownloader(models_dir=tmp_path)
 
         # 1) First attempt fails at the network layer.
-        monkeypatch.setattr(
-            wayfinder_main.urllib.request, "urlopen",
+        _patch_urllib_opener(
+            monkeypatch,
             lambda req, timeout=0: (_ for _ in ()).throw(urllib.error.URLError("down")),
         )
         done1, errors = threading.Event(), []
@@ -158,9 +170,11 @@ class TestModelDownloader:
 
         # 2) Retry on the SAME downloader now that the network is back.
         total = 2 * 1024 * 1024
-        monkeypatch.setattr(
-            wayfinder_main.urllib.request, "urlopen",
-            lambda req, timeout=0: FakeUrlResponse([b"\x00" * (1024 * 1024)] * 2, total),
+        _patch_urllib_opener(
+            monkeypatch,
+            lambda req, timeout=0: FakeUrlResponse(
+                [b"\x00" * (1024 * 1024)] * 2, total
+            ),
         )
         done2, completed = threading.Event(), {}
         dl.download_model("tiny.en",
@@ -204,6 +218,7 @@ class FakeRequestResponse:
 class FakeSession:
     def __init__(self, response=None, error=None):
         self.headers = {}
+        self.hooks = {"response": []}
         self._response = response
         self._error = error
 

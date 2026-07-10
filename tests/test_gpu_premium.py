@@ -31,17 +31,45 @@ def test_free_user_gpu_forced_off(monkeypatch, tmp_path):
     assert isinstance(b, WhisperCppBackend)
     assert b.use_gpu is False  # config asked for GPU, but free tier is gated to CPU
 
+def _premium_info(**extra):
+    # v2 entitlements: non-empty signed features list (incl. gpu_acceleration).
+    return LicenseInfo(
+        is_valid=True,
+        is_premium=True,
+        plan="pro",
+        features=[
+            "faster_whisper",
+            "large_models",
+            "gpu_acceleration",
+            "cloud_backends",
+            "chunked_recording",
+            "custom_vocabulary",
+            "voice_profiles",
+            "tone_system",
+            "large_cleanup_models",
+        ],
+        **extra,
+    )
+
+
 def test_premium_user_gpu_respected(monkeypatch):
-    monkeypatch.setattr("wayfinder.license.load_stored_license",
-                        lambda: LicenseInfo(is_valid=True, is_premium=True))
+    monkeypatch.setattr(
+        "wayfinder.license.load_stored_license", lambda: _premium_info()
+    )
     _reset_gate()
-    b = get_backend(dict(BASE_CFG))
+    # Use a free-tier path name so free GPU allowlist is not required; premium
+    # still needs gpu_acceleration for non-tiny/base, and we assert Ultra GPU.
+    cfg = dict(BASE_CFG)
+    cfg["model_path"] = "/x/ggml-small.en.bin"
+    b = get_backend(cfg)
     assert b.use_gpu is True
 
 def test_premium_user_can_still_choose_cpu(monkeypatch):
-    monkeypatch.setattr("wayfinder.license.load_stored_license",
-                        lambda: LicenseInfo(is_valid=True, is_premium=True))
+    monkeypatch.setattr(
+        "wayfinder.license.load_stored_license", lambda: _premium_info()
+    )
     _reset_gate()
-    cfg = dict(BASE_CFG); cfg["use_gpu"] = False
+    cfg = dict(BASE_CFG)
+    cfg["use_gpu"] = False
     b = get_backend(cfg)
     assert b.use_gpu is False
