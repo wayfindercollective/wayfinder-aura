@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import wave
+from math import gcd
 from pathlib import Path
 from typing import Callable
 
@@ -52,13 +53,44 @@ except (ImportError, OSError) as _sounddevice_error:
     sd = _MissingSoundDevice()
     sys.modules.setdefault("sounddevice", sd)
 
-# Try to import scipy for audio filtering and resampling
-try:
-    from scipy.signal import butter, filtfilt, resample_poly
-    from math import gcd
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
+# SciPy's signal package pulls in a large statistics/interpolation stack. Importing it at
+# module scope added roughly a second to every launch even though it is only needed after a
+# recording is complete. Resolve and cache the three functions on first audio-processing use.
+_SCIPY_SIGNAL_FUNCTIONS = None
+_SCIPY_IMPORT_ATTEMPTED = False
+_SCIPY_IMPORT_LOCK = threading.Lock()
+
+
+def _get_scipy_signal_functions():
+    """Return ``(butter, filtfilt, resample_poly)`` when SciPy is available.
+
+    The import is deliberately lazy so microphone discovery and recorder construction stay
+    fast. A failed optional import is cached too; repeated dictations then use the existing
+    NumPy fallback without repeatedly probing SciPy.
+    """
+    global _SCIPY_SIGNAL_FUNCTIONS, _SCIPY_IMPORT_ATTEMPTED
+    if _SCIPY_IMPORT_ATTEMPTED:
+        return _SCIPY_SIGNAL_FUNCTIONS
+    with _SCIPY_IMPORT_LOCK:
+        if _SCIPY_IMPORT_ATTEMPTED:
+            return _SCIPY_SIGNAL_FUNCTIONS
+        try:
+            from scipy.signal import butter, filtfilt, resample_poly
+        except ImportError:
+            _SCIPY_SIGNAL_FUNCTIONS = None
+        else:
+            _SCIPY_SIGNAL_FUNCTIONS = (butter, filtfilt, resample_poly)
+        _SCIPY_IMPORT_ATTEMPTED = True
+    return _SCIPY_SIGNAL_FUNCTIONS
+
+
+def preload_audio_processing() -> None:
+    """Warm optional audio processing after first paint.
+
+    This is a one-shot import, not a resident worker. It keeps SciPy off the click-to-visible
+    path without making the first completed dictation absorb the import cost.
+    """
+    _get_scipy_signal_functions()
 
 
 # Target sample rate for Whisper
@@ -634,8 +666,10 @@ def resample_audio(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.nd
     if orig_rate == target_rate:
         return audio
     
-    if SCIPY_AVAILABLE:
+    scipy_signal = _get_scipy_signal_functions()
+    if scipy_signal is not None:
         # Use scipy's polyphase resampling for high quality
+        _, _, resample_poly = scipy_signal
         g = gcd(orig_rate, target_rate)
         up = target_rate // g
         down = orig_rate // g
@@ -688,15 +722,18 @@ def preprocess_audio(
         audio = audio * (target_peak / peak)
     
     # Medium and Heavy: High-pass filter at 80Hz (remove rumble/noise)
-    if level in ("medium", "heavy") and SCIPY_AVAILABLE:
-        try:
-            nyquist = sample_rate / 2
-            cutoff = 80 / nyquist
-            if cutoff < 1:
-                b, a = butter(2, cutoff, btype='high')
-                audio = filtfilt(b, a, audio).astype(np.float32)
-        except Exception:
-            pass
+    if level in ("medium", "heavy"):
+        scipy_signal = _get_scipy_signal_functions()
+        if scipy_signal is not None:
+            butter, filtfilt, _ = scipy_signal
+            try:
+                nyquist = sample_rate / 2
+                cutoff = 80 / nyquist
+                if cutoff < 1:
+                    b, a = butter(2, cutoff, btype='high')
+                    audio = filtfilt(b, a, audio).astype(np.float32)
+            except Exception:
+                pass
     
     # Heavy only: Noise gate (can cut off soft consonants - use with caution!)
     if level == "heavy":

@@ -111,6 +111,9 @@ def socket_listener(
                     # Tray "Open" — raise/restore the main window.
                     log("🪟 Show window received via socket")
                     event_queue.put((EventType.SHOW_WINDOW, None))
+                    # Host launchers use this acknowledgement to distinguish a healthy live
+                    # instance from a stale socket before falling back to starting the service.
+                    conn.sendall(b"ok")
                 elif data_str == "reset":
                     # Tray "Reset" — abort stuck/in-flight dictation, return to idle.
                     log("🔄 Reset received via socket")
@@ -185,5 +188,4 @@ def send_style(style: Optional[str] = None):
         return True
     except Exception:
         return False
-
 

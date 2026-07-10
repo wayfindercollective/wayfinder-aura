@@ -39,6 +39,7 @@ RELEASE_PYTHON_SCRIPTS = [
     REPO / "scripts" / "ci" / "check-storefront-readiness.py",
     REPO / "scripts" / "ship_preflight.py",
     REPO / "flatpak" / "prepare-release-manifest.py",
+    REPO / "scripts" / "steamdeck" / "wayfinder-aura-show-or-start.py",
 ]
 
 
@@ -202,9 +203,12 @@ def test_global_shortcut_trigger_scripts_notify_on_unreachable_service():
 
 def test_legacy_app_socket_listener_has_health_probe_restart_path():
     main = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
+    listener = (REPO / "src" / "wayfinder" / "hotkeys" / "socket.py").read_text(
+        encoding="utf-8"
+    )
 
-    assert 'data_str == "ping"' in main
-    assert 'conn.sendall(b"pong")' in main
+    assert 'data_str == "ping"' in listener
+    assert 'conn.sendall(b"pong")' in listener
     assert "def _socket_listener_healthy" in main
     assert 'client.sendall(b"ping")' in main
     assert 'client.recv(16) == b"pong"' in main

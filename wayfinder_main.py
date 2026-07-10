@@ -78,7 +78,7 @@ from wayfinder.config import (
 )
 from wayfinder.utils.platform import get_portal_app_id
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, SILENCE_PEAK_THRESHOLD
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
@@ -4672,6 +4672,9 @@ class WayfinderApp(ctk.CTk):
         
         self.app_state = AppState.IDLE
         self.event_queue = queue.Queue()
+        # History is built lazily for returning users. Preserve log lines received before the
+        # tab exists, then flush them into its textbox the first time it is opened.
+        self._pending_ui_logs: list[str] = []
         self.stop_event = threading.Event()            # long-lived: socket listener + global shutdown
         self._evdev_stop_event = threading.Event()     # dedicated: evdev listener (restartable on its own)
         self._hotkey_thread = None                     # live evdev listener thread (for supervision)
@@ -4878,6 +4881,18 @@ class WayfinderApp(ctk.CTk):
         # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
         self._start_hotkey_supervisor()
         self.poll_events()
+
+        # SciPy's signal stack is deliberately absent from the first-frame import path. Warm it
+        # once immediately after the UI maps so first-dictation processing stays just as snappy.
+        # The worker exits after the import; this does not add a resident background service.
+        self.after(
+            100,
+            lambda: threading.Thread(
+                target=preload_audio_processing,
+                daemon=True,
+                name="wayfinder-audio-preload",
+            ).start(),
+        )
         
         # Log animation refresh rate info
         if self._use_pyqt_overlay:
@@ -5662,10 +5677,12 @@ class WayfinderApp(ctk.CTk):
         _welcome_done = bool(self.config.get("welcome_completed", False))
         self.active_tab = "dictate" if (_setup_done and _welcome_done) else "settings"
         
+        # Dictate is the returning-user landing page and remains eager. The other tabs contain
+        # hundreds of widgets and cost seconds on Deck-class CPUs, so create them on first use.
+        # First-run still eagerly creates Settings because that is its active landing page.
         self._create_dictate_tab()
-        self._create_settings_tab()
-        self._create_style_tab()
-        self._create_history_tab()
+        if self.active_tab != "dictate":
+            self._ensure_tab_created(self.active_tab)
         
         self._switch_tab(self.active_tab)
         
@@ -6412,6 +6429,50 @@ class WayfinderApp(ctk.CTk):
         if is_ultra:
             ToolTip(footer, "Ultra 😇 — thanks for supporting Wayfinder")
     
+    def _ensure_tab_created(self, tab_id: str) -> None:
+        """Build a tab once, immediately before its first display."""
+        if tab_id in self.tab_frames:
+            return
+        builders = {
+            "dictate": self._create_dictate_tab,
+            "settings": self._create_settings_tab,
+            "style": self._create_style_tab,
+            "history": self._create_history_tab,
+        }
+        builder = builders.get(tab_id)
+        if builder is None:
+            raise ValueError(f"Unknown tab: {tab_id}")
+
+        # Settings is intentionally substantial. Give the click immediate visual feedback
+        # before its first one-time build instead of leaving the old tab frozen on screen.
+        loading_frame = None
+        try:
+            if self.winfo_viewable():
+                loading_frame = ctk.CTkFrame(
+                    self.tab_content_container, fg_color="transparent"
+                )
+                ctk.CTkLabel(
+                    loading_frame,
+                    text=f"Loading {tab_id}…",
+                    font=(self.font_body[0], self.font_sizes["body"]),
+                    text_color=COLORS["text_secondary"],
+                ).pack(expand=True)
+                for frame in self.tab_frames.values():
+                    frame.pack_forget()
+                loading_frame.pack(fill="both", expand=True)
+                self.update_idletasks()
+        except Exception:
+            loading_frame = None
+
+        try:
+            builder()
+        finally:
+            if loading_frame is not None:
+                try:
+                    loading_frame.destroy()
+                except Exception:
+                    pass
+
     def _switch_tab(self, tab_id: str) -> None:
         """Switch to the specified tab."""
         # Update button styles for sidebar
@@ -6432,6 +6493,11 @@ class WayfinderApp(ctk.CTk):
                     hover_color=COLORS["bg_hover"],
                     text_color=COLORS["text_secondary"],
                 )
+
+        # Set this before the one-time builder runs so tab-specific setup observes the intended
+        # destination, and so the selected sidebar button + loading surface paint immediately.
+        self.active_tab = tab_id
+        self._ensure_tab_created(tab_id)
         
         # Hide all tabs, show selected
         for tid, frame in self.tab_frames.items():
@@ -6440,7 +6506,6 @@ class WayfinderApp(ctk.CTk):
             else:
                 frame.pack_forget()
         
-        self.active_tab = tab_id
         self._write_status_breadcrumb()
 
     def show_setup_pane(self, on_done=None) -> None:
@@ -9461,7 +9526,8 @@ class WayfinderApp(ctk.CTk):
             row, text="",
             variable=self.overlay_enabled_var,
             command=self._on_overlay_enabled_toggled,
-            width=40, height=22, switch_width=36, switch_height=18, corner_radius=9,  # pill: height/2, intentional off-token
+            width=40, height=22, switch_width=36, switch_height=18,
+            corner_radius=RADIUS["sm"] + 1,  # pill: height/2, intentional off-token
             fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
             button_color=COLORS["text_bright"], button_hover_color=COLORS["text_bright"],
         )
@@ -9809,6 +9875,11 @@ class WayfinderApp(ctk.CTk):
             scrollbar_button_hover_color=COLORS["accent_dim"],
         )
         self.log_textbox.pack(fill="both", expand=True, padx=12, pady=12)
+        pending_logs = list(getattr(self, "_pending_ui_logs", ()))
+        if pending_logs:
+            self.log_textbox.insert("end", "".join(pending_logs))
+            self.log_textbox.see("end")
+            self._pending_ui_logs.clear()
         self.log_textbox.configure(state="disabled")
 
         # Empty-state placeholder, centered over the card. Normally unseen (boot writes
@@ -12691,6 +12762,9 @@ class WayfinderApp(ctk.CTk):
     
     def _do_log(self, log_line: str):
         """Actually update the log textbox (must be called from main thread)."""
+        if not hasattr(self, "log_textbox"):
+            self._pending_ui_logs.append(log_line)
+            return
         try:
             self.log_textbox.configure(state="normal")
             self.log_textbox.insert("end", log_line)

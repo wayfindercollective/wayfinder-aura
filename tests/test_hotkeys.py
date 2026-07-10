@@ -359,6 +359,8 @@ class TestSocketListener:
             event_type, event_data = event_queue.get_nowait()
             assert event_type == expected_type
             assert event_data == expected_data
+            if payload == b"show":
+                mock_conn.sendall.assert_called_once_with(b"ok")
 
     @patch("wayfinder.hotkeys.socket.os.unlink")
     @patch("wayfinder.hotkeys.socket.socket.socket")

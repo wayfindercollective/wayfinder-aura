@@ -13,6 +13,7 @@ from typing import Any
 
 from wayfinder.utils.platform import (
     WAYFINDER_FLATPAK_ID,
+    get_steam_platform,
     get_wayfinder_appimage_dir,
     is_wayfinder_flatpak_env,
 )
@@ -264,8 +265,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "overlay_anchor": "bottom-center",  # {top,bottom}-{left,center,right}
     # Overlay render quality: "high" = the ambient corner wave animates continuously (smoothest
     # look); "performance" = the overlay holds still when idle to save CPU/battery on handhelds.
-    # Visual quality is identical in both — only whether the idle wave keeps moving.
-    "overlay_quality": "high",
+    # The wave still animates while recording/processing. Decks default to the battery-friendly
+    # idle behavior; other platforms retain the existing high-quality default.
+    "overlay_quality": "performance" if get_steam_platform() == "deck" else "high",
 
     # Audio ducking settings (reduce other audio while recording)
     "audio_ducking_enabled": True,  # Enable automatic volume reduction during recording

@@ -10,6 +10,8 @@ for disaster recovery — if the Deck is wiped, this directory plus
 |---|---|
 | `wayfinder-trigger-daemon.py` | `~/.local/bin/wayfinder-trigger-daemon.py` (executable) |
 | `wayfinder-mode-supervisor.py` | `~/.local/bin/wayfinder-mode-supervisor.py` (executable) |
+| `wayfinder-aura-show-or-start.py` | `~/.local/bin/wayfinder-aura-show-or-start` (executable) |
+| `wayfinder-aura.desktop` | `~/.local/share/applications/wayfinder-aura.desktop` |
 | `systemd/wayfinder-trigger.service` | `~/.config/systemd/user/wayfinder-trigger.service` |
 | `systemd/wayfinder-mode-supervisor.service` | `~/.config/systemd/user/wayfinder-mode-supervisor.service` |
 | `systemd/wayfinder-aura.service` | `~/.config/systemd/user/wayfinder-aura.service` |
@@ -26,6 +28,10 @@ systemctl --user disable --now r4-f3-bridge.service   # superseded; do not run b
 systemctl --user enable  --now wayfinder-aura.service wayfinder-trigger.service \
                                 wayfinder-mode-supervisor.service
 ```
+
+The desktop entry uses the one-shot `wayfinder-aura-show-or-start` helper. A click sends
+`show` to the existing app socket and returns immediately; only a genuinely stopped or
+unhealthy app touches systemd/Flatpak. The helper exits after the click and is not a daemon.
 
 ## How dictation gets triggered
 

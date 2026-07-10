@@ -1,0 +1,23 @@
+[Desktop Entry]
+Type=Application
+Name=Wayfinder Aura
+GenericName=Voice Dictation
+Comment=Local voice dictation using whisper.cpp
+Exec=/home/deck/.local/bin/wayfinder-aura-show-or-start
+Icon=/home/deck/dev/wayfinder-aura/assets/icon.png
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=voice;dictation;speech;whisper;transcription;speech-to-text;
+StartupNotify=true
+StartupWMClass=Wayfinder-aura
+Actions=toggle-recording;cycle-style;
+
+[Desktop Action toggle-recording]
+Name=Toggle Recording
+Exec=python3 /home/deck/dev/wayfinder-aura/trigger_record.py
+Icon=/home/deck/dev/wayfinder-aura/assets/icon.png
+
+[Desktop Action cycle-style]
+Name=Cycle Output Style
+Exec=python3 /home/deck/dev/wayfinder-aura/trigger_style.py
+Icon=/home/deck/dev/wayfinder-aura/assets/icon.png

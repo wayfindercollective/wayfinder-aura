@@ -41,9 +41,22 @@ def test_steamdeck_installer_installs_current_daemon_and_disables_legacy_bridge(
     installer = _read("install-steamdeck.sh")
 
     assert 'install -Dm755 "${SCRIPT_DIR}/wayfinder-trigger-daemon.py"' in installer
+    assert 'install -Dm755 "${SCRIPT_DIR}/wayfinder-aura-show-or-start.py"' in installer
+    assert '"${APPLICATION_DIR}/wayfinder-aura.desktop"' in installer
     assert 'install -Dm644 "${SYSTEMD_SRC}/wayfinder-trigger.service"' in installer
     assert 'install -Dm755 "${SCRIPT_DIR}/r4-f3-bridge.py"' not in installer
     assert "systemctl --user disable --now r4-f3-bridge.service" in installer
+
+
+def test_taskbar_launcher_accepts_current_ack_and_legacy_eof_before_starting_service():
+    launcher = _read("wayfinder-aura-show-or-start.py")
+    desktop = _read("wayfinder-aura.desktop")
+
+    assert 'client.sendall(b"show")' in launcher
+    assert 'response in (b"ok", b"")' in launcher
+    assert 'os.execvp("flatpak"' not in launcher
+    assert '"systemctl", "--user", "start", SERVICE' in launcher
+    assert "Exec=/home/deck/.local/bin/wayfinder-aura-show-or-start" in desktop
 
 
 def test_legacy_bridge_is_disabled_by_default_and_conflicts_with_current_daemon():

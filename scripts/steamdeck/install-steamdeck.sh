@@ -9,6 +9,8 @@
 #
 #   ~/.local/bin/wayfinder-trigger-daemon.py         (executable)
 #   ~/.local/bin/wayfinder-mode-supervisor.py        (executable)
+#   ~/.local/bin/wayfinder-aura-show-or-start         (executable)
+#   ~/.local/share/applications/wayfinder-aura.desktop
 #   ~/.config/systemd/user/wayfinder-trigger.service
 #   ~/.config/systemd/user/wayfinder-mode-supervisor.service
 #   ~/.config/systemd/user/wayfinder-aura.service
@@ -34,6 +36,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SYSTEMD_SRC="${SCRIPT_DIR}/systemd"
 
 BIN_DIR="${HOME}/.local/bin"
+APPLICATION_DIR="${HOME}/.local/share/applications"
 UNIT_DIR="${HOME}/.config/systemd/user"
 DROPIN_DIR="${UNIT_DIR}/wayfinder-aura.service.d"
 
@@ -57,6 +60,8 @@ require() {
 }
 require "${SCRIPT_DIR}/wayfinder-trigger-daemon.py"
 require "${SCRIPT_DIR}/wayfinder-mode-supervisor.py"
+require "${SCRIPT_DIR}/wayfinder-aura-show-or-start.py"
+require "${SCRIPT_DIR}/wayfinder-aura.desktop"
 require "${SYSTEMD_SRC}/wayfinder-trigger.service"
 require "${SYSTEMD_SRC}/wayfinder-mode-supervisor.service"
 require "${SYSTEMD_SRC}/wayfinder-aura.service"
@@ -67,6 +72,12 @@ require "${SYSTEMD_SRC}/wayfinder-aura-failed.service"
 say "Installing daemon scripts to ${BIN_DIR}"
 install -Dm755 "${SCRIPT_DIR}/wayfinder-trigger-daemon.py"  "${BIN_DIR}/wayfinder-trigger-daemon.py"
 install -Dm755 "${SCRIPT_DIR}/wayfinder-mode-supervisor.py" "${BIN_DIR}/wayfinder-mode-supervisor.py"
+install -Dm755 "${SCRIPT_DIR}/wayfinder-aura-show-or-start.py" "${BIN_DIR}/wayfinder-aura-show-or-start"
+
+# Restore a hidden live window through the existing app socket. The old desktop entry only
+# called `systemctl start`, which is a no-op while the service is already active.
+say "Installing responsive taskbar entry to ${APPLICATION_DIR}"
+install -Dm644 "${SCRIPT_DIR}/wayfinder-aura.desktop" "${APPLICATION_DIR}/wayfinder-aura.desktop"
 
 # --- 2. systemd user units -> ~/.config/systemd/user ----------------------
 say "Installing systemd user units to ${UNIT_DIR}"
