@@ -76,13 +76,45 @@ def test_assert_may_download_blocks_free_user():
 def test_auth_headers_include_bearer_when_gated():
     from wayfinder.models_cdn import download_auth_headers
 
+    cdn_url = "https://cdn.example/v1/objects/whisper/a.bin"
     h = download_auth_headers(
         {"requires_feature": "large_cleanup_models"},
         bearer_token="TOK.EN",
+        download_url=cdn_url,
+        config={"models_cdn_base": "https://cdn.example"},
     )
     assert h["Authorization"] == "Bearer TOK.EN"
-    h2 = download_auth_headers({"requires_feature": None}, bearer_token="TOK.EN")
+    h2 = download_auth_headers(
+        {"requires_feature": None},
+        bearer_token="TOK.EN",
+        download_url=cdn_url,
+        config={"models_cdn_base": "https://cdn.example"},
+    )
     assert "Authorization" not in h2
+
+
+def test_auth_headers_never_attach_bearer_to_hf_fallback(monkeypatch):
+    """Credential leak guard: gated Ultra must not send Bearer to Hugging Face."""
+    from wayfinder import models_cdn
+
+    monkeypatch.delenv("WAYFINDER_MODELS_CDN_BASE", raising=False)
+    monkeypatch.setattr(models_cdn, "DEFAULT_MODELS_CDN_BASE", "")
+    info = {
+        "url": "https://huggingface.co/org/model/resolve/main/a.bin",
+        "cdn_object": "whisper/a.bin",
+        "requires_feature": "large_models",
+    }
+    # CDN disabled → HF fallback
+    url = models_cdn.resolve_download_url(info, config={"models_cdn_base": ""})
+    assert "huggingface.co" in url
+    h = models_cdn.download_auth_headers(
+        info,
+        bearer_token="SECRET.TOKEN",
+        download_url=url,
+        config={"models_cdn_base": ""},
+    )
+    assert "Authorization" not in h
+    assert models_cdn.url_is_models_cdn(url, config={"models_cdn_base": ""}) is False
 
 
 def test_pilot_catalog_entries_are_gated():

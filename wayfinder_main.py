@@ -2399,14 +2399,35 @@ class ModelDownloader:
                 except Exception:
                     pass
                 
-                # Create request with headers (Bearer token for Ultra CDN objects)
+                # Create request with headers (Bearer only for Ultra CDN origin)
                 request = urllib.request.Request(url)
                 for hk, hv in download_auth_headers(
-                    model_info, bearer_token=gate.get_bearer_token()
+                    model_info,
+                    bearer_token=gate.get_bearer_token(),
+                    download_url=url,
+                    config=app_cfg,
                 ).items():
                     request.add_header(hk, hv)
-                
-                with urllib.request.urlopen(request, timeout=60) as response:
+
+                # Strip Authorization on cross-origin redirects (never leak token to HF).
+                class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, req, fp, code, msg, headers, newurl):
+                        new_req = super().redirect_request(
+                            req, fp, code, msg, headers, newurl
+                        )
+                        if new_req is None:
+                            return None
+                        try:
+                            from wayfinder.models_cdn import url_is_models_cdn
+
+                            if not url_is_models_cdn(newurl, config=app_cfg):
+                                new_req.remove_header("Authorization")
+                        except Exception:
+                            new_req.remove_header("Authorization")
+                        return new_req
+
+                opener = urllib.request.build_opener(_NoAuthRedirect)
+                with opener.open(request, timeout=60) as response:
                     total_size = int(response.headers.get("Content-Length", 0))
                     downloaded = 0
                     chunk_size = 1024 * 1024  # 1MB chunks
@@ -10926,14 +10947,36 @@ class WayfinderApp(ctk.CTk):
                     self.update_idletasks()
                 self.after(0, show_connecting)
                 
-                # Set up session with proper headers (Bearer for Ultra CDN objects)
+                # Bearer only when URL is Models CDN (never attach license token to HF).
                 session = requests.Session()
                 session.headers.update(
                     download_auth_headers(
-                        model_info, bearer_token=gate.get_bearer_token()
+                        model_info,
+                        bearer_token=gate.get_bearer_token(),
+                        download_url=url,
+                        config=app_cfg,
                     )
                 )
-                
+
+                def _strip_auth_on_cross_origin(r, *args, **kwargs):
+                    # requests hook: drop Authorization if redirect left CDN origin.
+                    try:
+                        from wayfinder.models_cdn import url_is_models_cdn
+
+                        if r.is_redirect and r.request is not None:
+                            loc = r.headers.get("Location") or ""
+                            # Absolute or relative — resolve against response URL.
+                            from urllib.parse import urljoin
+
+                            target = urljoin(r.url, loc)
+                            if not url_is_models_cdn(target, config=app_cfg):
+                                r.request.headers.pop("Authorization", None)
+                    except Exception:
+                        pass
+                    return r
+
+                session.hooks["response"].append(_strip_auth_on_cross_origin)
+
                 # Start download with reasonable timeouts
                 # (connect timeout, read timeout) - read timeout per chunk, not total
                 response = session.get(url, stream=True, timeout=(15, 30), allow_redirects=True)
