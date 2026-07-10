@@ -217,10 +217,19 @@ MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
     },
     "phi3:mini": {
         "issues": ["rewrites_standard_mode"],
-        "workaround": "Ignores 'keep exact words' in standard mode - rewrites sentences. Use for strong mode only, or switch to qwen3.5:2b.",
+        "workaround": "Ignores 'keep exact words' in standard mode - rewrites sentences. For strong/caricature, qwen3:4b is the better pick; for standard, use qwen3.5:2b.",
         "tier_override": "standard",  # phi3:mini is 3.8B params, supports strong/caricature
         "best_for": ["strong", "caricature"],  # Not good for standard mode
         "avoid_for": ["standard"],  # Will rewrite even with simple prompts
+    },
+    "qwen3:4b": {
+        # Qwen3-4B-Instruct-2507 — non-thinking refresh, best instruction
+        # follower at 4B (2026-07 research pass). Replaces Phi-3 Mini as the
+        # recommended strong/caricature model.
+        "issues": [],
+        "tier_override": "standard",
+        "best_for": ["standard", "strong", "caricature"],
+        "recommended": True,
     },
     "qwen2.5:1.5b": {
         "issues": [],  # Excellent - follows instructions well
@@ -311,6 +320,8 @@ MODEL_PARAM_COUNTS: Dict[str, Dict[str, Any]] = {
     "qwen2.5:7b": {"params": "7B", "tier": "standard"},
     "qwen2.5:14b": {"params": "14B", "tier": "large"},
     "qwen2.5:32b": {"params": "32B", "tier": "large"},
+    # Qwen 3 models (2507 instruct refresh)
+    "qwen3:4b": {"params": "4B", "tier": "standard"},
     # Qwen 3.5 models
     "qwen3.5:0.8b": {"params": "800M", "tier": "tiny"},
     "qwen3.5:2b": {"params": "2B", "tier": "small"},
@@ -350,12 +361,15 @@ def analyze_model(model_name: str) -> Dict[str, Any]:
         - quirks: list - any known issues
         - recommendation: str - usage recommendation
     """
-    model_lower = model_name.lower()
-    
+    # Match on normalized names so ollama-style keys ("qwen3:4b") resolve
+    # against GGUF file stems ("Qwen_Qwen3-4B-Instruct-2507-Q4_K_M") too.
+    model_norm = _normalize_model_name(model_name)
+
     # Try to get known param count
     params = "Unknown"
     for known_model, info in MODEL_PARAM_COUNTS.items():
-        if known_model in model_lower or model_lower in known_model:
+        known_norm = _normalize_model_name(known_model)
+        if known_norm in model_norm or model_norm in known_norm:
             params = info["params"]
             break
     
@@ -1634,9 +1648,17 @@ def _is_reasoning_model(model_path: str) -> bool:
     too. We must NOT match qwen2.5 (non-reasoning) — hence the explicit qwen3 check.
     """
     name = os.path.basename(model_path or "").lower()
+    if any(tok in name for tok in ("qwq", "-r1", "deepseek-r1", "thinking", "reasoning")):
+        return True
+    # Qwen3's 2507 refresh split the line: *-Instruct-2507 is explicitly
+    # NON-thinking (and prefilling an empty <think> block makes it emit EOS
+    # immediately on the standard cleanup prompts — no output at all), while
+    # *-Thinking-2507 already matched above.
+    if "instruct-2507" in name:
+        return False
     if "qwen3" in name:  # covers qwen3, qwen3.5, qwen35
         return True
-    return any(tok in name for tok in ("qwq", "-r1", "deepseek-r1", "thinking", "reasoning"))
+    return False
 
 
 # GPU post-proc probe budget: a 16-token generation on a healthy GPU finishes well
@@ -2941,11 +2963,11 @@ def get_recommended_models() -> list:
         },
         {
             "tier": "strong_mode",
-            "description": "Best for Strong mode (restructuring allowed)",
+            "description": "Best for Strong & Caricature (restructuring allowed)",
             "models": [
-                {"name": "qwen3.5:4b", "description": "Best quality for strong mode at this size"},
-                {"name": "phi3:mini", "description": "Great for strong mode - polishes well"},
-                {"name": "qwen2.5:3b", "description": "Good balance of speed and quality"},
+                {"name": "qwen3:4b", "description": "⭐ Best for Strong & Caricature — sharpest instruction following at 4B"},
+                {"name": "qwen3.5:4b", "description": "Newest generation, but thinks before answering (slower)"},
+                {"name": "phi3:mini", "description": "Dated 2024 model — works, but Qwen3 4B outclasses it"},
             ],
         },
         {
@@ -2977,12 +2999,12 @@ def get_model_recommendation_for_style(style: str, strong_mode: bool = False) ->
     """
     if strong_mode:
         return {
-            "recommended": ["qwen3.5:4b", "phi3:mini", "qwen2.5:3b"],
+            "recommended": ["qwen3:4b", "qwen3.5:4b", "phi3:mini"],
             # Sub-3B models are NOT listed: the model-tier cap downgrades strong
             # to standard on them, so advertising them here would be misleading.
-            "also_works": ["llama3.2:3b"],
+            "also_works": ["qwen2.5:3b", "llama3.2:3b"],
             "avoid": [],
-            "message": "Strong mode allows restructuring and requires a 3B+ model — smaller models fall back to standard.",
+            "message": "Strong mode allows restructuring and requires a 3B+ model — smaller models fall back to standard. Qwen3 4B is the best local pick.",
         }
 
     # Standard mode - need models that follow "keep exact words" instructions

@@ -166,9 +166,18 @@ class TestReasoningModel:
         ("qwen2.5-1.5b-instruct-q4_k_m.gguf", False),
         ("google_gemma-3-1b-it-Q4_K_M.gguf", False),
         ("LFM2.5-1.2B-Instruct-Q4_K_M.gguf", False),
+        # Qwen3 2507 refresh: Instruct = non-thinking (a <think> prefill makes
+        # it emit EOS immediately — live bug 2026-07-09), Thinking = reasoning.
+        ("Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf", False),
+        ("Qwen3-4B-Thinking-2507-Q4_K_M.gguf", True),
     ])
     def test_detection(self, name, expected):
         assert _is_reasoning_model(name) is expected
+
+    def test_non_thinking_2507_gets_no_think_prefill(self):
+        be = LlamaCppCliBackend(model_path="/x/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf")
+        p = be.build_cli_prompt("clean this text up please ok", "professional")
+        assert not p.rstrip().endswith("</think>")
 
     def test_reasoning_backend_prefills_think_block(self):
         be = LlamaCppCliBackend(model_path="/x/Qwen3.5-2B-Q4_K_M.gguf")

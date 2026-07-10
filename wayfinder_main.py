@@ -1517,6 +1517,16 @@ LLM_GGUF_MODELS = {
         "speed": "Very Fast",
         "accuracy": "Excellent",
     },
+    "qwen3-4b-2507": {
+        "name": "Qwen3 4B Instruct 2507",
+        "size": "2.5 GB",
+        "size_bytes": 2_497_280_736,
+        "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "description": "Best local pick for Strong & Caricature. Sharpest instruction-follower in its class, no reasoning latency.",
+        "speed": "Fast",
+        "accuracy": "Excellent",
+    },
     "lfm2.5-1.2b": {
         "name": "LFM2.5 1.2B",
         "size": "697 MB",
@@ -1533,7 +1543,7 @@ LLM_GGUF_MODELS = {
         "size_bytes": 2_393_231_072,
         "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
         "filename": "Phi-3-mini-4k-instruct-q4.gguf",
-        "description": "Microsoft's compact powerhouse. Excellent at text cleanup and formatting.",
+        "description": "Microsoft's 2024 compact model. Still works, but Qwen3 4B is the better Strong & Caricature pick.",
         "speed": "Fast",
         "accuracy": "High",
     },
@@ -7521,7 +7531,7 @@ class WayfinderApp(ctk.CTk):
         strong_toggle.pack(side="right")
         
         # Add tooltip for strong mode
-        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your exact words.\nWorks best with Cloud AI (Ultra) or a 🎭-marked local model (3B+).")
+        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your exact words.\nWorks best with Cloud AI (Ultra) or a 🎭-marked local model like Qwen3 4B.")
         
         # Caricature mode toggle (right side) - always visible now!
         caricature_container = ctk.CTkFrame(toggles_row, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
@@ -7559,12 +7569,12 @@ class WayfinderApp(ctk.CTk):
         caricature_toggle.pack(side="right")
         
         # Add tooltip for caricature mode
-        ToolTip(caricature_container, "Maximum parody mode! Exaggerates your style hilariously.\nWorks best with Cloud AI (Ultra) or a 🎭-marked local model (3B+).")
+        ToolTip(caricature_container, "Maximum parody mode! Exaggerates your style hilariously.\nWorks best with Cloud AI (Ultra) or a 🎭-marked local model like Qwen3 4B.")
 
         # Note: intensity modes are model-limited — cloud (Ultra) gives the best results
         ctk.CTkLabel(
             modes_frame,
-            text="💡 Strong & Caricature shine with Cloud AI (Ultra) — or a 🎭-marked local model (3B+).",
+            text="💡 Strong & Caricature shine with Cloud AI (Ultra) — or a 🎭-marked local model like Qwen3 4B.",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", pady=(6, 0))
@@ -7708,7 +7718,7 @@ class WayfinderApp(ctk.CTk):
                 if compat.get("effective_intensity") != compat.get("requested_intensity"):
                     self.log(
                         "🎭 …but the current LLM model is too small for caricature. "
-                        "Pick a 🎭-marked model (3B+) in Settings → Post-Processing — "
+                        "Pick a 🎭-marked model like Qwen3 4B in Settings → Post-Processing — "
                         "or use Cloud AI (Ultra) for the best results."
                     )
             except Exception:
@@ -8044,7 +8054,7 @@ class WayfinderApp(ctk.CTk):
                 if compat.get("effective_intensity") != compat.get("requested_intensity"):
                     self.log(
                         "💪 …but the current LLM model is too small for strong mode. "
-                        "Pick a 🎭-marked model (3B+) in Settings → Post-Processing — "
+                        "Pick a 🎭-marked model like Qwen3 4B in Settings → Post-Processing — "
                         "or use Cloud AI (Ultra) for the best results."
                     )
             except Exception:

@@ -80,6 +80,13 @@ LLM_MODELS: dict[str, dict] = {
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
         "note": "Capable reasoning model; less consistent than Gemma 3 for light cleanup",
     },
+    "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M": {
+        "label": "Qwen3 4B Instruct 2507 (Strong/Caricature)",
+        "size": "~2.5 GB",
+        "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "note": "Best local model for Strong & Caricature intensity; sharpest instruction follower at 4B",
+    },
     "qwen2.5-1.5b-instruct-q4_k_m": {
         "label": "Qwen 2.5 1.5B (Legacy)",
         "size": "~1.0 GB",

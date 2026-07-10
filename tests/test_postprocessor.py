@@ -68,6 +68,12 @@ class TestDetectModelTier:
         """phi3:mini has a tier_override to 'standard' in MODEL_QUIRKS."""
         assert detect_model_tier("phi3:mini") == "standard"
 
+    def test_qwen3_4b_gguf_stem_returns_standard(self):
+        """The strong/caricature flagship must resolve from its GGUF file stem
+        (quirk key qwen3:4b), not just the ollama-style name."""
+        assert detect_model_tier("Qwen_Qwen3-4B-Instruct-2507-Q4_K_M") == "standard"
+        assert detect_model_tier("qwen3:4b") == "standard"
+
     def test_qwen_7b_returns_standard(self):
         assert detect_model_tier("qwen2.5:7b") == "standard"
 

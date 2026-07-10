@@ -37,6 +37,12 @@ MONITORED_MODELS = {
         "current_filename": "Qwen3.5-2B-Q4_K_M.gguf",
         "category": "llm",
     },
+    "llm_qwen3_4b": {
+        "repo_id": "bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF",
+        "description": "Qwen3 4B Instruct 2507 (strong/caricature post-processing)",
+        "current_filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "category": "llm",
+    },
     "llm_lfm2_5": {
         "repo_id": "LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
         "description": "LFM2.5 1.2B (post-processing)",

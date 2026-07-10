@@ -79,6 +79,9 @@ else:
 _LLM_PREFERENCE = [
     "google_gemma-3-1b-it-Q4_K_M.gguf",
     "Qwen3.5-2B-Q4_K_M.gguf",
+    # Strong/caricature flagship — preferred over the legacy Qwen 2.5 as a
+    # default, but Gemma/Qwen3.5 stay first (faster for everyday cleanup).
+    "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
     "qwen2.5-1.5b-instruct-q4_k_m.gguf",
 ]
 
