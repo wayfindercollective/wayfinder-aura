@@ -76,9 +76,12 @@ class TestTranscriptionBackends:
         assert os.path.exists(resolved), f"downgrade produced a missing model_path: {resolved!r}"
         assert os.path.basename(resolved) == "ggml-base.en.bin"
 
-    def test_large_model_downgrade_keeps_model_when_no_free_alternative(self, sample_config, tmp_path, monkeypatch):
-        """Fail-safe: if no free model exists to fall back to, keep the configured model
-        rather than break transcription with a missing path."""
+    def test_large_model_downgrade_fails_closed_when_no_free_alternative(
+        self, sample_config, tmp_path, monkeypatch
+    ):
+        """Unlicensed Ultra weights must not run: when no free fallback file exists,
+        leave the Ultra path (point at conventional free basename) rather than keep
+        the large model."""
         import os
         from wayfinder.core.transcriber import get_backend
         monkeypatch.setattr("wayfinder.license.FeatureGate.has_feature", lambda self, f: False)
@@ -87,7 +90,48 @@ class TestTranscriptionBackends:
         sample_config["transcription_backend"] = "whisper_cpp"
         sample_config["model_path"] = str(large)
         backend = get_backend(sample_config)
-        assert os.path.expanduser(getattr(backend, "model_path", "")) == str(large)
+        resolved = os.path.expanduser(getattr(backend, "model_path", ""))
+        assert os.path.basename(resolved) == "ggml-base.en.bin"
+        assert "large" not in os.path.basename(resolved).lower()
+
+    def test_free_gpu_enabled_for_base_model(self, sample_config, monkeypatch):
+        """Free tier may use GPU when the active model is Base/Tiny."""
+        from wayfinder.core.transcriber import get_backend
+
+        monkeypatch.setattr("wayfinder.license.FeatureGate.has_feature", lambda self, f: False)
+        sample_config["transcription_backend"] = "whisper_cpp"
+        sample_config["model_path"] = "/models/ggml-base.en.bin"
+        sample_config["use_gpu"] = True
+        sample_config["whisper_server_mode"] = False
+        backend = get_backend(sample_config)
+        assert getattr(backend, "use_gpu", None) is True
+
+    def test_free_gpu_disabled_for_small_model(self, sample_config, monkeypatch):
+        """Free tier must not get GPU on Small — that is Ultra."""
+        from wayfinder.core.transcriber import get_backend
+
+        monkeypatch.setattr("wayfinder.license.FeatureGate.has_feature", lambda self, f: False)
+        sample_config["transcription_backend"] = "whisper_cpp"
+        sample_config["model_path"] = "/models/ggml-small.en.bin"
+        sample_config["use_gpu"] = True
+        sample_config["whisper_server_mode"] = False
+        backend = get_backend(sample_config)
+        assert getattr(backend, "use_gpu", None) is False
+
+    def test_ultra_gpu_enabled_for_small_model(self, sample_config, monkeypatch):
+        """Ultra (gpu_acceleration feature) may use GPU on Small."""
+        from wayfinder.core.transcriber import get_backend
+
+        monkeypatch.setattr(
+            "wayfinder.license.FeatureGate.has_feature",
+            lambda self, f: f == "gpu_acceleration" or f == "large_models",
+        )
+        sample_config["transcription_backend"] = "whisper_cpp"
+        sample_config["model_path"] = "/models/ggml-small.en.bin"
+        sample_config["use_gpu"] = True
+        sample_config["whisper_server_mode"] = False
+        backend = get_backend(sample_config)
+        assert getattr(backend, "use_gpu", None) is True
 
 
 class TestWhisperCppBackend:
@@ -479,6 +523,38 @@ class TestFasterWhisperBackend:
         assert "Base prompt here." not in result
         assert "Bazzite" in result
 
+    def test_whisper_cpp_and_server_prompt_strategy_match(self):
+        """CLI + server backends must prefer prior-chunk context over the base prompt.
+
+        Chunked dictation feeds context from the previous segment; stacking base
+        prompt + context blew the prompt budget and diluted continuity.
+        """
+        from wayfinder.core.transcriber import WhisperCppBackend, WhisperServerBackend
+
+        backends = [
+            WhisperCppBackend(
+                whisper_binary="/nonexistent",
+                model_path="/nonexistent",
+                prompt="Generic style seed.",
+                custom_vocabulary=["Wayfinder"],
+            ),
+            WhisperServerBackend(
+                prompt="Generic style seed.",
+                custom_vocabulary=["Wayfinder"],
+            ),
+        ]
+        for backend in backends:
+            first = backend._build_prompt()
+            assert "Generic style seed." in first, backend.get_name()
+            assert "Wayfinder" in first
+
+            later = backend._build_prompt(
+                context="and then we continued speaking about the release"
+            )
+            assert "continued speaking" in later, backend.get_name()
+            assert "Generic style seed." not in later, backend.get_name()
+            assert "Wayfinder" in later
+
     def test_get_backend_faster_whisper(self, sample_config: dict, monkeypatch: pytest.MonkeyPatch):
         """Test factory creates FasterWhisperBackend with all params."""
         from wayfinder.core.transcriber import get_backend, FasterWhisperBackend
@@ -533,6 +609,69 @@ class TestFasterWhisperBackend:
         # Specific device
         backend = FasterWhisperBackend(gpu_device="2")
         assert backend.gpu_device == "2"
+
+    def test_supports_gpu_uses_ctranslate2_not_torch(self, monkeypatch):
+        """Regression: torch.cuda (True on ROCm/AMD) must not claim FW GPU support.
+
+        Faster-Whisper runs on CTranslate2. Stock CT2 wheels need NVIDIA CUDA;
+        AMD ROCm torch reporting True previously made us open device='cuda' and
+        fail, then silently CPU-fall-back after a confusing error.
+        """
+        from wayfinder.core.transcriber import FasterWhisperBackend
+
+        FasterWhisperBackend._gpu_unavailable_logged = False
+        backend = FasterWhisperBackend(use_gpu=True)
+        backend._gpu_supported = None
+
+        monkeypatch.setattr(backend, "is_available", lambda: True)
+        monkeypatch.setattr(
+            FasterWhisperBackend, "ctranslate2_cuda_device_count", staticmethod(lambda: 0)
+        )
+        # Even if someone reintroduces a torch check, CT2 count wins.
+        import sys
+        fake_torch = type(sys)("torch")
+        fake_torch.cuda = type(sys)("cuda")
+        fake_torch.cuda.is_available = lambda: True
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        assert backend.supports_gpu() is False
+
+        backend._gpu_supported = None
+        monkeypatch.setattr(
+            FasterWhisperBackend, "ctranslate2_cuda_device_count", staticmethod(lambda: 1)
+        )
+        assert backend.supports_gpu() is True
+
+    def test_get_model_stays_on_cpu_when_ct2_has_no_cuda(self, monkeypatch):
+        """use_gpu=True + zero CT2 devices must load CPU int8 without trying CUDA."""
+        import sys
+        import types
+        from wayfinder.core.transcriber import FasterWhisperBackend
+
+        FasterWhisperBackend._model_cache.clear()
+        backend = FasterWhisperBackend(model_size="tiny", use_gpu=True, compute_type="float16")
+        backend._gpu_supported = None
+        monkeypatch.setattr(backend, "is_available", lambda: True)
+        monkeypatch.setattr(
+            FasterWhisperBackend, "ctranslate2_cuda_device_count", staticmethod(lambda: 0)
+        )
+
+        calls = []
+
+        class FakeWhisperModel:
+            def __init__(self, model_size, device="cpu", device_index=0, compute_type="default"):
+                calls.append(
+                    {"model_size": model_size, "device": device, "compute_type": compute_type}
+                )
+
+        fake_fw = types.ModuleType("faster_whisper")
+        fake_fw.WhisperModel = FakeWhisperModel
+        monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+
+        model = backend._get_model()
+        assert model is not None
+        assert calls == [{"model_size": "tiny", "device": "cpu", "compute_type": "int8"}]
+        assert backend._active_device == "cpu"
 
 
 class TestTranscriptionPostProcessing:

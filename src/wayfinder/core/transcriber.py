@@ -672,12 +672,20 @@ class WhisperServerBackend(TranscriptionBackend):
             WhisperServerBackend._server_lock = threading.Lock()
 
     def _build_prompt(self, context: str = "") -> str:
-        """Build the prompt string (same logic as WhisperCppBackend)."""
+        """Build the prompt string (same strategy as WhisperCppBackend).
+
+        Subsequent chunks prefer real prior-speech context over the generic base
+        prompt so the model continues the utterance rather than re-seeding style
+        (and so we don't blow the prompt budget on base+context combined).
+        """
         parts = []
-        if self.prompt:
-            parts.append(self.prompt)
         if context:
-            parts.append(context)
+            snippet = context.strip()
+            if len(snippet) > 200:
+                snippet = snippet[-200:]
+            parts.append(snippet)
+        elif self.prompt:
+            parts.append(self.prompt)
         if self.custom_vocabulary:
             vocab_str = ", ".join(self.custom_vocabulary[:50])
             parts.append(f"Vocabulary: {vocab_str}")
@@ -1064,12 +1072,19 @@ class WhisperServerBackend(TranscriptionBackend):
 class FasterWhisperBackend(TranscriptionBackend):
     """
     Faster-Whisper backend for transcription.
-    Uses CTranslate2 for optimized inference with GPU (ROCm/CUDA) support.
+
+    Inference runs through **CTranslate2**, not PyTorch. GPU acceleration therefore
+    requires a CTranslate2 build that can open CUDA devices (stock PyPI wheels are
+    NVIDIA-CUDA only). A ROCm-enabled *torch* install does **not** make this path
+    use the AMD GPU — on AMD, expect CPU int8 unless a custom CT2 build is present.
+    Prefer whisper.cpp + Vulkan for AMD GPU speed.
     """
 
     # Class-level model cache to avoid reloading
     _model_cache: dict = {}
-    
+    # True once we've logged why GPU was unavailable this process (avoid spam).
+    _gpu_unavailable_logged: bool = False
+
     def __init__(
         self,
         model_size: str = "small",
@@ -1110,7 +1125,8 @@ class FasterWhisperBackend(TranscriptionBackend):
 
         self._model = None
         self._gpu_supported: Optional[bool] = None
-    
+        self._active_device: str = "cpu"  # set by _get_model after load
+
     def _build_prompt(self, context: str = "") -> str:
         """
         Build the final prompt intelligently based on available context.
@@ -1147,37 +1163,62 @@ class FasterWhisperBackend(TranscriptionBackend):
             return True
         except ImportError:
             return False
-    
+
+    @staticmethod
+    def ctranslate2_cuda_device_count() -> int:
+        """How many CUDA devices CTranslate2 can actually use (0 on AMD-only hosts).
+
+        Faster-Whisper GPU = CT2 CUDA. Do **not** use ``torch.cuda.is_available()``:
+        ROCm builds of PyTorch report True for AMD, but stock CT2 wheels still need
+        NVIDIA drivers/libraries and will fail (or silently not see the GPU).
+        """
+        try:
+            import ctranslate2
+            return int(ctranslate2.get_cuda_device_count() or 0)
+        except Exception:
+            return 0
+
     def supports_gpu(self) -> bool:
-        """Check if GPU acceleration is available (ROCm or CUDA)."""
+        """True only when CTranslate2 reports at least one usable CUDA device."""
         if self._gpu_supported is not None:
             return self._gpu_supported
-        
+
         if not self.is_available():
             self._gpu_supported = False
             return False
-        
-        try:
-            import torch
-            self._gpu_supported = torch.cuda.is_available()  # Works for both CUDA and ROCm
-            return self._gpu_supported
-        except ImportError:
-            self._gpu_supported = False
-            return False
-    
+
+        n = self.ctranslate2_cuda_device_count()
+        self._gpu_supported = n > 0
+        if (
+            not self._gpu_supported
+            and self.use_gpu
+            and not FasterWhisperBackend._gpu_unavailable_logged
+        ):
+            # One-shot notice so Settings "GPU on" + Faster-Whisper on AMD isn't mysterious.
+            print(
+                "[Faster-Whisper] No CUDA devices visible to CTranslate2 "
+                f"(count={n}). GPU mode needs an NVIDIA-capable CT2 build; "
+                "on AMD use whisper.cpp (Vulkan) for GPU, or Faster-Whisper on CPU.",
+                flush=True,
+            )
+            FasterWhisperBackend._gpu_unavailable_logged = True
+        return self._gpu_supported
+
     def _get_model(self):
-        """Get or create the Whisper model (cached). Falls back to CPU on GPU OOM."""
+        """Get or create the Whisper model (cached). Falls back to CPU on GPU failure."""
         if self._model is not None:
             return self._model
 
-        cache_key = (self.model_size, self.use_gpu, self.compute_type)
+        want_gpu = bool(self.use_gpu and self.supports_gpu())
+        cache_key = (self.model_size, want_gpu, self.compute_type if want_gpu else "int8")
         if cache_key in FasterWhisperBackend._model_cache:
             self._model = FasterWhisperBackend._model_cache[cache_key]
+            self._active_device = "cuda" if want_gpu else "cpu"
             return self._model
 
         from faster_whisper import WhisperModel
 
-        device = "cuda" if self.use_gpu and self.supports_gpu() else "cpu"
+        device = "cuda" if want_gpu else "cpu"
         compute_type = self.compute_type if device == "cuda" else "int8"
 
         # GPU device selection for multi-GPU systems
@@ -1195,18 +1236,28 @@ class FasterWhisperBackend(TranscriptionBackend):
                 device_index=device_index,
                 compute_type=compute_type,
             )
+            self._active_device = device
         except Exception as e:
             # Fall back to CPU on GPU memory errors or other GPU failures
             if device == "cuda":
-                print(f"[Faster-Whisper] GPU failed ({e}), falling back to CPU with int8...")
+                print(
+                    f"[Faster-Whisper] CUDA load failed ({e}); "
+                    "falling back to CPU int8. On AMD GPUs prefer whisper.cpp + Vulkan.",
+                    flush=True,
+                )
                 try:
                     self._model = WhisperModel(
                         self.model_size,
                         device="cpu",
                         compute_type="int8",
                     )
+                    self._active_device = "cpu"
+                    # Cache under the CPU key so the next call doesn't re-try a broken CUDA path.
+                    cache_key = (self.model_size, False, "int8")
                 except Exception as cpu_e:
-                    raise TranscriptionError(f"Failed to load Faster-Whisper model on both GPU and CPU: {cpu_e}")
+                    raise TranscriptionError(
+                        f"Failed to load Faster-Whisper model on both GPU and CPU: {cpu_e}"
+                    )
             else:
                 raise TranscriptionError(f"Failed to load Faster-Whisper model: {e}")
 
@@ -1732,10 +1783,10 @@ def get_backend(config: dict) -> TranscriptionBackend:
         backend_type = "whisper_cpp"
         config = dict(config)
         config["transcription_backend"] = "whisper_cpp"
-        # Downgrade a large model to a FREE model that actually EXISTS — never point at a
-        # missing path (that fails transcription and loses the user's words). Prefer a free
-        # model in the same directory, then the bundled Flatpak base.en; if none is found,
-        # KEEP the configured model (fail-safe) rather than break dictation.
+        # Downgrade a large model to a FREE model. Prefer an existing free weight in the
+        # same directory, then Flatpak bundled base.en. If none exists, still leave the
+        # Ultra path — fail closed so unlicensed users cannot *use* Ultra weights
+        # (dictation may error; that is preferred over unlocking large_models).
         if _is_large_model(config.get("model_path", "")):
             import os as _os
             _cur = _os.path.expanduser(config.get("model_path", ""))
@@ -1752,13 +1803,30 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 _free = "/app/share/whisper-models/ggml-base.en.bin"  # bundled (Flatpak)
             if _free is not None:
                 config["model_path"] = _free
+            else:
+                # Point at conventional free basename next to the Ultra file (may be
+                # missing → transcription fails closed rather than running Ultra).
+                config["model_path"] = (
+                    _os.path.join(_dir, "ggml-base.en.bin") if _dir else "ggml-base.en.bin"
+                )
+                print(
+                    "[Transcription] No free Whisper model found to replace Ultra weight; "
+                    "refusing large_models without license (install Base/Tiny to continue)."
+                )
 
-    # GPU acceleration is a PREMIUM feature — enforce here (the backend factory), not
-    # only in the UI, so editing config.json can't unlock GPU without a license. Every
-    # GPU-capable backend below uses use_gpu_effective instead of the raw config value.
+    # GPU entitlement: Ultra gets GPU for every model; free gets GPU on Tiny/Base
+    # only (Small+ GPU is Ultra). Enforced here so config.json cannot unlock
+    # Small-on-GPU without a license. Every GPU-capable backend below uses
+    # use_gpu_effective instead of the raw config value.
     try:
-        from wayfinder.license import get_feature_gate
-        _gpu_allowed = get_feature_gate().has_feature("gpu_acceleration")
+        from wayfinder.license import gpu_allowed_for_model
+        # Prefer the (possibly downgraded) local model path for the size check.
+        _gpu_model_ref = (
+            config.get("faster_whisper_model", "small")
+            if backend_type == "faster_whisper"
+            else config.get("model_path", _local_model)
+        )
+        _gpu_allowed = gpu_allowed_for_model(_gpu_model_ref)
     except Exception:
         _gpu_allowed = False
     use_gpu_effective = bool(config.get("use_gpu", True)) and _gpu_allowed

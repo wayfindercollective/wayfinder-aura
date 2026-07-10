@@ -394,6 +394,12 @@ SPACING = {
     "2xl": 32,
 }
 
+# Max design-unit width for label↔control *rows* (not the whole tab pane).
+# Cards/tiles stay full-bleed; only the form measure inside each row is capped
+# and side-padded on wide/fullscreen so controls don't fly to the far edge.
+# Generous on purpose — 780 felt like a skinny window and was the wrong layer.
+FORM_MEASURE_MAX = 1200
+
 STATE_COLORS = {
     AppState.IDLE: COLORS["state_ready"],        # Soft brand blue when ready
     AppState.RECORDING: COLORS["state_recording"], # Rose when recording
@@ -437,6 +443,11 @@ STYLE_LABELS = {
 
 # === Tooltip Helper ===
 
+# Flipped True for the duration of a mouse-wheel gesture so hover ToolTips
+# don't spawn CTkToplevel windows while content is sliding under the pointer.
+_WHEEL_SCROLL_ACTIVE = False
+
+
 class ToolTip:
     """
     Modern hover tooltip for CustomTkinter widgets.
@@ -455,6 +466,10 @@ class ToolTip:
         widget.bind("<ButtonPress>", self.on_leave)
     
     def on_enter(self, event=None):
+        # Pointer is skating across rows during a wheel gesture — scheduling a
+        # Toplevel tooltip mid-scroll is a common source of bottom-of-pane jank.
+        if _WHEEL_SCROLL_ACTIVE:
+            return
         self.scheduled_id = self.widget.after(self.delay, self.show_tooltip)
     
     def on_leave(self, event=None):
@@ -466,7 +481,9 @@ class ToolTip:
     def show_tooltip(self):
         if self.tooltip_window:
             return
-        
+        if _WHEEL_SCROLL_ACTIVE:
+            return
+
         # Create tooltip window
         self.tooltip_window = tw = ctk.CTkToplevel(self.widget)
         tw.wm_overrideredirect(True)
@@ -908,19 +925,141 @@ class ModeSelector(ctk.CTkFrame):
 
 class SmoothScrollableFrame(ctk.CTkScrollableFrame):
     """
-    Scrollable frame wrapper that uses CTk's built-in scrolling.
-    The custom smooth scrolling implementation was incompatible with
-    the current CustomTkinter version.
+    Scrollable frame with a few scroll-feel patches on top of CTk.
+
+    CTk's stock <Configure>→scrollregion path rewrites the canvas region on
+    every child geometry change (hover recolors, font reflow, etc.). Near the
+    bottom that can shift yview by a fraction of a pixel and read as a glitch.
+    We only push scrollregion when bbox("all") actually changes.
+
+    The custom momentum/lerp scroller was removed earlier — it fought CTk.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Just use standard CTk scrolling - works reliably
+        self._sr_bbox = None
+        # Replace CTk's Configure→scrollregion binding (bind without add
+        # overwrites the widget-level handler installed in super().__init__).
+        self.bind("<Configure>", self._on_inner_configure)
+
+    def _on_inner_configure(self, _event=None):
+        try:
+            bbox = self._parent_canvas.bbox("all")
+        except Exception:
+            return
+        if bbox is None or bbox == self._sr_bbox:
+            return
+        self._sr_bbox = bbox
+        try:
+            self._parent_canvas.configure(scrollregion=bbox)
+        except Exception:
+            pass
 
 
 # Pixels scrolled per mouse-wheel notch at 1.0 UI scale (~2 settings rows).
-# Applied by _enable_linux_mousewheel, multiplied by the widget's CTk scaling.
-WHEEL_SCROLL_PX = 90
+# Applied by _enable_linux_mousewheel; scale is soft-damped (see _wheel_notch_px).
+WHEEL_SCROLL_PX = 72
+# Never jump more than this fraction of the visible viewport per notch — at
+# ui_scale=2.0 the old 90*scale=180px step was a big chunk of the pane and
+# made the last notches into the bottom feel like a hard slam.
+WHEEL_MAX_VIEWPORT_FRAC = 0.12
+# How hard to dampen widget scale above 1.0 when computing notch distance.
+# soft = 1 + (scale-1)*factor  →  scale 2.0 yields 1.45x, not 2x.
+WHEEL_SCALE_DAMP = 0.45
+
+
+def _wheel_notch_px(scale: float, viewport_h: float) -> float:
+    """Physical pixels for one wheel notch, scale-aware but viewport-capped."""
+    try:
+        scale = float(scale)
+    except (TypeError, ValueError):
+        scale = 1.0
+    if scale < 0.5:
+        scale = 0.5
+    soft = 1.0 + max(0.0, scale - 1.0) * WHEEL_SCALE_DAMP
+    step = WHEEL_SCROLL_PX * soft
+    try:
+        vh = float(viewport_h)
+    except (TypeError, ValueError):
+        vh = 0.0
+    if vh > 0:
+        cap = vh * WHEEL_MAX_VIEWPORT_FRAC
+        if step > cap:
+            step = cap
+    return max(24.0, step)
+
+
+def _wheel_clamp_delta_px(
+    delta_px: float,
+    top_frac: float,
+    content_h: float,
+    viewport_h: float,
+) -> float:
+    """Clamp a wheel delta so the viewport never overshoots top/bottom.
+
+    Overshooting with yview_scroll still forces a canvas redraw at the edge,
+    which reads as a quick up/down flash when the user keeps rolling past the
+    end of Settings (and other long panes). Returning 0 means "already there".
+    """
+    if content_h <= 0 or viewport_h <= 0:
+        return 0.0
+    max_top = content_h - viewport_h
+    if max_top <= 0.5:
+        return 0.0  # content fits; nothing to scroll
+    cur_top = top_frac * content_h
+    # Numerical noise around the edges
+    if cur_top < 0:
+        cur_top = 0.0
+    elif cur_top > max_top:
+        cur_top = max_top
+    new_top = cur_top + delta_px
+    if new_top < 0.0:
+        new_top = 0.0
+    elif new_top > max_top:
+        new_top = max_top
+    applied = new_top - cur_top
+    if abs(applied) < 0.5:
+        return 0.0
+    return applied
+
+
+def _wheel_top_frac_after(top_frac: float, applied_px: float, content_h: float) -> float:
+    """New yview_moveto fraction after applying applied_px (content_h > 0)."""
+    if content_h <= 0:
+        return top_frac
+    return max(0.0, (top_frac * content_h + applied_px) / content_h)
+
+
+def _patch_ctk_scrollbar_quiet_draw() -> None:
+    """Stop CTkScrollbar._draw from calling update_idletasks() every tick.
+
+    Every yview change fires yscrollcommand → Scrollbar.set → _draw →
+    update_idletasks(). On a dense Settings pane (and especially at 200% UI
+    scale) that forced layout pass is a big chunk of the 'jank near the
+    bottom' feel. Skipping the idle flush still redraws the thumb; it just
+    doesn't stall the event loop mid-gesture.
+    """
+    if getattr(ctk.CTkScrollbar, "_wf_quiet_draw", False):
+        return
+    _orig_draw = ctk.CTkScrollbar._draw
+
+    def _quiet_draw(self, no_color_updates=False):  # noqa: ANN001
+        canvas = getattr(self, "_canvas", None)
+        if canvas is None:
+            return _orig_draw(self, no_color_updates=no_color_updates)
+        saved = canvas.update_idletasks
+        canvas.update_idletasks = lambda: None  # type: ignore[method-assign]
+        try:
+            return _orig_draw(self, no_color_updates=no_color_updates)
+        finally:
+            canvas.update_idletasks = saved  # type: ignore[method-assign]
+
+    ctk.CTkScrollbar._draw = _quiet_draw  # type: ignore[method-assign]
+    ctk.CTkScrollbar._wf_quiet_draw = True  # type: ignore[attr-defined]
+
+
+_patch_ctk_scrollbar_quiet_draw()
+
 
 # Neuter CustomTkinter's own <MouseWheel> handler at import time — BEFORE any
 # CTkScrollableFrame is ever instantiated. Each frame's __init__ runs
@@ -948,7 +1087,7 @@ SETTING_TOOLTIPS = {
     "hotkey": "The keyboard shortcut to start/stop voice recording.\n⚡ Latency: None",
     "microphone": "Select which microphone/audio input device to use.\n⚡ Latency: None",
     "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\n⚡ Latency: None",
-    "benchmark": "Measure transcription speed on your hardware.\nResults customize speed estimates throughout the app.\n⏱️ Run once to get accurate timing predictions.",
+    "benchmark": "Measure end-to-end dictation speed on your hardware.\nTimes ASR + post-processing cleanup, with a per-model breakdown.\n⏱️ Run once to get accurate timing predictions.",
     "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
     "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
     "overlay_type": "Choose the status indicator style:\n• Always On: Stays visible, never steals focus (PyQt6)\n• Disappearing: Shows only during recording (CTk)\n⚠️ Requires restart to take effect.",
@@ -964,8 +1103,8 @@ SETTING_TOOLTIPS = {
     "audio_preprocessing": "Audio signal processing before transcription.\n🟢 Off: 0ms | Light: +2ms | Medium: +5ms | Heavy: +10ms",
     
     # 🟡 Moderate latency impact (10-100ms)
-    "chunked_mode": "Split long recordings into segments, transcribe each,\nand splice results together. Enables unlimited length.\n🟡 Latency: +50-100ms overhead per segment boundary",
-    "chunk_duration": "Length of each audio segment (seconds).\nShorter = faster feedback but more splice points.\n🟡 15-30s recommended for best balance",
+    "chunked_mode": "Split long recordings into segments, transcribe each while you speak,\nand splice results together. Makes very long dictations finish fast.\n🟢 Default 10s segments keep accuracy close to one-shot",
+    "chunk_duration": "New audio per segment (seconds).\nShorter = less work left when you stop, more splice points.\n🟢 8–12s: fast with little accuracy loss | 15–30s: safer, slower tail",
     
     # 🔴 MAJOR latency impact - These are the biggest factors
     "whisper_model": "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed.\n🔴 GPU: Tiny ~0.5s | Base ~1s | Small ~1.5s | Medium ~3s | Large ~6s | Turbo ~2s\n🔴 CPU: Tiny ~2s | Base ~4s | Small ~6s | Medium ~12s | Large ~25s | Turbo ~8s",
@@ -974,8 +1113,11 @@ SETTING_TOOLTIPS = {
     
     # GPU/Backend - Can dramatically change all timings
     "backend": "Transcription engine selection.\n⚙️ whisper.cpp: CPU-optimized, lower memory\n⚙️ Faster-Whisper: Better GPU utilization (up to 10x faster)",
-    "gpu_acceleration": "Use GPU for transcription.\n🚀 Enabled: 3-10x faster than CPU (requires CUDA/ROCm/Vulkan)",
+    "gpu_acceleration": "Use GPU for transcription.\n🚀 Free: Tiny & Base · Ultra: Small, Medium, Turbo, Large\n🚀 3-10x faster than CPU when available (Vulkan/CUDA/ROCm/Metal)",
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
+
+    # Post-processing — static defaults; get_dynamic_tooltip fills in measured times
+    "post_processing": "Clean up transcription with an LLM.\nRemoves filler words, fixes grammar, formats output.\n🟡 Latency: +100ms–few seconds depending on model\n⏱️ Run Benchmark for measured times on your hardware.",
 }
 
 
@@ -1045,6 +1187,40 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
                 avg_speedup = sum(speedups) / len(speedups)
                 return f"{base_text}\n🚀 Your GPU is {avg_speedup:.1f}x faster than CPU on average!"
         return f"{base_text}\n🚀 TBD — run benchmark to measure your GPU speedup"
+
+    # Post-processing tooltip with measured cleanup times + pipeline total
+    if key == "post_processing":
+        base_text = (
+            "Clean up transcription with an LLM.\n"
+            "Removes filler words, fixes grammar, formats output."
+        )
+        pp_results = config.get("postprocessing_benchmark_results", {}) or {}
+        pipeline = config.get("pipeline_benchmark", {}) or {}
+        lines = []
+        if pipeline.get("total_time") is not None:
+            asr = pipeline.get("asr_time")
+            ppt = pipeline.get("pp_time")
+            asr_s = f"{asr:.1f}s" if asr is not None else "—"
+            pp_s = f"{ppt:.1f}s" if ppt is not None else "off"
+            lines.append(
+                f"Your setup total: {pipeline['total_time']:.1f}s "
+                f"(ASR {asr_s} + cleanup {pp_s})"
+            )
+        if pp_results:
+            ranked = sorted(
+                (
+                    (mid, r) for mid, r in pp_results.items()
+                    if isinstance(r, dict) and r.get("avg_time") is not None and not r.get("error")
+                ),
+                key=lambda item: item[1]["avg_time"],
+            )
+            for mid, r in ranked[:6]:
+                mark = " ← current" if r.get("is_current") else ""
+                name = r.get("model_name", mid)
+                lines.append(f"  {name}: {r['avg_time']:.1f}s{mark}")
+        if lines:
+            return base_text + "\n\n⏱ Measured on your hardware:\n" + "\n".join(lines)
+        return base_text + "\n🟡 Latency: +100ms–few seconds depending on model\n⏱️ Run Benchmark for measured times."
     
     # Default to static tooltip
     return SETTING_TOOLTIPS.get(key, "")
@@ -1398,10 +1574,286 @@ class BenchmarkRunner:
         
         return self.results, overall_fastest
 
+    # Representative ASR output for cleanup timing (long enough to avoid the
+    # short-input bypass in process_with_config, short enough for a snappy bench).
+    PP_SAMPLE_TEXT = (
+        "Um so basically I think that you know the main thing we need to focus on is like "
+        "the performance of the application and also uh making sure that it actually works "
+        "properly on different systems. So um what I was thinking is that we could like "
+        "first run some benchmarks and then uh you know analyze the results and see where "
+        "we can make improvements. Does that make sense?"
+    )
+
+    @staticmethod
+    def clear_llm_caches() -> None:
+        """Drop resident LLM weights so multi-model benches don't OOM."""
+        try:
+            from wayfinder.core.postprocessor import LlamaCppCliBackend, LlamaCppBackend
+            if hasattr(LlamaCppCliBackend, "_resident_cache"):
+                LlamaCppCliBackend._resident_cache.clear()
+            if hasattr(LlamaCppBackend, "_model_cache"):
+                LlamaCppBackend._model_cache.clear()
+        except Exception:
+            pass
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+
+    @staticmethod
+    def discover_pp_models(config: dict, catalog: dict | None = None) -> list[dict]:
+        """
+        List installed GGUF cleanup models for benchmarking.
+
+        Returns list of dicts: model_id, model_name, path, filename, is_current.
+        Catalog models that exist on disk are preferred; current path is always included.
+        """
+        catalog = catalog if catalog is not None else LLM_GGUF_MODELS
+        models_dir = _get_llm_models_dir()
+        current_path = os.path.expanduser(config.get("llama_cpp_model_path", "") or "")
+        current_name = Path(current_path).name if current_path else ""
+        found: list[dict] = []
+        seen_paths: set[str] = set()
+
+        for model_id, info in catalog.items():
+            filename = info.get("filename", "")
+            path = models_dir / filename if filename else None
+            # Also accept the path if config already points at it under another dir
+            if path is None or not path.exists():
+                if current_name and current_name == filename and current_path and Path(current_path).exists():
+                    path = Path(current_path)
+                else:
+                    continue
+            resolved = str(path.resolve()) if path.exists() else str(path)
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+            is_current = bool(current_name) and (
+                Path(resolved).name == current_name
+                or (Path(current_path).exists() and Path(resolved).exists()
+                    and os.path.samefile(resolved, current_path))
+            )
+            found.append({
+                "model_id": model_id,
+                "model_name": info.get("name", model_id),
+                "path": resolved,
+                "filename": filename or Path(resolved).name,
+                "is_current": is_current,
+            })
+
+        # Current model not in catalog (user-dropped GGUF)
+        if current_path and Path(current_path).exists():
+            resolved = str(Path(current_path).resolve())
+            if resolved not in seen_paths:
+                stem = Path(current_path).stem
+                found.append({
+                    "model_id": stem,
+                    "model_name": stem.replace("_", " ").replace("-", " "),
+                    "path": resolved,
+                    "filename": Path(current_path).name,
+                    "is_current": True,
+                })
+
+        # Fastest / smallest first so the user sees early feedback
+        found.sort(key=lambda m: Path(m["path"]).stat().st_size if Path(m["path"]).exists() else 0)
+        return found
+
+    def run_postprocessing_benchmarks(
+        self,
+        config: dict,
+        models: list[dict] | None = None,
+        sample_text: str | None = None,
+        progress_phase=None,
+    ) -> dict:
+        """
+        Time LLM cleanup for each installed model (warm run after 1 warmup).
+
+        Returns dict keyed by model_id:
+          {model_name, filename, avg_time, is_current, error?, timestamp}
+        """
+        sample_text = sample_text or self.PP_SAMPLE_TEXT
+        models = models if models is not None else self.discover_pp_models(config)
+        results: dict = {}
+        if not models:
+            self.log_callback("⚠ No GGUF cleanup models found to benchmark")
+            return results
+
+        backend = config.get("post_processing_backend", "llama_cpp")
+        if backend != "llama_cpp":
+            # Cloud / OpenAI-compatible: time the single configured backend once
+            self.log_callback(f"⏱ Cleanup backend: {backend} (single-model timing)")
+            try:
+                if progress_phase:
+                    progress_phase(f"Cleanup ({backend})")
+                cfg = dict(config)
+                cfg["post_processing_enabled"] = True
+                # Warm-up
+                process_with_config(sample_text, cfg)
+                start = time.perf_counter()
+                process_with_config(sample_text, cfg)
+                elapsed = time.perf_counter() - start
+                mid = backend
+                results[mid] = {
+                    "model_name": backend,
+                    "filename": config.get(f"{backend}_model", backend),
+                    "avg_time": round(elapsed, 3),
+                    "is_current": True,
+                    "timestamp": int(time.time()),
+                }
+                self.log_callback(f"   ✅ {backend}: {elapsed:.2f}s")
+            except Exception as e:
+                results[backend] = {
+                    "model_name": backend,
+                    "avg_time": None,
+                    "is_current": True,
+                    "error": str(e),
+                    "timestamp": int(time.time()),
+                }
+                self.log_callback(f"   ⚠️ {backend} failed: {e}")
+            return results
+
+        total = len(models)
+        for i, m in enumerate(models, 1):
+            if self._cancel_requested:
+                break
+            mid = m["model_id"]
+            name = m["model_name"]
+            if progress_phase:
+                progress_phase(f"Cleanup {i}/{total}")
+            self.log_callback(f"⏱ Cleanup {name} ({i}/{total})...")
+            self.clear_llm_caches()
+            try:
+                cfg = dict(config)
+                cfg["post_processing_enabled"] = True
+                cfg["post_processing_backend"] = "llama_cpp"
+                cfg["llama_cpp_model_path"] = m["path"]
+                # Force a styled tone so we exercise the real LLM path, not
+                # minimal-regex (which would make every model look "instant").
+                if cfg.get("output_tone", "professional") == "minimal":
+                    cfg["output_tone"] = "professional"
+
+                # Warm-up (load + first tokens); discard timing
+                process_with_config(sample_text, cfg)
+                start = time.perf_counter()
+                process_with_config(sample_text, cfg)
+                elapsed = time.perf_counter() - start
+
+                results[mid] = {
+                    "model_name": name,
+                    "filename": m.get("filename", ""),
+                    "avg_time": round(elapsed, 3),
+                    "is_current": bool(m.get("is_current")),
+                    "timestamp": int(time.time()),
+                }
+                self.log_callback(f"   ✅ {name}: {elapsed:.2f}s")
+            except Exception as e:
+                results[mid] = {
+                    "model_name": name,
+                    "filename": m.get("filename", ""),
+                    "avg_time": None,
+                    "is_current": bool(m.get("is_current")),
+                    "error": str(e)[:200],
+                    "timestamp": int(time.time()),
+                }
+                self.log_callback(f"   ⚠️ {name} failed: {e}")
+            finally:
+                self.clear_llm_caches()
+
+        return results
+
+    @staticmethod
+    def build_pipeline_summary(
+        *,
+        asr_model_id: str,
+        asr_model_name: str,
+        gpu_time: float | None,
+        cpu_time: float | None,
+        use_gpu: bool,
+        pp_results: dict,
+        current_pp_path: str = "",
+        pp_enabled: bool = True,
+        audio_seconds: int = 10,
+    ) -> dict:
+        """
+        Build the headline "your current setup" pipeline numbers.
+
+        ASR mode follows the user's use_gpu preference when that path succeeded,
+        otherwise falls back to whichever ASR timing we have.
+        """
+        asr_mode = None
+        asr_time = None
+        if use_gpu and gpu_time is not None:
+            asr_mode, asr_time = "gpu", gpu_time
+        elif (not use_gpu) and cpu_time is not None:
+            asr_mode, asr_time = "cpu", cpu_time
+        elif gpu_time is not None:
+            asr_mode, asr_time = "gpu", gpu_time
+        elif cpu_time is not None:
+            asr_mode, asr_time = "cpu", cpu_time
+
+        pp_time = None
+        pp_model_id = None
+        pp_model_name = None
+        if pp_enabled and pp_results:
+            current_name = Path(os.path.expanduser(current_pp_path)).name if current_pp_path else ""
+            for mid, r in pp_results.items():
+                if r.get("error") or r.get("avg_time") is None:
+                    continue
+                if r.get("is_current") or (current_name and r.get("filename") == current_name):
+                    pp_time = r["avg_time"]
+                    pp_model_id = mid
+                    pp_model_name = r.get("model_name", mid)
+                    break
+            if pp_time is None:
+                # Fall back to fastest successful result
+                valid = [
+                    (mid, r) for mid, r in pp_results.items()
+                    if r.get("avg_time") is not None and not r.get("error")
+                ]
+                if valid:
+                    mid, r = min(valid, key=lambda item: item[1]["avg_time"])
+                    pp_time = r["avg_time"]
+                    pp_model_id = mid
+                    pp_model_name = r.get("model_name", mid)
+
+        total = None
+        if asr_time is not None:
+            total = round(asr_time + (pp_time or 0.0), 3)
+
+        fastest_pp = None
+        valid_pp = [
+            (mid, r) for mid, r in (pp_results or {}).items()
+            if r.get("avg_time") is not None and not r.get("error")
+        ]
+        if valid_pp:
+            fastest_pp = min(valid_pp, key=lambda item: item[1]["avg_time"])[0]
+
+        return {
+            "asr_model": asr_model_id,
+            "asr_model_name": asr_model_name,
+            "asr_mode": asr_mode,
+            "asr_time": round(asr_time, 3) if asr_time is not None else None,
+            "pp_model_id": pp_model_id,
+            "pp_model_name": pp_model_name,
+            "pp_time": round(pp_time, 3) if pp_time is not None else None,
+            "pp_enabled": bool(pp_enabled),
+            "total_time": total,
+            "audio_seconds": audio_seconds,
+            "timestamp": int(time.time()),
+            "fastest_postprocessor": fastest_pp,
+        }
+
 
 # === Model Download Definitions ===
 
 # whisper.cpp GGML models (from Hugging Face)
+#
+# speed_rating / accuracy_rating are relative 1–5 scores within this catalog
+# (not absolute WER). Calibrated from OpenAI large-v3-turbo guidance + common
+# whisper.cpp practice: tiny→large accuracy climbs, size climbs; turbo is near
+# large-v3 quality at far higher speed; Q5 is the default balance (smaller/faster
+# than full turbo with only a small accuracy tradeoff).
 WHISPER_CPP_MODELS = {
     "tiny.en": {
         "name": "Tiny (English)",
@@ -1409,7 +1861,10 @@ WHISPER_CPP_MODELS = {
         "size_bytes": 75_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
         "filename": "ggml-tiny.en.bin",
-        "speed": "⚡ Fastest • ~0.5s GPU | ~2s CPU",
+        "cdn_object": "whisper/ggml-tiny.en.bin",
+        "speed": "Fastest · lightest quality",
+        "speed_rating": 5,
+        "accuracy_rating": 1,
     },
     "base.en": {
         "name": "Base (English)",
@@ -1417,7 +1872,10 @@ WHISPER_CPP_MODELS = {
         "size_bytes": 142_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
         "filename": "ggml-base.en.bin",
-        "speed": "⚡ Fast • ~1s GPU | ~4s CPU",
+        "cdn_object": "whisper/ggml-base.en.bin",
+        "speed": "Very fast · basic quality",
+        "speed_rating": 5,
+        "accuracy_rating": 2,
     },
     "small.en": {
         "name": "Small (English)",
@@ -1425,7 +1883,10 @@ WHISPER_CPP_MODELS = {
         "size_bytes": 466_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
         "filename": "ggml-small.en.bin",
-        "speed": "🟡 Good • ~1.5s GPU | ~6s CPU",
+        "cdn_object": "whisper/ggml-small.en.bin",
+        "speed": "Fast · solid everyday",
+        "speed_rating": 4,
+        "accuracy_rating": 3,
     },
     "medium.en": {
         "name": "Medium (English)",
@@ -1433,24 +1894,37 @@ WHISPER_CPP_MODELS = {
         "size_bytes": 1_500_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
         "filename": "ggml-medium.en.bin",
-        "speed": "🔴 Slow • ~3s GPU | ~12s CPU",
+        "cdn_object": "whisper/ggml-medium.en.bin",
+        "requires_feature": "large_models",
+        "speed": "Moderate · strong quality",
+        "speed_rating": 2,
+        "accuracy_rating": 4,
     },
     "large-v3-turbo": {
-        "name": "Large v3 Turbo ⭐",
+        "name": "Large v3 Turbo",
         "size": "1.6 GB",
         "size_bytes": 1_600_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
         "filename": "ggml-large-v3-turbo.bin",
-        "speed": "🚀 Best balance • ~2s GPU | ~8s CPU",
-        "recommended": True,
+        "cdn_object": "whisper/ggml-large-v3-turbo.bin",
+        "requires_feature": "large_models",
+        "speed": "Fast · near top accuracy",
+        "speed_rating": 3,
+        "accuracy_rating": 5,
     },
     "large-v3-turbo-q5_0": {
-        "name": "Large v3 Turbo Q5 (Quantized)",
+        "name": "Large v3 Turbo Q5",
         "size": "547 MB",
         "size_bytes": 547_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
         "filename": "ggml-large-v3-turbo-q5_0.bin",
-        "speed": "🚀 Fast+Small • ~2s GPU | ~6s CPU",
+        "speed": "Fastest high-quality · best balance",
+        "speed_rating": 4,
+        "accuracy_rating": 4,
+        "recommended": True,
+        # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
+        "cdn_object": "whisper/ggml-large-v3-turbo-q5_0.bin",
+        "requires_feature": "large_models",
     },
     "tiny": {
         "name": "Tiny (Multi-lang)",
@@ -1458,7 +1932,10 @@ WHISPER_CPP_MODELS = {
         "size_bytes": 75_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
         "filename": "ggml-tiny.bin",
-        "speed": "⚡ Fastest • Multi-language",
+        "cdn_object": "whisper/ggml-tiny.bin",
+        "speed": "Fastest · lightest quality",
+        "speed_rating": 5,
+        "accuracy_rating": 1,
     },
     "base": {
         "name": "Base (Multi-lang)",
@@ -1466,7 +1943,10 @@ WHISPER_CPP_MODELS = {
         "size_bytes": 142_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
         "filename": "ggml-base.bin",
-        "speed": "⚡ Fast • Multi-language",
+        "cdn_object": "whisper/ggml-base.bin",
+        "speed": "Very fast · basic quality",
+        "speed_rating": 5,
+        "accuracy_rating": 2,
     },
     "small": {
         "name": "Small (Multi-lang)",
@@ -1474,7 +1954,10 @@ WHISPER_CPP_MODELS = {
         "size_bytes": 466_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
         "filename": "ggml-small.bin",
-        "speed": "🟡 Good • Multi-language",
+        "cdn_object": "whisper/ggml-small.bin",
+        "speed": "Fast · solid everyday",
+        "speed_rating": 4,
+        "accuracy_rating": 3,
     },
     "medium": {
         "name": "Medium (Multi-lang)",
@@ -1482,17 +1965,183 @@ WHISPER_CPP_MODELS = {
         "size_bytes": 1_500_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
         "filename": "ggml-medium.bin",
-        "speed": "🔴 Slow • Multi-language",
+        "cdn_object": "whisper/ggml-medium.bin",
+        "requires_feature": "large_models",
+        "speed": "Moderate · strong quality",
+        "speed_rating": 2,
+        "accuracy_rating": 4,
     },
     "large-v3": {
-        "name": "Large v3 (Best Quality)",
+        "name": "Large v3",
         "size": "3.0 GB",
         "size_bytes": 3_000_000_000,
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
         "filename": "ggml-large-v3.bin",
-        "speed": "🔴 Slowest • Best accuracy",
+        "cdn_object": "whisper/ggml-large-v3.bin",
+        "requires_feature": "large_models",
+        "speed": "Slowest · highest accuracy",
+        "speed_rating": 1,
+        "accuracy_rating": 5,
     },
 }
+
+# Alias ids used by scanners/benchmarks that drop the quant suffix.
+_WHISPER_MODEL_ID_ALIASES = {
+    "large-v3-turbo-q5": "large-v3-turbo-q5_0",
+}
+
+
+def resolve_whisper_model_catalog_id(model_id: str | None) -> str | None:
+    """Normalize a model_id to a WHISPER_CPP_MODELS key when possible."""
+    if not model_id:
+        return None
+    mid = model_id.strip().lower()
+    if mid in WHISPER_CPP_MODELS:
+        return mid
+    return _WHISPER_MODEL_ID_ALIASES.get(mid)
+
+
+def get_whisper_model_ratings(model_id: str | None) -> tuple[int | None, int | None]:
+    """Return (speed_rating, accuracy_rating) 1–5, or (None, None)."""
+    key = resolve_whisper_model_catalog_id(model_id)
+    if not key:
+        return None, None
+    info = WHISPER_CPP_MODELS.get(key) or {}
+    sp = info.get("speed_rating")
+    ac = info.get("accuracy_rating")
+    try:
+        sp_i = int(sp) if sp is not None else None
+        ac_i = int(ac) if ac is not None else None
+    except (TypeError, ValueError):
+        return None, None
+    return sp_i, ac_i
+
+
+def format_model_tile_title(name: str, model_id: str | None = None) -> tuple[str, str | None]:
+    """Compact title + optional badge for model picker tiles.
+
+    Returns (title, badge) where badge is one of:
+    "Balanced" (recommended default), "EN", "Multi", or None.
+    Language chips stay; quality guidance lives in Spd/Acc ratings, not a
+    misleading single "Best" chip on full Turbo.
+    """
+    raw = (name or "").strip()
+    mid = (model_id or "").strip().lower()
+    cat = resolve_whisper_model_catalog_id(mid) or mid
+
+    # Prefer id-based mapping (stable); fall back to name heuristics.
+    id_map = {
+        "large-v3-turbo": ("Turbo", None),
+        "large-v3-turbo-q5": ("Turbo Q5", "Balanced"),
+        "large-v3-turbo-q5_0": ("Turbo Q5", "Balanced"),
+        "large-v3": ("Large v3", None),
+        "large": ("Large", None),
+        "medium.en": ("Medium", "EN"),
+        "small.en": ("Small", "EN"),
+        "base.en": ("Base", "EN"),
+        "tiny.en": ("Tiny", "EN"),
+        "medium": ("Medium", "Multi"),
+        "small": ("Small", "Multi"),
+        "base": ("Base", "Multi"),
+        "tiny": ("Tiny", "Multi"),
+    }
+    if cat in id_map:
+        title, badge = id_map[cat]
+        # Catalog recommended flag wins for the balanced pick
+        info = WHISPER_CPP_MODELS.get(cat) or {}
+        if info.get("recommended"):
+            badge = "Balanced"
+        return title, badge
+    if mid in id_map:
+        return id_map[mid]
+
+    # Filename-ish ids sometimes include path crumbs
+    for key, val in id_map.items():
+        if key in mid:
+            return val
+
+    title = raw
+    badge = None
+    if "⭐" in title or "recommended" in title.lower() or "best balance" in title.lower():
+        badge = "Balanced"
+    title = title.replace("⭐", "").replace("*", "").strip()
+    title = title.replace(" (Quantized)", "").replace("Quantized", "").strip()
+    if "(English)" in title:
+        title = title.replace("(English)", "").strip()
+        badge = badge or "EN"
+    if "(Multi-lang)" in title or "(Multi)" in title:
+        title = title.replace("(Multi-lang)", "").replace("(Multi)", "").strip()
+        badge = badge or "Multi"
+    title = title.replace("Large v3 Turbo", "Turbo").replace("Large v3", "Large v3")
+    title = " ".join(title.split())
+    return title or "Model", badge
+
+
+def format_rating_bar(score: int | None, max_score: int = 5) -> str:
+    """Compact 1–5 score as filled/empty dots, e.g. ●●●●○."""
+    if score is None:
+        return "—"
+    try:
+        n = max(0, min(int(max_score), int(score)))
+    except (TypeError, ValueError):
+        return "—"
+    return ("●" * n) + ("○" * (max_score - n))
+
+
+def format_model_tile_meta(
+    size: str,
+    speed: str = "",
+    *,
+    speed_rating: int | None = None,
+    accuracy_rating: int | None = None,
+    timing: str = "",
+) -> str:
+    """Meta line: size + Spd/Acc ratings; optional measured timing tail.
+
+    Example: '547MB  ·  Spd ●●●●○  ·  Acc ●●●●○'
+    Falls back to legacy speed text when ratings are missing.
+    """
+    size_s = (size or "").strip()
+    parts: list[str] = []
+    if size_s:
+        parts.append(size_s)
+
+    if speed_rating is not None and accuracy_rating is not None:
+        parts.append(f"Spd {format_rating_bar(speed_rating)}")
+        parts.append(f"Acc {format_rating_bar(accuracy_rating)}")
+    else:
+        # Legacy catalog speed blurb (emoji stripped)
+        speed_s = (speed or "").strip()
+        for ch in ("🚀", "⚡", "🟡", "🔴", "🐌", "⚙️", "•"):
+            speed_s = speed_s.replace(ch, " ")
+        speed_s = " ".join(speed_s.split())
+        low = speed_s.lower()
+        if not speed_s or low in {"tbd", "n/a", "—", "-"} or low.endswith("tbd"):
+            speed_s = ""
+        if "|" in speed_s:
+            speed_s = speed_s.split("|", 1)[0].strip()
+        if len(speed_s) > 28 and "·" in speed_s:
+            speed_s = speed_s.split("·")[-1].strip()
+        if speed_s:
+            parts.append(speed_s)
+
+    # Measured timing from benchmarks (short), never replaces ratings
+    timing_s = (timing or "").strip()
+    for ch in ("🚀", "⚡", "🟡", "🔴", "🐌", "⚙️", "•"):
+        timing_s = timing_s.replace(ch, " ")
+    timing_s = " ".join(timing_s.split())
+    low_t = timing_s.lower()
+    if timing_s and low_t not in {"tbd", "n/a", "—", "-"} and not low_t.endswith("tbd"):
+        # Keep only compact GPU/CPU timing like "GPU: 1.2s"
+        if len(timing_s) > 18 and ":" in timing_s:
+            timing_s = timing_s.split(":", 1)[-1].strip()
+            if timing_s and not timing_s.startswith("~"):
+                timing_s = f"~{timing_s}"
+        if timing_s:
+            parts.append(timing_s)
+
+    return "  ·  ".join(parts) if parts else "—"
+
 
 # Recommended GGUF models for post-processing (llama.cpp)
 LLM_GGUF_MODELS = {
@@ -1502,6 +2151,7 @@ LLM_GGUF_MODELS = {
         "size_bytes": 806_058_496,
         "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf",
         "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
+        "cdn_object": "llm/google_gemma-3-1b-it-Q4_K_M.gguf",
         "description": "Top recommendation. Most consistent gentle-guide cleanup across tones; smaller and faster than Qwen 3.5.",
         "speed": "Very Fast",
         "accuracy": "Excellent",
@@ -1513,6 +2163,7 @@ LLM_GGUF_MODELS = {
         "size_bytes": 1_390_000_000,
         "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
+        "cdn_object": "llm/Qwen3.5-2B-Q4_K_M.gguf",
         "description": "Capable reasoning model, but less consistent than Gemma 3 1B for light dictation cleanup.",
         "speed": "Very Fast",
         "accuracy": "Excellent",
@@ -1526,6 +2177,9 @@ LLM_GGUF_MODELS = {
         "description": "Best local pick for Strong & Caricature. Sharpest instruction-follower in its class, no reasoning latency.",
         "speed": "Fast",
         "accuracy": "Excellent",
+        # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
+        "cdn_object": "llm/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "requires_feature": "large_cleanup_models",
     },
     "lfm2.5-1.2b": {
         "name": "LFM2.5 1.2B",
@@ -1533,6 +2187,7 @@ LLM_GGUF_MODELS = {
         "size_bytes": 730_895_168,
         "url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
         "filename": "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+        "cdn_object": "llm/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
         "description": "Liquid AI on-device model. Very fast, but tended to echo input unchanged in our cleanup eval.",
         "speed": "Very Fast",
         "accuracy": "Fair",
@@ -1543,6 +2198,8 @@ LLM_GGUF_MODELS = {
         "size_bytes": 2_393_231_072,
         "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
         "filename": "Phi-3-mini-4k-instruct-q4.gguf",
+        "cdn_object": "llm/Phi-3-mini-4k-instruct-q4.gguf",
+        "requires_feature": "large_cleanup_models",
         "description": "Microsoft's 2024 compact model. Still works, but Qwen3 4B is the better Strong & Caricature pick.",
         "speed": "Fast",
         "accuracy": "High",
@@ -1553,6 +2210,7 @@ LLM_GGUF_MODELS = {
         "size_bytes": 1_117_320_736,
         "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
         "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "cdn_object": "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf",
         "description": "Previous default, still works well.",
         "speed": "Very Fast",
         "accuracy": "Good",
@@ -1563,6 +2221,7 @@ LLM_GGUF_MODELS = {
         "size_bytes": 386_404_992,
         "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q8_0.gguf",
         "filename": "smollm2-360m-instruct-q8_0.gguf",
+        "cdn_object": "llm/smollm2-360m-instruct-q8_0.gguf",
         "description": "HuggingFace's tiny model. Blazing fast, best for simple cleanup.",
         "speed": "Instant",
         "accuracy": "Basic",
@@ -1573,6 +2232,7 @@ LLM_GGUF_MODELS = {
         "size_bytes": 807_694_464,
         "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
         "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "cdn_object": "llm/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
         "description": "Meta's latest efficient model. Good all-rounder for text tasks.",
         "speed": "Very Fast",
         "accuracy": "Good",
@@ -1581,44 +2241,102 @@ LLM_GGUF_MODELS = {
 
 # Faster-Whisper models (auto-downloaded by library, but we can list them)
 FASTER_WHISPER_MODELS = {
-    "tiny": {"name": "Tiny", "size": "~75 MB", "speed": "⚡ Fastest"},
-    "base": {"name": "Base", "size": "~142 MB", "speed": "⚡ Fast"},
-    "small": {"name": "Small", "size": "~466 MB", "speed": "🟡 Good"},
-    "medium": {"name": "Medium", "size": "~1.5 GB", "speed": "🔴 Slow"},
-    "large-v3-turbo": {"name": "Large v3 Turbo ⭐", "size": "~1.6 GB", "speed": "🚀 Best", "recommended": True},
-    "large-v3": {"name": "Large v3", "size": "~3 GB", "speed": "🔴 Slowest"},
+    "tiny": {"name": "Tiny", "size": "~75 MB", "speed": "Fastest", "speed_rating": 5, "accuracy_rating": 1},
+    "base": {"name": "Base", "size": "~142 MB", "speed": "Very fast", "speed_rating": 5, "accuracy_rating": 2},
+    "small": {"name": "Small", "size": "~466 MB", "speed": "Fast", "speed_rating": 4, "accuracy_rating": 3},
+    "medium": {"name": "Medium", "size": "~1.5 GB", "speed": "Moderate", "speed_rating": 2, "accuracy_rating": 4},
+    "large-v3-turbo": {"name": "Large v3 Turbo", "size": "~1.6 GB", "speed": "Fast · high accuracy", "speed_rating": 3, "accuracy_rating": 5},
+    "large-v3": {"name": "Large v3", "size": "~3 GB", "speed": "Slowest · top accuracy", "speed_rating": 1, "accuracy_rating": 5},
 }
 
 
 class ModelDownloader:
-    """Downloads whisper models with progress tracking."""
+    """Downloads / removes whisper models with progress tracking.
+
+    Installs always land in the writable download dir (`_get_whisper_models_dir`).
+    Discovery can also see host/bundled copies via `_resolve_whisper_model`; removal
+    only touches *writable* copies and never the Flatpak-bundled `/app/share/...`.
+    """
     
     def __init__(self, models_dir: Path = None):
         self.models_dir = models_dir or _get_whisper_models_dir()
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self._cancel_requested = False
         self._current_download = None
+
+    def _filename(self, model_id: str) -> str | None:
+        info = WHISPER_CPP_MODELS.get(model_id)
+        return info["filename"] if info else None
+
+    @staticmethod
+    def _is_bundled_dir(directory: Path) -> bool:
+        """Bundled Flatpak models are read-only — never delete from here."""
+        try:
+            return Path(directory).resolve().as_posix().startswith("/app/")
+        except Exception:
+            return str(directory).startswith("/app/")
+
+    @staticmethod
+    def _path_is_writable(path: Path) -> bool:
+        try:
+            if not path.exists():
+                return False
+            parent = path.parent
+            return os.access(path, os.W_OK) and os.access(parent, os.W_OK)
+        except Exception:
+            return False
+
+    def writable_copies(self, model_id: str) -> list[Path]:
+        """All on-disk copies of this model that we are allowed to delete."""
+        filename = self._filename(model_id)
+        if not filename:
+            return []
+        found: list[Path] = []
+        seen: set[str] = set()
+        for d in _whisper_model_search_dirs():
+            if self._is_bundled_dir(d):
+                continue
+            p = d / filename
+            try:
+                key = str(p.resolve()) if p.exists() else str(p)
+            except Exception:
+                key = str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            if p.exists() and self._path_is_writable(p):
+                found.append(p)
+            # Stale partial downloads from a prior cancel/crash
+            partial = d / f"{filename}.downloading"
+            if partial.exists() and self._path_is_writable(partial):
+                found.append(partial)
+        return found
     
     def get_installed_models(self) -> list[str]:
-        """Get list of installed model IDs."""
+        """Model IDs present in any search dir (download, host, or bundled)."""
         installed = []
         for model_id, info in WHISPER_CPP_MODELS.items():
-            if (self.models_dir / info["filename"]).exists():
+            if _resolve_whisper_model(info["filename"]) is not None:
                 installed.append(model_id)
         return installed
     
     def is_installed(self, model_id: str) -> bool:
-        """Check if a model is already downloaded."""
-        if model_id not in WHISPER_CPP_MODELS:
+        """True if the model file exists anywhere we search (incl. bundled)."""
+        filename = self._filename(model_id)
+        if not filename:
             return False
-        return (self.models_dir / WHISPER_CPP_MODELS[model_id]["filename"]).exists()
+        return _resolve_whisper_model(filename) is not None
+
+    def is_removable(self, model_id: str) -> bool:
+        """True if at least one writable copy exists (not only a bundled file)."""
+        return bool(self.writable_copies(model_id))
     
     def get_model_path(self, model_id: str) -> Path | None:
-        """Get the path to an installed model."""
-        if model_id not in WHISPER_CPP_MODELS:
+        """Best path for an installed model (download dir preferred)."""
+        filename = self._filename(model_id)
+        if not filename:
             return None
-        path = self.models_dir / WHISPER_CPP_MODELS[model_id]["filename"]
-        return path if path.exists() else None
+        return _resolve_whisper_model(filename)
     
     def download_model(
         self, 
@@ -1627,7 +2345,11 @@ class ModelDownloader:
         complete_callback: callable = None,
         error_callback: callable = None,
     ) -> None:
-        """Download a model in a background thread."""
+        """Download a model in a background thread into the writable models dir.
+
+        Always writes to a `.downloading` temp file then atomically replaces the
+        destination so a re-download after uninstall (or a half-file) is clean.
+        """
         if model_id not in WHISPER_CPP_MODELS:
             if error_callback:
                 error_callback(f"Unknown model: {model_id}")
@@ -1635,19 +2357,56 @@ class ModelDownloader:
         
         self._cancel_requested = False
         model_info = WHISPER_CPP_MODELS[model_id]
+        # Ensure destination dir exists (may have been wiped)
+        try:
+            self.models_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            if error_callback:
+                error_callback(f"Cannot write models dir: {e}")
+            return
         
         def download_thread():
+            temp_path = None
             try:
-                url = model_info["url"]
+                from wayfinder.models_cdn import (
+                    assert_may_download,
+                    download_auth_headers,
+                    resolve_download_url,
+                )
+                from wayfinder.license import get_feature_gate
+                from wayfinder.config import load_config
+
+                gate = get_feature_gate()
+                deny = assert_may_download(model_info, gate.has_feature)
+                if deny:
+                    if error_callback:
+                        error_callback(deny)
+                    return
+
+                app_cfg = load_config()
+                url = resolve_download_url(model_info, config=app_cfg)
+                if not url:
+                    if error_callback:
+                        error_callback("No download URL configured for this model")
+                    return
                 filename = model_info["filename"]
                 dest_path = self.models_dir / filename
                 temp_path = self.models_dir / f"{filename}.downloading"
+                # Drop any leftover partial from a previous attempt
+                try:
+                    if temp_path.exists():
+                        temp_path.unlink()
+                except Exception:
+                    pass
                 
-                # Create request with headers
+                # Create request with headers (Bearer token for Ultra CDN objects)
                 request = urllib.request.Request(url)
-                request.add_header("User-Agent", "Wayfinder-Voice/1.0")
+                for hk, hv in download_auth_headers(
+                    model_info, bearer_token=gate.get_bearer_token()
+                ).items():
+                    request.add_header(hk, hv)
                 
-                with urllib.request.urlopen(request, timeout=30) as response:
+                with urllib.request.urlopen(request, timeout=60) as response:
                     total_size = int(response.headers.get("Content-Length", 0))
                     downloaded = 0
                     chunk_size = 1024 * 1024  # 1MB chunks
@@ -1655,7 +2414,10 @@ class ModelDownloader:
                     with open(temp_path, "wb") as f:
                         while True:
                             if self._cancel_requested:
-                                temp_path.unlink(missing_ok=True)
+                                try:
+                                    temp_path.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
                                 if error_callback:
                                     error_callback("Download cancelled")
                                 return
@@ -1671,18 +2433,28 @@ class ModelDownloader:
                                 progress = downloaded / total_size
                                 progress_callback(progress, downloaded, total_size)
                 
-                # Move temp file to final destination
-                temp_path.rename(dest_path)
+                # Replace destination atomically (needed for clean re-download)
+                if dest_path.exists():
+                    dest_path.unlink()
+                temp_path.replace(dest_path)
+                temp_path = None  # ownership transferred
                 
                 if complete_callback:
                     complete_callback(str(dest_path))
                     
             except urllib.error.URLError as e:
                 if error_callback:
-                    error_callback(f"Network error: {e.reason}")
+                    error_callback(f"Network error: {getattr(e, 'reason', e)}")
             except Exception as e:
                 if error_callback:
                     error_callback(f"Download failed: {str(e)}")
+            finally:
+                # Don't leave a half-written .downloading file on failure
+                if temp_path is not None:
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
         
         self._current_download = threading.Thread(target=download_thread, daemon=True)
         self._current_download.start()
@@ -1691,15 +2463,50 @@ class ModelDownloader:
         """Cancel the current download."""
         self._cancel_requested = True
     
-    def delete_model(self, model_id: str) -> bool:
-        """Delete a downloaded model."""
+    def delete_model(self, model_id: str) -> dict:
+        """Delete writable copies of a model.
+
+        Returns a result dict:
+          ok (bool), removed (list[str paths]), skipped_bundled (bool),
+          error (str|None). Bundled `/app` copies are never touched.
+        """
+        result = {
+            "ok": False,
+            "removed": [],
+            "skipped_bundled": False,
+            "error": None,
+        }
         if model_id not in WHISPER_CPP_MODELS:
-            return False
-        path = self.models_dir / WHISPER_CPP_MODELS[model_id]["filename"]
-        if path.exists():
-            path.unlink()
-            return True
-        return False
+            result["error"] = f"Unknown model: {model_id}"
+            return result
+
+        filename = WHISPER_CPP_MODELS[model_id]["filename"]
+        # Detect a bundled-only install so the UI can explain "can't remove"
+        bundled = _resolve_whisper_model(filename)
+        if bundled is not None and self._is_bundled_dir(bundled.parent):
+            # There may still be writable copies elsewhere
+            result["skipped_bundled"] = True
+
+        targets = self.writable_copies(model_id)
+        if not targets:
+            if result["skipped_bundled"]:
+                result["error"] = "This model is bundled with the app and can’t be removed."
+            else:
+                result["error"] = "No removable copy found on disk."
+            return result
+
+        errors: list[str] = []
+        for path in targets:
+            try:
+                path.unlink()
+                result["removed"].append(str(path))
+            except Exception as e:
+                errors.append(f"{path.name}: {e}")
+
+        result["ok"] = len(result["removed"]) > 0
+        if errors:
+            result["error"] = "; ".join(errors)
+        return result
 
 
 def get_audio_input_devices() -> list[dict]:
@@ -1802,46 +2609,61 @@ def create_status_icon(color: str, size: int = 64) -> Image.Image:
 
 # === Hotkey Listener ===
 
+# Mouse side/extra/middle button codes — devices that only expose these (no F-keys)
+# must still be monitored so Detect and mouse-button hotkeys work.
+_MOUSE_BUTTON_CODES = {272, 273, 274, 275, 276, 277, 278}
+
+
 def get_all_input_devices() -> list[dict]:
-    """Get all input devices that could potentially send hotkeys."""
+    """Get all input devices that could potentially send hotkeys.
+
+    Includes keyboards (F1–F12) AND mice/pads that expose mouse buttons.
+    Excludes only our own ydotool injector (not all virtual devices — remappers
+    re-emit through virtual keyboards that must stay eligible).
+    """
     if not HAS_EVDEV:
         return []
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
     result = []
-    
+
     for device in devices:
         capabilities = device.capabilities()
-        if ecodes.EV_KEY in capabilities:
-            key_caps = capabilities[ecodes.EV_KEY]
-            has_fkeys = ecodes.KEY_F1 in key_caps and ecodes.KEY_F12 in key_caps
-            
-            name_lower = device.name.lower()
-            # Exclude ONLY our own text-injection device (ydotool's uinput
-            # keyboard) — monitoring it would feed injected text back into the
-            # hotkey listener. Other virtual keyboards must stay ELIGIBLE:
-            # remappers (keyd, input-remapper, gsr-ui, Steam Input) grab the
-            # physical devices and re-emit through a virtual one, so for a
-            # remapped mouse button — or every key on a keyd-managed system —
-            # the virtual device is the ONLY place the hotkey ever appears.
-            # The old blanket '"virtual" in name' filter silently broke
-            # dictation for every remapper user.
-            is_own_injector = "ydotool" in name_lower or "dotoold" in name_lower
+        if ecodes.EV_KEY not in capabilities:
+            continue
+        key_caps = capabilities[ecodes.EV_KEY]
+        has_fkeys = ecodes.KEY_F1 in key_caps and ecodes.KEY_F12 in key_caps
+        has_mouse_buttons = any(btn in key_caps for btn in _MOUSE_BUTTON_CODES)
 
-            if has_fkeys and not is_own_injector:
-                # Determine device type for display
-                device_type = "keyboard"
-                if "mouse" in name_lower:
-                    device_type = "mouse"
-                elif "gamepad" in name_lower or "controller" in name_lower:
-                    device_type = "gamepad"
-                
-                result.append({
-                    "name": device.name,
-                    "path": device.path,
-                    "type": device_type,
-                    "device": device,
-                })
-    
+        name_lower = device.name.lower()
+        # Exclude ONLY our own text-injection device (ydotool's uinput
+        # keyboard) — monitoring it would feed injected text back into the
+        # hotkey listener. Other virtual keyboards must stay ELIGIBLE:
+        # remappers (keyd, input-remapper, gsr-ui, Steam Input) grab the
+        # physical devices and re-emit through a virtual one, so for a
+        # remapped mouse button — or every key on a keyd-managed system —
+        # the virtual device is the ONLY place the hotkey ever appears.
+        is_own_injector = "ydotool" in name_lower or "dotoold" in name_lower
+        if is_own_injector:
+            continue
+
+        if not (has_fkeys or has_mouse_buttons):
+            continue
+
+        device_type = "keyboard"
+        if has_mouse_buttons and not has_fkeys:
+            device_type = "mouse"
+        elif "mouse" in name_lower:
+            device_type = "mouse"
+        elif "gamepad" in name_lower or "controller" in name_lower:
+            device_type = "gamepad"
+
+        result.append({
+            "name": device.name,
+            "path": device.path,
+            "type": device_type,
+            "device": device,
+        })
+
     return result
 
 
@@ -1870,7 +2692,28 @@ def _gamemode_hotkeys_paused() -> bool:
 # press as HOTKEY_CAPTURED instead of acting on it. Must run INSIDE the listener
 # (not a separate reader) because exclusively-grabbed devices — e.g. an MMO
 # mouse's side grid — deliver events ONLY to the listener's fds.
-_HOTKEY_CAPTURE = {"armed": False}
+# suppress_until: brief grace after capture so a concurrent KDE→socket trigger
+# for the same physical press doesn't start a dictation.
+_HOTKEY_CAPTURE = {"armed": False, "suppress_until": 0.0}
+
+
+def resolve_status_indicator_target(
+    use_pyqt_overlay: bool,
+    has_controller: bool,
+    tray_only: bool,
+    has_indicator: bool,
+) -> str:
+    """Which surface owns the on-screen status pill: ``pyqt`` | ``ctk`` | ``none``.
+
+    Pure helper so Disappearing (CTk) is never starved when a tray-only Qt
+    process exists for StatusNotifier. tray_only must not count as visual.
+    """
+    del tray_only  # explicit: tray-only never wins the pill
+    if has_controller and use_pyqt_overlay:
+        return "pyqt"
+    if has_indicator:
+        return "ctk"
+    return "none"
 
 # Free-tier GPU upsell: after a dictation this long (seconds) on the CPU/free path,
 # gently surface that GPU acceleration is much faster. Long enough that it never
@@ -1902,10 +2745,10 @@ def _keycode_display(code: int) -> str:
     return f"Key {code}"
 
 
-def kde_record_shortcut_active(kglobalshortcutsrc_text: str,
-                               desktop_group: str = "wayfinder-aura.desktop",
-                               action: str = "toggle-recording") -> bool:
-    """True if KDE binds `action` (default the record toggle) to a real key.
+def kde_record_shortcut_key(kglobalshortcutsrc_text: str,
+                            desktop_group: str = "wayfinder-aura.desktop",
+                            action: str = "toggle-recording") -> str | None:
+    """Return the active KDE binding for `action`, or None if unbound.
 
     Plasma 6 stores .desktop-action shortcuts under a ``[services]``-prefixed
     group and a bare value::
@@ -1914,20 +2757,10 @@ def kde_record_shortcut_active(kglobalshortcutsrc_text: str,
         toggle-recording=F3
 
     (older/other writers used ``[wayfinder-aura.desktop]`` with a comma-list
-    ``F3,none,Toggle Recording`` — the FIRST field is the active key). We accept
-    both: the group is matched by SUFFIX so the ``[services]`` prefix doesn't hide
-    it, and the value takes the first comma-field ("none"/empty = unbound). When
-    it's a real key, KWin grabs it at the compositor level, so the app must NOT
-    also read it via the passive evdev listener: evdev can't *consume* the key, so
-    a shared binding both leaks F3 into the focused window (→ the browser's Find
-    bar, which eats the dictation) AND double-fires (evdev + KDE→socket → record
-    toggles on then straight off → 0.0s "too short"). Reading KDE's own config —
-    never touched by save_config — makes this immune to the in-app hotkey setting
-    being reset. Pure/headless.
+    ``F3,none,Toggle Recording`` — the FIRST field is the active key). Group is
+    matched by SUFFIX so the ``[services]`` prefix doesn't hide it. Pure/headless.
     """
     in_group = False
-    # Suffix match so BOTH "[wayfinder-aura.desktop]" and Plasma 6's
-    # "[services][wayfinder-aura.desktop]" count as our group.
     suffix = f"[{desktop_group}]"
     prefix = f"{action}="
     for raw in kglobalshortcutsrc_text.splitlines():
@@ -1937,8 +2770,79 @@ def kde_record_shortcut_active(kglobalshortcutsrc_text: str,
             continue
         if in_group and line.startswith(prefix):
             active = line[len(prefix):].split(",", 1)[0].strip().lower()
-            return active not in ("", "none")
-    return False
+            if active in ("", "none"):
+                return None
+            return active
+    return None
+
+
+def kde_record_shortcut_active(kglobalshortcutsrc_text: str,
+                               desktop_group: str = "wayfinder-aura.desktop",
+                               action: str = "toggle-recording") -> bool:
+    """True if KDE binds `action` (default the record toggle) to a real key.
+
+    When it's a real key, KWin grabs it at the compositor level, so the app must
+    NOT also read the *same* key via the passive evdev listener: evdev can't
+    *consume* the key, so a shared binding both leaks F3 into the focused window
+    (→ the browser's Find bar) AND double-fires. Reading KDE's own config — never
+    touched by save_config — makes this immune to the in-app hotkey setting being
+    reset. Pure/headless.
+    """
+    return kde_record_shortcut_key(kglobalshortcutsrc_text, desktop_group, action) is not None
+
+
+# KDE System Settings tokens → evdev codes (for match-key defer).
+_KDE_KEY_TOKEN_TO_CODE: dict[str, int] = {
+    "f1": 59, "f2": 60, "f3": 61, "f4": 62, "f5": 63, "f6": 64,
+    "f7": 65, "f8": 66, "f9": 67, "f10": 68, "f11": 87, "f12": 88,
+    "scrolllock": 70, "scroll_lock": 70, "pause": 119, "space": 57,
+    "return": 28, "enter": 28, "tab": 15, "backspace": 14,
+    "insert": 110, "delete": 111, "home": 102, "end": 107,
+    "pageup": 104, "page_up": 104, "pagedown": 109, "page_down": 109,
+    "pgup": 104, "pgdown": 109,
+}
+
+
+def parse_kde_shortcut(active: str) -> tuple[int | None, set[str]] | None:
+    """Parse a KDE active shortcut field into (evdev_code, modifier_set).
+
+    Returns None if the token can't be mapped (caller should fail-safe to defer).
+    Modifiers use the same names as in-app config: ctrl, alt, shift, super.
+    """
+    if not active:
+        return None
+    parts = [p.strip().lower() for p in active.replace("-", "+").split("+") if p.strip()]
+    if not parts:
+        return None
+    mods: set[str] = set()
+    key_token = parts[-1]
+    for p in parts[:-1]:
+        if p in ("ctrl", "control", "control_l", "control_r"):
+            mods.add("ctrl")
+        elif p in ("alt", "alt_l", "alt_r", "altgr"):
+            mods.add("alt")
+        elif p in ("shift", "shift_l", "shift_r"):
+            mods.add("shift")
+        elif p in ("meta", "super", "win", "mod4"):
+            mods.add("super")
+        else:
+            return None  # unknown modifier — fail-safe
+    code = _KDE_KEY_TOKEN_TO_CODE.get(key_token)
+    if code is None:
+        return None
+    return code, mods
+
+
+def kde_binding_matches_config(active: str, config_code: int,
+                               config_modifiers: list[str] | None = None) -> bool:
+    """True when KDE's binding is the same physical chord as the in-app record hotkey."""
+    parsed = parse_kde_shortcut(active)
+    if parsed is None:
+        # Unknown KDE token — treat as match so we still defer (safe vs double-fire).
+        return True
+    kde_code, kde_mods = parsed
+    cfg_mods = {m.lower() for m in (config_modifiers or []) if m}
+    return kde_code == config_code and kde_mods == cfg_mods
 
 
 def resolve_hotkey_backend(platform: str, is_flatpak: bool, dbus_available: bool,
@@ -2255,6 +3159,90 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
     log("🛑 Hotkey listener stopped")
 
 
+def capture_hotkey_listener(event_queue, stop_event, enabled_devices=None, log_callback=None):
+    """Short-lived evdev reader used only by Settings → Detect.
+
+    Runs when the production hotkey listener is deferred (KDE owns the record
+    shortcut) so Detect still has something reading /dev/input. Emits a single
+    HOTKEY_CAPTURED then exits — never HOTKEY_PRESSED / STYLE_TOGGLE.
+    """
+    import select
+
+    def log(msg):
+        if log_callback:
+            try:
+                log_callback(msg)
+            except Exception:
+                pass
+
+    if not HAS_EVDEV:
+        log("⚠️ Detect capture needs evdev (not available)")
+        return
+
+    all_modifier_codes = set()
+    for codes in MODIFIER_CODES.values():
+        all_modifier_codes.update(codes)
+    pressed_modifiers: set[int] = set()
+
+    def _open_devices():
+        devices = find_keyboard_devices(enabled_devices)
+        fd_map = {}
+        for dev in devices:
+            try:
+                fd_map[dev.fd] = dev
+            except Exception:
+                pass
+        return fd_map
+
+    fd_to_device = _open_devices()
+    if not fd_to_device:
+        log("⚠️ Detect: no input devices readable — check input group membership")
+        return
+    log(f"🎯 Detect listening on {len(fd_to_device)} device(s)…")
+
+    try:
+        while not stop_event.is_set() and _HOTKEY_CAPTURE.get("armed"):
+            try:
+                r, _, _ = select.select(list(fd_to_device.keys()), [], [], 0.25)
+            except (ValueError, OSError):
+                fd_to_device = _open_devices()
+                continue
+            if not r:
+                continue
+            for fd in r:
+                device = fd_to_device.get(fd)
+                if device is None:
+                    continue
+                try:
+                    for event in device.read():
+                        if event.type != ecodes.EV_KEY:
+                            continue
+                        key_event = categorize(event)
+                        keycode = key_event.scancode
+                        if keycode in all_modifier_codes:
+                            if key_event.keystate == 1:
+                                pressed_modifiers.add(keycode)
+                            elif key_event.keystate == 0:
+                                pressed_modifiers.discard(keycode)
+                            continue
+                        if key_event.keystate != 1:
+                            continue
+                        # First non-modifier press wins
+                        _HOTKEY_CAPTURE["armed"] = False
+                        held = [name for name, codes in MODIFIER_CODES.items()
+                                if pressed_modifiers & set(codes)]
+                        event_queue.put((EventType.HOTKEY_CAPTURED,
+                                         {"code": keycode, "modifiers": held,
+                                          "device": device.name}))
+                        log(f"🎯 Detected key {keycode} from {device.name}")
+                        return
+                except (OSError, IOError) as e:
+                    log(f"⚠️ Detect device read failed: {device.name} ({e})")
+                    fd_to_device.pop(fd, None)
+    finally:
+        log("🎯 Detect capture listener stopped")
+
+
 def socket_listener(event_queue, stop_event, log_callback=None):
     """Delegate to the package socket listener (single hardened implementation).
 
@@ -2561,10 +3549,10 @@ class FloatingIndicator:
             pass
         
         try:
-            # Lift window and make it stay on top
+            # Lift only — do NOT focus_force (steals focus from the dictation target
+            # on Wayland and can break injection into the focused app).
             self.window.lift()
-            self.window.focus_force()
-        except:
+        except Exception:
             pass
         
         # GitHub Dark palette - reduces halation/eye strain
@@ -2597,7 +3585,8 @@ class FloatingIndicator:
         self.main_frame = ctk.CTkFrame(
             self.glow_frame,
             fg_color=inner_glow_color,  # Subtle accent-tinted background
-            corner_radius=20,  # Squircle feel  # module-scope squircle: no matching token
+            # Inset squircle: outer glow uses RADIUS["lg"]; -4 keeps concentric corners.
+            corner_radius=RADIUS["lg"] - 4,
             border_width=1,
             border_color=color,
         )
@@ -3619,15 +4608,20 @@ class WayfinderApp(ctk.CTk):
             ctk.deactivate_automatic_dpi_awareness()
         except Exception:
             pass  # older CustomTkinter without the API — harmless
-        # className sets the WM_CLASS *class* part — Tk capitalizes it to "Wayfinder-aura"
-        # (verified via KWin resourceClass). Plasma's taskbar matches StartupWMClass against
-        # the class, so without this the window reported class "Tk" and never merged into the
-        # pinned launcher — the "two taskbar icons" bug. Keep the .desktop files'
-        # StartupWMClass=Wayfinder-aura in sync with this.
-        super().__init__(className="wayfinder-aura")
+        # className sets the WM_CLASS *class* part. Plasma matches StartupWMClass
+        # against it to merge the window into the pinned launcher. Source and
+        # Flatpak MUST use different classes (see get_wm_class) — both desktops
+        # used to claim "Wayfinder-aura", so a source run attached to the Flatpak
+        # entry and showed a second taskbar icon next to the pin.
+        from wayfinder.utils.platform import get_portal_app_id, get_wm_class
+        _wm_class = get_wm_class()
+        # Tk capitalizes the first letter of className; pass lowercase lead so
+        # "Wayfinder-aura" / "WayfinderAura" round-trip cleanly.
+        _cn = _wm_class[0].lower() + _wm_class[1:] if _wm_class else "wayfinder-aura"
+        super().__init__(className=_cn)
 
-        # And the WM_CLASS *instance* part (some DEs/tools match on this instead).
-        self.tk.call('tk', 'appname', 'wayfinder-aura')
+        # Instance name (some DEs match this) — portal/desktop id without path.
+        self.tk.call('tk', 'appname', get_portal_app_id())
         
         self.config = load_config()
         
@@ -3696,6 +4690,8 @@ class WayfinderApp(ctk.CTk):
         # Chunked recorder for indefinite recording
         self.chunked_recorder: ChunkedRecorder | None = None
         self.chunk_transcriptions: list[str] = []
+        # Two workers: keep a pipeline of chunks during long dictations (GPU usually
+        # finishes one before the next arrives; CPU free-tier benefits more from 2).
         self.transcription_executor = ThreadPoolExecutor(max_workers=2)
         self.chunk_transcription_lock = threading.Lock()
         
@@ -4027,6 +5023,13 @@ class WayfinderApp(ctk.CTk):
         pointer. Button-4/5 bindings stay as a fallback for pre-Tk9/X11
         environments (harmless where they never fire; on an exotic setup that
         delivers both families a notch scrolls 2x — still smooth, never a jump).
+
+        Edge feel (2026-07-09+): clamp remaining pixels + yview_moveto so the
+        last notch settles cleanly. At ui_scale=2.0 the old 90*scale=180px step
+        slammed into the bottom; notch size is now soft-scaled and capped at
+        12% of the viewport. CTkScrollbar.update_idletasks is patched out (see
+        _patch_ctk_scrollbar_quiet_draw). ToolTips are suppressed mid-gesture
+        so CTkToplevel spawn doesn't hitch the scroll.
         """
         import tkinter as tk
 
@@ -4036,6 +5039,57 @@ class WayfinderApp(ctk.CTk):
         # setup_ui() already built, since bind_all froze the real handler. This
         # reassert is a harmless belt-and-suspenders (idempotent).
         ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
+
+        # Only install bind_all handlers once — setup_scaling_shortcuts can be
+        # re-entered after a scale reset; stacking add="+" handlers multiplies
+        # every notch and feels like a bounce.
+        if getattr(self, "_wheel_pipeline_bound", False):
+            return
+        self._wheel_pipeline_bound = True
+
+        # Per-canvas fractional-pixel remainder from high-res wheels.
+        # id(canvas) -> {"canvas": canvas, "acc": float}
+        self._wheel_acc = {}
+        self._wheel_active_gen = 0
+
+        def _canvas_metrics(canvas):
+            """Return (content_h, viewport_h, top_frac) or None if unusable."""
+            try:
+                sr = canvas.cget("scrollregion")
+                parts = str(sr).split()
+                if len(parts) != 4:
+                    return None
+                content_h = float(parts[3]) - float(parts[1])
+                viewport_h = float(canvas.winfo_height())
+                top_frac = float(canvas.yview()[0])
+                return content_h, viewport_h, top_frac
+            except Exception:
+                return None
+
+        def _acc_for(canvas):
+            key = id(canvas)
+            st = self._wheel_acc.get(key)
+            if st is None or st.get("canvas") is not canvas:
+                st = {"canvas": canvas, "acc": 0.0}
+                self._wheel_acc[key] = st
+            return st
+
+        def _mark_wheel_active():
+            """Suppress ToolTips for a short window after each wheel event."""
+            global _WHEEL_SCROLL_ACTIVE
+            _WHEEL_SCROLL_ACTIVE = True
+            self._wheel_active_gen += 1
+            gen = self._wheel_active_gen
+
+            def _clear():
+                global _WHEEL_SCROLL_ACTIVE
+                if self._wheel_active_gen == gen:
+                    _WHEEL_SCROLL_ACTIVE = False
+
+            try:
+                self.after(180, _clear)
+            except Exception:
+                _WHEEL_SCROLL_ACTIVE = False
 
         def _scroll_under_pointer(event, notches: float):
             try:
@@ -4051,38 +5105,57 @@ class WayfinderApp(ctk.CTk):
                     try:
                         canvas = widget._parent_canvas
                         view = canvas.yview()
-                        if view != (0.0, 1.0):
-                            # Don't overscroll past the top/bottom: yview_scroll at the
-                            # boundary still forces a canvas redraw, which shows as a
-                            # glitchy flash (reported scrolling UP at the top of Settings).
-                            # Skipping the no-op scroll keeps the edge steady.
-                            at_top = view[0] <= 1e-6
-                            at_bottom = view[1] >= 1.0 - 1e-6
-                            if (notches < 0 and at_top) or (notches > 0 and at_bottom):
-                                return "break"
-                            # A canvas "unit" defaults to 10% of the viewport;
-                            # pin it to 1px so we can scroll by pixels.
-                            if int(canvas.cget("yscrollincrement")) != 1:
-                                canvas.configure(yscrollincrement=1)
-                            try:
-                                scale = widget._get_widget_scaling()
-                            except Exception:
-                                scale = 1.0
-                            # Floor a sub-notch delta to one full step. The wheel
-                            # magnitude is input-stack-dependent: Tk 9 reports
-                            # |delta|==120 per notch, but libinput high-resolution
-                            # scrolling (and some mice) report a much smaller value
-                            # (e.g. ±1). Dividing by a fixed 120 then int()-
-                            # truncating collapsed those to a 0–1px no-op — the
-                            # "scroll stopped working in Settings" bug. Sign is
-                            # preserved, so the top/bottom guard above is unaffected;
-                            # a true |delta|>=120 notch keeps its proportional value.
-                            step = notches
-                            if 0 < abs(step) < 1:
-                                step = 1.0 if step > 0 else -1.0
-                            canvas.yview_scroll(
-                                int(step * WHEEL_SCROLL_PX * scale), "units"
-                            )
+                        if view == (0.0, 1.0):
+                            return "break"  # content fits; nothing to do
+                        metrics = _canvas_metrics(canvas)
+                        if metrics is None:
+                            return "break"
+                        content_h, viewport_h, top_frac = metrics
+                        try:
+                            scale = widget._get_widget_scaling()
+                        except Exception:
+                            scale = 1.0
+
+                        _mark_wheel_active()
+
+                        # Soft-scaled, viewport-capped notch size (see
+                        # _wheel_notch_px). Sub-notch deltas accumulate.
+                        notch_px = _wheel_notch_px(scale, viewport_h)
+                        st = _acc_for(canvas)
+                        st["acc"] += float(notches) * notch_px
+                        if abs(st["acc"]) < 1.0:
+                            return "break"
+                        delta_px = int(st["acc"])  # truncate toward 0
+                        st["acc"] -= delta_px
+
+                        # Soft approach: when less than one notch remains in
+                        # this direction, don't request a full step (clamp
+                        # would shrink it anyway, but smaller writes mean less
+                        # scrollbar/thumb thrash on the last ticks).
+                        max_top = max(0.0, content_h - viewport_h)
+                        cur_top = top_frac * content_h
+                        if delta_px > 0:
+                            remaining = max_top - cur_top
+                            if 0 < remaining < abs(delta_px):
+                                delta_px = int(remaining) if remaining >= 1 else 0
+                                st["acc"] = 0.0
+                        elif delta_px < 0:
+                            remaining = cur_top
+                            if 0 < remaining < abs(delta_px):
+                                delta_px = -int(remaining) if remaining >= 1 else 0
+                                st["acc"] = 0.0
+
+                        applied = _wheel_clamp_delta_px(
+                            float(delta_px), top_frac, content_h, viewport_h
+                        )
+                        if applied == 0.0:
+                            # At edge in this direction — drop residual so a
+                            # reverse roll starts clean; no canvas write.
+                            st["acc"] = 0.0
+                            return "break"
+
+                        new_frac = _wheel_top_frac_after(top_frac, applied, content_h)
+                        canvas.yview_moveto(new_frac)
                     except Exception:
                         pass
                     return "break"  # innermost frame handled it — stop here
@@ -4457,6 +5530,9 @@ class WayfinderApp(ctk.CTk):
         
         # Force layout recalculation so scrollable frames update
         self.update_idletasks()
+
+        # Form-row measure max is design units × scale → re-pad after scale change.
+        self._sync_all_form_measures(force=True)
         
         # Update all scale indicators
         if hasattr(self, 'header_scale_label'):
@@ -5706,8 +6782,9 @@ class WayfinderApp(ctk.CTk):
         # Refresh-devices affordance: rescan PortAudio so a mic plugged in AFTER launch (e.g. a
         # USB mic) appears here without restarting the app. PortAudio snapshots devices at init,
         # so a hotplugged mic is otherwise invisible to this process until restart.
-        _mic_refresh_row = ctk.CTkFrame(audio_content, fg_color="transparent")
-        _mic_refresh_row.pack(fill="x", padx=16, pady=(0, 6))
+        _refresh_shell, _mic_refresh_row = self._begin_form_row(
+            audio_content, padx=16, pady=(0, 6)
+        )
         ctk.CTkButton(
             _mic_refresh_row, text="Refresh devices",
             image=get_icon("rotate-ccw", 14, COLORS["text_secondary"]),
@@ -5804,7 +6881,12 @@ class WayfinderApp(ctk.CTk):
         }
         self._hotkey_code_to_name = {v: k for k, v in self._hotkey_key_codes.items()}
         current_key_code = self.config.get("hotkey_key", 67)
-        current_key_name = self._hotkey_code_to_name.get(current_key_code, "F9")
+        current_key_name = self._hotkey_code_to_name.get(current_key_code)
+        if current_key_name is None:
+            # Custom key from a prior Detect (e.g. Insert, F13, keypad)
+            current_key_name = _keycode_display(current_key_code)
+            self._hotkey_key_codes[current_key_name] = current_key_code
+            self._hotkey_code_to_name[current_key_code] = current_key_name
         self._hotkey_key_var = ctk.StringVar(value=current_key_name)
         self.hotkey_dropdown = self.create_dropdown_row(
             system_content, "Hotkey",
@@ -5828,9 +6910,9 @@ class WayfinderApp(ctk.CTk):
         )
         self._detect_btn_record.pack(side="left")
 
-        # Hotkey modifier checkboxes (inline row)
-        mod_row = ctk.CTkFrame(system_content, fg_color="transparent")
-        mod_row.pack(fill="x", padx=16, pady=(0, 10))
+        # Hotkey modifier checkboxes (inline row) — form measure so checks
+        # don't pin to the far edge on fullscreen.
+        _mod_shell, mod_row = self._begin_form_row(system_content, padx=16, pady=(0, 10))
         ctk.CTkLabel(
             mod_row, text="Modifiers",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
@@ -6010,14 +7092,14 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["accent"],
             ).pack(padx=10, pady=4)
 
-        # Clarify what the number means — users (rightly) read "2.0s" as their
-        # dictation latency, but it's a 10s clip transcribed from a COLD start
-        # (model loaded fresh each run). Live dictation keeps the model resident
-        # in the whisper-server, so it's several times faster than this figure.
+        # Headline is end-to-end pipeline (ASR + cleanup). ASR is a 10s clip from
+        # a COLD start (model load included); live whisper-server is faster.
+        # Cleanup times are WARM (after one load) to match live dictation.
         ctk.CTkLabel(
             benchmark_tile,
-            text="Transcribes a 10-second clip from a cold start (model load included). "
-                 "Live dictation keeps the model loaded, so it runs faster than this.",
+            text="Times your full pipeline: ASR (10s cold clip) + LLM cleanup (warm). "
+                 "Live dictation keeps ASR loaded so it runs faster than the ASR figure. "
+                 "Cleanup comparison lists every installed GGUF model.",
             font=(self.font_body[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
             wraplength=520, justify="left",
@@ -6074,8 +7156,8 @@ class WayfinderApp(ctk.CTk):
         self.benchmark_status_label.pack(side="left", padx=(15, 0))
 
         # Thin indeterminate busy bar under the button row — hidden until a run starts.
-        # Driven by our own >=100ms tick (_tick_benchmark_bar); NEVER .start() (its
-        # internal loop re-arms every 20ms, banned by rule 1 + the ratchet test).
+        # Driven by our own 100ms (~10fps) tick (_tick_benchmark_bar); NEVER .start()
+        # (its internal loop re-arms every 20ms, banned by rule 1 + the ratchet test).
         self.benchmark_progress = ctk.CTkProgressBar(
             benchmark_content,
             height=4,
@@ -6146,7 +7228,41 @@ class WayfinderApp(ctk.CTk):
         )
         self._license_feedback.pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 4))
 
-        # Get Premium / Deactivate buttons
+        # Free tier: pitch the upgrade — everything Ultra unlocks, then the CTA.
+        # Premium: just the Deactivate button.
+        if not is_premium:
+            ctk.CTkFrame(license_tile, fg_color=COLORS["border_subtle"], height=1).pack(
+                fill="x", padx=SPACING["tile_pad"], pady=(SPACING["xs"], SPACING["md"]))
+
+            ctk.CTkLabel(
+                license_tile, text="Upgrade to Ultra and unlock",
+                font=(self.font_header[0], self.font_sizes["heading"], "bold"),
+                text_color=COLORS["text_bright"],
+            ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"]))
+
+            benefits_box = ctk.CTkFrame(license_tile, fg_color="transparent")
+            benefits_box.pack(fill="x", padx=SPACING["tile_pad"])
+            self._build_ultra_benefit_rows(benefits_box)
+
+            price = self.config.get("premium_price", "$29.99")
+            price_row = ctk.CTkFrame(license_tile, fg_color="transparent")
+            price_row.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["md"], SPACING["sm"]))
+            ctk.CTkLabel(
+                price_row, text=price,
+                font=(self.font_header[0], self.font_sizes["title"], "bold"),
+                text_color=COLORS["accent"],
+            ).pack(side="left")
+            ctk.CTkLabel(
+                price_row, text=self.config.get("premium_price_regular", "$60"),
+                font=(self.font_body[0], self.font_sizes["body"], "overstrike"),
+                text_color=COLORS["text_muted"],
+            ).pack(side="left", padx=(SPACING["sm"], 0))
+            ctk.CTkLabel(
+                price_row, text="launch price",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_muted"],
+            ).pack(side="left", padx=(SPACING["sm"], 0))
+
         action_row = ctk.CTkFrame(license_tile, fg_color="transparent")
         action_row.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
 
@@ -6154,7 +7270,7 @@ class WayfinderApp(ctk.CTk):
             ctk.CTkButton(
                 action_row, text=f"Get Ultra — {self.config.get('premium_price', '$29.99')}",
                 font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                height=32, corner_radius=RADIUS["sm"],
+                height=36, width=200, corner_radius=RADIUS["sm"],
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
                 text_color="#000000",
                 command=lambda: self._show_premium_prompt("ultra"),
@@ -6192,64 +7308,131 @@ class WayfinderApp(ctk.CTk):
         self._settings_scroll = scroll
     
     def _update_benchmark_results_display(self):
-        """Update the inline benchmark results display."""
+        """Update the inline benchmark results display (pipeline + ASR + cleanup)."""
         # Clear existing
         for widget in self.benchmark_results_frame.winfo_children():
             widget.destroy()
-        
-        benchmark_results = self.config.get("benchmark_results", {})
-        fastest = self.config.get("benchmark_fastest_processor", None)
-        
+
+        def _section(title: str) -> None:
+            ctk.CTkLabel(
+                self.benchmark_results_frame,
+                text=title,
+                font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", pady=(8, 2))
+
+        def _line(text: str, *, muted: bool = False, bright: bool = False) -> None:
+            color = COLORS["text_muted"] if muted else (
+                COLORS["text_bright"] if bright else COLORS["text_primary"]
+            )
+            ctk.CTkLabel(
+                self.benchmark_results_frame,
+                text=text,
+                font=(self.font_body[0], self.font_sizes["body"]),
+                text_color=color,
+            ).pack(anchor="w", pady=1)
+
+        benchmark_results = self.config.get("benchmark_results", {}) or {}
+        pp_results = self.config.get("postprocessing_benchmark_results", {}) or {}
+        pipeline = self.config.get("pipeline_benchmark", {}) or {}
+
+        has_any = bool(benchmark_results or pp_results or pipeline)
+        if not has_any:
+            _line(
+                "No benchmark results yet. Click 'Test Current Model' to measure "
+                "ASR + cleanup on your hardware.",
+                muted=True,
+            )
+            return
+
+        # --- Pipeline headline (current setup) ---
+        if pipeline.get("total_time") is not None or pipeline.get("asr_time") is not None:
+            _section("YOUR SETUP (pipeline)")
+            total = pipeline.get("total_time")
+            asr_t = pipeline.get("asr_time")
+            pp_t = pipeline.get("pp_time")
+            asr_name = pipeline.get("asr_model_name") or pipeline.get("asr_model") or "ASR"
+            asr_mode = (pipeline.get("asr_mode") or "").upper() or "?"
+            pp_name = pipeline.get("pp_model_name") or "cleanup"
+            if total is not None:
+                _line(f"Total: {total:.1f}s  (10s audio + cleanup)", bright=True)
+            asr_part = f"{asr_t:.1f}s" if asr_t is not None else "—"
+            if asr_t and pipeline.get("audio_seconds"):
+                rtf = pipeline["audio_seconds"] / asr_t
+                asr_part = f"{asr_t:.1f}s ({rtf:.0f}× realtime)"
+            _line(f"  ASR  ({asr_name} · {asr_mode}):  {asr_part}")
+            if pipeline.get("pp_enabled") and pp_t is not None:
+                _line(f"  Cleanup ({pp_name}):  {pp_t:.1f}s")
+            elif not pipeline.get("pp_enabled", True):
+                _line("  Cleanup: off", muted=True)
+            else:
+                _line("  Cleanup: —", muted=True)
+
+        # --- ASR per whisper model ---
         if benchmark_results:
-            # Show results in a simple format
+            _section("TRANSCRIPTION (ASR)")
             for model_id, result in benchmark_results.items():
                 model_name = result.get("model_name", model_id)
                 gpu_time = result.get("gpu_10s")
                 cpu_time = result.get("cpu_10s")
                 model_fastest = result.get("fastest", "")
-                
-                # Show the realtime factor (10s clip / time) so the number reads as
-                # throughput ("5× realtime") rather than as per-dictation latency.
-                gpu_str = f"GPU {gpu_time:.1f}s ({10.0/gpu_time:.0f}× realtime)" if gpu_time else "GPU —"
-                cpu_str = f"CPU {cpu_time:.1f}s ({10.0/cpu_time:.0f}× realtime)" if cpu_time else "CPU —"
 
-                # Highlight the faster one
+                gpu_str = (
+                    f"GPU {gpu_time:.1f}s ({10.0 / gpu_time:.0f}× RT)"
+                    if gpu_time else "GPU —"
+                )
+                cpu_str = (
+                    f"CPU {cpu_time:.1f}s ({10.0 / cpu_time:.0f}× RT)"
+                    if cpu_time else "CPU —"
+                )
                 if model_fastest == "gpu":
                     result_text = f"{model_name}: {gpu_str} ✓  |  {cpu_str}"
                 elif model_fastest == "cpu":
                     result_text = f"{model_name}: {gpu_str}  |  {cpu_str} ✓"
                 else:
                     result_text = f"{model_name}: {gpu_str}  |  {cpu_str}"
-                
-                ctk.CTkLabel(
-                    self.benchmark_results_frame,
-                    text=result_text,
-                    font=(self.font_body[0], self.font_sizes["body"]),
-                    text_color=COLORS["text_primary"],
-                ).pack(anchor="w", pady=2)
-            
-            # Show timestamp
-            timestamps = [r.get("timestamp", 0) for r in benchmark_results.values()]
-            if timestamps and max(timestamps) > 0:
-                from datetime import datetime
-                last_run = datetime.fromtimestamp(max(timestamps)).strftime("%b %d, %H:%M")
-                ctk.CTkLabel(
-                    self.benchmark_results_frame,
-                    text=f"Last tested: {last_run}",
-                    font=(self.font_body[0], self.font_sizes["caption"]),
-                    text_color=COLORS["text_muted"],
-                ).pack(anchor="w", pady=(5, 0))
-        else:
-            ctk.CTkLabel(
-                self.benchmark_results_frame,
-                text="No benchmark results yet. Click 'Test Current Model' to measure speed.",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_muted"],
-            ).pack(anchor="w")
+                _line(result_text)
+
+        # --- Cleanup model comparison ---
+        if pp_results:
+            _section("CLEANUP MODELS (warm)")
+            ranked = sorted(
+                pp_results.items(),
+                key=lambda item: (
+                    item[1].get("avg_time") is None,
+                    item[1].get("avg_time") if item[1].get("avg_time") is not None else 1e9,
+                ),
+            )
+            for mid, result in ranked:
+                name = result.get("model_name", mid)
+                if result.get("error"):
+                    _line(f"{name}: failed — {result['error'][:40]}", muted=True)
+                    continue
+                t = result.get("avg_time")
+                if t is None:
+                    _line(f"{name}: —", muted=True)
+                    continue
+                mark = "  ← current" if result.get("is_current") else ""
+                _line(f"{name}: {t:.1f}s{mark}")
+
+        # Timestamp from newest of any section
+        timestamps = []
+        for r in benchmark_results.values():
+            if isinstance(r, dict) and r.get("timestamp"):
+                timestamps.append(r["timestamp"])
+        for r in pp_results.values():
+            if isinstance(r, dict) and r.get("timestamp"):
+                timestamps.append(r["timestamp"])
+        if pipeline.get("timestamp"):
+            timestamps.append(pipeline["timestamp"])
+        if timestamps:
+            from datetime import datetime
+            last_run = datetime.fromtimestamp(max(timestamps)).strftime("%b %d, %H:%M")
+            _line(f"Last tested: {last_run}", muted=True)
     
     def _refresh_benchmark_tooltips(self):
         """Refresh all dynamic tooltips that depend on benchmark results."""
-        tooltip_keys = ["whisper_model", "gpu_acceleration", "accuracy_mode"]
+        tooltip_keys = ["whisper_model", "gpu_acceleration", "accuracy_mode", "post_processing"]
         
         for key in tooltip_keys:
             if key in self.dynamic_tooltips:
@@ -6260,7 +7443,7 @@ class WayfinderApp(ctk.CTk):
         self.log("   📊 Updated tooltips with new benchmark data")
     
     def _tick_benchmark_bar(self) -> None:
-        """Advance the indeterminate benchmark bar at 120ms (>=100ms, ratchet-safe;
+        """Advance the indeterminate benchmark bar at 100ms (~10fps, ratchet-safe;
         NEVER .start() — that re-arms every 20ms). Self-cancels and hides the bar once
         _benchmark_running clears (set in the benchmark's completion/error path)."""
         if not getattr(self, "_benchmark_running", False):
@@ -6274,16 +7457,16 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         try:
-            self.after(120, self._tick_benchmark_bar)
+            self.after(100, self._tick_benchmark_bar)
         except Exception:
             pass
 
     def _run_inline_benchmark(self):
-        """Run a quick benchmark on the current model with live timer feedback."""
+        """Run ASR + post-processing benchmarks with live timer feedback."""
         import subprocess
         import queue
         
-        # Result queue for thread-safe communication
+        # Result queue for thread-safe communication (dict payload)
         result_queue = queue.Queue()
         
         # Debug logging to file
@@ -6292,29 +7475,26 @@ class WayfinderApp(ctk.CTk):
             try:
                 with open(log_file, "a") as f:
                     f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
-            except:
+            except Exception:
                 pass
         
         # Clear previous log
         try:
             log_file.unlink(missing_ok=True)
-        except:
+        except Exception:
             pass
         
-        # Get current model with proper display name
-        # Read from "model_path" config key (where UI saves the selection)
+        # Get current whisper model with proper display name
         model_path_config = self.config.get("model_path", "~/whisper.cpp/models/ggml-large-v3-turbo.bin")
-        # Extract just the filename from the full path
         selected_model = Path(os.path.expanduser(model_path_config)).name
         
-        # Create proper display name
         model_id = selected_model.replace("ggml-", "").replace(".bin", "")
         if model_id in WHISPER_CPP_MODELS:
             model_name = WHISPER_CPP_MODELS[model_id]["name"]
         else:
             model_name = model_id.replace("-", " ").replace("_", " ").title()
         
-        self.log(f"⏱️ BENCHMARK: Starting test of {model_name}")
+        self.log(f"⏱️ BENCHMARK: Starting pipeline test ({model_name} + cleanup models)")
         debug_log(f"Starting benchmark for {model_name}")
         
         # Timer state for live feedback
@@ -6326,10 +7506,10 @@ class WayfinderApp(ctk.CTk):
             
             # Check if benchmark completed (poll the queue)
             try:
-                gpu_time, cpu_time, error = result_queue.get_nowait()
+                payload = result_queue.get_nowait()
                 debug_log("Result retrieved from queue in timer")
                 timer_state["running"] = False
-                on_complete(gpu_time, cpu_time, error)
+                on_complete(payload)
                 return
             except queue.Empty:
                 pass  # No result yet, continue timer
@@ -6339,7 +7519,7 @@ class WayfinderApp(ctk.CTk):
             try:
                 self.benchmark_test_btn.configure(text=f"⏳ {phase} {timer_state['seconds']}s")
                 timer_state["timer_id"] = self.after(1000, update_timer)
-            except:
+            except Exception:
                 pass
         
         def stop_timer():
@@ -6347,7 +7527,7 @@ class WayfinderApp(ctk.CTk):
             if timer_state["timer_id"]:
                 try:
                     self.after_cancel(timer_state["timer_id"])
-                except:
+                except Exception:
                     pass
         
         # Disable button and start timer
@@ -6363,7 +7543,7 @@ class WayfinderApp(ctk.CTk):
         timer_state["timer_id"] = self.after(1000, update_timer)
         
         def run_benchmark_thread():
-            """Background thread to run benchmarks."""
+            """Background thread: ASR (GPU+CPU) then cleanup model comparison."""
             debug_log("Thread started")
             import tempfile
             import wave
@@ -6372,6 +7552,8 @@ class WayfinderApp(ctk.CTk):
             gpu_time = None
             cpu_time = None
             error = None
+            pp_results: dict = {}
+            pipeline: dict = {}
             
             try:
                 # Find whisper-cli
@@ -6389,116 +7571,152 @@ class WayfinderApp(ctk.CTk):
                 if not whisper_cli:
                     error = "whisper-cli not found"
                     debug_log(f"Error: {error}")
-                    return
-                
-                # CPU test binary: the GPU (Vulkan) build SIGSEGVs at Vulkan init on some
-                # devices (e.g. the Steam Deck's RDNA2) — which also kills the --no-gpu run,
-                # since the crash happens before the flag is read. Use the dedicated CPU-only
-                # binary (whisper-cli-cpu) when present so the CPU test still works there.
-                whisper_cli_cpu = whisper_cli
-                for path in [
-                    Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli-cpu",
-                    Path("/usr/bin/whisper-cli-cpu"),
-                    Path("/app/bin/whisper-cli-cpu"),
-                ]:
-                    if path.exists():
-                        whisper_cli_cpu = str(path)
-                        break
+                    # Still try cleanup-only timing so the tile isn't useless
+                else:
+                    # CPU test binary: the GPU (Vulkan) build SIGSEGVs at Vulkan init on some
+                    # devices (e.g. the Steam Deck's RDNA2) — which also kills the --no-gpu run,
+                    # since the crash happens before the flag is read. Use the dedicated CPU-only
+                    # binary (whisper-cli-cpu) when present so the CPU test still works there.
+                    whisper_cli_cpu = whisper_cli
+                    for path in [
+                        Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli-cpu",
+                        Path("/usr/bin/whisper-cli-cpu"),
+                        Path("/app/bin/whisper-cli-cpu"),
+                    ]:
+                        if path.exists():
+                            whisper_cli_cpu = str(path)
+                            break
 
                 # Find model across all model dirs (download dir first)
-                model_path = _resolve_whisper_model(selected_model)
+                model_path = _resolve_whisper_model(selected_model) if whisper_cli else None
                 
-                if model_path is None:
+                if whisper_cli and model_path is None:
                     error = f"Model not found: {selected_model}"
                     debug_log(f"Error: {error}")
-                    return
                 
-                debug_log(f"Binary: {whisper_cli}")
-                debug_log(f"Model: {model_path}")
-                self.after(0, lambda: self.log(f"   Binary: {whisper_cli}"))
-                self.after(0, lambda: self.log(f"   Model: {model_path}"))
-                
-                # Create 10s test audio
-                debug_log("Creating test audio...")
-                timer_state["phase"] = "Audio"
-                self.after(0, lambda: self.benchmark_status_label.configure(text="Creating test audio..."))
-                
-                sample_rate = 16000
-                duration = 10
-                samples = duration * sample_rate
-                t = np.linspace(0, duration, samples)
-                speech = np.sin(2 * np.pi * 200 * t) * 0.3 + np.sin(2 * np.pi * 400 * t) * 0.2
-                speech += np.random.randn(samples) * 0.1
-                speech = (speech / np.max(np.abs(speech)) * 0.7 * 32767).astype(np.int16)
-                
-                test_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                with wave.open(test_audio.name, "wb") as wav:
-                    wav.setnchannels(1)
-                    wav.setsampwidth(2)
-                    wav.setframerate(sample_rate)
-                    wav.writeframes(speech.tobytes())
-                
-                debug_log(f"Audio created: {test_audio.name}")
-                
-                try:
-                    # GPU TEST
-                    debug_log("Starting GPU test...")
-                    timer_state["phase"] = "GPU"
-                    self.after(0, lambda: self.benchmark_status_label.configure(text="Testing GPU..."))
-                    self.after(0, lambda: self.log("   🔥 GPU test starting..."))
+                if whisper_cli and model_path:
+                    debug_log(f"Binary: {whisper_cli}")
+                    debug_log(f"Model: {model_path}")
+                    self.after(0, lambda: self.log(f"   Binary: {whisper_cli}"))
+                    self.after(0, lambda: self.log(f"   Model: {model_path}"))
                     
-                    cmd_gpu = [whisper_cli, "-m", str(model_path), "-f", test_audio.name, 
-                               "-t", "6", "--no-timestamps", "--no-prints"]
+                    # Create 10s test audio
+                    debug_log("Creating test audio...")
+                    timer_state["phase"] = "Audio"
+                    self.after(0, lambda: self.benchmark_status_label.configure(text="Creating test audio..."))
                     
-                    start = time.perf_counter()
-                    result = subprocess.run(cmd_gpu, capture_output=True, timeout=60)
-                    gpu_elapsed = time.perf_counter() - start
-                    debug_log(f"GPU done: {gpu_elapsed:.2f}s, exit={result.returncode}")
+                    sample_rate = 16000
+                    duration = 10
+                    samples = duration * sample_rate
+                    t = np.linspace(0, duration, samples)
+                    speech = np.sin(2 * np.pi * 200 * t) * 0.3 + np.sin(2 * np.pi * 400 * t) * 0.2
+                    speech += np.random.randn(samples) * 0.1
+                    speech = (speech / np.max(np.abs(speech)) * 0.7 * 32767).astype(np.int16)
                     
-                    if result.returncode == 0:
-                        gpu_time = gpu_elapsed
-                        self.after(0, lambda t=gpu_time: self.log(f"   ✅ GPU: {t:.2f}s"))
-                    else:
-                        stderr = result.stderr.decode('utf-8', errors='replace')[:200]
-                        debug_log(f"GPU stderr: {stderr}")
-                        if result.returncode < 0:
-                            # Negative = killed by a signal (SIGSEGV at Vulkan init on the
-                            # Deck's RDNA2). GPU acceleration just isn't available here.
-                            self.after(0, lambda: self.log("   ⚠️ GPU unavailable on this device (Vulkan crashed) — CPU only"))
-                        else:
-                            self.after(0, lambda: self.log(f"   ⚠️ GPU failed: exit {result.returncode}"))
+                    test_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    with wave.open(test_audio.name, "wb") as wav:
+                        wav.setnchannels(1)
+                        wav.setsampwidth(2)
+                        wav.setframerate(sample_rate)
+                        wav.writeframes(speech.tobytes())
                     
-                    # CPU TEST  
-                    debug_log("Starting CPU test...")
-                    timer_state["phase"] = "CPU"
-                    self.after(0, lambda: self.benchmark_status_label.configure(text="Testing CPU..."))
-                    self.after(0, lambda: self.log("   🧠 CPU test starting..."))
+                    debug_log(f"Audio created: {test_audio.name}")
                     
-                    cmd_cpu = [whisper_cli_cpu, "-m", str(model_path), "-f", test_audio.name,
-                               "-t", "6", "--no-timestamps", "--no-prints", "--no-gpu"]
-                    
-                    start = time.perf_counter()
-                    result = subprocess.run(cmd_cpu, capture_output=True, timeout=120)
-                    cpu_elapsed = time.perf_counter() - start
-                    debug_log(f"CPU done: {cpu_elapsed:.2f}s, exit={result.returncode}")
-                    
-                    if result.returncode == 0:
-                        cpu_time = cpu_elapsed
-                        self.after(0, lambda t=cpu_time: self.log(f"   ✅ CPU: {t:.2f}s"))
-                    else:
-                        stderr = result.stderr.decode('utf-8', errors='replace')[:200]
-                        debug_log(f"CPU stderr: {stderr}")
-                        self.after(0, lambda: self.log(f"   ⚠️ CPU failed: exit {result.returncode}"))
-                        
-                except subprocess.TimeoutExpired as e:
-                    error = f"Test timed out: {e}"
-                    debug_log(f"Timeout: {e}")
-                    self.after(0, lambda: self.log(f"   ⚠️ {error}"))
-                finally:
                     try:
-                        os.unlink(test_audio.name)
-                    except:
-                        pass
+                        # GPU TEST
+                        debug_log("Starting GPU test...")
+                        timer_state["phase"] = "GPU"
+                        self.after(0, lambda: self.benchmark_status_label.configure(text="Testing GPU ASR..."))
+                        self.after(0, lambda: self.log("   🔥 GPU ASR test starting..."))
+                        
+                        cmd_gpu = [whisper_cli, "-m", str(model_path), "-f", test_audio.name, 
+                                   "-t", "6", "--no-timestamps", "--no-prints"]
+                        
+                        start = time.perf_counter()
+                        result = subprocess.run(cmd_gpu, capture_output=True, timeout=60)
+                        gpu_elapsed = time.perf_counter() - start
+                        debug_log(f"GPU done: {gpu_elapsed:.2f}s, exit={result.returncode}")
+                        
+                        if result.returncode == 0:
+                            gpu_time = gpu_elapsed
+                            self.after(0, lambda t=gpu_time: self.log(f"   ✅ GPU ASR: {t:.2f}s"))
+                        else:
+                            stderr = result.stderr.decode('utf-8', errors='replace')[:200]
+                            debug_log(f"GPU stderr: {stderr}")
+                            if result.returncode < 0:
+                                self.after(0, lambda: self.log("   ⚠️ GPU unavailable on this device (Vulkan crashed) — CPU only"))
+                            else:
+                                self.after(0, lambda: self.log(f"   ⚠️ GPU failed: exit {result.returncode}"))
+                        
+                        # CPU TEST  
+                        debug_log("Starting CPU test...")
+                        timer_state["phase"] = "CPU"
+                        self.after(0, lambda: self.benchmark_status_label.configure(text="Testing CPU ASR..."))
+                        self.after(0, lambda: self.log("   🧠 CPU ASR test starting..."))
+                        
+                        cmd_cpu = [whisper_cli_cpu, "-m", str(model_path), "-f", test_audio.name,
+                                   "-t", "6", "--no-timestamps", "--no-prints", "--no-gpu"]
+                        
+                        start = time.perf_counter()
+                        result = subprocess.run(cmd_cpu, capture_output=True, timeout=120)
+                        cpu_elapsed = time.perf_counter() - start
+                        debug_log(f"CPU done: {cpu_elapsed:.2f}s, exit={result.returncode}")
+                        
+                        if result.returncode == 0:
+                            cpu_time = cpu_elapsed
+                            self.after(0, lambda t=cpu_time: self.log(f"   ✅ CPU ASR: {t:.2f}s"))
+                        else:
+                            stderr = result.stderr.decode('utf-8', errors='replace')[:200]
+                            debug_log(f"CPU stderr: {stderr}")
+                            self.after(0, lambda: self.log(f"   ⚠️ CPU failed: exit {result.returncode}"))
+                            
+                    except subprocess.TimeoutExpired as e:
+                        error = f"ASR test timed out: {e}"
+                        debug_log(f"Timeout: {e}")
+                        self.after(0, lambda: self.log(f"   ⚠️ {error}"))
+                    finally:
+                        try:
+                            os.unlink(test_audio.name)
+                        except Exception:
+                            pass
+
+                # --- Post-processing / cleanup model comparison ---
+                # Always attempt so users get Gemma vs Qwen timings even if ASR fails.
+                timer_state["phase"] = "Cleanup"
+                self.after(0, lambda: self.benchmark_status_label.configure(
+                    text="Timing cleanup models..."
+                ))
+                self.after(0, lambda: self.log("   🧹 Cleanup model comparison..."))
+
+                def _phase(label: str) -> None:
+                    timer_state["phase"] = label
+                    self.after(0, lambda l=label: self.benchmark_status_label.configure(
+                        text=f"Testing {l}..."
+                    ))
+
+                runner = BenchmarkRunner(
+                    self.config,
+                    log_callback=lambda msg: self.after(0, lambda m=msg: self.log(f"   {m}")),
+                )
+                pp_results = runner.run_postprocessing_benchmarks(
+                    self.config,
+                    progress_phase=_phase,
+                )
+                pipeline = BenchmarkRunner.build_pipeline_summary(
+                    asr_model_id=model_id,
+                    asr_model_name=model_name,
+                    gpu_time=gpu_time,
+                    cpu_time=cpu_time,
+                    use_gpu=bool(self.config.get("use_gpu", True)),
+                    pp_results=pp_results,
+                    current_pp_path=self.config.get("llama_cpp_model_path", ""),
+                    pp_enabled=bool(self.config.get("post_processing_enabled", True)),
+                    audio_seconds=10,
+                )
+                if pipeline.get("total_time") is not None:
+                    self.after(0, lambda t=pipeline["total_time"]: self.log(
+                        f"   📦 Pipeline total (current setup): {t:.2f}s"
+                    ))
                         
             except Exception as e:
                 error = str(e)
@@ -6506,16 +7724,29 @@ class WayfinderApp(ctk.CTk):
                 debug_log(f"Exception: {e}\n{traceback.format_exc()}")
                 self.after(0, lambda: self.log(f"   ❌ Error: {error}"))
             
-            debug_log(f"Benchmark complete: GPU={gpu_time}, CPU={cpu_time}, error={error}")
-            # Put result in queue for main thread to pick up
-            result_queue.put((gpu_time, cpu_time, error))
+            debug_log(
+                f"Benchmark complete: GPU={gpu_time}, CPU={cpu_time}, "
+                f"pp={len(pp_results)}, error={error}"
+            )
+            result_queue.put({
+                "gpu_time": gpu_time,
+                "cpu_time": cpu_time,
+                "error": error,
+                "pp_results": pp_results,
+                "pipeline": pipeline,
+            })
             debug_log("Result placed in queue")
         
-        def on_complete(gpu_time, cpu_time, error):
+        def on_complete(payload):
             """Handle benchmark completion on main thread."""
-            # Clear the busy flag first so the bar's next tick stops + hides it,
-            # covering both the success and the early-return error path below.
+            # Clear the busy flag first so the bar's next tick stops + hides it.
             self._benchmark_running = False
+            gpu_time = payload.get("gpu_time") if isinstance(payload, dict) else None
+            cpu_time = payload.get("cpu_time") if isinstance(payload, dict) else None
+            error = payload.get("error") if isinstance(payload, dict) else str(payload)
+            pp_results = payload.get("pp_results", {}) if isinstance(payload, dict) else {}
+            pipeline = payload.get("pipeline", {}) if isinstance(payload, dict) else {}
+
             try:
                 debug_log(f"on_complete EXECUTING: GPU={gpu_time}, CPU={cpu_time}, error={error}")
                 stop_timer()
@@ -6528,60 +7759,92 @@ class WayfinderApp(ctk.CTk):
                 )
                 debug_log("Button reset done")
                 
-                if error:
+                # Hard fail only when we got nothing useful at all
+                if error and gpu_time is None and cpu_time is None and not pp_results:
                     self.benchmark_status_label.configure(text=f"Error: {error}")
                     self.log(f"   ❌ BENCHMARK FAILED: {error}")
                     debug_log(f"Error case handled: {error}")
                     return
                 
-                # Log summary
-                self.log(f"   🏁 BENCHMARK COMPLETE")
+                self.log("   🏁 BENCHMARK COMPLETE")
                 if gpu_time and cpu_time:
                     faster = "GPU" if gpu_time < cpu_time else "CPU"
                     speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
-                    self.log(f"      🚀 {faster} is {speedup:.1f}x faster!")
+                    self.log(f"      🚀 ASR: {faster} is {speedup:.1f}x faster!")
+                if pipeline.get("total_time") is not None:
+                    self.log(
+                        f"      📦 Your setup: {pipeline['total_time']:.1f}s total "
+                        f"(ASR {pipeline.get('asr_time')}s + cleanup {pipeline.get('pp_time')}s)"
+                    )
                 debug_log("Summary logged")
             except Exception as ex:
                 import traceback
                 debug_log(f"EXCEPTION in on_complete: {ex}\n{traceback.format_exc()}")
             
             # Determine model_id from filename
-            model_id = selected_model.replace("ggml-", "").replace(".bin", "")
+            asr_model_id = selected_model.replace("ggml-", "").replace(".bin", "")
             
-            # Save results
+            # Save ASR results
             existing = self.config.get("benchmark_results", {})
-            existing[model_id] = {
-                "model_name": model_name,
-                "gpu_10s": round(gpu_time, 2) if gpu_time else None,
-                "cpu_10s": round(cpu_time, 2) if cpu_time else None,
-                "fastest": "gpu" if (gpu_time and cpu_time and gpu_time < cpu_time) else "cpu" if cpu_time else None,
-                "timestamp": int(time.time()),
-            }
-            self.config["benchmark_results"] = existing
-            
-            # Determine overall fastest
-            gpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "gpu")
-            cpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "cpu")
-            self.config["benchmark_fastest_processor"] = "gpu" if gpu_wins > cpu_wins else "cpu"
+            if gpu_time is not None or cpu_time is not None:
+                existing[asr_model_id] = {
+                    "model_name": model_name,
+                    "gpu_10s": round(gpu_time, 2) if gpu_time else None,
+                    "cpu_10s": round(cpu_time, 2) if cpu_time else None,
+                    "fastest": (
+                        "gpu" if (gpu_time and cpu_time and gpu_time < cpu_time)
+                        else "cpu" if cpu_time
+                        else "gpu" if gpu_time
+                        else None
+                    ),
+                    "timestamp": int(time.time()),
+                }
+                self.config["benchmark_results"] = existing
+                
+                gpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "gpu")
+                cpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "cpu")
+                self.config["benchmark_fastest_processor"] = (
+                    "gpu" if gpu_wins > cpu_wins else "cpu" if cpu_wins > 0 else None
+                )
+
+            # Save post-processing results + pipeline headline
+            if pp_results:
+                self.config["postprocessing_benchmark_results"] = pp_results
+            if pipeline:
+                self.config["pipeline_benchmark"] = pipeline
+                if pipeline.get("fastest_postprocessor"):
+                    self.config["benchmark_fastest_postprocessor"] = pipeline["fastest_postprocessor"]
+
             save_config(self.config)
             
             # Update display and refresh tooltips with new benchmark data
             self._update_benchmark_results_display()
             self._refresh_benchmark_tooltips()
             
-            # Show completion message
-            if gpu_time and cpu_time:
+            # Status line prioritizes pipeline total when available
+            if pipeline.get("total_time") is not None:
+                asr_s = pipeline.get("asr_time")
+                pp_s = pipeline.get("pp_time")
+                pp_label = pipeline.get("pp_model_name") or "cleanup"
+                asr_bit = f"ASR {asr_s:.1f}s" if asr_s is not None else "ASR —"
+                pp_bit = f"{pp_label} {pp_s:.1f}s" if pp_s is not None else "cleanup off"
+                self.benchmark_status_label.configure(
+                    text=f"✓ Pipeline {pipeline['total_time']:.1f}s  ({asr_bit} + {pp_bit})"
+                )
+            elif gpu_time and cpu_time:
                 faster = "GPU" if gpu_time < cpu_time else "CPU"
                 speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
                 self.benchmark_status_label.configure(
-                    text=f"✓ {faster} is {speedup:.1f}x faster (GPU:{gpu_time:.1f}s CPU:{cpu_time:.1f}s)"
+                    text=f"✓ ASR {faster} {speedup:.1f}x faster (GPU:{gpu_time:.1f}s CPU:{cpu_time:.1f}s)"
                 )
             elif gpu_time:
-                self.benchmark_status_label.configure(text=f"✓ GPU: {gpu_time:.1f}s (CPU failed)")
+                self.benchmark_status_label.configure(text=f"✓ GPU ASR: {gpu_time:.1f}s (CPU failed)")
             elif cpu_time:
-                self.benchmark_status_label.configure(text=f"✓ CPU: {cpu_time:.1f}s (GPU unavailable)")
+                self.benchmark_status_label.configure(text=f"✓ CPU ASR: {cpu_time:.1f}s (GPU unavailable)")
+            elif pp_results:
+                self.benchmark_status_label.configure(text="✓ Cleanup models timed (ASR failed)")
             else:
-                self.benchmark_status_label.configure(text="Both tests failed")
+                self.benchmark_status_label.configure(text="Both ASR tests failed")
         
         # Start benchmark in background thread
         threading.Thread(target=run_benchmark_thread, daemon=True).start()
@@ -6929,12 +8192,22 @@ class WayfinderApp(ctk.CTk):
         
         # Note: Prompt button removed - now configured via Style tab
         
-        # GPU Acceleration toggle (premium feature). Reflect the effective state:
-        # free tier shows OFF (GPU is gated) with a lock hint; enabling prompts upgrade.
-        _gpu_premium = self.feature_gate.has_feature("gpu_acceleration")
-        self.gpu_var = ctk.BooleanVar(value=bool(self.config.get("use_gpu", True)) and _gpu_premium)
+        # GPU toggle: Ultra = all models. Free = Tiny/Base only (Small+ needs Ultra).
+        from wayfinder.license import gpu_allowed_for_model, is_free_tier_gpu_model
+        _gpu_full = self.feature_gate.has_feature("gpu_acceleration")
+        _model_ref = self.config.get("model_path", "")
+        _gpu_ok_now = gpu_allowed_for_model(_model_ref, self.feature_gate)
+        _want_gpu = bool(self.config.get("use_gpu", True))
+        # Reflect effective entitlement: free on Small shows off even if config says on.
+        self.gpu_var = ctk.BooleanVar(value=_want_gpu and _gpu_ok_now)
+        if _gpu_full:
+            _gpu_label = "GPU Acceleration"
+        elif is_free_tier_gpu_model(_model_ref):
+            _gpu_label = "GPU Acceleration"  # free on Tiny/Base
+        else:
+            _gpu_label = "GPU Acceleration  🔒 Ultra for Small+"
         self.create_toggle_row(
-            parent, "GPU Acceleration" if _gpu_premium else "GPU Acceleration  🔒 Ultra",
+            parent, _gpu_label,
             self.gpu_var, self.toggle_gpu,
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
             tooltip_key="gpu_acceleration",
@@ -6976,7 +8249,7 @@ class WayfinderApp(ctk.CTk):
         self.create_toggle_row(
             parent, "Chunked Mode",
             self.chunked_var, self.toggle_chunked_mode,
-            tooltip="Split long recordings into segments for unlimited duration.\n\n✅ Enables recordings of any length\n✅ Transcribes while you speak\n⚠️ Small overhead at chunk boundaries\n\nRecommended for recordings >30 seconds.",
+            tooltip="Split long recordings into segments and transcribe while you speak.\n\n✅ Long dictations finish fast (most work done mid-recording)\n✅ Unlimited length\n⚠️ Tiny accuracy tradeoff vs one-shot on short segments\n\nRecommended for recordings longer than ~20 seconds.",
         )
         
         # === Post-Processing Section ===
@@ -7607,7 +8880,11 @@ class WayfinderApp(ctk.CTk):
         
         # Style hotkey key dropdown (inline)
         current_style_key_code = self.config.get("style_toggle_key", 68)
-        current_style_key_name = self._hotkey_code_to_name.get(current_style_key_code, "F10")
+        current_style_key_name = self._hotkey_code_to_name.get(current_style_key_code)
+        if current_style_key_name is None:
+            current_style_key_name = _keycode_display(current_style_key_code)
+            self._hotkey_key_codes[current_style_key_name] = current_style_key_code
+            self._hotkey_code_to_name[current_style_key_code] = current_style_key_name
         self._style_hotkey_key_var = ctk.StringVar(value=current_style_key_name)
         self.style_hotkey_dropdown = self.create_dropdown_row(
             hotkey_content, "Toggle Style",
@@ -7797,32 +9074,97 @@ class WayfinderApp(ctk.CTk):
             self._confetti_overlay = None
     
     
+    @staticmethod
+    def _pointer_inside_widget(surface) -> bool:
+        """True if the mouse pointer is still over `surface` or a descendant.
+
+        Tk fires <Leave> when the pointer moves from a parent into a child; without
+        this check hover chrome flickers off while the cursor is still on the row.
+        """
+        try:
+            x, y = surface.winfo_pointerxy()
+            w = surface.winfo_containing(x, y)
+            while w is not None:
+                if w is surface:
+                    return True
+                w = getattr(w, "master", None)
+        except Exception:
+            pass
+        return False
+
+    def _bind_surface_hover(
+        self,
+        surface,
+        *,
+        on_hover,
+        on_idle,
+        is_locked=None,
+        skip_types=None,
+    ) -> None:
+        """Stable hover for composite cards/tiles (design-system surfaces).
+
+        - Applies `on_hover` on enter unless `is_locked()` (e.g. selected).
+        - On leave, only applies `on_idle` if the pointer fully left the surface
+          (so child-label transitions don't kill the highlight).
+        - Binds the whole widget tree so labels inside the tile stay hot.
+        No repeating timers — at most one after_idle check per Leave.
+        """
+        skip_types = skip_types or ()
+
+        def enter(_e=None):
+            try:
+                if is_locked is not None and is_locked():
+                    return
+                on_hover()
+            except Exception:
+                pass
+
+        def leave(_e=None):
+            def _settle():
+                try:
+                    if is_locked is not None and is_locked():
+                        on_idle()  # restore locked (selected) chrome
+                        return
+                    if self._pointer_inside_widget(surface):
+                        on_hover()  # still inside — keep highlight
+                    else:
+                        on_idle()
+                except Exception:
+                    pass
+
+            try:
+                surface.after_idle(_settle)
+            except Exception:
+                _settle()
+
+        def bind_tree(w):
+            try:
+                if skip_types and isinstance(w, skip_types):
+                    return
+                w.bind("<Enter>", enter, add="+")
+                w.bind("<Leave>", leave, add="+")
+                for c in w.winfo_children():
+                    bind_tree(c)
+            except Exception:
+                pass
+
+        bind_tree(surface)
+
     def _bind_row_hover(self, row, normal="transparent") -> None:
-        """Instant bg_hover feedback for a non-selected list row (whisper model rows).
-        Bound on the row and all descendants so crossing into a child keeps the row's
-        state consistent (same idiom as the tone-card click loop). No timers."""
-        def on_enter(_e):
+        """Instant bg_hover feedback for a list row. Survives child Enter/Leave."""
+        def hover():
             try:
                 row.configure(fg_color=COLORS["bg_hover"])
             except Exception:
                 pass
 
-        def on_leave(_e):
+        def idle():
             try:
                 row.configure(fg_color=normal)
             except Exception:
                 pass
 
-        def bind_all(w):
-            try:
-                w.bind("<Enter>", on_enter, add="+")
-                w.bind("<Leave>", on_leave, add="+")
-                for c in w.winfo_children():
-                    bind_all(c)
-            except Exception:
-                pass
-
-        bind_all(row)
+        self._bind_surface_hover(row, on_hover=hover, on_idle=idle)
 
     def _bind_link_hover(self, label, size) -> None:
         """Give a clickable CTkLabel link instant hover feedback: accent_hover + underline
@@ -7995,8 +9337,8 @@ class WayfinderApp(ctk.CTk):
             self._update_compatibility_banner()             # banner depends on the active tone/config
         except Exception:
             pass
-        # Update the floating always-on overlay pill (send_command already swallows errors).
-        if getattr(self, "overlay_controller", None) and (getattr(self, "_use_pyqt_overlay", False) or getattr(getattr(self, "overlay_controller", None), "tray_only", False)):
+        # Style label on the Always On pill and/or tray menu (any live controller).
+        if getattr(self, "overlay_controller", None) is not None:
             self.overlay_controller.send_command({"cmd": "style", "value": tone_id})
 
     def _set_output_style(self, tone_id: str) -> None:
@@ -8102,6 +9444,51 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         return 0.0
+
+    def _has_visual_pyqt_overlay(self) -> bool:
+        """True when the Always On PyQt pill is the on-screen status surface.
+
+        tray_only controllers host the system tray only — they must NOT steal
+        show/hide from FloatingIndicator (Disappearing mode).
+        """
+        ctrl = getattr(self, "overlay_controller", None)
+        return resolve_status_indicator_target(
+            use_pyqt_overlay=bool(getattr(self, "_use_pyqt_overlay", False)),
+            has_controller=ctrl is not None,
+            tray_only=bool(getattr(ctrl, "tray_only", False)) if ctrl else False,
+            has_indicator=getattr(self, "indicator", None) is not None,
+        ) == "pyqt"
+
+    def _set_status_indicator(self, state: str):
+        """Drive the on-screen status pill (not the tray icon).
+
+        state: ``listening`` | ``processing`` | ``ready`` | ``hide``
+
+        Returns the controller show/update result when using PyQt Always On
+        (so callers can retry critical ready transitions); otherwise None.
+        """
+        if self._has_visual_pyqt_overlay():
+            ctrl = self.overlay_controller
+            if state == "listening":
+                return ctrl.show("listening")
+            if state == "processing":
+                return ctrl.update("processing")
+            if state == "ready":
+                return ctrl.show("ready")
+            if state == "hide":
+                ctrl.hide()
+                return True
+            return None
+        ind = getattr(self, "indicator", None)
+        if ind is None:
+            return None
+        if state == "listening":
+            ind.show("Listening...", COLORS["state_recording"])
+        elif state == "processing":
+            ind.update("Processing...", COLORS["accent_yellow"])
+        elif state in ("ready", "hide"):
+            ind.hide()
+        return None
 
     def _stop_overlay_process(self) -> bool:
         """Stop CTk indicator + PyQt overlay/tray process. Returns prior want_tray."""
@@ -8620,13 +10007,18 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⚙ Punctuation: {status}")
 
     def toggle_gpu(self):
-        """Toggle GPU acceleration (premium-gated; applies live, no app restart)."""
+        """Toggle GPU acceleration (applies live, no app restart).
+
+        Free: GPU allowed on Tiny/Base only. Small+ GPU requires Ultra.
+        Ultra: GPU for every model size.
+        """
         if not hasattr(self, 'gpu_var'):
             return
         want = self.gpu_var.get()
-        # GPU acceleration is a premium feature — block enabling it on the free tier
-        # (the backend factory also enforces this, so config edits can't bypass it).
-        if want and not self.feature_gate.has_feature("gpu_acceleration"):
+        from wayfinder.license import gpu_allowed_for_model
+        model_ref = self.config.get("model_path", "")
+        if want and not gpu_allowed_for_model(model_ref, self.feature_gate):
+            # Free user on Small+ (or unknown) — upsell full GPU, leave toggle off.
             self.gpu_var.set(False)
             self._show_premium_prompt("gpu_acceleration")
             return
@@ -9501,8 +10893,23 @@ class WayfinderApp(ctk.CTk):
                 self.after(0, lambda: self.log("📦 Download thread started..."))
                 
                 import requests
-                
-                url = model_info["url"]
+                from wayfinder.models_cdn import (
+                    assert_may_download,
+                    download_auth_headers,
+                    resolve_download_url,
+                )
+                from wayfinder.license import get_feature_gate
+                from wayfinder.config import load_config
+
+                gate = get_feature_gate()
+                deny = assert_may_download(model_info, gate.has_feature)
+                if deny:
+                    raise Exception(deny)
+
+                app_cfg = load_config()
+                url = resolve_download_url(model_info, config=app_cfg)
+                if not url:
+                    raise Exception("No download URL configured for this model")
                 filename = model_info["filename"]
                 model_file = models_dir / filename
                 temp_path = model_file.with_suffix('.tmp')
@@ -9519,12 +10926,13 @@ class WayfinderApp(ctk.CTk):
                     self.update_idletasks()
                 self.after(0, show_connecting)
                 
-                # Set up session with proper headers (some CDNs block requests without User-Agent)
+                # Set up session with proper headers (Bearer for Ultra CDN objects)
                 session = requests.Session()
-                session.headers.update({
-                    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) Wayfinder-Voice/1.0',
-                    'Accept': '*/*',
-                })
+                session.headers.update(
+                    download_auth_headers(
+                        model_info, bearer_token=gate.get_bearer_token()
+                    )
+                )
                 
                 # Start download with reasonable timeouts
                 # (connect timeout, read timeout) - read timeout per chunk, not total
@@ -9797,7 +11205,8 @@ class WayfinderApp(ctk.CTk):
     def _start_overlay_health_check(self) -> None:
         """Start periodic health check for the overlay subprocess."""
         def check_health():
-            if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
+            # Health applies to any overlay subprocess (Always On OR tray-only).
+            if self.overlay_controller is not None:
                 if not self.overlay_controller.is_healthy():
                     self.log("🔄 Overlay process died - restarting...")
                     self.overlay_controller.refresh()
@@ -9864,7 +11273,9 @@ class WayfinderApp(ctk.CTk):
         
         Refreshes the overlay to ensure it's visible and properly positioned.
         """
-        if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
+        # Only the Always On visual pill needs a geometry refresh on wake.
+        # tray_only has no on-screen window; CTk FloatingIndicator is recreated on next show.
+        if self._has_visual_pyqt_overlay():
             self.log("🌅 Display woke up - refreshing overlay...")
             if self.overlay_controller.refresh():
                 self.log("✓ Overlay refreshed successfully")
@@ -10335,15 +11746,82 @@ class WayfinderApp(ctk.CTk):
             else:
                 child.pack()
 
+    def _begin_form_row(self, parent, padx=16, pady=10):
+        """Full-width shell + centered form measure for label/control rows.
+
+        Cards stay full-bleed. On wide/fullscreen panes the *measure* (where
+        label and control live) caps at FORM_MEASURE_MAX and gets equal side
+        padding so space sits outside the pair — not between label and control.
+        Narrow windows: measure fills the shell (identical to a plain row).
+        """
+        shell = ctk.CTkFrame(parent, fg_color="transparent")
+        shell.pack(fill="x", padx=padx, pady=pady)
+
+        measure = ctk.CTkFrame(shell, fg_color="transparent")
+        measure.pack(fill="x")
+        measure._form_side_pad = 0  # last applied side pad (px)
+
+        if not hasattr(self, "_form_measures"):
+            self._form_measures = []
+        self._form_measures.append((shell, measure))
+
+        def _on_shell_configure(event, s=shell, m=measure):
+            if event.widget is not s:
+                return
+            self._sync_form_measure(s, m, available_px=int(event.width))
+
+        shell.bind("<Configure>", _on_shell_configure)
+        self.after_idle(lambda s=shell, m=measure: self._sync_form_measure(s, m))
+        return shell, measure
+
+    def _sync_form_measure(self, shell, measure, available_px: int | None = None, force: bool = False) -> None:
+        """Pad a form measure so it never exceeds FORM_MEASURE_MAX design units."""
+        try:
+            if not shell.winfo_exists() or not measure.winfo_exists():
+                return
+        except Exception:
+            return
+        if available_px is None:
+            try:
+                available_px = int(shell.winfo_width())
+            except Exception:
+                return
+        if available_px <= 1:
+            return
+        try:
+            scale = float(self._get_widget_scaling())
+        except Exception:
+            scale = float(getattr(self, "ui_scale", 1.0) or 1.0)
+        max_px = max(1, int(FORM_MEASURE_MAX * scale))
+        side = 0 if available_px <= max_px else (available_px - max_px) // 2
+        if not force and side == getattr(measure, "_form_side_pad", None):
+            return
+        measure._form_side_pad = side
+        try:
+            measure.pack_configure(padx=side)
+        except Exception:
+            pass
+
+    def _sync_all_form_measures(self, force: bool = False) -> None:
+        """Re-pad every live form measure (e.g. after UI scale change)."""
+        alive = []
+        for shell, measure in getattr(self, "_form_measures", []):
+            try:
+                if shell.winfo_exists() and measure.winfo_exists():
+                    self._sync_form_measure(shell, measure, force=force)
+                    alive.append((shell, measure))
+            except Exception:
+                pass
+        self._form_measures = alive
+
     def create_setting_row(self, parent, label, value, command, tooltip=None, tooltip_key=None):
         """Create a premium setting row with improved typography and spacing.
         
         Args:
             tooltip_key: If provided, stores tooltips for dynamic updates (e.g., after benchmarks)
         """
-        # Row container with increased padding (20% more breathing room)
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=10)  # Increased vertical padding
+        # Shell stays full card width; measure centers on wide/fullscreen.
+        _shell, row = self._begin_form_row(parent, padx=16, pady=10)
         
         row.grid_columnconfigure(0, weight=1)  # Label column - grows
         row.grid_columnconfigure(1, weight=0)  # Button column - fixed
@@ -10398,8 +11876,7 @@ class WayfinderApp(ctk.CTk):
 
     def _create_scale_slider_row(self, parent):
         """Create inline UI scale slider with real-time adjustment."""
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=8)
+        _shell, row = self._begin_form_row(parent, padx=16, pady=8)
         
         row.grid_columnconfigure(0, weight=0)  # Label column
         row.grid_columnconfigure(1, weight=1)  # Slider column - grows
@@ -10481,8 +11958,7 @@ class WayfinderApp(ctk.CTk):
 
     def _create_overlay_scale_slider_row(self, parent):
         """Create inline overlay scale slider (separate from UI scale)."""
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=8)
+        _shell, row = self._begin_form_row(parent, padx=16, pady=8)
         
         row.grid_columnconfigure(0, weight=0)  # Label column
         row.grid_columnconfigure(1, weight=1)  # Slider column - grows
@@ -10571,8 +12047,7 @@ class WayfinderApp(ctk.CTk):
 
     def _create_overlay_anchor_row(self, parent):
         """6-position corner/edge anchor picker (top/bottom × left/center/right)."""
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=(8, 2))
+        _shell, row = self._begin_form_row(parent, padx=16, pady=(8, 2))
 
         label = ctk.CTkLabel(
             row, text="Overlay Placement",
@@ -10618,8 +12093,7 @@ class WayfinderApp(ctk.CTk):
 
     def _create_overlay_position_slider_row(self, parent):
         """Create overlay vertical position slider."""
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=8)
+        _shell, row = self._begin_form_row(parent, padx=16, pady=8)
 
         row.grid_columnconfigure(0, weight=0)
         row.grid_columnconfigure(1, weight=1)
@@ -10708,8 +12182,7 @@ class WayfinderApp(ctk.CTk):
         Args:
             tooltip_key: If provided, stores tooltips for dynamic updates (e.g., after benchmarks)
         """
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=10)  # Increased padding
+        _shell, row = self._begin_form_row(parent, padx=16, pady=10)
         
         row.grid_columnconfigure(0, weight=1)
         row.grid_columnconfigure(1, weight=0)
@@ -10765,8 +12238,7 @@ class WayfinderApp(ctk.CTk):
         Args:
             tooltip_key: If provided, stores tooltips for dynamic updates (e.g., after benchmarks)
         """
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=10)  # Increased padding
+        _shell, row = self._begin_form_row(parent, padx=16, pady=10)
         
         row.grid_columnconfigure(0, weight=1)
         row.grid_columnconfigure(1, weight=0)
@@ -10997,8 +12469,21 @@ class WayfinderApp(ctk.CTk):
             if duration < _GPU_NUDGE_MIN_DURATION_S:
                 return
             gate = getattr(self, "feature_gate", None)
-            if gate is None or gate.has_feature("gpu_acceleration"):
-                return  # already has GPU — nothing to upsell
+            if gate is None:
+                return
+            # Ultra already has full GPU. Free on Tiny/Base with GPU on is already
+            # enjoying free GPU — don't nag; upsell only when they're on Small+ CPU
+            # or have GPU off and would benefit from Ultra's Small+/large-model GPU.
+            from wayfinder.license import gpu_allowed_for_model, is_free_tier_gpu_model
+            if gate.has_feature("gpu_acceleration"):
+                return
+            model_ref = self.config.get("model_path", "")
+            if (
+                self.config.get("use_gpu", True)
+                and is_free_tier_gpu_model(model_ref)
+                and gpu_allowed_for_model(model_ref, gate)
+            ):
+                return  # free Tiny/Base GPU path — happy path, no nudge
             # Don't upsell GPU acceleration to a machine with no usable GPU — the nudge
             # would promise a speedup the hardware can't deliver. Cheap, cached,
             # lspci/sysfs-based detector: model-independent (no whisper probe) and
@@ -11181,6 +12666,43 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self.log(f"⚠ Couldn't open {url}: {e}")
 
+    # Ultra benefits are rendered in two places (the upgrade panel and the Settings
+    # License tile) — one list so the copy never drifts. Lucide row markers
+    # (CLAUDE.md: no decorative emoji as UI chrome).
+    ULTRA_BENEFITS = [
+        ("sparkles", "GPU for Small & larger", "Free already has GPU on Tiny/Base — Ultra unlocks Small, Turbo, Large"),
+        ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),
+        ("pen-line", "Tone Presets", "Professional, Casual, Dev and Personal styles"),
+        ("audio-waveform", "Chunked Recording", "Unlimited length with live feedback"),
+        ("check", "Higher Accuracy", "Large models, beam search, and custom vocabulary"),
+    ]
+
+    def _build_ultra_benefit_rows(self, parent) -> None:
+        """Render the Ultra benefit rows (icon + title + description) into `parent`."""
+        for icon_name, title, desc in self.ULTRA_BENEFITS:
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", pady=3)
+            try:
+                ctk.CTkLabel(
+                    row, text="", image=get_icon(icon_name, 16, COLORS["accent"]),
+                    width=24,
+                ).pack(side="left", anchor="n", padx=(0, 6))
+            except Exception:
+                ctk.CTkLabel(
+                    row, text="·", font=(self.font_body[0], self.font_sizes["body"]),
+                    text_color=COLORS["accent"], width=24,
+                ).pack(side="left", anchor="n")
+            txt = ctk.CTkFrame(row, fg_color="transparent")
+            txt.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(
+                txt, text=title, font=(self.font_body[0], self.font_sizes["body"], "bold"),
+                text_color=COLORS["text_bright"], anchor="w", justify="left",
+            ).pack(fill="x")
+            ctk.CTkLabel(
+                txt, text=desc, font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"], anchor="w", justify="left",
+            ).pack(fill="x")
+
     def _show_premium_prompt(self, feature_id: str) -> None:
         """Ultra upgrade panel: the locked feature + benefits + pricing + Buy Now / More Info.
 
@@ -11199,15 +12721,6 @@ class WayfinderApp(ctk.CTk):
         info_url = self.config.get("premium_info_url", "https://wayfindercollective.io/aura")
         feature_msg = self.feature_gate.get_upgrade_message(feature_id)
 
-        # Lucide row markers (CLAUDE.md: no decorative emoji as UI chrome).
-        benefits = [
-            ("sparkles", "GPU Acceleration", "Faster GPU transcription, including Steam Deck"),
-            ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),
-            ("pen-line", "Tone Presets", "Professional, Casual, Dev and Personal styles"),
-            ("audio-waveform", "Chunked Recording", "Unlimited length with live feedback"),
-            ("check", "Higher Accuracy", "Large models, beam search, and custom vocabulary"),
-        ]
-
         # Dim scrim behind the panel so it clearly separates from the app (inline panel,
         # not a popup window — rule #2). No corner_radius arg — the theme default keeps this
         # ratchet-clean (a bare zero radius would be an unsanctioned literal).
@@ -11215,57 +12728,56 @@ class WayfinderApp(ctk.CTk):
         scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._premium_banner = scrim
 
-        # Elevated surface + bright accent border so the card's edges read clearly against
-        # the (previously same-colored) background.
+        # Content-hugging card (~470px) — the old relwidth=0.82 card stretched absurdly
+        # wide on large windows. place() with no explicit size lets pack propagation size
+        # the card to its content; the strut below sets the minimum content width.
         card = ctk.CTkFrame(
-            scrim, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["lg"],
+            scrim, fg_color=COLORS["bg_card"], corner_radius=RADIUS["xl"],
             border_width=2, border_color=COLORS["accent"],
         )
-        card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.82)
+        card.place(relx=0.5, rely=0.5, anchor="center")
 
         inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=SPACING["tile_pad"], pady=SPACING["tile_pad_y"])
+        inner.pack(fill="both", expand=True, padx=SPACING["2xl"], pady=SPACING["xl"])
+        ctk.CTkFrame(inner, fg_color="transparent", width=420, height=1).pack()
 
         ctk.CTkLabel(
             inner, text="😇  Wayfinder Ultra",
-            font=(self.font_header[0], self.font_sizes["title"], "bold"),
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
             text_color=COLORS["accent"],
-        ).pack(anchor="w")
+        ).pack(pady=(SPACING["xs"], 0))
 
         ctk.CTkLabel(
             inner, text=feature_msg, font=(self.font_body[0], self.font_sizes["body"]),
-            text_color=COLORS["text_primary"], wraplength=440, justify="left",
-        ).pack(fill="x", anchor="w", pady=(6, 10))
+            text_color=COLORS["text_secondary"], wraplength=400, justify="center",
+        ).pack(pady=(SPACING["sm"], SPACING["lg"]))
 
-        for icon_name, title, desc in benefits:
-            row = ctk.CTkFrame(inner, fg_color="transparent")
-            row.pack(fill="x", pady=2)
-            try:
-                ctk.CTkLabel(
-                    row, text="", image=get_icon(icon_name, 16, COLORS["accent"]),
-                    width=24,
-                ).pack(side="left", anchor="n", padx=(0, 4))
-            except Exception:
-                ctk.CTkLabel(
-                    row, text="·", font=(self.font_body[0], self.font_sizes["body"]),
-                    text_color=COLORS["accent"], width=24,
-                ).pack(side="left", anchor="n")
-            txt = ctk.CTkFrame(row, fg_color="transparent")
-            txt.pack(side="left", fill="x", expand=True)
-            ctk.CTkLabel(
-                txt, text=title, font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                text_color=COLORS["text_bright"], anchor="w", justify="left",
-            ).pack(fill="x")
-            ctk.CTkLabel(
-                txt, text=desc, font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_muted"], anchor="w", justify="left",
-            ).pack(fill="x")
+        ctk.CTkFrame(inner, fg_color=COLORS["border_subtle"], height=1).pack(
+            fill="x", pady=(0, SPACING["md"]))
 
+        self._build_ultra_benefit_rows(inner)
+
+        ctk.CTkFrame(inner, fg_color=COLORS["border_subtle"], height=1).pack(
+            fill="x", pady=(SPACING["md"], SPACING["md"]))
+
+        # Price: launch price large in accent, regular price struck through beside it.
+        price_row = ctk.CTkFrame(inner, fg_color="transparent")
+        price_row.pack(pady=(0, SPACING["md"]))
         ctk.CTkLabel(
-            inner, text=f"{price} launch   ·   regularly {price_reg}",
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", pady=(12, 8))
+            price_row, text=price,
+            font=(self.font_header[0], self.font_sizes["display"], "bold"),
+            text_color=COLORS["accent"],
+        ).pack(side="left")
+        ctk.CTkLabel(
+            price_row, text=price_reg,
+            font=(self.font_body[0], self.font_sizes["body"], "overstrike"),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left", padx=(SPACING["sm"], 0))
+        ctk.CTkLabel(
+            price_row, text="launch price",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left", padx=(SPACING["sm"], 0))
 
         def _dismiss():
             try:
@@ -11275,32 +12787,32 @@ class WayfinderApp(ctk.CTk):
                 pass
             self._premium_banner = None
 
-        btn_row = ctk.CTkFrame(inner, fg_color="transparent")
-        btn_row.pack(fill="x")
-
         ctk.CTkButton(
-            btn_row, text=f"Buy Now — {price}",
+            inner, text=f"Buy Now — {price}",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-            text_color="#000000", height=38, corner_radius=RADIUS["sm"],
+            text_color="#000000", height=42, corner_radius=RADIUS["md"],
             command=lambda: [self._open_url(checkout), _dismiss()],
-        ).pack(side="left", padx=(0, 8))
+        ).pack(fill="x")
+
+        btn_row = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_row.pack(pady=(SPACING["sm"], 0))
 
         ctk.CTkButton(
             btn_row, text="More Info",
             font=(self.font_body[0], self.font_sizes["body"]),
-            fg_color=COLORS["bg_elevated"], hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_primary"], height=38, corner_radius=RADIUS["sm"],
+            fg_color="transparent", hover_color=COLORS["bg_hover"],
+            text_color=COLORS["accent"], height=32, width=120, corner_radius=RADIUS["sm"],
             command=lambda: self._open_url(info_url),
-        ).pack(side="left", padx=(0, 8))
+        ).pack(side="left", padx=(0, SPACING["sm"]))
 
         ctk.CTkButton(
             btn_row, text="Maybe later",
             font=(self.font_body[0], self.font_sizes["small"]),
             fg_color="transparent", hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_muted"], height=38, width=96, corner_radius=RADIUS["sm"],
+            text_color=COLORS["text_muted"], height=32, width=120, corner_radius=RADIUS["sm"],
             command=_dismiss,
-        ).pack(side="right")
+        ).pack(side="left")
 
     def _activate_license(self) -> None:
         """Activate a license key from the Settings UI."""
@@ -11411,19 +12923,71 @@ class WayfinderApp(ctk.CTk):
 
     _DETECT_IDLE_TEXT = "Detect — click, then press a key"
 
+    def _stop_capture_listener(self) -> None:
+        """Stop any short-lived Detect capture thread."""
+        stop = getattr(self, "_capture_stop_event", None)
+        thread = getattr(self, "_capture_thread", None)
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.5)
+        self._capture_thread = None
+        self._capture_stop_event = None
+
     def _start_hotkey_detect(self, target: str) -> None:
-        """Arm capture: the listener reports the next key press instead of acting on it."""
+        """Arm capture: next key press becomes the hotkey (any key/button).
+
+        Smart arm:
+          - If the production evdev listener is already alive → just set the flag
+            (existing path; works for exclusive-grab MMO devices).
+          - Else (typical when KDE owns F3 and defers evdev) → start a
+            capture-only temporary listener so Detect still sees keys.
+        """
+        if IS_FLATPAK and not HAS_EVDEV:
+            self.log("🎯 Detect needs host input access — in Flatpak use System Settings → Shortcuts")
+            return
+        if not HAS_EVDEV and not getattr(self, "_pynput_listener_started", False):
+            self.log("🎯 Detect unavailable (no evdev / pynput listener)")
+            return
+
+        self._stop_capture_listener()
         self._hotkey_capture_target = target
         _HOTKEY_CAPTURE["armed"] = True
+        _HOTKEY_CAPTURE["suppress_until"] = time.time() + 10.0  # covers the 8s window + margin
         btn = self._detect_btn_record if target == "record" else self._detect_btn_style
-        btn.configure(text="Listening… press a key or side button", state="disabled")
+        try:
+            btn.configure(text="Listening… press a key or side button", state="disabled")
+        except Exception:
+            pass
         self.log("🎯 Press the key/button you want to use…")
+
+        production_alive = (
+            self._hotkey_thread is not None and self._hotkey_thread.is_alive()
+        )
+        pynput_alive = getattr(self, "_pynput_listener_started", False)
+        if not production_alive and not pynput_alive and HAS_EVDEV:
+            # KDE-defer case (or listener died): temporary capture-only reader.
+            self._capture_stop_event = threading.Event()
+            enabled = self.config.get("enabled_input_devices") or None
+            self._capture_thread = threading.Thread(
+                target=capture_hotkey_listener,
+                args=(self.event_queue, self._capture_stop_event, enabled, self.log),
+                daemon=True,
+                name="wayfinder-hotkey-capture",
+            )
+            self._capture_thread.start()
+
         # Safety: disarm if nothing was pressed (e.g. user clicked by accident).
         self.after(8000, lambda: self._cancel_hotkey_detect(target))
 
     def _cancel_hotkey_detect(self, target: str) -> None:
-        if _HOTKEY_CAPTURE["armed"] and getattr(self, "_hotkey_capture_target", None) == target:
+        if getattr(self, "_hotkey_capture_target", None) != target:
+            return
+        if _HOTKEY_CAPTURE.get("armed"):
             _HOTKEY_CAPTURE["armed"] = False
+            _HOTKEY_CAPTURE["suppress_until"] = time.time() + 0.5
+            self._hotkey_capture_target = None
+            self._stop_capture_listener()
             self._reset_detect_button(target)
             self.log("🎯 Detect cancelled (no key pressed)")
 
@@ -11434,15 +12998,41 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass  # settings panel may have been rebuilt/destroyed
 
+    def _ensure_hotkey_label(self, code: int, target: str = "record") -> str:
+        """Ensure a key label is in the dropdown map (for keys outside F1–F12 list)."""
+        label = _keycode_display(code)
+        if not hasattr(self, "_hotkey_key_codes"):
+            return label
+        # Prefer existing canonical name if this code is already listed
+        existing = self._hotkey_code_to_name.get(code)
+        if existing:
+            label = existing
+        elif label not in self._hotkey_key_codes:
+            self._hotkey_key_codes[label] = code
+            self._hotkey_code_to_name[code] = label
+            try:
+                values = list(self._hotkey_key_codes.keys())
+                if target == "record" and hasattr(self, "hotkey_dropdown"):
+                    self.hotkey_dropdown.configure(values=values)
+                if target == "style" and hasattr(self, "style_hotkey_dropdown"):
+                    self.style_hotkey_dropdown.configure(values=values)
+            except Exception:
+                pass
+        return label
+
     def _apply_captured_hotkey(self, data: dict) -> None:
         """A Detect capture arrived from the listener — bind it and restart."""
         target = getattr(self, "_hotkey_capture_target", None)
         if target is None:
             return
         self._hotkey_capture_target = None
+        _HOTKEY_CAPTURE["armed"] = False
+        _HOTKEY_CAPTURE["suppress_until"] = time.time() + 1.0  # absorb same-press socket fire
+        self._stop_capture_listener()
         code = data["code"]
         modifiers = list(data.get("modifiers", []))
-        display = _keycode_display(code)
+        label = self._ensure_hotkey_label(code, target)
+        display = label
         if modifiers:
             display = "+".join(m.capitalize() for m in modifiers) + "+" + display
 
@@ -11468,7 +13058,7 @@ class WayfinderApp(ctk.CTk):
             self.config["hotkey_key"] = code
             self.config["hotkey_modifiers"] = modifiers
             try:
-                self._hotkey_key_var.set(_keycode_display(code))
+                self._hotkey_key_var.set(label)
                 for mod, var in self._hotkey_mod_vars.items():
                     var.set(mod in modifiers)
             except Exception:
@@ -11477,7 +13067,7 @@ class WayfinderApp(ctk.CTk):
             self.config["style_toggle_key"] = code
             self.config["style_toggle_modifiers"] = modifiers
             try:
-                self._style_hotkey_key_var.set(_keycode_display(code))
+                self._style_hotkey_key_var.set(label)
                 for mod, var in self._style_hotkey_mod_vars.items():
                     var.set(mod in modifiers)
             except Exception:
@@ -11487,6 +13077,24 @@ class WayfinderApp(ctk.CTk):
         self._reset_detect_button(target)
         which = "Record hotkey" if target == "record" else "Style toggle"
         self.log(f"🎯 {which} set to {display} (from {data.get('device', 'input device')})")
+        # If KDE still owns a *different* key (e.g. F3), tip the user once.
+        try:
+            path = os.path.join(
+                os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                "kglobalshortcutsrc",
+            )
+            with open(path, "r", encoding="utf-8") as fh:
+                kde_active = kde_record_shortcut_key(fh.read())
+            if kde_active and target == "record" and not kde_binding_matches_config(
+                kde_active, code, modifiers
+            ):
+                self.log(
+                    f"ℹ️ KDE still binds toggle-recording to {kde_active.upper()} — "
+                    f"that key will also trigger dictation via System Settings. "
+                    f"Unbind it there if you only want {display}."
+                )
+        except (OSError, UnicodeDecodeError):
+            pass
         self.restart_evdev_listener("hotkey detected")
 
     def _apply_hotkey_change(self):
@@ -11736,15 +13344,12 @@ class WayfinderApp(ctk.CTk):
 
     def _build_audio_calibration_section(self, parent):
         """Build simple mic test section - record and playback with level meter."""
-        # Container frame
+        # Outer shell matches other form rows (padx 16); header uses form measure
+        # so Play/Record don't pin to the far right edge on fullscreen.
         self._mic_test_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        # padx=16 lands the label at the same left edge as every other settings row
-        # (rows use padx=16 inside the tile content) — was 8px left of its siblings.
         self._mic_test_frame.pack(fill="x", padx=SPACING["lg"], pady=(8, 0))
 
-        # Header row
-        header_row = ctk.CTkFrame(self._mic_test_frame, fg_color="transparent")
-        header_row.pack(fill="x")
+        _header_shell, header_row = self._begin_form_row(self._mic_test_frame, padx=0, pady=0)
 
         ctk.CTkLabel(
             header_row,
@@ -11753,7 +13358,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_primary"],
         ).pack(side="left")
 
-        # Buttons on the right
+        # Buttons on the right of the measure (not the full card width)
         btn_frame = ctk.CTkFrame(header_row, fg_color="transparent")
         btn_frame.pack(side="right")
         
@@ -11786,7 +13391,7 @@ class WayfinderApp(ctk.CTk):
         )
         self._mic_test_btn.pack(side="left")
         
-        # Level meter (shown during recording)
+        # Level meter (shown during recording) — plain row; header above uses form measure
         self._mic_meter_frame = ctk.CTkFrame(self._mic_test_frame, fg_color="transparent")
         # Don't pack yet - shown during recording
         
@@ -11859,8 +13464,7 @@ class WayfinderApp(ctk.CTk):
     
     def _create_audio_ducking_slider_row(self, parent):
         """Create inline audio ducking percentage slider."""
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=8)
+        _shell, row = self._begin_form_row(parent, padx=16, pady=8)
         
         row.grid_columnconfigure(0, weight=0)  # Label column
         row.grid_columnconfigure(1, weight=1)  # Slider column - grows
@@ -12193,23 +13797,23 @@ class WayfinderApp(ctk.CTk):
         """Get display name for current model."""
         model_path = self.config.get("model_path", "")
         # Extract model name from path - check specific models first (most specific to least)
-        # Turbo Q5 quantized
+        # Turbo Q5 quantized — recommended speed/accuracy balance
         if "large-v3-turbo-q5" in model_path:
-            return "Turbo Q5 (Fast)"
-        # Turbo full precision
+            return "Turbo Q5 (Balanced)"
+        # Turbo full precision — top accuracy, still fast
         elif "large-v3-turbo" in model_path:
-            return "Turbo (Fast)"
-        # Large v3 (non-turbo)
+            return "Turbo (Accurate)"
+        # Large v3 (non-turbo) — max accuracy, slowest
         elif "large-v3" in model_path:
-            return "Large v3 (Slow)"
+            return "Large v3 (Max Acc)"
         # Legacy large
         elif "large" in model_path:
-            return "Large (Slow)"
+            return "Large (Max Acc)"
         # English-only models
         elif "tiny.en" in model_path:
             return "Tiny (Fastest)"
         elif "base.en" in model_path:
-            return "Base"
+            return "Base (Fast)"
         elif "small.en" in model_path:
             return "Small"
         elif "medium.en" in model_path:
@@ -12271,268 +13875,680 @@ class WayfinderApp(ctk.CTk):
         """Scan for available whisper models across all model dirs."""
         models = []
         
-        # Default model info with estimated latencies
-        # These are overridden by benchmark results if available
+        # filename → (display name, size label, model_id)
+        # Spd/Acc ratings come from WHISPER_CPP_MODELS; timing from benchmarks.
         model_info = {
-            "ggml-tiny.en.bin": ("Tiny (English)", "75MB", "⚡ TBD", "tiny.en"),
-            "ggml-base.en.bin": ("Base (English)", "142MB", "⚡ TBD", "base.en"),
-            "ggml-small.en.bin": ("Small (English)", "466MB", "🟡 TBD", "small.en"),
-            "ggml-medium.en.bin": ("Medium (English)", "1.5GB", "🔴 TBD", "medium.en"),
-            "ggml-large-v3-turbo.bin": ("Large v3 Turbo ⭐", "1.6GB", "🚀 TBD", "large-v3-turbo"),
-            "ggml-large-v3-turbo-q5_0.bin": ("Large v3 Turbo Q5", "547MB", "🚀 TBD", "large-v3-turbo-q5"),
-            "ggml-tiny.bin": ("Tiny (Multi-lang)", "75MB", "⚡ TBD", "tiny"),
-            "ggml-base.bin": ("Base (Multi-lang)", "142MB", "⚡ TBD", "base"),
-            "ggml-small.bin": ("Small (Multi-lang)", "466MB", "🟡 TBD", "small"),
-            "ggml-medium.bin": ("Medium (Multi-lang)", "1.5GB", "🔴 TBD", "medium"),
-            "ggml-large-v3.bin": ("Large v3", "3GB", "🔴 TBD", "large-v3"),
-            "ggml-large.bin": ("Large (Multi-lang)", "3GB", "🐌 TBD", "large"),
+            "ggml-tiny.en.bin": ("Tiny (English)", "75MB", "tiny.en"),
+            "ggml-base.en.bin": ("Base (English)", "142MB", "base.en"),
+            "ggml-small.en.bin": ("Small (English)", "466MB", "small.en"),
+            "ggml-medium.en.bin": ("Medium (English)", "1.5GB", "medium.en"),
+            "ggml-large-v3-turbo.bin": ("Large v3 Turbo", "1.6GB", "large-v3-turbo"),
+            "ggml-large-v3-turbo-q5_0.bin": ("Large v3 Turbo Q5", "547MB", "large-v3-turbo-q5"),
+            "ggml-tiny.bin": ("Tiny (Multi-lang)", "75MB", "tiny"),
+            "ggml-base.bin": ("Base (Multi-lang)", "142MB", "base"),
+            "ggml-small.bin": ("Small (Multi-lang)", "466MB", "small"),
+            "ggml-medium.bin": ("Medium (Multi-lang)", "1.5GB", "medium"),
+            "ggml-large-v3.bin": ("Large v3", "3GB", "large-v3"),
+            "ggml-large.bin": ("Large (Multi-lang)", "3GB", "large"),
         }
         
-        # Get benchmark results for dynamic speed display
+        # Get benchmark results for optional measured timing
         benchmark_results = self.config.get("benchmark_results", {})
         fastest = self.config.get("benchmark_fastest_processor", None)
         
-        for filename, (name, size, default_speed, model_id) in model_info.items():
+        for filename, (name, size, model_id) in model_info.items():
             path = _resolve_whisper_model(filename)
             if path is not None:
-                # Try to get benchmarked speed
-                speed = default_speed
+                timing = ""
                 if model_id in benchmark_results:
                     result = benchmark_results[model_id]
                     if fastest == "gpu" and "gpu_10s" in result:
-                        speed = f"🚀 GPU: {result['gpu_10s']}s"
+                        timing = f"GPU: {result['gpu_10s']}s"
                     elif "cpu_10s" in result:
-                        speed = f"⚙️ CPU: {result['cpu_10s']}s"
+                        timing = f"CPU: {result['cpu_10s']}s"
+                cat = resolve_whisper_model_catalog_id(model_id)
+                cat_info = WHISPER_CPP_MODELS.get(cat or "", {})
+                sp, ac = get_whisper_model_ratings(model_id)
                 
                 models.append({
                     "name": name,
                     "path": str(path),
                     "size": size,
-                    "speed": speed,
+                    "speed": cat_info.get("speed", ""),
+                    "timing": timing,
+                    "speed_rating": sp,
+                    "accuracy_rating": ac,
                     "filename": filename,
                     "model_id": model_id,
+                    "recommended": bool(cat_info.get("recommended")),
                 })
         
         return models
 
     def open_model_settings(self):
-        """Show inline panel to select or download whisper models."""
+        """Show inline panel to select or download whisper models.
+
+        Production layout: segmented Installed/Download tabs + compact two-column
+        tiles (click to select, double-click to apply). No radio clutter; selection
+        is an accent border + soft fill that matches the rest of the design system.
+        """
         container = self.mode_settings_container
 
         def build_panel(content, close_panel):
-            # Initialize model downloader
             downloader = ModelDownloader()
-
-            # Subtitle
-            ctk.CTkLabel(
-                content,
-                text="Select an installed model or download new ones.",
-                font=(self.font_body[0], self.font_sizes["caption"]),
-                text_color=COLORS["text_secondary"],
-            ).pack(anchor="w", padx=8, pady=(0, 8))
-
-            # Tab button container
-            tab_container = ctk.CTkFrame(content, fg_color="transparent")
-            tab_container.pack(fill="x", padx=8, pady=(0, 8))
-
-            installed_btn = ctk.CTkButton(
-                tab_container, text="Installed",
-                font=(self.font_body[0], self.font_sizes["body"]), height=30,
-                corner_radius=RADIUS["xs"], fg_color=COLORS["accent"], text_color="#000000",
-                hover_color=COLORS["accent_hover"],
-            )
-            installed_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
-
-            download_btn = ctk.CTkButton(
-                tab_container, text="Download",
-                font=(self.font_body[0], self.font_sizes["body"]), height=30,
-                corner_radius=RADIUS["xs"], fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
-                hover_color=COLORS["bg_elevated"],
-            )
-            download_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
-
-            # Content area
-            content_area = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
-            content_area.pack(fill="both", expand=True, padx=8)
-
+            fam = self.font_body[0]
+            fs = self.font_sizes
             current_path = os.path.expanduser(self.config.get("model_path", ""))
             model_var = ctk.StringVar(value=current_path)
+
+            # ---- chrome: subtitle + segmented tabs + card body ---------------
+            ctk.CTkLabel(
+                content,
+                text="Each model is rated Spd / Acc (1–5). Turbo Q5 is the recommended balance of speed and accuracy.",
+                font=(fam, fs["caption"]),
+                text_color=COLORS["text_secondary"],
+                wraplength=560,
+                justify="left",
+            ).pack(anchor="w", padx=SPACING["sm"], pady=(0, SPACING["sm"]))
+
+            # Segmented tabs — sharp corners (xs) so the picker stays crisp, not bubbly
+            tab_shell = ctk.CTkFrame(
+                content, fg_color=COLORS["bg_input"], corner_radius=RADIUS["xs"], height=40,
+            )
+            tab_shell.pack(fill="x", padx=SPACING["sm"], pady=(0, SPACING["sm"]))
+            tab_shell.pack_propagate(False)
+            tab_inner = ctk.CTkFrame(tab_shell, fg_color="transparent")
+            tab_inner.pack(fill="both", expand=True, padx=2, pady=2)
+            tab_inner.grid_columnconfigure(0, weight=1)
+            tab_inner.grid_columnconfigure(1, weight=1)
+
+            installed_btn = ctk.CTkButton(
+                tab_inner, text="Installed", height=32,
+                font=(fam, fs["body"], "bold"),
+                corner_radius=RADIUS["xs"],
+                fg_color=COLORS["bg_card"], text_color=COLORS["text_bright"],
+                hover_color=COLORS["bg_hover"],
+            )
+            installed_btn.grid(row=0, column=0, sticky="nsew", padx=1)
+            download_btn = ctk.CTkButton(
+                tab_inner, text="Download", height=32,
+                font=(fam, fs["body"]),
+                corner_radius=RADIUS["xs"],
+                fg_color="transparent", text_color=COLORS["text_secondary"],
+                hover_color=COLORS["bg_hover"],
+            )
+            download_btn.grid(row=0, column=1, sticky="nsew", padx=1)
+
+            content_area = ctk.CTkFrame(
+                content, fg_color=COLORS["bg_card"], corner_radius=RADIUS["xs"],
+                border_width=1, border_color=COLORS["border_subtle"],
+            )
+            content_area.pack(fill="both", expand=True, padx=SPACING["sm"], pady=(0, SPACING["xs"]))
 
             def clear_content():
                 for widget in content_area.winfo_children():
                     widget.destroy()
 
-            def show_installed():
-                clear_content()
-                installed_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
-                download_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
-
-                models = self.get_available_models()
-
-                if not models:
-                    ctk.CTkLabel(
-                        content_area,
-                        text="No models installed yet",
-                        font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                        text_color=COLORS["text_primary"],
-                    ).pack(pady=(40, 8))
-                    ctk.CTkButton(
-                        content_area, text="Download Models",
-                        font=(self.font_body[0], self.font_sizes["body"], "bold"), height=36, corner_radius=RADIUS["sm"],
-                        fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-                        text_color="#000000", command=show_download,
-                    ).pack(pady=(0, 30))
-                    return
-
-                scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
-                scroll.pack(fill="both", expand=True, padx=5, pady=5)
-
-                for model in models:
-                    is_current = os.path.expanduser(model["path"]) == current_path
-
-                    row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_current else "transparent", corner_radius=RADIUS["xs"])
-                    row.pack(fill="x", pady=1, padx=2)
-
-                    radio = ctk.CTkRadioButton(
-                        row, text="", variable=model_var, value=model["path"],
-                        width=18, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            def set_tab(which: str):
+                if which == "installed":
+                    installed_btn.configure(
+                        fg_color=COLORS["bg_card"], text_color=COLORS["text_bright"],
+                        font=(fam, fs["body"], "bold"),
                     )
-                    radio.pack(side="left", padx=(8, 4), pady=6)
+                    download_btn.configure(
+                        fg_color="transparent", text_color=COLORS["text_secondary"],
+                        font=(fam, fs["body"]),
+                    )
+                else:
+                    download_btn.configure(
+                        fg_color=COLORS["bg_card"], text_color=COLORS["text_bright"],
+                        font=(fam, fs["body"], "bold"),
+                    )
+                    installed_btn.configure(
+                        fg_color="transparent", text_color=COLORS["text_secondary"],
+                        font=(fam, fs["body"]),
+                    )
 
-                    info_frame = ctk.CTkFrame(row, fg_color="transparent")
-                    info_frame.pack(side="left", fill="x", expand=True, pady=5)
+            def tile_grid(parent, columns: int = 2, key: str = "tiles"):
+                grid = ctk.CTkFrame(parent, fg_color="transparent")
+                grid.pack(fill="x", padx=SPACING["xs"], pady=SPACING["xs"])
+                for c in range(columns):
+                    grid.grid_columnconfigure(c, weight=1, uniform=key)
+                return grid
 
-                    ctk.CTkLabel(
-                        info_frame, text=model["name"],
-                        font=(self.font_body[0], self.font_sizes["body"], "bold" if is_current else "normal"),
-                        text_color=COLORS["accent"] if is_current else COLORS["text_primary"],
-                    ).pack(anchor="w")
+            def place_tile(grid, tile, index: int, columns: int = 2):
+                tile.grid(
+                    row=index // columns, column=index % columns,
+                    sticky="nsew", padx=4, pady=4,
+                )
 
-                    ctk.CTkLabel(
-                        info_frame, text=f"{model['speed']} • {model['size']}",
-                        font=(self.font_body[0], self.font_sizes["caption"]), text_color=COLORS["text_muted"],
-                    ).pack(anchor="w")
+            def style_select_tile(tile, name_lbl, meta_lbl, selected: bool, mark_lbl=None):
+                """Selected = sticky accent surface (dropdown-row language);
+                idle = recessed bg_input like tone cards / inputs."""
+                try:
+                    tile.configure(
+                        # Selected stays lit (bg_hover_strong) so it doesn't look
+                        # like a fleeting hover; matches dropdown selection weight.
+                        fg_color=COLORS["bg_hover_strong"] if selected else COLORS["bg_input"],
+                        border_width=1,
+                        border_color=COLORS["accent"] if selected else COLORS["border_subtle"],
+                    )
+                    name_lbl.configure(
+                        text_color=COLORS["text_bright"] if selected else COLORS["text_primary"],
+                        font=(fam, fs["small"], "bold" if selected else "normal"),
+                    )
+                    meta_lbl.configure(
+                        text_color=COLORS["accent_hover"] if selected else COLORS["text_muted"],
+                    )
+                    if mark_lbl is not None:
+                        mark_lbl.configure(
+                            text="●" if selected else "○",
+                            text_color=COLORS["accent"] if selected else COLORS["text_muted"],
+                        )
+                except Exception:
+                    pass
 
-                    if not is_current:
-                        self._bind_row_hover(row)
-
-                def save_selection():
-                    selected = model_var.get()
-                    large_keywords = ("medium", "large", "turbo")
-                    if any(kw in selected.lower() for kw in large_keywords) and not self.feature_gate.has_feature("large_models"):
-                        self._show_premium_prompt("large_models")
-                        return
-                    if selected.startswith(str(Path.home())):
-                        selected = "~" + selected[len(str(Path.home())):]
-                    self.config["model_path"] = selected
-                    save_config(self.config)
-                    if hasattr(self, 'model_btn'):
-                        self.model_btn.configure(text=self.get_model_display())
-                    self.log(f"⚙ Model: {self.get_model_display()}")
+            def save_selection(close: bool = True):
+                selected = model_var.get()
+                if not selected:
+                    return
+                large_keywords = ("medium", "large", "turbo")
+                if any(kw in selected.lower() for kw in large_keywords) and not self.feature_gate.has_feature("large_models"):
+                    self._show_premium_prompt("large_models")
+                    return
+                store = selected
+                home = str(Path.home())
+                if store.startswith(home):
+                    store = "~" + store[len(home):]
+                self.config["model_path"] = store
+                save_config(self.config)
+                if hasattr(self, "model_btn"):
+                    self.model_btn.configure(text=self.get_model_display())
+                self.log(f"⚙ Model: {self.get_model_display()}")
+                # Free + GPU on + Small: keep use_gpu preference, but effective
+                # transcription is CPU until Ultra — surface that clearly.
+                try:
+                    from wayfinder.license import gpu_allowed_for_model
+                    if (
+                        self.config.get("use_gpu", True)
+                        and not gpu_allowed_for_model(store, self.feature_gate)
+                    ):
+                        self.log(
+                            "⚙ GPU for Small+ is Ultra — this model runs on CPU. "
+                            "Tiny/Base keep free GPU."
+                        )
+                        if hasattr(self, "gpu_var"):
+                            self.gpu_var.set(False)
+                except Exception:
+                    pass
+                if close:
                     close_panel()
 
+            def show_installed():
+                clear_content()
+                set_tab("installed")
+
+                models = list(self.get_available_models())
+                if not models:
+                    empty = ctk.CTkFrame(content_area, fg_color="transparent")
+                    empty.pack(expand=True, fill="both", pady=SPACING["2xl"])
+                    ctk.CTkLabel(
+                        empty, text="No models on disk yet",
+                        font=(fam, fs["body"], "bold"), text_color=COLORS["text_primary"],
+                    ).pack(pady=(0, 4))
+                    ctk.CTkLabel(
+                        empty, text="Download one to start dictating offline.",
+                        font=(fam, fs["caption"]), text_color=COLORS["text_muted"],
+                    ).pack(pady=(0, SPACING["md"]))
+                    ctk.CTkButton(
+                        empty, text="Browse downloads",
+                        font=(fam, fs["body"], "bold"), height=34, corner_radius=RADIUS["xs"],
+                        fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+                        text_color="#000000", command=show_download, width=180,
+                    ).pack()
+                    return
+
+                # Active first, then recommended (Turbo Q5), then name
+                def _sort_key(m):
+                    p = os.path.expanduser(m["path"])
+                    active = 0 if p == current_path else 1
+                    mid = (m.get("model_id") or "").lower()
+                    rec = 0 if (
+                        m.get("recommended")
+                        or mid in ("large-v3-turbo-q5", "large-v3-turbo-q5_0")
+                    ) else 1
+                    return (active, rec, m.get("name", ""))
+
+                models.sort(key=_sort_key)
+
+                body = ctk.CTkFrame(content_area, fg_color="transparent")
+                body.pack(fill="both", expand=True)
+
+                scroll = ctk.CTkScrollableFrame(body, fg_color="transparent")
+                scroll.pack(fill="both", expand=True, padx=4, pady=(6, 2))
+
+                # tile records: (tile, name_lbl, meta_lbl, mark_lbl, path)
+                tiles: list[tuple] = []
+
+                def refresh():
+                    sel = os.path.expanduser(model_var.get() or "")
+                    for tile, name_lbl, meta_lbl, mark_lbl, path in tiles:
+                        style_select_tile(
+                            tile, name_lbl, meta_lbl,
+                            os.path.expanduser(path) == sel,
+                            mark_lbl=mark_lbl,
+                        )
+
+                def select_model(path: str):
+                    model_var.set(path)
+                    refresh()
+
+                grid = tile_grid(scroll, columns=2, key="installed_tiles")
+                for i, model in enumerate(models):
+                    path = model["path"]
+                    selected = os.path.expanduser(path) == current_path
+                    title, badge = format_model_tile_title(model["name"], model.get("model_id"))
+                    sp = model.get("speed_rating")
+                    ac = model.get("accuracy_rating")
+                    if sp is None or ac is None:
+                        sp, ac = get_whisper_model_ratings(model.get("model_id"))
+                    meta = format_model_tile_meta(
+                        model.get("size", ""),
+                        model.get("speed", ""),
+                        speed_rating=sp,
+                        accuracy_rating=ac,
+                        timing=model.get("timing", ""),
+                    )
+
+                    tile = ctk.CTkFrame(
+                        grid,
+                        fg_color=COLORS["bg_hover_strong"] if selected else COLORS["bg_input"],
+                        corner_radius=RADIUS["xs"],
+                        border_width=1,
+                        border_color=COLORS["accent"] if selected else COLORS["border_subtle"],
+                    )
+                    place_tile(grid, tile, i)
+
+                    pad = ctk.CTkFrame(tile, fg_color="transparent")
+                    pad.pack(fill="both", expand=True, padx=10, pady=8)
+
+                    top = ctk.CTkFrame(pad, fg_color="transparent")
+                    top.pack(fill="x")
+
+                    mark = ctk.CTkLabel(
+                        top, text="●" if selected else "○", width=14,
+                        font=(fam, fs["small"]),
+                        text_color=COLORS["accent"] if selected else COLORS["text_muted"],
+                    )
+                    mark.pack(side="left", padx=(0, 6))
+
+                    name_lbl = ctk.CTkLabel(
+                        top, text=title, anchor="w",
+                        font=(fam, fs["small"], "bold" if selected else "normal"),
+                        text_color=COLORS["text_bright"] if selected else COLORS["text_primary"],
+                    )
+                    name_lbl.pack(side="left", fill="x", expand=True)
+
+                    if badge:
+                        # Balanced (recommended) uses accent; language chips stay muted
+                        chip_accent = badge in ("Balanced", "Best")
+                        chip = ctk.CTkLabel(
+                            top, text=f" {badge} ",
+                            font=(fam, fs["caption"], "bold"),
+                            text_color=COLORS["accent"] if chip_accent else COLORS["text_secondary"],
+                            fg_color=COLORS["bg_elevated"],
+                            corner_radius=RADIUS["xs"],
+                        )
+                        chip.pack(side="right", padx=(4, 0))
+
+                    meta_lbl = ctk.CTkLabel(
+                        pad, text=meta, anchor="w",
+                        font=(fam, fs["caption"]),
+                        text_color=COLORS["accent_hover"] if selected else COLORS["text_muted"],
+                    )
+                    meta_lbl.pack(fill="x", padx=(20, 0), pady=(2, 0))
+
+                    tiles.append((tile, name_lbl, meta_lbl, mark, path))
+
+                    def _apply(p=path):
+                        select_model(p)
+                        save_selection(close=True)
+
+                    # Entire tile is the hit target (including badge chips).
+                    def _bind_pick(w, p=path):
+                        try:
+                            w.bind("<Button-1>", lambda _e, path=p: select_model(path), add="+")
+                            w.bind("<Double-Button-1>", lambda _e, path=p: _apply(path), add="+")
+                            for c in w.winfo_children():
+                                _bind_pick(c, p)
+                        except Exception:
+                            pass
+
+                    _bind_pick(tile)
+
+                    # Hover: soft blue wash (tone-card language). Selection stays
+                    # lit via is_locked + style_select_tile — never drops while
+                    # the pointer is still on the tile (child Leave fix).
+                    def _is_selected(p=path):
+                        return os.path.expanduser(model_var.get() or "") == os.path.expanduser(p)
+
+                    def _hover(t=tile):
+                        try:
+                            t.configure(
+                                fg_color=COLORS["bg_hover"],
+                                border_color=COLORS["border"],
+                            )
+                        except Exception:
+                            pass
+
+                    def _idle(t=tile, name=name_lbl, meta=meta_lbl, mk=mark, p=path):
+                        style_select_tile(t, name, meta, _is_selected(p), mark_lbl=mk)
+
+                    self._bind_surface_hover(
+                        tile,
+                        on_hover=_hover,
+                        on_idle=_idle,
+                        is_locked=_is_selected,
+                    )
+
+                # Sticky footer
+                foot = ctk.CTkFrame(body, fg_color="transparent")
+                foot.pack(fill="x", padx=SPACING["sm"], pady=(4, SPACING["sm"]))
+                ctk.CTkLabel(
+                    foot, text="Double-click a model to apply instantly",
+                    font=(fam, fs["caption"]), text_color=COLORS["text_muted"],
+                ).pack(side="left")
                 ctk.CTkButton(
-                    content_area, text="Save & Apply",
-                    font=(self.font_body[0], self.font_sizes["body"], "bold"), height=38, corner_radius=RADIUS["sm"],
-                    fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], text_color="#000000",
-                    command=save_selection,
-                ).pack(fill="x", padx=8, pady=8)
+                    foot, text="Save & Apply",
+                    font=(fam, fs["body"], "bold"), height=34, width=130,
+                    corner_radius=RADIUS["xs"],
+                    fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+                    text_color="#000000",
+                    command=lambda: save_selection(close=True),
+                ).pack(side="right")
 
             def show_download():
                 clear_content()
-                installed_btn.configure(fg_color=COLORS["bg_hover"], text_color=COLORS["text_primary"])
-                download_btn.configure(fg_color=COLORS["accent"], text_color="#000000")
+                set_tab("download")
 
                 scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
-                scroll.pack(fill="both", expand=True, padx=5, pady=5)
+                scroll.pack(fill="both", expand=True, padx=4, pady=6)
 
                 categories = [
-                    ("RECOMMENDED", ["large-v3-turbo", "large-v3-turbo-q5_0"]),
-                    ("ENGLISH ONLY", ["tiny.en", "base.en", "small.en", "medium.en"]),
-                    ("MULTI-LANGUAGE", ["tiny", "base", "small", "medium", "large-v3"]),
+                    # Q5 first — recommended balance; full Turbo still a strong pick
+                    ("Recommended", ["large-v3-turbo-q5_0", "large-v3-turbo"]),
+                    ("English", ["tiny.en", "base.en", "small.en", "medium.en"]),
+                    ("Multi-language", ["tiny", "base", "small", "medium", "large-v3"]),
                 ]
 
                 for section_title, model_ids in categories:
                     ctk.CTkLabel(
-                        scroll, text=section_title,
-                        font=(self.font_body[0], self.font_sizes["caption"], "bold"),
+                        scroll, text=section_title.upper(),
+                        font=(fam, fs["caption"], "bold"),
                         text_color=COLORS["text_muted"],
-                    ).pack(anchor="w", padx=8, pady=(8, 3))
+                    ).pack(anchor="w", padx=SPACING["sm"], pady=(SPACING["sm"], 2))
 
+                    grid = tile_grid(scroll, columns=2, key=f"dl_{section_title}")
+                    col_i = 0
                     for model_id in model_ids:
                         if model_id not in WHISPER_CPP_MODELS:
                             continue
-
                         info = WHISPER_CPP_MODELS[model_id]
                         is_installed = downloader.is_installed(model_id)
+                        title, badge = format_model_tile_title(info["name"], model_id)
+                        if info.get("recommended") and badge not in ("Balanced", "Best"):
+                            badge = "Balanced"
+                        sp = info.get("speed_rating")
+                        ac = info.get("accuracy_rating")
+                        meta = format_model_tile_meta(
+                            info.get("size", ""),
+                            info.get("speed", ""),
+                            speed_rating=sp,
+                            accuracy_rating=ac,
+                        )
 
-                        row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_hover"] if is_installed else "transparent", corner_radius=RADIUS["xs"])
-                        row.pack(fill="x", pady=1, padx=2)
+                        tile = ctk.CTkFrame(
+                            grid,
+                            # Installed models use the same sticky selected wash
+                            # as the Installed tab's active tile.
+                            fg_color=COLORS["bg_hover_strong"] if is_installed else COLORS["bg_input"],
+                            corner_radius=RADIUS["xs"],
+                            border_width=1,
+                            border_color=COLORS["accent"] if is_installed else COLORS["border_subtle"],
+                        )
+                        place_tile(grid, tile, col_i)
+                        col_i += 1
 
-                        info_frame = ctk.CTkFrame(row, fg_color="transparent")
-                        info_frame.pack(side="left", fill="x", expand=True, padx=8, pady=5)
+                        pad = ctk.CTkFrame(tile, fg_color="transparent")
+                        pad.pack(fill="both", expand=True, padx=10, pady=8)
 
-                        name_text = info["name"]
-                        if info.get("recommended"):
-                            name_text += " *"
+                        top = ctk.CTkFrame(pad, fg_color="transparent")
+                        top.pack(fill="x")
 
-                        ctk.CTkLabel(
-                            info_frame, text=name_text,
-                            font=(self.font_body[0], self.font_sizes["small"], "bold"),
-                            text_color=COLORS["accent"] if is_installed else COLORS["text_primary"],
-                        ).pack(anchor="w")
+                        name_lbl = ctk.CTkLabel(
+                            top, text=title, anchor="w",
+                            font=(fam, fs["small"], "bold"),
+                            text_color=COLORS["text_bright"] if is_installed else COLORS["text_primary"],
+                        )
+                        name_lbl.pack(side="left", fill="x", expand=True)
 
-                        ctk.CTkLabel(
-                            info_frame, text=f"{info['size']} • {info['speed']}",
-                            font=(self.font_body[0], self.font_sizes["caption"]), text_color=COLORS["text_muted"],
-                        ).pack(anchor="w")
+                        if badge and not is_installed:
+                            chip_accent = badge in ("Balanced", "Best")
+                            ctk.CTkLabel(
+                                top, text=f" {badge} ",
+                                font=(fam, fs["caption"], "bold"),
+                                text_color=COLORS["accent"] if chip_accent else COLORS["text_secondary"],
+                                fg_color=COLORS["bg_elevated"],
+                                corner_radius=RADIUS["xs"],
+                            ).pack(side="right", padx=(4, 4))
 
                         if is_installed:
-                            ctk.CTkLabel(
-                                row, text="Installed",
-                                font=(self.font_body[0], self.font_sizes["caption"]),
-                                text_color=COLORS["accent_green"],
-                            ).pack(side="right", padx=12, pady=6)
-                        else:
-                            def make_handler(mid=model_id):
-                                return lambda: do_download(mid)
+                            removable = downloader.is_removable(model_id)
+                            # Actions on the right: Remove (if writable) + Ready
+                            actions = ctk.CTkFrame(top, fg_color="transparent")
+                            actions.pack(side="right")
+                            if removable:
+                                # Two-step confirm on the button itself (no modal)
+                                rm_btn = ctk.CTkButton(
+                                    actions, text="Remove", width=64, height=24,
+                                    font=(fam, fs["caption"], "bold"),
+                                    corner_radius=RADIUS["xs"],
+                                    fg_color=COLORS["bg_elevated"],
+                                    hover_color=COLORS["danger_bg_hover"],
+                                    text_color=COLORS["text_secondary"],
+                                    command=lambda mid=model_id: None,  # set below
+                                )
+                                rm_btn.pack(side="left", padx=(0, 6))
 
+                                def _arm_remove(btn=rm_btn, mid=model_id):
+                                    # First click arms; second click within ~3s deletes
+                                    if getattr(btn, "_wf_armed", False):
+                                        do_uninstall(mid)
+                                        return
+                                    btn._wf_armed = True
+                                    try:
+                                        btn.configure(
+                                            text="Sure?",
+                                            fg_color=COLORS["danger"],
+                                            hover_color=COLORS["danger_hover"],
+                                            text_color="#FFFFFF",
+                                        )
+                                    except Exception:
+                                        pass
+
+                                    def _disarm(b=btn):
+                                        try:
+                                            if not b.winfo_exists():
+                                                return
+                                            b._wf_armed = False
+                                            b.configure(
+                                                text="Remove",
+                                                fg_color=COLORS["bg_elevated"],
+                                                hover_color=COLORS["danger_bg_hover"],
+                                                text_color=COLORS["text_secondary"],
+                                            )
+                                        except Exception:
+                                            pass
+
+                                    self.after(3000, _disarm)
+
+                                rm_btn.configure(command=_arm_remove)
+                            ctk.CTkLabel(
+                                actions, text="Ready",
+                                font=(fam, fs["caption"], "bold"),
+                                text_color=COLORS["accent_green"],
+                            ).pack(side="left")
+                        else:
                             ctk.CTkButton(
-                                row, text="Get",
-                                font=(self.font_body[0], self.font_sizes["caption"]), width=50, height=24,
-                                corner_radius=RADIUS["xs"], fg_color=COLORS["bg_elevated"],
-                                hover_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
-                                command=make_handler(),
-                            ).pack(side="right", padx=8, pady=5)
+                                top, text="Get", width=44, height=24,
+                                font=(fam, fs["caption"], "bold"),
+                                corner_radius=RADIUS["xs"],
+                                fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+                                text_color="#000000",
+                                command=(lambda mid=model_id: do_download(mid)),
+                            ).pack(side="right")
+
+                        ctk.CTkLabel(
+                            pad, text=meta, anchor="w",
+                            font=(fam, fs["caption"]),
+                            text_color=COLORS["text_muted"],
+                        ).pack(fill="x", pady=(2, 0))
 
                         if not is_installed:
-                            self._bind_row_hover(row)
+                            def _hover(t=tile):
+                                try:
+                                    t.configure(
+                                        fg_color=COLORS["bg_hover"],
+                                        border_color=COLORS["border"],
+                                    )
+                                except Exception:
+                                    pass
+
+                            def _idle(t=tile):
+                                try:
+                                    t.configure(
+                                        fg_color=COLORS["bg_input"],
+                                        border_color=COLORS["border_subtle"],
+                                    )
+                                except Exception:
+                                    pass
+
+                            self._bind_surface_hover(
+                                tile,
+                                on_hover=_hover,
+                                on_idle=_idle,
+                                skip_types=(ctk.CTkButton,),
+                            )
+
+            def _clear_model_path_if_deleted(model_id: str) -> None:
+                """If the active config points at the deleted model, pick a fallback."""
+                filename = WHISPER_CPP_MODELS.get(model_id, {}).get("filename", "")
+                current = os.path.expanduser(str(self.config.get("model_path", "") or ""))
+                if not filename or not current:
+                    return
+                cur_name = Path(current).name
+                points_here = (
+                    cur_name == filename
+                    or current.endswith("/" + filename)
+                    or current.endswith("\\" + filename)
+                )
+                if not points_here:
+                    return
+                # Prefer another still-installed model (download dir first via resolve)
+                fallback = None
+                for mid, info in WHISPER_CPP_MODELS.items():
+                    if mid == model_id:
+                        continue
+                    p = _resolve_whisper_model(info["filename"])
+                    if p is not None:
+                        fallback = p
+                        break
+                if fallback is not None:
+                    store = str(fallback)
+                    home = str(Path.home())
+                    if store.startswith(home):
+                        store = "~" + store[len(home):]
+                    self.config["model_path"] = store
+                    self.log(f"⚙ Active model was removed — switched to {fallback.name}")
+                else:
+                    self.config["model_path"] = ""
+                    self.log("⚙ Active model was removed — no other models installed")
+                save_config(self.config)
+                if hasattr(self, "model_btn"):
+                    try:
+                        self.model_btn.configure(text=self.get_model_display())
+                    except Exception:
+                        pass
+                # Keep the in-panel selection var in sync if still open
+                try:
+                    model_var.set(
+                        os.path.expanduser(self.config.get("model_path", "") or "")
+                    )
+                except Exception:
+                    pass
+
+            def do_uninstall(model_id: str):
+                """Remove writable copies of a model, then refresh the Download tab."""
+                info = WHISPER_CPP_MODELS.get(model_id, {})
+                title, _ = format_model_tile_title(info.get("name", model_id), model_id)
+                result = downloader.delete_model(model_id)
+                if result.get("ok"):
+                    n = len(result.get("removed") or [])
+                    self.log(f"🗑 Removed {title} ({n} file{'s' if n != 1 else ''})")
+                    _clear_model_path_if_deleted(model_id)
+                    show_download()
+                else:
+                    err = result.get("error") or "Could not remove model"
+                    self.log(f"⚠ Remove failed ({title}): {err}")
+                    # Brief inline notice without a modal
+                    try:
+                        # Rebuild list so state is honest, then we can't easily toast —
+                        # log is the durable signal; still refresh UI.
+                        show_download()
+                    except Exception:
+                        pass
 
             def do_download(model_id: str):
                 """Download a model with inline progress."""
                 info = WHISPER_CPP_MODELS[model_id]
                 clear_content()
+                set_tab("download")
 
-                ctk.CTkLabel(
-                    content_area, text=f"Downloading {info['name']}",
-                    font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                    text_color=COLORS["text_bright"],
-                ).pack(pady=(20, 4))
+                wrap = ctk.CTkFrame(content_area, fg_color="transparent")
+                wrap.pack(expand=True, fill="both", padx=SPACING["lg"], pady=SPACING["xl"])
 
+                title, _badge = format_model_tile_title(info["name"], model_id)
                 ctk.CTkLabel(
-                    content_area, text=f"Size: {info['size']}",
-                    font=(self.font_body[0], self.font_sizes["small"]),
+                    wrap, text=f"Downloading {title}",
+                    font=(fam, fs["body"], "bold"), text_color=COLORS["text_bright"],
+                ).pack(pady=(0, 4))
+                ctk.CTkLabel(
+                    wrap, text=info.get("size", ""),
+                    font=(fam, fs["small"]), text_color=COLORS["text_secondary"],
+                ).pack(pady=(0, SPACING["md"]))
+
+                # Cancel control (keeps redownload path clean via .downloading unlink)
+                cancel_row = ctk.CTkFrame(wrap, fg_color="transparent")
+                cancel_row.pack(fill="x", pady=(0, SPACING["sm"]))
+                ctk.CTkButton(
+                    cancel_row, text="Cancel", width=72, height=26,
+                    font=(fam, fs["caption"]),
+                    corner_radius=RADIUS["xs"],
+                    fg_color=COLORS["bg_elevated"], hover_color=COLORS["bg_hover"],
                     text_color=COLORS["text_secondary"],
-                ).pack(pady=(0, 12))
+                    command=lambda: downloader.cancel_download(),
+                ).pack(side="right")
 
-                progress_bar = ctk.CTkProgressBar(content_area, height=16, corner_radius=RADIUS["sm"])
-                progress_bar.pack(fill="x", padx=16, pady=(0, 6))
+                progress_bar = ctk.CTkProgressBar(
+                    wrap, height=8, corner_radius=RADIUS["xs"],
+                    progress_color=COLORS["accent"],
+                )
+                progress_bar.pack(fill="x", pady=(0, 6))
                 progress_bar.set(0)
 
                 status_lbl = ctk.CTkLabel(
-                    content_area, text="Starting...",
-                    font=(self.font_body[0], self.font_sizes["caption"]),
-                    text_color=COLORS["text_muted"],
+                    wrap, text="Starting…",
+                    font=(fam, fs["caption"]), text_color=COLORS["text_muted"],
                 )
                 status_lbl.pack()
 
@@ -12541,13 +14557,18 @@ class WayfinderApp(ctk.CTk):
                         try:
                             progress_bar.set(pct)
                             mb_done = done / (1024 * 1024)
-                            mb_total = total / (1024 * 1024)
-                            status_lbl.configure(text=f"{mb_done:.1f} / {mb_total:.1f} MB ({pct*100:.0f}%)")
+                            mb_total = total / (1024 * 1024) if total else 0
+                            if mb_total:
+                                status_lbl.configure(
+                                    text=f"{mb_done:.0f} / {mb_total:.0f} MB  ·  {pct * 100:.0f}%"
+                                )
+                            else:
+                                status_lbl.configure(text=f"{mb_done:.0f} MB")
                         except Exception:
                             pass
                     self.after(0, update)
 
-                def on_complete(path):
+                def on_complete(_path):
                     def update():
                         self.log(f"Downloaded: {info['name']}")
                         show_download()
@@ -13591,15 +15612,17 @@ class WayfinderApp(ctk.CTk):
         threading.Thread(target=_portal_wrapper, daemon=True).start()
 
     def _compositor_owns_hotkeys(self) -> bool:
-        """True when KDE has a global shortcut bound to our record action.
+        """True when KDE's global shortcut matches our *current* record hotkey.
 
-        In that case KWin grabs the key (e.g. F3) at the compositor level and
-        trigger_record.py drives us over the socket — so the evdev listener must
-        NOT also bind it. A passive evdev read can't consume the key, so a shared
-        binding both double-fires AND leaks F3 into the focused app (Brave's Find
-        bar, which then captures the dictation). We read KDE's own config, which
-        save_config never rewrites, so this can't be clobbered by the in-app
-        hotkey setting being reset back to F3."""
+        When KWin owns the same chord as the in-app config (e.g. both F3), the
+        evdev listener must NOT also bind it — passive reads can't consume the
+        key, so a shared binding double-fires and leaks F3 into the focused app
+        (Brave Find bar). If the user Detects a *different* key, KDE's binding
+        no longer matches config → we start evdev for the new key.
+
+        Unknown KDE tokens still defer (fail-safe). save_config never rewrites
+        kglobalshortcutsrc, so this stays authoritative.
+        """
         if sys.platform != "linux":
             return False
         try:
@@ -13611,7 +15634,12 @@ class WayfinderApp(ctk.CTk):
                 text = fh.read()
         except (OSError, UnicodeDecodeError):
             return False
-        return kde_record_shortcut_active(text)
+        active = kde_record_shortcut_key(text)
+        if not active:
+            return False
+        config_code = int(self.config.get("hotkey_key", 67))
+        config_mods = self.config.get("hotkey_modifiers", []) or []
+        return kde_binding_matches_config(active, config_code, config_mods)
 
     def _start_evdev_listener(self):
         """Start (or restart) the evdev hotkey listener thread, cleanly stopping any prior one."""
@@ -13704,6 +15732,13 @@ class WayfinderApp(ctk.CTk):
         # is registered. Other event types (transcription results, UI updates,
         # quit, etc.) must still flow so the app can finish in-flight work.
         if event_type in (EventType.HOTKEY_PRESSED, EventType.STYLE_TOGGLE):
+            # While Settings → Detect is armed (or just finished), ignore
+            # record/style triggers (including KDE→socket F3) so binding a key
+            # doesn't start a dictation from the same physical press.
+            if _HOTKEY_CAPTURE.get("armed") or time.time() < float(
+                _HOTKEY_CAPTURE.get("suppress_until") or 0
+            ):
+                return
             try:
                 from wayfinder.integrations.gamemode import is_hotkeys_paused
             except ImportError:
@@ -13819,12 +15854,9 @@ class WayfinderApp(ctk.CTk):
             # Update state FIRST for immediate feedback
             self.update_state(AppState.RECORDING)
             
-            # Show floating indicator / overlay
+            # Show floating indicator / overlay (Never route tray_only → pill)
             try:
-                if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
-                    self.overlay_controller.show("listening")
-                elif self.indicator:
-                    self.indicator.show("Listening...", COLORS["state_recording"])
+                self._set_status_indicator("listening")
             except Exception as e:
                 self.log(f"⚠ Indicator error: {e}")
             
@@ -13871,8 +15903,8 @@ class WayfinderApp(ctk.CTk):
             sample_rate=self.config["sample_rate"],
             device=self._resolved_audio_device,
             preprocessing=self.config.get("audio_preprocessing", "light"),
-            chunk_duration=self.config.get("chunk_duration", 30),
-            chunk_overlap=self.config.get("chunk_overlap", 2),
+            chunk_duration=self.config.get("chunk_duration", 10),
+            chunk_overlap=self.config.get("chunk_overlap", 1),
             on_chunk_ready=on_chunk_ready,
             warm_mic=self.warm_mic,
         )
@@ -13890,14 +15922,27 @@ class WayfinderApp(ctk.CTk):
             # `store` already isolates writes, so this only avoids wasted transcription work).
             if gen is not None and gen != self.session_generation:
                 return
-            # Get context from previous chunk for continuity
+            # Prefer prior-chunk text as Whisper prompt (continuity). Wait only briefly —
+            # long blocking here serializes the pipeline and kills the speed win of
+            # chunking. On GPU the previous chunk is almost always done already; on a
+            # slow CPU we proceed without context rather than stalling for many seconds.
             context = ""
             if chunk_index > 0:
-                with self.chunk_transcription_lock:
-                    if len(store) >= chunk_index:
-                        prev_text = store[chunk_index - 1]
-                        if prev_text and prev_text != "[error]":
-                            context = prev_text
+                deadline = time.time() + 1.5
+                while True:
+                    if gen is not None and gen != self.session_generation:
+                        return
+                    with self.chunk_transcription_lock:
+                        if len(store) >= chunk_index:
+                            prev_text = store[chunk_index - 1]
+                            if prev_text and prev_text not in ("[error]", "[empty]"):
+                                context = prev_text
+                                break
+                            if prev_text in ("[error]", "[empty]"):
+                                break  # prior chunk is terminal; no useful context
+                    if time.time() >= deadline:
+                        break
+                    time.sleep(0.05)
 
             # Skip post-processing per-chunk - will be applied to final combined text
             text = transcribe_with_config(
@@ -13957,11 +16002,11 @@ class WayfinderApp(ctk.CTk):
         self._processing_start_time = time_module.time()
         
         # Update floating indicator / overlay to processing FIRST
-        if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
-            self.overlay_controller.update("processing")
-        elif self.indicator:
-            self.indicator.update("Processing...", COLORS["accent_yellow"])
-        
+        try:
+            self._set_status_indicator("processing")
+        except Exception as e:
+            self.log(f"⚠ Indicator error: {e}")
+
         self.update_state(AppState.PROCESSING)
 
         gen = self.session_generation  # this recording's session id (set in start_recording)
@@ -14193,63 +16238,68 @@ class WayfinderApp(ctk.CTk):
             
             # Find overlap between end of combined and start of next_chunk
             overlap = self._find_text_overlap(combined, next_chunk)
-            
+
             if overlap:
                 # Skip the overlapping part from the next chunk
-                combined += " " + next_chunk[len(overlap):].lstrip()
+                remainder = next_chunk[len(overlap):].lstrip()
+                if not remainder:
+                    continue
+                # Whisper often ends the earlier chunk with sentence punctuation
+                # even when the next chunk continues the same clause after the
+                # audio overlap ("…word." + "that the speaker…" → drop the
+                # boundary period so we don't leave "word. that").
+                if remainder[:1].islower() and combined.rstrip()[-1:] in ".!?":
+                    combined = combined.rstrip().rstrip(".!?")
+                combined += " " + remainder
             else:
                 # No overlap found, just append with space
                 combined += " " + next_chunk
-        
+
         # Clean up multiple spaces
         import re
         combined = re.sub(r'\s+', ' ', combined).strip()
-        
+
         return combined
     
     def _find_text_overlap(self, text1: str, text2: str, min_words: int = 2, max_words: int = 15) -> str:
         """
         Find overlapping text between end of text1 and start of text2.
-        
+
+        Chunk audio overlaps by a few seconds, so the same spoken words often
+        appear at the end of one transcript and the start of the next. We only
+        accept a full word-sequence match (case/punctuation-insensitive) so we
+        never drop a unique content word that merely *mostly* matches the prior
+        boundary — a previous 80%-fuzzy path could skip "configuration" when the
+        previous chunk said "documentation", etc.
+
         Args:
             text1: First text (look at the end)
             text2: Second text (look at the start)
             min_words: Minimum words for a valid overlap
             max_words: Maximum words to check for overlap
-            
+
         Returns:
-            The overlapping text, or empty string if no overlap found
+            The overlapping text (from text2, original casing), or "" if none
         """
-        # Split into words
         words1 = text1.split()
         words2 = text2.split()
-        
+
         if len(words1) < min_words or len(words2) < min_words:
             return ""
-        
-        # Check for overlapping sequences of words
-        # Start with longer sequences (more confident matches)
+
+        def _norm(w: str) -> str:
+            # Strip common trailing/leading punct so "today?" matches "today".
+            return w.lower().strip(".,!?;:\"'`")
+
+        # Longest full match first (more confident).
         for overlap_len in range(min(max_words, len(words1), len(words2)), min_words - 1, -1):
-            # Get last N words of text1
-            end_of_text1 = " ".join(words1[-overlap_len:]).lower()
-            # Get first N words of text2
-            start_of_text2 = " ".join(words2[:overlap_len]).lower()
-            
-            if end_of_text1 == start_of_text2:
-                # Found overlap - return the actual text from text2 (preserves casing)
+            end_norm = [_norm(w) for w in words1[-overlap_len:]]
+            start_norm = [_norm(w) for w in words2[:overlap_len]]
+            # Require every token to match after normalization; empty tokens
+            # (e.g. a bare "...") are not a real speech overlap.
+            if end_norm == start_norm and all(end_norm):
                 return " ".join(words2[:overlap_len])
-        
-        # Also check for partial word overlaps (fuzzy matching)
-        # This helps when transcription slightly differs at boundaries
-        for overlap_len in range(min(max_words, len(words1), len(words2)), min_words - 1, -1):
-            end_words = [w.lower().strip('.,!?;:') for w in words1[-overlap_len:]]
-            start_words = [w.lower().strip('.,!?;:') for w in words2[:overlap_len]]
-            
-            # Check if at least 80% of words match
-            matches = sum(1 for a, b in zip(end_words, start_words) if a == b)
-            if matches >= overlap_len * 0.8:
-                return " ".join(words2[:overlap_len])
-        
+
         return ""
 
     def transcribe_and_inject(self, audio_path, gen=None):
@@ -14410,20 +16460,25 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             return
         self._processing_start_time = None
-        # Return overlay to ready state, and verify the command actually reached the overlay
-        # (a dropped critical command would otherwise leave the overlay stuck visually).
-        if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
-            if not error:
-                ok = self.overlay_controller.show("ready")  # Return to grey ready state
-                if ok is False and _retries < 3:
-                    self.log("⚠ Overlay reset command failed to send — retrying")
-                    self._finish_injection_job = self.after(
-                        150, lambda: self._finish_injection(gen, _retries + 1, error))
-                    return
-                # After a few failed retries, fall through and reset app state anyway — the overlay's
-                # own watchdog / the health-check supervisor will recover the overlay separately.
-        elif self.indicator:
-            self.indicator.hide()
+        # Return overlay to ready (Always On) or hide Disappearing CTk pill.
+        # Verify critical PyQt ready reaches the subprocess so it isn't stuck "Listening…".
+        try:
+            ok = self._set_status_indicator("ready")
+        except Exception as e:
+            self.log(f"⚠ Indicator reset: {e}")
+            ok = None
+        if (
+            not error
+            and self._has_visual_pyqt_overlay()
+            and ok is False
+            and _retries < 3
+        ):
+            self.log("⚠ Overlay reset command failed to send — retrying")
+            self._finish_injection_job = self.after(
+                150, lambda: self._finish_injection(gen, _retries + 1, error))
+            return
+        # After a few failed retries, fall through and reset app state anyway — the overlay's
+        # own watchdog / the health-check supervisor will recover the overlay separately.
         self.update_state(AppState.IDLE)
 
     def _error_guidance(self, message: str) -> str:
@@ -14552,14 +16607,13 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
-        # Stop the audio-level flood and return the overlay to ready. update() (unlike show())
-        # stops audio polling when leaving the listening state — this is what unsticks a frozen
-        # "Listening…" overlay.
+        # Stop the audio-level flood and return the overlay to ready / hide CTk pill.
+        # PyQt update("ready") stops audio polling (unsticks a frozen "Listening…").
         try:
-            if self.overlay_controller and (self._use_pyqt_overlay or getattr(self.overlay_controller, "tray_only", False)):
+            if self._has_visual_pyqt_overlay():
                 self.overlay_controller.update("ready")
-            elif self.indicator:
-                self.indicator.hide()
+            else:
+                self._set_status_indicator("hide")
         except Exception as e:
             self.log(f"⚠ Reset overlay: {e}")
 

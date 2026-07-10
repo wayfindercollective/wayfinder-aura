@@ -218,9 +218,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "voice_learning_regen_interval": 20,  # Regenerate profile summary every N transcriptions
     
     # Chunked recording settings
+    # Goal: long dictations finish almost as soon as you stop speaking, because
+    # mid-recording chunks already transcribed in the background. Defaults pick
+    # speed with only a tiny accuracy tradeoff (golden ASR: 10s/1s ≈ whole-file
+    # WER on turbo-Q5; ≤6s starts losing content).
     "chunked_mode": True,  # Enable chunked processing for long recordings
-    "chunk_duration": 15,  # Seconds per chunk (shorter = faster feedback)
-    "chunk_overlap": 2,  # Overlap seconds to avoid word cuts
+    "chunk_duration": 10,  # Seconds of new audio per chunk (shorter → less left at stop)
+    "chunk_overlap": 1,  # Seconds re-included at each boundary (word-cut guard)
     "max_recording_duration": 0,  # 0 = unlimited
     
     # GPU acceleration settings
@@ -325,10 +329,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}
     "benchmark_results": {},
     "benchmark_fastest_processor": None,  # "gpu" or "cpu" - auto-detected from benchmarks
+
+    # Post-processing (LLM cleanup) timings per installed GGUF model
+    # Format: {"gemma3-1b": {"model_name": "...", "avg_time": 1.2, "is_current": True, ...}}
+    "postprocessing_benchmark_results": {},
+    "benchmark_fastest_postprocessor": None,  # model_id of fastest cleanup model
+
+    # Headline pipeline numbers for the user's current setup
+    # {asr_time, pp_time, total_time, asr_mode, asr_model_name, pp_model_name, ...}
+    "pipeline_benchmark": {},
     
     # API benchmark results - populated by running API latency test
     # Format: {"openai": {"latency_10s": 2.5, "timestamp": 1234567890}, "anthropic": {...}}
     "api_benchmark_results": {},
+
+    # Cloudflare R2 models CDN (Worker base URL, no trailing slash).
+    # Empty = use Hugging Face fallback URLs in the catalog (dev). Production:
+    #   "https://wayfinder-models-cdn.<subdomain>.workers.dev"
+    # or custom domain. Also overridable via env WAYFINDER_MODELS_CDN_BASE.
+    # Pilot Models CDN Worker. Empty string disables CDN (HF-only). Override in
+    # user config or WAYFINDER_MODELS_CDN_BASE for custom domains.
+    "models_cdn_base": "https://wayfinder-models-cdn.peter-7b5.workers.dev",
 }
 
 # Key codes for hotkey configuration

@@ -1,0 +1,25 @@
+# Cloudflare Worker + R2 binding for Wayfinder Aura model downloads.
+# See docs/MODELS-CDN-SETUP.md for full setup (bucket, upload, secrets).
+#
+# Deploy:
+#   cd infra/models-cdn && npm i && npx wrangler secret put LICENSE_PUBLIC_KEY_HEX
+#   npx wrangler deploy
+
+name = "wayfinder-models-cdn"
+main = "src/index.ts"
+compatibility_date = "2025-03-01"
+
+# Public hostname (optional — set after you attach a custom domain):
+# routes = [{ pattern = "models.wayfindercollective.io/*", zone_name = "wayfindercollective.io" }]
+
+[[r2_buckets]]
+binding = "MODELS"
+bucket_name = "wayfinder-aura-models"
+# preview_bucket_name = "wayfinder-aura-models-dev"
+
+[vars]
+# Comma-separated object keys that may be fetched WITHOUT a license token (free tier).
+# Pilot: leave empty so only authenticated Ultra downloads work for gated objects.
+# After you upload free models, e.g.:
+# PUBLIC_OBJECTS = "whisper/ggml-tiny.en.bin,whisper/ggml-base.en.bin,whisper/ggml-small.en.bin,whisper/ggml-tiny.bin,whisper/ggml-base.bin,whisper/ggml-small.bin,llm/google_gemma-3-1b-it-Q4_K_M.gguf,llm/qwen2.5-1.5b-instruct-q4_k_m.gguf,llm/Qwen3.5-2B-Q4_K_M.gguf,llm/LFM2.5-1.2B-Instruct-Q4_K_M.gguf,llm/smollm2-360m-instruct-q8_0.gguf,llm/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+PUBLIC_OBJECTS = "whisper/ggml-tiny.en.bin,whisper/ggml-base.en.bin,whisper/ggml-small.en.bin,whisper/ggml-tiny.bin,whisper/ggml-base.bin,whisper/ggml-small.bin,llm/google_gemma-3-1b-it-Q4_K_M.gguf,llm/qwen2.5-1.5b-instruct-q4_k_m.gguf,llm/Qwen3.5-2B-Q4_K_M.gguf,llm/LFM2.5-1.2B-Instruct-Q4_K_M.gguf,llm/smollm2-360m-instruct-q8_0.gguf,llm/Llama-3.2-1B-Instruct-Q4_K_M.gguf"

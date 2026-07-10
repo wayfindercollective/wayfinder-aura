@@ -332,16 +332,105 @@ class TestFeatureGate:
 
         expected = ["faster_whisper", "large_models", "cloud_backends",
                     "chunked_recording", "voice_profiles", "tone_system",
-                    "custom_vocabulary", "high_beam_search", "typing_speeds"]
+                    "custom_vocabulary", "gpu_acceleration", "large_cleanup_models"]
         for feat in expected:
             assert feat in PREMIUM_FEATURES, f"Missing premium feature: {feat}"
+        # Paper tigers removed — free by honesty, not marketed as Ultra-only.
+        for removed in ("high_beam_search", "typing_speeds", "advanced_preprocessing"):
+            assert removed not in PREMIUM_FEATURES
 
     def test_gpu_is_premium(self, temp_config_dir: Path):
-        """GPU acceleration is now a PREMIUM feature (gated for free users)."""
+        """Full GPU (all models) remains a PREMIUM feature id."""
         from wayfinder.license import FREE_FEATURES, PREMIUM_FEATURES
 
         assert "gpu_acceleration" in PREMIUM_FEATURES
         assert "gpu_acceleration" not in FREE_FEATURES
+
+    def test_free_tier_gpu_models_tiny_and_base_only(self, temp_config_dir: Path):
+        """Free GPU applies to Tiny/Base only — not Small or larger."""
+        from wayfinder.license import is_free_tier_gpu_model
+
+        assert is_free_tier_gpu_model("ggml-tiny.en.bin")
+        assert is_free_tier_gpu_model("~/models/ggml-base.en.bin")
+        assert is_free_tier_gpu_model("base.en")
+        assert is_free_tier_gpu_model("tiny")
+        assert not is_free_tier_gpu_model("ggml-small.en.bin")
+        assert not is_free_tier_gpu_model("ggml-medium.en.bin")
+        assert not is_free_tier_gpu_model("ggml-large-v3-turbo.bin")
+        assert not is_free_tier_gpu_model("large-v3")
+        # Substring traps: path containing "base" must not free-GPU an Ultra weight.
+        assert not is_free_tier_gpu_model("/home/user/base-station/ggml-small.en.bin")
+        assert not is_free_tier_gpu_model("my-base-large-hack.bin")
+
+    def test_gpu_allowed_free_tiny_base_not_small(self, temp_config_dir: Path):
+        """Free user: GPU yes on Base, no on Small. Ultra: yes on Small."""
+        from wayfinder.license import FeatureGate, gpu_allowed_for_model
+
+        free = FeatureGate()
+        assert not free.is_premium
+        assert gpu_allowed_for_model("ggml-base.en.bin", free) is True
+        assert gpu_allowed_for_model("ggml-tiny.en.bin", free) is True
+        assert gpu_allowed_for_model("ggml-small.en.bin", free) is False
+
+    def test_gpu_allowed_ultra_all_models(
+        self, temp_config_dir: Path, mock_online_license
+    ):
+        from wayfinder.license import FeatureGate, gpu_allowed_for_model
+
+        gate = FeatureGate()
+        gate.activate(SAMPLE_LICENSE_KEY)
+        assert gate.is_premium
+        assert gpu_allowed_for_model("ggml-small.en.bin", gate) is True
+        assert gpu_allowed_for_model("ggml-large-v3-turbo.bin", gate) is True
+
+    def test_token_feature_list_gates_unknown_premium_ids(
+        self, temp_config_dir: Path, mock_online_license
+    ):
+        """Signed features list is authoritative: not every string is Ultra."""
+        from wayfinder.license import FeatureGate
+
+        gate = FeatureGate()
+        gate.activate(SAMPLE_LICENSE_KEY)
+        assert gate.has_feature("large_models")
+        assert gate.has_feature("large_cleanup_models")
+        assert gate.get_bearer_token() == "TEST.TOKEN"
+
+    def test_activate_online_rejects_unsigned_valid_response(self, temp_config_dir: Path):
+        """Forged {valid:true} JSON without a verifiable token must not unlock Ultra."""
+        from unittest.mock import MagicMock, patch
+        from wayfinder.license import activate_online
+
+        fake = MagicMock()
+        fake.json.return_value = {
+            "valid": True,
+            "plan": "pro",
+            "features": ["large_models", "gpu_acceleration"],
+            "token": "NOT.SIGNED",
+        }
+        with patch("requests.post", return_value=fake):
+            info, token, reachable = activate_online("WF-FAKE", "MACHINE123")
+        assert reachable is True
+        assert token is None
+        assert info.is_valid is False
+        assert info.is_premium is False
+
+    def test_activate_online_rejects_v1_payload_even_with_features(
+        self, temp_config_dir: Path
+    ):
+        """Desktop must match Worker: v>=2 required (features alone is not enough)."""
+        from unittest.mock import MagicMock, patch
+        from wayfinder.license import activate_online
+
+        fake = MagicMock()
+        fake.json.return_value = {"valid": True, "token": "signed.example"}
+        with patch("requests.post", return_value=fake), patch(
+            "wayfinder.license._verify_token",
+            return_value={"v": 1, "plan": "pro", "features": ["large_models"]},
+        ):
+            info, token, reachable = activate_online("WF-TEST", "MACHINE")
+        assert reachable is True
+        assert info.is_premium is False
+        assert token is None
 
     def test_premium_user_has_all_features(self, temp_config_dir: Path, mock_online_license):
         """Test that premium user can access all premium features."""
