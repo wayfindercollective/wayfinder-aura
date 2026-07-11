@@ -350,6 +350,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Pilot Models CDN Worker. Empty string disables CDN (HF-only). Override in
     # user config or WAYFINDER_MODELS_CDN_BASE for custom domains.
     "models_cdn_base": "https://wayfinder-models-cdn.peter-7b5.workers.dev",
+    # Optional override for remote model catalog JSON. Empty = {models_cdn_base}/v1/catalog
+    "models_catalog_url": "",
 }
 
 # Key codes for hotkey configuration

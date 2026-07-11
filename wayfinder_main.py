@@ -4645,6 +4645,25 @@ class WayfinderApp(ctk.CTk):
         self.tk.call('tk', 'appname', get_portal_app_id())
         
         self.config = load_config()
+
+        # Merge remote model catalog (CDN) over built-in lists when available so
+        # newly published models appear without an app rebuild.
+        try:
+            from wayfinder.model_catalog import apply_remote_to_globals
+
+            _cat_status = apply_remote_to_globals(
+                WHISPER_CPP_MODELS, LLM_GGUF_MODELS, self.config
+            )
+            if _cat_status.get("remote_applied"):
+                print(
+                    f"[catalog] remote merge: whisper={_cat_status['whisper_count']} "
+                    f"llm={_cat_status['llm_count']} "
+                    f"updated_at={_cat_status.get('updated_at')}"
+                )
+            else:
+                print("[catalog] using built-in model lists (no remote catalog)")
+        except Exception as _cat_err:
+            print(f"[catalog] remote merge skipped: {_cat_err}")
         
         # Load API keys from config into environment variables
         # This makes them available to transcription and post-processing backends

@@ -234,6 +234,34 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return handleAdminMultipart(request, env, url);
   }
 
+  // Public remote model catalog (no auth). Apps merge this over built-in catalogs
+  // so new models can ship without an app rebuild after you publish R2 + JSON.
+  if (
+    (url.pathname === "/v1/catalog" || url.pathname === "/v1/catalog.json") &&
+    (request.method === "GET" || request.method === "HEAD")
+  ) {
+    if (!env.MODELS) {
+      return json({ error: "server_misconfigured", reason: "missing_r2_binding" }, 500);
+    }
+    const catKey = "catalog/v1.json";
+    const obj = await env.MODELS.get(catKey);
+    if (!obj) {
+      return json({ error: "catalog_not_published", key: catKey }, 404);
+    }
+    const headers = new Headers();
+    obj.writeHttpMetadata(headers);
+    headers.set("etag", obj.httpEtag);
+    headers.set("content-type", "application/json; charset=utf-8");
+    // Short cache so catalog updates propagate within ~5 minutes at the edge.
+    headers.set("cache-control", "public, max-age=300");
+    headers.set("access-control-allow-origin", "*");
+    if (obj.size != null) headers.set("content-length", String(obj.size));
+    if (request.method === "HEAD") {
+      return new Response(null, { status: 200, headers });
+    }
+    return new Response(obj.body, { status: 200, headers });
+  }
+
   // GET /v1/objects/<key...>
   const prefix = "/v1/objects/";
   if (!url.pathname.startsWith(prefix)) {
@@ -250,7 +278,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   const publicSet = parsePublicSet(env);
   // Fail closed: never serve Ultra-weight keys as public even if listed in PUBLIC_OBJECTS.
-  const isPublic = isEffectivelyPublic(objectKey, publicSet);
+  // Catalog JSON is always public (no weights).
+  const isPublic =
+    objectKey === "catalog/v1.json" ||
+    objectKey.startsWith("catalog/") ||
+    isEffectivelyPublic(objectKey, publicSet);
 
   if (!isPublic) {
     const auth = request.headers.get("authorization") || "";
