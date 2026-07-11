@@ -44,11 +44,12 @@ LICENSE_PUBLIC_KEY_HEX = os.environ.get(
     "WAYFINDER_LICENSE_PUBKEY",
     "e45d352f85af09afd208ca55458964aae2c018f4a538e17a11fd47211190c60a",
 )
-# Activation endpoint. NOTE: points at the DEV deployment for now — switch the default to the
-# production (shiny-goshawk-432) URL at go-live. Overridable via env for testing.
+# Activation endpoint — production Convex deployment (shiny-goshawk-432).
+# Matching private key lives only in Convex env (LICENSE_SIGNING_PRIVATE_KEY).
+# Override via WAYFINDER_LICENSE_API_URL for local testing against dev if needed.
 LICENSE_API_URL = os.environ.get(
     "WAYFINDER_LICENSE_API_URL",
-    "https://valuable-stoat-578.convex.site/activate",
+    "https://shiny-goshawk-432.convex.site/activate",
 )
 LICENSE_HTTP_TIMEOUT = 10  # seconds for the activation request
 

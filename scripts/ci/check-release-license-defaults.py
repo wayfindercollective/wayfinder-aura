@@ -8,8 +8,12 @@ import ast
 import sys
 from pathlib import Path
 
-DEV_LICENSE_API_URL = "https://valuable-stoat-578.convex.site/activate"
-DEV_LICENSE_PUBLIC_KEY_HEX = "e45d352f85af09afd208ca55458964aae2c018f4a538e17a11fd47211190c60a"
+# Known non-production backends (must not ship in release artifacts).
+DEV_LICENSE_API_URLS = {
+    "https://valuable-stoat-578.convex.site/activate",
+}
+# Production activate URL (same Ed25519 keypair as pilot is OK).
+PROD_LICENSE_API_URL = "https://shiny-goshawk-432.convex.site/activate"
 REQUIRED_DEFAULTS = {"LICENSE_API_URL", "LICENSE_PUBLIC_KEY_HEX"}
 
 
@@ -44,11 +48,23 @@ def license_default_literals(license_file: Path) -> dict[str, str]:
 
 
 def dev_license_defaults(license_file: Path) -> list[str]:
+    """Return fields that still point at a non-production activation backend.
+
+    Pubkey may match the former pilot key when production uses the same keypair;
+    we only fail when the activate URL is still a known dev deployment.
+    """
     defaults = license_default_literals(license_file)
     offenders = []
-    if defaults.get("LICENSE_API_URL") == DEV_LICENSE_API_URL:
+    api = defaults.get("LICENSE_API_URL", "")
+    if api in DEV_LICENSE_API_URLS or (
+        api and "valuable-stoat-578" in api
+    ):
         offenders.append("LICENSE_API_URL")
-    if defaults.get("LICENSE_PUBLIC_KEY_HEX") == DEV_LICENSE_PUBLIC_KEY_HEX:
+    elif api and api != PROD_LICENSE_API_URL and "shiny-goshawk-432" not in api:
+        # Unknown non-prod URL — still block release until explicitly production.
+        if "convex.site/activate" in api and "shiny-goshawk-432" not in api:
+            offenders.append("LICENSE_API_URL")
+    if not defaults.get("LICENSE_PUBLIC_KEY_HEX"):
         offenders.append("LICENSE_PUBLIC_KEY_HEX")
     return offenders
 

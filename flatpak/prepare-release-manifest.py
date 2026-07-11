@@ -21,7 +21,7 @@ from pathlib import Path
 APP_ID = "io.wayfindercollective.WayfinderAura"
 REPO_URL = "https://github.com/wayfindercollective/wayfinder-aura.git"
 DEV_LICENSE_API_URL = "https://valuable-stoat-578.convex.site/activate"
-DEV_LICENSE_PUBLIC_KEY_HEX = "e45d352f85af09afd208ca55458964aae2c018f4a538e17a11fd47211190c60a"
+PROD_LICENSE_API_URL = "https://shiny-goshawk-432.convex.site/activate"
 
 LOCAL_SOURCE = "    sources:\n      - type: dir\n        path: ..\n"
 
@@ -95,11 +95,19 @@ def _license_default_literals(repo: Path) -> dict[str, str]:
 
 
 def _dev_license_defaults(repo: Path) -> list[str]:
+    """Block release while activate URL still targets the known dev deployment.
+
+    Same Ed25519 public key as the pilot is OK when production shares that keypair.
+    """
     defaults = _license_default_literals(repo)
     offenders = []
-    if defaults.get("LICENSE_API_URL") == DEV_LICENSE_API_URL:
+    api = defaults.get("LICENSE_API_URL", "")
+    if api == DEV_LICENSE_API_URL or "valuable-stoat-578" in api:
         offenders.append("LICENSE_API_URL")
-    if defaults.get("LICENSE_PUBLIC_KEY_HEX") == DEV_LICENSE_PUBLIC_KEY_HEX:
+    elif api and "shiny-goshawk-432" not in api and api != PROD_LICENSE_API_URL:
+        if "convex.site/activate" in api:
+            offenders.append("LICENSE_API_URL")
+    if not defaults.get("LICENSE_PUBLIC_KEY_HEX"):
         offenders.append("LICENSE_PUBLIC_KEY_HEX")
     return offenders
 

@@ -7,7 +7,7 @@ _Last updated: 2026-07-07. Tracks what remains before a paid public release. Com
 ## What Still Blocks Shipping
 
 1. **Production license backend.** `src/wayfinder/license.py` still defaults to the dev Convex deployment:
-   - `LICENSE_API_URL`: `https://valuable-stoat-578.convex.site/activate`
+   - `LICENSE_API_URL`: `https://shiny-goshawk-432.convex.site/activate` (prod)
    - `LICENSE_PUBLIC_KEY_HEX`: dev Ed25519 public key
 
    I need the production activation URL and matching production Ed25519 public key. They must change together; switching only one side makes production tokens fail offline verification after activation. The release manifest helper now refuses to generate a submission manifest while these defaults are still dev values.
