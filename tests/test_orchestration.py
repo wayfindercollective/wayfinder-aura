@@ -179,6 +179,8 @@ class FakeApp:
     _find_text_overlap = WApp._find_text_overlap
     _silence_error_message = WApp._silence_error_message
     _maybe_show_gpu_nudge = WApp._maybe_show_gpu_nudge
+    _has_visual_pyqt_overlay = WApp._has_visual_pyqt_overlay
+    _set_status_indicator = WApp._set_status_indicator
     transcribe_and_inject = WApp.transcribe_and_inject
     on_transcription_done = WApp.on_transcription_done
     do_inject = WApp.do_inject

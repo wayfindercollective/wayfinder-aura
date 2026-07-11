@@ -7,6 +7,7 @@ backend factory, and the top-level process_with_config entry point.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, PropertyMock
 
 import pytest
@@ -576,7 +577,11 @@ class TestGetBackend:
         backend = get_backend(config)
         assert isinstance(backend, LlamaCppCliBackend)
 
-    def test_returns_anthropic_backend(self):
+    def test_returns_anthropic_backend(self, monkeypatch):
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
         config = {"post_processing_backend": "anthropic"}
         backend = get_backend(config)
         assert isinstance(backend, AnthropicBackend)
@@ -630,7 +635,11 @@ class TestDevToneGuidance:
         assert "Cleaned text:" in p
         assert "Remove only filler" not in p  # that's the minimal-only prompt
 
-    def test_returns_openai_backend(self):
+    def test_returns_openai_backend(self, monkeypatch):
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
         config = {"post_processing_backend": "openai"}
         backend = get_backend(config)
         assert isinstance(backend, OpenAIBackend)

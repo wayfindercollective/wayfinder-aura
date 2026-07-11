@@ -79,11 +79,21 @@ def mock_online_license():
     path is covered by the licensing-service e2e tests."""
     import time
     from unittest.mock import patch
-    from wayfinder.license import LicenseInfo
+    from wayfinder.license import LicenseInfo, PREMIUM_FEATURES
+
+    features = list(PREMIUM_FEATURES)
 
     def _activate(key, machine_id):
         return (
-            LicenseInfo(is_valid=True, is_premium=True, license_key=key, machine_id=machine_id),
+            LicenseInfo(
+                is_valid=True,
+                is_premium=True,
+                license_key=key,
+                machine_id=machine_id,
+                plan="ultra",
+                features=features,
+                token="TEST.TOKEN",
+            ),
             "TEST.TOKEN",
             True,
         )
@@ -92,7 +102,14 @@ def mock_online_license():
         if not token:
             return None
         now = int(time.time())
-        return {"plan": "pro", "machineId": machine_id, "iat": now, "exp": now + 10 ** 9, "v": 1}
+        return {
+            "plan": "ultra",
+            "features": features,
+            "machineId": machine_id,
+            "iat": now,
+            "exp": now + 10 ** 9,
+            "v": 2,
+        }
 
     with patch("wayfinder.license.activate_online", _activate), patch(
         "wayfinder.license._verify_token", _verify
