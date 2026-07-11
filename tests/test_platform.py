@@ -23,6 +23,7 @@ from wayfinder.utils.platform import (
     get_default_ydotool_binary,
     get_desktop_environment,
     get_portal_app_id,
+    get_wm_class,
     get_platform,
     get_platform_info,
     get_session_type,
@@ -98,6 +99,12 @@ class TestFlatpakDetection:
         """is_flatpak() returns False when no Flatpak env vars are set."""
         # clean_environment autouse fixture already clears FLATPAK_ID
         assert is_flatpak() is False
+
+    def test_wm_class_matches_flatpak_desktop_and_separates_source_runs(self):
+        flatpak_env = {"FLATPAK_ID": "io.wayfindercollective.WayfinderAura"}
+        assert get_wm_class(flatpak_env) == "Wayfinder-aura"
+        assert get_wm_class({}) == "WayfinderAura"
+        assert get_wm_class({"FLATPAK_ID": "com.visualstudio.code"}) == "WayfinderAura"
 
     def test_foreign_parent_flatpak_id_is_not_wayfinder_flatpak(self, monkeypatch):
         """A Flatpak-hosted editor should not make source runs use /app defaults."""

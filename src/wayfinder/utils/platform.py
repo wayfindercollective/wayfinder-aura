@@ -36,6 +36,16 @@ def get_portal_app_id(env: dict[str, str] | None = None) -> str:
     return WAYFINDER_FLATPAK_ID if is_wayfinder_flatpak_env(env) else SOURCE_PORTAL_APP_ID
 
 
+def get_wm_class(env: dict[str, str] | None = None) -> str:
+    """Return the Tk/Plasma WM class for this runtime.
+
+    The packaged class matches the Flatpak desktop file's ``StartupWMClass``.
+    Source runs intentionally use a distinct class so Plasma does not merge a
+    developer checkout into the installed application's pinned launcher.
+    """
+    return "Wayfinder-aura" if is_wayfinder_flatpak_env(env) else "WayfinderAura"
+
+
 def get_wayfinder_appimage_dir(env: dict[str, str] | None = None) -> Path | None:
     """Return APPDIR only when it is Wayfinder's mounted AppDir."""
     environ = os.environ if env is None else env
