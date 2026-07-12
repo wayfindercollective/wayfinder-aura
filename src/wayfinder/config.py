@@ -226,7 +226,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chunked_mode": True,  # Enable chunked processing for long recordings
     "chunk_duration": 10,  # Seconds of new audio per chunk (shorter → less left at stop)
     "chunk_overlap": 1,  # Seconds re-included at each boundary (word-cut guard)
-    "max_recording_duration": 0,  # 0 = unlimited
+    # Optional safety cap (seconds). 0 = unlimited. When set, auto-stops and processes
+    # like a normal toggle-off. Wired via the RECORDING watchdog in WayfinderApp.
+    "max_recording_duration": 0,
     
     # GPU acceleration settings
     "transcription_backend": "whisper_cpp",  # whisper_cpp | faster_whisper

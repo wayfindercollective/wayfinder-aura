@@ -4309,7 +4309,9 @@ class OverlayController:
 
         self._current_state = state
         ok = self._send_command({"cmd": "show", "state": state}, critical=True)
-
+        if not ok:
+            # Child not accepting commands → restart it (tray lives in this process too).
+            return self._restart_and_show(state)
         if state == "listening":
             self._start_audio_polling()
         return ok
@@ -4320,17 +4322,34 @@ class OverlayController:
             return self.show(state)
 
         old_state = self._current_state
-        self._current_state = state
 
-        # Stop audio polling BEFORE sending state command to free the lock
-        if state != "listening" and old_state == "listening":
+        # Leaving listen: always recycle the child. `_send_command` only proves
+        # stdin accepted bytes — the Qt loop (pill + tray) can stay wedged while
+        # StdinCommandReader still drains the pipe (2026-07-11 freeze). One restart
+        # per dictation end is cheap and guarantees recovery without probes/acks.
+        if old_state == "listening" and state != "listening":
             self._stop_audio_polling()
+            return self._restart_and_show(state)
 
+        self._current_state = state
         ok = self._send_command({"cmd": "show", "state": state}, critical=True)
-
+        if not ok:
+            return self._restart_and_show(state)
         if state == "listening" and old_state != "listening":
             self._start_audio_polling()
         return ok
+
+    def _restart_and_show(self, state: str) -> bool:
+        """Kill overlay subprocess and re-apply state (no recursion via show/update)."""
+        self._log(f"Overlay restart → {state}")
+        # Pin desired state before refresh so refresh's restore path matches.
+        self._current_state = state
+        if not self.refresh():
+            return False
+        # refresh() already re-shows previous_state (== state) when not hidden.
+        if state == "listening":
+            self._start_audio_polling()
+        return self._process is not None and self._process.poll() is None
     
     def hide(self):
         """Hide the overlay."""
@@ -4444,7 +4463,11 @@ class OverlayController:
         self._audio_level_callback = callback
     
     def is_healthy(self) -> bool:
-        """Check if the overlay subprocess is running and responsive."""
+        """True if the overlay subprocess is still alive.
+
+        Wedged-but-alive children are recovered on the next failed critical
+        state write (see show/update → _restart_and_show), not by probing here.
+        """
         # Use non-blocking lock check to avoid deadlock
         acquired = self._lock.acquire(timeout=0.1)
         if not acquired:
@@ -15284,14 +15307,19 @@ class WayfinderApp(ctk.CTk):
             elif old_state == AppState.PROCESSING:
                 self._cancel_processing_watchdog()
 
-        # Audio ducking on state transitions
+            # Optional RECORDING cap (config max_recording_duration; 0 = off).
+            if new_state == AppState.RECORDING:
+                self._start_recording_watchdog()
+            elif old_state == AppState.RECORDING:
+                self._cancel_recording_watchdog()
+
+        # Duck off the Tk thread via a single FIFO worker (order preserved; no race
+        # where a slow duck finishes after restore and leaves audio attenuated).
         if self.config.get("audio_ducking_enabled", True) and hasattr(self, 'audio_ducker'):
             if new_state == AppState.RECORDING and old_state != AppState.RECORDING:
-                # Entering recording - duck other audio
-                self.audio_ducker.duck()
+                self._enqueue_duck_action("duck")
             elif old_state == AppState.RECORDING and new_state != AppState.RECORDING:
-                # Leaving recording - restore audio
-                self.audio_ducker.restore()
+                self._enqueue_duck_action("restore")
         
         # Update tray FIRST - this is critical for user feedback
         self.update_tray(new_state)
@@ -15323,6 +15351,37 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ UI update error: {e}")
 
     # === PROCESSING watchdog (recover from a hung transcription / post-processing) ===
+
+    def _enqueue_duck_action(self, action: str) -> None:
+        """Queue duck/restore on one background worker so transitions stay ordered."""
+        q = getattr(self, "_duck_action_queue", None)
+        if q is None:
+            q = queue.Queue()
+            self._duck_action_queue = q
+
+            def _worker():
+                while True:
+                    act = q.get()
+                    if act is None:
+                        return
+                    self._duck_audio_safe(act)
+
+            threading.Thread(
+                target=_worker, daemon=True, name="audio-duck-fifo"
+            ).start()
+        q.put(action)
+
+    def _duck_audio_safe(self, action: str) -> None:
+        try:
+            ducker = getattr(self, "audio_ducker", None)
+            if ducker is None:
+                return
+            if action == "duck":
+                ducker.duck()
+            else:
+                ducker.restore()
+        except Exception as e:
+            print(f"[AudioDucker] {action} failed: {e}", flush=True)
 
     def _start_processing_watchdog(self) -> None:
         """Arm a one-shot timer that fires if PROCESSING never resolves."""
@@ -15362,6 +15421,41 @@ class WayfinderApp(ctk.CTk):
             "post-processing step. Reset to idle; see the activity log for details.",
             self.session_generation,
         )
+
+    # === RECORDING cap (optional; max_recording_duration seconds, 0 = off) ===
+
+    def _start_recording_watchdog(self) -> None:
+        self._cancel_recording_watchdog()
+        try:
+            timeout_s = float(self.config.get("max_recording_duration", 0) or 0)
+        except (TypeError, ValueError):
+            timeout_s = 0.0
+        if timeout_s <= 0:
+            return
+        gen = self.session_generation
+        self._recording_watchdog_job = self.after(
+            int(timeout_s * 1000), lambda: self._on_recording_timeout(gen, timeout_s)
+        )
+
+    def _cancel_recording_watchdog(self) -> None:
+        job = getattr(self, "_recording_watchdog_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._recording_watchdog_job = None
+
+    def _on_recording_timeout(self, gen: int, timeout_s: float) -> None:
+        self._recording_watchdog_job = None
+        if self.app_state != AppState.RECORDING or gen != self.session_generation:
+            return
+        self.log(f"⏱ Max recording duration ({timeout_s:.0f}s) — auto-stopping")
+        try:
+            self.stop_recording_and_process()
+        except Exception as e:
+            self.log(f"⚠ Auto-stop failed ({e}); resetting")
+            self.force_reset()
 
     # === Hero Animation System ===
     
@@ -16743,11 +16837,23 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
-        # Stop the audio-level flood and return the overlay to ready / hide CTk pill.
-        # PyQt update("ready") stops audio polling (unsticks a frozen "Listening…").
+        # Always recycle the overlay subprocess on reset. Write-success only means
+        # stdin accepted bytes — a wedged Qt loop still freezes pill + tray
+        # (2026-07-11). refresh() is the guaranteed unstick path.
         try:
             if self._has_visual_pyqt_overlay():
-                self.overlay_controller.update("ready")
+                ctrl = self.overlay_controller
+                ctrl._stop_audio_polling()
+                ctrl._current_state = "ready"
+                if not ctrl.refresh():
+                    self.log("⚠ Overlay refresh failed on reset")
+            elif getattr(self, "overlay_controller", None) is not None:
+                # tray-only: still host StatusNotifier in the child — recycle it too
+                ctrl = self.overlay_controller
+                ctrl._stop_audio_polling()
+                ctrl._current_state = "hidden"
+                if not ctrl.refresh():
+                    self.log("⚠ Tray overlay refresh failed on reset")
             else:
                 self._set_status_indicator("hide")
         except Exception as e:
