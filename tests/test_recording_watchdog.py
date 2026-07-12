@@ -50,8 +50,8 @@ def test_on_recording_timeout_stops_matching_session():
     app.stop_recording_and_process.assert_called_once()
 
 
-def test_update_leaving_listen_always_restarts_overlay():
-    """Leaving listen recycles child even when writes would report success."""
+def test_update_leaving_listen_soft_updates_without_restart():
+    """Leaving listen must soft-update — hard restart steals Wayland focus (ydotool)."""
     from wayfinder_main import OverlayController
 
     ctrl = OverlayController()
@@ -65,12 +65,14 @@ def test_update_leaving_listen_always_restarts_overlay():
     ctrl._send_command = MagicMock(return_value=True)
 
     assert ctrl.update("processing") is True
-    ctrl.refresh.assert_called_once()
-    # Must not rely on a successful-but-unhandled write path alone.
+    ctrl._stop_audio_polling.assert_called_once()
+    ctrl._send_command.assert_called_once()
+    ctrl.refresh.assert_not_called()
     assert ctrl._current_state == "processing"
+    assert ctrl._restart_pending is False
 
 
-def test_update_failed_write_still_restarts():
+def test_update_failed_write_still_restarts_when_allowed():
     from wayfinder_main import OverlayController
 
     ctrl = OverlayController()
@@ -82,9 +84,31 @@ def test_update_failed_write_still_restarts():
     ctrl.refresh = MagicMock(return_value=True)
     ctrl._log = MagicMock()
 
-    assert ctrl.update("processing") is True
+    assert ctrl.update("processing", allow_restart=True) is True
     ctrl.refresh.assert_called_once()
 
+
+def test_update_failed_write_defers_restart_when_disallowed():
+    """Dictation-critical path must not remap overlay/tray mid-inject."""
+    from wayfinder_main import OverlayController
+
+    ctrl = OverlayController()
+    ctrl._process = MagicMock()
+    ctrl._process.poll.return_value = None
+    ctrl._current_state = "listening"
+    ctrl._stop_audio_polling = MagicMock()
+    ctrl._send_command = MagicMock(return_value=False)
+    ctrl.refresh = MagicMock(return_value=True)
+    ctrl._log = MagicMock()
+
+    assert ctrl.update("processing", allow_restart=False) is False
+    ctrl.refresh.assert_not_called()
+    assert ctrl._restart_pending is True
+
+    ctrl._send_command = MagicMock(return_value=True)
+    assert ctrl.flush_deferred_restart() is True
+    ctrl.refresh.assert_called_once()
+    assert ctrl._restart_pending is False
 
 def test_force_reset_always_refreshes_overlay():
     """Reset unsticks pill/tray even when stdin writes report success."""

@@ -4115,6 +4115,9 @@ class OverlayController:
         self._initial_style = initial_style  # "professional", "dev", "casual", or "personal"
         self._config_ref = config  # Reference to app config for refresh
         self._log_callback = log_callback  # route rare failures to the app/UI log (diagnostics)
+        # When True, a failed state write asked for a restart that was deferred
+        # until after dictation/injection (see update(allow_restart=False)).
+        self._restart_pending = False
 
     def _log(self, msg: str):
         """Surface a diagnostic message to the app/UI log if available, else stderr."""
@@ -4316,31 +4319,58 @@ class OverlayController:
             self._start_audio_polling()
         return ok
 
-    def update(self, state: str):
-        """Update the overlay to a new state. Returns the send result (True/False)."""
+    def update(self, state: str, *, allow_restart: bool = True):
+        """Update the overlay to a new state. Returns the send result (True/False).
+
+        *allow_restart*: when False (dictation-critical path), a failed write
+        marks ``_restart_pending`` instead of recycling the child immediately —
+        killing/recreating the overlay mid-inject steals Wayland focus so ydotool
+        types into the wrong surface. Call ``flush_deferred_restart()`` once IDLE.
+        """
         if self._process is None or self._process.poll() is not None:
             return self.show(state)
 
         old_state = self._current_state
 
-        # Leaving listen: always recycle the child. `_send_command` only proves
-        # stdin accepted bytes — the Qt loop (pill + tray) can stay wedged while
-        # StdinCommandReader still drains the pipe (2026-07-11 freeze). One restart
-        # per dictation end is cheap and guarantees recovery without probes/acks.
+        # Leaving listen: stop level spam first, then soft-update. Do NOT always
+        # kill/restart the overlay child here — on KDE Wayland recycling the
+        # process every dictation steals focus from the user's text field so
+        # ydotool types into the wrong place (or nowhere). Restart only when the
+        # critical state write fails (wedged/dead child — 2026-07-11 freeze path),
+        # and prefer deferring that restart until after injection when requested.
         if old_state == "listening" and state != "listening":
             self._stop_audio_polling()
-            return self._restart_and_show(state)
 
         self._current_state = state
         ok = self._send_command({"cmd": "show", "state": state}, critical=True)
         if not ok:
-            return self._restart_and_show(state)
+            if allow_restart:
+                return self._restart_and_show(state)
+            self._restart_pending = True
+            self._log(
+                f"⚠ Overlay command failed (state={state}) — restart deferred until idle"
+            )
+            return False
         if state == "listening" and old_state != "listening":
             self._start_audio_polling()
         return ok
 
+    def flush_deferred_restart(self) -> bool:
+        """Apply a restart that was deferred during RECORDING/PROCESSING/PASTING.
+
+        Safe to call when the app is IDLE (after injection). Returns True if a
+        restart ran (or was unnecessary because the child is healthy).
+        """
+        if not getattr(self, "_restart_pending", False):
+            return True
+        self._restart_pending = False
+        state = self._current_state if self._current_state not in (None, "hidden") else "ready"
+        self._log(f"Overlay deferred restart → {state}")
+        return self._restart_and_show(state)
+
     def _restart_and_show(self, state: str) -> bool:
         """Kill overlay subprocess and re-apply state (no recursion via show/update)."""
+        self._restart_pending = False
         self._log(f"Overlay restart → {state}")
         # Pin desired state before refresh so refresh's restore path matches.
         self._current_state = state
@@ -5036,9 +5066,15 @@ class WayfinderApp(ctk.CTk):
             try:
                 from PIL import ImageTk
                 icon_img = Image.open(ICON_PATH)
-                self.icon_photo = ImageTk.PhotoImage(icon_img.resize((64, 64)))
-                self.iconphoto(True, self.icon_photo)
-            except:
+                # Taskbar / window manager icon: 128 reads clearly on HiDPI panels
+                # (64 looked undersized next to the StatusNotifier tray glyph).
+                # Provide 64 as well so WMs that pick a smaller slot stay sharp.
+                _im128 = icon_img.resize((128, 128), Image.LANCZOS)
+                _im64 = icon_img.resize((64, 64), Image.LANCZOS)
+                self.icon_photo = ImageTk.PhotoImage(_im128)
+                self.icon_photo_sm = ImageTk.PhotoImage(_im64)
+                self.iconphoto(True, self.icon_photo, self.icon_photo_sm)
+            except Exception:
                 pass
         
         ctk.set_appearance_mode("dark")
@@ -9601,7 +9637,9 @@ class WayfinderApp(ctk.CTk):
             if state == "listening":
                 return ctrl.show("listening")
             if state == "processing":
-                return ctrl.update("processing")
+                # Never hard-restart mid-dictation: remapping the overlay/tray
+                # steals Wayland focus so ydotool injects into the wrong surface.
+                return ctrl.update("processing", allow_restart=False)
             if state == "ready":
                 return ctrl.show("ready")
             if state == "hide":
@@ -11364,8 +11402,19 @@ class WayfinderApp(ctk.CTk):
             # Health applies to any overlay subprocess (Always On OR tray-only).
             if self.overlay_controller is not None:
                 if not self.overlay_controller.is_healthy():
-                    self.log("🔄 Overlay process died - restarting...")
-                    self.overlay_controller.refresh()
+                    # Never recycle mid-dictation — remapping steals Wayland focus.
+                    if self.app_state in (
+                        AppState.RECORDING,
+                        AppState.PROCESSING,
+                        AppState.PASTING,
+                    ):
+                        self.overlay_controller._restart_pending = True
+                        self.log(
+                            "🔄 Overlay process died during dictation — restart deferred until idle"
+                        )
+                    else:
+                        self.log("🔄 Overlay process died - restarting...")
+                        self.overlay_controller.refresh()
             # Check again in 10 seconds
             self.after(10000, check_health)
         
@@ -11432,6 +11481,16 @@ class WayfinderApp(ctk.CTk):
         # Only the Always On visual pill needs a geometry refresh on wake.
         # tray_only has no on-screen window; CTk FloatingIndicator is recreated on next show.
         if self._has_visual_pyqt_overlay():
+            # Defer if the user is mid-dictation (focus-critical).
+            if self.app_state in (
+                AppState.RECORDING,
+                AppState.PROCESSING,
+                AppState.PASTING,
+            ):
+                if self.overlay_controller is not None:
+                    self.overlay_controller._restart_pending = True
+                self.log("🌅 Display woke during dictation — overlay refresh deferred")
+                return
             self.log("🌅 Display woke up - refreshing overlay...")
             if self.overlay_controller.refresh():
                 self.log("✓ Overlay refreshed successfully")
@@ -14932,7 +14991,7 @@ class WayfinderApp(ctk.CTk):
         self.custom_icon = None
         if ICON_PATH.exists():
             try:
-                self.custom_icon = Image.open(ICON_PATH).resize((64, 64))
+                self.custom_icon = Image.open(ICON_PATH).resize((128, 128), Image.LANCZOS)
             except:
                 pass
         
@@ -14983,17 +15042,19 @@ class WayfinderApp(ctk.CTk):
         Clean cursor/pointer arrow shape. Color indicates state.
         Recording state has a "drawing" animation that traces the arrow outline.
         """
-        # 128px @ 2× the 64 design grid — larger/sharper on HiDPI trays (matches tray_icon.py).
-        size = 128
+        # Match tray_icon.py: 96px + slight glyph inset so the tray stays
+        # prominent but no longer larger than the taskbar app icon.
+        size = 96
         design = 64
+        glyph_scale = 0.88
         sc = size / float(design)
+        cx = cy = design * 0.5
 
         # Create transparent background
         icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(icon)
 
-        # Arrow points on the 64 design grid, scaled up (glyph fills ~90% of the slot).
-        # Keep index order identical to tray_icon._ARROW / recording trace.
+        # Arrow points on the 64 design grid (index order = tray_icon._ARROW).
         _arrow_design = [
             (55, 3),    # 0: Tip (upper-right)
             (43, 61),   # 1: Right corner
@@ -15002,8 +15063,14 @@ class WayfinderApp(ctk.CTk):
             (28, 38),   # 4: Inner left (notch end)
             (9, 41),    # 5: Left corner
         ]
-        arrow_points = [(int(x * sc), int(y * sc)) for x, y in _arrow_design]
-        stroke_w = max(3, int(5 * sc))
+        arrow_points = [
+            (
+                int((cx + (x - cx) * glyph_scale) * sc),
+                int((cy + (y - cy) * glyph_scale) * sc),
+            )
+            for x, y in _arrow_design
+        ]
+        stroke_w = max(2, int(5 * sc * glyph_scale))
         
         if state == AppState.RECORDING:
             # Red color for recording
@@ -16631,11 +16698,11 @@ class WayfinderApp(ctk.CTk):
                 self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
                 return
 
-            # Brief delay to let focus settle back to the user's target window
-            # On macOS the overlay uses WindowDoesNotAcceptFocus so focus rarely shifts,
-            # but 30ms provides a safety margin for OS-level focus handling
+            # Brief delay to let focus settle on the user's target window after
+            # stop-recording / overlay state change. Keep this short — long sleeps
+            # race a newer recording (checked below via session_generation).
             import time as _time
-            _time.sleep(0.03)
+            _time.sleep(0.08)
 
             # Re-check after the delay: a reset / new recording during the sleep must NOT result
             # in stale text being typed into whatever window the user has now focused.
@@ -16650,14 +16717,32 @@ class WayfinderApp(ctk.CTk):
                 now_focused = get_active_window()
             except Exception:
                 now_focused = None
-            drift = " [focus drifted since record-start → retargeting]" if (
-                target and now_focused and target != now_focused) else ""
-            self.log(f"⌨ Inject {len(text)} chars → win {target or now_focused or '?'}{drift}")
+            try:
+                from wayfinder.utils.platform import get_text_injector
+                backend = get_text_injector()
+            except Exception:
+                backend = "?"
+            # ydotool/wtype cannot retarget a record-start window (xdotool only).
+            can_retarget = backend == "xdotool"
+            drift = ""
+            if target and now_focused and target != now_focused:
+                drift = (
+                    " [focus drifted; retargeting]"
+                    if can_retarget
+                    else " [focus drifted; backend cannot retarget — soft-overlay path must preserve focus]"
+                )
+            self.log(
+                f"⌨ Inject {len(text)} chars via {backend} → win {target or now_focused or '?'}{drift}"
+            )
+
+            # Final generation gate immediately before keystrokes leave the process.
+            if gen is not None and gen != self.session_generation:
+                return
 
             inject_text(
                 text,
                 typing_speed="instant",
-                target_window=target,
+                target_window=target if can_retarget else None,
                 game_mode=bool(getattr(self, "_game_mode", False)),
                 paste_fallback=bool(self.config.get("game_mode_paste_fallback", True)),
             )
@@ -16726,6 +16811,14 @@ class WayfinderApp(ctk.CTk):
         # After a few failed retries, fall through and reset app state anyway — the overlay's
         # own watchdog / the health-check supervisor will recover the overlay separately.
         self.update_state(AppState.IDLE)
+        # Apply any overlay restart that was deferred during processing/inject so
+        # a wedged child is still recovered — but only after focus-critical work.
+        try:
+            ctrl = getattr(self, "overlay_controller", None)
+            if ctrl is not None and getattr(ctrl, "_restart_pending", False):
+                ctrl.flush_deferred_restart()
+        except Exception as e:
+            self.log(f"⚠ Deferred overlay restart: {e}")
 
     def _error_guidance(self, message: str) -> str:
         """Map a raw error string to plain-language guidance for the error banner.

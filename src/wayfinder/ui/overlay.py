@@ -1347,24 +1347,30 @@ class GlassmorphicOverlay(QWidget):
                 min_display_ms = 800  # Show "Processing..." for at least 800ms
                 if elapsed_ms < min_display_ms:
                     remaining = int(min_display_ms - elapsed_ms)
-                    _log(f"set_state: DELAYING transition by {remaining}ms (min display time)")
-                    # Parent the timer to the widget so it can't be garbage-collected before it
-                    # fires (which would drop the Processing->Ready transition). The callback is
-                    # guarded and only applies if we're STILL in PROCESSING — a newer transition
-                    # (which also cancels this timer at the top of set_state) must win.
-                    self._delayed_state_timer = QTimer(self)
-                    self._delayed_state_timer.setSingleShot(True)
+                    # QTimer(0) busy-spins the Qt loop (seen as "DELAYING by 0ms" storms).
+                    # Sub-millisecond remainder: apply immediately; otherwise use ≥1ms.
+                    if remaining <= 0:
+                        pass  # fall through to apply READY now
+                    else:
+                        remaining = max(1, remaining)
+                        _log(f"set_state: DELAYING transition by {remaining}ms (min display time)")
+                        # Parent the timer to the widget so it can't be garbage-collected before it
+                        # fires (which would drop the Processing->Ready transition). The callback is
+                        # guarded and only applies if we're STILL in PROCESSING — a newer transition
+                        # (which also cancels this timer at the top of set_state) must win.
+                        self._delayed_state_timer = QTimer(self)
+                        self._delayed_state_timer.setSingleShot(True)
 
-                    def _do_delayed_transition():
-                        try:
-                            if self._state == OverlayState.PROCESSING:
-                                self.set_state(state, animate)
-                        except Exception as exc:
-                            _log(f"set_state: delayed transition error: {exc}")
+                        def _do_delayed_transition():
+                            try:
+                                if self._state == OverlayState.PROCESSING:
+                                    self.set_state(state, animate)
+                            except Exception as exc:
+                                _log(f"set_state: delayed transition error: {exc}")
 
-                    self._delayed_state_timer.timeout.connect(_do_delayed_transition)
-                    self._delayed_state_timer.start(remaining)
-                    return
+                        self._delayed_state_timer.timeout.connect(_do_delayed_transition)
+                        self._delayed_state_timer.start(remaining)
+                        return
         
         old_state = self._state
         self._state = state
