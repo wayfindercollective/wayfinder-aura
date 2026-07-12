@@ -1115,16 +1115,16 @@ SETTING_TOOLTIPS = {
     "backend": (
         "Local transcription engine.\n\n"
         "• Auto / default — always whisper.cpp (AMD, Intel, Apple, and NVIDIA).\n"
-        "  Never auto-selects Faster-Whisper (avoids accidental slow CPU path).\n\n"
-        "• whisper.cpp — Vulkan (AMD/Intel), CUDA CLI, Metal, CPU.\n\n"
-        "• Faster-Whisper (CUDA) — Manual only, shown when NVIDIA GPU is detected.\n"
-        "  CTranslate2 needs real NVIDIA CUDA. Not selected automatically.\n"
+        "  Recommended path; never auto-selects Faster-Whisper.\n\n"
+        "• whisper.cpp — Vulkan (AMD/Intel), CUDA, Metal, CPU. Supported default.\n\n"
+        "• Faster-Whisper (experimental) — Manual only, NVIDIA hosts only.\n"
+        "  CTranslate2 CUDA path; not fully dogfooded. May fall back to slow CPU.\n"
         "  Ultra feature. Manual pick turns Auto off."
     ),
     "gpu_acceleration": (
         "Use GPU for transcription when the backend supports it.\n"
-        "🚀 whisper.cpp: Vulkan (AMD/Intel), CUDA, Metal\n"
-        "🚀 Faster-Whisper: NVIDIA CUDA via CTranslate2 only (not ROCm/Vulkan)\n"
+        "🚀 whisper.cpp: Vulkan (AMD/Intel), CUDA, Metal (recommended)\n"
+        "🚀 Faster-Whisper (experimental): NVIDIA CUDA via CTranslate2 only\n"
         "🚀 Free: Tiny & Base · Ultra: Small, Medium, Turbo, Large"
     ),
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",

@@ -75,7 +75,10 @@ class LicenseInfo:
 
 PREMIUM_FEATURES = {
     # Feature ID: (display name, description)
-    "faster_whisper": ("Faster-Whisper Backend", "CTranslate2 optimized inference engine"),
+    "faster_whisper": (
+        "Faster-Whisper (experimental)",
+        "Optional CTranslate2 engine for NVIDIA CUDA — manual only, not the default",
+    ),
     "large_models": ("Large Models", "Access to Medium.en and Large v3 Turbo models"),
     # Full GPU for every model size. Free still gets GPU on Tiny/Base — see
     # is_free_tier_gpu_model() / gpu_allowed_for_model().

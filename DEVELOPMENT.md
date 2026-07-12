@@ -220,7 +220,7 @@ into the wrong surface).
 ### Local ASR backend auto-select (GPU)
 
 Settings → **Backend** offers **Auto (whisper.cpp)** | whisper.cpp |
-**Faster-Whisper (CUDA, manual)** (listed only when NVIDIA is detected).
+**Faster-Whisper (experimental)** (listed only when NVIDIA is detected).
 
 Logic: `recommend_local_transcription_backend()` / `apply_auto_transcription_backend()`
 in `src/wayfinder/utils/gpu.py`.
@@ -228,11 +228,11 @@ in `src/wayfinder/utils/gpu.py`.
 | Mode | Backend |
 |------|---------|
 | **Default / Auto** (any GPU, **including NVIDIA**) | Always **`whisper_cpp`** |
-| Manual whisper.cpp | `whisper_cpp` |
-| Manual Faster-Whisper | Only if NVIDIA present; never selected by Auto |
+| Manual whisper.cpp | `whisper_cpp` (supported) |
+| Manual Faster-Whisper (experimental) | NVIDIA only; never Auto |
 
-**Product rule:** never auto-place users on Faster-Whisper (especially NVIDIA).
-Default is always whisper.cpp. FW is an explicit Manual choice on NVIDIA only.
+**Product rule:** default is always whisper.cpp. Faster-Whisper is an
+**experimental** Manual option on NVIDIA only — never auto-selected.
 
 **Hard rules**
 
