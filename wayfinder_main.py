@@ -4326,6 +4326,19 @@ class OverlayController:
                     cmd_args.append(f"--offset={offset}")
                     cmd_args.append(f"--anchor={anchor}")
                     cmd_args.append(f"--quality={quality}")
+                def _overlay_preexec() -> None:
+                    # If the main process is hard-killed, the overlay (tray) must not
+                    # outlive it. Linux PR_SET_PDEATHSIG delivers SIGTERM to the child
+                    # when the parent dies.
+                    try:
+                        import ctypes
+
+                        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+                        # PR_SET_PDEATHSIG = 1
+                        libc.prctl(1, signal.SIGTERM)
+                    except Exception:
+                        pass
+
                 self._process = subprocess.Popen(
                     cmd_args,
                     stdin=subprocess.PIPE,
@@ -4333,6 +4346,7 @@ class OverlayController:
                     stderr=subprocess.PIPE,  # Captured + drained (Phase 2.3)
                     text=True,
                     bufsize=1,  # Line buffered
+                    preexec_fn=_overlay_preexec if sys.platform.startswith("linux") else None,
                 )
                 try:
                     from wayfinder.utils.overlay_process import write_overlay_pidfile
@@ -5132,7 +5146,10 @@ class WayfinderApp(ctk.CTk):
             self.log("🎯 Overlay: off")
         self.log(f"🎬 Animation refresh: {self._target_fps} Hz (monitor sync)")
         
-        self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        # Taskbar Close / window manager delete = full quit (overlay + tray too).
+        # Hide-to-tray is only via start_minimized or an explicit minimize control —
+        # treating Close as hide left orphan tray/overlay and looked like a leak.
+        self.protocol("WM_DELETE_WINDOW", self.quit_app)
         
         # Only start minimized to tray if the user has enabled this option
         if self.config.get("start_minimized", False):
@@ -6148,7 +6165,8 @@ class WayfinderApp(ctk.CTk):
         right_controls = ctk.CTkFrame(header, fg_color="transparent")
         right_controls.pack(side="right")
         
-        # Close button - minimal
+        # Close = full quit (same as tray Quit / taskbar Close). Use tray or
+        # start-minimized to keep dictation running without the window.
         ctk.CTkButton(
             right_controls,
             text="×",
@@ -6159,7 +6177,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
             font=(self.font_body[0], 18),  # optical glyph size
             corner_radius=RADIUS["sm"],
-            command=self.hide_to_tray,
+            command=self.quit_app,
         ).pack(side="right")
         
         # === Quick Scale Controls (always visible for accessibility) ===
