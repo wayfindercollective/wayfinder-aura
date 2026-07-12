@@ -1194,8 +1194,25 @@ class GlassmorphicOverlay(QWidget):
         except Exception as e:
             print(f"KWin positioning rule setup failed: {e}", file=sys.stderr)
     
+    @staticmethod
+    def _is_wayland_session() -> bool:
+        return (
+            os.environ.get("XDG_SESSION_TYPE") == "wayland"
+            or bool(os.environ.get("WAYLAND_DISPLAY"))
+        )
+
     def _position_at_bottom(self):
-        """Position overlay at bottom center of screen, above the taskbar."""
+        """Position overlay on the configured anchor (default bottom-center).
+
+        On **Wayland/KDE**, Qt ``setGeometry`` / ``move`` do not reliably set absolute
+        position — they often flash the window to the compositor default (center /
+        top-left) for a frame, then KWin corrects it. That is the listen-button
+        "overlay jumps" bug. So on Wayland we **never** call setGeometry for on-screen
+        placement; only KWin ``frameGeometry`` (the path that actually sticks).
+
+        On X11, native setGeometry/move work and we skip KWin scripting (loadScript
+        spam can freeze the overlay on SteamOS X11).
+        """
         w, h = self.width(), self.height()
         x, y = self._calculate_position(w, h)
         
@@ -1207,35 +1224,22 @@ class GlassmorphicOverlay(QWidget):
             if y < 0 or y > full.y() + full.height() - h:
                 # Position seems wrong, use a safe fallback (60px from bottom)
                 y = full.y() + full.height() - 60 - h
-        
-        # Try multiple methods to set position (Wayland workarounds)
-        # Method 1: setGeometry with explicit size
+
+        if self._is_wayland_session():
+            # Size-only via Qt is OK (setFixedWidth in _update_size); position = KWin only.
+            if self.isVisible():
+                _force_kde_window_position("Wayfinder Aura Overlay", x, y, w, h)
+            return
+
+        # X11 (and non-Wayland): Qt owns geometry.
         self.setGeometry(x, y, w, h)
-        
-        # Method 2: move after geometry is set
         self.move(x, y)
-        
-        # Method 3: Set position via window handle (more direct on Wayland)
         try:
             if self.windowHandle():
                 from PyQt6.QtCore import QPoint
                 self.windowHandle().setPosition(QPoint(x, y))
         except Exception:
             pass
-        
-        # Method 4: Force via KWin script — needed ONLY on Wayland, where Qt can't set an
-        # absolute window position. On X11 the native setGeometry/move above already work, and
-        # calling KWin scripting on every reposition is harmful: each loadScript registers a new
-        # script (never unloaded) and `start` re-runs ALL of them, so repeated repositioning (e.g.
-        # dragging the position slider) accumulates in KWin until the qdbus calls hit their
-        # timeouts and the overlay+tray subprocess stalls — the SteamOS-X11 "overlay froze, tray
-        # stopped" hang. Gate to Wayland so X11 uses native positioning only.
-        _is_wayland = (
-            os.environ.get("XDG_SESSION_TYPE") == "wayland"
-            or bool(os.environ.get("WAYLAND_DISPLAY"))
-        )
-        if self.isVisible() and _is_wayland:
-            _force_kde_window_position("Wayfinder Aura Overlay", x, y, w, h)
     
     def _update_size(self):
         """Update widget width based on current width (called during animations)."""
@@ -1430,11 +1434,17 @@ class GlassmorphicOverlay(QWidget):
         
         # Calculate new width
         target_width = self._calculate_target_width(label)
+
+        # On Wayland, animating width fires setFixedWidth + KWin every tick. Even without
+        # setGeometry, multi-step size changes can still reflow the surface. Snap width
+        # instantly so READY→Listening is one size + one KWin place (no jump train).
+        # Color/glow still animate for polish.
+        width_duration = 0 if self._is_wayland_session() else duration
         
         # Animate properties (guarded: a bad color/NaN must not abort the transition or stop
         # future repaints — the new state has already been committed above).
         try:
-            self._width_animator.animate_to(float(target_width), duration)
+            self._width_animator.animate_to(float(target_width), width_duration)
             self._border_color_top.animate_to(QColor(palette.border_top), duration)
             self._border_color_bottom.animate_to(QColor(palette.border_bottom), duration)
             self._glow_color.animate_to(QColor(palette.glow), duration)
@@ -1515,16 +1525,17 @@ class GlassmorphicOverlay(QWidget):
         
         # Calculate position using unified method
         x, y = self._calculate_position(final_width, final_height)
-        
-        # Try Qt first (won't work on Wayland but doesn't hurt)
-        self.setGeometry(x, y, final_width, final_height)
-        
-        # Force position via KWin (the only way that works on Wayland)
-        _force_kde_window_position(
-            "Wayfinder Aura Overlay",
-            x, y,
-            final_width, final_height
-        )
+
+        # Wayland: do NOT setGeometry first — that is what flashes the pill off-anchor
+        # (often to center) before KWin can place it. X11 uses Qt geometry.
+        if self._is_wayland_session():
+            _force_kde_window_position(
+                "Wayfinder Aura Overlay",
+                x, y,
+                final_width, final_height,
+            )
+        else:
+            self.setGeometry(x, y, final_width, final_height)
         
         # Start transparent BEFORE mapping so the first mapped frame is invisible, then
         # fade up. Force the window to 0 directly (the value-setter guard skips the emit
@@ -2059,18 +2070,30 @@ def run_overlay():
         
         # Use overlay's unified position calculation
         x, y = overlay._calculate_position(final_width, final_height)
-        
-        # Try Qt positioning (may not work on Wayland)
-        overlay.setGeometry(x, y, final_width, final_height)
+
+        overlay.setFixedSize(final_width, final_height)
+        # Wayland: avoid setGeometry (center flash); KWin places after map.
+        if not (
+            os.environ.get("XDG_SESSION_TYPE") == "wayland"
+            or os.environ.get("WAYLAND_DISPLAY")
+        ):
+            overlay.setGeometry(x, y, final_width, final_height)
         overlay.show()
         overlay.set_state(OverlayState.READY, animate=False)
-        
-        # Force position via KWin after showing
-        QTimer.singleShot(100, lambda: _force_kde_window_position(
-            "Wayfinder Aura Overlay",
-            x, y,
-            final_width, final_height
-        ))
+
+        def _boot_place():
+            _force_kde_window_position(
+                "Wayfinder Aura Overlay", x, y, final_width, final_height
+            )
+
+        if (
+            os.environ.get("XDG_SESSION_TYPE") == "wayland"
+            or os.environ.get("WAYLAND_DISPLAY")
+        ):
+            QTimer.singleShot(50, _boot_place)
+            QTimer.singleShot(150, _boot_place)
+        else:
+            QTimer.singleShot(100, _boot_place)
     # In "standard" mode, window starts hidden
     
     # Command processing timer
