@@ -39,10 +39,10 @@
 
 | Step | Work | Status |
 |------|------|--------|
-| 2.1 | KWin geometry **once per state transition**, not per animation frame | **Done** |
-| 2.2 | Unload previous KWin script id before load (stop leak) | **Done** |
-| 2.3 | Drain overlay **stderr** after start (reader thread) | **Done** |
-| 2.4 | Optional rate-limit under load | Deferred (unload + once-per-transition covers common case) |
+| 2.1 | KWin geometry once per transition (not per frame) | **Reverted** — caused listen/stop jump on Wayland; back to pre-Phase-2 always-position path |
+| 2.2 | Unload previous KWin script id before load | **Reverted** with 2.1 (same block) |
+| 2.3 | Drain overlay **stderr** after start (reader thread) | **Done** (in OverlayController) |
+| 2.4 | Optional rate-limit under load | Deferred |
 
 ### Phase 3 — Inject honesty & optional focus assist
 

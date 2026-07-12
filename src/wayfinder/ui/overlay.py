@@ -51,98 +51,24 @@ if os.environ.get("XDG_SESSION_TYPE") == "wayland":
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
 
 
-# KWin loadScript never unloads itself; each call leaks a script and `start`
-# re-runs the whole set. Track the last ID so we unload before the next load.
-_kwin_last_script_id: str | None = None
-
-
-def _kwin_unload_last_script() -> None:
-    """Best-effort unload of the previous KWin script (stops leak / freeze path)."""
-    global _kwin_last_script_id
-    if not _kwin_last_script_id:
-        return
-    sid = _kwin_last_script_id
-    _kwin_last_script_id = None
-    try:
-        subprocess.run(
-            [
-                "qdbus", "org.kde.KWin", "/Scripting",
-                "org.kde.kwin.Scripting.unloadScript", str(sid),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-    except Exception:
-        pass
-
-
-def _kwin_load_and_start(script_content: str) -> bool:
-    """Write a temp KWin script, unload any previous ID, load once, start.
-
-    Returns True if loadScript reported success. Caller should not call this
-    on every animation frame — only on completed state transitions / show.
-    """
-    global _kwin_last_script_id
-    try:
-        import tempfile
-
-        _kwin_unload_last_script()
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False) as f:
-            f.write(script_content)
-            script_path = f.name
-
-        try:
-            result = subprocess.run(
-                [
-                    "qdbus", "org.kde.KWin", "/Scripting",
-                    "org.kde.kwin.Scripting.loadScript", script_path,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if result.returncode != 0:
-                return False
-            # loadScript prints the script id (int) on stdout when successful.
-            sid = (result.stdout or "").strip().splitlines()
-            if sid and sid[-1].strip().isdigit():
-                _kwin_last_script_id = sid[-1].strip()
-            subprocess.run(
-                [
-                    "qdbus", "org.kde.KWin", "/Scripting",
-                    "org.kde.kwin.Scripting.start",
-                ],
-                capture_output=True,
-                timeout=1,
-            )
-            return True
-        finally:
-            try:
-                os.unlink(script_path)
-            except OSError:
-                pass
-    except Exception as e:
-        print(f"KWin script load failed: {e}", file=sys.stderr)
-    return False
-
-
 def _force_kde_window_position(window_title: str, x: int, y: int, width: int, height: int) -> bool:
     """Force window position using KWin scripting - the ONLY way that works on Wayland."""
-    # Escape for JS string context (title is a fixed product string, still be safe).
-    safe_title = window_title.replace("\\", "\\\\").replace('"', '\\"')
-    script_content = f'''
+    try:
+        import tempfile
+        
+        # Create a KWin script that FORCES position via frameGeometry
+        script_content = f'''
         // KWin script to force overlay position (required for Wayland)
         var windows = workspace.windowList();
         for (var i = 0; i < windows.length; i++) {{
             var w = windows[i];
-            if (w.caption && w.caption.indexOf("{safe_title}") !== -1) {{
+            if (w.caption && w.caption.indexOf("{window_title}") !== -1) {{
+                // Force position - this is the only way on Wayland
                 w.frameGeometry = {{
-                    x: {int(x)},
-                    y: {int(y)},
-                    width: {int(width)},
-                    height: {int(height)}
+                    x: {x},
+                    y: {y},
+                    width: {width},
+                    height: {height}
                 }};
                 w.keepAbove = true;
                 w.skipTaskbar = true;
@@ -151,22 +77,48 @@ def _force_kde_window_position(window_title: str, x: int, y: int, width: int, he
             }}
         }}
         '''
-    try:
-        return _kwin_load_and_start(script_content)
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
+        
+        try:
+            result = subprocess.run([
+                "qdbus", "org.kde.KWin", "/Scripting",
+                "org.kde.kwin.Scripting.loadScript", script_path
+            ], capture_output=True, text=True, timeout=2)
+            
+            if result.returncode == 0:
+                subprocess.run([
+                    "qdbus", "org.kde.KWin", "/Scripting",
+                    "org.kde.kwin.Scripting.start"
+                ], capture_output=True, timeout=1)
+                return True
+        finally:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+                
     except Exception as e:
         print(f"KWin position force failed: {e}", file=sys.stderr)
+    
     return False
 
 
 def _try_kde_window_setup(window_title: str, x: int, y: int, width: int, height: int) -> bool:
     """Try to set window properties using KWin scripting (no position - app handles that)."""
-    safe_title = window_title.replace("\\", "\\\\").replace('"', '\\"')
-    script_content = f'''
+    try:
+        import tempfile
+        
+        # Create a KWin script that sets properties only (not position)
+        # Position is handled by the app to allow off-screen hiding
+        script_content = f'''
         // KWin script to configure overlay window (properties only)
         var windows = workspace.windowList();
         for (var i = 0; i < windows.length; i++) {{
             var w = windows[i];
-            if (w.caption && w.caption.indexOf("{safe_title}") !== -1) {{
+            if (w.caption && w.caption.indexOf("{window_title}") !== -1) {{
                 w.keepAbove = true;
                 w.skipTaskbar = true;
                 w.skipPager = true;
@@ -175,45 +127,94 @@ def _try_kde_window_setup(window_title: str, x: int, y: int, width: int, height:
             }}
         }}
         '''
-    try:
-        return _kwin_load_and_start(script_content)
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
+        
+        try:
+            result = subprocess.run([
+                "qdbus", "org.kde.KWin", "/Scripting",
+                "org.kde.kwin.Scripting.loadScript", script_path
+            ], capture_output=True, text=True, timeout=2)
+            
+            if result.returncode == 0:
+                subprocess.run([
+                    "qdbus", "org.kde.KWin", "/Scripting",
+                    "org.kde.kwin.Scripting.start"
+                ], capture_output=True, timeout=1)
+                return True
+        finally:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+                
     except Exception as e:
         print(f"KDE window setup failed: {e}", file=sys.stderr)
+    
     return False
 
 
 def _setup_kwin_window_rule(x: int, y: int, width: int, height: int) -> bool:
     """Create a persistent KWin window rule to position the overlay from first frame."""
-    # x/y/w/h kept in signature for call-site compatibility; rule is property-only.
-    del x, y, width, height
-    script_content = '''
+    try:
+        import tempfile
+        
+        # Create a KWin script that sets window properties but NOT position
+        # Position is handled by the app itself to allow off-screen hiding
+        script_content = f'''
         // KWin script - set overlay properties (not position - app handles that)
-        workspace.windowAdded.connect(function(client) {
-            if (client.caption && client.caption.indexOf("Wayfinder Aura Overlay") !== -1) {
+        workspace.windowAdded.connect(function(client) {{
+            if (client.caption && client.caption.indexOf("Wayfinder Aura Overlay") !== -1) {{
+                // Only set properties, not position
                 client.keepAbove = true;
                 client.skipTaskbar = true;
                 client.skipPager = true;
                 client.skipSwitcher = true;
                 client.demandsAttention = false;
-            }
-        });
-
+            }}
+        }});
+        
+        // Also handle existing windows (properties only, not position)
         var windows = workspace.windowList();
-        for (var i = 0; i < windows.length; i++) {
+        for (var i = 0; i < windows.length; i++) {{
             var w = windows[i];
-            if (w.caption && w.caption.indexOf("Wayfinder Aura Overlay") !== -1) {
+            if (w.caption && w.caption.indexOf("Wayfinder Aura Overlay") !== -1) {{
                 w.keepAbove = true;
                 w.skipTaskbar = true;
                 w.skipPager = true;
                 w.skipSwitcher = true;
                 w.demandsAttention = false;
-            }
-        }
+            }}
+        }}
         '''
-    try:
-        return _kwin_load_and_start(script_content)
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
+        
+        try:
+            result = subprocess.run([
+                "qdbus", "org.kde.KWin", "/Scripting",
+                "org.kde.kwin.Scripting.loadScript", script_path
+            ], capture_output=True, text=True, timeout=2)
+            
+            if result.returncode == 0:
+                subprocess.run([
+                    "qdbus", "org.kde.KWin", "/Scripting",
+                    "org.kde.kwin.Scripting.start"
+                ], capture_output=True, timeout=1)
+                return True
+        finally:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+                
     except Exception as e:
         print(f"KWin rule setup failed: {e}", file=sys.stderr)
+    
     return False
 
 
@@ -1193,14 +1194,8 @@ class GlassmorphicOverlay(QWidget):
         except Exception as e:
             print(f"KWin positioning rule setup failed: {e}", file=sys.stderr)
     
-    def _position_at_bottom(self, *, use_kwin: bool = True):
-        """Position overlay at bottom center of screen, above the taskbar.
-
-        *use_kwin*: when True (default for completed transitions / show), force
-        absolute geometry via a single KWin script on Wayland. Animation frames
-        must pass ``use_kwin=False`` so we only update Qt geometry — KWin once
-        per transition (Phase 2.1), never per width-animation tick.
-        """
+    def _position_at_bottom(self):
+        """Position overlay at bottom center of screen, above the taskbar."""
         w, h = self.width(), self.height()
         x, y = self._calculate_position(w, h)
         
@@ -1229,11 +1224,12 @@ class GlassmorphicOverlay(QWidget):
             pass
         
         # Method 4: Force via KWin script — needed ONLY on Wayland, where Qt can't set an
-        # absolute window position. On X11 the native setGeometry/move above already work.
-        # Call only when use_kwin=True (state transition / show), never per animation frame:
-        # loadScript without unload used to leak and freeze the overlay+tray process.
-        if not use_kwin:
-            return
+        # absolute window position. On X11 the native setGeometry/move above already work, and
+        # calling KWin scripting on every reposition is harmful: each loadScript registers a new
+        # script (never unloaded) and `start` re-runs ALL of them, so repeated repositioning (e.g.
+        # dragging the position slider) accumulates in KWin until the qdbus calls hit their
+        # timeouts and the overlay+tray subprocess stalls — the SteamOS-X11 "overlay froze, tray
+        # stopped" hang. Gate to Wayland so X11 uses native positioning only.
         _is_wayland = (
             os.environ.get("XDG_SESSION_TYPE") == "wayland"
             or bool(os.environ.get("WAYLAND_DISPLAY"))
@@ -1245,8 +1241,7 @@ class GlassmorphicOverlay(QWidget):
         """Update widget width based on current width (called during animations)."""
         width = int(self._current_width) + (self.glow_margin * 2)
         self.setFixedWidth(width)
-        # Qt geometry only — KWin is applied once when the state transition settles.
-        self._position_at_bottom(use_kwin=False)
+        self._position_at_bottom()
         # Re-apply mask when size changes
         if self.isVisible():
             self._apply_squircle_mask()
@@ -1259,8 +1254,8 @@ class GlassmorphicOverlay(QWidget):
         # Re-apply mask when size changes
         if self.isVisible():
             self._apply_squircle_mask()
-            # Scale change is a discrete user action — allow one KWin force.
-            self._position_at_bottom(use_kwin=True)
+            # Force reposition after size change (critical for Wayland)
+            self._position_at_bottom()
     
     def _on_width_changed(self, width: float):
         """Handle width animation updates."""
@@ -1467,14 +1462,6 @@ class GlassmorphicOverlay(QWidget):
         self._idle_frozen = False
         if not self._render_timer.isActive():
             self._render_timer.start()
-
-        # One KWin geometry force per completed state transition (not per animation frame).
-        # Animation ticks use _position_at_bottom(use_kwin=False) via _update_size.
-        if self.isVisible() and old_state != OverlayState.HIDDEN:
-            try:
-                self._position_at_bottom(use_kwin=True)
-            except Exception as exc:
-                _log(f"set_state: position/KWin error: {exc}")
 
         # Show and fade in if hidden
         if old_state == OverlayState.HIDDEN:
