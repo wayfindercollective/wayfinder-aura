@@ -36,15 +36,21 @@ def main() -> int:
     p.add_argument("--bucket", default=os.environ.get("R2_BUCKET", "wayfinder-aura-models"))
     p.add_argument(
         "--endpoint",
-        default=os.environ.get(
-            "R2_ENDPOINT",
-            "https://<ACCOUNT_ID>.r2.cloudflarestorage.com",
-        ),
+        default=os.environ.get("R2_ENDPOINT"),
+        help="R2 S3 API endpoint (or set R2_ENDPOINT). "
+        "Form: https://<ACCOUNT_ID>.r2.cloudflarestorage.com",
     )
     args = p.parse_args()
 
     access = os.environ.get("R2_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID")
     secret = os.environ.get("R2_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not args.endpoint:
+        print(
+            "Missing R2_ENDPOINT.\n"
+            "  export R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com",
+            file=sys.stderr,
+        )
+        return 2
     if not access or not secret:
         print(
             "Missing R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY.\n"

@@ -1,8 +1,8 @@
 """
 Models CDN helpers — resolve download URLs for free (public) and Ultra (auth) assets.
 
-Pilot-hosted models live on Cloudflare R2 behind a Worker. The Worker verifies the
-same Ed25519 license token the app already stores (Bearer header).
+Models live on Cloudflare R2 behind a Worker. The Worker verifies the same
+Ed25519 license token the app already stores (Bearer header).
 
 Env / config:
   WAYFINDER_MODELS_CDN_BASE  e.g. https://models.wayfindercollective.io
@@ -30,16 +30,17 @@ import os
 from typing import Optional
 from urllib.parse import quote, urlparse
 
-# Pilot Worker (Path A). Override via WAYFINDER_MODELS_CDN_BASE or config
-# models_cdn_base. Empty string disables CDN (HF catalog fallback only).
-_PILOT_MODELS_CDN = "https://wayfinder-models-cdn.peter-7b5.workers.dev"
+# Default Workers hostname until a custom domain is attached (see wrangler.toml).
+# Override via WAYFINDER_MODELS_CDN_BASE or config models_cdn_base.
+# Empty string disables CDN (HF catalog fallback only).
+_DEFAULT_MODELS_CDN = "https://wayfinder-models-cdn.peter-7b5.workers.dev"
 DEFAULT_MODELS_CDN_BASE = os.environ.get(
-    "WAYFINDER_MODELS_CDN_BASE", _PILOT_MODELS_CDN
+    "WAYFINDER_MODELS_CDN_BASE", _DEFAULT_MODELS_CDN
 ).rstrip("/")
 
 
 def get_models_cdn_base(config: Optional[dict] = None) -> str:
-    """Resolve CDN base: env → config → pilot default.
+    """Resolve CDN base: env → config → built-in default.
 
     Env wins so operators can point a build at staging/prod without rewriting
     config.json. Explicit empty config value still disables CDN when env is unset.

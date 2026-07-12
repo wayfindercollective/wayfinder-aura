@@ -348,11 +348,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "api_benchmark_results": {},
 
     # Cloudflare R2 models CDN (Worker base URL, no trailing slash).
-    # Empty = use Hugging Face fallback URLs in the catalog (dev). Production:
-    #   "https://wayfinder-models-cdn.<subdomain>.workers.dev"
-    # or custom domain. Also overridable via env WAYFINDER_MODELS_CDN_BASE.
-    # Pilot Models CDN Worker. Empty string disables CDN (HF-only). Override in
-    # user config or WAYFINDER_MODELS_CDN_BASE for custom domains.
+    # Empty string disables CDN (Hugging Face catalog fallback only).
+    # Override via user config or env WAYFINDER_MODELS_CDN_BASE (preferred for
+    # custom domains like https://models.wayfindercollective.io).
     "models_cdn_base": "https://wayfinder-models-cdn.peter-7b5.workers.dev",
     # Optional override for remote model catalog JSON. Empty = {models_cdn_base}/v1/catalog
     "models_catalog_url": "",

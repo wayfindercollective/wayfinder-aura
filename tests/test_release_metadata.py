@@ -127,15 +127,38 @@ def test_desktop_entries_validate_when_tool_is_available():
     if not validator:
         return
 
-    for desktop in (SOURCE_DESKTOP, FLATPAK_DESKTOP):
+    # Flatpak desktop is install-ready as checked in.
+    result = subprocess.run(
+        [validator, str(FLATPAK_DESKTOP)],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"{FLATPAK_DESKTOP.relative_to(REPO)}: {result.stderr}"
+
+    # Source desktop is a template (@WAYFINDER_ROOT@); validate after rewrite.
+    import tempfile
+    from pathlib import Path
+
+    rewritten = SOURCE_DESKTOP.read_text(encoding="utf-8").replace(
+        "@WAYFINDER_ROOT@", "/opt/wayfinder-aura"
+    )
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".desktop", delete=False, encoding="utf-8"
+    ) as tmp:
+        tmp.write(rewritten)
+        tmp_path = Path(tmp.name)
+    try:
         result = subprocess.run(
-            [validator, str(desktop)],
-            cwd=REPO,
+            [validator, str(tmp_path)],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        assert result.returncode == 0, f"{desktop.relative_to(REPO)}: {result.stderr}"
+        assert result.returncode == 0, f"rewritten source desktop: {result.stderr}"
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def test_source_desktop_actions_match_build_rewrite_contract():
@@ -143,13 +166,14 @@ def test_source_desktop_actions_match_build_rewrite_contract():
     build = (REPO / "build.sh").read_text(encoding="utf-8")
 
     assert "Actions=toggle-recording;cycle-style;" in desktop
-    assert "Exec=/home/bazzite/Dev/wayfinder-aura/launch-wayfinder-aura.sh" in desktop
-    assert "Exec=python3 /home/bazzite/Dev/wayfinder-aura/trigger_record.py" in desktop
-    assert "Exec=python3 /home/bazzite/Dev/wayfinder-aura/trigger_style.py" in desktop
-    assert "Icon=/home/bazzite/Dev/wayfinder-aura/assets/icon.png" in desktop
+    assert "Exec=@WAYFINDER_ROOT@/launch-wayfinder-aura.sh" in desktop
+    assert "Exec=python3 @WAYFINDER_ROOT@/trigger_record.py" in desktop
+    assert "Exec=python3 @WAYFINDER_ROOT@/trigger_style.py" in desktop
+    assert "Icon=@WAYFINDER_ROOT@/assets/icon.png" in desktop
+    assert "/home/bazzite/" not in desktop
 
     assert 'DESKTOP_DEST="$HOME/.local/share/applications/wayfinder-aura.desktop"' in build
-    assert 'sed "s|/home/bazzite/Dev/wayfinder-aura|$SCRIPT_DIR|g"' in build
+    assert 'sed "s|@WAYFINDER_ROOT@|$SCRIPT_DIR|g"' in build
     assert '"$SCRIPT_DIR/wayfinder-aura.desktop" > "$DESKTOP_DEST"' in build
 
 

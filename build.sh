@@ -98,7 +98,7 @@ if [ -f "dist/wayfinder-aura" ]; then
     DESKTOP_DEST="$HOME/.local/share/applications/wayfinder-aura.desktop"
     echo "📄 Installing desktop entry to $DESKTOP_DEST ..."
     mkdir -p "$(dirname "$DESKTOP_DEST")"
-    sed "s|/home/bazzite/Dev/wayfinder-aura|$SCRIPT_DIR|g" \
+    sed "s|@WAYFINDER_ROOT@|$SCRIPT_DIR|g" \
         "$SCRIPT_DIR/wayfinder-aura.desktop" > "$DESKTOP_DEST"
     echo "   ✅ Installed (paths point at $SCRIPT_DIR)"
     echo ""
