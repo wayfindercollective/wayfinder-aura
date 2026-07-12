@@ -15285,17 +15285,17 @@ class WayfinderApp(ctk.CTk):
         # stuck-overlay report can be correlated against the overlay-debug.log timeline.
         if old_state != new_state:
             print(f"[STATE] {old_state.name} -> {new_state.name}", flush=True)
-            # Game Mode audio cues — sound is the only feedback when the overlay is off.
+            # Game Mode feedback — audio + optional rumble (overlay is off).
             # 'done'/'error' are fired from on_injection_done()/on_error(), NOT here: both
             # the success and failure paths funnel through IDLE, so a →IDLE cue here would
             # chime success even when nothing landed.
             if getattr(self, "_game_mode", False):
                 try:
-                    from wayfinder.feedback import audio as _audio
+                    from wayfinder.feedback import play_game_mode_cue
                     if new_state == AppState.RECORDING:
-                        _audio.play_cue("start")
+                        play_game_mode_cue("start")
                     elif old_state == AppState.RECORDING and new_state == AppState.PROCESSING:
-                        _audio.play_cue("stop")
+                        play_game_mode_cue("stop")
                 except Exception:
                     pass
 
@@ -16174,10 +16174,15 @@ class WayfinderApp(ctk.CTk):
                         break
                     time.sleep(0.05)
 
-            # Skip post-processing per-chunk - will be applied to final combined text
+            # Skip post-processing per-chunk - will be applied to final combined text.
+            # Light ASR profile is a runtime overlay only (never written back to disk).
+            from wayfinder.core.gm_asr import effective_asr_config
+            asr_cfg = effective_asr_config(
+                self.config, bool(getattr(self, "_game_mode", False))
+            )
             text = transcribe_with_config(
                 chunk_path,
-                self.config,
+                asr_cfg,
                 context=context,
                 skip_post_processing=True,
             )
@@ -16537,7 +16542,12 @@ class WayfinderApp(ctk.CTk):
         try:
             self.log("🔄 Transcribing...")
             trans_start = time_module.perf_counter()
-            text = transcribe_with_config(audio_path, self.config)
+            # Light ASR profile is a runtime overlay only (never written back to disk).
+            from wayfinder.core.gm_asr import effective_asr_config
+            asr_cfg = effective_asr_config(
+                self.config, bool(getattr(self, "_game_mode", False))
+            )
+            text = transcribe_with_config(audio_path, asr_cfg)
             trans_elapsed = time_module.perf_counter() - trans_start
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
             self.event_queue.put((EventType.TRANSCRIPTION_DONE, (text, gen)))
@@ -16644,7 +16654,13 @@ class WayfinderApp(ctk.CTk):
                 target and now_focused and target != now_focused) else ""
             self.log(f"⌨ Inject {len(text)} chars → win {target or now_focused or '?'}{drift}")
 
-            inject_text(text, typing_speed="instant", target_window=target)
+            inject_text(
+                text,
+                typing_speed="instant",
+                target_window=target,
+                game_mode=bool(getattr(self, "_game_mode", False)),
+                paste_fallback=bool(self.config.get("game_mode_paste_fallback", True)),
+            )
             self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
@@ -16658,8 +16674,8 @@ class WayfinderApp(ctk.CTk):
         # see update_state(), which deliberately does NOT cue on the shared →IDLE transition.
         if getattr(self, "_game_mode", False):
             try:
-                from wayfinder.feedback import audio as _audio
-                _audio.play_cue("done")
+                from wayfinder.feedback import play_game_mode_cue
+                play_game_mode_cue("done")
             except Exception:
                 pass
 
@@ -16760,8 +16776,8 @@ class WayfinderApp(ctk.CTk):
         # landed) from a successful one without the overlay.
         if getattr(self, "_game_mode", False):
             try:
-                from wayfinder.feedback import audio as _audio
-                _audio.play_cue("error")
+                from wayfinder.feedback import play_game_mode_cue
+                play_game_mode_cue("error")
             except Exception:
                 pass
 

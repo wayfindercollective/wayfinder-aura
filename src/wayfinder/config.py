@@ -255,9 +255,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Master switch for the on-screen status pill. Off = no visual overlay; a
     # tray-only overlay subprocess still hosts the Qt StatusNotifier tray on Linux.
     "overlay_enabled": True,
-    # SteamOS Game Mode dictation (audio cues, no overlay). This module is the single
-    # source of DEFAULT_CONFIG — wayfinder_main.py imports it (no mirror to keep in sync).
+    # SteamOS Game Mode dictation (audio cues + rumble, no overlay). This module is the
+    # single source of DEFAULT_CONFIG — wayfinder_main.py imports it (no mirror to keep in sync).
     "game_mode_dictation": False,
+    # When True (default) and Game Mode dictation is active, ASR uses a lighter
+    # runtime profile (smaller model if available, accuracy_mode=fast, GPU off by
+    # default). Does NOT rewrite the user's saved Desktop model_path on disk.
+    "game_mode_light_asr": True,
+    "game_mode_accuracy_mode": "fast",
+    "game_mode_use_gpu": False,
+    # Optional explicit light model path (empty = auto-pick tiny/base next to the
+    # user's model, or Flatpak bundled base.en). Only used while GM dictation is on.
+    "game_mode_model_path": "",
+    "game_mode_faster_whisper_model": "base",
+    # When True (default), failed type-injection in Game Mode falls back to
+    # clipboard write + Ctrl+V paste. Desktop happy-path typing is unchanged.
+    "game_mode_paste_fallback": True,
     # Watchdog timeout (s) for a hung PROCESSING state; 0 disables.
     "processing_timeout_secs": 120,
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0

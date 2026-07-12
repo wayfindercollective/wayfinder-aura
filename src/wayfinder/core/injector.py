@@ -358,38 +358,139 @@ def prime_wayland_injection() -> "tuple[bool, str]":
         return False, "wtype not found — can't pre-arm Wayland injection approval"
 
 
-def inject_text(text: str, typing_speed: str = "instant", target_window: "str | None" = None) -> None:
-    """
-    Inject text into the active window.
+def _clipboard_write_linux(text: str) -> None:
+    """Write *text* to the session clipboard. Raises InjectionError on failure."""
+    # Prefer Wayland tools when available; fall back to X11 clipboard utilities.
+    for cmd in (
+        ["wl-copy", "--"],
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+    ):
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            result = subprocess.run(
+                cmd,
+                input=text.encode("utf-8"),
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return
+        except Exception:
+            continue
+    raise InjectionError(
+        "No working clipboard writer found (need wl-copy, xclip, or xsel)"
+    )
 
-    Dispatches to platform-specific backend:
-    - Linux/X11: xdotool (preferred); ydotool as fallback
-    - Linux/Wayland: wtype (preferred — sandbox-safe); ydotool as fallback
-    - macOS: clipboard paste (pbcopy + Cmd-V)
 
-    Args:
-        text: Text to inject
-        typing_speed: Speed preset (Linux only) - "instant", "fast", "normal", "slow", "very_slow"
-        target_window: X11 window id (from get_active_window() at record-start) to refocus before
-            typing, so a long dictation lands in the user's window even if focus drifted during
-            transcription. xdotool backend only; ignored elsewhere.
+def _clipboard_read_linux() -> "str | None":
+    """Best-effort read of the session clipboard (for restore after paste)."""
+    for cmd in (
+        ["wl-paste", "--no-newline"],
+        ["xclip", "-selection", "clipboard", "-o"],
+        ["xsel", "--clipboard", "--output"],
+    ):
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=5)
+            if result.returncode == 0:
+                return result.stdout.decode("utf-8", errors="replace")
+        except Exception:
+            continue
+    return None
+
+
+def _send_ctrl_v_linux(tool: str) -> None:
+    """Synthesize Ctrl+V with the active injection tool."""
+    if tool == "xdotool":
+        result = subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+            raise InjectionError(f"xdotool ctrl+v failed: {detail}")
+        return
+    if tool == "wtype":
+        result = subprocess.run(
+            ["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+            raise InjectionError(f"wtype ctrl+v failed: {detail}")
+        return
+    # ydotool (and any other Linux path that reached here)
+    ydotool_bin = _get_ydotool_binary()
+    env = _get_ydotool_env()
+    # KEY_LEFTCTRL = 29, KEY_V = 47; 1=press, 0=release
+    result = subprocess.run(
+        [ydotool_bin, "key", "29:1", "47:1", "47:0", "29:0"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+        raise InjectionError(f"ydotool ctrl+v failed: {detail}")
+
+
+def inject_text_clipboard_paste(text: str) -> None:
+    """Inject *text* via clipboard write + Ctrl+V (Linux) or Cmd+V (macOS).
+
+    Used as the Game Mode fallback when synthetic typing fails, and as the
+    native macOS path. Best-effort clipboard restore after paste.
     """
     if not text:
         return
-
-    # Clean up the text - remove leading/trailing whitespace
     text = text.strip()
-
     if not text:
         return
 
     if sys.platform == "darwin":
-        _inject_text_pyautogui(text, typing_speed)
+        _inject_text_pyautogui(text, "instant")
         return
 
-    # Linux: prefer xdotool on X11 (no daemon, survives SteamOS pacman wipes);
-    # fall back to ydotool on Wayland or when xdotool missing.
     from ..utils.platform import get_text_injector
+
+    tool = get_text_injector()
+    if tool == "none":
+        raise InjectionError(
+            "No text injection tool available for clipboard paste on Linux."
+        )
+
+    old_clipboard = _clipboard_read_linux()
+    _clipboard_write_linux(text)
+    time.sleep(0.05)
+    try:
+        _send_ctrl_v_linux(tool if tool in ("xdotool", "wtype", "ydotool") else "ydotool")
+    finally:
+        # Best-effort restore: only if clipboard still holds our text.
+        if old_clipboard is not None:
+            try:
+                time.sleep(0.08)
+                current = _clipboard_read_linux()
+                if current == text:
+                    _clipboard_write_linux(old_clipboard)
+            except Exception:
+                pass
+
+
+def _inject_text_type_linux(
+    text: str,
+    typing_speed: str = "instant",
+    target_window: "str | None" = None,
+) -> None:
+    """Linux type-path only (xdotool / wtype / ydotool). Raises InjectionError."""
+    from ..utils.platform import get_text_injector
+
     tool = get_text_injector()
     if tool == "xdotool":
         _inject_text_xdotool(text, typing_speed, target_window)
@@ -408,7 +509,6 @@ def inject_text(text: str, typing_speed: str = "instant", target_window: "str | 
     if not ready:
         raise InjectionError(msg)
 
-    # Get delay values from preset
     if typing_speed in TYPING_SPEEDS:
         key_delay, key_hold = TYPING_SPEEDS[typing_speed]
     else:
@@ -420,11 +520,9 @@ def inject_text(text: str, typing_speed: str = "instant", target_window: "str | 
             ydotool_bin, "type",
             "--key-delay", str(key_delay),
             "--key-hold", str(key_hold),
-            "--", text
+            "--", text,
         ]
-
         env = _get_ydotool_env()
-
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -432,7 +530,6 @@ def inject_text(text: str, typing_speed: str = "instant", target_window: "str | 
             timeout=120,
             env=env,
         )
-
         if result.returncode != 0:
             stderr = result.stderr.strip()
             stdout = result.stdout.strip()
@@ -440,7 +537,6 @@ def inject_text(text: str, typing_speed: str = "instant", target_window: "str | 
             raise InjectionError(
                 f"ydotool failed (exit {result.returncode}): {error_detail}"
             )
-
     except subprocess.TimeoutExpired:
         raise InjectionError("ydotool timed out after 120s")
     except FileNotFoundError:
@@ -448,3 +544,56 @@ def inject_text(text: str, typing_speed: str = "instant", target_window: "str | 
         raise InjectionError(
             f"ydotool not found. Install with: {_get_install_hint('ydotool')}"
         )
+
+
+def inject_text(
+    text: str,
+    typing_speed: str = "instant",
+    target_window: "str | None" = None,
+    *,
+    game_mode: bool = False,
+    paste_fallback: bool = True,
+) -> None:
+    """
+    Inject text into the active window.
+
+    Dispatches to platform-specific backend:
+    - Linux/X11: xdotool (preferred); ydotool as fallback
+    - Linux/Wayland: wtype (preferred — sandbox-safe); ydotool as fallback
+    - macOS: clipboard paste (pbcopy + Cmd-V)
+
+    When *game_mode* is True and *paste_fallback* is True, a failed Linux type
+    path is retried once via clipboard write + Ctrl+V (chat boxes that reject
+    synthetic typing). Desktop Mode (game_mode=False) never takes that GM path.
+
+    Args:
+        text: Text to inject
+        typing_speed: Speed preset (Linux only) - "instant", "fast", "normal", "slow", "very_slow"
+        target_window: X11 window id (from get_active_window() at record-start) to refocus before
+            typing, so a long dictation lands in the user's window even if focus drifted during
+            transcription. xdotool backend only; ignored elsewhere.
+        game_mode: Enable Game Mode type→paste fallback when the type path fails.
+        paste_fallback: When game_mode is True, attempt clipboard paste after type failure.
+    """
+    if not text:
+        return
+
+    # Clean up the text - remove leading/trailing whitespace
+    text = text.strip()
+
+    if not text:
+        return
+
+    if sys.platform == "darwin":
+        _inject_text_pyautogui(text, typing_speed)
+        return
+
+    # Linux type path first.
+    try:
+        _inject_text_type_linux(text, typing_speed, target_window)
+        return
+    except InjectionError:
+        if not (game_mode and paste_fallback):
+            raise
+        # Game Mode only: type failed → clipboard + Ctrl+V.
+        inject_text_clipboard_paste(text)

@@ -178,3 +178,20 @@ def test_audio_load_real_cue_decodes():
 def test_prewarm_never_raises():
     from wayfinder.feedback import audio
     audio.prewarm()
+
+
+# =============================================================================
+# Rumble cues — silent no-op contract (paired with audio in Game Mode)
+# =============================================================================
+
+def test_pulse_for_cue_unknown_is_noop():
+    from wayfinder.feedback import pulse_for_cue
+    pulse_for_cue("not-a-cue")
+
+
+def test_pulse_for_cue_missing_device_is_silent(monkeypatch):
+    """pulse_for_cue must never raise when no force-feedback pad is present."""
+    monkeypatch.setattr("wayfinder.feedback.rumble._find_ff_device", lambda: None)
+    from wayfinder.feedback.rumble import pulse_for_cue
+    pulse_for_cue("start")
+    time.sleep(0.1)
