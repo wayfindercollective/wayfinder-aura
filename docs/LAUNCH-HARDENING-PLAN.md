@@ -1,12 +1,27 @@
 # Launch hardening plan — focus, inject, overlay recovery
 
-**Status:** Phase 0 shipped (soft overlay update + deferred restart). Next phases below are for post-commit execution after compact.  
+**Status:** Phase 0 shipped at `b517549` (soft overlay update + deferred restart). Next: execute phases below after compact.  
 **Owner context:** Codex Sol (xhigh) **REVISE** on the soft-update fix; user confirmed dictation works again; launching soon.  
-**Branch:** `main` (wayfinder-aura)
+**Branch:** `main` (wayfinder-aura) — local commit `b517549`; push to origin optional until dogfood OK.
 
 ---
 
-## Already committed (do not re-do)
+## Handoff for next session (after compact)
+
+**Do this first, then code:**
+
+1. **Restart Aura** so the running process is on `b517549` before more dogfood (soft-update is useless if the old always-restart binary is still live).
+2. **Execute in this order only:**
+   1. **Phase 1** — Overlay ack recovery (Sol High) — full section below
+   2. **Phase 2.3** — Drain overlay stderr after start (small, high value)
+   3. **Phase 2.1–2.2** — KWin geometry once + script reuse/unload
+3. Then Phase 3 product decisions, then Phase 4 QA.
+
+**Do not:** re-do Phase 0; hard-restart mid-PASTING; production-deploy Wayfinder-OS storefront (preview only until separate go-ahead).
+
+---
+
+## Already committed (do not re-do) — `b517549`
 
 ### Focus / inject (this commit)
 
@@ -83,11 +98,12 @@
 
 ## Execution order after compact
 
-1. **Phase 1** (ack + deferred restart already partially done — finish ack).  
-2. **Phase 2.3** (stderr drain — small, high value).  
-3. **Phase 2.1–2.2** (KWin).  
-4. **Phase 3** product decision.  
-5. **Phase 4** QA + tag.
+0. **Restart Aura on `b517549`** (or later HEAD after Phase 1 lands).  
+1. **Phase 1** — Qt-thread nonce acks for `show`/`ping`; critical `_send_command` waits + stdout drain; missed ack → `_restart_pending` (never mid-PASTING); tests soft success / ack timeout → pending.  
+2. **Phase 2.3** — stderr drain after overlay start.  
+3. **Phase 2.1–2.2** — geometry once per transition; KWin script load once / unload-reuse.  
+4. **Phase 3** — optional clipboard fallback (product decision); SUPPORT focus note.  
+5. **Phase 4** — physical QA matrix; Flathub/storefront; purchase→activate dry-run; tag.
 
 ## Success metrics
 
