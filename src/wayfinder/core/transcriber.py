@@ -1102,7 +1102,8 @@ class FasterWhisperBackend(TranscriptionBackend):
         suppress_nst: bool = False,
         vad_enabled: bool = True,
         vad_threshold: float = 0.3,
-        gpu_device: str = "auto",
+        gpu_device: str = "auto",  # legacy; ignored for CUDA index (Vulkan ordinal)
+        cuda_device: str | int = "auto",  # CTranslate2 CUDA ordinal only
         timeout: float = 300.0,
     ):
         self.model_size = model_size
@@ -1121,7 +1122,8 @@ class FasterWhisperBackend(TranscriptionBackend):
         self.suppress_nst = suppress_nst
         self.vad_enabled = vad_enabled
         self.vad_threshold = vad_threshold
-        self.gpu_device = gpu_device
+        self.gpu_device = gpu_device  # kept for API compat; not used as CUDA index
+        self.cuda_device = cuda_device
 
         self._model = None
         self._gpu_supported: Optional[bool] = None
@@ -1210,7 +1212,15 @@ class FasterWhisperBackend(TranscriptionBackend):
             return self._model
 
         want_gpu = bool(self.use_gpu and self.supports_gpu())
-        cache_key = (self.model_size, want_gpu, self.compute_type if want_gpu else "int8")
+        # CUDA ordinal only. Never reuse Vulkan/ggml ``gpu_device`` indices here —
+        # those enumerations differ and a bad index forces CUDA fail → CPU-large.
+        device_index = self._cuda_device_index() if want_gpu else 0
+        cache_key = (
+            self.model_size,
+            want_gpu,
+            self.compute_type if want_gpu else "int8",
+            device_index,
+        )
         if cache_key in FasterWhisperBackend._model_cache:
             self._model = FasterWhisperBackend._model_cache[cache_key]
             self._active_device = "cuda" if want_gpu else "cpu"
@@ -1220,14 +1230,6 @@ class FasterWhisperBackend(TranscriptionBackend):
 
         device = "cuda" if want_gpu else "cpu"
         compute_type = self.compute_type if device == "cuda" else "int8"
-
-        # GPU device selection for multi-GPU systems
-        device_index = 0
-        if device == "cuda" and self.gpu_device != "auto":
-            try:
-                device_index = int(self.gpu_device)
-            except (ValueError, TypeError):
-                device_index = 0
 
         try:
             self._model = WhisperModel(
@@ -1242,7 +1244,9 @@ class FasterWhisperBackend(TranscriptionBackend):
             if device == "cuda":
                 print(
                     f"[Faster-Whisper] CUDA load failed ({e}); "
-                    "falling back to CPU int8. On AMD GPUs prefer whisper.cpp + Vulkan.",
+                    "falling back to CPU int8 — this is slow for large models. "
+                    "Prefer whisper.cpp + Vulkan on AMD, or fix CUDA/cuBLAS. "
+                    f"(device_index={device_index}, compute_type={compute_type})",
                     flush=True,
                 )
                 try:
@@ -1253,7 +1257,7 @@ class FasterWhisperBackend(TranscriptionBackend):
                     )
                     self._active_device = "cpu"
                     # Cache under the CPU key so the next call doesn't re-try a broken CUDA path.
-                    cache_key = (self.model_size, False, "int8")
+                    cache_key = (self.model_size, False, "int8", 0)
                 except Exception as cpu_e:
                     raise TranscriptionError(
                         f"Failed to load Faster-Whisper model on both GPU and CPU: {cpu_e}"
@@ -1263,6 +1267,22 @@ class FasterWhisperBackend(TranscriptionBackend):
 
         FasterWhisperBackend._model_cache[cache_key] = self._model
         return self._model
+
+    def _cuda_device_index(self) -> int:
+        """CUDA device ordinal for CTranslate2 (not Vulkan gpu_device).
+
+        Prefer dedicated ``faster_whisper_cuda_device`` when set. Otherwise 0.
+        The shared Settings ``gpu_device`` picker is Vulkan/ggml-ordered and must
+        not be passed through as a CUDA index.
+        """
+        # Optional future config; default safe.
+        raw = getattr(self, "cuda_device", None)
+        if raw is None or raw == "" or raw == "auto":
+            return 0
+        try:
+            return max(0, int(raw))
+        except (ValueError, TypeError):
+            return 0
     
     def transcribe(self, audio_path: str, context: str = "") -> str:
         """
@@ -1861,7 +1881,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
             suppress_nst=config.get("suppress_nst", False),
             vad_enabled=config.get("faster_whisper_vad_enabled", True),
             vad_threshold=config.get("faster_whisper_vad_threshold", 0.3),
-            gpu_device=config.get("gpu_device", "auto"),
+            # Never pass Vulkan gpu_device as CUDA index (different enumeration).
+            cuda_device=config.get("faster_whisper_cuda_device", "auto"),
             # Wall-clock recovery bound for the in-process call. Generous default (CPU transcribe
             # can be slow) — honored from config if the user sets it.
             timeout=config.get("faster_whisper_timeout", 300.0),

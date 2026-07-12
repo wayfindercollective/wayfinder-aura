@@ -877,6 +877,146 @@ def get_gpu_info() -> GPUInfo:
     return _cached_gpu_info
 
 
+# Cache CT2 / package probes — avoid multi-second imports on tooltip/startup.
+_ct2_cuda_cache: bool | None = None
+_fw_pkg_cache: bool | None = None
+_recommend_cache: dict[tuple, tuple[str, str]] = {}
+
+
+def ctranslate2_cuda_available() -> bool:
+    """True when CTranslate2 can open at least one CUDA device.
+
+    Faster-Whisper GPU = CT2 CUDA only (not ROCm torch, not Vulkan).
+    ``torch.cuda.is_available()`` is **not** sufficient: ROCm builds report
+    True for AMD without CT2 being able to run on that device.
+    """
+    global _ct2_cuda_cache
+    if _ct2_cuda_cache is not None:
+        return _ct2_cuda_cache
+    try:
+        import ctranslate2
+
+        _ct2_cuda_cache = int(ctranslate2.get_cuda_device_count() or 0) > 0
+    except Exception:
+        _ct2_cuda_cache = False
+    return _ct2_cuda_cache
+
+
+def faster_whisper_package_available() -> bool:
+    """True if the ``faster_whisper`` package is installed (no heavy import).
+
+    Uses ``importlib.util.find_spec`` so Auto/tooltips never pay the full
+    Faster-Whisper + torch load cost on the UI thread (~1s+ / hundreds of MB).
+    """
+    global _fw_pkg_cache
+    if _fw_pkg_cache is not None:
+        return _fw_pkg_cache
+    try:
+        import importlib.util
+
+        _fw_pkg_cache = importlib.util.find_spec("faster_whisper") is not None
+    except Exception:
+        _fw_pkg_cache = False
+    return _fw_pkg_cache
+
+
+def recommend_local_transcription_backend(
+    *,
+    ctranslate2_cuda: bool | None = None,
+    gpu: GPUInfo | None = None,
+    faster_whisper_installed: bool | None = None,
+    allow_faster_whisper: bool | None = None,
+    use_gpu: bool | None = None,
+    probe_cuda: bool = False,
+) -> tuple[str, str]:
+    """Pick local ASR backend for **Auto** mode (safe default).
+
+    Returns:
+        ``(backend_id, human_reason)`` — Auto **always** returns ``whisper_cpp``.
+
+    Does **not** import CTranslate2 or Faster-Whisper unless *probe_cuda* is True
+    (or callers pass explicit ctranslate2_cuda). Auto/startup must leave
+    *probe_cuda* False so the UI thread never pays ~1s+ / hundreds of MB for CT2.
+
+    NVIDIA: Auto stays on whisper.cpp. Manual Faster-Whisper is optional when
+    CT2 CUDA is known-good (probe only on manual select / optional diagnostics).
+    """
+    del faster_whisper_installed, allow_faster_whisper, use_gpu  # reserved / unused for Auto
+
+    if gpu is None:
+        gpu = get_gpu_info()
+
+    # Optional diagnostics only — never for Auto hot path.
+    if probe_cuda and ctranslate2_cuda is None:
+        ctranslate2_cuda = ctranslate2_cuda_available()
+
+    if gpu.vendor == "apple" or getattr(gpu, "is_apple", False):
+        return (
+            "whisper_cpp",
+            "Apple Silicon: whisper.cpp + Metal is the Auto path.",
+        )
+    if gpu.is_amd:
+        return (
+            "whisper_cpp",
+            "AMD GPU: Auto uses whisper.cpp + Vulkan. "
+            "Faster-Whisper cannot use Vulkan/ROCm (CPU-only and often very slow).",
+        )
+    if gpu.is_intel:
+        return (
+            "whisper_cpp",
+            "Intel GPU: Auto uses whisper.cpp (Vulkan/CPU). "
+            "Faster-Whisper would be CPU-only.",
+        )
+    if gpu.is_nvidia:
+        if ctranslate2_cuda is True:
+            return (
+                "whisper_cpp",
+                "NVIDIA + CT2 CUDA: Auto still uses whisper.cpp (safe GPU path). "
+                "Optional: Manual “Faster-Whisper (CUDA)” for CTranslate2.",
+            )
+        return (
+            "whisper_cpp",
+            "NVIDIA: Auto uses whisper.cpp. "
+            "Faster-Whisper is Manual-only (needs CUDA CTranslate2 + Ultra).",
+        )
+    return (
+        "whisper_cpp",
+        "Auto uses whisper.cpp (CPU / Vulkan / Metal). "
+        "Faster-Whisper is Manual-only when NVIDIA CT2 CUDA is available.",
+    )
+
+
+def apply_auto_transcription_backend(
+    config: dict,
+    *,
+    allow_faster_whisper: bool | None = None,
+) -> tuple[bool, str]:
+    """If auto mode is on, set ``transcription_backend`` to whisper.cpp.
+
+    Returns:
+        ``(changed, message)``.
+
+    No CT2/FW probes. Short-circuits when auto off, remote mode, cloud backend,
+    or already on whisper_cpp.
+    """
+    del allow_faster_whisper  # Auto never selects FW; keep kwarg for call-site compat
+
+    if not config.get("transcription_backend_auto", True):
+        return False, ""
+    if config.get("processing_mode", "local") != "local":
+        return False, ""
+
+    current = config.get("transcription_backend", "whisper_cpp")
+    if current in ("openai_whisper", "groq_whisper"):
+        return False, ""
+    if current == "whisper_cpp":
+        return False, ""
+
+    rec, reason = recommend_local_transcription_backend()
+    config["transcription_backend"] = rec
+    return True, f"{rec} — {reason}"
+
+
 def get_optimal_thread_count() -> int:
     """
     Get optimal thread count based on CPU cores.

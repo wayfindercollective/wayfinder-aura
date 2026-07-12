@@ -18,6 +18,10 @@ from .gpu import (
     benchmark_gpu_devices,
     run_gpu_benchmark_and_cache,
     detect_vulkan_devices,
+    ctranslate2_cuda_available,
+    faster_whisper_package_available,
+    recommend_local_transcription_backend,
+    apply_auto_transcription_backend,
 )
 
 from .platform import (
@@ -100,6 +104,10 @@ __all__ = [
     "benchmark_gpu_devices",
     "run_gpu_benchmark_and_cache",
     "detect_vulkan_devices",
+    "ctranslate2_cuda_available",
+    "faster_whisper_package_available",
+    "recommend_local_transcription_backend",
+    "apply_auto_transcription_backend",
     # Platform - Cross-platform detection
     "get_platform",
     "is_linux",

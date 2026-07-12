@@ -231,7 +231,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_recording_duration": 0,
     
     # GPU acceleration settings
-    "transcription_backend": "whisper_cpp",  # whisper_cpp | faster_whisper
+    "transcription_backend": "whisper_cpp",  # whisper_cpp | faster_whisper | cloud ids
+    # When True (default), local backend is forced to whisper.cpp (safe GPU/CPU
+    # path on AMD/Intel/Apple/NVIDIA). Recovers mis-set Faster-Whisper-on-CPU.
+    # Manual Backend dropdown sets this False. Auto never picks Faster-Whisper
+    # (CUDA load can fail closed to slow CPU-large — Manual only).
+    "transcription_backend_auto": True,
     "use_gpu": True,  # Enable GPU acceleration
     "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
     "gpu_device": "auto",  # "auto" = benchmark and pick fastest, or "0", "1", "2" for manual selection
@@ -240,6 +245,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Faster-Whisper specific settings
     "faster_whisper_model": "large-v3-turbo",  # tiny, base, small, medium, large-v3, large-v3-turbo
     "faster_whisper_compute_type": "float16",  # float16, int8, int8_float16
+    # CTranslate2 CUDA ordinal only (not Vulkan gpu_device). "auto" → device 0.
+    "faster_whisper_cuda_device": "auto",
     "faster_whisper_vad_enabled": True,  # Silero VAD for filtering silence (tuned for dictation)
     "faster_whisper_vad_threshold": 0.3,  # VAD sensitivity (lower = more sensitive, less cutting)
     

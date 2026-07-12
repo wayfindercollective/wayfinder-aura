@@ -217,6 +217,37 @@ on the overlay surface. Fix by routing place through KWin only (see
 overlay every dictation — that steals focus from the text field (ydotool types
 into the wrong surface).
 
+### Local ASR backend auto-select (GPU)
+
+Settings → **Backend** offers **Auto (GPU-based)** | whisper.cpp | Faster-Whisper (CUDA).
+
+Logic: `recommend_local_transcription_backend()` / `apply_auto_transcription_backend()`
+in `src/wayfinder/utils/gpu.py`.
+
+| Mode | Backend |
+|------|---------|
+| **Auto** (any GPU) | Always **`whisper_cpp`** — safe Vulkan/CUDA-CLI/Metal/CPU path |
+| Manual whisper.cpp | `whisper_cpp` |
+| Manual Faster-Whisper | `faster_whisper` (Ultra; CT2 **CUDA only**) |
+
+**Why Auto never picks Faster-Whisper:** CT2 can report CUDA devices while model
+load still fails (cuBLAS/cuDNN, float16, bad device index), then silently run
+**CPU-large** — the “stuck for a minute” failure. Auto recovers mis-set FW on AMD
+by forcing whisper.cpp. NVIDIA users who want CTranslate2 pick **Manual**
+Faster-Whisper when CT2 CUDA is known-good.
+
+**Hard rules**
+
+- Faster-Whisper GPU = **CTranslate2 CUDA only**. Do **not** use
+  `torch.cuda.is_available()` (ROCm can be True on AMD without CT2 GPU).
+- Do **not** pass Vulkan `gpu_device` as CT2 `device_index` — use
+  `faster_whisper_cuda_device` (default `auto` → 0).
+- Package probe uses `find_spec` (never full-import FW on the UI thread).
+- Manual Backend choice sets `transcription_backend_auto: false`.
+
+Config keys: `transcription_backend`, `transcription_backend_auto` (default True),
+`faster_whisper_cuda_device`.
+
 ## GPU Acceleration
 
 Wayfinder Aura supports GPU acceleration for faster transcription. Two backends are available:
@@ -245,33 +276,30 @@ After rebuilding, enable GPU in Wayfinder Aura settings:
 2. Enable "GPU Acceleration"
 3. GPU Layers: "Auto (all)" for maximum speed
 
-### Option 2: Faster-Whisper with ROCm (AMD) or CUDA (NVIDIA)
+### Option 2: Faster-Whisper on NVIDIA CUDA (manual only)
 
-For the Faster-Whisper backend with PyTorch GPU support:
+Faster-Whisper runs through **CTranslate2**, not PyTorch. GPU mode requires a
+**CUDA-capable CT2 build** and an NVIDIA driver. ROCm/PyTorch does **not** enable
+FW GPU on AMD — use whisper.cpp + Vulkan instead.
 
 ```bash
-# AMD GPU (ROCm)
-pip install torch --index-url https://download.pytorch.org/whl/rocm6.0
-
-# NVIDIA GPU (CUDA)
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-
-# Install Faster-Whisper
+# NVIDIA: ensure CT2 sees CUDA
+python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
+# Install Faster-Whisper if needed
 pip install faster-whisper
 ```
 
 Configure in Wayfinder Aura:
-1. Open Settings → Advanced → GPU Acceleration
-2. Set Backend to "Faster-Whisper"
-3. Enable "GPU Acceleration"
-4. Choose model size and compute type
+1. Backend → **Manual** “Faster-Whisper (CUDA)” (Ultra)
+2. GPU Acceleration on; model size as desired
+3. Optional config `faster_whisper_cuda_device` (CUDA ordinal; default 0)
 
 ### Performance Comparison
 
-| Backend | CPU (6 threads) | GPU (AMD RX 7000) |
-|---------|-----------------|-------------------|
-| whisper.cpp small | ~3-5s/10s audio | ~0.5-1s/10s audio |
-| Faster-Whisper small | ~2-3s/10s audio | ~0.3-0.8s/10s audio |
+| Backend | CPU | AMD Vulkan | NVIDIA CUDA |
+|---------|-----|------------|-------------|
+| whisper.cpp small | ~3-5s/10s | ~0.5-1s/10s | good (CLI CUDA/Vulkan) |
+| Faster-Whisper small | ~2-3s/10s | N/A (CPU only) | competitive when CT2 works |
 
 ### Troubleshooting GPU
 
@@ -282,13 +310,9 @@ vulkaninfo --summary
 # Should show your AMD GPU
 ```
 
-**ROCm not working:**
-```bash
-# Verify ROCm installation
-rocminfo
-# Check PyTorch sees GPU
-python -c "import torch; print(torch.cuda.is_available())"
-```
+**Faster-Whisper stuck on “Processing…”:**
+Usually running **large** models on **CPU** because CT2 has no CUDA. Switch
+Backend to Auto / whisper.cpp, or fix CT2 CUDA (`get_cuda_device_count() > 0`).
 
 **Out of VRAM:**
 - Use a smaller model (tiny, base)

@@ -1112,8 +1112,21 @@ SETTING_TOOLTIPS = {
     "beam_size": "Search width for finding best transcription.\n🔴 1 = fastest (-50%) | 5 = balanced | 10 = slowest (+100%)",
     
     # GPU/Backend - Can dramatically change all timings
-    "backend": "Transcription engine selection.\n⚙️ whisper.cpp: CPU-optimized, lower memory\n⚙️ Faster-Whisper: Better GPU utilization (up to 10x faster)",
-    "gpu_acceleration": "Use GPU for transcription.\n🚀 Free: Tiny & Base · Ultra: Small, Medium, Turbo, Large\n🚀 3-10x faster than CPU when available (Vulkan/CUDA/ROCm/Metal)",
+    "backend": (
+        "Local transcription engine.\n\n"
+        "• Auto (GPU-based) — always whisper.cpp (safe GPU/CPU path for AMD, Intel,\n"
+        "  Apple, and NVIDIA). Recovers you if Faster-Whisper was left on CPU.\n\n"
+        "• whisper.cpp — Vulkan (AMD/Intel), CUDA CLI, Metal, CPU.\n\n"
+        "• Faster-Whisper (CUDA) — CTranslate2; GPU only with NVIDIA CUDA + package.\n"
+        "  Manual only. On AMD it falls back to CPU (large models feel stuck).\n"
+        "  Ultra feature. Manual pick turns Auto off."
+    ),
+    "gpu_acceleration": (
+        "Use GPU for transcription when the backend supports it.\n"
+        "🚀 whisper.cpp: Vulkan (AMD/Intel), CUDA, Metal\n"
+        "🚀 Faster-Whisper: NVIDIA CUDA via CTranslate2 only (not ROCm/Vulkan)\n"
+        "🚀 Free: Tiny & Base · Ultra: Small, Medium, Turbo, Large"
+    ),
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
 
     # Post-processing — static defaults; get_dynamic_tooltip fills in measured times
@@ -1174,7 +1187,7 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     
     # GPU acceleration tooltip with measured speedup
     if key == "gpu_acceleration":
-        base_text = "Use GPU for transcription."
+        base_text = SETTING_TOOLTIPS.get("gpu_acceleration", "Use GPU for transcription.")
         if benchmark_results:
             # Calculate actual speedup from benchmark data
             speedups = []
@@ -1185,8 +1198,40 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
                     speedups.append(cpu_time / gpu_time)
             if speedups:
                 avg_speedup = sum(speedups) / len(speedups)
-                return f"{base_text}\n🚀 Your GPU is {avg_speedup:.1f}x faster than CPU on average!"
-        return f"{base_text}\n🚀 TBD — run benchmark to measure your GPU speedup"
+                return f"{base_text}\n\n🚀 Your GPU is {avg_speedup:.1f}x faster than CPU on average!"
+        return base_text
+
+    # Backend: static rules + this machine's Auto recommendation
+    if key == "backend":
+        base = SETTING_TOOLTIPS.get("backend", "")
+        try:
+            from wayfinder.utils.gpu import recommend_local_transcription_backend
+            # Tooltip cannot call feature_gate; pass allow from config-only hints
+            # (Ultra is not stored as a simple flag — fail closed for “allowed”).
+            fw_hint = False
+            rec, reason = recommend_local_transcription_backend(
+                allow_faster_whisper=fw_hint,
+                use_gpu=bool(config.get("use_gpu", True)),
+            )
+        except Exception:
+            rec, reason = "whisper_cpp", "whisper.cpp is the safe default."
+        rec_label = {
+            "whisper_cpp": "whisper.cpp",
+            "faster_whisper": "Faster-Whisper",
+        }.get(rec, rec)
+        auto_on = bool(config.get("transcription_backend_auto", True))
+        active = config.get("transcription_backend", "whisper_cpp")
+        active_label = {
+            "whisper_cpp": "whisper.cpp",
+            "faster_whisper": "Faster-Whisper",
+        }.get(active, active)
+        mode = "Auto (safe GPU path)" if auto_on else "Manual (your choice)"
+        return (
+            f"{base}\n\n"
+            f"This PC → Auto picks: {rec_label}\n"
+            f"{reason}\n\n"
+            f"Current: {active_label} · {mode}"
+        )
 
     # Post-processing tooltip with measured cleanup times + pipeline total
     if key == "post_processing":
@@ -5880,20 +5925,36 @@ class WayfinderApp(ctk.CTk):
         self.log("✓ Wayfinder Aura started")
         self.log(f"⌨ Hotkey: {self.get_hotkey_display()}")
         
-        # Log detected hardware
+        # Log detected hardware + apply GPU-based ASR backend when Auto is on
         gpu_info = get_gpu_info()
         cpu_count = os.cpu_count() or 4
+        try:
+            from wayfinder.utils.gpu import (
+                apply_auto_transcription_backend,
+                recommend_local_transcription_backend,
+            )
+            # Auto path: no CT2 import (keep startup light).
+            changed, auto_msg = apply_auto_transcription_backend(self.config)
+            if changed:
+                save_config(self.config)
+                self.log(f"⚙ Backend auto-selected: {auto_msg}")
+            rec, reason = recommend_local_transcription_backend()
+        except Exception:
+            rec, reason = "whisper_cpp", ""
+
         if gpu_info.is_nvidia:
-            self.log(f"🟢 GPU: NVIDIA detected (use Faster-Whisper + CUDA)")
+            self.log("🟢 GPU: NVIDIA (Auto → whisper.cpp; Manual Faster-Whisper if CT2 CUDA)")
         elif gpu_info.is_amd:
-            self.log(f"🔴 GPU: AMD detected (Vulkan ready)")
+            self.log("🔴 GPU: AMD detected (whisper.cpp + Vulkan)")
         elif gpu_info.is_apple:
             self.log(f"🍎 GPU: {gpu_info.name}")
         elif gpu_info.is_intel:
-            self.log(f"🔵 GPU: Intel detected (CPU mode recommended)")
+            self.log("🔵 GPU: Intel detected (whisper.cpp Vulkan/CPU)")
         else:
-            self.log(f"⚪ GPU: Not detected (using CPU)")
-        
+            self.log("⚪ GPU: Not detected (using CPU)")
+        if reason and self.config.get("transcription_backend_auto", True):
+            self.log(f"   ASR: {rec} — {reason}")
+
         threads_config = self.config.get("threads", 4)
         if cpu_count < threads_config:
             optimal = get_optimal_thread_count()
@@ -8528,15 +8589,28 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["language"], width=100,
         )
         
-        # Backend (whisper_cpp or faster_whisper only for local)
+        # Backend (local): Auto picks from GPU; manual whisper.cpp / Faster-Whisper
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("openai_whisper", "groq_whisper"):
             backend = "whisper_cpp"  # Default to local backend
-        self.backend_var = ctk.StringVar(value=backend)
+        self._backend_display_map = {
+            "Auto (GPU-based)": "auto",
+            "whisper.cpp": "whisper_cpp",
+            "Faster-Whisper (CUDA)": "faster_whisper",
+        }
+        self._backend_id_to_display = {v: k for k, v in self._backend_display_map.items()}
+        if self.config.get("transcription_backend_auto", True):
+            backend_display = "Auto (GPU-based)"
+        else:
+            backend_display = self._backend_id_to_display.get(backend, "whisper.cpp")
+        self.backend_var = ctk.StringVar(value=backend_display)
         self.backend_dropdown = self.create_dropdown_row(
-            parent, "Backend", ["whisper_cpp", "faster_whisper"],
+            parent, "Backend",
+            list(self._backend_display_map.keys()),
             self.backend_var, self.on_backend_changed,
-            tooltip=SETTING_TOOLTIPS["backend"], width=160,
+            tooltip=get_dynamic_tooltip("backend", self.config),
+            tooltip_key="backend",
+            width=200,
         )
         
         # Chunked Mode toggle (for unlimited recording length)
@@ -10219,21 +10293,94 @@ class WayfinderApp(ctk.CTk):
         self.log(f"⚙ Segment length: {value}s")
     
     def on_backend_changed(self, value: str):
-        """Handle transcription backend change from dropdown."""
-        # Gate Faster-Whisper behind premium
-        if value == "faster_whisper" and not self.feature_gate.has_feature("faster_whisper"):
-            self._show_premium_prompt("faster_whisper")
-            self.backend_var.set(self.config.get("transcription_backend", "whisper_cpp"))
+        """Handle transcription backend change from dropdown (display labels or ids)."""
+        display_map = getattr(self, "_backend_display_map", None) or {
+            "Auto (GPU-based)": "auto",
+            "whisper.cpp": "whisper_cpp",
+            "Faster-Whisper (CUDA)": "faster_whisper",
+            "whisper_cpp": "whisper_cpp",
+            "faster_whisper": "faster_whisper",
+            "auto": "auto",
+        }
+        backend_id = display_map.get(value, value)
+
+        if backend_id == "auto":
+            self.config["transcription_backend_auto"] = True
+            try:
+                from wayfinder.utils.gpu import (
+                    apply_auto_transcription_backend,
+                    recommend_local_transcription_backend,
+                )
+                fw_ok = False
+                try:
+                    fw_ok = bool(self.feature_gate.has_feature("faster_whisper"))
+                except Exception:
+                    fw_ok = False
+                apply_auto_transcription_backend(
+                    self.config, allow_faster_whisper=fw_ok
+                )
+                rec, reason = recommend_local_transcription_backend(
+                    allow_faster_whisper=fw_ok,
+                    use_gpu=bool(self.config.get("use_gpu", True)),
+                )
+            except Exception:
+                rec, reason = "whisper_cpp", "whisper.cpp default"
+                self.config["transcription_backend"] = rec
+            save_config(self.config)
+            label = "whisper.cpp" if rec == "whisper_cpp" else "Faster-Whisper"
+            self.log(f"⚙ Backend: Auto → {label}")
+            self.log(f"   {reason}")
+            self._refresh_backend_tooltip()
             return
-        self.config["transcription_backend"] = value
+
+        # Gate Faster-Whisper behind premium
+        if backend_id == "faster_whisper" and not self.feature_gate.has_feature("faster_whisper"):
+            self._show_premium_prompt("faster_whisper")
+            # Restore prior display selection
+            if self.config.get("transcription_backend_auto", True):
+                restore = "Auto (GPU-based)"
+            else:
+                restore = getattr(self, "_backend_id_to_display", {}).get(
+                    self.config.get("transcription_backend", "whisper_cpp"),
+                    "whisper.cpp",
+                )
+            self.backend_var.set(restore)
+            return
+
+        self.config["transcription_backend_auto"] = False
+        self.config["transcription_backend"] = backend_id
         save_config(self.config)
         display_names = {
             "whisper_cpp": "whisper.cpp",
-            "faster_whisper": "Faster-Whisper",
+            "faster_whisper": "Faster-Whisper (CUDA)",
             "openai_whisper": "OpenAI Whisper (Cloud)",
         }
-        display = display_names.get(value, value)
-        self.log(f"⚙ Backend: {display}")
+        display = display_names.get(backend_id, backend_id)
+        self.log(f"⚙ Backend: {display} (manual)")
+        if backend_id == "faster_whisper":
+            # Probe CT2 only on Manual FW select (not during Auto/startup).
+            try:
+                from wayfinder.utils.gpu import ctranslate2_cuda_available
+                if not ctranslate2_cuda_available():
+                    self.log(
+                        "⚠ Faster-Whisper: CTranslate2 reports no CUDA devices — "
+                        "will run on CPU (slow for large models). Prefer whisper.cpp on AMD."
+                    )
+                else:
+                    self.log("✓ Faster-Whisper: CTranslate2 CUDA devices available")
+            except Exception as e:
+                self.log(f"⚠ Faster-Whisper CUDA probe failed: {e}")
+        self._refresh_backend_tooltip()
+
+    def _refresh_backend_tooltip(self) -> None:
+        """Refresh Backend ⓘ text after Auto/manual changes."""
+        try:
+            tips = getattr(self, "dynamic_tooltips", {}).get("backend") or []
+            text = get_dynamic_tooltip("backend", self.config)
+            for tip in tips:
+                tip.update_text(text)
+        except Exception:
+            pass
     
     def on_gpu_layers_changed(self, value: str):
         """Handle GPU layers change from dropdown."""

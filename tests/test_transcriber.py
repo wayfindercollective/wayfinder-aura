@@ -565,14 +565,18 @@ class TestFasterWhisperBackend:
         sample_config["transcription_backend"] = "faster_whisper"
         sample_config["no_speech_threshold"] = 0.4
         sample_config["faster_whisper_vad_enabled"] = False
+        # Vulkan gpu_device must NOT become the CUDA ordinal.
         sample_config["gpu_device"] = "1"
+        sample_config["faster_whisper_cuda_device"] = "2"
 
         backend = get_backend(sample_config)
 
         assert isinstance(backend, FasterWhisperBackend)
         assert backend.no_speech_threshold == 0.4
         assert backend.vad_enabled is False
-        assert backend.gpu_device == "1"
+        assert backend._cuda_device_index() == 2
+        # Vulkan index must not be used as CUDA device_index
+        assert backend._cuda_device_index() != int(sample_config["gpu_device"])
 
     @patch("wayfinder.core.transcriber.FasterWhisperBackend.is_available", return_value=True)
     def test_transcribe_file_not_found(self, mock_avail):
