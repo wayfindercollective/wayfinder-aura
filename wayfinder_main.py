@@ -1217,13 +1217,13 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
             rec, reason = "whisper_cpp", "whisper.cpp is the safe default."
         rec_label = {
             "whisper_cpp": "whisper.cpp",
-            "faster_whisper": "Faster-Whisper",
+            "faster_whisper": "Faster-Whisper (experimental)",
         }.get(rec, rec)
         auto_on = bool(config.get("transcription_backend_auto", True))
         active = config.get("transcription_backend", "whisper_cpp")
         active_label = {
             "whisper_cpp": "whisper.cpp",
-            "faster_whisper": "Faster-Whisper",
+            "faster_whisper": "Faster-Whisper (experimental)",
         }.get(active, active)
         mode = "Auto (safe GPU path)" if auto_on else "Manual (your choice)"
         return (
@@ -5945,7 +5945,7 @@ class WayfinderApp(ctk.CTk):
         if gpu_info.is_nvidia:
             self.log(
                 "🟢 GPU: NVIDIA — default/Auto is whisper.cpp "
-                "(Faster-Whisper is Manual-only, never auto)"
+                "(Faster-Whisper experimental is Manual-only)"
             )
         elif gpu_info.is_amd:
             self.log("🔴 GPU: AMD detected (whisper.cpp + Vulkan)")
@@ -8593,8 +8593,7 @@ class WayfinderApp(ctk.CTk):
         )
         
         # Backend (local): default/Auto = always whisper.cpp (incl. NVIDIA).
-        # Faster-Whisper is Manual-only and only listed when NVIDIA is detected
-        # (or already selected), so nobody is auto-switched onto it.
+        # Faster-Whisper is experimental, Manual-only, NVIDIA-only (or already selected).
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("openai_whisper", "groq_whisper"):
             backend = "whisper_cpp"  # Default to local backend
@@ -8604,7 +8603,7 @@ class WayfinderApp(ctk.CTk):
             "whisper.cpp": "whisper_cpp",
         }
         if show_fw:
-            self._backend_display_map["Faster-Whisper (CUDA, manual)"] = "faster_whisper"
+            self._backend_display_map["Faster-Whisper (experimental)"] = "faster_whisper"
         self._backend_id_to_display = {v: k for k, v in self._backend_display_map.items()}
         if self.config.get("transcription_backend_auto", True):
             backend_display = "Auto (whisper.cpp)"
@@ -10305,8 +10304,9 @@ class WayfinderApp(ctk.CTk):
             "Auto (whisper.cpp)": "auto",
             "Auto (GPU-based)": "auto",  # legacy label
             "whisper.cpp": "whisper_cpp",
-            "Faster-Whisper (CUDA, manual)": "faster_whisper",
-            "Faster-Whisper (CUDA)": "faster_whisper",
+            "Faster-Whisper (experimental)": "faster_whisper",
+            "Faster-Whisper (CUDA, manual)": "faster_whisper",  # legacy
+            "Faster-Whisper (CUDA)": "faster_whisper",  # legacy
             "whisper_cpp": "whisper_cpp",
             "faster_whisper": "faster_whisper",
             "auto": "auto",
@@ -10347,11 +10347,10 @@ class WayfinderApp(ctk.CTk):
             self.backend_var.set(restore)
             return
 
-        # Non-NVIDIA: don't leave people on Faster-Whisper by accident (no GPU path).
+        # Non-NVIDIA: don't leave people on experimental Faster-Whisper (CPU trap).
         if backend_id == "faster_whisper" and not get_gpu_info().is_nvidia:
             self.log(
-                "⚠ Faster-Whisper needs NVIDIA CUDA — staying on whisper.cpp "
-                "(AMD/Intel/other would run FW on slow CPU)."
+                "⚠ Faster-Whisper (experimental) needs NVIDIA CUDA — staying on whisper.cpp."
             )
             backend_id = "whisper_cpp"
 
@@ -10360,12 +10359,13 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
         display_names = {
             "whisper_cpp": "whisper.cpp",
-            "faster_whisper": "Faster-Whisper (CUDA, manual)",
+            "faster_whisper": "Faster-Whisper (experimental)",
             "openai_whisper": "OpenAI Whisper (Cloud)",
         }
         display = display_names.get(backend_id, backend_id)
         self.log(f"⚙ Backend: {display} (manual)")
         if backend_id == "faster_whisper":
+            self.log("⚠ Experimental path — prefer Auto / whisper.cpp for daily use.")
             # Probe CT2 only on Manual FW select (not during Auto/startup).
             try:
                 from wayfinder.utils.gpu import ctranslate2_cuda_available

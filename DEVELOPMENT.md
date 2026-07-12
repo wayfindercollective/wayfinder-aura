@@ -274,11 +274,11 @@ After rebuilding, enable GPU in Wayfinder Aura settings:
 2. Enable "GPU Acceleration"
 3. GPU Layers: "Auto (all)" for maximum speed
 
-### Option 2: Faster-Whisper on NVIDIA CUDA (manual only)
+### Option 2: Faster-Whisper (experimental, NVIDIA manual only)
 
-Faster-Whisper runs through **CTranslate2**, not PyTorch. GPU mode requires a
-**CUDA-capable CT2 build** and an NVIDIA driver. ROCm/PyTorch does **not** enable
-FW GPU on AMD — use whisper.cpp + Vulkan instead.
+Labeled **experimental** in Settings. Runs through **CTranslate2**, not PyTorch.
+GPU mode needs a **CUDA-capable CT2 build** and NVIDIA drivers. Not auto-selected.
+ROCm/PyTorch does **not** enable FW GPU on AMD — use whisper.cpp + Vulkan.
 
 ```bash
 # NVIDIA: ensure CT2 sees CUDA
@@ -288,7 +288,7 @@ pip install faster-whisper
 ```
 
 Configure in Wayfinder Aura:
-1. Backend → **Manual** “Faster-Whisper (CUDA)” (Ultra)
+1. Backend → **Manual** “Faster-Whisper (experimental)” (Ultra, NVIDIA only)
 2. GPU Acceleration on; model size as desired
 3. Optional config `faster_whisper_cuda_device` (CUDA ordinal; default 0)
 
