@@ -14,6 +14,7 @@ class EventType(Enum):
     HOTKEY_PRESSED = auto()
     STYLE_TOGGLE = auto()  # Cycle through output styles (Professional/AI Prompt/Casual)
     SHOW_WINDOW = auto()   # Tray "Open" — raise/restore the main window
+    HIDE_WINDOW = auto()   # Tray / desktop action — hide main window to tray
     FORCE_RESET = auto()   # Tray "Reset" — unstick overlay / abort in-flight dictation
     QUIT_APP = auto()      # Tray "Quit" — clean full shutdown
     HOTKEY_CAPTURED = auto()  # Settings "Detect" — next pressed key reported to the UI

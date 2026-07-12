@@ -135,8 +135,8 @@ def _control_socket_path() -> str:
         return str(Path(runtime) / "wayfinder-aura" / "wayfinder-aura.sock")
 
 
-def _try_control_show() -> bool:
-    """Ask a live instance to raise its window via the control socket."""
+def _try_control_command(verb: bytes, *, expect_reply: bool = False) -> bool:
+    """Send a control-socket verb to a live instance. Returns True if connected."""
     import socket
 
     path = _control_socket_path()
@@ -144,15 +144,45 @@ def _try_control_show() -> bool:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(2)
         sock.connect(path)
-        sock.sendall(b"show")
-        try:
-            sock.recv(16)
-        except socket.timeout:
-            pass
+        sock.sendall(verb)
+        if expect_reply:
+            try:
+                sock.recv(16)
+            except socket.timeout:
+                pass
         sock.close()
         return True
     except (ConnectionRefusedError, FileNotFoundError, OSError):
         return False
+
+
+def _try_control_show() -> bool:
+    """Ask a live instance to raise its window via the control socket."""
+    return _try_control_command(b"show", expect_reply=True)
+
+
+def _dispatch_cli_control_verb() -> int | None:
+    """Handle flatpak/desktop CLI hooks: --toggle / --cycle-style / --hide.
+
+    Returns an exit code if this process should exit, or None to continue
+    normal GUI launch.
+    """
+    if len(sys.argv) < 2:
+        return None
+    flag = sys.argv[1]
+    mapping = {
+        "--toggle": (b"toggle", False),
+        "--cycle-style": (b"style", False),
+        "--hide": (b"hide", True),
+        "--show": (b"show", True),
+    }
+    if flag not in mapping:
+        return None
+    verb, expect = mapping[flag]
+    if _try_control_command(verb, expect_reply=expect):
+        return 0
+    print(f"[CLI] No live instance for {flag} (socket unreachable)", file=sys.stderr)
+    return 1
 
 
 def _acquire_instance_lock() -> bool:
@@ -280,6 +310,12 @@ def _check_venv_health(venv_dir: Path | None = None, smoke_imports: tuple[str, .
 
 def main():
     """Run Wayfinder Aura."""
+    # Desktop actions / Flatpak CLI: send control-socket verbs and exit
+    # (do not take the single-instance lock or start a second UI).
+    _cli_exit = _dispatch_cli_control_verb()
+    if _cli_exit is not None:
+        sys.exit(_cli_exit)
+
     # === Venv health check ===
     _check_venv_health()
 

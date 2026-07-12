@@ -6165,8 +6165,8 @@ class WayfinderApp(ctk.CTk):
         right_controls = ctk.CTkFrame(header, fg_color="transparent")
         right_controls.pack(side="right")
         
-        # Close = full quit (same as tray Quit / taskbar Close). Use tray or
-        # start-minimized to keep dictation running without the window.
+        # Close = full quit (taskbar Close / tray Quit). Hide-to-tray is the
+        # minimize control and tray / desktop "Hide to tray" action.
         ctk.CTkButton(
             right_controls,
             text="×",
@@ -6179,6 +6179,20 @@ class WayfinderApp(ctk.CTk):
             corner_radius=RADIUS["sm"],
             command=self.quit_app,
         ).pack(side="right")
+        hide_btn = ctk.CTkButton(
+            right_controls,
+            text="–",
+            width=28,
+            height=28,
+            fg_color="transparent",
+            hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_muted"],
+            font=(self.font_body[0], 18),
+            corner_radius=RADIUS["sm"],
+            command=self.hide_to_tray,
+        )
+        hide_btn.pack(side="right", padx=(0, 2))
+        ToolTip(hide_btn, "Hide to tray\nDictation and overlay keep running.")
         
         # === Quick Scale Controls (always visible for accessibility) ===
         scale_frame = ctk.CTkFrame(right_controls, fg_color="transparent")
@@ -15306,6 +15320,7 @@ class WayfinderApp(ctk.CTk):
             pystray.MenuItem("Reset (unstick overlay)", self.tray_reset),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open Settings", self.show_from_tray),
+            pystray.MenuItem("Hide to tray", self.hide_to_tray),
             pystray.MenuItem(
                 "Model",
                 self._create_model_tray_menu,
@@ -16360,6 +16375,8 @@ class WayfinderApp(ctk.CTk):
             self._apply_captured_hotkey(data)
         elif event_type == EventType.SHOW_WINDOW:
             self.show_from_tray()
+        elif event_type == EventType.HIDE_WINDOW:
+            self.hide_to_tray()
         elif event_type == EventType.FORCE_RESET:
             self.force_reset()
         elif event_type == EventType.QUIT_APP:

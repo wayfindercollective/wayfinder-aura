@@ -328,6 +328,7 @@ class TestSocketListener:
 
         cases = [
             (b"show", EventType.SHOW_WINDOW, None),
+            (b"hide", EventType.HIDE_WINDOW, None),
             (b"reset", EventType.FORCE_RESET, None),
             (b"quit", EventType.QUIT_APP, None),
             (b"tab:settings", EventType.SWITCH_TAB, "settings"),

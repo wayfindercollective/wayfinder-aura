@@ -10,7 +10,7 @@ Categories=Utility;Accessibility;
 Keywords=voice;dictation;speech;whisper;transcription;speech-to-text;
 StartupNotify=true
 StartupWMClass=Wayfinder-aura
-Actions=toggle-recording;cycle-style;
+Actions=toggle-recording;cycle-style;hide-to-tray;
 
 [Desktop Action toggle-recording]
 Name=Toggle Recording
@@ -20,5 +20,10 @@ Icon=io.wayfindercollective.WayfinderAura
 [Desktop Action cycle-style]
 Name=Cycle Output Style
 Exec=wayfinder-aura --cycle-style
+Icon=io.wayfindercollective.WayfinderAura
+
+[Desktop Action hide-to-tray]
+Name=Hide to tray
+Exec=wayfinder-aura --hide
 Icon=io.wayfindercollective.WayfinderAura
 

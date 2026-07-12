@@ -31,6 +31,7 @@ def socket_listener(
     echo "style"     | nc -U "$SOCK"   # Cycle styles
     echo "style:dev" | nc -U "$SOCK"   # Set a specific style
     echo "show"      | nc -U "$SOCK"   # Raise the main window
+    echo "hide"      | nc -U "$SOCK"   # Hide main window to tray (keep running)
     echo "reset"     | nc -U "$SOCK"   # Abort stuck work and return to idle
     echo "quit"      | nc -U "$SOCK"   # Quit cleanly
     echo "ping"      | nc -U "$SOCK"   # Health probe, replies "pong"
@@ -113,6 +114,11 @@ def socket_listener(
                     event_queue.put((EventType.SHOW_WINDOW, None))
                     # Host launchers use this acknowledgement to distinguish a healthy live
                     # instance from a stale socket before falling back to starting the service.
+                    conn.sendall(b"ok")
+                elif data_str == "hide":
+                    # Tray / desktop action — withdraw main window; tray + overlay stay.
+                    log("🫥 Hide to tray received via socket")
+                    event_queue.put((EventType.HIDE_WINDOW, None))
                     conn.sendall(b"ok")
                 elif data_str == "reset":
                     # Tray "Reset" — abort stuck/in-flight dictation, return to idle.

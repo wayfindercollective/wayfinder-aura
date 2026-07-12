@@ -165,10 +165,11 @@ def test_source_desktop_actions_match_build_rewrite_contract():
     desktop = SOURCE_DESKTOP.read_text(encoding="utf-8")
     build = (REPO / "build.sh").read_text(encoding="utf-8")
 
-    assert "Actions=toggle-recording;cycle-style;" in desktop
+    assert "Actions=toggle-recording;cycle-style;hide-to-tray;" in desktop
     assert "Exec=@WAYFINDER_ROOT@/launch-wayfinder-aura.sh" in desktop
     assert "Exec=python3 @WAYFINDER_ROOT@/trigger_record.py" in desktop
     assert "Exec=python3 @WAYFINDER_ROOT@/trigger_style.py" in desktop
+    assert "Exec=python3 @WAYFINDER_ROOT@/trigger_hide.py" in desktop
     assert "Icon=@WAYFINDER_ROOT@/assets/icon.png" in desktop
     assert "/home/bazzite/" not in desktop
 
@@ -183,6 +184,8 @@ def test_flatpak_desktop_actions_use_current_app_id_and_cli_hooks():
     assert "Exec=wayfinder-aura" in desktop
     assert "Exec=wayfinder-aura --toggle" in desktop
     assert "Exec=wayfinder-aura --cycle-style" in desktop
+    assert "Exec=wayfinder-aura --hide" in desktop
+    assert "hide-to-tray" in desktop
     assert f"Icon={APP_ID}" in desktop
     assert "/home/bazzite/Dev/wayfinder-aura" not in desktop
     assert "io.github.wayfinder" not in desktop
