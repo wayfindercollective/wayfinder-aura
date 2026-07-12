@@ -84,6 +84,30 @@ Design system: COLORS, FONTS, SPACING, RADIUS tokens.
 ### src/wayfinder/hotkeys/
 Hotkey detection for X11 (evdev), Wayland socket, and D-Bus portal.
 
+### src/wayfinder/ui/overlay.py — Wayland positioning (KDE)
+
+The glassmorphic status pill runs in a **PyQt6 subprocess**. On **KDE Wayland**,
+Qt cannot set absolute window position reliably. Absolute place is done via
+**KWin scripting** (`frameGeometry` through `qdbus` / `loadScript`).
+
+**Hard rule (dogfooded 2026-07):** on Wayland, **never** call
+`setGeometry` / `move` / `windowHandle().setPosition` for on-screen placement.
+Those APIs flash the window to the compositor default (often **center**) for a
+frame before KWin corrects it — visible as the pill **jumping when you hit
+record / “Listening…”** (especially with `bottom-right` anchor).
+
+| Session | How to place |
+|---------|----------------|
+| Wayland | KWin only (`_force_kde_window_position`); size via `setFixedWidth` / `setFixedSize` |
+| X11 | Qt `setGeometry` / `move`; **skip** KWin loadScript spam (can freeze overlay/tray) |
+
+**Also:** on Wayland, **snap width** on state change (`width_duration = 0`) so
+READY→Listening is one size + one KWin place, not a multi-frame resize thrash.
+
+Implementation lives in `_position_at_bottom`, `_delayed_show`, boot `show()` in
+`run_overlay()`, and `set_state` width animation. See also
+`docs/LAUNCH-HARDENING-PLAN.md` (Phase 2 notes) and SUPPORT.md for users.
+
 ## UI Customization
 
 ### Color Palette (COLORS dict)
@@ -185,6 +209,13 @@ Add user to input group: `sudo usermod -aG input $USER`
 Wayland blocks direct input monitoring. Use:
 1. Socket method with KDE shortcut calling `trigger_record.py`
 2. Or configure in System Settings → Shortcuts
+
+### Overlay jumps when starting to record (KDE Wayland)
+Almost always a **positioning** regression: something called `setGeometry`/`move`
+on the overlay surface. Fix by routing place through KWin only (see
+**overlay.py — Wayland positioning** above). Do not “fix” it by restarting the
+overlay every dictation — that steals focus from the text field (ydotool types
+into the wrong surface).
 
 ## GPU Acceleration
 

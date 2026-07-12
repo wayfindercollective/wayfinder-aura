@@ -127,6 +127,18 @@ Try these before filing an issue — they cover the most common problems.
   drift is detected — it can still paste into the wrong app if you switched
   windows on purpose.
 
+### Overlay jumps when I hit record / “Listening…”
+
+- On **KDE Wayland**, the status pill is placed by the window manager (KWin),
+  not by normal Qt window moves. A bad build can flash it toward the **center**
+  (or another default) when the label grows to “Listening…”.
+- **Fix:** update/restart Aura so you are on a build that places the pill via
+  KWin only (and does not call Qt `setGeometry` for on-screen place). Your
+  anchor/offset in Settings still apply after place.
+- If it still jumps after a full app restart, note your desktop (KDE/GNOME),
+  session type (`echo $XDG_SESSION_TYPE`), and overlay anchor (e.g. bottom-right)
+  in a GitHub issue, and attach `~/.cache/wayfinder-aura/overlay-debug.log`.
+
 ### Overlay stuck on “Processing…” / tray frozen
 
 - Use **tray → Reset (unstick overlay)** or the reset hotkey path.

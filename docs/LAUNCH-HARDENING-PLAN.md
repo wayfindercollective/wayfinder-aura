@@ -39,10 +39,10 @@
 
 | Step | Work | Status |
 |------|------|--------|
-| 2.1 | KWin geometry once per transition (not per frame) | **Reverted** — caused listen/stop jump on Wayland; back to pre-Phase-2 always-position path |
-| 2.2 | Unload previous KWin script id before load | **Reverted** with 2.1 (same block) |
+| 2.1–2.2 | “Geometry once per frame” / script-unload rewrite | **Wrong direction** — intermediate attempts either leaked KWin scripts or left Qt `setGeometry` fighting KWin |
+| 2.1′ | **Final rule (dogfood OK):** Wayland on-screen place = **KWin only** (no `setGeometry`/`move`); snap width on state change; X11 keeps Qt geometry and skips KWin spam | **Done** (`662d24b`) — see `DEVELOPMENT.md` (overlay Wayland positioning) |
 | 2.3 | Drain overlay **stderr** after start (reader thread) | **Done** (in OverlayController) |
-| 2.4 | Optional rate-limit under load | Deferred |
+| 2.4 | Optional rate-limit under load | Deferred (width snap reduces KWin call rate) |
 
 ### Phase 3 — Inject honesty & optional focus assist
 

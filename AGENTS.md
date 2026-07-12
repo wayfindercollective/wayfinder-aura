@@ -377,6 +377,14 @@ Some displays cause Tk scaling errors. `main.py` handles this with a cached scal
 - **X11**: evdev works directly
 - **Wayland**: Must use socket method with KDE shortcut calling `trigger_record.py`
 
+### 5b. Overlay place on KDE Wayland (do not regress)
+
+On Wayland, **never** use Qt `setGeometry`/`move` for the on-screen status pill —
+it flashes to compositor default (often center) when entering Listening.
+Place via **KWin only** (`_force_kde_window_position`); snap width on state
+change. X11: Qt geometry, no KWin loadScript spam. Details: `DEVELOPMENT.md`
+(section *overlay.py — Wayland positioning*).
+
 ### 6. ydotool Socket
 
 ydotool needs its daemon running. Check socket at `/run/ydotool/ydotool.sock`.
