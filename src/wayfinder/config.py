@@ -271,6 +271,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # When True (default), failed type-injection in Game Mode falls back to
     # clipboard write + Ctrl+V paste. Desktop happy-path typing is unchanged.
     "game_mode_paste_fallback": True,
+    # Opt-in (default False): on desktop, when focus drifted away from the
+    # record-start window and the injector cannot retarget (ydotool/wtype on
+    # Wayland), use clipboard + Ctrl+V instead of typing. May paste into the
+    # wrong field if the user intentionally switched apps — leave off unless
+    # dogfood shows systematic type-into-wrong-surface after soft-overlay.
+    "desktop_paste_on_focus_drift": False,
     # Watchdog timeout (s) for a hung PROCESSING state; 0 disables.
     "processing_timeout_secs": 120,
     "overlay_scale": 1.0,  # Overlay scale (separate from UI scale) - 0.5 to 2.0

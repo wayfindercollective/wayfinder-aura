@@ -113,6 +113,27 @@ Try these before filing an issue — they cover the most common problems.
 
 - Press **Ctrl + Plus**, or open **Settings → UI Scale**.
 
+### Text typed into the wrong place (or nowhere) on Wayland
+
+- **Wayland cannot retarget a window.** ydotool/wtype type into whatever
+  surface currently has keyboard focus. Aura cannot “click back” into the
+  field you were in when recording started (that only works with X11 + xdotool).
+- **Keep focus in the text field** while you dictate and until text appears.
+- Aura’s overlay uses a **soft update** path so leaving “Listening…” does not
+  recycle the pill/tray every dictation (that used to steal KDE focus).
+- If you still see systematic focus loss, check `activity.log` for
+  `focus drifted` and `Overlay deferred restart`. Optional advanced config
+  `desktop_paste_on_focus_drift` (default **off**) pastes via clipboard when
+  drift is detected — it can still paste into the wrong app if you switched
+  windows on purpose.
+
+### Overlay stuck on “Processing…” / tray frozen
+
+- Use **tray → Reset (unstick overlay)** or the reset hotkey path.
+- Missed overlay acks defer a restart until you are idle (never mid-paste).
+- Attach `~/.cache/wayfinder-aura/activity.log` and
+  `~/.cache/wayfinder-aura/overlay-debug.log` when reporting.
+
 ## Steam Deck setup and recovery
 
 The Steam Deck host-side setup (systemd user services + the trigger daemon) is

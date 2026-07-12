@@ -177,3 +177,134 @@ def test_is_healthy_is_process_liveness_only():
     assert ctrl.is_healthy() is True
     ctrl._process.poll.return_value = 1
     assert ctrl.is_healthy() is False
+
+
+def test_wait_for_ack_success():
+    """Qt-thread nonce acks are collected from the stdout drain set."""
+    from wayfinder_main import OverlayController
+
+    ctrl = OverlayController()
+    ctrl._process = MagicMock()
+    ctrl._process.poll.return_value = None
+    with ctrl._ack_lock:
+        ctrl._received_acks.add("n-test")
+    assert ctrl._wait_for_ack("n-test", timeout=0.1) is True
+    # Consumed once
+    assert ctrl._wait_for_ack("n-test", timeout=0.05) is False
+
+
+def test_wait_for_ack_timeout():
+    from wayfinder_main import OverlayController
+
+    ctrl = OverlayController()
+    ctrl._process = MagicMock()
+    ctrl._process.poll.return_value = None
+    assert ctrl._wait_for_ack("never", timeout=0.05) is False
+
+
+def test_critical_send_soft_success_when_ack_arrives():
+    """Write + matching nonce ack → True (soft path proven on Qt thread)."""
+    from wayfinder_main import OverlayController
+
+    ctrl = OverlayController()
+    ctrl._ack_timeout_s = 0.3
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.stdin = MagicMock()
+    ctrl._process = proc
+
+    # Deliver ack shortly after write so the waiter succeeds.
+    def fake_write(_line):
+        # Nonce is attached inside _send_command before write; pull from last dumps.
+        # Simpler: after any write, inject all recent nonces — use spy on dumps.
+        pass
+
+    written = []
+
+    def capture_write(line):
+        written.append(line)
+        import json as _json
+
+        cmd = _json.loads(line.strip())
+        nonce = cmd.get("nonce")
+        if nonce is not None:
+            with ctrl._ack_lock:
+                ctrl._received_acks.add(str(nonce))
+        return len(line)
+
+    proc.stdin.write.side_effect = capture_write
+    proc.stdin.flush = MagicMock()
+
+    import select as select_mod
+
+    real_select = select_mod.select
+
+    def select_stdin(r, w, x, timeout=None):
+        # stdin always ready when process is mocked
+        if w:
+            return [], w, []
+        return real_select(r, w, x, timeout)
+
+    import wayfinder_main as wm
+
+    original = select_mod.select
+    select_mod.select = select_stdin
+    try:
+        ok = ctrl._send_command({"cmd": "show", "state": "processing"}, critical=True)
+    finally:
+        select_mod.select = original
+
+    assert ok is True
+    assert written, "expected a write to overlay stdin"
+    assert '"nonce"' in written[0]
+
+
+def test_critical_send_ack_timeout_returns_false():
+    """No Qt ack within timeout → False (caller defers or restarts)."""
+    from wayfinder_main import OverlayController
+    import select as select_mod
+
+    ctrl = OverlayController()
+    ctrl._ack_timeout_s = 0.05
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.stdin = MagicMock()
+    ctrl._process = proc
+
+    def select_stdin(r, w, x, timeout=None):
+        if w:
+            return [], w, []
+        return [], [], []
+
+    original = select_mod.select
+    select_mod.select = select_stdin
+    try:
+        ok = ctrl._send_command({"cmd": "show", "state": "processing"}, critical=True)
+    finally:
+        select_mod.select = original
+
+    assert ok is False
+
+
+def test_update_ack_timeout_defers_when_disallowed():
+    """Missed ack on dictation path → _restart_pending, never hard restart."""
+    from wayfinder_main import OverlayController
+
+    ctrl = OverlayController()
+    ctrl._process = MagicMock()
+    ctrl._process.poll.return_value = None
+    ctrl._current_state = "listening"
+    ctrl._stop_audio_polling = MagicMock()
+    ctrl._send_command = MagicMock(return_value=False)  # simulates ack timeout
+    ctrl.refresh = MagicMock(return_value=True)
+    ctrl._log = MagicMock()
+
+    assert ctrl.update("processing", allow_restart=False) is False
+    ctrl.refresh.assert_not_called()
+    assert ctrl._restart_pending is True
+
+
+def test_default_desktop_paste_on_focus_drift_is_off():
+    from wayfinder.config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG.get("desktop_paste_on_focus_drift") is False

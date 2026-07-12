@@ -4118,6 +4118,16 @@ class OverlayController:
         # When True, a failed state write asked for a restart that was deferred
         # until after dictation/injection (see update(allow_restart=False)).
         self._restart_pending = False
+        # Phase 1: Qt-thread nonce acks + continuous stdout/stderr drain.
+        self._nonce_seq = 0
+        self._ack_lock = threading.Lock()
+        self._received_acks: set[str] = set()
+        self._ready_event = threading.Event()
+        self._stop_readers = threading.Event()
+        self._stdout_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        # Ack wait for critical show/ping (ms → s). Soft write ≠ Qt handled.
+        self._ack_timeout_s = 0.25
 
     def _log(self, msg: str):
         """Surface a diagnostic message to the app/UI log if available, else stderr."""
@@ -4128,6 +4138,92 @@ class OverlayController:
             except Exception:
                 pass
         print(msg, flush=True)
+
+    def _next_nonce(self) -> str:
+        self._nonce_seq += 1
+        return f"{self._nonce_seq}-{int(time.time() * 1000) % 1_000_000}"
+
+    def _stop_io_readers(self) -> None:
+        """Signal stdout/stderr drain threads to exit (process kill closes pipes)."""
+        self._stop_readers.set()
+
+    def _start_io_readers(self) -> None:
+        """Drain overlay stdout (acks/ready) and stderr (avoid full-pipe block)."""
+        self._stop_readers.clear()
+        self._ready_event.clear()
+        with self._ack_lock:
+            self._received_acks.clear()
+        self._stdout_thread = threading.Thread(
+            target=self._stdout_reader_loop, name="overlay-stdout", daemon=True
+        )
+        self._stderr_thread = threading.Thread(
+            target=self._stderr_reader_loop, name="overlay-stderr", daemon=True
+        )
+        self._stdout_thread.start()
+        self._stderr_thread.start()
+
+    def _stdout_reader_loop(self) -> None:
+        """Continuous stdout drain: ready handshake + nonce acks.
+
+        Freeze detection for critical path is ack-based; ``is_healthy()`` remains
+        process-liveness only (see Phase 1.4).
+        """
+        proc = self._process
+        if proc is None or proc.stdout is None:
+            return
+        try:
+            for line in proc.stdout:
+                if self._stop_readers.is_set():
+                    break
+                line = (line or "").strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("status") == "ready":
+                    self.tray_available = bool(data.get("tray_available", False))
+                    self._ready_event.set()
+                if data.get("ack") and data.get("nonce") is not None:
+                    with self._ack_lock:
+                        self._received_acks.add(str(data["nonce"]))
+        except Exception:
+            pass
+
+    def _stderr_reader_loop(self) -> None:
+        """Drain overlay stderr so a chatty child cannot block on a full pipe (Phase 2.3)."""
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in proc.stderr:
+                if self._stop_readers.is_set():
+                    break
+                # Discard by default; surface only likely errors (avoid UI spam).
+                text = (line or "").rstrip()
+                if not text:
+                    continue
+                low = text.lower()
+                if any(k in low for k in ("error", "traceback", "exception", "fatal")):
+                    self._log(f"[overlay stderr] {text[:300]}")
+        except Exception:
+            pass
+
+    def _wait_for_ack(self, nonce: str, timeout: float | None = None) -> bool:
+        """Wait until the Qt-thread ack for *nonce* appears on stdout."""
+        timeout = self._ack_timeout_s if timeout is None else timeout
+        deadline = time.time() + timeout
+        key = str(nonce)
+        while time.time() < deadline:
+            with self._ack_lock:
+                if key in self._received_acks:
+                    self._received_acks.discard(key)
+                    return True
+            if self._process is None or self._process.poll() is not None:
+                return False
+            time.sleep(0.01)
+        return False
     
     def _start_process(self) -> bool:
         """Start the overlay subprocess if not already running."""
@@ -4138,6 +4234,7 @@ class OverlayController:
             # Fresh start: clear stale tray availability — it's re-set from the ready
             # handshake below, so it can't go stale across a refresh()/health-check restart.
             self.tray_available = False
+            self._stop_io_readers()
 
             # Clean up any stale overlay we previously tracked (pidfile + uid/path check).
             try:
@@ -4188,7 +4285,7 @@ class OverlayController:
                     cmd_args,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,  # Capture errors for debugging
+                    stderr=subprocess.PIPE,  # Captured + drained (Phase 2.3)
                     text=True,
                     bufsize=1,  # Line buffered
                 )
@@ -4197,23 +4294,12 @@ class OverlayController:
                     write_overlay_pidfile(self._process.pid)
                 except Exception:
                     pass
-                
-                # Wait for ready signal with timeout
-                import select
-                ready, _, _ = select.select([self._process.stdout], [], [], 2.0)
-                if ready:
-                    response = self._process.stdout.readline()
-                    if response:
-                        try:
-                            data = json.loads(response)
-                            if data.get("status") == "ready":
-                                # The overlay reports whether it created a QSystemTrayIcon
-                                # (tray mode + SNI available). hide_to_tray reads this live.
-                                self.tray_available = bool(data.get("tray_available", False))
-                                return True
-                        except json.JSONDecodeError:
-                            pass
-                
+
+                # Reader threads own stdout/stderr — do not also readline() here.
+                self._start_io_readers()
+                # Wait for ready signal with timeout (via drain thread).
+                if self._ready_event.wait(timeout=2.0):
+                    return True
                 return True
             except Exception as e:
                 print(f"Failed to start overlay: {e}")
@@ -4225,8 +4311,19 @@ class OverlayController:
         Args:
             cmd: JSON-serializable command dict.
             critical: If True, use longer timeout and retry (for state changes).
-                      If False, best-effort with short timeout (for audio levels).
+                      Critical ``show`` / ``ping`` also wait for a Qt-thread nonce
+                      ack on stdout (~150–300ms). Soft stdin write alone is not
+                      proof the overlay handled the command (Phase 1).
+                      Non-critical: best-effort with short timeout (audio levels).
         """
+        wait_ack = critical and cmd.get("cmd") in ("show", "ping")
+        nonce = None
+        if wait_ack:
+            nonce = self._next_nonce()
+            cmd = {**cmd, "nonce": nonce}
+            with self._ack_lock:
+                self._received_acks.discard(str(nonce))
+
         attempts = 3 if critical else 1
         lock_timeout = 0.5 if critical else 0.05
 
@@ -4235,6 +4332,7 @@ class OverlayController:
             if not acquired:
                 continue
 
+            wrote = False
             try:
                 if self._process is None or self._process.poll() is not None:
                     return False
@@ -4249,7 +4347,7 @@ class OverlayController:
                         return False
                     self._process.stdin.write(line)
                     self._process.stdin.flush()
-                    return True
+                    wrote = True
                 except (BrokenPipeError, OSError) as e:
                     self._log(f"⚠ Overlay subprocess died: {e}")
                     self._process = None
@@ -4260,8 +4358,26 @@ class OverlayController:
             finally:
                 self._lock.release()
 
+            # Wait for Qt-thread ack *outside* the IPC lock so the stdout reader
+            # and concurrent level spam are not blocked.
+            if wrote and wait_ack and nonce is not None:
+                if self._wait_for_ack(nonce):
+                    return True
+                self._log(
+                    f"⚠ Overlay ack timeout ({int(self._ack_timeout_s * 1000)}ms) "
+                    f"cmd={cmd.get('cmd')} state={cmd.get('state', '')} nonce={nonce}"
+                )
+                if critical and attempt + 1 < attempts:
+                    continue
+                return False
+            if wrote:
+                return True
+
         if critical:
-            self._log(f"⚠ Overlay command not delivered after {attempts} attempts: {cmd.get('cmd')} {cmd.get('state', '')}")
+            self._log(
+                f"⚠ Overlay command not delivered after {attempts} attempts: "
+                f"{cmd.get('cmd')} {cmd.get('state', '')}"
+            )
         return False
     
     def send_command(self, cmd: dict) -> bool:
@@ -4360,12 +4476,14 @@ class OverlayController:
 
         Safe to call when the app is IDLE (after injection). Returns True if a
         restart ran (or was unnecessary because the child is healthy).
+        Never call mid-PASTING — focus steal. Missed Qt acks set ``_restart_pending``.
         """
         if not getattr(self, "_restart_pending", False):
             return True
         self._restart_pending = False
         state = self._current_state if self._current_state not in (None, "hidden") else "ready"
-        self._log(f"Overlay deferred restart → {state}")
+        # Explicit activity-log line (Phase 3.1) so dogfood can grep recovery.
+        self._log(f"Overlay deferred restart flush → {state} (ack/write recovery)")
         return self._restart_and_show(state)
 
     def _restart_and_show(self, state: str) -> bool:
@@ -4407,6 +4525,7 @@ class OverlayController:
         """Shut down the overlay subprocess."""
         self._stop_audio_polling()
         self._send_command({"cmd": "quit"})
+        self._stop_io_readers()
         
         # Use timeout on lock to avoid deadlock
         acquired = self._lock.acquire(timeout=1.0)
@@ -4446,6 +4565,7 @@ class OverlayController:
     def stop(self):
         """Stop and clean up the overlay subprocess forcefully."""
         self._stop_audio_polling()
+        self._stop_io_readers()
         
         # Use timeout on lock to avoid deadlock
         acquired = self._lock.acquire(timeout=0.5)
@@ -4493,10 +4613,12 @@ class OverlayController:
         self._audio_level_callback = callback
     
     def is_healthy(self) -> bool:
-        """True if the overlay subprocess is still alive.
+        """True if the overlay subprocess is still alive (process-liveness only).
 
-        Wedged-but-alive children are recovered on the next failed critical
-        state write (see show/update → _restart_and_show), not by probing here.
+        Wedged-but-alive children (stdin accepts writes, Qt loop frozen) are
+        detected via critical-path **nonce ack timeout**, not here. Missed acks
+        set ``_restart_pending`` (or hard-restart when allow_restart) — see
+        ``_send_command`` / ``update`` / ``flush_deferred_restart``.
         """
         # Use non-blocking lock check to avoid deadlock
         acquired = self._lock.acquire(timeout=0.1)
@@ -4523,6 +4645,7 @@ class OverlayController:
         
         # Stop audio polling while refreshing
         self._stop_audio_polling()
+        self._stop_io_readers()
         
         # Kill existing process (use timeout on lock to avoid deadlock)
         acquired = self._lock.acquire(timeout=0.5)
@@ -4566,10 +4689,18 @@ class OverlayController:
             if offset != 0:
                 self._send_command({"cmd": "offset", "value": offset})
 
-        # Restore previous state (if not hidden)
+        # Restore previous state (if not hidden) — critical so we wait for Qt ack.
         if previous_state != "hidden":
-            self._send_command({"cmd": "show", "state": previous_state})
+            ok = self._send_command(
+                {"cmd": "show", "state": previous_state}, critical=True
+            )
             self._current_state = previous_state
+            if not ok:
+                self._restart_pending = True
+                self._log(
+                    f"⚠ Overlay restore after refresh failed (state={previous_state}) "
+                    "— restart deferred"
+                )
             if previous_state == "listening":
                 self._start_audio_polling()
 
@@ -16724,8 +16855,11 @@ class WayfinderApp(ctk.CTk):
                 backend = "?"
             # ydotool/wtype cannot retarget a record-start window (xdotool only).
             can_retarget = backend == "xdotool"
+            focus_drifted = bool(
+                target and now_focused and target != now_focused
+            )
             drift = ""
-            if target and now_focused and target != now_focused:
+            if focus_drifted:
                 drift = (
                     " [focus drifted; retargeting]"
                     if can_retarget
@@ -16739,13 +16873,36 @@ class WayfinderApp(ctk.CTk):
             if gen is not None and gen != self.session_generation:
                 return
 
-            inject_text(
-                text,
-                typing_speed="instant",
-                target_window=target if can_retarget else None,
-                game_mode=bool(getattr(self, "_game_mode", False)),
-                paste_fallback=bool(self.config.get("game_mode_paste_fallback", True)),
+            # Phase 3.2: optional desktop clipboard paste when focus already drifted
+            # and the type backend cannot retarget (Wayland ydotool/wtype). Off by
+            # default — paste can still hit the wrong field if the user refocused
+            # elsewhere intentionally. Game Mode keeps its own type→paste fallback.
+            desktop_paste_on_drift = bool(
+                self.config.get("desktop_paste_on_focus_drift", False)
             )
+            in_game_mode = bool(getattr(self, "_game_mode", False))
+            if (
+                desktop_paste_on_drift
+                and focus_drifted
+                and not can_retarget
+                and not in_game_mode
+            ):
+                self.log(
+                    "⌨ desktop_paste_on_focus_drift: clipboard+Ctrl+V "
+                    "(opt-in; Wayland cannot retarget)"
+                )
+                from wayfinder.core.injector import inject_text_clipboard_paste
+                inject_text_clipboard_paste(text)
+            else:
+                inject_text(
+                    text,
+                    typing_speed="instant",
+                    target_window=target if can_retarget else None,
+                    game_mode=in_game_mode,
+                    paste_fallback=bool(
+                        self.config.get("game_mode_paste_fallback", True)
+                    ),
+                )
             self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))

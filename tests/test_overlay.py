@@ -37,6 +37,22 @@ class TestIPCCommandFormat:
         assert parsed["cmd"] == "show"
         assert parsed["state"] in ("ready", "listening", "processing")
 
+    def test_show_ack_protocol_shape(self):
+        """Phase 1: critical show may carry nonce; Qt acks with nonce+state+ok."""
+        cmd = {"cmd": "show", "state": "processing", "nonce": "1-abc"}
+        raw = json.dumps(cmd)
+        assert "\n" not in raw
+        parsed = json.loads(raw)
+        assert parsed["nonce"] == "1-abc"
+        ack = {"ack": True, "nonce": parsed["nonce"], "state": "processing", "ok": True}
+        assert json.loads(json.dumps(ack))["ack"] is True
+
+    def test_ping_command_format(self):
+        cmd = {"cmd": "ping", "nonce": "2-xyz"}
+        parsed = json.loads(json.dumps(cmd))
+        assert parsed["cmd"] == "ping"
+        assert "nonce" in parsed
+
     def test_hide_command_format(self):
         cmd = {"cmd": "hide"}
         parsed = json.loads(json.dumps(cmd))
