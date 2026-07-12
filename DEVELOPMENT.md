@@ -219,22 +219,20 @@ into the wrong surface).
 
 ### Local ASR backend auto-select (GPU)
 
-Settings → **Backend** offers **Auto (GPU-based)** | whisper.cpp | Faster-Whisper (CUDA).
+Settings → **Backend** offers **Auto (whisper.cpp)** | whisper.cpp |
+**Faster-Whisper (CUDA, manual)** (listed only when NVIDIA is detected).
 
 Logic: `recommend_local_transcription_backend()` / `apply_auto_transcription_backend()`
 in `src/wayfinder/utils/gpu.py`.
 
 | Mode | Backend |
 |------|---------|
-| **Auto** (any GPU) | Always **`whisper_cpp`** — safe Vulkan/CUDA-CLI/Metal/CPU path |
+| **Default / Auto** (any GPU, **including NVIDIA**) | Always **`whisper_cpp`** |
 | Manual whisper.cpp | `whisper_cpp` |
-| Manual Faster-Whisper | `faster_whisper` (Ultra; CT2 **CUDA only**) |
+| Manual Faster-Whisper | Only if NVIDIA present; never selected by Auto |
 
-**Why Auto never picks Faster-Whisper:** CT2 can report CUDA devices while model
-load still fails (cuBLAS/cuDNN, float16, bad device index), then silently run
-**CPU-large** — the “stuck for a minute” failure. Auto recovers mis-set FW on AMD
-by forcing whisper.cpp. NVIDIA users who want CTranslate2 pick **Manual**
-Faster-Whisper when CT2 CUDA is known-good.
+**Product rule:** never auto-place users on Faster-Whisper (especially NVIDIA).
+Default is always whisper.cpp. FW is an explicit Manual choice on NVIDIA only.
 
 **Hard rules**
 

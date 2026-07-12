@@ -938,8 +938,9 @@ def recommend_local_transcription_backend(
     (or callers pass explicit ctranslate2_cuda). Auto/startup must leave
     *probe_cuda* False so the UI thread never pays ~1s+ / hundreds of MB for CT2.
 
-    NVIDIA: Auto stays on whisper.cpp. Manual Faster-Whisper is optional when
-    CT2 CUDA is known-good (probe only on manual select / optional diagnostics).
+    Product rule: default and Auto are **always** whisper.cpp — including on
+    NVIDIA. Never auto-select Faster-Whisper (avoids accidental slow path if
+    CUDA/CT2 is broken). FW remains Manual-only when NVIDIA is present.
     """
     del faster_whisper_installed, allow_faster_whisper, use_gpu  # reserved / unused for Auto
 
@@ -953,36 +954,27 @@ def recommend_local_transcription_backend(
     if gpu.vendor == "apple" or getattr(gpu, "is_apple", False):
         return (
             "whisper_cpp",
-            "Apple Silicon: whisper.cpp + Metal is the Auto path.",
+            "Default: whisper.cpp + Metal.",
         )
     if gpu.is_amd:
         return (
             "whisper_cpp",
-            "AMD GPU: Auto uses whisper.cpp + Vulkan. "
-            "Faster-Whisper cannot use Vulkan/ROCm (CPU-only and often very slow).",
+            "Default: whisper.cpp + Vulkan. Faster-Whisper is not offered on AMD.",
         )
     if gpu.is_intel:
         return (
             "whisper_cpp",
-            "Intel GPU: Auto uses whisper.cpp (Vulkan/CPU). "
-            "Faster-Whisper would be CPU-only.",
+            "Default: whisper.cpp (Vulkan/CPU). Faster-Whisper is not offered here.",
         )
     if gpu.is_nvidia:
-        if ctranslate2_cuda is True:
-            return (
-                "whisper_cpp",
-                "NVIDIA + CT2 CUDA: Auto still uses whisper.cpp (safe GPU path). "
-                "Optional: Manual “Faster-Whisper (CUDA)” for CTranslate2.",
-            )
         return (
             "whisper_cpp",
-            "NVIDIA: Auto uses whisper.cpp. "
-            "Faster-Whisper is Manual-only (needs CUDA CTranslate2 + Ultra).",
+            "Default: whisper.cpp (never auto Faster-Whisper). "
+            "Optional Manual Faster-Whisper if you want CTranslate2 CUDA.",
         )
     return (
         "whisper_cpp",
-        "Auto uses whisper.cpp (CPU / Vulkan / Metal). "
-        "Faster-Whisper is Manual-only when NVIDIA CT2 CUDA is available.",
+        "Default: whisper.cpp. Faster-Whisper is Manual-only on NVIDIA.",
     )
 
 

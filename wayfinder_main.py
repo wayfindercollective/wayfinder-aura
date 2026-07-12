@@ -1114,11 +1114,11 @@ SETTING_TOOLTIPS = {
     # GPU/Backend - Can dramatically change all timings
     "backend": (
         "Local transcription engine.\n\n"
-        "• Auto (GPU-based) — always whisper.cpp (safe GPU/CPU path for AMD, Intel,\n"
-        "  Apple, and NVIDIA). Recovers you if Faster-Whisper was left on CPU.\n\n"
+        "• Auto / default — always whisper.cpp (AMD, Intel, Apple, and NVIDIA).\n"
+        "  Never auto-selects Faster-Whisper (avoids accidental slow CPU path).\n\n"
         "• whisper.cpp — Vulkan (AMD/Intel), CUDA CLI, Metal, CPU.\n\n"
-        "• Faster-Whisper (CUDA) — CTranslate2; GPU only with NVIDIA CUDA + package.\n"
-        "  Manual only. On AMD it falls back to CPU (large models feel stuck).\n"
+        "• Faster-Whisper (CUDA) — Manual only, shown when NVIDIA GPU is detected.\n"
+        "  CTranslate2 needs real NVIDIA CUDA. Not selected automatically.\n"
         "  Ultra feature. Manual pick turns Auto off."
     ),
     "gpu_acceleration": (
@@ -5943,7 +5943,10 @@ class WayfinderApp(ctk.CTk):
             rec, reason = "whisper_cpp", ""
 
         if gpu_info.is_nvidia:
-            self.log("🟢 GPU: NVIDIA (Auto → whisper.cpp; Manual Faster-Whisper if CT2 CUDA)")
+            self.log(
+                "🟢 GPU: NVIDIA — default/Auto is whisper.cpp "
+                "(Faster-Whisper is Manual-only, never auto)"
+            )
         elif gpu_info.is_amd:
             self.log("🔴 GPU: AMD detected (whisper.cpp + Vulkan)")
         elif gpu_info.is_apple:
@@ -8589,18 +8592,22 @@ class WayfinderApp(ctk.CTk):
             tooltip=SETTING_TOOLTIPS["language"], width=100,
         )
         
-        # Backend (local): Auto picks from GPU; manual whisper.cpp / Faster-Whisper
+        # Backend (local): default/Auto = always whisper.cpp (incl. NVIDIA).
+        # Faster-Whisper is Manual-only and only listed when NVIDIA is detected
+        # (or already selected), so nobody is auto-switched onto it.
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("openai_whisper", "groq_whisper"):
             backend = "whisper_cpp"  # Default to local backend
+        show_fw = bool(get_gpu_info().is_nvidia) or backend == "faster_whisper"
         self._backend_display_map = {
-            "Auto (GPU-based)": "auto",
+            "Auto (whisper.cpp)": "auto",
             "whisper.cpp": "whisper_cpp",
-            "Faster-Whisper (CUDA)": "faster_whisper",
         }
+        if show_fw:
+            self._backend_display_map["Faster-Whisper (CUDA, manual)"] = "faster_whisper"
         self._backend_id_to_display = {v: k for k, v in self._backend_display_map.items()}
         if self.config.get("transcription_backend_auto", True):
-            backend_display = "Auto (GPU-based)"
+            backend_display = "Auto (whisper.cpp)"
         else:
             backend_display = self._backend_id_to_display.get(backend, "whisper.cpp")
         self.backend_var = ctk.StringVar(value=backend_display)
@@ -8610,7 +8617,7 @@ class WayfinderApp(ctk.CTk):
             self.backend_var, self.on_backend_changed,
             tooltip=get_dynamic_tooltip("backend", self.config),
             tooltip_key="backend",
-            width=200,
+            width=220,
         )
         
         # Chunked Mode toggle (for unlimited recording length)
@@ -10295,8 +10302,10 @@ class WayfinderApp(ctk.CTk):
     def on_backend_changed(self, value: str):
         """Handle transcription backend change from dropdown (display labels or ids)."""
         display_map = getattr(self, "_backend_display_map", None) or {
-            "Auto (GPU-based)": "auto",
+            "Auto (whisper.cpp)": "auto",
+            "Auto (GPU-based)": "auto",  # legacy label
             "whisper.cpp": "whisper_cpp",
+            "Faster-Whisper (CUDA, manual)": "faster_whisper",
             "Faster-Whisper (CUDA)": "faster_whisper",
             "whisper_cpp": "whisper_cpp",
             "faster_whisper": "faster_whisper",
@@ -10311,25 +10320,16 @@ class WayfinderApp(ctk.CTk):
                     apply_auto_transcription_backend,
                     recommend_local_transcription_backend,
                 )
-                fw_ok = False
-                try:
-                    fw_ok = bool(self.feature_gate.has_feature("faster_whisper"))
-                except Exception:
-                    fw_ok = False
-                apply_auto_transcription_backend(
-                    self.config, allow_faster_whisper=fw_ok
-                )
-                rec, reason = recommend_local_transcription_backend(
-                    allow_faster_whisper=fw_ok,
-                    use_gpu=bool(self.config.get("use_gpu", True)),
-                )
+                apply_auto_transcription_backend(self.config)
+                rec, reason = recommend_local_transcription_backend()
             except Exception:
                 rec, reason = "whisper_cpp", "whisper.cpp default"
                 self.config["transcription_backend"] = rec
             save_config(self.config)
-            label = "whisper.cpp" if rec == "whisper_cpp" else "Faster-Whisper"
-            self.log(f"⚙ Backend: Auto → {label}")
-            self.log(f"   {reason}")
+            # Auto always lands on whisper.cpp (incl. NVIDIA) — never Faster-Whisper.
+            self.log("⚙ Backend: Auto → whisper.cpp")
+            if reason:
+                self.log(f"   {reason}")
             self._refresh_backend_tooltip()
             return
 
@@ -10338,7 +10338,7 @@ class WayfinderApp(ctk.CTk):
             self._show_premium_prompt("faster_whisper")
             # Restore prior display selection
             if self.config.get("transcription_backend_auto", True):
-                restore = "Auto (GPU-based)"
+                restore = "Auto (whisper.cpp)"
             else:
                 restore = getattr(self, "_backend_id_to_display", {}).get(
                     self.config.get("transcription_backend", "whisper_cpp"),
@@ -10347,12 +10347,20 @@ class WayfinderApp(ctk.CTk):
             self.backend_var.set(restore)
             return
 
+        # Non-NVIDIA: don't leave people on Faster-Whisper by accident (no GPU path).
+        if backend_id == "faster_whisper" and not get_gpu_info().is_nvidia:
+            self.log(
+                "⚠ Faster-Whisper needs NVIDIA CUDA — staying on whisper.cpp "
+                "(AMD/Intel/other would run FW on slow CPU)."
+            )
+            backend_id = "whisper_cpp"
+
         self.config["transcription_backend_auto"] = False
         self.config["transcription_backend"] = backend_id
         save_config(self.config)
         display_names = {
             "whisper_cpp": "whisper.cpp",
-            "faster_whisper": "Faster-Whisper (CUDA)",
+            "faster_whisper": "Faster-Whisper (CUDA, manual)",
             "openai_whisper": "OpenAI Whisper (Cloud)",
         }
         display = display_names.get(backend_id, backend_id)
@@ -10364,7 +10372,7 @@ class WayfinderApp(ctk.CTk):
                 if not ctranslate2_cuda_available():
                     self.log(
                         "⚠ Faster-Whisper: CTranslate2 reports no CUDA devices — "
-                        "will run on CPU (slow for large models). Prefer whisper.cpp on AMD."
+                        "will run on CPU (slow for large models). Prefer Auto / whisper.cpp."
                     )
                 else:
                     self.log("✓ Faster-Whisper: CTranslate2 CUDA devices available")

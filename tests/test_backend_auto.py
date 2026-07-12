@@ -20,22 +20,15 @@ def test_recommend_amd_is_whisper_cpp():
     assert "AMD" in reason or "Vulkan" in reason
 
 
-def test_recommend_nvidia_cuda_auto_still_whisper_cpp():
-    """Sol: Auto prefers whisper.cpp even when CT2 CUDA is present."""
+def test_recommend_nvidia_never_auto_faster_whisper():
+    """NVIDIA defaults to whisper.cpp — never auto Faster-Whisper."""
     rec, reason = recommend_local_transcription_backend(
         ctranslate2_cuda=True,
         gpu=GPUInfo("nvidia", "RTX 4080", "nvidia"),
     )
     assert rec == "whisper_cpp"
-    assert "Manual" in reason or "whisper.cpp" in reason
-
-
-def test_recommend_nvidia_default_whisper_cpp():
-    rec, reason = recommend_local_transcription_backend(
-        gpu=GPUInfo("nvidia", "RTX", "nvidia"),
-    )
-    assert rec == "whisper_cpp"
-    assert "NVIDIA" in reason
+    assert rec != "faster_whisper"
+    assert "never auto" in reason.lower() or "Manual" in reason or "whisper.cpp" in reason
 
 
 def test_apply_auto_recovers_from_faster_whisper():
