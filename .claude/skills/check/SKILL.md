@@ -26,7 +26,7 @@ Cost: ~$0.80 per full 3-round review (1 GPT round + 2 local Qwen rounds).
 
 ### Qwen 3.5 (local LM Studio via LiteLLM proxy)
 - **Endpoint:** http://localhost:8080/v1/chat/completions
-- **API Key:** REDACTED_LOCAL_PROXY_KEY
+- **API Key:** from env `LITELLM_API_KEY` (local LiteLLM/LM Studio; never commit)
 - **Model:** qwen3.5-397b-a17b
 
 ### GPT 5.4 (OpenAI)
@@ -271,7 +271,7 @@ for tool_round in range(MAX_TOOL_ROUNDS):
     req = urllib.request.Request(
         'http://localhost:8080/v1/chat/completions',
         data=payload,
-        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer REDACTED_LOCAL_PROXY_KEY'}
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${LITELLM_API_KEY}'}
     )
     resp = urllib.request.urlopen(req, timeout=300)
     result = json.loads(resp.read())
@@ -313,7 +313,7 @@ if not got_final and not output:
     req = urllib.request.Request(
         'http://localhost:8080/v1/chat/completions',
         data=payload,
-        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer REDACTED_LOCAL_PROXY_KEY'}
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${LITELLM_API_KEY}'}
     )
     resp = urllib.request.urlopen(req, timeout=300)
     result = json.loads(resp.read())
