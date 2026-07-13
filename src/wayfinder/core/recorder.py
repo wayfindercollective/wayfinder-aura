@@ -786,6 +786,10 @@ class WarmMic:
         # and the idle-timer thread can take the same lock without self-deadlock.
         self._lock = threading.RLock()
         self._idle_timer: threading.Timer | None = None
+        # True when an open was abandoned by the watchdog — a late PortAudio worker may
+        # still be inside InputStream()/start(). Never _pa_rescan() while set: terminate
+        # racing an in-flight open has SEGV'd ALSA (2026-07-13 Detect session).
+        self._abandoned_open = False
 
     @property
     def sample_rate(self) -> int:
@@ -811,10 +815,21 @@ class WarmMic:
         device table is a snapshot from process init, so a mic that appeared after the
         app booted (USB hub powered on in the morning) is invisible to every rung of
         the chain until the tables are rebuilt (2026-07-02 morning failure mode).
+
+        Never rescan while an open was abandoned mid-flight — ``sd._terminate()`` racing
+        a still-running ``InputStream()`` is the ALSA SEGV class of crash.
         """
+        # Do NOT clear _abandoned_open here. Once a watchdog abandoned an in-flight
+        # PortAudio open, a late C worker may still be inside InputStream()/start()
+        # for the rest of the process lifetime of this WarmMic. Clearing the flag on
+        # the next acquire would re-enable _pa_rescan() under that worker (Sol R2).
         try:
             self._open_chain()
         except Exception as first_err:
+            if self._abandoned_open:
+                # A watchdog-abandoned open may still be inside PortAudio; terminating
+                # the library here is worse than leaving a stale device table.
+                raise first_err
             if not _pa_rescan():
                 raise first_err
             # Re-resolve the user's saved mic by name against the FRESH device table.
@@ -863,12 +878,14 @@ class WarmMic:
                 # on the Tk main thread — uncapped, that hang freezes the whole app.
                 # On timeout we abandon it and fall through to the next fallback.
                 stream, rate = _run_with_timeout(_probe_and_open, _MIC_OPEN_TIMEOUT)
-                self._stream = stream
-                self._recording_sample_rate = rate
-                self.device = dev  # remember the working index — heals a stale/dead cached one
+                with self._lock:
+                    self._stream = stream
+                    self._recording_sample_rate = rate
+                    self.device = dev  # remember the working index — heals a stale/dead cached one
                 return
             except TimeoutError as e:
                 last_err = e
+                self._abandoned_open = True
                 print(f"WarmMic: device {dev} open timed out (>{_MIC_OPEN_TIMEOUT:.0f}s) — "
                       "likely a wedged PipeWire node; trying next input")
             except Exception as e:
@@ -916,27 +933,48 @@ class WarmMic:
                 self._idle_timer = None
 
     def _close_stream(self) -> None:
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
+        """Stop/close the PortAudio stream without double-close races.
+
+        Atomically detach under ``_lock`` so concurrent callers cannot stop/close the
+        same handle twice. ALSA's ``snd_async_del_handler`` / ``snd_pcm_close`` has
+        SEGV'd when PortAudio tore down a stream that was already half-closed
+        (live: 2026-07-13 Detect-key session after a mic rescan). Python
+        try/except cannot catch SIGSEGV, so the only defense is never double-enter.
+        Teardown runs outside the lock so abort/close cannot deadlock other paths.
+        """
+        with self._lock:
+            stream = self._stream
             self._stream = None
             self._recording_sample_rate = None
+        if stream is None:
+            return
+        try:
+            # abort() is preferred when available: stop() can block waiting for the
+            # PortAudio callback thread while a rescan/terminate is racing.
+            abort = getattr(stream, "abort", None)
+            if callable(abort):
+                abort()
+            else:
+                stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
 
     def close(self) -> None:
         """Stop and close the stream entirely (app shutdown, device change, force reset)."""
         with self._lock:
             self._cancel_idle_timer()
             self._sink = None
-            self._close_stream()
+        self._close_stream()
 
     def set_device(self, device: int | None) -> None:
         """Point at a new device and drop the warm stream so the next acquire reopens on it."""
         with self._lock:
             self.device = device
-            self._close_stream()
+        self._close_stream()
 
     @property
     def in_use(self) -> bool:
@@ -951,12 +989,19 @@ class WarmMic:
         so the warm stream is closed first; the next acquire() re-opens against the fresh table
         (via resolve_device). Serialized on the same lock as open/close. Refuses (returns False)
         while a recording holds the mic — call it between recordings. Returns True on success.
+        Also refuses while an open was abandoned mid-flight (watchdog timeout) so we never
+        ``_terminate()`` PortAudio under a still-running InputStream constructor.
         """
         with self._lock:
             if self._sink is not None:
                 return False  # a recording is active — don't yank its stream
+            if self._abandoned_open:
+                return False  # late open worker may still be inside PortAudio
             self._cancel_idle_timer()
-            self._close_stream()
+        self._close_stream()
+        with self._lock:
+            if self._sink is not None or self._abandoned_open:
+                return False
             return _pa_rescan()
 
 

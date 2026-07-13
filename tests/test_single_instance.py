@@ -228,13 +228,200 @@ class TestHotkeyDetect:
     @pytest.fixture(autouse=True)
     def _clean_capture(self):
         wayfinder_main._HOTKEY_CAPTURE["armed"] = False
+        wayfinder_main._HOTKEY_CAPTURE["suppress_until"] = 0.0
         yield
         wayfinder_main._HOTKEY_CAPTURE["armed"] = False
+        wayfinder_main._HOTKEY_CAPTURE["suppress_until"] = 0.0
 
     def test_keycode_display_known_and_unknown(self):
         assert wayfinder_main._keycode_display(61) == "F3"
         assert wayfinder_main._keycode_display(275) == "Mouse Side"
         assert wayfinder_main._keycode_display(99999) == "Key 99999"
+
+    def _make_detect_app(self, monkeypatch, config=None):
+        """Minimal stand-in for WayfinderApp Detect-apply without constructing Tk."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        saved = []
+
+        def fake_save(cfg):
+            saved.append(dict(cfg))
+
+        monkeypatch.setattr(wayfinder_main, "save_config", fake_save)
+
+        logs = []
+        app = SimpleNamespace(
+            config=config or {"hotkey_key": 61, "hotkey_modifiers": [],
+                              "style_toggle_key": 68, "style_toggle_modifiers": []},
+            _hotkey_capture_target="record",
+            _detect_cancel_after_id=None,
+            _detect_rearm_after=0.0,
+            _DETECT_REARM_COOLDOWN_S=wayfinder_main.WayfinderApp._DETECT_REARM_COOLDOWN_S,
+            _hotkey_key_codes={},
+            _hotkey_code_to_name={},
+            _hotkey_key_var=SimpleNamespace(set=MagicMock()),
+            _hotkey_mod_vars={},
+            _style_hotkey_key_var=SimpleNamespace(set=MagicMock()),
+            _style_hotkey_mod_vars={},
+            _detect_btn_record=MagicMock(),
+            _detect_btn_style=MagicMock(),
+            _hotkey_thread=None,
+            _pynput_listener_started=False,
+            _capture_thread=None,
+            _capture_stop_event=None,
+            log=lambda msg: logs.append(msg),
+            after=MagicMock(return_value="after-id"),
+            after_cancel=MagicMock(),
+            restart_evdev_listener=MagicMock(),
+        )
+        # Bind real methods onto the stand-in
+        for name in (
+            "_apply_captured_hotkey",
+            "_ensure_hotkey_label",
+            "_pure_hotkey_label",
+            "_reset_detect_button",
+            "_stop_capture_listener",
+            "_cancel_detect_timeout",
+            "_start_hotkey_detect",
+            "_cancel_hotkey_detect",
+        ):
+            setattr(app, name, getattr(wayfinder_main.WayfinderApp, name).__get__(app))
+        return app, saved, logs
+
+    def test_apply_persists_binding_before_listener_restart(self, monkeypatch):
+        """Regression 2026-07-13: crash mid-Detect lost the capture because config
+        was only written after UI work. Save must happen even if restart raises."""
+        from unittest.mock import MagicMock
+
+        app, saved, logs = self._make_detect_app(monkeypatch)
+        order = []
+
+        def save_side(cfg):
+            order.append("save")
+            saved.append(dict(cfg))
+
+        def restart_side(reason=""):
+            order.append("restart")
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(wayfinder_main, "save_config", save_side)
+        app.restart_evdev_listener = MagicMock(side_effect=restart_side)
+        app._hotkey_capture_gen = 1
+        app._apply_captured_hotkey(
+            {"code": 24, "modifiers": [], "device": "Corsair SCIMITAR", "gen": 1}
+        )
+
+        assert saved, "config must be saved even when listener restart fails"
+        assert saved[0]["hotkey_key"] == 24
+        assert app.config["hotkey_key"] == 24
+        assert order.index("save") < order.index("restart"), "save must precede listener restart"
+        assert any("set to O" in m or "set to Key" in m or "Record hotkey set" in m
+                   for m in logs)
+        assert any("restart after Detect failed" in m for m in logs)
+        assert app._hotkey_capture_target is None
+        assert wayfinder_main._HOTKEY_CAPTURE["armed"] is False
+
+    def test_apply_rolls_back_config_when_save_fails(self, monkeypatch):
+        app, saved, logs = self._make_detect_app(monkeypatch)
+        monkeypatch.setattr(
+            wayfinder_main, "save_config",
+            lambda cfg: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        app._hotkey_capture_gen = 1
+        app._apply_captured_hotkey(
+            {"code": 24, "modifiers": [], "device": "Corsair SCIMITAR", "gen": 1}
+        )
+        assert app.config["hotkey_key"] == 61  # rolled back to F3
+        assert not saved
+        assert any("Could not save" in m for m in logs)
+        app.restart_evdev_listener.assert_not_called()
+
+    def test_apply_rejects_stale_generation(self, monkeypatch):
+        app, saved, _logs = self._make_detect_app(monkeypatch)
+        app._hotkey_capture_gen = 5
+        app._hotkey_capture_target = "record"
+        app._apply_captured_hotkey(
+            {"code": 24, "modifiers": [], "device": "x", "gen": 4}
+        )
+        assert not saved
+        assert app.config["hotkey_key"] == 61
+        assert app._hotkey_capture_target == "record"  # untouched stale event
+
+    def test_detect_rearm_cooldown_blocks_immediate_rearm(self, monkeypatch):
+        """Scimitar side buttons can re-click Detect right after bind and overwrite
+        the new hotkey with F3. Cooldown must reject that re-arm."""
+        import time
+        app, _saved, logs = self._make_detect_app(monkeypatch)
+        app._detect_rearm_after = time.monotonic() + 5.0
+
+        app._start_hotkey_detect("record")
+
+        assert wayfinder_main._HOTKEY_CAPTURE["armed"] is False
+        assert any("Detect ready in" in m for m in logs)
+
+    def test_successful_apply_sets_rearm_cooldown(self, monkeypatch):
+        import time
+        app, saved, _logs = self._make_detect_app(monkeypatch)
+        app._hotkey_capture_gen = 1
+        before = time.monotonic()
+        app._apply_captured_hotkey(
+            {"code": 24, "modifiers": [], "device": "Corsair", "gen": 1}
+        )
+        assert saved
+        assert app._detect_rearm_after >= before + app._DETECT_REARM_COOLDOWN_S - 0.05
+
+    def test_capture_listener_stamps_immutable_session_gen(self, monkeypatch):
+        """Sol R2: a join-timed-out capture reader must not emit the *newer*
+        session gen from the shared global — stamp the gen it was started with.
+        """
+        import os
+        import queue
+        import threading
+        import time
+        from itertools import chain, repeat
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        r, w = os.pipe()
+        fake_event = SimpleNamespace(type=1, code=24, value=1)
+        dev = MagicMock()
+        dev.name = "Scimitar"
+        dev.fd = r
+        dev.read = MagicMock(side_effect=chain([[fake_event]], repeat([])))
+
+        monkeypatch.setattr(wayfinder_main, "find_keyboard_devices", lambda e: [dev])
+        monkeypatch.setattr(wayfinder_main, "ecodes", SimpleNamespace(EV_KEY=1))
+        monkeypatch.setattr(
+            wayfinder_main, "categorize",
+            lambda ev: SimpleNamespace(scancode=ev.code, keystate=ev.value),
+        )
+
+        q = queue.Queue()
+        stop = threading.Event()
+        # Session 1 starts, then a newer session overwrites the global gen.
+        wayfinder_main._HOTKEY_CAPTURE["armed"] = True
+        wayfinder_main._HOTKEY_CAPTURE["gen"] = 1
+        t = threading.Thread(
+            target=wayfinder_main.capture_hotkey_listener,
+            args=(q, stop, None, None, 1),  # immutable capture_gen=1
+            daemon=True,
+        )
+        t.start()
+        try:
+            time.sleep(0.15)
+            # Simulate a newer Detect session taking over the globals.
+            wayfinder_main._HOTKEY_CAPTURE["armed"] = True
+            wayfinder_main._HOTKEY_CAPTURE["gen"] = 2
+            os.write(w, b"x")
+            time.sleep(0.3)
+            # Old reader must refuse (session no longer ours) — no event for gen 2.
+            assert q.empty(), "stale reader must not emit under a newer session gen"
+        finally:
+            stop.set()
+            t.join(timeout=3)
+            os.close(r)
+            os.close(w)
 
     def test_armed_capture_reports_key_instead_of_firing_hotkey(self, monkeypatch):
         import os

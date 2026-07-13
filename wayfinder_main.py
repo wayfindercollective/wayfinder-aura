@@ -3176,12 +3176,16 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                             # exclusively-grabbed side button emits.
                             if (_HOTKEY_CAPTURE["armed"] and key_event.keystate == 1
                                     and keycode not in all_modifier_codes):
+                                # Snapshot gen before disarm so a concurrent re-arm
+                                # cannot make this press claim a newer session.
+                                cap_gen = _HOTKEY_CAPTURE.get("gen")
                                 _HOTKEY_CAPTURE["armed"] = False
                                 held = [name for name, codes in MODIFIER_CODES.items()
                                         if pressed_modifiers & set(codes)]
                                 event_queue.put((EventType.HOTKEY_CAPTURED,
                                                  {"code": keycode, "modifiers": held,
-                                                  "device": device.name}))
+                                                  "device": device.name,
+                                                  "gen": cap_gen}))
                                 continue
 
                             # Debug: log all key presses (F-keys only to reduce noise)
@@ -3225,12 +3229,18 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
     log("🛑 Hotkey listener stopped")
 
 
-def capture_hotkey_listener(event_queue, stop_event, enabled_devices=None, log_callback=None):
+def capture_hotkey_listener(event_queue, stop_event, enabled_devices=None,
+                            log_callback=None, capture_gen=None):
     """Short-lived evdev reader used only by Settings → Detect.
 
     Runs when the production hotkey listener is deferred (KDE owns the record
     shortcut) so Detect still has something reading /dev/input. Emits a single
     HOTKEY_CAPTURED then exits — never HOTKEY_PRESSED / STYLE_TOGGLE.
+
+    ``capture_gen`` is the immutable Detect session id assigned at thread start.
+    Stamping the live global gen at emit time lets a join-timed-out reader claim
+    a *newer* session (Sol R2); always stamp ``capture_gen`` and refuse to emit
+    if a newer session has taken ownership.
     """
     import select
 
@@ -3260,6 +3270,16 @@ def capture_hotkey_listener(event_queue, stop_event, enabled_devices=None, log_c
                 pass
         return fd_map
 
+    def _session_still_ours() -> bool:
+        if stop_event.is_set():
+            return False
+        if capture_gen is None:
+            return bool(_HOTKEY_CAPTURE.get("armed"))
+        return (
+            _HOTKEY_CAPTURE.get("armed")
+            and _HOTKEY_CAPTURE.get("gen") == capture_gen
+        )
+
     fd_to_device = _open_devices()
     if not fd_to_device:
         log("⚠️ Detect: no input devices readable — check input group membership")
@@ -3267,7 +3287,7 @@ def capture_hotkey_listener(event_queue, stop_event, enabled_devices=None, log_c
     log(f"🎯 Detect listening on {len(fd_to_device)} device(s)…")
 
     try:
-        while not stop_event.is_set() and _HOTKEY_CAPTURE.get("armed"):
+        while _session_still_ours():
             try:
                 r, _, _ = select.select(list(fd_to_device.keys()), [], [], 0.25)
             except (ValueError, OSError):
@@ -3293,13 +3313,16 @@ def capture_hotkey_listener(event_queue, stop_event, enabled_devices=None, log_c
                             continue
                         if key_event.keystate != 1:
                             continue
-                        # First non-modifier press wins
+                        # First non-modifier press wins — only if we still own the session.
+                        if not _session_still_ours():
+                            return
                         _HOTKEY_CAPTURE["armed"] = False
                         held = [name for name, codes in MODIFIER_CODES.items()
                                 if pressed_modifiers & set(codes)]
                         event_queue.put((EventType.HOTKEY_CAPTURED,
                                          {"code": keycode, "modifiers": held,
-                                          "device": device.name}))
+                                          "device": device.name,
+                                          "gen": capture_gen}))
                         log(f"🎯 Detected key {keycode} from {device.name}")
                         return
                 except (OSError, IOError) as e:
@@ -13459,6 +13482,11 @@ class WayfinderApp(ctk.CTk):
 
     _DETECT_IDLE_TEXT = "Detect — click, then press a key"
 
+    # After a successful Detect bind, ignore re-clicks briefly so a mouse-side
+    # button that also synthesizes a click can't immediately re-arm Detect and
+    # overwrite the binding (live: O → re-arm → F3 within ~1s on Scimitar).
+    _DETECT_REARM_COOLDOWN_S = 2.0
+
     def _stop_capture_listener(self) -> None:
         """Stop any short-lived Detect capture thread."""
         stop = getattr(self, "_capture_stop_event", None)
@@ -13467,8 +13495,22 @@ class WayfinderApp(ctk.CTk):
             stop.set()
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.5)
+        # If join timed out, keep the refs — the stop event is set and the
+        # daemon will exit; clearing them would hide a still-running reader.
+        if thread is not None and thread.is_alive():
+            return
         self._capture_thread = None
         self._capture_stop_event = None
+
+    def _cancel_detect_timeout(self) -> None:
+        """Cancel the pending 8s Detect safety timeout, if any."""
+        after_id = getattr(self, "_detect_cancel_after_id", None)
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+            self._detect_cancel_after_id = None
 
     def _start_hotkey_detect(self, target: str) -> None:
         """Arm capture: next key press becomes the hotkey (any key/button).
@@ -13486,10 +13528,25 @@ class WayfinderApp(ctk.CTk):
             self.log("🎯 Detect unavailable (no evdev / pynput listener)")
             return
 
+        # Debounce: a just-finished Detect must not re-arm from the same physical press
+        # (MMO mice often emit both a keycode and a click on the focused button).
+        cooldown_until = float(getattr(self, "_detect_rearm_after", 0.0) or 0.0)
+        now = time.monotonic()
+        if now < cooldown_until:
+            remaining = max(0.1, cooldown_until - now)
+            self.log(f"🎯 Detect ready in {remaining:.1f}s — binding already applied")
+            return
+
+        self._cancel_detect_timeout()
         self._stop_capture_listener()
+        # Generation stamps timeouts + capture events so a stale after()/queue
+        # event cannot cancel or rebind a newer Detect session.
+        self._hotkey_capture_gen = int(getattr(self, "_hotkey_capture_gen", 0) or 0) + 1
+        gen = self._hotkey_capture_gen
         self._hotkey_capture_target = target
         _HOTKEY_CAPTURE["armed"] = True
-        _HOTKEY_CAPTURE["suppress_until"] = time.time() + 10.0  # covers the 8s window + margin
+        _HOTKEY_CAPTURE["gen"] = gen
+        _HOTKEY_CAPTURE["suppress_until"] = time.time() + 10.0  # wall clock: compared in handle_event
         btn = self._detect_btn_record if target == "record" else self._detect_btn_style
         try:
             btn.configure(text="Listening… press a key or side button", state="disabled")
@@ -13507,22 +13564,29 @@ class WayfinderApp(ctk.CTk):
             enabled = self.config.get("enabled_input_devices") or None
             self._capture_thread = threading.Thread(
                 target=capture_hotkey_listener,
-                args=(self.event_queue, self._capture_stop_event, enabled, self.log),
+                args=(self.event_queue, self._capture_stop_event, enabled, self.log, gen),
                 daemon=True,
                 name="wayfinder-hotkey-capture",
             )
             self._capture_thread.start()
 
         # Safety: disarm if nothing was pressed (e.g. user clicked by accident).
-        self.after(8000, lambda: self._cancel_hotkey_detect(target))
+        # Keep the after-id so a successful capture can cancel this and not race
+        # a second Detect session. Stamp generation so a stale timeout is a no-op.
+        self._detect_cancel_after_id = self.after(
+            8000, lambda t=target, g=gen: self._cancel_hotkey_detect(t, g)
+        )
 
-    def _cancel_hotkey_detect(self, target: str) -> None:
+    def _cancel_hotkey_detect(self, target: str, gen: int | None = None) -> None:
+        if gen is not None and getattr(self, "_hotkey_capture_gen", None) != gen:
+            return
         if getattr(self, "_hotkey_capture_target", None) != target:
             return
         if _HOTKEY_CAPTURE.get("armed"):
             _HOTKEY_CAPTURE["armed"] = False
             _HOTKEY_CAPTURE["suppress_until"] = time.time() + 0.5
             self._hotkey_capture_target = None
+            self._detect_cancel_after_id = None
             self._stop_capture_listener()
             self._reset_detect_button(target)
             self.log("🎯 Detect cancelled (no key pressed)")
@@ -13534,9 +13598,17 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass  # settings panel may have been rebuilt/destroyed
 
+    def _pure_hotkey_label(self, code: int) -> str:
+        """Human label for a keycode without touching any widgets."""
+        if hasattr(self, "_hotkey_code_to_name"):
+            existing = self._hotkey_code_to_name.get(code)
+            if existing:
+                return existing
+        return _keycode_display(code)
+
     def _ensure_hotkey_label(self, code: int, target: str = "record") -> str:
         """Ensure a key label is in the dropdown map (for keys outside F1–F12 list)."""
-        label = _keycode_display(code)
+        label = self._pure_hotkey_label(code)
         if not hasattr(self, "_hotkey_key_codes"):
             return label
         # Prefer existing canonical name if this code is already listed
@@ -13557,59 +13629,116 @@ class WayfinderApp(ctk.CTk):
         return label
 
     def _apply_captured_hotkey(self, data: dict) -> None:
-        """A Detect capture arrived from the listener — bind it and restart."""
+        """A Detect capture arrived from the listener — bind it and restart.
+
+        Order is intentional (2026-07-13 crash lost the bind):
+          1. Pure validation + collision checks (no UI, no thread join)
+          2. Mutate config + save_config (persist before anything that can hang)
+          3. Stop capture listener / UI sync / restart production listener
+        """
         target = getattr(self, "_hotkey_capture_target", None)
         if target is None:
             return
-        self._hotkey_capture_target = None
-        _HOTKEY_CAPTURE["armed"] = False
-        _HOTKEY_CAPTURE["suppress_until"] = time.time() + 1.0  # absorb same-press socket fire
-        self._stop_capture_listener()
-        code = data["code"]
-        modifiers = list(data.get("modifiers", []))
-        label = self._ensure_hotkey_label(code, target)
+        # Reject stale queue events from a previous Detect generation.
+        event_gen = data.get("gen")
+        current_gen = getattr(self, "_hotkey_capture_gen", None)
+        if event_gen is not None and current_gen is not None and event_gen != current_gen:
+            return
+
+        try:
+            code = int(data["code"])
+        except (KeyError, TypeError, ValueError) as e:
+            self._hotkey_capture_target = None
+            self._cancel_detect_timeout()
+            _HOTKEY_CAPTURE["armed"] = False
+            self._reset_detect_button(target)
+            self.log(f"⚠ Detect capture ignored (bad payload): {e}")
+            return
+        modifiers = list(data.get("modifiers", []) or [])
+        label = self._pure_hotkey_label(code)
         display = label
         if modifiers:
             display = "+".join(m.capitalize() for m in modifiers) + "+" + display
 
-        # "Already bound" guard: don't silently rebind to a key that's already in use —
-        # tell the user instead (their request). Compare (code, modifier-set).
+        # "Already bound" guard: pure config compare before any side effects.
         captured = (code, set(modifiers))
-        cur_record = (self.config.get("hotkey_key"), set(self.config.get("hotkey_modifiers", [])))
-        cur_style = (self.config.get("style_toggle_key"), set(self.config.get("style_toggle_modifiers", [])))
+        cur_record = (self.config.get("hotkey_key"), set(self.config.get("hotkey_modifiers", []) or []))
+        cur_style = (self.config.get("style_toggle_key"), set(self.config.get("style_toggle_modifiers", []) or []))
         same_action = cur_record if target == "record" else cur_style
         other_action = cur_style if target == "record" else cur_record
         this_name = "Record" if target == "record" else "Style toggle"
         other_name = "Style toggle" if target == "record" else "Record"
         if captured == same_action:
+            self._hotkey_capture_target = None
+            self._cancel_detect_timeout()
+            _HOTKEY_CAPTURE["armed"] = False
+            _HOTKEY_CAPTURE["suppress_until"] = time.time() + 2.0
+            self._detect_rearm_after = time.monotonic() + self._DETECT_REARM_COOLDOWN_S
             self._reset_detect_button(target)
             self.log(f"🎯 {display} is already your {this_name} hotkey — no change.")
             return
         if captured == other_action:
+            self._hotkey_capture_target = None
+            self._cancel_detect_timeout()
+            _HOTKEY_CAPTURE["armed"] = False
+            _HOTKEY_CAPTURE["suppress_until"] = time.time() + 2.0
+            self._detect_rearm_after = time.monotonic() + self._DETECT_REARM_COOLDOWN_S
             self._reset_detect_button(target)
             self.log(f"🎯 {display} is already bound to {other_name} — pick another key.")
             return
 
+        # Snapshot for rollback if save fails (pynput reads config live).
         if target == "record":
+            prev_key, prev_mods = self.config.get("hotkey_key"), list(self.config.get("hotkey_modifiers", []) or [])
             self.config["hotkey_key"] = code
             self.config["hotkey_modifiers"] = modifiers
-            try:
+        else:
+            prev_key, prev_mods = self.config.get("style_toggle_key"), list(self.config.get("style_toggle_modifiers", []) or [])
+            self.config["style_toggle_key"] = code
+            self.config["style_toggle_modifiers"] = modifiers
+
+        # Persist BEFORE any join/UI/listener work that can hang or race audio.
+        try:
+            save_config(self.config)
+        except Exception as e:
+            if target == "record":
+                self.config["hotkey_key"] = prev_key
+                self.config["hotkey_modifiers"] = prev_mods
+            else:
+                self.config["style_toggle_key"] = prev_key
+                self.config["style_toggle_modifiers"] = prev_mods
+            self._hotkey_capture_target = None
+            self._cancel_detect_timeout()
+            _HOTKEY_CAPTURE["armed"] = False
+            self._reset_detect_button(target)
+            self.log(f"⚠ Could not save hotkey config: {e}")
+            return
+
+        # Config is durable — clear arming state and best-effort cleanup.
+        self._hotkey_capture_target = None
+        self._cancel_detect_timeout()
+        _HOTKEY_CAPTURE["armed"] = False
+        _HOTKEY_CAPTURE["suppress_until"] = time.time() + 2.0
+        self._detect_rearm_after = time.monotonic() + self._DETECT_REARM_COOLDOWN_S
+        try:
+            self._stop_capture_listener()
+        except Exception as e:
+            self.log(f"⚠ Detect capture stop: {e}")
+
+        # Best-effort UI sync — config is already on disk.
+        try:
+            label = self._ensure_hotkey_label(code, target)
+            if target == "record":
                 self._hotkey_key_var.set(label)
                 for mod, var in self._hotkey_mod_vars.items():
                     var.set(mod in modifiers)
-            except Exception:
-                pass
-        else:
-            self.config["style_toggle_key"] = code
-            self.config["style_toggle_modifiers"] = modifiers
-            try:
+            else:
                 self._style_hotkey_key_var.set(label)
                 for mod, var in self._style_hotkey_mod_vars.items():
                     var.set(mod in modifiers)
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-        save_config(self.config)
         self._reset_detect_button(target)
         which = "Record hotkey" if target == "record" else "Style toggle"
         self.log(f"🎯 {which} set to {display} (from {data.get('device', 'input device')})")
@@ -13631,7 +13760,10 @@ class WayfinderApp(ctk.CTk):
                 )
         except (OSError, UnicodeDecodeError):
             pass
-        self.restart_evdev_listener("hotkey detected")
+        try:
+            self.restart_evdev_listener("hotkey detected")
+        except Exception as e:
+            self.log(f"⚠ Hotkey listener restart after Detect failed: {e}")
 
     def _apply_hotkey_change(self):
         """Apply hotkey config change and update the listener."""
@@ -16328,8 +16460,13 @@ class WayfinderApp(ctk.CTk):
         except queue.Empty:
             pass
         # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
-        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms
-        interval = 250 if self.app_state == AppState.IDLE else 100
+        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
+        # While Settings → Detect is armed, use the CLAUDE.md floor (100ms) so the
+        # capture is applied promptly without a sub-100ms self-rearming poll.
+        if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
+            interval = 100
+        else:
+            interval = 250
         self.after(interval, self.poll_events)
 
     @staticmethod

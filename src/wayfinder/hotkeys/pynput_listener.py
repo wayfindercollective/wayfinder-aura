@@ -282,10 +282,14 @@ def pynput_hotkey_listener(
             code = PYNPUT_TO_EVDEV.get(key)
             if code is None:
                 return  # unmapped key (e.g. a letter) — keep waiting; Detect times out otherwise
+            # Snapshot gen before disarm so a concurrent re-arm cannot re-stamp
+            # this press with a newer Detect session id.
+            cap_gen = capture_state.get("gen")
             capture_state["armed"] = False
             event_queue.put((EventType.HOTKEY_CAPTURED,
                              {"code": code, "modifiers": sorted(pressed_modifiers),
-                              "device": "keyboard"}))
+                              "device": "keyboard",
+                              "gen": cap_gen}))
             return
 
         # Read live config for hotkey changes

@@ -215,6 +215,108 @@ class TestWarmMicIdleClose:
         warm.close()
         assert not warm.is_open
 
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_close_stream_detaches_before_teardown(self, mock_sd, _rate):
+        """Regression 2026-07-13: double-close of the same PortAudio handle SEGV'd in
+        ALSA (snd_async_del_handler). Drop the reference before stop/close so a
+        concurrent idle/rescan path cannot re-enter on the same object.
+        """
+        warm = _make_warm(device=7)
+        warm.acquire(MagicMock())
+        stream = warm._stream
+        assert stream is not None
+
+        seen = []
+
+        def tracking_abort():
+            # While abort/close run, WarmMic must already have cleared _stream.
+            seen.append(warm._stream)
+            raise RuntimeError("pa boom")  # still must not leave a dangling ref
+
+        stream.abort = tracking_abort
+        stream.close = MagicMock(side_effect=RuntimeError("close boom"))
+
+        warm._close_stream()
+        assert warm._stream is None
+        assert not warm.is_open
+        assert seen == [None]  # detached before teardown
+        stream.close.assert_called_once()
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_close_stream_prefers_abort_over_stop(self, mock_sd, _rate):
+        warm = _make_warm(device=7)
+        warm.acquire(MagicMock())
+        stream = warm._stream
+        stream.abort = MagicMock()
+        stream.stop = MagicMock()
+        stream.close = MagicMock()
+
+        warm._close_stream()
+        stream.abort.assert_called_once()
+        stream.stop.assert_not_called()
+        stream.close.assert_called_once()
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_concurrent_close_only_tears_down_once(self, mock_sd, _rate):
+        warm = _make_warm(device=7)
+        warm.acquire(MagicMock())
+        stream = warm._stream
+        stream.abort = MagicMock()
+        stream.close = MagicMock()
+
+        def closer():
+            warm._close_stream()
+
+        threads = [threading.Thread(target=closer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=2)
+        assert stream.abort.call_count == 1
+        assert stream.close.call_count == 1
+        assert warm._stream is None
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder._system_default_input_index", return_value=None)
+    @patch("wayfinder.core.recorder.sd")
+    def test_abandoned_open_skips_pa_rescan(self, mock_sd, _sys, _rate):
+        """Watchdog-abandoned open must not call sd._terminate (SEGV race)."""
+        warm = _make_warm(device=4)
+        warm._abandoned_open = True
+        with patch("wayfinder.core.recorder._pa_rescan") as rescan:
+            assert warm.rescan() is False
+            rescan.assert_not_called()
+
+    @patch("wayfinder.core.recorder._MIC_OPEN_TIMEOUT", 0.2)
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder._system_default_input_index", return_value=None)
+    @patch("wayfinder.core.recorder.sd")
+    def test_later_open_still_skips_pa_rescan_after_abandon(self, mock_sd, _sys, _rate):
+        """Sol R2: clearing _abandoned_open on the next _open() re-enabled rescan
+        under a still-blocked PortAudio worker. Flag must stick for the WarmMic life.
+        """
+        blocker = threading.Event()
+
+        def open_stream(*args, **kwargs):
+            blocker.wait(timeout=5)
+            return MagicMock()
+
+        mock_sd.InputStream.side_effect = open_stream
+        warm = _make_warm(device=4)
+        with pytest.raises((TimeoutError, RuntimeError)):
+            warm.acquire(MagicMock())
+        assert warm._abandoned_open is True
+
+        with patch("wayfinder.core.recorder._pa_rescan") as rescan:
+            # A later open that also fails must not rescan while abandoned.
+            with pytest.raises((TimeoutError, RuntimeError)):
+                warm.acquire(MagicMock())
+            rescan.assert_not_called()
+        blocker.set()
+
 
 class TestRecordersUseWarmMic:
     """The recorders delegate stream ownership to WarmMic when given one, but keep their own
