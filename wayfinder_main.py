@@ -13276,7 +13276,7 @@ class WayfinderApp(ctk.CTk):
 
         price = self.config.get("premium_price", "$29.99")
         price_reg = self.config.get("premium_price_regular", "$60")
-        checkout = self.config.get("premium_url", "https://wayfindercollective.io/checkout/m97bzwd3j9d0628vakzf94mggd8824n9")
+        checkout = self.config.get("premium_url", "https://wayfindercollective.io/checkout/aura-ultra")
         info_url = self.config.get("premium_info_url", "https://wayfindercollective.io/aura")
         feature_msg = self.feature_gate.get_upgrade_message(feature_id)
 

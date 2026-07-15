@@ -343,7 +343,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # License / Premium
     # "Buy Now" goes straight to the Ultra checkout; "More Info" goes to the landing page.
     # Both live in config so they're a one-line change without a rebuild.
-    "premium_url": "https://wayfindercollective.io/checkout/m97bzwd3j9d0628vakzf94mggd8824n9",  # Buy Now / checkout
+    "premium_url": "https://wayfindercollective.io/checkout/aura-ultra",  # Stable Buy Now / checkout alias
     "premium_info_url": "https://wayfindercollective.io/aura",  # More Info / landing page
     "premium_price": "$29.99",        # launch price
     "premium_price_regular": "$60",   # regular price (shown struck-through / as "reg.")
@@ -517,6 +517,7 @@ def load_config() -> dict:
                 "https://wayfinder.dev/premium",
                 "https://wayfinder.dev/ultra",
                 "http://wayfinder.dev/premium",
+                "https://wayfindercollective.io/checkout/m97bzwd3j9d0628vakzf94mggd8824n9",
             }
             if config.get("premium_url") in _stale_premium_urls:
                 config["premium_url"] = DEFAULT_CONFIG["premium_url"]

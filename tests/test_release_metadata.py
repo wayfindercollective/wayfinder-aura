@@ -304,6 +304,7 @@ def test_premium_storefront_defaults_are_consistent_across_release_surfaces():
     regular_price = DEFAULT_CONFIG["premium_price_regular"]
 
     assert checkout.startswith("https://wayfindercollective.io/checkout/")
+    assert checkout.endswith("/aura-ultra")
     assert info_url == "https://wayfindercollective.io/aura"
     assert launch_price in readme
     assert regular_price in readme

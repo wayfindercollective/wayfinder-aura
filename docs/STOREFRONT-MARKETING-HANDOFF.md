@@ -9,7 +9,7 @@
 | Role in app | Config key | URL |
 |-------------|------------|-----|
 | **More Info** | `premium_info_url` | https://wayfindercollective.io/aura |
-| **Buy Now** | `premium_url` | https://wayfindercollective.io/checkout/m97bzwd3j9d0628vakzf94mggd8824n9 |
+| **Buy Now** | `premium_url` | https://wayfindercollective.io/checkout/aura-ultra |
 | Launch price | `premium_price` | `$29.99` |
 | Regular price | `premium_price_regular` | `$60` |
 
