@@ -104,14 +104,12 @@ modules:
         tag: vulkan-sdk-1.4.321.0
         commit: 2a611a970fdbc41ac2e3e328802aed9985352dca
 
-  # whisper.cpp — GPU (Vulkan) transcription engine, the default binary.
-  # GGML_VULKAN=ON initializes Vulkan at startup; on hardware/driver combos where
-  # that init crashes (it SIGSEGVed on the Deck's RDNA2 — STEAMDECK-INSTALL-LOG
-  # reference notes), the APP detects the signal-death of this subprocess and
-  # retries with the CPU binary below (transcriber.py auto-fallback, memoized per
-  # session). Broken Vulkan on a given machine degrades to CPU silently instead
-  # of producing "no output". --device=dri in finish-args exposes the GPU; the
-  # runtime GL extensions supply the Vulkan ICDs at runtime.
+  # whisper.cpp — primary binary (installed as whisper-cli).
+  # TEMP (2026-07): GGML_VULKAN is OFF for the Flatpak path. whisper.cpp v1.9.1
+  # + SDK glslc 2025.x fails to link with undefined matmul_id_subgroup_* symbols
+  # after shader gen. Free-tier CPU dictation works; re-enable Vulkan once upstream
+  # or a newer whisper tag fixes shader embedding. The -cpu twin remains for
+  # explicit fallback paths in the app.
   - name: whisper-cpp
     buildsystem: cmake-ninja
     # v1.9.x's `ninja install` installs the example binaries (whisper-cli/server)
@@ -136,7 +134,7 @@ modules:
       - -DGGML_FMA=ON
       - -DGGML_F16C=ON
       - -DGGML_BMI2=ON
-      - -DGGML_VULKAN=ON
+      - -DGGML_VULKAN=OFF
     sources:
       - type: git
         url: https://github.com/ggerganov/whisper.cpp.git
@@ -306,15 +304,8 @@ modules:
   #     wheel build doesn't package the variant backends — load fails.)
   # Future instant path: bundle llama-server with cache_prompt (KV reuse of the
   # shared tone-guidance prefix), mirroring the whisper-server architecture.
-  # GPU (GGML_VULKAN=ON) + a CPU twin (llama-simple-cpu, the next module): the
-  # post-processor now has a GPU->CPU auto-fallback (postprocessor.py
-  # _subprocess_target — a one-time 16-token GPU probe; a Vulkan crash or the
-  # ~1 tok/s "radv not conformant" degradation routes cleanup to llama-simple-cpu).
-  # That fallback is what makes shipping a Vulkan llama SAFE: broken-Vulkan hosts
-  # (e.g. an older Steam Deck Mesa) fall back to CPU instead of the old
-  # 60s-hang-per-dictation. A Vulkan build can SIGSEGV at ggml-vulkan init even with
-  # -ngl 0, so the CPU fallback needs its OWN binary (the llama-simple-cpu twin) —
-  # exactly like whisper-server-cpu.
+  # TEMP (2026-07): primary llama-simple is CPU-only (same glslc/whisper Vulkan
+  # link issue). Keep llama-simple-cpu twin for app fallback paths.
   # Instruction sets MUST be enabled explicitly: modern ggml with GGML_NATIVE=OFF
   # builds pure SCALAR kernels (no SSE/AVX at all — measured 25-40x slower, 29s
   # per cleanup). AVX2/FMA/F16C/BMI2 is the Zen 2 (Deck) baseline = any x86-64
@@ -326,12 +317,11 @@ modules:
   - name: llama-cpp
     buildsystem: simple
     build-commands:
-      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
+      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
       - cmake --build build --target llama-simple --parallel ${FLATPAK_BUILDER_N_JOBS:-2}
       # The app's CLI backend prefers llama-simple (stable echo+generation stdout
       # format its extraction is built around); config defaults to /app/bin/llama-simple
-      # inside the sandbox (config.py IS_FLATPAK branch). This is the Vulkan build —
-      # the post-processor probes it and falls back to llama-simple-cpu if GPU is bad.
+      # inside the sandbox (config.py IS_FLATPAK branch).
       - install -Dm755 build/bin/llama-simple ${FLATPAK_DEST}/bin/llama-simple
     sources:
       - type: git
