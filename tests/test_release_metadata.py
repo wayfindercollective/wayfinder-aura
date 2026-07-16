@@ -583,7 +583,11 @@ def test_flatpak_ci_builds_tag_sourced_release_manifest_on_tags():
     assert "--output flatpak/release/io.wayfindercollective.WayfinderAura.yml" in job
     assert "manifest=release/io.wayfindercollective.WayfinderAura.yml" in job
     assert "manifest=io.wayfindercollective.WayfinderAura.yml" in job
-    assert 'flatpak-builder --user --force-clean --jobs=2 --repo=repo build-dir "${{ steps.flatpak-manifest.outputs.manifest }}"' in job
+    # Builds via Flathub org.flatpak.Builder so KDE 6.10 picks rust-stable//25.08
+    assert "org.flatpak.Builder" in job
+    assert "org.freedesktop.Sdk.Extension.rust-stable//25.08" in job
+    assert '--repo=repo build-dir "${{ steps.flatpak-manifest.outputs.manifest }}"' in job
+    assert "--install-deps-from=flathub" in job
 
 
 def test_appimage_version_matches_pyproject():
