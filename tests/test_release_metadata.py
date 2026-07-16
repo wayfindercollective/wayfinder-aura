@@ -434,7 +434,7 @@ def test_storefront_readiness_checker_rejects_unproven_checkout_payload():
         "premium_price_regular": "$60",
     }
     pages = {
-        defaults["premium_info_url"]: "Wayfinder Aura - Your voice, turned to text",
+        defaults["premium_info_url"]: "Wayfinder Aura - Press a key. Speak. Your words land at your cursor.",
         defaults["premium_url"]: "Wayfinder Loading checkout...",
     }
 
@@ -461,7 +461,9 @@ def test_storefront_readiness_checker_accepts_client_rendered_checkout_markers()
         defaults["premium_url"]: "Loading checkout...",
     }
     rendered_pages = {
-        defaults["premium_info_url"]: "Wayfinder Aura\nYour voice, turned to text",
+        defaults["premium_info_url"]: (
+            "Wayfinder Aura\nPress a key. Speak. Your words land at your cursor."
+        ),
         defaults["premium_url"]: "Wayfinder Aura\nOne-time license\nPay with card\n$29.99 launch",
     }
 
