@@ -90,10 +90,19 @@ modules:
         tag: v19.7.0
         commit: 147dd722548358763a8b649b3e4b41dfffbcfbb6
 
-  # SPIRV-Headers: prefer the SDK-bundled headers matching the SDK's glslc/Vulkan
-  # (KDE 6.10 / Freedesktop 25.08 ships Vulkan 1.4 + glslc 2025.x). A pinned
-  # vulkan-sdk-1.3.290 headers module mismatched CI glslc and left
-  # matmul_id_subgroup_* shader symbols undefined at link time.
+  # SPIRV-Headers — required by ggml-vulkan's find_package(SPIRV-Headers).
+  # Pin to vulkan-sdk-1.4.321 to match the KDE 6.10 / Freedesktop 25.08 SDK
+  # Vulkan stack (CI reported Vulkan 1.4.321 + glslc 2025.x). The older
+  # 1.3.290 pin left matmul_id_subgroup_* symbols undefined at link.
+  - name: spirv-headers
+    buildsystem: cmake-ninja
+    cleanup:
+      - '*'
+    sources:
+      - type: git
+        url: https://github.com/KhronosGroup/SPIRV-Headers.git
+        tag: vulkan-sdk-1.4.321.0
+        commit: 2a611a970fdbc41ac2e3e328802aed9985352dca
 
   # whisper.cpp — GPU (Vulkan) transcription engine, the default binary.
   # GGML_VULKAN=ON initializes Vulkan at startup; on hardware/driver combos where
@@ -109,11 +118,6 @@ modules:
     # into /app/bin; with two whisper modules that would overwrite GPU<->CPU. Skip
     # install — the post-install below copies each binary under its correct name.
     no-make-install: true
-    # Parallel ninja has raced on vulkan-shaders-gen output (undefined
-    # matmul_id_subgroup_*_dot2_* symbols at link). Serialize the GPU build.
-    build-options:
-      make-args:
-        - -j1
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
       - -DWHISPER_BUILD_EXAMPLES=ON

@@ -722,9 +722,8 @@ def test_flatpak_git_sources_are_all_tag_and_commit_pinned():
     manifest = _manifest_text()
     blocks = re.findall(r"(?m)^      - type: git\n((?:        .+\n)+)", manifest)
 
-    # PortAudio, whisper×2, wtype, xdotool, llama×2 (SPIRV-Headers removed —
-    # SDK headers match glslc). Keep a floor so a missing pin is still noisy.
-    assert len(blocks) >= 7, "expected all native git sources to be visible to this guard"
+    # PortAudio, SPIRV-Headers, whisper×2, wtype, xdotool, llama×2.
+    assert len(blocks) >= 8, "expected all native git sources to be visible to this guard"
     for block in blocks:
         assert re.search(r"^        url: https://", block, re.MULTILINE), block
         assert re.search(r"^        tag: .+", block, re.MULTILINE), block
