@@ -569,7 +569,7 @@ def test_appimage_ci_glslc_helper_is_pinned_and_builds_shaderc_when_needed():
     assert "python3 \"$SOURCE_DIR/utils/git-sync-deps\"" in script
     assert "-DSHADERC_SKIP_TESTS=ON" in script
     assert "-DSHADERC_SKIP_EXAMPLES=ON" in script
-    assert "cmake --build \"$BUILD_DIR\" --target glslc" in script
+    assert "cmake --build \"$BUILD_DIR\" --target glslc_exe" in script
     assert "glslc --version" in script
 
 

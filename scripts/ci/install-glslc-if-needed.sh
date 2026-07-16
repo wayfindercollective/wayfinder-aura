@@ -36,12 +36,33 @@ cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DSHADERC_SKIP_TESTS=ON \
     -DSHADERC_SKIP_EXAMPLES=ON
-cmake --build "$BUILD_DIR" --target glslc --config Release -j"$BUILD_JOBS"
+# Executable target is glslc_exe; "glslc" alone builds only the static lib.
+cmake --build "$BUILD_DIR" --target glslc_exe --config Release -j"$BUILD_JOBS"
+
+GLSLC_BIN=""
+for candidate in \
+    "$BUILD_DIR/glslc/glslc" \
+    "$BUILD_DIR/glslc/glslc_exe" \
+    "$BUILD_DIR/bin/glslc"
+do
+    if [ -x "$candidate" ]; then
+        GLSLC_BIN="$candidate"
+        break
+    fi
+done
+if [ -z "$GLSLC_BIN" ]; then
+    GLSLC_BIN="$(find "$BUILD_DIR" -type f -name glslc -perm -111 2>/dev/null | head -1 || true)"
+fi
+if [ -z "$GLSLC_BIN" ] || [ ! -x "$GLSLC_BIN" ]; then
+    echo "error: built glslc binary not found under $BUILD_DIR" >&2
+    find "$BUILD_DIR" -name 'glslc*' 2>/dev/null | head -40 >&2 || true
+    exit 1
+fi
 
 if [ -w "$INSTALL_PREFIX/bin" ]; then
-    install -m 0755 "$BUILD_DIR/glslc/glslc" "$INSTALL_PREFIX/bin/glslc"
+    install -m 0755 "$GLSLC_BIN" "$INSTALL_PREFIX/bin/glslc"
 else
-    sudo install -m 0755 "$BUILD_DIR/glslc/glslc" "$INSTALL_PREFIX/bin/glslc"
+    sudo install -m 0755 "$GLSLC_BIN" "$INSTALL_PREFIX/bin/glslc"
 fi
 
 glslc --version
