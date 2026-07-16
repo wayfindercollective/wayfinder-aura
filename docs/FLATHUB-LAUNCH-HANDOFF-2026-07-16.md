@@ -3,7 +3,7 @@
 **Date:** 2026-07-16  
 **Repo:** https://github.com/wayfindercollective/wayfinder-aura  
 **App ID:** `io.wayfindercollective.WayfinderAura`  
-**Release tag (target):** `v1.1.2` (follow-up after v1.1.1 packaging; see git tags)  
+**Release tag:** `v1.1.2` → commit `cdf948c4f563860164652817332de41452789754`  
 **Goal:** Ship on Flathub so the app appears in KDE Discover / Bazaar.
 
 This doc is for the next person fixing blockers and finishing submission. It is not the Flathub PR text (that must be **human-authored**).
@@ -16,15 +16,16 @@ This doc is for the next person fixing blockers and finishing submission. It is 
 |------|--------|
 | Version / packaging for Flathub | **Mostly ready** (1.1.1, release manifest, freemium metainfo, sandbox grants cleaned) |
 | `main` CI (incl. Flatpak) | **Green** |
-| Tag CI for `v1.1.1` | **Not fully green** — Flatpak + PyInstaller + storefront OK; **AppImage smoke fails** → GitHub Release skipped |
+| Tag CI for `v1.1.2` | **Green** (all jobs + Create Release) — https://github.com/wayfindercollective/wayfinder-aura/actions/runs/29535468381 |
+| GitHub Release | **Published** — https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.2 |
 | Flathub PR | **Not opened** (must be human; AI policy) |
 | Discover listing | **Not live** until Flathub merge + official build |
 
 **Highest-value fixes next:**
 
-1. ~~Unblock tag CI AppImage (metainfo validate)~~ — fixed on main (tolerate jammy warnings; only fail on `E:`).  
-2. Confirm **full tag CI green** on `v1.1.2` + GitHub Release.  
-3. Owner: **Flathub AI exception** + **human submission PR**.  
+1. ~~AppImage smoke / tag CI~~ — done on `v1.1.2`.  
+2. ~~Confirm full tag CI + GH Release~~ — done.  
+3. Owner: **Flathub AI exception** + **human submission PR** (artifacts in `.tmp-flathub-handoff/` for tag `v1.1.2`).  
 4. Follow-ups: **Vulkan** in Flatpak, **sdist/wheels** policy, **runtime 6.11** when BaseApp exists.
 
 ---
