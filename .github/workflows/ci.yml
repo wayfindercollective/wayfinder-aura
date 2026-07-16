@@ -70,7 +70,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk portaudio19-dev
+          # python3-tk / portaudio: app deps
+          # libegl1 + GL stack: PyQt6 QtGui imports (overlay tests) need libEGL.so.1
+          sudo apt-get install -y python3-tk portaudio19-dev \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libxcb-cursor0
 
       - name: Install Python dependencies
         run: |

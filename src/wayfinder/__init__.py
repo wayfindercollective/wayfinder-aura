@@ -18,7 +18,7 @@ Usage:
     python -m wayfinder             # Package-style entry (future)
 """
 
-__version__ = "1.1.0"  # Keep in sync with pyproject.toml [project] version
+__version__ = "1.1.1"  # Keep in sync with pyproject.toml [project] version
 __app_name__ = "Wayfinder Aura"
 
 

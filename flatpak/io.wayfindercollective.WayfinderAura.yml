@@ -21,14 +21,22 @@ runtime-version: '6.10'
 sdk: org.kde.Sdk
 base: com.riverbankcomputing.PyQt.BaseApp
 base-version: '6.10'
+# Rust is required to build cryptography / jiter / pydantic-core from sdist
+# (Flathub build-from-source; platform wheels are no longer used).
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
 command: wayfinder-aura
 
 cleanup-commands:
   - /app/cleanup-BaseApp.sh
 
 build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
   env:
     BASEAPP_REMOVE_WEBENGINE: '1'
+    CARGO_HOME: /run/build/cargo
+    # Prefer system OpenSSL when building cryptography from source.
+    PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1'
 
 finish-args:
   # Display - Wayland preferred, X11 fallback
@@ -49,15 +57,10 @@ finish-args:
   # $XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock. Sandbox /tmp is private, so the
   # old /tmp socket was unreachable from the host — this is the R4-dictation fix.
   - --filesystem=xdg-run/wayfinder-aura:create
-  
-  # In-app whisper model downloads land here (writable). The app resolves whisper
-  # models from this XDG path (_get_whisper_models_dir() in wayfinder_main.py).
-  # Non-XDG home grants (~/whisper.cpp, ~/.local/share/whisper.cpp) were removed —
-  # Flathub rejects arbitrary home access. Mirrors the llm-models grant below.
-  - --filesystem=~/.local/share/wayfinder-aura/whisper-models:create
 
-  # LLM model access (user's downloaded models for post-processing)
-  - --filesystem=~/.local/share/wayfinder-aura/llm-models:create
+  # Model downloads use Path.home()/.local/share/wayfinder-aura/... which inside
+  # Flatpak is already the sandboxed app home (~/.var/app/<app-id>/...). Do NOT
+  # grant host ~/.local/share/... — Flathub requires minimized static permissions.
   
   # GPU acceleration (Vulkan for whisper.cpp and llama.cpp)
   - --device=dri

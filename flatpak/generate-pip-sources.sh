@@ -24,7 +24,8 @@ echo "Project directory: $PROJECT_DIR"
 # Exclude pyautogui: macOS-only dependency.
 cat > "$SCRIPT_DIR/flatpak-requirements.txt" << 'EOF'
 # Core dependencies for Flatpak build
-customtkinter>=5.2.0
+# Pin CustomTkinter below 6.x until the app is validated against the major bump.
+customtkinter>=5.2.0,<6
 requests>=2.28.0
 cryptography>=41.0.0
 sounddevice>=0.5.0
@@ -37,41 +38,37 @@ openai>=1.0.0
 groq>=0.4.0
 EOF
 
-# Check if flatpak-pip-generator is available. Prefer `python3 -m`: the current
-# PyPI package's console wrapper can fail after generation in some environments,
-# while the module entry point works reliably.
-PREFER_WHEELS="numpy,scipy,cryptography,Pillow,cffi,jiter,pydantic-core,pydantic_core"
+# Prefer source distributions for Flathub build-from-source policy.
+# Do NOT pass --prefer-wheels for compiled packages (numpy, scipy, cryptography,
+# Pillow, cffi, jiter, pydantic-core): platform wheels are binary artifacts.
+# flatpak-pip-generator defaults to sdist when wheels are not preferred.
 if python3 -c "import flatpak_pip_generator" &> /dev/null; then
-    echo "Using python3 -m flatpak_pip_generator..."
+    echo "Using python3 -m flatpak_pip_generator (sdist-first)..."
     python3 -m flatpak_pip_generator \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10' \
-        --prefer-wheels="$PREFER_WHEELS"
+        --runtime='org.kde.Sdk//6.10'
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 elif command -v flatpak_pip_generator &> /dev/null; then
-    echo "Using flatpak_pip_generator..."
+    echo "Using flatpak_pip_generator (sdist-first)..."
     flatpak_pip_generator \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10' \
-        --prefer-wheels="$PREFER_WHEELS"
+        --runtime='org.kde.Sdk//6.10'
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 elif command -v flatpak-pip-generator &> /dev/null; then
-    echo "Using flatpak-pip-generator..."
+    echo "Using flatpak-pip-generator (sdist-first)..."
     flatpak-pip-generator \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10' \
-        --prefer-wheels="$PREFER_WHEELS"
+        --runtime='org.kde.Sdk//6.10'
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 elif [ -f "$HOME/flatpak-builder-tools/pip/flatpak-pip-generator.py" ]; then
-    echo "Using flatpak-builder-tools..."
+    echo "Using flatpak-builder-tools (sdist-first)..."
     python3 "$HOME/flatpak-builder-tools/pip/flatpak-pip-generator.py" \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10' \
-        --prefer-wheels="$PREFER_WHEELS"
+        --runtime='org.kde.Sdk//6.10'
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 else
     echo ""

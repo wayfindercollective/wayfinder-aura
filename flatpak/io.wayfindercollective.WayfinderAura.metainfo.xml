@@ -24,6 +24,13 @@
       Optional cloud transcription backends are available if you choose to enable them, and the
       app checks online for model updates (toggleable).
     </p>
+    <p>
+      Free tier includes local whisper.cpp dictation, hotkeys, text injection, and the full
+      settings UI. Wayfinder Aura Ultra is an optional one-time purchase (launch price $29.99;
+      regular price $60) that unlocks GPU acceleration, larger models, longer recording sessions,
+      advanced audio options, and other premium features. Ultra is sold on wayfindercollective.io
+      (not through Flathub billing); enter a license key in Settings after purchase.
+    </p>
     <p>Features:</p>
     <ul>
       <li>Local-first &amp; Private — transcribed on your device by default; optional cloud backends if you choose them</li>
@@ -106,6 +113,17 @@
   </supports>
 
   <releases>
+    <release version="1.1.1" date="2026-07-16">
+      <description>
+        <p>Flathub submission packaging release</p>
+        <ul>
+          <li>Sandbox-friendly model download paths (no host home filesystem grants)</li>
+          <li>Clear free-tier vs Ultra pricing disclosure in store metadata</li>
+          <li>Stable storefront checkout alias for Ultra purchase</li>
+          <li>CI and packaging hardening for public Flatpak builds</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-07-07">
       <description>
         <p>First public release of Wayfinder Aura</p>

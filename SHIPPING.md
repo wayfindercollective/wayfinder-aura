@@ -40,50 +40,29 @@ between the repo and a live listing.
 
 ## Remaining for Flathub submission (in order)
 
-### 1. Production license + storefront
-- Set the production activation URL and matching Ed25519 public key in
-  `src/wayfinder/license.py`.
-- Fix/confirm the checkout and landing URLs, then confirm pricing in
-  `src/wayfinder/config.py` and README. Current configured storefront URLs
-  return HTTP 200; the Aura landing shell is present, but the checkout route
-  exposes only a `Loading checkout...` shell and no Ultra or `$29.99` / `$60`
-  copy in the server-rendered payload. Browser-rendered verification reaches the
-  card form and shows subtotal `$29.99`, processing fee `$0.90`, and total
-  `$30.89`; confirm that fee/copy treatment before tagging.
-- See `docs/GO-LIVE-INPUTS.md` for the exact values to provide.
+See **`docs/FLATHUB-HANDOFF.md`** for the full owner checklist (AI exception,
+reviewer Ultra keys, human PR only).
 
-`flatpak/prepare-release-manifest.py` intentionally refuses to generate the
-submission manifest while the checked-in license defaults still point at the dev
-backend. `--allow-dev-license` is only for local dry-runs. Tag-triggered GitHub
-release artifact jobs run the same guarded generation before building or
-publishing tag artifacts.
+### 1. Production license + storefront
+- ✅ Production activation URL is set (`shiny-goshawk-432`).
+- Confirm checkout fee/copy is final (`premium_url` stable alias).
+- See `docs/GO-LIVE-INPUTS.md`.
 
 ### 2. Public repo + tag
-- Push to `github.com/wayfindercollective/wayfinder-aura` (must be public —
-  AppStream and screenshot URL checks currently fail while it is private/missing).
-- Tag `v1.1.0` matching the metainfo release entry.
+- Repo is public. Ship **`v1.1.1`** (do not move `v1.1.0`).
+- CI on `main` must be green before tagging.
 
 ### 3. Git source for the app module (tag-time blocker)
 The `wayfinder-aura` module uses `type: dir, path: ..` (local builds only).
-After the release commit is tagged, generate the submission manifest:
+After the release commit is tagged:
 
 ```bash
-cd flatpak/
-./prepare-release-manifest.py --tag v1.1.0
+python3 flatpak/prepare-release-manifest.py --tag v1.1.1
 ```
 
-This writes `release/io.wayfindercollective.WayfinderAura.yml` with the app
-module sourced from the tag + full commit SHA and `python-deps.json` copied next
-to it. The GitHub `build-flatpak` job performs this same selection
-automatically for tag refs and builds the generated release manifest; main-branch
-CI keeps using the local manifest.
-
 ### 4. Clean Flatpak build on the target manifest
-Run a clean build after the release source pin is in place:
-`flatpak-builder --user --install --force-clean build-dir release/io.wayfindercollective.WayfinderAura.yml`
-
-Tag-time CI is wired to run this against the generated release manifest. It
-still needs a real `v1.1.0` tag run after production license defaults are set.
+`flatpak-builder` (or `org.flatpak.Builder`) against the **release** YAML.
+Compiled Python deps are now **sdists** (rust-stable SDK extension required).
 
 Current Bazzite audit note: host `flatpak-builder` is absent, but the
 `org.flatpak.Builder` app works when its host-command path is pointed at the

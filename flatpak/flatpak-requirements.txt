@@ -1,5 +1,6 @@
 # Core dependencies for Flatpak build
-customtkinter>=5.2.0
+# Pin CustomTkinter below 6.x until the app is validated against the major bump.
+customtkinter>=5.2.0,<6
 requests>=2.28.0
 cryptography>=41.0.0
 sounddevice>=0.5.0

@@ -127,12 +127,9 @@ def _get_llm_models_dir() -> Path:
 def _get_whisper_models_dir() -> Path:
     """Writable whisper models directory for in-app model downloads.
 
-    In a Flatpak the host model dirs (~/whisper.cpp/models and
-    ~/.local/share/whisper.cpp) are mounted READ-ONLY, so downloading a model
-    into them fails with EROFS ("Read-only file system"). Downloads must target a
-    granted, writable location that mirrors the llm-models layout — see the
-    matching `--filesystem=~/.local/share/wayfinder-aura/whisper-models:create`
-    grant in flatpak/io.wayfindercollective.WayfinderAura.yml. Outside a
+    In a Flatpak, `$HOME` is the sandboxed app home (~/.var/app/<app-id>/), so
+    downloads under ~/.local/share/wayfinder-aura/... persist without host
+    filesystem grants (Flathub prefers minimized permissions). Outside a
     Flatpak the long-standing ~/whisper.cpp/models location is kept (existing
     installs, docs and from-source builds all use it).
     """
@@ -6210,7 +6207,7 @@ class WayfinderApp(ctk.CTk):
             fg_color="transparent",
             hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_muted"],
-            font=(self.font_body[0], 18),
+            font=(self.font_body[0], 18),  # optical glyph size
             corner_radius=RADIUS["sm"],
             command=self.hide_to_tray,
         )
@@ -7703,7 +7700,7 @@ class WayfinderApp(ctk.CTk):
         try:
             from wayfinder import __version__ as _wf_version
         except Exception:
-            _wf_version = "1.1.0"
+            _wf_version = "1.1.1"
         _is_premium = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         _tier = "Ultra 😇" if _is_premium else "Free"
         ctk.CTkLabel(
