@@ -204,11 +204,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-tk portaudio19-dev \
             cmake make g++ git \
-            libvulkan-dev vulkan-tools \
+            libvulkan-dev vulkan-tools glslang-tools \
             ydotool wtype \
             libfuse2 desktop-file-utils appstream
 
       - name: Install glslc for Vulkan builds
+        # glslc from shaderc; glslangValidator from apt glslang-tools (required by
+        # whisper.cpp / llama.cpp find_package(Vulkan COMPONENTS glslc glslangValidator)).
         run: scripts/ci/install-glslc-if-needed.sh
 
       - name: Install Python dependencies
