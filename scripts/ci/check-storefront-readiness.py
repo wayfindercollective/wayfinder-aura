@@ -171,7 +171,8 @@ def live_readiness_errors(
     pages = {
         "premium_info_url": (
             info_url,
-            ("Wayfinder Aura", "Your voice, turned to text"),
+            # Live /aura hero (2026-07): marketing copy moved off the old tagline.
+            ("Wayfinder Aura", "Press a key. Speak. Your words land at your cursor."),
         ),
         "premium_url": (
             checkout,
