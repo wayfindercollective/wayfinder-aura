@@ -587,7 +587,7 @@ def test_flatpak_ci_builds_tag_sourced_release_manifest_on_tags():
     assert "org.flatpak.Builder" in job
     assert "org.freedesktop.Sdk.Extension.rust-stable//25.08" in job
     assert '--repo=repo build-dir "${{ steps.flatpak-manifest.outputs.manifest }}"' in job
-    assert "--install-deps-from=flathub" in job
+    assert "--talk-name=org.freedesktop.Flatpak" in job
 
 
 def test_appimage_version_matches_pyproject():

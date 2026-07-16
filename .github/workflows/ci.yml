@@ -298,14 +298,17 @@ jobs:
       - name: Build Flatpak
         run: |
           cd flatpak
-          # org.flatpak.Builder needs host flatpak install dirs for SDKs
+          # SDKs/extensions are pre-installed above. Do not use --install-deps-from
+          # inside org.flatpak.Builder (D-Bus install fails headless).
+          # Talk to host flatpak so the builder sees user-installed SDKs.
           flatpak run --command=flatpak-builder \
             --filesystem="$PWD":rw \
-            --filesystem="$HOME/.local/share/flatpak":rw \
+            --filesystem=home \
+            --socket=session-bus \
+            --talk-name=org.freedesktop.Flatpak \
             --env=FLATPAK_USER_DIR="$HOME/.local/share/flatpak" \
-            --env=FLATPAK_SYSTEM_DIR="$HOME/.local/share/flatpak" \
             org.flatpak.Builder \
-            --user --force-clean --install-deps-from=flathub --jobs=2 \
+            --user --force-clean --jobs=2 \
             --repo=repo build-dir "${{ steps.flatpak-manifest.outputs.manifest }}"
 
       - name: Build single-file bundle
