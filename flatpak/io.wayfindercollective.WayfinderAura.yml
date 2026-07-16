@@ -90,19 +90,10 @@ modules:
         tag: v19.7.0
         commit: 147dd722548358763a8b649b3e4b41dfffbcfbb6
 
-  # SPIRV-Headers — build-only dep of ggml-vulkan's shader generator
-  # (find_package(SPIRV-Headers)) in whisper.cpp v1.8+ AND llama.cpp b9608. Must
-  # build BEFORE the Vulkan whisper modules below. Header-only; installs its cmake
-  # config into /app so later modules' find_package resolves. Cleaned from the app.
-  - name: spirv-headers
-    buildsystem: cmake-ninja
-    cleanup:
-      - '*'
-    sources:
-      - type: git
-        url: https://github.com/KhronosGroup/SPIRV-Headers.git
-        tag: vulkan-sdk-1.3.290.0
-        commit: 2acb319af38d43be3ea76bfabf3998e5281d8d12
+  # SPIRV-Headers: prefer the SDK-bundled headers matching the SDK's glslc/Vulkan
+  # (KDE 6.10 / Freedesktop 25.08 ships Vulkan 1.4 + glslc 2025.x). A pinned
+  # vulkan-sdk-1.3.290 headers module mismatched CI glslc and left
+  # matmul_id_subgroup_* shader symbols undefined at link time.
 
   # whisper.cpp — GPU (Vulkan) transcription engine, the default binary.
   # GGML_VULKAN=ON initializes Vulkan at startup; on hardware/driver combos where
