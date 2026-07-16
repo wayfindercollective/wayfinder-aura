@@ -550,10 +550,10 @@ def test_appimage_ci_build_uses_older_glibc_runner_and_smoke_test():
         assert f"test -x squashfs-root/usr/bin/{binary}" in job
 
     assert "desktop-file-validate squashfs-root/io.wayfindercollective.WayfinderAura.desktop" in job
-    assert (
-        "appstreamcli validate --no-net "
-        "squashfs-root/usr/share/metainfo/io.wayfindercollective.WayfinderAura.metainfo.xml"
-    ) in job
+    assert "appstreamcli validate --no-net" in job
+    # Jammy appstreamcli exits non-zero on modern tags; CI only fails on hard E: lines.
+    assert 'grep -qE \'^E:\'' in job or 'grep -qE "^E:"' in job
+    assert "glslang-tools" in job
 
 
 def test_appimage_ci_glslc_helper_is_pinned_and_builds_shaderc_when_needed():

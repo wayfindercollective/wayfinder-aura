@@ -7700,7 +7700,7 @@ class WayfinderApp(ctk.CTk):
         try:
             from wayfinder import __version__ as _wf_version
         except Exception:
-            _wf_version = "1.1.1"
+            _wf_version = "1.1.2"
         _is_premium = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         _tier = "Ultra 😇" if _is_premium else "Free"
         ctk.CTkLabel(

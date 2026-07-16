@@ -3,7 +3,7 @@
 **Date:** 2026-07-16  
 **Repo:** https://github.com/wayfindercollective/wayfinder-aura  
 **App ID:** `io.wayfindercollective.WayfinderAura`  
-**Release tag:** `v1.1.1` → commit `3e54b34c64ff0ecba749daa31fb53780a5d30ea9`  
+**Release tag (target):** `v1.1.2` (follow-up after v1.1.1 packaging; see git tags)  
 **Goal:** Ship on Flathub so the app appears in KDE Discover / Bazaar.
 
 This doc is for the next person fixing blockers and finishing submission. It is not the Flathub PR text (that must be **human-authored**).

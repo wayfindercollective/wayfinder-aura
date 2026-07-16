@@ -113,6 +113,15 @@
   </supports>
 
   <releases>
+    <release version="1.1.2" date="2026-07-16">
+      <description>
+        <p>Tag CI hardening for AppImage smoke and release packaging</p>
+        <ul>
+          <li>Tolerate modern AppStream tags on older ubuntu-22.04 appstreamcli</li>
+          <li>glslc_exe + glslang-tools for AppImage native builds</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.1" date="2026-07-16">
       <description>
         <p>Flathub submission packaging release</p>

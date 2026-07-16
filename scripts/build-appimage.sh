@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 APP_NAME="WayfinderAura"
 APP_ID="io.wayfindercollective.WayfinderAura"
 APPDIR="AppDir"
