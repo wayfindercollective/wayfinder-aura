@@ -22,9 +22,10 @@ This doc is for the next person fixing blockers and finishing submission. It is 
 
 **Highest-value fixes next:**
 
-1. Unblock **tag CI AppImage** (metainfo validate exit code) so `Create Release` runs.  
-2. Owner: **Flathub AI exception** + **human submission PR**.  
-3. Follow-ups: **Vulkan** in Flatpak, **sdist/wheels** policy, **runtime 6.11** when BaseApp exists.
+1. ~~Unblock tag CI AppImage (metainfo validate)~~ — fixed on main (tolerate jammy warnings; only fail on `E:`).  
+2. Confirm **full tag CI green** on `v1.1.2` + GitHub Release.  
+3. Owner: **Flathub AI exception** + **human submission PR**.  
+4. Follow-ups: **Vulkan** in Flatpak, **sdist/wheels** policy, **runtime 6.11** when BaseApp exists.
 
 ---
 
