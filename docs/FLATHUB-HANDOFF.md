@@ -2,6 +2,9 @@
 
 **Updated:** 2026-07-16 (v1.1.1 launch path; Sol-approved plan)
 
+> **Full engineering handoff (blockers, CI, fix order):**  
+> **`docs/FLATHUB-LAUNCH-HANDOFF-2026-07-16.md`**
+
 Discover on Bazzite/Fedora installs apps from **Flathub**. A local Flatpak on your machine does not appear for other users until Flathub publishes the app.
 
 **Agent will not open the Flathub PR or write reviewer replies** (Flathub generative-AI policy). You author the submission.
