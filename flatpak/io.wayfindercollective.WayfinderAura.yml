@@ -118,6 +118,11 @@ modules:
     # into /app/bin; with two whisper modules that would overwrite GPU<->CPU. Skip
     # install — the post-install below copies each binary under its correct name.
     no-make-install: true
+    # Parallel ninja has raced on vulkan-shaders-gen output (undefined
+    # matmul_id_subgroup_*_dot2_* symbols at link). Serialize the GPU build.
+    build-options:
+      make-args:
+        - -j1
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
       - -DWHISPER_BUILD_EXAMPLES=ON
