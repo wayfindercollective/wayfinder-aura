@@ -40,7 +40,7 @@ Reviewers must be able to test paid features. Have a process to issue a **tempor
 | Version | **1.1.1** (`pyproject`, `__init__`, metainfo, AppImage script) |
 | Freemium disclosure in metainfo | Free tier + Ultra $29.99 / $60 + external checkout |
 | Host model FS grants removed | Sandbox `$HOME` only |
-| Platform wheels for compiled pkgs | Regenerated as **sdists** (cffi, cryptography, jiter, numpy, Pillow, pydantic-core, SciPy) |
+| Platform wheels for compiled pkgs | Still manylinux wheels (cryptography, cffi, jiter, pydantic-core, numpy, scipy, Pillow). Full sdist offline builds need maturin/OpenBLAS — request temporary Flathub exception or schedule follow-up |
 | CI EGL for PyQt overlay tests | `libegl1` et al. in Tests job |
 | Screenshots on public `main` | HTTP 200 |
 | AppStream / desktop validate | Clean (1 pedantic note) |

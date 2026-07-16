@@ -14,13 +14,8 @@ sudo dnf install flatpak-builder appstream desktop-file-utils
 flatpak install flathub \
   org.kde.Platform//6.10 \
   org.kde.Sdk//6.10 \
-  com.riverbankcomputing.PyQt.BaseApp//6.10 \
-  org.freedesktop.Sdk.Extension.rust-stable//25.08
+  com.riverbankcomputing.PyQt.BaseApp//6.10
 ```
-
-KDE 6.10 is based on Freedesktop **25.08**, so the rust-stable SDK
-extension branch is `25.08` (needed to compile cryptography / jiter /
-pydantic-core from source for Flathub).
 
 
 ## Quick Build (Local Testing)

@@ -38,37 +38,42 @@ openai>=1.0.0
 groq>=0.4.0
 EOF
 
-# Prefer source distributions for Flathub build-from-source policy.
-# Do NOT pass --prefer-wheels for compiled packages (numpy, scipy, cryptography,
-# Pillow, cffi, jiter, pydantic-core): platform wheels are binary artifacts.
-# flatpak-pip-generator defaults to sdist when wheels are not preferred.
+# Platform wheels for compiled packages (numpy/scipy/Pillow/cryptography/…).
+# Flathub prefers sdists; full offline sdist builds need maturin + OpenBLAS and
+# are tracked as a follow-up. Owner brief must request a temporary wheels
+# exception for these packages on first submission.
+PREFER_WHEELS="numpy,scipy,cryptography,Pillow,cffi,jiter,pydantic-core,pydantic_core"
 if python3 -c "import flatpak_pip_generator" &> /dev/null; then
-    echo "Using python3 -m flatpak_pip_generator (sdist-first)..."
+    echo "Using python3 -m flatpak_pip_generator (hybrid sdist + rust wheels)..."
     python3 -m flatpak_pip_generator \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10'
+        --runtime='org.kde.Sdk//6.10' \
+        --prefer-wheels="$PREFER_WHEELS"
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 elif command -v flatpak_pip_generator &> /dev/null; then
-    echo "Using flatpak_pip_generator (sdist-first)..."
+    echo "Using flatpak_pip_generator (hybrid sdist + rust wheels)..."
     flatpak_pip_generator \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10'
+        --runtime='org.kde.Sdk//6.10' \
+        --prefer-wheels="$PREFER_WHEELS"
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 elif command -v flatpak-pip-generator &> /dev/null; then
-    echo "Using flatpak-pip-generator (sdist-first)..."
+    echo "Using flatpak-pip-generator (hybrid sdist + rust wheels)..."
     flatpak-pip-generator \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10'
+        --runtime='org.kde.Sdk//6.10' \
+        --prefer-wheels="$PREFER_WHEELS"
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 elif [ -f "$HOME/flatpak-builder-tools/pip/flatpak-pip-generator.py" ]; then
-    echo "Using flatpak-builder-tools (sdist-first)..."
+    echo "Using flatpak-builder-tools (hybrid sdist + rust wheels)..."
     python3 "$HOME/flatpak-builder-tools/pip/flatpak-pip-generator.py" \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10'
+        --runtime='org.kde.Sdk//6.10' \
+        --prefer-wheels="$PREFER_WHEELS"
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 else
     echo ""
