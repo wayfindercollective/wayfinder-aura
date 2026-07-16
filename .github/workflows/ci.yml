@@ -263,7 +263,11 @@ jobs:
       - name: Install Flatpak tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          sudo apt-get install -y flatpak
+          # Use Flathub's Builder app (current flatpak-builder) so SDK extensions
+          # resolve against Freedesktop 25.08 for KDE 6.10, not a stale host builder.
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.flatpak.Builder
 
       - name: Add Flathub remote
         run: |
@@ -271,11 +275,13 @@ jobs:
 
       - name: Install SDK
         run: |
+          # KDE 6.10 → Freedesktop 25.08; rust-stable is required for sdist builds of
+          # cryptography / jiter / pydantic-core.
           flatpak install --user -y flathub \
             org.kde.Platform//6.10 \
             org.kde.Sdk//6.10 \
-            com.riverbankcomputing.PyQt.BaseApp//6.10
-        continue-on-error: true
+            com.riverbankcomputing.PyQt.BaseApp//6.10 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
 
       - name: Select Flatpak manifest
         id: flatpak-manifest
@@ -292,7 +298,15 @@ jobs:
       - name: Build Flatpak
         run: |
           cd flatpak
-          flatpak-builder --user --force-clean --jobs=2 --repo=repo build-dir "${{ steps.flatpak-manifest.outputs.manifest }}"
+          # org.flatpak.Builder needs host flatpak install dirs for SDKs
+          flatpak run --command=flatpak-builder \
+            --filesystem="$PWD":rw \
+            --filesystem="$HOME/.local/share/flatpak":rw \
+            --env=FLATPAK_USER_DIR="$HOME/.local/share/flatpak" \
+            --env=FLATPAK_SYSTEM_DIR="$HOME/.local/share/flatpak" \
+            org.flatpak.Builder \
+            --user --force-clean --install-deps-from=flathub --jobs=2 \
+            --repo=repo build-dir "${{ steps.flatpak-manifest.outputs.manifest }}"
 
       - name: Build single-file bundle
         run: |
