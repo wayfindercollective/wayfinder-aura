@@ -78,7 +78,7 @@ from wayfinder.config import (
 )
 from wayfinder.utils.platform import get_portal_app_id
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
@@ -16674,6 +16674,23 @@ class WayfinderApp(ctk.CTk):
             # `store` already isolates writes, so this only avoids wasted transcription work).
             if gen is not None and gen != self.session_generation:
                 return
+
+            # The session-level peak guard cannot catch a silent tail after an earlier
+            # spoken chunk.  Whisper is especially prone to echoing its prompt and
+            # inventing prose for such chunks, so mark this one empty without invoking
+            # ASR.  Fail open when the WAV cannot be measured to avoid dropping speech.
+            chunk_peak = get_wav_peak_amplitude(chunk_path)
+            if chunk_peak is not None and chunk_peak < SILENCE_PEAK_THRESHOLD:
+                with self.chunk_transcription_lock:
+                    while len(store) <= chunk_index:
+                        store.append("")
+                    store[chunk_index] = "[empty]"
+                self.log(f"🔇 Chunk {chunk_index + 1} skipped (no speech-level audio)")
+                self.event_queue.put(
+                    (EventType.CHUNK_TRANSCRIBED, (chunk_index, "", False))
+                )
+                return
+
             # Prefer prior-chunk text as Whisper prompt (continuity). Wait only briefly —
             # long blocking here serializes the pipeline and kills the speed win of
             # chunking. On GPU the previous chunk is almost always done already; on a

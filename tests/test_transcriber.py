@@ -547,6 +547,7 @@ class TestFasterWhisperBackend:
             first = backend._build_prompt()
             assert "Generic style seed." in first, backend.get_name()
             assert "Wayfinder" in first
+            assert "Vocabulary:" not in first
 
             later = backend._build_prompt(
                 context="and then we continued speaking about the release"
@@ -738,6 +739,21 @@ class TestWhisperArtifactCleanup:
 
         assert clean_whisper_artifacts(text) == text
 
+    def test_drops_observed_vocabulary_prompt_leak_when_hints_are_active(self):
+        from wayfinder.core.transcriber import drop_whisper_prompt_leak
+
+        leaked = (
+            "Vocabulary: We're in the front of the audience. We're taking the alarm, "
+            "and now they're in the moment."
+        )
+        assert drop_whisper_prompt_leak(leaked, ["daan"]) == ""
+
+    def test_keeps_vocabulary_word_when_it_is_not_the_internal_marker(self):
+        from wayfinder.core.transcriber import drop_whisper_prompt_leak
+
+        text = "We should improve the vocabulary in this paragraph."
+        assert drop_whisper_prompt_leak(text, ["daan"]) == text
+
 
 class TestTranscribeWithConfig:
     """Test the high-level transcribe_with_config function."""
@@ -771,6 +787,19 @@ class TestTranscribeWithConfig:
         # Verify context was passed
         call_args = mock_backend.transcribe.call_args
         assert mock_backend.transcribe.called
+
+    @patch("wayfinder.core.transcriber.get_backend")
+    def test_transcribe_with_config_drops_vocabulary_prompt_leak(
+        self, mock_get_backend, sample_config: dict, sample_audio_file: Path
+    ):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        sample_config["custom_vocabulary"] = ["daan"]
+        mock_backend = MagicMock()
+        mock_backend.transcribe.return_value = "Vocabulary: invented words from silence"
+        mock_get_backend.return_value = mock_backend
+
+        assert transcribe_with_config(str(sample_audio_file), sample_config) == ""
 
 
 class TestGpuCpuFallback:

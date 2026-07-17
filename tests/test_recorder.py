@@ -232,6 +232,33 @@ class TestSilenceDetection:
         recorder._audio_callback(np.full(100, 0.3, dtype=np.float32), 100, None, None)
         assert recorder.get_peak_amplitude() == pytest.approx(0.3)
 
+    def test_saved_wav_peak_distinguishes_silence_from_speech(self, tmp_path):
+        import wave
+        import numpy as np
+        from wayfinder.core.recorder import get_wav_peak_amplitude
+
+        silent = tmp_path / "silent.wav"
+        voiced = tmp_path / "voiced.wav"
+        for path, samples in (
+            (silent, np.zeros(1600, dtype=np.int16)),
+            (voiced, np.full(1600, 8192, dtype=np.int16)),
+        ):
+            with wave.open(str(path), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16000)
+                wav_file.writeframes(samples.tobytes())
+
+        assert get_wav_peak_amplitude(silent) == 0.0
+        assert get_wav_peak_amplitude(voiced) == pytest.approx(0.25)
+
+    def test_saved_wav_peak_fails_open_for_invalid_input(self, tmp_path):
+        from wayfinder.core.recorder import get_wav_peak_amplitude
+
+        invalid = tmp_path / "not-a-wav.wav"
+        invalid.write_text("not audio")
+        assert get_wav_peak_amplitude(invalid) is None
+
 
 # Real-world snapshot (Bazzite desktop, PipeWire): PortAudio shows raw ALSA dupes,
 # virtual PCMs, and sink monitors exposed as JACK capture nodes — while pactl lists

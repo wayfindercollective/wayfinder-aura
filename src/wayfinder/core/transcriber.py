@@ -688,7 +688,10 @@ class WhisperServerBackend(TranscriptionBackend):
             parts.append(self.prompt)
         if self.custom_vocabulary:
             vocab_str = ", ".join(self.custom_vocabulary[:50])
-            parts.append(f"Vocabulary: {vocab_str}")
+            # Keep vocabulary as bare recognition hints, matching the CLI backend.
+            # A literal "Vocabulary:" label leaked into output when Whisper received
+            # a silent trailing chunk and then continued hallucinating prose.
+            parts.append(vocab_str)
         return " ".join(parts) if parts else ""
 
     def _is_our_server(self, port: int) -> bool:
@@ -2168,6 +2171,25 @@ def clean_whisper_artifacts(text: str) -> str:
     return text
 
 
+def drop_whisper_prompt_leak(text: str, custom_vocabulary: list | None = None) -> str:
+    """Drop a chunk that begins with Aura's former internal vocabulary marker.
+
+    Older/currently-running server prompts may still echo ``Vocabulary:`` on
+    silence.  Only activate this compatibility guard when vocabulary hints are
+    configured; ordinary dictation containing the word "vocabulary" elsewhere
+    is left untouched.
+    """
+    if not text or not custom_vocabulary:
+        return text
+
+    import re
+
+    if re.match(r"^\s*vocabulary\s*:", text, flags=re.IGNORECASE):
+        print(f"[Transcription] Dropped Whisper vocabulary prompt leak: {text!r}")
+        return ""
+    return text
+
+
 # Acronyms and abbreviations that should stay uppercase
 _PRESERVE_CAPS = {
     'I', 'OK', 'API', 'HTML', 'CSS', 'JSON', 'XML', 'YAML', 'TOML',
@@ -2368,6 +2390,10 @@ def transcribe_with_config(
     
     backend = get_backend(config)
     text = backend.transcribe(audio_path, context=context)
+
+    # Compatibility guard for a prompt marker used by older server-mode code.
+    # Run before punctuation/caps cleanup so the marker remains exact.
+    text = drop_whisper_prompt_leak(text, config.get("custom_vocabulary", []))
     
     # ALWAYS clean up Whisper artifacts (dots, [BLANK_AUDIO], <>, caps, etc.)
     # This runs regardless of post-processing settings

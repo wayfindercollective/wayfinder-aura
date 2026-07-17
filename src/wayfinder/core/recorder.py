@@ -137,6 +137,30 @@ EXCLUDED_DEVICE_KEYWORDS = [
 SILENCE_PEAK_THRESHOLD = 0.001
 
 
+def get_wav_peak_amplitude(audio_path: str | Path) -> float | None:
+    """Return a mono/stereo PCM WAV's normalized peak, or ``None`` if unreadable.
+
+    Chunked recordings are written as signed 16-bit PCM before transcription.
+    Measuring the saved file lets the orchestration layer reject an individually
+    silent trailing chunk even when earlier chunks contained real speech.  Fail
+    open for an unexpected WAV format so a format mismatch never drops words.
+    """
+    try:
+        with wave.open(str(audio_path), "rb") as wav_file:
+            if wav_file.getsampwidth() != 2:
+                return None
+            frames = wav_file.readframes(wav_file.getnframes())
+        if not frames:
+            return 0.0
+        samples = np.frombuffer(frames, dtype="<i2")
+        if samples.size == 0:
+            return 0.0
+        # Promote before abs: abs(int16(-32768)) overflows in int16.
+        return float(np.max(np.abs(samples.astype(np.int32)))) / 32768.0
+    except (OSError, EOFError, wave.Error):
+        return None
+
+
 def is_output_device(device_name: str) -> bool:
     """Check if a device name matches known output device patterns."""
     name_lower = device_name.lower()

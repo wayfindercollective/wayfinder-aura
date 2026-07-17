@@ -687,6 +687,37 @@ class TestChunkedFinalize:
         assert any("Timeout" in m for m in app.logs)
 
 
+class TestChunkSilenceGuard:
+    def test_silent_trailing_chunk_skips_whisper_and_completes_store(
+        self, app, monkeypatch, tmp_path
+    ):
+        import numpy as np
+
+        chunk = tmp_path / "silent-tail.wav"
+        with wave.open(str(chunk), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+
+        called = {"transcribe": False}
+        monkeypatch.setattr(
+            wayfinder_main,
+            "transcribe_with_config",
+            lambda *_a, **_k: called.update(transcribe=True) or "hallucination",
+        )
+        store = []
+
+        app._transcribe_chunk(str(chunk), 0, app.session_generation, store)
+
+        assert called["transcribe"] is False
+        assert store == ["[empty]"]
+        assert any("skipped" in message.lower() for message in app.logs)
+        event_type, data = app.event_queue.get_nowait()
+        assert event_type == wayfinder_main.EventType.CHUNK_TRANSCRIBED
+        assert data == (0, "", False)
+
+
 # ===========================================================================
 # stop_recording_and_process — chunked path wiring
 # ===========================================================================
