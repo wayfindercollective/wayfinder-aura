@@ -31,23 +31,9 @@ build-options:
     BASEAPP_REMOVE_WEBENGINE: '1'
 
 finish-args:
-  # Display — the main UI is CustomTkinter/Tk, which is X11-ONLY (no Wayland backend).
-  # Do NOT grant --socket=wayland: under a Wayland session (e.g. Plasma Wayland on newer
-  # SteamOS), flatpak hands the app the Wayland socket and then treats --socket=fallback-x11
-  # as already-satisfied, so it does NOT forward X11. Tk then starts with an empty $DISPLAY
-  # and hard-crashes on launch (_tkinter.TclError: no display name). Forcing unconditional
-  # --socket=x11 makes the whole app run on Xwayland — the only display server Tk can use.
-  - --socket=x11
-  # Because this Flatpak is X11-only, tell the app so explicitly. On a host Wayland session
-  # flatpak passes XDG_SESSION_TYPE=wayland straight through, which makes is_wayland() True
-  # even though there is NO wayland socket in the sandbox. That mismatch (a) routed the PyQt6
-  # overlay down its Wayland/KWin-scripting positioning path while Qt was actually on xcb, so
-  # the overlay window never appeared, and (b) selected wtype for text injection, which cannot
-  # work without the wayland socket. Pinning XDG_SESSION_TYPE=x11 (is_wayland()->False) sends
-  # the overlay through its native-X11 positioning and injection through the bundled xdotool;
-  # QT_QPA_PLATFORM=xcb makes Qt's platform choice deterministic.
-  - --env=XDG_SESSION_TYPE=x11
-  - --env=QT_QPA_PLATFORM=xcb
+  # Display - Wayland preferred, X11 fallback
+  - --socket=wayland
+  - --socket=fallback-x11
   - --share=ipc
   
   # Audio recording (PipeWire/PulseAudio) - essential for voice dictation
