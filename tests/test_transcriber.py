@@ -245,9 +245,11 @@ class TestWhisperServerBackend:
             result = backend.transcribe(str(sample_audio_file))
 
         assert result == "recovered"
-        assert mock_stop.called, "wedged server must be stopped before the restart retry"
-        # _start_server: once at entry + once on restart
-        assert mock_start.call_count == 2
+        # The stop now happens INSIDE _start_server(force=True); recovery evidences the
+        # restart by force-restarting (which replaces a wedged-but-listening server).
+        assert mock_start.call_count == 2  # entry + restart
+        assert mock_start.call_args_list[1].kwargs.get("force") is True, \
+            "recovery must force-restart the wedged server"
         # POST(initial) + POST(post-restart) = 2 — no duplicate warm re-POST
         assert urlopen.call_count == 2
 
@@ -276,8 +278,8 @@ class TestWhisperServerBackend:
             result = backend.transcribe(str(sample_audio_file))
 
         assert result == "recovered"
-        assert mock_stop.called
         assert mock_start.call_count == 2
+        assert mock_start.call_args_list[1].kwargs.get("force") is True  # recovery force-restarts
         assert urlopen.call_count == 2
 
     def test_startup_failure_during_recovery_salvages_via_cli(
@@ -499,6 +501,189 @@ class TestWhisperServerBackend:
         assert str(binary) not in _T._CPU_FALLBACK_ACTIVE, \
             "a deadline-clamped timeout must NOT memoize CPU fallback"
 
+    def test_start_server_lock_acquire_bounded_by_deadline(self, tmp_path):
+        """Round-4 Finding-1: a competing holder of _server_lock must not make a
+        deadline-bounded startup block past its budget — it raises instead of hanging."""
+        import time
+        from wayfinder.core.transcriber import WhisperServerBackend, TranscriptionError
+
+        binary = tmp_path / "whisper-server"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        backend = WhisperServerBackend(whisper_server_binary=str(binary),
+                                       model_path=str(model), use_gpu=False)
+
+        WhisperServerBackend._server_lock.acquire()  # hold it so the bounded acquire can't
+        try:
+            t0 = time.monotonic()
+            with pytest.raises(TranscriptionError) as exc:
+                backend._start_server(deadline=time.monotonic() + 0.3)  # 0.3s budget
+            elapsed = time.monotonic() - t0
+        finally:
+            WhisperServerBackend._server_lock.release()
+        assert "lock" in str(exc.value).lower()
+        assert elapsed < 2.0, "must give up near the deadline, not block indefinitely"
+
+    def test_force_restart_replaces_a_running_server(self, tmp_path):
+        """Round-4 Finding-1: force=True must NOT early-return on a server that looks
+        'already running with the right model' — recovery uses it to replace a
+        wedged-but-listening server."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        binary = tmp_path / "whisper-server"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        backend = WhisperServerBackend(whisper_server_binary=str(binary),
+                                       model_path=str(model), use_gpu=False)
+
+        alive = MagicMock(); alive.poll.return_value = None       # looks healthy
+        WhisperServerBackend._server_process = alive
+        WhisperServerBackend._server_model_path = str(model)      # ...and same model
+        stopped = []
+        new_proc = MagicMock(); new_proc.poll.return_value = None
+        try:
+            with patch.object(WhisperServerBackend, "_stop_server_internal",
+                              side_effect=lambda *a, **k: stopped.append(True)), \
+                 patch.object(WhisperServerBackend, "_find_available_port", return_value=8178), \
+                 patch.object(WhisperServerBackend, "_is_our_server", side_effect=[False, True]), \
+                 patch("subprocess.Popen", return_value=new_proc), \
+                 patch("time.sleep"):
+                backend._start_server(force=True)
+        finally:
+            WhisperServerBackend._server_process = None
+        assert stopped, "force=True must stop the existing server, not reuse it as-is"
+
+    def test_deadline_bail_in_readiness_does_not_disable_server(self, tmp_path):
+        """Round-4 Finding-1/3: a startup abandoned because the recovery DEADLINE passed
+        is a budget bail, NOT a broken server — it must NOT set _server_disabled (which
+        would send every future dictation to the slow CLI fallback)."""
+        import time
+        from wayfinder.core.transcriber import WhisperServerBackend, TranscriptionError
+
+        binary = tmp_path / "whisper-server"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        backend = WhisperServerBackend(whisper_server_binary=str(binary),
+                                       model_path=str(model), use_gpu=False)
+        WhisperServerBackend._server_process = None
+        WhisperServerBackend._server_disabled = False
+
+        never_ready = MagicMock(); never_ready.poll.return_value = None
+        try:
+            with patch.object(WhisperServerBackend, "_stop_server_internal"), \
+                 patch.object(WhisperServerBackend, "_find_available_port", return_value=8178), \
+                 patch.object(WhisperServerBackend, "_is_our_server", return_value=False), \
+                 patch("subprocess.Popen", return_value=never_ready):
+                with pytest.raises(TranscriptionError) as exc:
+                    backend._start_server(deadline=time.monotonic() + 0.15)  # tiny budget
+        finally:
+            WhisperServerBackend._server_process = None
+        assert "deadline" in str(exc.value).lower()
+        assert WhisperServerBackend._server_disabled is False, \
+            "a deadline bail must NOT disable the server (poisoning guard)"
+
+    def test_stop_server_clamps_sigterm_wait_to_deadline(self, tmp_path):
+        """Round-4 Finding-1: _stop_server_internal(deadline=near) clamps its SIGTERM
+        wait to the remaining budget instead of blocking the full 5s."""
+        import time
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        proc = MagicMock(); proc.wait.return_value = 0  # exits promptly on SIGTERM
+        WhisperServerBackend._server_process = proc
+        WhisperServerBackend._stop_server_internal(deadline=time.monotonic() + 1.0)  # ~1s
+
+        term_wait = proc.wait.call_args.kwargs.get("timeout")
+        assert term_wait is not None and 0 < term_wait <= 1.5, \
+            f"SIGTERM wait must be clamped to remaining budget, got {term_wait}"
+        assert WhisperServerBackend._server_process is None  # cleaned up
+
+    def test_cli_flag_probe_clamped_to_small_budget(self, tmp_path):
+        """Round-4 Finding-2: with a small positive salvage budget, the --help flag
+        probe timeout is clamped, not left at the full 5s."""
+        import time
+        from wayfinder.core.transcriber import WhisperCppBackend
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        backend = WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                    use_gpu=False, timeout=30)
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append((cmd, kw.get("timeout")))
+            m = MagicMock(); m.returncode = 0; m.stdout = "hello"; m.stderr = ""
+            return m
+
+        with patch("subprocess.run", side_effect=fake_run):
+            backend.transcribe(str(audio), deadline=time.monotonic() + 1.0)  # ~1s budget
+
+        help_timeout = next((t for cmd, t in seen if "--help" in cmd), None)
+        assert help_timeout is not None and 0 < help_timeout <= 1.5, \
+            f"--help probe must be clamped to the small remaining budget, got {help_timeout}"
+
+    def test_force_recovery_does_not_reuse_orphaned_listener(self, tmp_path):
+        """Round-5 Finding-3: when _server_process is None (orphaned) but a wedged
+        server is still LISTENING on the port, forced recovery must NOT re-adopt it —
+        port discovery gets reuse_ok=False and the reuse branch is disabled, so a fresh
+        server is spawned instead."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        binary = tmp_path / "whisper-server"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        backend = WhisperServerBackend(whisper_server_binary=str(binary),
+                                       model_path=str(model), use_gpu=False)
+        WhisperServerBackend._server_process = None  # orphaned — nothing tracked to stop
+        reuse_ok_seen = {}
+
+        def fake_find(probe_timeout=2, reuse_ok=True):
+            reuse_ok_seen["v"] = reuse_ok
+            return 8200
+
+        new_proc = MagicMock(); new_proc.poll.return_value = None
+        # A wedged server WOULD answer "our server" — the code must not reuse it.
+        try:
+            with patch.object(WhisperServerBackend, "_stop_server_internal"), \
+                 patch.object(WhisperServerBackend, "_find_available_port", side_effect=fake_find), \
+                 patch.object(WhisperServerBackend, "_is_our_server", return_value=True), \
+                 patch("subprocess.Popen", return_value=new_proc) as mock_popen, \
+                 patch("time.sleep"):
+                backend._start_server(force=True)
+        finally:
+            WhisperServerBackend._server_process = None
+        assert reuse_ok_seen.get("v") is False, "forced recovery must pass reuse_ok=False"
+        assert mock_popen.called, "forced recovery must spawn a fresh server, not reuse the wedge"
+
+    def test_deadline_truncated_flag_probe_drops_fragile_flags(self, tmp_path):
+        """Round-5 Finding-2: if the --help probe times out under a salvage deadline,
+        the version-fragile flags must NOT be emitted (fail-open would make bundled
+        v1.7.2 transcribe nothing), and the truncated probe must not be cached."""
+        import time
+        import subprocess as _sp
+        from wayfinder.core.transcriber import WhisperCppBackend
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        backend = WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                    use_gpu=False, timeout=30, suppress_nst=True,
+                                    no_speech_threshold=0.5)
+        got = {}
+
+        def fake_run(cmd, **kw):
+            if "--help" in cmd:
+                raise _sp.TimeoutExpired(cmd, kw.get("timeout"))  # probe truncated
+            got["cmd"] = cmd
+            m = MagicMock(); m.returncode = 0; m.stdout = "hello"; m.stderr = ""
+            return m
+
+        with patch("subprocess.run", side_effect=fake_run):
+            backend.transcribe(str(audio), deadline=time.monotonic() + 1.0)
+
+        cmd = got["cmd"]
+        assert "--no-speech-thold" not in cmd and "--suppress-nst" not in cmd, \
+            "a truncated probe must NOT fail-open on fragile flags under a deadline"
+        assert "--no-gpu" in cmd, "non-fragile flags (e.g. --no-gpu) keep fail-open behavior"
+        assert getattr(backend, "_supported_flags_cache", None) is None, \
+            "a truncated probe must not be cached (a later unhurried call can re-probe)"
+
     def test_gpu_adaptive_timeout_capped_below_short_configured_timeout(self, tmp_path):
         """Finding-2 regression: with a configured timeout below the 15s floor, the
         adaptive GPU timeout must still be CAPPED at self.timeout — the cap wins over
@@ -550,7 +735,8 @@ class TestWhisperServerBackend:
             result = backend.transcribe(str(sample_audio_file))
 
         assert result == "recovered", "malformed initial response must recover, not drop"
-        assert mock_stop.called and mock_start.call_count == 2, "must restart on a bad initial response"
+        assert mock_start.call_count == 2 and mock_start.call_args_list[1].kwargs.get("force") is True, \
+            "must force-restart on a bad initial response"
 
     def test_retry_uses_fresh_port_after_restart(self, sample_audio_file: Path):
         """Finding-4 regression: if _start_server() selects a NEW port on restart, the

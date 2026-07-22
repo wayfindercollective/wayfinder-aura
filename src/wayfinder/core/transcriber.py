@@ -351,7 +351,7 @@ class WhisperCppBackend(TranscriptionBackend):
             self._gpu_supported = False
             return False
     
-    def _supported_flags(self) -> set:
+    def _supported_flags(self, probe_timeout: float = 5) -> set:
         """Long options the actual whisper-cli accepts (parsed from --help, cached).
 
         The Flatpak bundles whisper.cpp v1.7.2, which lacks --no-speech-thold and --suppress-nst
@@ -369,9 +369,13 @@ class WhisperCppBackend(TranscriptionBackend):
             import re
             h = subprocess.run(
                 [self.whisper_binary, "--help"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=probe_timeout,
             )
             flags = set(re.findall(r"--[a-z][a-z0-9-]+", (h.stdout or "") + (h.stderr or "")))
+        except subprocess.TimeoutExpired:
+            # A deadline-truncated probe learned nothing — return empty for THIS call
+            # but do NOT cache it, so a later unhurried call can still introspect.
+            return set()
         except Exception:
             pass
         self._supported_flags_cache = flags
@@ -403,22 +407,34 @@ class WhisperCppBackend(TranscriptionBackend):
         if not Path(audio_path).exists():
             raise TranscriptionError(f"Audio file not found: {audio_path}")
 
-        # Salvage budget already spent? Bail BEFORE the (possibly 5s) --help flag
-        # probe below, so an expired deadline can't be overrun during preprocessing.
+        # Salvage budget already spent? Bail BEFORE the (possibly 5s) --help flag probe
+        # below. With a small positive budget, also CLAMP that probe to what's left so
+        # preprocessing can't overrun the deadline.
+        probe_timeout = 5
         if deadline is not None:
             import time as _time
-            if deadline - _time.monotonic() <= 0:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
                 raise TranscriptionError("whisper-cli salvage budget exhausted before start")
+            probe_timeout = max(0.2, min(5.0, remaining))
 
         # Build the final prompt with custom vocabulary and context
         final_prompt = self._build_prompt(context)
-        
+
         # Some accuracy/suppression flags exist only in newer whisper.cpp; the bundled v1.7.2
         # lacks --no-speech-thold / --suppress-nst, and whisper-cli aborts (transcribing nothing)
         # on the first unknown flag. Emit version-fragile flags only when --help advertises them;
         # _flag_ok fails OPEN (empty set => no filtering) so an un-introspectable binary is safe.
-        _sup = self._supported_flags()
+        _sup = self._supported_flags(probe_timeout=probe_timeout)
+        # Under a salvage DEADLINE the --help probe may have been truncated to empty, so
+        # do NOT fail OPEN on the version-fragile flags (v1.7.2 aborts on them → silent
+        # empty transcription — the very failure this filtering prevents). Emit those
+        # only when CONFIRMED present; dropping them costs a minor accuracy tweak, which
+        # beats losing the words. Non-fragile flags keep the normal fail-open behavior.
+        _fragile = {"--no-speech-thold", "--suppress-nst"}
         def _flag_ok(flag):
+            if deadline is not None and flag in _fragile:
+                return flag in _sup
             return (not _sup) or (flag in _sup)
 
         # Route to the CPU sibling if the GPU binary already crashed this session,
@@ -722,20 +738,30 @@ class WhisperServerBackend(TranscriptionBackend):
             parts.append(vocab_str)
         return " ".join(parts) if parts else ""
 
-    def _is_our_server(self, port: int) -> bool:
-        """Check if a whisper-server is running on the given port."""
+    def _is_our_server(self, port: int, timeout: float = 2) -> bool:
+        """Check if a whisper-server is running on the given port.
+
+        timeout: health-probe budget. Recovery clamps it to the remaining deadline so
+        a slow probe can't overrun the caller's watchdog budget.
+        """
         try:
             import urllib.request
             req = urllib.request.Request(f"http://127.0.0.1:{port}/")
-            resp = urllib.request.urlopen(req, timeout=2)
+            resp = urllib.request.urlopen(req, timeout=timeout)
             # whisper-server returns an HTML page at root
             content = resp.read().decode("utf-8", errors="ignore")
             return "whisper" in content.lower()
         except Exception:
             return False
 
-    def _find_available_port(self) -> int:
-        """Find the configured port or the next available one."""
+    def _find_available_port(self, probe_timeout: float = 2, reuse_ok: bool = True) -> int:
+        """Find the configured port or the next available one.
+
+        probe_timeout: budget for the reuse health-probe, so port discovery stays inside
+        the recovery deadline.
+        reuse_ok: when False (forced recovery), an occupied port is treated as
+        unavailable — never re-adopt a wedged-but-listening endpoint we can't replace.
+        """
         import socket
         port = self.port
         for attempt in range(5):
@@ -743,8 +769,8 @@ class WhisperServerBackend(TranscriptionBackend):
             try:
                 if sock.connect_ex(("127.0.0.1", port)) != 0:
                     return port  # Port is free
-                # Port in use — check if it's our server
-                if self._is_our_server(port):
+                # Port in use — reuse only if allowed AND it's our server.
+                if reuse_ok and self._is_our_server(port, timeout=probe_timeout):
                     return port  # Reuse existing server
                 port += 1  # Try next port
             finally:
@@ -794,50 +820,79 @@ class WhisperServerBackend(TranscriptionBackend):
             attempts.append([cpu_server] + base[1:])
         return attempts
 
-    def _start_server(self, deadline: float = None) -> None:
+    def _start_server(self, deadline: float = None, force: bool = False) -> None:
         """Start the whisper-server process if not already running.
 
         deadline: optional absolute time.monotonic() budget. When set (the recovery
-        path passes it), the readiness wait bails as soon as the budget is spent
-        instead of blocking its full ~30s loop, so a listening-but-unresponsive child
-        cannot push the caller past the PROCESSING watchdog. None = full wait.
+        path passes it), EVERY blocking step — lock acquisition, shutdown waits, health
+        probes, and the readiness sleeps — is clamped to the remaining budget, so a
+        listening-but-unresponsive child (or a competing startup holding the lock)
+        cannot push the caller past the PROCESSING watchdog. None = full, unbounded wait.
+        force: restart even if a server appears to be running — recovery uses this to
+        replace a wedged-but-listening server that would otherwise look healthy.
         """
         if not self.is_available():
             WhisperServerBackend._server_disabled = True
             raise TranscriptionError(
                 f"whisper-server binary not found: {self.whisper_server_binary or '<empty>'}"
             )
-        with WhisperServerBackend._server_lock:
-            # Check if already running with matching model
-            if (WhisperServerBackend._server_process is not None
+
+        import atexit
+        import time
+
+        def _left() -> float:
+            return float("inf") if deadline is None else deadline - time.monotonic()
+
+        def _probe_budget() -> float:
+            return 2 if deadline is None else max(0.2, min(2.0, _left()))
+
+        # Bounded lock acquisition: a competing startup can hold this lock through its
+        # entire readiness wait, so under a recovery deadline never block past the budget.
+        if deadline is None:
+            WhisperServerBackend._server_lock.acquire()
+        else:
+            rem = _left()
+            if rem <= 0 or not WhisperServerBackend._server_lock.acquire(timeout=rem):
+                raise TranscriptionError(
+                    "recovery deadline hit while acquiring the server lock")
+        try:
+            # Already running with the right model? Skipped when force=True so a
+            # wedged-but-alive server is replaced instead of mistaken for healthy.
+            if (not force
+                    and WhisperServerBackend._server_process is not None
                     and WhisperServerBackend._server_process.poll() is None
                     and WhisperServerBackend._server_model_path == self.model_path):
                 return
 
-            # Kill any existing server with different config
-            self._stop_server_internal()
+            # Kill any existing server (different config, or force-replace a wedge).
+            self._stop_server_internal(deadline=deadline)
 
-            port = self._find_available_port()
+            # Budget already gone (before any spawn)? Bail. NOTE: a budget bail is NOT
+            # a broken server, so it must NOT set _server_disabled (that would wrongly
+            # send every future dictation to the slow CLI fallback).
+            if deadline is not None and _left() <= 0:
+                raise TranscriptionError(
+                    "whisper-server startup skipped — recovery deadline already passed")
 
-            # Check if an existing compatible server is already on this port
-            if self._is_our_server(port):
+            # Under force (recovery), never re-adopt an occupied endpoint: a
+            # wedged-but-listening server we cannot prove we own must be treated as
+            # unavailable, so port discovery skips it (reuse_ok=False) AND the reuse
+            # branch is disabled — recovery MUST bind a fresh server, not the wedge.
+            port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
+
+            if not force and self._is_our_server(port, timeout=_probe_budget()):
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
                 print(f"[Whisper Server] Reusing existing server on port {port}")
                 return
 
-            import atexit
-            import time
-
-            # Don't even spawn a subprocess if the recovery budget is already gone —
-            # a doomed child would just have to be reaped, burning more of the caller's
-            # deadline. (The readiness loop below re-checks for a mid-startup crossing.)
-            if deadline is not None and time.monotonic() >= deadline:
-                raise TranscriptionError(
-                    "whisper-server startup skipped — recovery deadline already passed")
-
             last_error = ""
             for attempt, cmd in enumerate(self._server_cmd_attempts(port)):
+                # Re-check the budget before each (re)spawn so a slow prior attempt
+                # can't push a fresh Popen past the deadline.
+                if deadline is not None and _left() <= 0:
+                    raise TranscriptionError(
+                        "whisper-server startup exceeded the recovery deadline (before spawn)")
                 if attempt:
                     print(f"[Whisper Server] Start failed ({last_error.strip()[-200:]}) — "
                           f"retrying with reduced flags (attempt {attempt + 1})...")
@@ -857,18 +912,23 @@ class WhisperServerBackend(TranscriptionBackend):
                 # safe to call multiple times)
                 atexit.register(WhisperServerBackend.shutdown)
 
-                # Wait for server to be ready (model loading takes a few seconds)
+                # Wait for server to be ready (model loading takes a few seconds).
                 died = False
-                for i in range(60):  # Wait up to 30 seconds
-                    # Recovery budget spent? Stop waiting rather than blocking the
-                    # full loop on a listening-but-unresponsive child (the health
-                    # probe below can itself take 2s per iteration → ~150s worst case).
-                    if deadline is not None and time.monotonic() >= deadline:
-                        self._stop_server_internal()
-                        raise TranscriptionError(
-                            "whisper-server startup exceeded the recovery deadline")
-                    time.sleep(0.5)
-                    if self._is_our_server(port):
+                for i in range(60):  # up to ~30s (None) — or until the deadline
+                    if deadline is not None:
+                        rem = _left()
+                        if rem <= 0:
+                            # Budget bail mid-startup — NOT a broken server, so leave
+                            # _server_disabled untouched; just reap the child.
+                            self._stop_server_internal(deadline=deadline)
+                            raise TranscriptionError(
+                                "whisper-server startup exceeded the recovery deadline")
+                        sleep_to = min(0.5, rem)
+                        probe_to = max(0.2, min(2.0, rem))
+                    else:
+                        sleep_to, probe_to = 0.5, 2
+                    time.sleep(sleep_to)
+                    if self._is_our_server(port, timeout=probe_to):
                         print(f"[Whisper Server] Ready on port {port} (took {(i+1)*0.5:.1f}s)")
                         return
                     if proc.poll() is not None:
@@ -877,8 +937,8 @@ class WhisperServerBackend(TranscriptionBackend):
                         break
 
                 if not died:
-                    # Startup hang — reduced flags won't fix that; stop trying.
-                    self._stop_server_internal()
+                    # Startup hang with budget still available — a real fault; stop trying.
+                    self._stop_server_internal(deadline=deadline)
                     WhisperServerBackend._server_disabled = True
                     raise TranscriptionError("whisper-server timed out during startup (30s)")
 
@@ -886,19 +946,31 @@ class WhisperServerBackend(TranscriptionBackend):
             WhisperServerBackend._server_model_path = ""
             WhisperServerBackend._server_disabled = True
             raise TranscriptionError(f"whisper-server failed to start: {last_error}")
+        finally:
+            WhisperServerBackend._server_lock.release()
 
     @classmethod
-    def _stop_server_internal(cls) -> None:
-        """Internal: stop the server process without acquiring the lock."""
+    def _stop_server_internal(cls, deadline: float = None) -> None:
+        """Internal: stop the server process without acquiring the lock.
+
+        deadline: when set (recovery), the graceful SIGTERM/SIGKILL waits are clamped
+        to the remaining budget — under a deadline we escalate to SIGKILL sooner rather
+        than blocking the caller for the full 5s + 2s.
+        """
         if cls._server_process is not None:
             import signal, time
+            term_wait, kill_wait = 5.0, 2.0
+            if deadline is not None:
+                term_wait = max(0.1, min(term_wait, deadline - time.monotonic()))
             try:
                 cls._server_process.send_signal(signal.SIGTERM)
                 try:
-                    cls._server_process.wait(timeout=5)
+                    cls._server_process.wait(timeout=term_wait)
                 except subprocess.TimeoutExpired:
                     cls._server_process.kill()
-                    cls._server_process.wait(timeout=2)
+                    if deadline is not None:
+                        kill_wait = max(0.1, min(kill_wait, deadline - time.monotonic()))
+                    cls._server_process.wait(timeout=kill_wait)
             except Exception:
                 pass
             cls._server_process = None
@@ -1105,9 +1177,11 @@ class WhisperServerBackend(TranscriptionBackend):
                 recovery_deadline = time.monotonic() + float(self.timeout)
                 print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
                 try:
-                    with WhisperServerBackend._server_lock:
-                        self._stop_server_internal()
-                    self._start_server(deadline=recovery_deadline)
+                    # force=True replaces a wedged-but-listening server (which would
+                    # otherwise look "already running"); _start_server bounds every
+                    # step of its own restart — lock, stop, probes, readiness — by the
+                    # same deadline, so the whole recovery is hard-capped.
+                    self._start_server(deadline=recovery_deadline, force=True)
                     # Retry once on the fresh server (fresh port), clamped to the
                     # remaining budget. Skip entirely if the restart already spent it.
                     remaining = recovery_deadline - time.monotonic()
