@@ -219,18 +219,21 @@ class TestWhisperServerBackend:
         self, sample_audio_file: Path
     ):
         """Regression: a wedged-but-listening whisper-server makes urlopen raise
-        TimeoutError (not URLError) — observed after a suspend/resume cycle.
-        That must restart the server and retry, not fall through to an
+        TimeoutError (not URLError) — observed after a suspend/resume cycle. That
+        must restart the server and retry on the fresh one, never fall through to an
         unrecoverable error that leaves the dead server hanging every dictation.
+        We do NOT re-POST to the same (possibly still-busy) server first — that would
+        queue behind the wedged request — so the whole recovery is one restart + retry.
         """
         from wayfinder.core.transcriber import WhisperServerBackend
 
+        WhisperServerBackend._server_disabled = False
         backend = WhisperServerBackend(use_gpu=False, timeout=1)
 
-        def fake_start():
+        def fake_start(*a, **k):
             WhisperServerBackend._server_port = 8178
 
-        # First inference hangs (TimeoutError); after restart it succeeds.
+        # First inference hangs (TimeoutError); after the restart it succeeds.
         urlopen = MagicMock(side_effect=[TimeoutError("timed out"),
                                          self._make_resp("recovered")])
 
@@ -242,10 +245,338 @@ class TestWhisperServerBackend:
             result = backend.transcribe(str(sample_audio_file))
 
         assert result == "recovered"
-        assert mock_stop.called, "wedged server must be stopped before retry"
+        assert mock_stop.called, "wedged server must be stopped before the restart retry"
         # _start_server: once at entry + once on restart
         assert mock_start.call_count == 2
+        # POST(initial) + POST(post-restart) = 2 — no duplicate warm re-POST
         assert urlopen.call_count == 2
+
+    def test_dead_server_urlerror_restarts_and_retries(
+        self, sample_audio_file: Path
+    ):
+        """A URLError (connection refused: the server PROCESS is gone, not merely
+        slow) must also restart + retry, recovering on the fresh server."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+        import urllib.error
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=False, timeout=1)
+
+        def fake_start(*a, **k):
+            WhisperServerBackend._server_port = 8178
+
+        urlopen = MagicMock(side_effect=[urllib.error.URLError("connection refused"),
+                                         self._make_resp("recovered")])
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server",
+                          side_effect=fake_start) as mock_start, \
+             patch.object(WhisperServerBackend, "_stop_server_internal") as mock_stop, \
+             patch("urllib.request.urlopen", urlopen):
+            result = backend.transcribe(str(sample_audio_file))
+
+        assert result == "recovered"
+        assert mock_stop.called
+        assert mock_start.call_count == 2
+        assert urlopen.call_count == 2
+
+    def test_startup_failure_during_recovery_salvages_via_cli(
+        self, sample_audio_file: Path
+    ):
+        """Finding-3 regression: a _start_server() failure DURING recovery must route
+        to whisper-cli salvage, not escape and drop the chunk's words. _start_server()
+        now sits INSIDE the salvage try (the old code left it outside)."""
+        from wayfinder.core.transcriber import WhisperServerBackend, TranscriptionError
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=False, timeout=1)
+
+        calls = {"n": 0}
+
+        def start_side(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                WhisperServerBackend._server_port = 8178      # entry start succeeds
+            else:
+                raise TranscriptionError("restart startup failed")  # restart fails
+
+        cli = MagicMock()
+        cli.transcribe.return_value = "salvaged words"
+        urlopen = MagicMock(side_effect=[TimeoutError("wedged")])
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=start_side), \
+             patch.object(WhisperServerBackend, "_stop_server_internal"), \
+             patch.object(WhisperServerBackend, "_cli_fallback", return_value=cli), \
+             patch("urllib.request.urlopen", urlopen):
+            result = backend.transcribe(str(sample_audio_file))
+
+        assert result == "salvaged words"
+        assert cli.transcribe.called, "startup failure must fall through to whisper-cli salvage"
+
+    def test_malformed_response_after_restart_salvages_via_cli(
+        self, sample_audio_file: Path
+    ):
+        """Finding-3 regression: a malformed/short response on the post-restart retry
+        (a JSON parse error) must route to salvage, not escape the except and drop
+        words. The JSON parse now sits INSIDE the salvage try."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=False, timeout=1)
+
+        def fake_start(*a, **k):
+            WhisperServerBackend._server_port = 8178
+
+        bad = MagicMock()
+        bad.read.return_value = b"not json"          # post-restart retry returns garbage
+        cli = MagicMock()
+        cli.transcribe.return_value = "salvaged words"
+        urlopen = MagicMock(side_effect=[TimeoutError("wedged"), bad])
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch.object(WhisperServerBackend, "_stop_server_internal"), \
+             patch.object(WhisperServerBackend, "_cli_fallback", return_value=cli), \
+             patch("urllib.request.urlopen", urlopen):
+            result = backend.transcribe(str(sample_audio_file))
+
+        assert result == "salvaged words"
+        assert cli.transcribe.called, "malformed post-restart response must fall through to salvage"
+
+    def test_recovery_retry_is_clamped_to_watchdog_budget(self, sample_audio_file: Path):
+        """Finding-1 regression (retry leg): the post-restart retry timeout is DERIVED
+        from the monotonic recovery deadline (now + self.timeout), not the full
+        self.timeout. Here the clock advances during the restart, leaving only ~2s of
+        budget, so the retry must be clamped to that. (This pins the retry-timeout
+        derivation only; the salvage leg's clamping is covered by
+        test_cli_salvage_attempt_is_clamped_to_deadline.)"""
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=False, timeout=30)
+
+        # monotonic(): deadline set at t=1000 (+30 -> 1030); by the retry the clock is
+        # at 1028, leaving ~2s. (Extra calls, if any, stay at 1028.)
+        clock = iter([1000.0, 1028.0])
+
+        def fake_monotonic():
+            try:
+                return next(clock)
+            except StopIteration:
+                return 1028.0
+
+        def fake_start(*a, **k):
+            WhisperServerBackend._server_port = 8178
+
+        urlopen = MagicMock(side_effect=[TimeoutError("wedged"), self._make_resp("ok")])
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch.object(WhisperServerBackend, "_stop_server_internal"), \
+             patch("time.monotonic", fake_monotonic), \
+             patch("urllib.request.urlopen", urlopen):
+            result = backend.transcribe(str(sample_audio_file))
+
+        assert result == "ok"
+        # The post-restart retry (2nd urlopen) must be clamped to the ~2s remaining,
+        # never the full 30s — proving the retry timeout tracks the recovery deadline.
+        retry_timeout = urlopen.call_args_list[1].kwargs.get("timeout")
+        assert 0 < retry_timeout <= 3, \
+            f"retry timeout should be clamped to remaining budget, got {retry_timeout}"
+
+    def test_cli_salvage_attempt_is_clamped_to_deadline(self, tmp_path):
+        """Finding-1 regression (salvage leg): WhisperCppBackend.transcribe(deadline=…)
+        must clamp each subprocess attempt to the time remaining, so the whisper-cli
+        salvage cascade cannot overrun the recovery budget / the 120s watchdog."""
+        import time as _time
+        import subprocess as _sp  # noqa: F401 (patched by name below)
+        from wayfinder.core.transcriber import WhisperCppBackend
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        backend = WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                    use_gpu=False, timeout=30)
+
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append((cmd, kw.get("timeout")))
+            m = MagicMock(); m.returncode = 0; m.stdout = "hello world"; m.stderr = ""
+            return m
+
+        deadline = _time.monotonic() + 2.0   # only ~2s of budget remains
+        with patch("subprocess.run", side_effect=fake_run):
+            backend.transcribe(str(audio), deadline=deadline)
+
+        # Ignore the cached `--help` flag probe; the transcription attempt(s) must each
+        # be clamped to the ~2s remaining, never the full 30s configured timeout.
+        attempt_timeouts = [t for cmd, t in seen if "--help" not in cmd]
+        assert attempt_timeouts, "no transcription attempt observed"
+        assert all(0 < t <= 3 for t in attempt_timeouts), \
+            f"CLI salvage attempt must be clamped to remaining budget, got {attempt_timeouts}"
+
+    def test_start_server_bails_when_deadline_passed(self, tmp_path):
+        """Finding-1 regression: _start_server(deadline=…) must abandon its readiness
+        wait once the budget is spent, instead of blocking its full ~30s (up to ~150s)
+        loop on a listening-but-unresponsive child and blowing the 120s watchdog."""
+        import time
+        from wayfinder.core.transcriber import WhisperServerBackend, TranscriptionError
+
+        binary = tmp_path / "whisper-server"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        backend = WhisperServerBackend(whisper_server_binary=str(binary),
+                                       model_path=str(model), use_gpu=False)
+        WhisperServerBackend._server_process = None
+
+        fake_proc = MagicMock(); fake_proc.poll.return_value = None  # alive, never ready
+        with patch("subprocess.Popen", return_value=fake_proc) as mock_popen, \
+             patch.object(WhisperServerBackend, "_is_our_server", return_value=False), \
+             patch.object(WhisperServerBackend, "_find_available_port", return_value=8178), \
+             patch.object(WhisperServerBackend, "_stop_server_internal"):
+            with pytest.raises(TranscriptionError) as exc:
+                backend._start_server(deadline=time.monotonic() - 1)  # already expired
+        assert "deadline" in str(exc.value).lower(), \
+            "startup must abandon its wait when the recovery deadline has passed"
+        mock_popen.assert_not_called()  # must NOT spawn a doomed child past the deadline
+
+    def test_cli_salvage_bails_before_flag_probe_when_expired(self, tmp_path):
+        """Finding-2 regression: WhisperCppBackend.transcribe(deadline=…) with an
+        already-expired deadline must bail BEFORE the (up to 5s) --help flag probe, so
+        preprocessing can't overrun an exhausted budget."""
+        import time
+        from wayfinder.core.transcriber import WhisperCppBackend, TranscriptionError
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        backend = WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                    use_gpu=False, timeout=30)
+        ran = []
+
+        def fake_run(cmd, **kw):
+            ran.append(cmd)
+            m = MagicMock(); m.returncode = 0; m.stdout = ""; m.stderr = ""
+            return m
+
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(TranscriptionError) as exc:
+                backend.transcribe(str(audio), deadline=time.monotonic() - 1)  # expired
+        assert "exhausted before start" in str(exc.value)
+        assert ran == [], "must not run the --help probe (or any subprocess) when already expired"
+
+    def test_deadline_clamped_timeout_does_not_poison_gpu_health(self, tmp_path):
+        """Finding-3 regression: a subprocess timeout that fires because the salvage
+        DEADLINE (not the GPU) ran out must NOT memoize CPU fallback — that would
+        poison GPU health for every future dictation."""
+        import time
+        import subprocess as _sp
+        from wayfinder.core import transcriber as _T
+        from wayfinder.core.transcriber import WhisperCppBackend, TranscriptionError
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        # A CPU sibling makes the GPU binary the FIRST-of-two attempt (not the last),
+        # which is exactly when the OLD code would _activate_fallback() on a timeout —
+        # so this genuinely exercises the regression, not the is_last shortcut.
+        cpu = tmp_path / "whisper-cli-cpu"; cpu.write_text("#!/bin/sh\n"); cpu.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        _T._CPU_FALLBACK_ACTIVE.pop(str(binary), None)
+        backend = WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                    use_gpu=True, timeout=30)
+
+        def fake_run(cmd, **kw):
+            if "--help" in cmd:
+                m = MagicMock(); m.returncode = 0; m.stdout = ""; m.stderr = ""
+                return m
+            raise _sp.TimeoutExpired(cmd, kw.get("timeout"))  # GPU attempt "times out"
+
+        # deadline ~2s out -> attempt clamped to ~2 < 30 -> a timeout here is the
+        # budget expiring, NOT the GPU hanging.
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(TranscriptionError):
+                backend.transcribe(str(audio), deadline=time.monotonic() + 2)
+        assert str(binary) not in _T._CPU_FALLBACK_ACTIVE, \
+            "a deadline-clamped timeout must NOT memoize CPU fallback"
+
+    def test_gpu_adaptive_timeout_capped_below_short_configured_timeout(self, tmp_path):
+        """Finding-2 regression: with a configured timeout below the 15s floor, the
+        adaptive GPU timeout must still be CAPPED at self.timeout — the cap wins over
+        the floor. `max(15, min(t, …))` would wrongly return 15 > t."""
+        import wave as _wave
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        wav = tmp_path / "clip.wav"
+        with _wave.open(str(wav), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 16000)  # 1s
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=True, timeout=5)  # below the 15s floor
+
+        def fake_start(*a, **k):
+            WhisperServerBackend._server_port = 8178
+
+        urlopen = MagicMock(return_value=self._make_resp("ok"))
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch("urllib.request.urlopen", urlopen):
+            backend.transcribe(str(wav))
+
+        assert urlopen.call_args.kwargs.get("timeout") == 5.0, \
+            "adaptive GPU timeout must be capped at self.timeout even when it is below 15s"
+
+    def test_malformed_initial_response_routes_to_recovery(self, sample_audio_file: Path):
+        """Finding-3 regression: a malformed/undecodable response on the FIRST attempt
+        (not just post-restart) must route into recovery, not escape as a generic error
+        and drop the chunk. Here the initial POST returns garbage; the restart+retry
+        then succeeds."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=False, timeout=5)
+
+        def fake_start(*a, **k):
+            WhisperServerBackend._server_port = 8178
+
+        bad = MagicMock(); bad.read.return_value = b"not json"    # initial: garbage
+        urlopen = MagicMock(side_effect=[bad, self._make_resp("recovered")])
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server",
+                          side_effect=fake_start) as mock_start, \
+             patch.object(WhisperServerBackend, "_stop_server_internal") as mock_stop, \
+             patch("urllib.request.urlopen", urlopen):
+            result = backend.transcribe(str(sample_audio_file))
+
+        assert result == "recovered", "malformed initial response must recover, not drop"
+        assert mock_stop.called and mock_start.call_count == 2, "must restart on a bad initial response"
+
+    def test_retry_uses_fresh_port_after_restart(self, sample_audio_file: Path):
+        """Finding-4 regression: if _start_server() selects a NEW port on restart, the
+        post-restart retry must POST to that new port, not the stale original one."""
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=False, timeout=5)
+
+        ports = iter([8178, 8180])   # entry start -> 8178, restart -> 8180
+
+        def start_side(*a, **k):
+            WhisperServerBackend._server_port = next(ports)
+
+        urlopen = MagicMock(side_effect=[TimeoutError("wedged"), self._make_resp("ok")])
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=start_side), \
+             patch.object(WhisperServerBackend, "_stop_server_internal"), \
+             patch("urllib.request.urlopen", urlopen):
+            result = backend.transcribe(str(sample_audio_file))
+
+        assert result == "ok"
+        # The 2nd urlopen (post-restart) Request must target the NEW port 8180.
+        retry_req = urlopen.call_args_list[1].args[0]
+        assert ":8180/" in retry_req.full_url, \
+            f"retry must use the fresh port, got {retry_req.full_url}"
 
     def test_retry_failure_salvages_words_via_cli(self, sample_audio_file: Path):
         """Regression: a chunk whose request fails even after restart+retry must be
@@ -257,12 +588,12 @@ class TestWhisperServerBackend:
 
         backend = WhisperServerBackend(use_gpu=False, timeout=1)
 
-        def fake_start():
+        def fake_start(*a, **k):
             WhisperServerBackend._server_port = 8178
 
         # Initial request AND post-restart retry both fail — the server is gone.
         urlopen = MagicMock(side_effect=[TimeoutError("timed out"),
-                                         TimeoutError("still wedged")])
+                                         TimeoutError("gone after restart")])
         cli = MagicMock()
         cli.transcribe.return_value = "salvaged words"
 
@@ -328,11 +659,11 @@ class TestWhisperServerBackend:
             use_gpu=False, timeout=1,
         )
 
-        def fake_start():
+        def fake_start(*a, **k):
             WhisperServerBackend._server_port = 8178
 
         urlopen = MagicMock(side_effect=[TimeoutError("wedged"),
-                                         TimeoutError("still wedged")])
+                                         TimeoutError("gone after restart")])
         with patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
              patch.object(WhisperServerBackend, "_stop_server_internal"), \
              patch("urllib.request.urlopen", urlopen):
@@ -341,16 +672,16 @@ class TestWhisperServerBackend:
         assert "salvage also failed" in str(exc.value)
 
     def test_cpu_path_keeps_full_request_timeout(self, sample_audio_file: Path):
-        """On the CPU path the adaptive request-timeout shrink (which assumes GPU
-        speed) must NOT apply. The 1s fixture would otherwise shrink to the 8s floor,
-        which a cold restart + base.en load can exceed — timing out and dropping the
-        final chunk's words. CPU keeps the full configured budget.
+        """On the CPU path the adaptive request-timeout curve (which assumes GPU
+        speed) must NOT apply. The 1s fixture would otherwise be sized to the GPU floor
+        (15s), which a cold restart + base.en load can exceed — timing out and dropping
+        the final chunk's words. CPU keeps the full configured budget.
         """
         from wayfinder.core.transcriber import WhisperServerBackend
 
         backend = WhisperServerBackend(use_gpu=False, timeout=30)
 
-        def fake_start():
+        def fake_start(*a, **k):
             WhisperServerBackend._server_port = 8178
 
         urlopen = MagicMock(return_value=self._make_resp("ok"))
@@ -363,15 +694,16 @@ class TestWhisperServerBackend:
             "CPU path must use the full timeout, not the GPU-optimistic shrink"
 
     def test_gpu_path_still_shrinks_request_timeout(self, sample_audio_file: Path):
-        """Guard the inverse: on GPU the adaptive shrink is still applied, so a short
-        clip self-heals fast on a contention wedge. The 1s fixture shrinks to the 8s
-        floor (max(8, min(30, 1*2+4))).
+        """Guard the inverse: on GPU the adaptive cap is still applied, but with a
+        GENEROUS floor so a slow-but-completing chunk under GPU contention finishes on
+        the first try instead of timing out into a model reload. The 1s fixture floors
+        at 15s (min(30, max(15, 1*4+10))).
         """
         from wayfinder.core.transcriber import WhisperServerBackend
 
         backend = WhisperServerBackend(use_gpu=True, timeout=30)
 
-        def fake_start():
+        def fake_start(*a, **k):
             WhisperServerBackend._server_port = 8178
 
         urlopen = MagicMock(return_value=self._make_resp("ok"))
@@ -380,21 +712,22 @@ class TestWhisperServerBackend:
              patch("urllib.request.urlopen", urlopen):
             backend.transcribe(str(sample_audio_file))
 
-        assert urlopen.call_args.kwargs.get("timeout") == 8.0, \
-            "GPU path should keep the adaptive shrink (8s floor for the 1s fixture)"
+        assert urlopen.call_args.kwargs.get("timeout") == 15.0, \
+            "GPU path should use the generous adaptive floor (15s for the 1s fixture)"
 
     @pytest.mark.parametrize("dur_s,expected_timeout", [
-        (1.0, 8.0),    # below floor: 1*2+4=6 -> clamped up to the 8s floor
-        (2.0, 8.0),    # floor knee: 2*2+4=8 == floor
-        (3.0, 10.0),   # interior: 3*2+4=10
-        (13.0, 30.0),  # cap knee: 13*2+4=30 == self.timeout
-        (20.0, 30.0),  # above cap: 20*2+4=44 -> capped at self.timeout (30)
+        (1.0, 15.0),   # below floor: 1*4+10=14 -> clamped up to the 15s floor
+        (2.0, 18.0),   # interior above floor: 2*4+10=18
+        (3.0, 22.0),   # interior: 3*4+10=22
+        (5.0, 30.0),   # cap knee: 5*4+10=30 == self.timeout
+        (20.0, 30.0),  # above cap: 20*4+10=90 -> capped at self.timeout (30)
     ])
     def test_gpu_adaptive_timeout_knees(self, tmp_path, dur_s, expected_timeout):
-        """M2: GPU request timeout = max(8, min(self.timeout, dur*2+4)). Exercise
-        the floor, the floor knee, the interior, and the cap knee so a change to the
-        adaptive formula can't silently over-shrink (needless restarts) or
-        under-shrink (slow self-heal). Characterization guard — passes today."""
+        """M2: GPU request timeout = min(self.timeout, max(15, dur*4+10)). Exercise
+        the floor, the interior, and the cap knee so a change to the adaptive formula
+        can't silently over-shrink (needless restarts/reloads under contention) or
+        exceed the self.timeout cap (recovery blowing the watchdog). Characterization
+        guard — passes today."""
         import wave as _wave
         from wayfinder.core.transcriber import WhisperServerBackend
 
@@ -408,7 +741,7 @@ class TestWhisperServerBackend:
         WhisperServerBackend._server_disabled = False
         backend = WhisperServerBackend(use_gpu=True, timeout=30)
 
-        def fake_start():
+        def fake_start(*a, **k):
             WhisperServerBackend._server_port = 8178
 
         urlopen = MagicMock(return_value=self._make_resp("ok"))

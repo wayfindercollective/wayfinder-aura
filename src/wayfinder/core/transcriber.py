@@ -377,17 +377,21 @@ class WhisperCppBackend(TranscriptionBackend):
         self._supported_flags_cache = flags
         return flags
 
-    def transcribe(self, audio_path: str, context: str = "") -> str:
+    def transcribe(self, audio_path: str, context: str = "", deadline: float = None) -> str:
         """
         Transcribe an audio file using whisper.cpp.
-        
+
         Args:
             audio_path: Path to the WAV file to transcribe
             context: Optional context from previous transcription for continuity
-            
+            deadline: Optional absolute time.monotonic() deadline. When set (the
+                whisper-server salvage path passes it), EACH GPU→CPU attempt is
+                clamped to the time remaining so a salvage cascade cannot overrun the
+                caller's recovery budget / the PROCESSING watchdog. None = full timeout.
+
         Returns:
             Transcribed text string
-            
+
         Raises:
             TranscriptionError: If transcription fails
         """
@@ -398,6 +402,13 @@ class WhisperCppBackend(TranscriptionBackend):
             raise TranscriptionError(f"Model file not found: {self.model_path}")
         if not Path(audio_path).exists():
             raise TranscriptionError(f"Audio file not found: {audio_path}")
+
+        # Salvage budget already spent? Bail BEFORE the (possibly 5s) --help flag
+        # probe below, so an expired deadline can't be overrun during preprocessing.
+        if deadline is not None:
+            import time as _time
+            if deadline - _time.monotonic() <= 0:
+                raise TranscriptionError("whisper-cli salvage budget exhausted before start")
 
         # Build the final prompt with custom vocabulary and context
         final_prompt = self._build_prompt(context)
@@ -484,18 +495,35 @@ class WhisperCppBackend(TranscriptionBackend):
         for attempt_idx, binary in enumerate(attempts):
             cmd[0] = binary
             is_last = attempt_idx == len(attempts) - 1
+            # When a caller (the whisper-server salvage path) passes an absolute
+            # deadline, clamp THIS attempt to the time left so a GPU→CPU cascade can't
+            # overrun the shared recovery budget. deadline=None keeps the full timeout.
+            attempt_timeout = self.timeout
+            if deadline is not None:
+                import time as _time
+                attempt_timeout = min(float(self.timeout), deadline - _time.monotonic())
+                if attempt_timeout <= 0:
+                    raise TranscriptionError(
+                        f"whisper-cli salvage budget exhausted after {attempt_idx} attempt(s)")
             try:
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=self.timeout,
+                    timeout=attempt_timeout,
                     # No env= needed - subprocess inherits GGML_VK_VISIBLE_DEVICES from parent
                 )
             except subprocess.TimeoutExpired:
+                # A deadline-CLAMPED timeout means the caller's salvage budget ran
+                # out, NOT that the GPU hung — so it must NOT memoize CPU fallback
+                # (that would poison GPU health for every future dictation). Bail
+                # cleanly instead of degrading global state on a false signal.
+                if deadline is not None and attempt_timeout < self.timeout:
+                    raise TranscriptionError(
+                        f"whisper-cli salvage attempt exceeded its {attempt_timeout:.0f}s budget")
                 if is_last:
-                    raise TranscriptionError(f"Transcription timed out after {self.timeout} seconds")
-                _activate_fallback(f"hung past {self.timeout}s")
+                    raise TranscriptionError(f"Transcription timed out after {attempt_timeout:.0f} seconds")
+                _activate_fallback(f"hung past {attempt_timeout:.0f}s")
                 continue
             except FileNotFoundError:
                 raise TranscriptionError(f"Could not execute whisper.cpp: {binary}")
@@ -766,8 +794,14 @@ class WhisperServerBackend(TranscriptionBackend):
             attempts.append([cpu_server] + base[1:])
         return attempts
 
-    def _start_server(self) -> None:
-        """Start the whisper-server process if not already running."""
+    def _start_server(self, deadline: float = None) -> None:
+        """Start the whisper-server process if not already running.
+
+        deadline: optional absolute time.monotonic() budget. When set (the recovery
+        path passes it), the readiness wait bails as soon as the budget is spent
+        instead of blocking its full ~30s loop, so a listening-but-unresponsive child
+        cannot push the caller past the PROCESSING watchdog. None = full wait.
+        """
         if not self.is_available():
             WhisperServerBackend._server_disabled = True
             raise TranscriptionError(
@@ -795,6 +829,13 @@ class WhisperServerBackend(TranscriptionBackend):
             import atexit
             import time
 
+            # Don't even spawn a subprocess if the recovery budget is already gone —
+            # a doomed child would just have to be reaped, burning more of the caller's
+            # deadline. (The readiness loop below re-checks for a mid-startup crossing.)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TranscriptionError(
+                    "whisper-server startup skipped — recovery deadline already passed")
+
             last_error = ""
             for attempt, cmd in enumerate(self._server_cmd_attempts(port)):
                 if attempt:
@@ -819,6 +860,13 @@ class WhisperServerBackend(TranscriptionBackend):
                 # Wait for server to be ready (model loading takes a few seconds)
                 died = False
                 for i in range(60):  # Wait up to 30 seconds
+                    # Recovery budget spent? Stop waiting rather than blocking the
+                    # full loop on a listening-but-unresponsive child (the health
+                    # probe below can itself take 2s per iteration → ~150s worst case).
+                    if deadline is not None and time.monotonic() >= deadline:
+                        self._stop_server_internal()
+                        raise TranscriptionError(
+                            "whisper-server startup exceeded the recovery deadline")
                     time.sleep(0.5)
                     if self._is_our_server(port):
                         print(f"[Whisper Server] Ready on port {port} (took {(i+1)*0.5:.1f}s)")
@@ -966,108 +1014,125 @@ class WhisperServerBackend(TranscriptionBackend):
         # Build prompt
         final_prompt = self._build_prompt(context)
 
-        # Adaptive request timeout: self.timeout (30s) is the worst-case budget for a full
-        # 30s chunk on slow hardware, but a healthy GPU transcribes in a fraction of the
-        # audio length (measured ~0.2s for 3s of audio). Sizing the timeout to THIS clip's
-        # length means an intermittent GPU-contention wedge on a short dictation self-heals
-        # in a few seconds (restart+retry) instead of stalling the full 30s. Floor 8s covers
-        # cold starts; capped at self.timeout so long chunks keep their headroom.
+        # Adaptive request timeout (GPU). A healthy GPU transcribes a chunk in a small
+        # fraction of its audio length, but under transient GPU contention (e.g. the
+        # Wayfinder-OS whisperx stack loading its model on the SHARED GPU) a perfectly
+        # healthy request can run several times slower. The old aggressive shrink
+        # (floor 8s, dur*2+4) timed out on those slow-but-completing chunks, and the
+        # recovery below then RELOADED the model — the multi-second "warm-up" stall the
+        # user reported. A generous floor lets a slow chunk finish on the FIRST try, so
+        # no reload happens; a timeout past THIS budget instead means a genuine wedge,
+        # which the bounded restart handles. Still capped at self.timeout so the whole
+        # recovery can stay under the PROCESSING watchdog.
         #
-        # CPU path (free tier): the shrink assumes GPU speed, which does NOT hold on CPU —
-        # base.en runs slower than realtime, and a cold restart + model load can itself
-        # exceed the 8s floor. That starved a short *final* chunk into a retry timeout and
-        # dropped its words. There is no fast self-heal to win on CPU, so keep the FULL
-        # budget there: waiting beats timing out and losing speech.
+        # CPU path (free tier): never shrink — base.en runs slower than realtime and a
+        # cold restart + model load can itself exceed a short budget, starving a short
+        # *final* chunk into a retry timeout that drops its words. Waiting beats losing
+        # speech, and there is no fast GPU self-heal to win on CPU anyway.
         req_timeout = self.timeout
         if self.use_gpu:
             try:
                 with contextlib.closing(wave.open(audio_path, "rb")) as _wf:
                     _dur = _wf.getnframes() / float(_wf.getframerate() or 16000)
-                req_timeout = max(8.0, min(float(self.timeout), _dur * 2.0 + 4.0))
+                # self.timeout is the hard cap and must win even when it is below the
+                # 15s floor (a short configured timeout) — hence min(cap, max(floor, …)),
+                # NOT max(floor, min(cap, …)) which would return the floor > cap.
+                req_timeout = min(float(self.timeout), max(15.0, _dur * 4.0 + 10.0))
             except Exception:
                 pass  # unreadable header → fall back to the full configured timeout
 
-        try:
-            import urllib.request
-            import urllib.parse
+        import urllib.request
 
-            # Build multipart form data
+        try:
+            # Build the multipart request body ONCE. It is immutable bytes, so it is
+            # safe to resubmit on a post-restart retry. A body-build failure (e.g. a
+            # vanished audio file) is NOT a server problem and surfaces through the
+            # generic handler below as a TranscriptionError, never the restart path.
             boundary = "----WayfinderBoundary"
             body = b""
-
-            # Add the audio file
             with open(audio_path, "rb") as f:
                 audio_data = f.read()
-
             body += f"--{boundary}\r\n".encode()
             body += f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(audio_path)}"\r\n'.encode()
             body += b"Content-Type: audio/wav\r\n\r\n"
             body += audio_data
             body += b"\r\n"
-
-            # Add response_format
             body += f"--{boundary}\r\n".encode()
             body += b'Content-Disposition: form-data; name="response_format"\r\n\r\n'
             body += b"json\r\n"
-
-            # Add prompt if provided
             if final_prompt:
                 body += f"--{boundary}\r\n".encode()
                 body += b'Content-Disposition: form-data; name="prompt"\r\n\r\n'
                 body += final_prompt.encode("utf-8")
                 body += b"\r\n"
-
             body += f"--{boundary}--\r\n".encode()
 
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/inference",
-                data=body,
-                headers={
-                    "Content-Type": f"multipart/form-data; boundary={boundary}",
-                },
-                method="POST",
-            )
+            def _post(_port: int, _timeout: float) -> str:
+                # Rebuilt per attempt: _start_server() may pick a DIFFERENT port on a
+                # restart, so the URL must follow the live _server_port, not a stale one.
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{_port}/inference",
+                    data=body,
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                    method="POST",
+                )
+                resp = urllib.request.urlopen(req, timeout=_timeout)
+                return json.loads(resp.read().decode("utf-8")).get("text", "").strip()
 
-            resp = urllib.request.urlopen(req, timeout=req_timeout)
-            result = json.loads(resp.read().decode("utf-8"))
-            text = result.get("text", "").strip()
-            return text
-
-        except (urllib.error.URLError, TimeoutError) as e:
-            # Server may have died (URLError: connection refused) OR wedged its
-            # inference worker while still listening (TimeoutError: the request
-            # hangs past self.timeout — observed after a suspend/resume cycle,
-            # where GET / still returns 200 but POST /inference never completes).
-            # A hung-but-listening server raises TimeoutError, which is NOT a
-            # URLError, so it must be caught here explicitly — otherwise it falls
-            # through to the generic handler below and the dead server is left
-            # running, hanging every subsequent dictation until manually killed.
-            print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
-            with WhisperServerBackend._server_lock:
-                self._stop_server_internal()
-            self._start_server()
-
-            # Retry once
             try:
-                resp = urllib.request.urlopen(req, timeout=req_timeout)
-                result = json.loads(resp.read().decode("utf-8"))
-                return result.get("text", "").strip()
-            except Exception as retry_err:
-                # The server won't come back for this chunk. Dropping it here means the
-                # caller stores "[error]" and those words are lost from the final text
-                # (observed on the free/CPU path: a long multi-chunk dictation wedged the
-                # server and the final chunk vanished). Salvage the words with the per-call
-                # whisper-cli backend — it loads the model itself and does not depend on the
-                # wedged server. Slower, but no lost speech.
-                print(f"[Whisper Server] retry failed ({retry_err}); "
-                      "salvaging this chunk via whisper-cli.")
+                # Initial attempt. ANY failure — connection refused/reset, a wedged or
+                # merely slow inference worker (TimeoutError), OR a malformed/short/
+                # undecodable response — routes to the SAME bounded recovery below, so
+                # a bad response can never silently drop the chunk's words.
+                return _post(port, req_timeout)
+            except Exception as e:
+                # We deliberately do NOT re-POST to the same server before restarting:
+                # after a client timeout the original /inference is usually still
+                # running (whisper.cpp serialises inference behind the model mutex and
+                # does not abort on client disconnect), so a bare re-POST would queue
+                # behind the stuck request and duplicate work. Loosening req_timeout
+                # above (so healthy-but-slow chunks finish on the first try) is what
+                # avoids the needless model reload; the restart is reserved for a
+                # genuine failure.
+                #
+                # Bound the ENTIRE recovery — restart, retry, AND whisper-cli salvage —
+                # with ONE absolute deadline, so no cascade of failures can push
+                # transcribe() past the PROCESSING watchdog (config:
+                # processing_timeout_secs, 120s), which on expiry bumps the session
+                # generation and DROPS this result. self.timeout of recovery budget on
+                # top of the initial attempt keeps the worst case well under 120s.
+                import time
+                recovery_deadline = time.monotonic() + float(self.timeout)
+                print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
                 try:
-                    return self._cli_fallback().transcribe(audio_path, context)
-                except Exception as cli_err:
-                    raise TranscriptionError(
-                        f"whisper-server failed after restart ({retry_err}); "
-                        f"whisper-cli salvage also failed: {cli_err}")
+                    with WhisperServerBackend._server_lock:
+                        self._stop_server_internal()
+                    self._start_server(deadline=recovery_deadline)
+                    # Retry once on the fresh server (fresh port), clamped to the
+                    # remaining budget. Skip entirely if the restart already spent it.
+                    remaining = recovery_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("recovery budget exhausted before retry")
+                    return _post(WhisperServerBackend._server_port, remaining)
+                except Exception as retry_err:
+                    # Any recovery failure — still-dead server, _start_server() failure,
+                    # malformed response, or exhausted budget — falls to the per-call
+                    # whisper-cli salvage, itself bounded by the SAME deadline so its
+                    # GPU→CPU attempts cannot blow the watchdog either. The salvage
+                    # backend loads the model in its own process, independent of the
+                    # (possibly wedged) server.
+                    print(f"[Whisper Server] recovery failed ({retry_err}); "
+                          "salvaging this chunk via whisper-cli.")
+                    try:
+                        return self._cli_fallback().transcribe(
+                            audio_path, context, deadline=recovery_deadline)
+                    except Exception as cli_err:
+                        raise TranscriptionError(
+                            f"whisper-server failed after restart ({retry_err}); "
+                            f"whisper-cli salvage also failed: {cli_err}")
 
+        except TranscriptionError:
+            raise
         except Exception as e:
             raise TranscriptionError(f"whisper-server transcription failed: {e}")
 
