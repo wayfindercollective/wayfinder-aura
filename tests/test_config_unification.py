@@ -96,7 +96,7 @@ def test_whisper_server_fields_in_defaults():
 
     assert DEFAULT_CONFIG["whisper_server_mode"] is True
     assert DEFAULT_CONFIG["whisper_server_port"] == 8178
-    assert DEFAULT_CONFIG["whisper_server_timeout"] == 30
+    assert DEFAULT_CONFIG["whisper_server_timeout"] == 5
 
 
 def test_fresh_install_creates_file_and_returns_defaults(temp_config_dir: Path):
