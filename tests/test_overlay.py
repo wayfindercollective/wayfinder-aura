@@ -203,6 +203,7 @@ def test_overlay_signal_handler_does_not_raise_through_qt():
 
     assert "QApplication.quit" in calls
     assert "sys.exit" not in calls
+    assert "print" not in calls
 
 
 class TestStylePalettes:
