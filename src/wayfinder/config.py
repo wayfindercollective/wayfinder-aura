@@ -177,9 +177,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # inference worker (keeps answering health checks but never returns a result —
     # seen after an audio "input overflow" glitch or suspend/resume). A short request
     # timeout detects the wedge fast, so the backend can restart the server and retry
-    # on a healthy one and still PASTE the dictation well before the watchdog abandons
-    # the session. GPU transcribes a chunk in 1-3s, so 30s is huge headroom.
-    "whisper_server_timeout": 30,
+    # on a healthy one and still PASTE the dictation almost immediately. A resident GPU
+    # server transcribes a 10-15s chunk in well under a second on current hardware; 5s
+    # leaves ample contention headroom without ever imposing the old 30s dead-air wait.
+    "whisper_server_timeout": 5,
     "min_recording_duration": 0.5,
 
     # Whisper server mode: keep model loaded in memory for fast inference

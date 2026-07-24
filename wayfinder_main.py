@@ -16919,7 +16919,12 @@ class WayfinderApp(ctk.CTk):
                     self.log(f"⚠ Timeout: only {completed}/{expected_chunks} chunks transcribed")
                     break
 
-                time.sleep(0.5)
+                # A healthy GPU chunk finishes in well under a second. Checking only
+                # twice per second added a random 0–500ms tail after the final chunk,
+                # even though all useful work was already complete. Keep a short poll
+                # rather than a busy loop: this preserves the simple, race-resistant
+                # per-session store while bounding completion-detection latency to 50ms.
+                time.sleep(0.05)
 
             if gen is not None and gen != self.session_generation:
                 return

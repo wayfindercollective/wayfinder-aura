@@ -215,6 +215,46 @@ class TestWhisperServerBackend:
         resp.read.return_value = ('{"text": "%s"}' % text).encode("utf-8")
         return resp
 
+    def test_server_output_pipe_is_continuously_drained_and_tail_is_bounded(self):
+        """Regression: whisper-server writes several KB of logs per request. Keeping
+        stdout=PIPE without a reader eventually fills the pipe and blocks the server
+        inside write(), presenting as a random inference hang after many dictations.
+
+        Emit substantially more than a normal pipe can hold; the child can exit only
+        if Aura consumes concurrently. Diagnostics retain just the bounded last lines.
+        """
+        import subprocess
+        import sys
+
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        script = (
+            "import sys\n"
+            "for i in range(400):\n"
+            "    sys.stdout.write(f'line-{i:04d} ' + ('x' * 4096) + '\\n')\n"
+            "sys.stdout.flush()\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            WhisperServerBackend._start_server_output_drain(proc)
+            assert proc.wait(timeout=5) == 0, (
+                "child blocked because its stdout pipe was not drained"
+            )
+            WhisperServerBackend._server_log_thread.join(timeout=2)
+            retained = list(WhisperServerBackend._server_log_tail)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=2)
+
+        assert len(retained) == 200
+        assert retained[-1].startswith("line-0399 ")
+        assert all(not line.startswith("line-0000 ") for line in retained)
+
     def test_hung_server_timeout_triggers_restart_and_retry(
         self, sample_audio_file: Path
     ):

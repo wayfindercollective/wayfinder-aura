@@ -686,6 +686,30 @@ class TestChunkedFinalize:
         assert text == "only chunk"
         assert any("Timeout" in m for m in app.logs)
 
+    def test_final_chunk_completion_is_detected_within_50ms(self, app, monkeypatch):
+        """The finalizer must not add the old random half-second tail after ASR."""
+        app.config["post_processing_enabled"] = False
+        store = [""]
+        sleeps = []
+
+        def complete_during_wait(delay):
+            sleeps.append(delay)
+            store[0] = "ready now"
+
+        monkeypatch.setattr(wayfinder_main.time, "sleep", complete_during_wait)
+        app._finalize_chunked_transcription(
+            1,
+            app.session_generation,
+            store,
+            FakeChunkedRecorder(),
+        )
+
+        event_type, data = app.event_queue.get_nowait()
+        text, _ = app._split_gen(data)
+        assert event_type == wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE
+        assert text == "ready now"
+        assert sleeps == [0.05]
+
 
 class TestChunkSilenceGuard:
     def test_silent_trailing_chunk_skips_whisper_and_completes_store(

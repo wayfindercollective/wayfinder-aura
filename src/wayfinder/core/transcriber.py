@@ -13,8 +13,10 @@ import threading
 import time
 import wave
 from abc import ABC, abstractmethod
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from wayfinder.config import IS_FLATPAK
 
@@ -669,6 +671,12 @@ class WhisperServerBackend(TranscriptionBackend):
     _server_port: int = 0
     _server_lock = None  # Initialized lazily
     _server_model_path: str = ""
+    # whisper-server is intentionally verbose (several KB per request). Its stdout
+    # MUST be consumed continuously: leaving Popen(stdout=PIPE) unread eventually
+    # fills the kernel pipe and blocks the server in write(), which looks exactly like
+    # a random inference hang after the app has handled enough dictations.
+    _server_log_tail = None
+    _server_log_thread = None
     # Set when every startup attempt failed on this machine — transcribe()
     # then delegates straight to the per-call CLI backend instead of paying
     # the failed-startup cost on every dictation.
@@ -820,6 +828,60 @@ class WhisperServerBackend(TranscriptionBackend):
             attempts.append([cpu_server] + base[1:])
         return attempts
 
+    @staticmethod
+    def _drain_server_output(stream, tail: deque) -> None:
+        """Continuously consume whisper-server output without growing memory.
+
+        The bounded tail preserves useful startup diagnostics while the reader thread
+        prevents stdout pipe backpressure from freezing inference. ``stream`` is binary
+        for the Popen configuration below.
+        """
+        try:
+            while True:
+                raw_line = stream.readline()
+                if not raw_line:
+                    break
+                # Production Popen pipes are binary. Treat a test double or corrupted
+                # stream that violates that contract as EOF instead of spinning forever
+                # on an object that can never equal the b"" sentinel.
+                if not isinstance(raw_line, (bytes, bytearray)):
+                    break
+                line = raw_line.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    tail.append(line)
+        except (OSError, ValueError):
+            # Normal during shutdown when the child/pipe is closed underneath us.
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    @classmethod
+    def _start_server_output_drain(cls, proc: subprocess.Popen) -> None:
+        """Attach the bounded background log reader immediately after Popen."""
+        tail = deque(maxlen=200)
+        thread = threading.Thread(
+            target=cls._drain_server_output,
+            args=(proc.stdout, tail),
+            name="wayfinder-whisper-server-log",
+            daemon=True,
+        )
+        cls._server_log_tail = tail
+        cls._server_log_thread = thread
+        thread.start()
+
+    @classmethod
+    def _server_output(cls) -> str:
+        """Return the retained diagnostic tail for the current server attempt."""
+        thread = cls._server_log_thread
+        if thread is not None:
+            # On a just-exited child, allow the reader a moment to consume the final
+            # diagnostic lines and observe EOF.
+            thread.join(timeout=0.2)
+        return "\n".join(cls._server_log_tail or ())
+
     def _start_server(self, deadline: float = None, force: bool = False) -> None:
         """Start the whisper-server process if not already running.
 
@@ -907,6 +969,9 @@ class WhisperServerBackend(TranscriptionBackend):
                 WhisperServerBackend._server_process = proc
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
+                # Start draining BEFORE readiness probes. A chatty startup or repeated
+                # requests must never be able to fill stdout and deadlock inference.
+                WhisperServerBackend._start_server_output_drain(proc)
 
                 # Register atexit handler for cleanup (idempotent: shutdown is
                 # safe to call multiple times)
@@ -932,7 +997,7 @@ class WhisperServerBackend(TranscriptionBackend):
                         print(f"[Whisper Server] Ready on port {port} (took {(i+1)*0.5:.1f}s)")
                         return
                     if proc.poll() is not None:
-                        last_error = proc.stdout.read().decode("utf-8", errors="ignore")[-500:]
+                        last_error = WhisperServerBackend._server_output()[-500:]
                         died = True
                         break
 
