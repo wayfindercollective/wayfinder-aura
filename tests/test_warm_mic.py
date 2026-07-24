@@ -125,9 +125,12 @@ class TestWarmMicOpenTimeout:
     @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder._system_default_input_index", return_value=6)
     @patch("wayfinder.core.recorder.sd")
-    def test_wedged_device_times_out_and_falls_through(self, mock_sd, _sys, _rate):
-        """Device 4's open HANGS (wedged PipeWire node). The watchdog times out and
-        the next fallback (6) opens instead of the app freezing. Regression: 2026-07-03."""
+    def test_wedged_device_trips_circuit_breaker(self, mock_sd, _sys, _rate):
+        """A timed-out open must not launch concurrent fallbacks into PortAudio.
+
+        The abandoned C call is still running, and PortAudio is process-global.
+        Additional opens leak capture clients and wedge PipeWire system-wide.
+        """
         blocker = threading.Event()  # never set -> device 4 hangs forever
 
         def open_stream(*args, **kwargs):
@@ -137,10 +140,11 @@ class TestWarmMicOpenTimeout:
         mock_sd.InputStream.side_effect = open_stream
 
         warm = _make_warm(device=4)
-        actual = warm.acquire(MagicMock())
+        with pytest.raises(TimeoutError):
+            warm.acquire(MagicMock())
 
-        assert actual == 6          # skipped the hung device, opened the fallback
-        assert warm.device == 6
+        assert mock_sd.InputStream.call_count == 1
+        assert warm._abandoned_open is True
         blocker.set()               # release the abandoned watchdog worker
 
     @patch("wayfinder.core.recorder._MIC_OPEN_TIMEOUT", 0.2)
@@ -311,9 +315,12 @@ class TestWarmMicIdleClose:
         assert warm._abandoned_open is True
 
         with patch("wayfinder.core.recorder._pa_rescan") as rescan:
-            # A later open that also fails must not rescan while abandoned.
-            with pytest.raises((TimeoutError, RuntimeError)):
+            # A later acquire must fail immediately: no additional PortAudio
+            # worker and no unsafe rescan while the abandoned one may be alive.
+            calls_before = mock_sd.InputStream.call_count
+            with pytest.raises(RuntimeError, match="restart Wayfinder Aura"):
                 warm.acquire(MagicMock())
+            assert mock_sd.InputStream.call_count == calls_before
             rescan.assert_not_called()
         blocker.set()
 

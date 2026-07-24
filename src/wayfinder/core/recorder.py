@@ -847,6 +847,11 @@ class WarmMic:
         # PortAudio open, a late C worker may still be inside InputStream()/start()
         # for the rest of the process lifetime of this WarmMic. Clearing the flag on
         # the next acquire would re-enable _pa_rescan() under that worker (Sol R2).
+        if self._abandoned_open:
+            raise RuntimeError(
+                "Microphone backend is still recovering from a timed-out open; "
+                "restart Wayfinder Aura before recording again"
+            )
         try:
             self._open_chain()
         except Exception as first_err:
@@ -911,7 +916,13 @@ class WarmMic:
                 last_err = e
                 self._abandoned_open = True
                 print(f"WarmMic: device {dev} open timed out (>{_MIC_OPEN_TIMEOUT:.0f}s) — "
-                      "likely a wedged PipeWire node; trying next input")
+                      "likely a wedged PipeWire node; blocking further opens until restart")
+                # PortAudio is process-global.  The timed-out C call is still alive
+                # on the watchdog thread, so trying the system-default/None fallbacks
+                # concurrently only creates more uncancellable opens and eventually
+                # wedges PipeWire itself.  Fail this recording immediately and let a
+                # process restart clear the one abandoned call.
+                raise
             except Exception as e:
                 last_err = e
                 if dev is not None:

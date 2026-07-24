@@ -410,6 +410,29 @@ class TestStartRecording:
         app.run_after()
         assert any("no mic" in m for m in app.logs)
 
+    def test_start_failure_drops_stop_press_queued_during_blocked_open(
+        self, app, monkeypatch
+    ):
+        """A stop press during a timed-out mic open must not replay as a new start."""
+        app.config["chunked_mode"] = False
+        starts = 0
+
+        def boom():
+            nonlocal starts
+            starts += 1
+            # Socket/hotkey listener can enqueue this while Tk is blocked in
+            # recorder.start(). It is intended to stop, never to start again.
+            app.event_queue.put((wayfinder_main.EventType.HOTKEY_PRESSED, None))
+            raise TimeoutError("audio device open exceeded 4s")
+
+        monkeypatch.setattr(app.recorder, "start", boom)
+        app.start_recording()
+        app.pump_events()
+
+        assert starts == 1
+        assert app.app_state == AppState.IDLE
+        assert app.states.count(AppState.RECORDING) == 1
+
 
 # ===========================================================================
 # stop_recording_and_process — simple path

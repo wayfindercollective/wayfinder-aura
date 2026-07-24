@@ -16502,6 +16502,14 @@ class WayfinderApp(ctk.CTk):
                 if is_hotkeys_paused() and not getattr(self, "_game_mode", False):
                     return
         if event_type == EventType.HOTKEY_PRESSED:
+            # A PortAudio open can only be bounded by abandoning its C worker. Any
+            # stop presses arriving during that bounded wait sit in event_queue;
+            # after the start fails and returns to IDLE they would otherwise replay
+            # as fresh starts, creating an endless RECORDING→IDLE→RECORDING loop.
+            if time.monotonic() < float(
+                getattr(self, "_record_toggle_suppress_until", 0) or 0
+            ):
+                return
             self.on_hotkey()
         elif event_type == EventType.STYLE_TOGGLE:
             self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
@@ -16629,11 +16637,14 @@ class WayfinderApp(ctk.CTk):
                 self._resolved_audio_device = self.warm_mic.device
             
             # Start duration update timer
-            import time
             self._recording_start_time = time.time()
             self._update_recording_duration()
             
         except Exception as e:
+            # Drop queued stop presses from the failed startup window. poll_events()
+            # drains the queue immediately after this call returns, so a short
+            # monotonic guard catches every stale toggle without delaying recovery.
+            self._record_toggle_suppress_until = time.monotonic() + 0.75
             self.on_error(f"Microphone: {e}")
     
     def _start_chunked_recording(self, gen=None):
