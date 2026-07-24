@@ -1986,9 +1986,12 @@ def run_overlay():
     # Handle termination signals for clean shutdown
     def signal_handler(signum, frame):
         print(f"Overlay received signal {signum}, exiting...", file=sys.stderr)
+        # Do not raise SystemExit from a Python signal handler while Qt may be
+        # dispatching a callback.  PyQt treats exceptions escaping into C++ as
+        # fatal and aborts the process.  Quitting the event loop lets the
+        # existing sys.exit(app.exec()) below return normally instead.
         QApplication.quit()
-        sys.exit(0)
-    
+
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     

@@ -11,6 +11,7 @@ Since PyQt6 may not be available in CI, these tests focus on:
 PyQt6-dependent tests are guarded with importorskip.
 """
 
+import ast
 import json
 import os
 import re
@@ -172,6 +173,36 @@ assert str(src_root) in sys.path
         timeout=10,
     )
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_overlay_signal_handler_does_not_raise_through_qt():
+    """SIGTERM during a Qt callback must stop the loop without aborting PyQt."""
+    overlay = (
+        Path(__file__).resolve().parent.parent
+        / "src"
+        / "wayfinder"
+        / "ui"
+        / "overlay.py"
+    )
+    tree = ast.parse(overlay.read_text())
+    run_overlay = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_overlay"
+    )
+    signal_handler = next(
+        node
+        for node in run_overlay.body
+        if isinstance(node, ast.FunctionDef) and node.name == "signal_handler"
+    )
+    calls = {
+        ast.unparse(node.func)
+        for node in ast.walk(signal_handler)
+        if isinstance(node, ast.Call)
+    }
+
+    assert "QApplication.quit" in calls
+    assert "sys.exit" not in calls
 
 
 class TestStylePalettes:
