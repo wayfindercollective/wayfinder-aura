@@ -696,8 +696,9 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
         "base: com.riverbankcomputing.PyQt.BaseApp",
         "base-version: '6.10'",
         "BASEAPP_REMOVE_WEBENGINE: '1'",
-        "- --socket=wayland",
-        "- --socket=fallback-x11",
+        "- --socket=x11",
+        "- --env=XDG_SESSION_TYPE=x11",
+        "- --env=QT_QPA_PLATFORM=xcb",
         "- --socket=pulseaudio",
         "- --device=dri",
         "- --filesystem=xdg-run/wayfinder-aura:create",
@@ -707,6 +708,8 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
         assert expected in manifest
 
     assert "--filesystem=home" not in manifest
+    assert "--socket=fallback-x11" not in manifest
+    assert "--socket=wayland" not in manifest
     assert "--filesystem=host" not in manifest
     assert "--filesystem=xdg-config/wayfinder-aura" not in manifest
     assert "--filesystem=xdg-cache/wayfinder-aura:create" not in manifest
@@ -718,6 +721,10 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
     assert "whisper-cli-cpu" in manifest
     assert "whisper-server-cpu" in manifest
     assert "llama-simple-cpu" in manifest
+    assert manifest.count("-DGGML_VULKAN=ON") >= 2
+    assert manifest.count(
+        "std::min(2u, std::thread::hardware_concurrency())"
+    ) == 2
 
 
 def test_flatpak_git_sources_are_all_tag_and_commit_pinned():

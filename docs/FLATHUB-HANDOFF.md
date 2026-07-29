@@ -94,7 +94,7 @@ Handoff files for the Flathub fork root:
 
 | Permission | Why |
 |------------|-----|
-| wayland / fallback-x11 / ipc | Display |
+| x11 / ipc | CustomTkinter UI, PyQt overlay, and xdotool injection through XWayland |
 | pulseaudio | Microphone |
 | dri + GGML_VK_DISABLE_COOPMAT | GPU whisper (Deck-safe) |
 | network | License activate, model updates, optional cloud STT (off by default) |

@@ -169,8 +169,7 @@ The manifest requests these permissions:
 
 | Permission | Reason |
 |------------|--------|
-| `--socket=wayland` | Display on Wayland |
-| `--socket=fallback-x11` | Display on X11 |
+| `--socket=x11` | CustomTkinter UI and PyQt overlay through XWayland |
 | `--socket=pulseaudio` | Record audio |
 | `--talk-name=org.freedesktop.Notifications` | Desktop notifications |
 | `--talk-name=org.kde.StatusNotifierWatcher` | KDE/StatusNotifier tray icon |
@@ -204,4 +203,3 @@ flatpak-builder --user --install --force-clean build-dir io.wayfindercollective.
 # Check logs
 flatpak run io.wayfindercollective.WayfinderAura 2>&1 | tee app.log
 ```
-

@@ -162,7 +162,7 @@ flatpak install -y flathub io.wayfindercollective.WayfinderAura
 
 | Permission | Why |
 |------------|-----|
-| wayland / fallback-x11 / ipc | Display |
+| x11 / ipc | CustomTkinter UI, PyQt overlay, and xdotool injection through XWayland |
 | pulseaudio | Mic |
 | dri | GPU path (when re-enabled) / graphics |
 | network | License activate, model updates, optional cloud STT (off by default) |

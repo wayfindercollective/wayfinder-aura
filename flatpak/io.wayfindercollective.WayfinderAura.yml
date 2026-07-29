@@ -31,9 +31,14 @@ build-options:
     BASEAPP_REMOVE_WEBENGINE: '1'
 
 finish-args:
-  # Display - Wayland preferred, X11 fallback
-  - --socket=wayland
-  - --socket=fallback-x11
+  # The CustomTkinter main window requires X11/XWayland. fallback-x11 may omit
+  # DISPLAY whenever Wayland is present, which makes Tk abort at cold launch.
+  # Keep the whole Flatpak on XWayland so the Qt overlay follows its tested X11
+  # placement path and text injection uses xdotool instead of wtype (KWin does
+  # not expose the virtual-keyboard protocol wtype needs).
+  - --socket=x11
+  - --env=XDG_SESSION_TYPE=x11
+  - --env=QT_QPA_PLATFORM=xcb
   - --share=ipc
   
   # Audio recording (PipeWire/PulseAudio) - essential for voice dictation
@@ -104,12 +109,15 @@ modules:
         tag: vulkan-sdk-1.4.321.0
         commit: 2a611a970fdbc41ac2e3e328802aed9985352dca
 
-  # whisper.cpp — primary binary (installed as whisper-cli).
-  # TEMP (2026-07): GGML_VULKAN is OFF for the Flatpak path. whisper.cpp v1.9.1
-  # + SDK glslc 2025.x fails to link with undefined matmul_id_subgroup_* symbols
-  # after shader gen. Free-tier CPU dictation works; re-enable Vulkan once upstream
-  # or a newer whisper tag fixes shader embedding. The -cpu twin remains for
-  # explicit fallback paths in the app.
+  # whisper.cpp — primary Vulkan binary (installed as whisper-cli).
+  #
+  # The shader generator defaults to 16 concurrent glslc children independently
+  # of flatpak-builder's --jobs setting. On constrained CI workers, glslc children
+  # were OOM-killed and v1.9.1 silently emitted an incomplete shader header; the
+  # later link then failed with undefined matmul_id_subgroup_* symbols. Bound the
+  # generator itself to two children so the Vulkan build is deterministic within
+  # Flathub's memory limit. The separately compiled -cpu twin remains the runtime
+  # fallback for hosts whose Vulkan driver fails or stalls.
   - name: whisper-cpp
     buildsystem: cmake-ninja
     # v1.9.x's `ninja install` installs the example binaries (whisper-cli/server)
@@ -134,12 +142,15 @@ modules:
       - -DGGML_FMA=ON
       - -DGGML_F16C=ON
       - -DGGML_BMI2=ON
-      - -DGGML_VULKAN=OFF
+      - -DGGML_VULKAN=ON
     sources:
       - type: git
         url: https://github.com/ggerganov/whisper.cpp.git
         tag: v1.9.1
         commit: f049fff95a089aa9969deb009cdd4892b3e74916
+      - type: shell
+        commands:
+          - sed -i 's/std::min(16u, std::thread::hardware_concurrency())/std::min(2u, std::thread::hardware_concurrency())/' ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
     post-install:
       # whisper.cpp v1.7.2 builds the transcription CLI as bin/main (renamed to whisper-cli
       # only in later releases). Install it under the whisper-cli name the app/config expects.
@@ -304,8 +315,10 @@ modules:
   #     wheel build doesn't package the variant backends — load fails.)
   # Future instant path: bundle llama-server with cache_prompt (KV reuse of the
   # shared tone-guidance prefix), mirroring the whisper-server architecture.
-  # TEMP (2026-07): primary llama-simple is CPU-only (same glslc/whisper Vulkan
-  # link issue). Keep llama-simple-cpu twin for app fallback paths.
+  # Bound ggml-vulkan's internal shader compiler fan-out to two jobs for the same
+  # reason as whisper.cpp above. Keep llama-simple-cpu as an independently built
+  # fallback because a Vulkan binary can fail during backend initialization
+  # before `-ngl 0` takes effect.
   # Instruction sets MUST be enabled explicitly: modern ggml with GGML_NATIVE=OFF
   # builds pure SCALAR kernels (no SSE/AVX at all — measured 25-40x slower, 29s
   # per cleanup). AVX2/FMA/F16C/BMI2 is the Zen 2 (Deck) baseline = any x86-64
@@ -317,7 +330,7 @@ modules:
   - name: llama-cpp
     buildsystem: simple
     build-commands:
-      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
+      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
       - cmake --build build --target llama-simple --parallel ${FLATPAK_BUILDER_N_JOBS:-2}
       # The app's CLI backend prefers llama-simple (stable echo+generation stdout
       # format its extraction is built around); config defaults to /app/bin/llama-simple
@@ -328,6 +341,9 @@ modules:
         url: https://github.com/ggml-org/llama.cpp.git
         tag: b9608
         commit: 70b54e140c90a92285ba699d77e1e32e0868a0e2
+      - type: shell
+        commands:
+          - sed -i 's/std::min(16u, std::thread::hardware_concurrency())/std::min(2u, std::thread::hardware_concurrency())/' ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
 
   # CPU twin of llama-cpp — the GPU->CPU fallback target (postprocessor.py
   # _subprocess_target). Same source/SIMD flags, Vulkan OFF, installed as
