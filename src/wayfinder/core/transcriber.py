@@ -2308,6 +2308,28 @@ def clean_whisper_artifacts(text: str) -> str:
     text = re.sub(r'\[MUSIC\]', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'\[APPLAUSE\]', ' ', text, flags=re.IGNORECASE)
 
+    # Generalized noise annotations. Whisper emits many bracketed/parenthesized
+    # variants beyond the exact markers above — "[audience noise]" was typed
+    # verbatim into a user's document when they dictated near-silence (launch
+    # feedback). Strip short annotations built ONLY from known noise vocabulary
+    # so legitimately dictated bracket text survives.
+    _noise_word = (
+        r'(?:audience|background|street|wind|static|noise|noises|sound|sounds|'
+        r'music|applause|laughter|laughing|laughs|coughing|coughs?|typing|'
+        r'keyboard|clicking|clicks|silence|silent|inaudible|unintelligible|'
+        r'indistinct|chatter|murmuring|breathing|sighs?|sighing|sniffs?|'
+        r'sniffing|beeping|buzzing|humming|rustling|footsteps|door|engine|'
+        r'clapping|claps|cheering|cheers|whistling|whistles|ringing|phone|'
+        r'camera|shutter|snapping|snaps|tapping|taps|knocking|knocks|'
+        r'banging|thud|thumping|crowd|birds?|chirping|barking|dog|rain|'
+        r'thunder|water|waves|crackling|scraping|shuffling|whispering|'
+        r'whispers|mumbling|mumbles|gasps?|gasping|groans?|groaning|'
+        r'grunts?|grunting|snoring|yawning|swallowing|throat|clearing)'
+    )
+    _noise_marker = r'\s*' + _noise_word + r'(?:\s+' + _noise_word + r'){0,2}\s*'
+    text = re.sub(r'\[' + _noise_marker + r'\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\(' + _noise_marker + r'\)', ' ', text, flags=re.IGNORECASE)
+
     # Remove music note symbols (replace with space to preserve word boundaries)
     text = re.sub(r'♪+', ' ', text)
 

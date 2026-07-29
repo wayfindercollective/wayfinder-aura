@@ -49,10 +49,15 @@ except Exception as _pystray_err:  # backend probe can raise non-ImportError
 try:
     import dbus
     from dbus.mainloop.glib import DBusGMainLoop
+    # gi can raise non-ImportError at import time: PyGObject's override loader
+    # asserts against the host GLib typelib, and a version mismatch (e.g. a
+    # bundled PyGObject on Fedora 44 / GLib 2.88) raises AssertionError —
+    # same failure class as the pystray probe above, so guard identically.
     from gi.repository import GLib
     DBUS_AVAILABLE = True
-except ImportError:
+except Exception as _dbus_err:
     DBUS_AVAILABLE = False
+    print(f"[Hotkeys] D-Bus/GLib unavailable ({_dbus_err.__class__.__name__}: {_dbus_err}); portal shortcuts disabled", flush=True)
 
 # pynput for cross-platform hotkeys (macOS/Windows)
 try:
@@ -1096,6 +1101,7 @@ SETTING_TOOLTIPS = {
     
     # 🟢 Minimal latency impact (<10ms per invocation)
     "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
+    "press_enter_after_dictation": "Press Enter automatically once dictated text finishes typing —\nchat messages send hands-free. Off by default.\n🟢 Latency: none (fires after injection)",
     "ensure_punctuation": "Extra punctuation fixes if model output lacks periods/caps.\n🟢 Latency: +1-3ms (optional, most models handle this well)",
     "audio_preprocessing": "Audio signal processing before transcription.\n🟢 Off: 0ms | Light: +2ms | Medium: +5ms | Heavy: +10ms",
     
@@ -2790,7 +2796,7 @@ def _keycode_display(code: int) -> str:
     known = {
         59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
         65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
-        70: "ScrollLock", 119: "Pause", 57: "Space",
+        70: "ScrollLock", 119: "Pause", 57: "Space", 28: "Enter",
         274: "Mouse Middle", 275: "Mouse Side", 276: "Mouse Extra",
         277: "Mouse Forward", 278: "Mouse Back",
     }
@@ -3197,17 +3203,16 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                                     log(f"🎙️ Dictation triggered by: {device.name}")
                                     event_queue.put((EventType.HOTKEY_PRESSED, None))
                             
-                            # Check for style toggle hotkey press
+                            # Check for style toggle hotkey press. Log ONLY on a full
+                            # chord match: the default style key is Enter (28), so a
+                            # bare-keypress log line here would spam two lines into the
+                            # activity log on every Enter press system-wide.
                             if style_toggle_key and key_event.keystate == 1:
-                                # Debug: log when we see the style toggle key
-                                if keycode == style_toggle_key:
-                                    print(f"[DEBUG] Style toggle key {keycode} detected!", flush=True)
-                                    log(f"🎯 Style toggle key {keycode} pressed!")
-                                    if check_modifiers(required_style_modifiers, style_toggle_modifiers):
-                                        log(f"🎨 Style toggle by: {device.name}")
-                                        event_queue.put((EventType.STYLE_TOGGLE, None))
-                                    else:
-                                        log(f"   (modifiers not matched)")
+                                if keycode == style_toggle_key and check_modifiers(
+                                    required_style_modifiers, style_toggle_modifiers
+                                ):
+                                    log(f"🎨 Style toggle by: {device.name}")
+                                    event_queue.put((EventType.STYLE_TOGGLE, None))
                 except (OSError, IOError) as e:
                     # Device read failed - remove it from monitoring
                     log(f"⚠️ Device read failed, removing: {device.name} ({e})")
@@ -4309,27 +4314,27 @@ class OverlayController:
                 pass
             
             try:
-                # In frozen builds, sys.executable is the app binary — not Python.
-                # Launching it would relaunch the entire app, causing a fork bomb.
                 if getattr(sys, 'frozen', False):
-                    print("[Overlay] Subprocess disabled in frozen builds")
-                    return False
+                    # Frozen: sys.executable is the app binary, not Python, so there is
+                    # no script to point it at. The binary doubles as the overlay via
+                    # the --overlay-subprocess sentinel dispatched at the top of
+                    # main.py (without the sentinel this spawn would relaunch the full
+                    # app — the fork bomb that used to force-disable the overlay here).
+                    cmd_args = [sys.executable, "--overlay-subprocess"]
+                else:
+                    # Find the overlay script (prefer new location in src/)
+                    script_path = Path(__file__).parent / "src" / "wayfinder" / "ui" / "overlay.py"
+                    if not script_path.exists():
+                        # Fallback to old location
+                        script_path = Path(__file__).parent / "status_overlay.py"
+                    if not script_path.exists():
+                        print(f"Overlay script not found: {script_path}")
+                        return False
+                    # Use the same Python interpreter that's running this script
+                    cmd_args = [sys.executable, str(script_path)]
 
-                # Find the overlay script (prefer new location in src/)
-                script_path = Path(__file__).parent / "src" / "wayfinder" / "ui" / "overlay.py"
-                if not script_path.exists():
-                    # Fallback to old location
-                    script_path = Path(__file__).parent / "status_overlay.py"
-                if not script_path.exists():
-                    print(f"Overlay script not found: {script_path}")
-                    return False
-                
-                # Use the same Python interpreter that's running this script
-                python_exe = sys.executable
-                
-                # Start subprocess with mode, style, scale, and offset arguments
-                cmd_args = [
-                    python_exe, str(script_path),
+                # Mode, style, scale, and offset arguments (shared by both spawn forms)
+                cmd_args += [
                     f"--mode={self._mode}",
                     f"--style={self._initial_style}",
                 ]
@@ -5062,15 +5067,15 @@ class WayfinderApp(ctk.CTk):
                 pass
             return 0.0
         
-        # Check which overlay type to use
+        # Check which overlay type to use. Frozen builds are NOT special-cased
+        # anymore: the app binary doubles as the overlay via the
+        # --overlay-subprocess sentinel (see main.py / OverlayController), so
+        # the PyQt Always On indicator works in AppImage/PyInstaller builds.
+        # The old forced "disappearing" fallback put every shipped build on the
+        # CTk indicator, which cannot do per-pixel alpha on Wayland (hard black
+        # edges — 2026-07 launch feedback).
         overlay_type = self.config.get("overlay_type", "always_on")
         overlay_enabled = bool(self.config.get("overlay_enabled", True))
-
-        # In frozen builds, sys.executable is the app binary, not Python —
-        # launching overlay.py this way would relaunch the entire app.
-        # Use CTk indicator fallback instead.
-        if getattr(sys, 'frozen', False):
-            overlay_type = "disappearing"
 
         self._use_pyqt_overlay = False
         self.overlay_controller = None
@@ -7284,6 +7289,7 @@ class WayfinderApp(ctk.CTk):
         
         # Hotkey key dropdown (inline, no popup)
         self._hotkey_key_codes = {
+            "Space": 57, "Enter": 28,
             "F9": 67, "F10": 68, "F8": 66, "F7": 65, "F6": 64, "F5": 63,
             "F4": 62, "F3": 61, "F2": 60, "F1": 59, "F11": 87, "F12": 88,
             "ScrollLock": 70, "Pause": 119,
@@ -7373,7 +7379,36 @@ class WayfinderApp(ctk.CTk):
             self._device_var, self._on_device_selected,
             tooltip=SETTING_TOOLTIPS["hotkey_devices"], width=200,
         )
-        
+
+        # Auto press Enter after dictation (opt-in): dictate → text lands →
+        # Enter fires, so chat-style inputs submit hands-free.
+        enter_row = ctk.CTkFrame(system_content, fg_color="transparent")
+        enter_row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            enter_row, text="Auto press Enter after dictation",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        self._auto_enter_var = ctk.BooleanVar(
+            value=bool(self.config.get("press_enter_after_dictation", False))
+        )
+        ctk.CTkSwitch(
+            enter_row, text="",
+            variable=self._auto_enter_var,
+            command=self._on_auto_enter_toggled,
+            width=40, height=22, switch_width=36, switch_height=18,
+            corner_radius=RADIUS["sm"] + 1,  # pill: height/2, intentional off-token
+            fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"], button_hover_color=COLORS["text_bright"],
+        ).pack(side="right")
+        ToolTip(
+            enter_row,
+            SETTING_TOOLTIPS.get(
+                "press_enter_after_dictation",
+                "Press Enter automatically after dictated text is typed — chat messages send hands-free.",
+            ),
+        )
+
         # === BENTO TILE: Status Overlay ===
         overlay_tile = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_card"],
@@ -9993,6 +10028,13 @@ class WayfinderApp(ctk.CTk):
             self.overlay_controller = None
             self._use_pyqt_overlay = False
             return False
+
+    def _on_auto_enter_toggled(self) -> None:
+        """Persist the opt-in Auto-Enter-after-dictation switch (applies live)."""
+        self.config["press_enter_after_dictation"] = bool(self._auto_enter_var.get())
+        save_config(self.config)
+        state = "on" if self.config["press_enter_after_dictation"] else "off"
+        self.log(f"↵ Auto press Enter after dictation: {state}")
 
     def _on_overlay_enabled_toggled(self) -> None:
         """Persist Show Overlay and apply immediately — no app restart required.
@@ -14393,10 +14435,27 @@ class WayfinderApp(ctk.CTk):
                     sample_rate = wf.getframerate()
                     frames = wf.readframes(wf.getnframes())
                     audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-                
+
                 # Play audio (can be stopped with sd.stop())
-                sd.play(audio, sample_rate)
-                sd.wait()
+                try:
+                    sd.play(audio, sample_rate)
+                    sd.wait()
+                except sd.PortAudioError:
+                    # Output device refuses the recording rate ("Invalid sample
+                    # rate" — ALSA/PipeWire devices pinned to e.g. 48 kHz won't
+                    # open a 16 kHz stream). Resample to the device's default
+                    # rate and retry instead of failing the mic test.
+                    try:
+                        dev_rate = int(sd.query_devices(kind="output")["default_samplerate"])
+                    except Exception:
+                        dev_rate = 48000
+                    if dev_rate != sample_rate and len(audio):
+                        n_out = max(1, int(len(audio) * dev_rate / sample_rate))
+                        x_old = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)
+                        x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+                        audio = np.interp(x_new, x_old, audio).astype(np.float32)
+                    sd.play(audio, dev_rate)
+                    sd.wait()
                 
                 # Done (only update if we weren't stopped)
                 if self._mic_test_playing:
@@ -16427,7 +16486,8 @@ class WayfinderApp(ctk.CTk):
 
         hotkey_name = self.get_hotkey_display()
         style_key_name = {59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
-                         65: "F7", 66: "F8", 67: "F9", 68: "F10"}.get(style_toggle_key, f"Key{style_toggle_key}")
+                         65: "F7", 66: "F8", 67: "F9", 68: "F10",
+                         57: "Space", 28: "Enter"}.get(style_toggle_key, f"Key{style_toggle_key}")
         self.log(f"⌨️ Record hotkey: {hotkey_name} | Style toggle: {style_key_name}")
 
         self._hotkey_thread = threading.Thread(
@@ -16589,6 +16649,25 @@ class WayfinderApp(ctk.CTk):
                 self._hide_error_banner()
             except Exception:
                 pass
+
+            # No-model guard: with the local whisper backend and no usable
+            # (license-permitted) model on disk, recording would run the full
+            # RECORDING → PROCESSING arc and silently type nothing (launch
+            # feedback: "audio did not output"). Refuse up front and point at
+            # the model download instead.
+            if self.config.get("transcription_backend", "whisper_cpp") == "whisper_cpp":
+                try:
+                    from wayfinder.core.setup import check_whisper_model
+                    _model_ok = check_whisper_model(self.config).installed
+                except Exception:
+                    _model_ok = True  # never let the guard itself break recording
+                if not _model_ok:
+                    self.log("⚠ No usable Whisper model installed — recording refused")
+                    self._show_error_banner(
+                        "No speech model installed — open Settings → Whisper Models "
+                        "and download a free model (Tiny, Base, or Small)."
+                    )
+                    return
 
             # Capture the window focused RIGHT NOW (record-start) so we can target it at inject
             # time. With a global-hotkey trigger the user's terminal/chat is focused here; a long
@@ -17260,6 +17339,17 @@ class WayfinderApp(ctk.CTk):
                         self.config.get("game_mode_paste_fallback", True)
                     ),
                 )
+            # Opt-in auto-send ("Auto press Enter after dictation"): fire Enter
+            # right here in the worker so it lands immediately after the text,
+            # in the same focus context. Never fail a successful injection over
+            # it — a missed Enter is a shrug, un-typed text is a bug report.
+            if text.strip() and self.config.get("press_enter_after_dictation", False):
+                try:
+                    from wayfinder.core.injector import press_enter
+                    press_enter()
+                    self.log("↵ Auto-Enter sent")
+                except Exception as _enter_err:
+                    self.log(f"⚠ Auto-Enter failed: {_enter_err}")
             self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))

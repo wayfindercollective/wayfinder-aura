@@ -111,6 +111,10 @@ def is_our_overlay_pid(
     cmdline = _read_cmdline(pid)
     if not cmdline:
         return False
+    # Frozen builds spawn the overlay as "<app-binary> --overlay-subprocess …"
+    # (no script path in the cmdline) — the sentinel is the marker there.
+    if "--overlay-subprocess" in cmdline:
+        return True
     scripts = list(script_paths) if script_paths is not None else overlay_script_candidates()
     for script in scripts:
         # Exact path match preferred; also allow basename overlay.py / status_overlay.py

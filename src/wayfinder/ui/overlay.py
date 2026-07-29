@@ -56,19 +56,27 @@ def _force_kde_window_position(window_title: str, x: int, y: int, width: int, he
     try:
         import tempfile
         
-        # Create a KWin script that FORCES position via frameGeometry
+        # Create a KWin script that FORCES position via frameGeometry.
+        # POSITION ONLY: width/height must come from the window's LIVE frame at
+        # script-execution time, never the values Python captured. The script
+        # loads asynchronously (qdbus subprocess), so a passed-in size is often
+        # stale by the time it runs — KWin then clamped the frame to the OLD
+        # width mid state-transition and the compositor clipped the buffer: the
+        # "hard black edge / cut-off pill" on the disappearing overlay. Qt owns
+        # the size (setFixedWidth/_update_size); KWin owns only x/y.
         script_content = f'''
         // KWin script to force overlay position (required for Wayland)
         var windows = workspace.windowList();
         for (var i = 0; i < windows.length; i++) {{
             var w = windows[i];
             if (w.caption && w.caption.indexOf("{window_title}") !== -1) {{
-                // Force position - this is the only way on Wayland
+                var g = w.frameGeometry;
+                // Force position only — keep the window's current live size
                 w.frameGeometry = {{
                     x: {x},
                     y: {y},
-                    width: {width},
-                    height: {height}
+                    width: g.width,
+                    height: g.height
                 }};
                 w.keepAbove = true;
                 w.skipTaskbar = true;
@@ -1243,16 +1251,50 @@ class GlassmorphicOverlay(QWidget):
     
     def _update_size(self):
         """Update widget width based on current width (called during animations)."""
+        if getattr(self, "_static_width", None):
+            # Static-geometry (persistent) mode: the window was sized to the max
+            # pill width and KWin-placed ONCE at boot; the pill animates by
+            # painting centered inside it. Never resize or re-place here — on
+            # KWin Wayland every move/resize of the visible window could strand
+            # a stale ghost frame ("two overlays stacked" launch feedback).
+            self.update()
+            return
         width = int(self._current_width) + (self.glow_margin * 2)
         self.setFixedWidth(width)
         self._position_at_bottom()
         # Re-apply mask when size changes
         if self.isVisible():
             self._apply_squircle_mask()
+        # Field-debuggable geometry trace (set WAYFINDER_OVERLAY_DEBUG=1):
+        # requested vs actual window size, DPR, and frame geometry — for
+        # diagnosing Wayland clip/scale bugs without a special build.
+        if os.environ.get("WAYFINDER_OVERLAY_DEBUG"):
+            try:
+                print(
+                    f"[ovdbg] cur_w={self._current_width:.1f} req_w={width} "
+                    f"actual={self.width()}x{self.height()} dpr={self.devicePixelRatioF():.2f} "
+                    f"glow={self.glow_margin} state={getattr(self, '_state', '?')}",
+                    flush=True,
+                )
+                grab_dir = os.environ.get("WAYFINDER_OVERLAY_DEBUG_GRAB")
+                if grab_dir and self.isVisible():
+                    self.grab().save(os.path.join(grab_dir, "overlay_grab.png"))
+            except Exception:
+                pass
     
     def _update_size_full(self):
         """Update both widget width AND height (called when scale changes)."""
-        width = int(self._current_width) + (self.glow_margin * 2)
+        if getattr(self, "_static_width", None):
+            # Static-geometry mode: recompute the max-width envelope for the new
+            # scale (a rare, user-initiated settings change — the one sanctioned
+            # resize+re-place after boot).
+            content_width = max(
+                self._calculate_target_width(lbl) for lbl in STATE_LABELS.values()
+            )
+            self._static_width = content_width + (self.glow_margin * 2)
+            width = self._static_width
+        else:
+            width = int(self._current_width) + (self.glow_margin * 2)
         height = self.widget_height
         self.setFixedSize(width, height)
         # Re-apply mask when size changes
@@ -1294,7 +1336,18 @@ class GlassmorphicOverlay(QWidget):
         # LISTENING/PROCESSING: full width with label + text + wave
         fm = QFontMetrics(self._font)
         text_width = fm.horizontalAdvance(text)
-        return self.PADDING_H * 2 + style_label_width + text_width + 6 + self.WAVE_WIDTH
+        total = self.PADDING_H * 2 + style_label_width + text_width + 6 + self.WAVE_WIDTH
+        if os.environ.get("WAYFINDER_OVERLAY_DEBUG"):
+            try:
+                print(
+                    f"[ovdbg-calc] text={text!r} pad_h={self.PADDING_H} label_w={style_label_width} "
+                    f"text_w={text_width} wave_w={self.WAVE_WIDTH} total={total} "
+                    f"font={self._font.family()}@{self._font.pointSize()}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+        return total
     
     def set_state(self, state: OverlayState, animate: bool = True):
         """
@@ -1510,16 +1563,22 @@ class GlassmorphicOverlay(QWidget):
         # Calculate final size based on current state's text
         label = STATE_LABELS.get(self._state, "")
         content_width = self._calculate_target_width(label)
-        final_width = content_width + (self.glow_margin * 2)  # content + glow margins
+        # Static-geometry mode: the window keeps its boot-time max width (the
+        # pill paints centered inside); only the painted content width tracks
+        # the state. Resizing here would re-trigger the KWin ghost-frame bug.
+        if getattr(self, "_static_width", None):
+            final_width = self._static_width
+        else:
+            final_width = content_width + (self.glow_margin * 2)  # content + glow margins
         final_height = self.widget_height
-        
+
         # Stop any running width animation and set final value immediately
         if self._width_animator._animation:
             self._width_animator._animation.stop()
         self._current_width = float(content_width)
         self._target_width = content_width
         self._width_animator._value = float(content_width)
-        
+
         # Lock size to prevent "growing" animation
         self.setFixedSize(final_width, final_height)
         
@@ -1560,6 +1619,11 @@ class GlassmorphicOverlay(QWidget):
 
         # Fade in (reuses _opacity AnimatedValue / QVariantAnimation — no new timer,
         # Rule 1). duration 0 when animate=False jumps straight to full opacity.
+        # Boot holds the reveal until the async KWin placement has landed —
+        # fading up over the compositor's auto-placement painted a ghost frame
+        # ("two overlays stacked"); run_overlay reveals at +400ms instead.
+        if getattr(self, "_boot_hold_reveal", False):
+            return
         self._opacity.animate_to(1.0, self.FADE_MS if animate else 0)
     
     def set_audio_level(self, level: float):
@@ -1730,8 +1794,12 @@ class GlassmorphicOverlay(QWidget):
 
             # Calculate centered rect for the squircle
             # Margin provides room for subtle glow
+            # Center the pill horizontally. In static-geometry (persistent) mode
+            # the window stays at max width while the pill animates inside it;
+            # when window == content + 2*glow (standard mode) this reduces to
+            # exactly glow_margin, so both modes share one formula.
             bar_rect = QRectF(
-                self.glow_margin,
+                max(self.glow_margin, (self.width() - self._current_width) / 2.0),
                 self.glow_margin,
                 self._current_width,
                 self.scaled_height
@@ -2066,12 +2134,17 @@ def run_overlay():
         # Start in READY state (visible, soft brand-blue READY palette)
         overlay._overlay_mode = mode
         
-        # Calculate initial size for "Ready" text
-        label = STATE_LABELS.get(OverlayState.READY, "Ready")
-        content_width = overlay._calculate_target_width(label)
+        # STATIC GEOMETRY: size the window ONCE for the widest state and never
+        # resize/move it again — the pill paints centered inside (see
+        # _update_size / paintEvent). Per-state window resizes + KWin re-places
+        # stranded ghost frames on KWin Wayland ("two overlays stacked").
+        content_width = max(
+            overlay._calculate_target_width(lbl) for lbl in STATE_LABELS.values()
+        )
         final_width = content_width + (overlay.glow_margin * 2)
         final_height = overlay.widget_height
-        
+        overlay._static_width = final_width
+
         # Use overlay's unified position calculation
         x, y = overlay._calculate_position(final_width, final_height)
 
@@ -2082,6 +2155,16 @@ def run_overlay():
             or os.environ.get("WAYLAND_DISPLAY")
         ):
             overlay.setGeometry(x, y, final_width, final_height)
+        # Map INVISIBLE and hold the reveal until KWin placement has landed.
+        # The placement script is async: any visible frame rendered at the
+        # compositor's initial auto-placement left a persistent ghost pill there
+        # once the script moved the window ("two overlays stacked" — 2026-07
+        # launch feedback). Opacity 0 + _boot_hold_reveal keep every
+        # pre-placement frame unseen; _boot_reveal fades up after both
+        # placement nudges have had time to land.
+        overlay._boot_hold_reveal = True
+        overlay.setWindowOpacity(0.0)
+        overlay._opacity._value = 0.0
         overlay.show()
         overlay.set_state(OverlayState.READY, animate=False)
 
@@ -2090,14 +2173,20 @@ def run_overlay():
                 "Wayfinder Aura Overlay", x, y, final_width, final_height
             )
 
+        def _boot_reveal():
+            overlay._boot_hold_reveal = False
+            overlay._opacity.animate_to(1.0, overlay.FADE_MS)
+
         if (
             os.environ.get("XDG_SESSION_TYPE") == "wayland"
             or os.environ.get("WAYLAND_DISPLAY")
         ):
             QTimer.singleShot(50, _boot_place)
             QTimer.singleShot(150, _boot_place)
+            QTimer.singleShot(400, _boot_reveal)
         else:
             QTimer.singleShot(100, _boot_place)
+            QTimer.singleShot(250, _boot_reveal)
     # In "standard" mode, window starts hidden
     
     # Command processing timer

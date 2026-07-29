@@ -92,17 +92,18 @@ class TestListenerGuards:
             gamemode.gamemode_pause_listener(stop, log_callback=bad_log)
 
 
-class TestDefaultsAreSuperFKey:
-    """Smoke check: DEFAULT_CONFIG ships modifiered F-keys, not bare F-keys.
+class TestDefaultsAreModifieredKeys:
+    """Smoke check: DEFAULT_CONFIG ships modifiered chords, not bare keys.
 
-    Bare F-keys collide with countless game keybinds. New users get Super+F2 /
-    Super+F3 by default — almost no game binds Super+combos because compositors
-    reserve them.
+    Bare keys collide with countless game keybinds. New users get
+    Ctrl+Alt+Space / Ctrl+Alt+Enter by default — discoverable on any keyboard
+    (2026-07 launch feedback: nobody knew what "Super" was) and as game-safe
+    as the old Super+F* chords.
     """
 
     def test_defaults(self):
         from wayfinder.config import DEFAULT_CONFIG
-        assert DEFAULT_CONFIG["hotkey_key"] == 60  # F2
-        assert DEFAULT_CONFIG["hotkey_modifiers"] == ["super"]
-        assert DEFAULT_CONFIG["style_toggle_key"] == 61  # F3
-        assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["super"]
+        assert DEFAULT_CONFIG["hotkey_key"] == 57  # Space
+        assert DEFAULT_CONFIG["hotkey_modifiers"] == ["ctrl", "alt"]
+        assert DEFAULT_CONFIG["style_toggle_key"] == 28  # Enter
+        assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["ctrl", "alt"]

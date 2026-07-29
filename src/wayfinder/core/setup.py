@@ -347,24 +347,42 @@ def check_whisper_cpp(config: dict) -> DependencyStatus:
 
 
 def check_whisper_model(config: dict) -> DependencyStatus:
-    """Check if a Whisper model file exists."""
+    """Check if a USABLE Whisper model exists — on disk AND permitted by license.
+
+    A weight only satisfies the dependency if the current license lets the
+    transcriber load it (mirror of transcriber's _is_large_model gate). A
+    license-blind check saw a leftover Ultra weight (large/medium/turbo),
+    reported the model "installed", skipped the wizard's download step — and
+    the user finished Setup with a model dictation then refused: recordings
+    silently produced nothing.
+    """
+    def _usable(path: str) -> bool:
+        n = Path(path).name.lower()
+        if not ("large" in n or "medium" in n or "turbo" in n):
+            return True  # free-tier weight (tiny/base/small)
+        try:
+            from wayfinder.license import get_feature_gate
+            return get_feature_gate().has_feature("large_models")
+        except Exception:
+            return False  # fail closed → Setup offers a free model download
+
     model_path = os.path.expanduser(config.get("model_path", "~/whisper.cpp/models/ggml-large-v3-turbo.bin"))
 
-    if Path(model_path).exists():
+    if Path(model_path).exists() and _usable(model_path):
         size_mb = Path(model_path).stat().st_size / 1_000_000
         return DependencyStatus(True, detail=f"{Path(model_path).name} ({size_mb:.0f} MB)")
 
-    # Check model directory for any models
+    # Check model directory for any usable models
     model_dir = Path.home() / "whisper.cpp" / "models"
     if model_dir.exists():
-        models = list(model_dir.glob("ggml-*.bin"))
+        models = [p for p in model_dir.glob("ggml-*.bin") if _usable(str(p))]
         if models:
             best = max(models, key=lambda p: p.stat().st_size)
             size_mb = best.stat().st_size / 1_000_000
             return DependencyStatus(True, detail=f"{best.name} ({size_mb:.0f} MB)",
                                     warning="Configured model not found, but others available")
 
-    return DependencyStatus(False, error="No Whisper model downloaded")
+    return DependencyStatus(False, error="No usable Whisper model — download a free model (Tiny/Base/Small)")
 
 
 # ─── Install Functions ───────────────────────────────────────────
@@ -373,10 +391,23 @@ LogCallback = Callable[[str], None]
 DoneCallback = Callable[[bool, str], None]
 
 
+def _is_atomic_host() -> bool:
+    """True on image-based Fedora (Bazzite/Silverblue/Kinoite/SteamOS-like ostree).
+
+    These hosts ship a `dnf` shim that refuses to install ("Fedora Atomic images
+    utilize rpm-ostree instead") — running it just paints a red error wall in
+    Setup. /run/ostree-booted is the canonical runtime marker.
+    """
+    return Path("/run/ostree-booted").exists()
+
+
 def _detect_package_manager() -> str:
-    """Detect the system package manager. Returns 'brew', 'dnf', 'apt', or 'unknown'."""
+    """Detect the system package manager. Returns 'brew', 'ostree', 'dnf', 'apt', or 'unknown'."""
     if sys.platform == "darwin" and shutil.which("brew"):
         return "brew"
+    # Must precede the dnf check: Atomic hosts have a dnf binary that refuses to run.
+    if _is_atomic_host():
+        return "ostree"
     if shutil.which("dnf"):
         return "dnf"
     if shutil.which("apt"):
@@ -413,6 +444,8 @@ def _get_install_hint(generic_name: str) -> str:
         return f"brew install {pkg_str}"
     if pkg_mgr == "pacman":
         return f"sudo pacman -S {pkg_str}   (on SteamOS run 'sudo steamos-readonly disable' first)"
+    if pkg_mgr == "ostree":
+        return f"rpm-ostree install {pkg_str}   (immutable Fedora — layers the package, reboot required)"
     if pkg_mgr == "dnf":
         return f"sudo dnf install {pkg_str}"
     if pkg_mgr == "apt":
@@ -442,18 +475,8 @@ def install_system_packages(
     pkg_mgr = _detect_package_manager()
 
     if packages is None:
-        # Determine what's needed (generic names)
-        packages = []
-        if not shutil.which("ydotool"):
-            packages.append("ydotool")
-        if not shutil.which("git"):
-            packages.append("git")
-        if not shutil.which("cmake"):
-            packages.append("cmake")
-        if not shutil.which("make") or not (shutil.which("g++") or shutil.which("clang++")):
-            packages.append("build-essential")
-        if _detect_gpu_vendor() == "nvidia" and not shutil.which("nvcc"):
-            packages.append("nvidia-cuda-toolkit")
+        # Single source of truth for what's needed (bundle-aware, Atomic-aware).
+        packages = get_missing_system_packages()
 
     if not packages:
         done(True, "All system packages already installed")
@@ -463,6 +486,18 @@ def install_system_packages(
     resolved = _resolve_packages(packages, pkg_mgr)
 
     def _run():
+        if pkg_mgr == "ostree":
+            # Never invoke dnf here — Atomic's dnf shim refuses with an error wall
+            # (observed on Bazzite: "Fedora Atomic images utilize rpm-ostree instead").
+            log("Immutable Fedora detected (Bazzite/Silverblue) — system packages are")
+            log("managed by rpm-ostree and can't be installed live from Setup.")
+            log("")
+            log("These tools are optional here. To add them anyway:")
+            log(f"  rpm-ostree install {' '.join(resolved)}")
+            log("(layers the packages; takes effect after a reboot)")
+            done(False, "Immutable OS — skipped automatic install (see log)")
+            return
+
         log(f"Installing: {', '.join(resolved)}")
         log(f"(Using {pkg_mgr} — a password dialog may appear)")
         log("")
@@ -862,14 +897,25 @@ def is_steam_deck() -> bool:
 
 
 def get_recommended_model() -> str:
-    """Return the best whisper model name for this system's hardware class."""
+    """Return the best whisper model name for this system's hardware class AND license.
+
+    Never recommend an Ultra-gated model to an unlicensed install: the transcriber
+    refuses `large_models` weights without a license, so a free user who accepts the
+    default would finish Setup with no working model at all.
+    """
     # Steam Deck (Zen 2 APU): large-v3-turbo runs ~10x slower than real-time and is unusable
     # for live dictation — default to base.en (STEAMDECK-INSTALL-LOG Issues 11/17).
     if is_steam_deck():
         return "base.en"
     vendor = _detect_gpu_vendor()
     if vendor in ("nvidia", "amd", "apple"):
-        return "large-v3-turbo"
+        try:
+            from wayfinder.license import get_feature_gate
+            if get_feature_gate().has_feature("large_models"):
+                return "large-v3-turbo"
+        except Exception:
+            pass  # any license-path hiccup → free-tier recommendation below
+        return "small.en"
     return "small.en"
 
 
@@ -880,17 +926,27 @@ def get_missing_system_packages() -> list[str]:
     to the actual package manager names during installation.
     """
     packages = []
-    # ydotool is Linux-only; macOS uses pyautogui (pip package, not system)
-    if sys.platform != "darwin" and not shutil.which("ydotool"):
+    # ydotool is Linux-only; macOS uses pyautogui (pip package, not system).
+    # AppImage bundles its own ydotool (check_text_injection honors it) — don't
+    # demand a system copy there.
+    bundled_ydotool = bool(
+        IS_APPIMAGE and APPDIR and os.path.exists(os.path.join(APPDIR, "usr", "bin", "ydotool"))
+    )
+    if sys.platform != "darwin" and not bundled_ydotool and not shutil.which("ydotool"):
         packages.append("ydotool")
-    if not shutil.which("git"):
-        packages.append("git")
-    if not shutil.which("cmake"):
-        packages.append("cmake")
-    if not shutil.which("make") or not (shutil.which("g++") or shutil.which("clang++")):
-        packages.append("build-essential")
-    if _detect_gpu_vendor() == "nvidia" and not shutil.which("nvcc"):
-        packages.append("nvidia-cuda-toolkit")
+    # git/cmake/compilers/CUDA exist only to build whisper.cpp/llama.cpp from
+    # source — a step get_dependencies already skips for AppImage/Flatpak runs
+    # (bundled binaries ship in the package). Demanding them anyway turned the
+    # Bazzite first run into a dnf error wall for tools that would never be used.
+    if not (IS_APPIMAGE or IS_FLATPAK):
+        if not shutil.which("git"):
+            packages.append("git")
+        if not shutil.which("cmake"):
+            packages.append("cmake")
+        if not shutil.which("make") or not (shutil.which("g++") or shutil.which("clang++")):
+            packages.append("build-essential")
+        if _detect_gpu_vendor() == "nvidia" and not shutil.which("nvcc"):
+            packages.append("nvidia-cuda-toolkit")
     return packages
 
 

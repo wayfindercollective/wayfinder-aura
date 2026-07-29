@@ -352,17 +352,17 @@ class TestHotkeyDefaultMigration:
         assert config["hotkey_key"] == 61
         assert config["hotkey_modifiers"] == []
 
-    def test_fresh_install_gets_super_f2_defaults(self, temp_config_dir: Path):
+    def test_fresh_install_gets_ctrl_alt_space_defaults(self, temp_config_dir: Path):
         from wayfinder.config import load_config, CONFIG_FILE
 
         if CONFIG_FILE.exists():
             CONFIG_FILE.unlink()
         config = load_config()
 
-        assert config["hotkey_key"] == 60
-        assert config["hotkey_modifiers"] == ["super"]
-        assert config["style_toggle_key"] == 61
-        assert config["style_toggle_modifiers"] == ["super"]
+        assert config["hotkey_key"] == 57  # Space
+        assert config["hotkey_modifiers"] == ["ctrl", "alt"]
+        assert config["style_toggle_key"] == 28  # Enter
+        assert config["style_toggle_modifiers"] == ["ctrl", "alt"]
 
     def test_colliding_combos_repaired(self, temp_config_dir: Path):
         from wayfinder.config import load_config

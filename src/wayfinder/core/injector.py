@@ -25,6 +25,19 @@ class InjectionError(Exception):
     pass
 
 
+# Set once a wtype attempt reveals the compositor refuses the virtual-keyboard
+# protocol (GNOME/Mutter always does; some KWin setups deny it). Selection
+# happens before any attempt, so this session cache lets later injections skip
+# straight to ydotool instead of re-failing every dictation.
+_WTYPE_UNSUPPORTED = False
+
+
+def _note_wtype_failure(detail: str) -> None:
+    global _WTYPE_UNSUPPORTED
+    if "virtual keyboard protocol" in detail.lower():
+        _WTYPE_UNSUPPORTED = True
+
+
 def _get_ydotool_binary() -> str:
     """
     Find the ydotool binary, checking AppImage bundle first.
@@ -350,6 +363,14 @@ def prime_wayland_injection() -> "tuple[bool, str]":
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+            # Learn compositor refusal at startup so the first REAL dictation
+            # already routes to ydotool (with a clear enable-hint if it's down).
+            _note_wtype_failure(detail)
+            if _WTYPE_UNSUPPORTED:
+                return False, (
+                    f"this compositor refuses wtype ({detail}) — dictation will use "
+                    "ydotool; enable its daemon: sudo systemctl enable --now ydotoold"
+                )
             return False, f"injection primer failed (exit {result.returncode}): {detail}"
         return True, "Wayland injection pre-armed — approve KDE's 'allow input' prompt once if it appears"
     except subprocess.TimeoutExpired:
@@ -442,6 +463,54 @@ def _send_ctrl_v_linux(tool: str) -> None:
         raise InjectionError(f"ydotool ctrl+v failed: {detail}")
 
 
+def press_enter() -> None:
+    """Synthesize a single Enter keypress with the active injection backend.
+
+    Backs the opt-in "Auto press Enter after dictation" setting: dictate →
+    text lands → Enter fires, so chat-style inputs submit hands-free. Uses the
+    same tool dispatch as text injection so it works wherever typing works.
+    """
+    if sys.platform == "darwin":
+        import pyautogui
+        pyautogui.press("enter")
+        return
+
+    from wayfinder.utils.platform import get_text_injector
+    tool = get_text_injector()
+    if tool == "xdotool":
+        result = subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", "Return"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+            raise InjectionError(f"xdotool Return failed: {detail}")
+        return
+    if tool == "wtype" and not _WTYPE_UNSUPPORTED:
+        result = subprocess.run(
+            ["wtype", "-k", "Return"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return
+        detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+        _note_wtype_failure(detail)
+        ready, _msg = check_ydotool_ready()
+        if not ready:
+            raise InjectionError(f"wtype Return failed: {detail}")
+        # fall through to ydotool (same chain as text injection)
+    # ydotool (and any other Linux path): KEY_ENTER = 28; 1=press, 0=release
+    ydotool_bin = _get_ydotool_binary()
+    env = _get_ydotool_env()
+    result = subprocess.run(
+        [ydotool_bin, "key", "28:1", "28:0"],
+        capture_output=True, text=True, timeout=10, env=env,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+        raise InjectionError(f"ydotool Return failed: {detail}")
+
+
 def inject_text_clipboard_paste(text: str) -> None:
     """Inject *text* via clipboard write + Ctrl+V (Linux) or Cmd+V (macOS).
 
@@ -495,9 +564,28 @@ def _inject_text_type_linux(
     if tool == "xdotool":
         _inject_text_xdotool(text, typing_speed, target_window)
         return
+    if tool == "wtype" and _WTYPE_UNSUPPORTED:
+        # This compositor already refused wtype's protocol this session —
+        # go straight to ydotool instead of failing the same way again.
+        tool = "ydotool"
     if tool == "wtype":
-        _inject_text_wtype(text)
-        return
+        try:
+            _inject_text_wtype(text)
+            return
+        except InjectionError as wtype_err:
+            # Tool selection can't know the compositor refuses the
+            # virtual-keyboard protocol until the first real attempt
+            # (GNOME/Mutter never supports it; some KWin setups deny it).
+            # Fall through the documented chain — ydotool if its daemon is
+            # up — instead of dying with a working alternative bundled.
+            _note_wtype_failure(str(wtype_err))
+            ready, _msg = check_ydotool_ready()
+            if not ready:
+                raise InjectionError(
+                    f"{wtype_err} — and the ydotool daemon is not running. "
+                    "Enable it for this desktop: sudo systemctl enable --now ydotoold"
+                ) from wtype_err
+            # fall through to the ydotool path below
     if tool == "none":
         raise InjectionError(
             "No text injection tool available on Linux. "

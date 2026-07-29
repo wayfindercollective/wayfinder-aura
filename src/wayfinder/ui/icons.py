@@ -30,8 +30,13 @@ _MODULE_DIR = Path(__file__).resolve().parent
 
 
 def _resolve_icon_dir() -> Path:
-    """Find assets/icons for both a source checkout and the Flatpak install."""
+    """Find assets/icons for a source checkout, the Flatpak install, and frozen builds."""
+    import sys
     candidates = [
+        # PyInstaller onefile/onedir: datas land at sys._MEIPASS/assets/icons.
+        # Must come first — the frozen tree has no src/ layer, so the relative
+        # walk below overshoots the bundle root by one level (into $TMPDIR).
+        *([Path(sys._MEIPASS) / "assets" / "icons"] if getattr(sys, "_MEIPASS", None) else []),
         # src/wayfinder/ui/icons.py -> repo/app root (parents[3]) / assets/icons
         _MODULE_DIR.parents[2] / "assets" / "icons",
         # Explicit Flatpak install path, in case the package is imported from a

@@ -25,31 +25,44 @@ class GpuDevice:
     has_matrix_cores: bool  # coopmat support for fast ML
 
 
-def detect_gpu_devices() -> List[GpuDevice]:
+def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
     """
     Detect GPU devices using ggml's actual device ordering.
-    
+
     This is the ONLY detection method we use - no vulkaninfo fallback.
     If this fails, we return empty list and use device 0 (default).
-    
+
     Returns:
         List of GpuDevice in ggml's ordering.
     """
     devices = []
-    
-    # Find whisper-cli
-    whisper_paths = [
+
+    # Find whisper-cli. Order matters: the user's configured binary, then PATH
+    # (the AppImage AppRun prepends its bundled usr/bin — without this the
+    # probe found nothing in an AppImage and reported "No discrete GPU" on
+    # machines with one), then the bundle/flatpak/source-build locations.
+    import shutil
+    whisper_paths: List[Path] = []
+    if config and config.get("whisper_binary"):
+        whisper_paths.append(Path(os.path.expanduser(str(config["whisper_binary"]))))
+    which_cli = shutil.which("whisper-cli")
+    if which_cli:
+        whisper_paths.append(Path(which_cli))
+    appdir = os.environ.get("APPDIR", "")
+    if appdir:
+        whisper_paths.append(Path(appdir) / "usr" / "bin" / "whisper-cli")
+    whisper_paths += [
         Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli",
         Path("/usr/bin/whisper-cli"),
         Path("/app/bin/whisper-cli"),
     ]
-    
+
     whisper_cli = None
     for path in whisper_paths:
         if path.exists():
             whisper_cli = str(path)
             break
-    
+
     if not whisper_cli:
         return devices
     
@@ -144,7 +157,7 @@ def detect_gpu_devices() -> List[GpuDevice]:
     return devices
 
 
-def get_discrete_gpu() -> Optional[int]:
+def get_discrete_gpu(config: Optional[dict] = None) -> Optional[int]:
     """
     Get the discrete GPU device index.
     
@@ -153,8 +166,8 @@ def get_discrete_gpu() -> Optional[int]:
     2. Find first with is_discrete=True (prefer one with matrix cores)
     3. Return its index, or None if no discrete GPU found
     """
-    devices = detect_gpu_devices()
-    
+    devices = detect_gpu_devices(config)
+
     if not devices:
         return None
     
@@ -202,7 +215,7 @@ def setup_gpu_environment(config: Optional[dict] = None) -> dict:
         return env_set
 
     # 3. Linux: Auto-detect discrete Vulkan GPU
-    discrete = get_discrete_gpu()
+    discrete = get_discrete_gpu(config)
 
     if discrete is not None:
         os.environ["GGML_VK_VISIBLE_DEVICES"] = str(discrete)

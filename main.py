@@ -39,6 +39,18 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 
+# Frozen overlay dispatch: PyInstaller builds can't spawn "python overlay.py"
+# (sys.executable IS the app binary — that spawn would relaunch the full app,
+# a fork bomb). Instead the binary doubles as the overlay when launched with
+# this sentinel. Must run before ANY app-side work: this process becomes only
+# the overlay. Remaining argv (--mode/--style/--scale/…) is parsed by overlay.
+if "--overlay-subprocess" in sys.argv:
+    sys.argv.remove("--overlay-subprocess")
+    from wayfinder.ui.overlay import run_overlay
+    run_overlay()
+    sys.exit(0)
+
+
 # Scaling cache file location
 SCALING_CACHE_FILE = Path.home() / ".config" / "wayfinder-aura" / "display_scaling.json"
 

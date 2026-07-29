@@ -369,12 +369,35 @@ class TestCheckWhisperCpp:
 class TestCheckWhisperModel:
     """Test Whisper model file detection."""
 
-    def test_model_found(self, temp_dir: Path):
-        model = temp_dir / "ggml-large-v3-turbo.bin"
+    def test_free_model_found(self, temp_dir: Path):
+        """A free-tier weight satisfies the check with no license at all."""
+        model = temp_dir / "ggml-base.en.bin"
         model.write_bytes(b"\x00" * 1_600_000)  # 1.6 MB fake model
 
         config = {"model_path": str(model)}
         status = check_whisper_model(config)
+        assert status.installed is True
+        assert "base.en" in status.detail
+
+    def test_ultra_model_requires_license(self, temp_dir: Path):
+        """An Ultra-gated weight only counts when large_models is licensed.
+
+        License-blind counting made Setup skip the model download while the
+        transcriber refused the weight — user ended up dictating into nothing.
+        """
+        model = temp_dir / "ggml-large-v3-turbo.bin"
+        model.write_bytes(b"\x00" * 1_600_000)
+        config = {"model_path": str(model)}
+
+        gate = MagicMock()
+        gate.has_feature.return_value = False
+        with patch("wayfinder.license.get_feature_gate", return_value=gate), \
+             patch("wayfinder.core.setup.Path.home", return_value=temp_dir / "fakehome"):
+            assert check_whisper_model(config).installed is False
+
+        gate.has_feature.return_value = True
+        with patch("wayfinder.license.get_feature_gate", return_value=gate):
+            status = check_whisper_model(config)
         assert status.installed is True
         assert "large-v3-turbo" in status.detail
 
@@ -387,7 +410,7 @@ class TestCheckWhisperModel:
             status = check_whisper_model(config)
 
         assert status.installed is False
-        assert "No Whisper model" in status.error
+        assert "No usable Whisper model" in status.error
 
     def test_alternative_model_found(self, temp_dir: Path):
         """If configured model is missing but other models exist, report them."""
@@ -519,15 +542,33 @@ class TestModelCatalog:
     # is_steam_deck() is mocked False so these exercise the GPU-vendor branch
     # deterministically — on real Deck hardware get_recommended_model() short-circuits
     # to base.en regardless of GPU vendor.
+    # large-v3-turbo is Ultra-gated (large_models): recommending it to an
+    # unlicensed install would leave Setup with a model the transcriber refuses,
+    # so the GPU recommendation applies only when the feature gate grants it.
     @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="nvidia")
-    def test_nvidia_recommends_large_turbo(self, mock_vendor, mock_deck):
-        assert get_recommended_model() == "large-v3-turbo"
+    def test_nvidia_recommends_large_turbo_when_licensed(self, mock_vendor, mock_deck):
+        gate = MagicMock()
+        gate.has_feature.return_value = True
+        with patch("wayfinder.license.get_feature_gate", return_value=gate):
+            assert get_recommended_model() == "large-v3-turbo"
+        gate.has_feature.assert_called_with("large_models")
 
     @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="amd")
-    def test_amd_recommends_large_turbo(self, mock_vendor, mock_deck):
-        assert get_recommended_model() == "large-v3-turbo"
+    def test_amd_recommends_large_turbo_when_licensed(self, mock_vendor, mock_deck):
+        gate = MagicMock()
+        gate.has_feature.return_value = True
+        with patch("wayfinder.license.get_feature_gate", return_value=gate):
+            assert get_recommended_model() == "large-v3-turbo"
+
+    @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
+    @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="nvidia")
+    def test_gpu_unlicensed_recommends_free_model(self, mock_vendor, mock_deck):
+        gate = MagicMock()
+        gate.has_feature.return_value = False
+        with patch("wayfinder.license.get_feature_gate", return_value=gate):
+            assert get_recommended_model() == "small.en"
 
     @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="unknown")

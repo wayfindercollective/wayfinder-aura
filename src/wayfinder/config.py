@@ -144,16 +144,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
     
-    # Hotkey settings — Super+F2 / Super+F3 by default.
-    # Bare F-keys collide with countless game keybinds (e.g. DAoC qbinds);
-    # Super+F* almost never does, since DEs reserve the Super key for the
-    # compositor. Existing user configs keep whatever they had saved.
-    "hotkey_key": 60,  # F2
-    "hotkey_modifiers": ["super"],
+    # Hotkey settings — Ctrl+Alt+Space / Ctrl+Alt+S by default.
+    # Chosen 2026-07 over Super+F2: first-run users didn't know what the
+    # "Super" key was (launch feedback), and every keyboard labels Ctrl/Alt/
+    # Space. Still game-safe: bare F-keys collide with countless game keybinds
+    # (e.g. DAoC qbinds) but Ctrl+Alt chords are as rare in games as Super+F*,
+    # and the GameMode pause covers the rest. DE conflicts checked: unassigned
+    # by default on KDE and GNOME. Existing user configs keep what they saved.
+    "hotkey_key": 57,  # Space
+    "hotkey_modifiers": ["ctrl", "alt"],
 
-    # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal)
-    "style_toggle_key": 61,  # F3
-    "style_toggle_modifiers": ["super"],
+    # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal).
+    # Enter (not a letter): KEY_CODES/display maps carry no letter keys, and
+    # Ctrl+Alt+letter chords collide with IDE bindings (e.g. Ctrl+Alt+S).
+    "style_toggle_key": 28,  # Enter
+    "style_toggle_modifiers": ["ctrl", "alt"],
+
+    # Auto press Enter after dictation (opt-in): dictate → text lands → Enter
+    # fires, so chat inputs submit hands-free. Off by default — implicitly
+    # sending messages would surprise anyone dictating into a document.
+    "press_enter_after_dictation": False,
     
     # Exclusive-grab devices (name substrings). Wayfinder takes these input
     # devices exclusively (EVIOCGRAB) so their keys reach ONLY the dictation
@@ -440,6 +450,54 @@ def _which_runtime_path(name: str) -> str | None:
     return None
 
 
+def _usable_model_candidates() -> list:
+    """Existing whisper model files the CURRENT license may load, best first.
+
+    Ultra-gated weights (large/medium/turbo — mirror of the transcriber's
+    _is_large_model rule) are offered only when `large_models` is licensed;
+    the license check is lazy and fails closed to the free tier so config
+    loading never depends on the license path being importable.
+    """
+    licensed = False
+    try:
+        from wayfinder.license import get_feature_gate
+        licensed = get_feature_gate().has_feature("large_models")
+    except Exception:
+        licensed = False
+
+    def _ultra(name: str) -> bool:
+        n = name.lower()
+        return "large" in n or "medium" in n or "turbo" in n
+
+    dirs = [Path(os.path.expanduser("~/whisper.cpp/models"))]
+    if IS_APPIMAGE and APPDIR:
+        dirs.append(Path(APPDIR) / "usr" / "share" / "whisper-models")
+    if IS_FLATPAK:
+        dirs.append(Path("/app/share/whisper-models"))
+
+    found: list[Path] = []
+    for d in dirs:
+        try:
+            if d.is_dir():
+                found.extend(
+                    p for p in d.glob("ggml-*.bin") if licensed or not _ultra(p.name)
+                )
+        except OSError:
+            continue
+
+    # Best quality first within what the license allows.
+    _order = ["large-v3-turbo", "large", "medium", "small.en", "small",
+              "base.en", "base", "tiny.en", "tiny"]
+
+    def _rank(p: Path) -> int:
+        for i, k in enumerate(_order):
+            if p.name == f"ggml-{k}.bin":
+                return i
+        return len(_order)
+
+    return [str(p) for p in sorted(found, key=_rank)]
+
+
 def _repair_config_path(key: str, saved: object) -> object:
     """Repair blank/stale critical paths without treating '' as cwd."""
     if _path_exists(saved):
@@ -468,6 +526,12 @@ def _repair_config_path(key: str, saved: object) -> object:
         ])
         if IS_FLATPAK:
             candidates[1:1] = ["/app/bin/llama-simple", "/app/bin/llama-cli"]
+    elif key == "model_path":
+        # Auto-select the best INSTALLED model the current license may load.
+        # Without this, a fresh free install kept pointing at the (nonexistent,
+        # Ultra-gated) default weight and the user had to hand-pick the model
+        # they had just downloaded (2026-07 launch feedback).
+        candidates.extend(_usable_model_candidates())
 
     repaired = _first_existing_path(candidates)
     if repaired:
@@ -523,8 +587,9 @@ def load_config() -> dict:
             if config.get("premium_url") in _stale_premium_urls:
                 config["premium_url"] = DEFAULT_CONFIG["premium_url"]
 
-            # Hotkey defaults changed for NEW installs (bare F3/F10 → Super+F2/F3,
-            # to dodge in-game F-key collisions; the GameMode pause covers games).
+            # Hotkey defaults changed for NEW installs over time (bare F3/F10 →
+            # Super+F2/F3 to dodge in-game F-key collisions → Ctrl+Alt+Space/S
+            # for discoverability, 2026-07; the GameMode pause covers games).
             # In an EXISTING config, every hotkey field the user never explicitly
             # saved must fall to its LEGACY default — never the new one. Otherwise
             # a config with a saved key but unsaved modifiers gets ["super"] merged
@@ -581,9 +646,15 @@ def load_config() -> dict:
                 print(f"WARNING: config file was corrupt ({e}) and could not be backed up ({rename_err}); loaded defaults")
             return DEFAULT_CONFIG.copy()
     else:
-        # First run - save defaults
-        save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
+        # First run - save defaults, but repair critical paths first: the static
+        # defaults can point at files that don't exist here (e.g. model_path names
+        # the Ultra turbo weight while the user has just downloaded base.en) —
+        # repair auto-selects what's actually installed and license-usable.
+        config = DEFAULT_CONFIG.copy()
+        for key in ("whisper_binary", "model_path", "llama_cpp_model_path", "llama_cpp_binary"):
+            config[key] = _repair_config_path(key, config.get(key, ""))
+        save_config(config)
+        return config.copy()
 
 
 def save_config(config: dict) -> None:
@@ -682,8 +753,11 @@ def get_modifier_name(modifier: str) -> str:
     """
     names = {
         "ctrl": "Ctrl",
-        "alt": "Alt", 
+        "alt": "Alt",
         "shift": "Shift",
-        "super": "Super",
+        # "⊞ Win" over the Linux-correct "Super": launch feedback showed new
+        # users don't know which key Super is; the ⊞ logo + "Win" matches
+        # what's printed on nearly every physical keyboard.
+        "super": "⊞ Win",
     }
     return names.get(modifier, modifier.title())
