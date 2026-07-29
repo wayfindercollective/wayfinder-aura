@@ -250,13 +250,13 @@ if [ "$BUILD_MODE" = "--full" ]; then
         fi
     done
 
-    # ── ydotool ──
-    if command -v ydotool &> /dev/null; then
-        cp "$(which ydotool)" "$APPDIR/usr/bin/"
-        echo "   ✓ ydotool bundled"
-    else
-        echo "   ⚠ ydotool not found on system, skipping"
-    fi
+    # ── ydotool: deliberately NOT bundled ──
+    # The ydotool client must protocol-match the HOST's ydotoold daemon: a
+    # bundled client against a different distro's daemon silently falls back
+    # to a throwaway direct-uinput device (types nothing, exits 0), and the
+    # jammy CI client (0.1.8) predates the app's CLI syntax entirely. The
+    # injector uses the host's client only; wtype ships bundled for Wayland
+    # and Setup can self-provision a user-level ydotoold where available.
 
     # ── wtype ──
     if command -v wtype &> /dev/null; then

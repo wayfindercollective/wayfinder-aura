@@ -534,7 +534,18 @@ def test_appimage_ci_build_uses_older_glibc_runner_and_smoke_test():
     assert "runs-on: ubuntu-22.04" in job
     assert "libvulkan-dev vulkan-tools" in job
     assert "scripts/ci/install-glslc-if-needed.sh" in job
-    assert "ydotool wtype" in job
+    # ydotool is deliberately NOT installed/bundled at build: the client must
+    # protocol-match the HOST daemon (jammy's 0.1.8 doesn't speak the app CLI).
+    assert "ydotool" not in job.split("Smoke-test")[0]
+    assert "wtype" in job
+    # Vulkan configure hard-requires SPIRV-Headers; without it the build
+    # silently ships CPU-only inference binaries.
+    assert "spirv-headers" in job
+    # Hermetic setup-python needs pip PyGObject/dbus-python or the bundle
+    # ships without gi/dbus (no portal shortcuts, no GI typelibs).
+    assert "PyGObject==3.50.2" in job
+    assert "dbus-python==1.4.0" in job
+    assert "from gi.repository import GLib" in job
     assert "desktop-file-utils appstream" in job
     assert "./scripts/build-appimage.sh --full" in job
     assert "./Wayfinder_Aura-*.AppImage --appimage-extract" in job
@@ -545,9 +556,15 @@ def test_appimage_ci_build_uses_older_glibc_runner_and_smoke_test():
         "llama-cli",
         "llama-simple",
         "wtype",
-        "ydotool",
     ):
         assert f"test -x squashfs-root/usr/bin/{binary}" in job
+
+    # The bundle must NOT contain a ydotool client, and the release must be
+    # provably Vulkan-native with gi/dbus bundled.
+    assert "test ! -e squashfs-root/usr/bin/ydotool" in job
+    assert 'grep -aFq "ggml_vulkan" squashfs-root/usr/bin/whisper-cli' in job
+    assert "gi_typelibs/GLib-2.0.typelib" in job
+    assert "_dbus_bindings" in job
 
     assert "desktop-file-validate squashfs-root/io.wayfindercollective.WayfinderAura.desktop" in job
     assert "appstreamcli validate --no-net" in job

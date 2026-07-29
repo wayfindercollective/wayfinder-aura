@@ -192,21 +192,30 @@ class TestCheckYdotool:
     # to pin the backend under test, rather than the old ydotool-only shutil.which mocks.
 
     def test_ydotool_backend_with_daemon_running(self):
-        """ydotool backend + a daemon socket present -> installed, no warning."""
+        """ydotool backend + a LIVE daemon (per check_ydotool_ready) -> installed."""
         with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
-             patch.object(Path, "exists", return_value=True):
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "ok")):
             status = check_ydotool()
         assert status.installed is True
         assert "daemon" in status.detail.lower()
 
     def test_ydotool_backend_without_daemon(self):
-        """ydotool backend but no socket and ydotoold not running -> installed + warning."""
+        """Daemon down and NOT self-provisionable -> installed + blocking warning."""
         with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
-             patch.object(Path, "exists", return_value=False), \
-             patch("wayfinder.core.setup.subprocess.run", return_value=MagicMock(returncode=1)):
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(False, "down")), \
+             patch("wayfinder.core.setup.can_self_provision_ydotoold", return_value=False):
             status = check_ydotool()
         assert status.installed is True
         assert status.warning != ""  # Should warn about the missing daemon
+
+    def test_ydotool_backend_daemon_down_self_provisions(self):
+        """Daemon down and self-provisionable -> not-installed so Setup auto-installs."""
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(False, "down")), \
+             patch("wayfinder.core.setup.can_self_provision_ydotoold", return_value=True):
+            status = check_ydotool()
+        assert status.installed is False
+        assert "one-click" in status.error.lower()
 
     def test_no_injection_backend_available(self):
         """No wtype/xdotool/ydotool -> not installed, error tells the user to install one."""
@@ -1126,3 +1135,133 @@ class TestFullSetupFlow:
         assert "whisper_cpp" in dep_ids
         assert "whisper_model" in dep_ids
         assert "cuda" not in dep_ids
+
+
+class TestYdotooldSelfProvision:
+    """The zero-terminal typing fix: Setup installs a user-level ydotoold service.
+
+    Contract (2026-07): a bundled/bare ydotool client is never "sufficient";
+    provisioning requires host ydotoold + user-writable /dev/uinput + systemd.
+    Stale socket files (daemon dead, file left behind) must not count as ready.
+    """
+
+    def test_can_self_provision_all_conditions_met(self, monkeypatch):
+        from wayfinder.core import setup as s
+        monkeypatch.setattr(s, "_find_host_ydotoold", lambda: "/usr/bin/ydotoold")
+        monkeypatch.setattr(s.os, "access", lambda p, m: True)
+        monkeypatch.setattr(s.shutil, "which", lambda n: "/usr/bin/systemctl")
+        monkeypatch.setattr(s.sys, "platform", "linux")
+        assert s.can_self_provision_ydotoold() is True
+
+    def test_cannot_without_host_daemon_binary(self, monkeypatch):
+        from wayfinder.core import setup as s
+        monkeypatch.setattr(s, "_find_host_ydotoold", lambda: None)
+        monkeypatch.setattr(s.os, "access", lambda p, m: True)
+        monkeypatch.setattr(s.shutil, "which", lambda n: "/usr/bin/systemctl")
+        assert s.can_self_provision_ydotoold() is False
+
+    def test_cannot_without_uinput_access(self, monkeypatch):
+        from wayfinder.core import setup as s
+        monkeypatch.setattr(s, "_find_host_ydotoold", lambda: "/usr/bin/ydotoold")
+        monkeypatch.setattr(s.os, "access", lambda p, m: False)
+        monkeypatch.setattr(s.shutil, "which", lambda n: "/usr/bin/systemctl")
+        assert s.can_self_provision_ydotoold() is False
+
+    def test_find_host_ydotoold_skips_appdir(self, monkeypatch, temp_dir):
+        from wayfinder.core import setup as s
+        appdir = temp_dir / "AppDir"
+        bundled = appdir / "usr" / "bin" / "ydotoold"
+        bundled.parent.mkdir(parents=True)
+        bundled.write_text("#!/bin/sh\n")
+        bundled.chmod(0o755)
+        hostdir = temp_dir / "hostbin"
+        hostdir.mkdir()
+        host = hostdir / "ydotoold"
+        host.write_text("#!/bin/sh\n")
+        host.chmod(0o755)
+        monkeypatch.setenv("APPDIR", str(appdir))
+        monkeypatch.setenv("PATH", f"{appdir / 'usr' / 'bin'}:{hostdir}")
+        assert s._find_host_ydotoold() == str(host)
+
+
+class TestStaleYdotoolSocket:
+    """A socket file with no listener must not report ready (probe by connect)."""
+
+    def test_stale_socket_not_ready(self, monkeypatch, temp_dir):
+        from wayfinder.core import injector as inj
+
+        stale = temp_dir / ".ydotool_socket"
+        stale.touch()  # plain file: connect() will fail — exactly a stale socket
+        monkeypatch.setattr(inj, "_get_ydotool_binary", lambda: "/usr/bin/ydotool")
+        monkeypatch.setattr(
+            inj, "_get_ydotool_env", lambda: {"YDOTOOL_SOCKET": str(stale)},
+        )
+        ready, msg = inj.check_ydotool_ready()
+        assert ready is False
+        assert "nothing is listening" in msg
+
+    def test_live_socket_ready(self, monkeypatch, temp_dir):
+        import socket as socketlib
+        from wayfinder.core import injector as inj
+
+        live = temp_dir / "live.sock"
+        server = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+        try:
+            server.bind(str(live))
+            server.listen(1)
+            monkeypatch.setattr(inj, "_get_ydotool_binary", lambda: "/usr/bin/ydotool")
+            monkeypatch.setattr(
+                inj, "_get_ydotool_env", lambda: {"YDOTOOL_SOCKET": str(live)},
+            )
+            ready, msg = inj.check_ydotool_ready()
+        finally:
+            server.close()
+        assert ready is True
+
+    def test_provision_verify_forces_own_socket(self, monkeypatch, temp_dir):
+        """The installer must verify against ITS socket, not env-priority ones."""
+        from wayfinder.core import setup as s
+
+        seen_env = {}
+        real_run = s.subprocess.run
+
+        def fake_run(cmd, **kw):
+            if cmd and str(cmd[0]).endswith("ydotool"):
+                seen_env.update(kw.get("env") or {})
+                m = MagicMock(returncode=0, stdout="", stderr="")
+                return m
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        own_sock = Path(f"/run/user/{os.getuid()}/.ydotool_socket")
+        monkeypatch.setattr(s.subprocess, "run", fake_run)
+        monkeypatch.setattr(s, "_find_host_ydotoold", lambda: "/usr/bin/ydotoold")
+        monkeypatch.setattr(s.os, "access", lambda p, m: True)
+        monkeypatch.setattr(
+            s.os.path, "expanduser",
+            lambda p: p.replace("~", str(temp_dir)),
+        )
+        monkeypatch.setattr(
+            "wayfinder.core.injector._get_ydotool_binary", lambda: "/usr/bin/ydotool"
+        )
+        monkeypatch.setattr(
+            "wayfinder.core.injector._get_ydotool_env",
+            lambda: {"YDOTOOL_SOCKET": "/run/ydotool/ydotool.sock"},  # decoy priority socket
+        )
+        monkeypatch.setattr(
+            "wayfinder.core.injector._probe_unix_socket",
+            lambda p, timeout=1.0: True,
+        )
+        # No pre-existing user ydotoold.service → the app-owned-unit path runs,
+        # which is the branch that must FORCE our socket during verification.
+        monkeypatch.setattr(Path, "exists", lambda self: False)
+        monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
+
+        result = {}
+        s.install_ydotoold_user_service(lambda m: None, lambda ok, msg: result.update(ok=ok, msg=msg))
+        import time
+        for _ in range(40):
+            if result:
+                break
+            time.sleep(0.1)
+        assert result.get("ok") is True, result
+        assert seen_env.get("YDOTOOL_SOCKET") == str(own_sock)

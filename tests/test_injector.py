@@ -199,7 +199,7 @@ class TestInjectTextErrors:
     """Tests for InjectionError being raised on various failures."""
 
     def test_nonzero_returncode_raises_injection_error(self, mock_ydotool_failure):
-        with pytest.raises(InjectionError, match="ydotool failed"):
+        with pytest.raises(InjectionError, match="ydotool type failed"):
             inject_text("hello", "instant")
 
     def test_error_message_includes_stderr(self, mock_ydotool_failure):
@@ -233,42 +233,80 @@ class TestInjectTextErrors:
 
 
 class TestGetYdotoolBinary:
-    """Tests for finding the ydotool binary."""
+    """Tests for finding the ydotool binary.
 
-    def test_returns_ydotool_when_no_appdir(self, monkeypatch):
-        monkeypatch.delenv("APPDIR", raising=False)
-        assert _get_ydotool_binary() == "ydotool"
+    Contract (2026-07): prefer the HOST's ydotool client — it protocol-matches
+    the host ydotoold; a bundled client against a foreign daemon silently
+    typed nothing ("backend unavailable" + direct-uinput fallback). The
+    bundled client is only a fallback for hosts without ydotool installed.
+    """
 
-    def test_returns_appimage_path_when_appdir_set_and_binary_exists(
-        self, appimage_env
+    def _host_client(self, temp_dir):
+        hostdir = temp_dir / "hostbin"
+        hostdir.mkdir()
+        host = hostdir / "ydotool"
+        host.write_text("#!/bin/sh\n")
+        host.chmod(0o755)
+        return hostdir, host
+
+    def test_prefers_host_client_over_bundle(
+        self, monkeypatch, temp_dir, appimage_env
     ):
-        """When APPDIR is set and the bundled binary exists, return full path."""
+        """Host ydotool on PATH wins even when a bundled one exists."""
         bundled = appimage_env / "usr" / "bin" / "ydotool"
         bundled.touch()
         bundled.chmod(0o755)
+        hostdir, host = self._host_client(temp_dir)
+        # AppRun-style PATH: bundle dir first, host dir after
+        monkeypatch.setenv("PATH", f"{appimage_env / 'usr' / 'bin'}:{hostdir}")
 
-        result = _get_ydotool_binary()
-        assert result == str(bundled)
+        assert _get_ydotool_binary() == str(host)
 
-    def test_returns_ydotool_when_appdir_set_but_binary_missing(
-        self, monkeypatch, temp_dir
-    ):
-        """When APPDIR is set but bundled binary doesn't exist, fall back."""
+    def test_host_client_when_no_appdir(self, monkeypatch, temp_dir):
+        monkeypatch.delenv("APPDIR", raising=False)
+        hostdir, host = self._host_client(temp_dir)
+        monkeypatch.setenv("PATH", str(hostdir))
+        assert _get_ydotool_binary() == str(host)
+
+    def test_no_bundle_fallback_ever(self, monkeypatch, temp_dir, appimage_env):
+        """A bundled client is NEVER used, even with no host client on PATH.
+
+        Jammy's bundled 0.1.8 didn't speak the app's CLI, and any bundled
+        client can protocol-mismatch the host daemon (silent no-op typing).
+        """
+        bundled = appimage_env / "usr" / "bin" / "ydotool"
+        bundled.touch()
+        bundled.chmod(0o755)
+        emptydir = temp_dir / "emptybin"
+        emptydir.mkdir()
+        monkeypatch.setenv("PATH", f"{appimage_env / 'usr' / 'bin'}:{emptydir}")
+
+        assert _get_ydotool_binary() is None
+
+    def test_none_when_no_client_anywhere(self, monkeypatch, temp_dir):
+        """APPDIR set, nothing bundled, nothing on host → None."""
         appdir = temp_dir / "EmptyAppDir"
         appdir.mkdir()
         monkeypatch.setenv("APPDIR", str(appdir))
+        emptydir = temp_dir / "emptybin"
+        emptydir.mkdir()
+        monkeypatch.setenv("PATH", str(emptydir))
 
-        assert _get_ydotool_binary() == "ydotool"
+        assert _get_ydotool_binary() is None
 
-    def test_ignores_foreign_appdir_with_ydotool(self, monkeypatch, temp_dir):
-        """Do not use another AppImage app's bundled ydotool."""
-        appdir = temp_dir / "ForeignAppDir"
-        bundled = appdir / "usr" / "bin" / "ydotool"
-        bundled.parent.mkdir(parents=True)
-        bundled.write_text("#!/bin/sh\n")
+    def test_appdir_exclusion_is_realpath_based(self, monkeypatch, temp_dir):
+        """A sibling dir sharing the APPDIR string prefix is NOT excluded."""
+        appdir = temp_dir / "AppDir"
+        (appdir / "usr" / "bin").mkdir(parents=True)
+        lookalike = temp_dir / "AppDir2"  # startswith('.../AppDir') would wrongly skip this
+        lookalike.mkdir()
+        host = lookalike / "ydotool"
+        host.write_text("#!/bin/sh\n")
+        host.chmod(0o755)
         monkeypatch.setenv("APPDIR", str(appdir))
+        monkeypatch.setenv("PATH", str(lookalike))
 
-        assert _get_ydotool_binary() == "ydotool"
+        assert _get_ydotool_binary() == str(host)
 
 
 # =============================================================================
@@ -490,3 +528,130 @@ class TestInjectTextXdotool:
 
         type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
         assert type_cmd[-1] == "hello"
+
+
+class TestUncertainDelivery:
+    """Exit-0 'backend unavailable' means delivery is UNCERTAIN, never success."""
+
+    def _unavailable_result(self):
+        m = MagicMock()
+        m.returncode = 0
+        m.stdout = ""
+        m.stderr = "ydotool: notice: ydotoold backend unavailable (may have latency+delay issues)"
+        return m
+
+    def test_backend_unavailable_raises_uncertain(self):
+        from wayfinder.core.injector import InjectionError, _check_ydotool_result
+
+        with pytest.raises(InjectionError) as exc:
+            _check_ydotool_result(self._unavailable_result(), "type")
+        assert getattr(exc.value, "uncertain_delivery", False) is True
+        assert "uncertain" in str(exc.value)
+
+    def test_clean_success_passes(self):
+        from wayfinder.core.injector import _check_ydotool_result
+
+        m = MagicMock(returncode=0, stdout="", stderr="")
+        _check_ydotool_result(m, "type")  # must not raise
+
+    def test_game_mode_paste_retry_suppressed_for_uncertain(self, monkeypatch):
+        """Uncertain delivery must NOT trigger the clipboard retry (double-type risk)."""
+        from wayfinder.core import injector as inj
+
+        err = inj.InjectionError("uncertain")
+        err.uncertain_delivery = True
+
+        def raise_uncertain(*a, **k):
+            raise err
+
+        pasted = []
+        monkeypatch.setattr(inj, "_inject_text_type_linux", raise_uncertain)
+        monkeypatch.setattr(inj, "inject_text_clipboard_paste", lambda t: pasted.append(t))
+        monkeypatch.setattr(inj.sys, "platform", "linux")
+
+        with pytest.raises(inj.InjectionError):
+            inj.inject_text("hello", "instant", game_mode=True, paste_fallback=True)
+        assert pasted == []
+
+    def test_game_mode_paste_retry_still_works_for_certain_failures(self, monkeypatch):
+        from wayfinder.core import injector as inj
+
+        def raise_plain(*a, **k):
+            raise inj.InjectionError("wtype refused")
+
+        pasted = []
+        monkeypatch.setattr(inj, "_inject_text_type_linux", raise_plain)
+        monkeypatch.setattr(inj, "inject_text_clipboard_paste", lambda t: pasted.append(t))
+        monkeypatch.setattr(inj.sys, "platform", "linux")
+
+        inj.inject_text("hello", "instant", game_mode=True, paste_fallback=True)
+        assert pasted == ["hello"]
+
+
+class TestSocketSelectionPrefersConnectable:
+    """A stale system socket FILE must not mask a live user socket (Codex P1)."""
+
+    def test_stale_system_socket_does_not_mask_live_user_socket(
+        self, monkeypatch, temp_dir
+    ):
+        import socket as socketlib
+        from wayfinder.core import injector as inj
+
+        stale_system = temp_dir / "system.sock"
+        stale_system.touch()  # exists, nothing listening
+        live_user = temp_dir / "user.sock"
+        server = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+        try:
+            server.bind(str(live_user))
+            server.listen(1)
+            monkeypatch.delenv("YDOTOOL_SOCKET", raising=False)
+            monkeypatch.setattr(
+                inj, "_ydotool_socket_candidates",
+                lambda: [str(stale_system), str(live_user)],
+            )
+            env = inj._get_ydotool_env()
+        finally:
+            server.close()
+        assert env["YDOTOOL_SOCKET"] == str(live_user)
+
+    def test_falls_back_to_first_existing_when_none_connectable(
+        self, monkeypatch, temp_dir
+    ):
+        from wayfinder.core import injector as inj
+
+        stale_a = temp_dir / "a.sock"
+        stale_a.touch()
+        stale_b = temp_dir / "b.sock"
+        stale_b.touch()
+        monkeypatch.delenv("YDOTOOL_SOCKET", raising=False)
+        monkeypatch.setattr(
+            inj, "_ydotool_socket_candidates",
+            lambda: [str(stale_a), str(stale_b)],
+        )
+        env = inj._get_ydotool_env()
+        # Named for error messages, and check_ydotool_ready's probe then fails it.
+        assert env["YDOTOOL_SOCKET"] == str(stale_a)
+
+
+class TestProbeDgramSocket:
+    """ydotoold binds a DGRAM socket — the probe must detect it (field bug:
+    a STREAM-only probe got EPROTOTYPE against every LIVE daemon)."""
+
+    def test_live_dgram_socket_probes_true(self, temp_dir):
+        import socket as socketlib
+        from wayfinder.core.injector import _probe_unix_socket
+
+        path = temp_dir / "dgram.sock"
+        server = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_DGRAM)
+        try:
+            server.bind(str(path))
+            assert _probe_unix_socket(str(path)) is True
+        finally:
+            server.close()
+
+    def test_plain_file_probes_false(self, temp_dir):
+        from wayfinder.core.injector import _probe_unix_socket
+
+        path = temp_dir / "stale"
+        path.touch()
+        assert _probe_unix_socket(str(path)) is False

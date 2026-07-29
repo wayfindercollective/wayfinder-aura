@@ -3,8 +3,10 @@ Text injection module for Wayfinder Aura.
 
 Platform dispatch:
 - Linux/X11: xdotool (preferred — no daemon, no uinput, present in stock SteamOS image)
-- Linux/Wayland: wtype (virtual-keyboard protocol — no daemon/uinput, so it works inside a
-  Flatpak sandbox), falling back to ydotool, then the RemoteDesktop portal
+- Linux/Wayland: ydotool when its daemon is live (kernel-level, compositor-proof), else wtype
+  (virtual-keyboard protocol — refused outright by GNOME/Mutter and revocable by KWin); a
+  wtype failure at injection time falls back to ydotool when possible. (A RemoteDesktop-portal
+  backend — the universal path — is planned but NOT yet implemented.)
 - Linux/X11 fallback: ydotool if xdotool unavailable
 - macOS: clipboard paste via pbcopy + Cmd-V
 """
@@ -38,27 +40,59 @@ def _note_wtype_failure(detail: str) -> None:
         _WTYPE_UNSUPPORTED = True
 
 
-def _get_ydotool_binary() -> str:
+def _path_is_under(path: str, root: str) -> bool:
+    """Real-path containment check (no string-prefix collisions, symlink-safe)."""
+    try:
+        return os.path.commonpath(
+            [os.path.realpath(path), os.path.realpath(root)]
+        ) == os.path.realpath(root)
+    except (ValueError, OSError):
+        return False
+
+
+def _get_ydotool_binary() -> "str | None":
+    """HOST ydotool client only — never a bundled one. None when absent.
+
+    The client must protocol-match the host's ydotoold. Field bug: a bundled
+    (Ubuntu-built) client against a Fedora daemon printed "ydotoold backend
+    unavailable", silently switched to a throwaway direct-uinput device, and
+    exited 0 while nothing reached the compositor. Worse, the CI (jammy) build
+    would bundle ydotool 0.1.8, whose CLI predates the code's `key code:state`
+    / `--key-hold` syntax entirely (Codex review). Policy: use the host's
+    client, which matches the host's daemon, or report ydotool unavailable so
+    selection uses wtype / the Setup wizard self-provisions.
     """
-    Find the ydotool binary, checking AppImage bundle first.
+    appdir = os.environ.get("APPDIR", "")
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue  # never interpret empty PATH entries as CWD
+        d_abs = os.path.realpath(d)
+        if appdir and _path_is_under(d_abs, appdir):
+            continue  # AppRun prepends the bundle dir — we want the HOST client
+        cand = os.path.join(d_abs, "ydotool")
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
 
-    Returns:
-        Path to ydotool binary, defaults to "ydotool" (relies on PATH).
-    """
-    # Check AppImage bundle
-    from wayfinder.utils.platform import get_appimage_dir
 
-    appdir = get_appimage_dir()
-    if appdir:
-        bundled = Path(appdir) / "usr" / "bin" / "ydotool"
-        if bundled.exists():
-            return str(bundled)
-
-    return "ydotool"
+def _ydotool_socket_candidates() -> list:
+    """Common ydotoold socket locations, system service first."""
+    return [
+        "/run/ydotool/ydotool.sock",  # System service (Bazzite/Fedora)
+        f"/run/user/{os.getuid()}/.ydotool_socket",  # User service
+        "/tmp/.ydotool_socket",  # Fallback
+    ]
 
 
 def _get_ydotool_env() -> dict:
-    """Get environment with correct ydotool socket path."""
+    """Get environment with correct ydotool socket path.
+
+    Selection prefers a socket something actually LISTENS on: a stale
+    system-socket FILE must not mask a live user socket (e.g. right after
+    Setup self-provisions the user service — Codex review). Falls back to the
+    first existing path when nothing is connectable, so error messages still
+    name a concrete socket.
+    """
     env = os.environ.copy()
 
     # A user-set YDOTOOL_SOCKET is authoritative (custom daemon setups) —
@@ -67,17 +101,13 @@ def _get_ydotool_env() -> dict:
     if preset and Path(preset).exists():
         return env
 
-    # Check common socket locations (varies by distro/setup)
-    socket_paths = [
-        "/run/ydotool/ydotool.sock",  # System service (Bazzite/Fedora)
-        f"/run/user/{os.getuid()}/.ydotool_socket",  # User service
-        "/tmp/.ydotool_socket",  # Fallback
-    ]
-
-    for socket_path in socket_paths:
-        if Path(socket_path).exists():
+    existing = [p for p in _ydotool_socket_candidates() if Path(p).exists()]
+    for socket_path in existing:
+        if _probe_unix_socket(socket_path):
             env["YDOTOOL_SOCKET"] = socket_path
-            break
+            return env
+    if existing:
+        env["YDOTOOL_SOCKET"] = existing[0]
 
     return env
 
@@ -94,6 +124,40 @@ TYPING_SPEEDS = {
 }
 
 
+def _check_ydotool_result(result, action: str) -> None:
+    """Raise unless the ydotool run BOTH exited 0 and actually used the daemon.
+
+    The client exits 0 even when it prints 'ydotoold backend unavailable' and
+    falls back to a throwaway direct-uinput device. That direct path is
+    unreliable (the transient device often vanishes before the compositor
+    registers it — observed as "typed nothing" in the field) but it is NOT
+    provably a no-op: delivery is UNCERTAIN. Raise with `uncertain=True` so
+    callers surface the problem WITHOUT auto-retrying another injector —
+    a retry after partial delivery would duplicate text (Codex review).
+    """
+    stderr = _to_text(result.stderr).strip()
+    stdout = _to_text(result.stdout).strip()
+    if result.returncode != 0:
+        detail = stderr or stdout or "(no output)"
+        raise InjectionError(f"ydotool {action} failed (exit {result.returncode}): {detail}")
+    if "backend unavailable" in stderr.lower():
+        err = InjectionError(
+            f"ydotool {action}: ydotoold unreachable (client/daemon mismatch or dead "
+            f"socket); the direct-uinput fallback makes delivery uncertain: {stderr}"
+        )
+        err.uncertain_delivery = True
+        raise err
+
+
+def _to_text(v) -> str:
+    """stderr/stdout may be str or bytes depending on the caller's text= flag."""
+    if v is None:
+        return ""
+    if isinstance(v, bytes):
+        return v.decode("utf-8", errors="replace")
+    return str(v)
+
+
 def check_ydotool_ready() -> tuple[bool, str]:
     """Check if ydotool is installed and the daemon is running.
 
@@ -101,9 +165,9 @@ def check_ydotool_ready() -> tuple[bool, str]:
         (ready, message) tuple
     """
     ydotool_bin = _get_ydotool_binary()
-    if not shutil.which(ydotool_bin):
+    if not ydotool_bin:
         from wayfinder.core.setup import _get_install_hint
-        return False, f"ydotool not found. Install with: {_get_install_hint('ydotool')}"
+        return False, f"ydotool not found on this system. Install with: {_get_install_hint('ydotool')}"
 
     env = _get_ydotool_env()
     socket_path = env.get("YDOTOOL_SOCKET")
@@ -115,7 +179,40 @@ def check_ydotool_ready() -> tuple[bool, str]:
             hint = "Start the ydotoold daemon with your init system"
         return False, f"ydotool daemon socket not found. {hint}"
 
+    # A socket FILE can outlive a dead daemon (stale after a stop/crash), and a
+    # process check can't tell WHICH socket a live ydotoold owns. Probe the
+    # exact selected socket by CONNECTING (no input events, microseconds):
+    # only a daemon actually listening there counts as ready (Codex review).
+    if not _probe_unix_socket(socket_path):
+        return False, (
+            f"ydotool socket exists ({socket_path}) but nothing is listening "
+            "on it (stale socket or dead daemon). Restart the daemon."
+        )
+
     return True, f"ydotool ready (socket: {socket_path})"
+
+
+def _probe_unix_socket(path: str, timeout: float = 1.0) -> bool:
+    """True if a live endpoint exists at the unix socket *path*.
+
+    ydotoold binds a DATAGRAM socket (verified live: SOCK_STREAM connect gets
+    EPROTOTYPE against a running daemon) — probe DGRAM first, STREAM second
+    for generality. connect() on either type fails for stale files and dead
+    sockets, which is exactly the liveness signal we need. No input events.
+    """
+    import socket as _socket
+    for stype in (_socket.SOCK_DGRAM, _socket.SOCK_STREAM):
+        try:
+            s = _socket.socket(_socket.AF_UNIX, stype)
+            try:
+                s.settimeout(timeout)
+                s.connect(path)
+                return True
+            finally:
+                s.close()
+        except OSError:
+            continue
+    return False
 
 
 def _inject_text_macos(text: str) -> None:
@@ -449,6 +546,10 @@ def _send_ctrl_v_linux(tool: str) -> None:
         return
     # ydotool (and any other Linux path that reached here)
     ydotool_bin = _get_ydotool_binary()
+    if not ydotool_bin:
+        raise InjectionError(
+            "No host ydotool client found — install ydotool, or rely on wtype/xdotool"
+        )
     env = _get_ydotool_env()
     # KEY_LEFTCTRL = 29, KEY_V = 47; 1=press, 0=release
     result = subprocess.run(
@@ -458,9 +559,7 @@ def _send_ctrl_v_linux(tool: str) -> None:
         timeout=10,
         env=env,
     )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-        raise InjectionError(f"ydotool ctrl+v failed: {detail}")
+    _check_ydotool_result(result, "ctrl+v")
 
 
 def press_enter() -> None:
@@ -501,14 +600,16 @@ def press_enter() -> None:
         # fall through to ydotool (same chain as text injection)
     # ydotool (and any other Linux path): KEY_ENTER = 28; 1=press, 0=release
     ydotool_bin = _get_ydotool_binary()
+    if not ydotool_bin:
+        raise InjectionError(
+            "No host ydotool client found — install ydotool, or rely on wtype/xdotool"
+        )
     env = _get_ydotool_env()
     result = subprocess.run(
         [ydotool_bin, "key", "28:1", "28:0"],
         capture_output=True, text=True, timeout=10, env=env,
     )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-        raise InjectionError(f"ydotool Return failed: {detail}")
+    _check_ydotool_result(result, "Return")
 
 
 def inject_text_clipboard_paste(text: str) -> None:
@@ -604,6 +705,10 @@ def _inject_text_type_linux(
 
     try:
         ydotool_bin = _get_ydotool_binary()
+        if not ydotool_bin:
+            raise InjectionError(
+                "No host ydotool client found — install ydotool, or rely on wtype/xdotool"
+            )
         cmd = [
             ydotool_bin, "type",
             "--key-delay", str(key_delay),
@@ -618,13 +723,7 @@ def _inject_text_type_linux(
             timeout=120,
             env=env,
         )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            stdout = result.stdout.strip()
-            error_detail = stderr or stdout or "(no output)"
-            raise InjectionError(
-                f"ydotool failed (exit {result.returncode}): {error_detail}"
-            )
+        _check_ydotool_result(result, "type")
     except subprocess.TimeoutExpired:
         raise InjectionError("ydotool timed out after 120s")
     except FileNotFoundError:
@@ -647,7 +746,8 @@ def inject_text(
 
     Dispatches to platform-specific backend:
     - Linux/X11: xdotool (preferred); ydotool as fallback
-    - Linux/Wayland: wtype (preferred — sandbox-safe); ydotool as fallback
+    - Linux/Wayland: ydotool when its daemon is live (compositor-proof), else
+      wtype; a wtype refusal at injection time falls back to ydotool if ready
     - macOS: clipboard paste (pbcopy + Cmd-V)
 
     When *game_mode* is True and *paste_fallback* is True, a failed Linux type
@@ -680,7 +780,12 @@ def inject_text(
     try:
         _inject_text_type_linux(text, typing_speed, target_window)
         return
-    except InjectionError:
+    except InjectionError as e:
+        # Uncertain delivery (ydotool direct-uinput fallback engaged): the text
+        # MAY have partially landed — a paste retry could duplicate it. Surface
+        # the error instead of retrying (Codex review).
+        if getattr(e, "uncertain_delivery", False):
+            raise
         if not (game_mode and paste_fallback):
             raise
         # Game Mode only: type failed → clipboard + Ctrl+V.

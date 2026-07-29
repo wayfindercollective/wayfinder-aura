@@ -170,30 +170,49 @@ def check_text_injection() -> DependencyStatus:
         except ImportError:
             return DependencyStatus(False, error="pyautogui not installed. Run: pip install pyautogui")
 
-    # AppImage bundles ydotool at a fixed path that may not be on PATH.
-    if IS_APPIMAGE and APPDIR and os.path.exists(os.path.join(APPDIR, "usr", "bin", "ydotool")):
-        return DependencyStatus(True, detail="Bundled ydotool")
+    # NOTE: a bundled ydotool CLIENT is deliberately NOT treated as sufficient —
+    # it must protocol-match a running host daemon, and without one it silently
+    # types into a throwaway uinput device nothing receives (2026-07 field bug).
 
-    from wayfinder.utils.platform import get_text_injector
+    from wayfinder.utils.platform import get_text_injector, is_wayland
     tool = get_text_injector()
     if tool == "xdotool":
         return DependencyStatus(True, detail="xdotool (X11)")
     if tool == "wtype":
-        return DependencyStatus(True, detail="wtype (Wayland)")
+        # wtype works only while the compositor honors the virtual-keyboard
+        # protocol (GNOME never does; KWin can revoke it mid-session). When we
+        # can self-provision the robust backend (host ydotoold + user-writable
+        # /dev/uinput + systemd --user), report not-ready so the Setup wizard
+        # auto-installs the user service — zero-terminal typing that keeps
+        # working when wtype doesn't.
+        if is_wayland() and can_self_provision_ydotoold():
+            return DependencyStatus(
+                False,
+                error="Installing background typing service (one-click, no password)",
+            )
+        # Honest status: with wtype as the ONLY backend there is no automatic
+        # desktop-mode fallback if the compositor refuses it (GNOME always
+        # does; KWin can revoke mid-session) — say so instead of promising a
+        # clipboard path that only Game Mode has (Codex review).
+        return DependencyStatus(True, detail="wtype (Wayland)",
+                                warning="wtype only — some desktops refuse it; "
+                                        "install ydotool for reliable typing")
     if tool == "ydotool":
-        # ydotool needs its daemon + /dev/uinput — having the binary is not enough.
-        socket_paths = ["/run/ydotool/ydotool.sock", "/tmp/.ydotool_socket",
-                        f"/run/user/{os.getuid()}/.ydotool_socket"]
-        daemon_running = any(Path(p).exists() for p in socket_paths)
-        if not daemon_running:
-            try:
-                result = subprocess.run(["pgrep", "-x", "ydotoold"], capture_output=True, timeout=5)
-                daemon_running = result.returncode == 0
-            except Exception:
-                pass
+        # ydotool needs its daemon + /dev/uinput — having the binary is not
+        # enough. Delegate to check_ydotool_ready: it also rejects STALE socket
+        # files from a dead daemon, which a bare exists() check reported as
+        # "running" while every connect got refused.
+        from wayfinder.core.injector import check_ydotool_ready
+        daemon_running = check_ydotool_ready()[0]
         if daemon_running:
             return DependencyStatus(True, detail="ydotool + daemon running")
-        # Binary present but the daemon is down -> injection will actually fail.
+        # Daemon down -> injection will actually fail. If we can self-provision
+        # the user service, report not-ready so the wizard installs it hands-free.
+        if can_self_provision_ydotoold():
+            return DependencyStatus(
+                False,
+                error="Installing background typing service (one-click, no password)",
+            )
         # Keep the gold warning badge, but flag it blocking so Setup won't claim
         # "All set!" while typing is broken (Codex review F11).
         return DependencyStatus(True, detail="ydotool installed",
@@ -203,6 +222,163 @@ def check_text_injection() -> DependencyStatus:
 
 # Keep old name for backwards compat (tests, etc.)
 check_ydotool = check_text_injection
+
+
+def _find_host_ydotoold() -> Optional[str]:
+    """Host ydotoold daemon binary — PATH walk skipping AppImage bundle dirs."""
+    appdir = os.environ.get("APPDIR", "")
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d or (appdir and d.startswith(appdir)):
+            continue
+        cand = os.path.join(d, "ydotoold")
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def can_self_provision_ydotoold() -> bool:
+    """True when the user-level ydotoold service can be installed with NO root.
+
+    Needs: a host ydotoold binary, user-writable /dev/uinput (Bazzite/Fedora
+    grant this via ACL), and systemd --user. When all three hold, Setup can
+    make typing robust with zero terminal work.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        return bool(
+            _find_host_ydotoold()
+            and os.access("/dev/uinput", os.W_OK)
+            and shutil.which("systemctl")
+        )
+    except OSError:
+        return False
+
+
+def install_ydotoold_user_service(log: 'LogCallback', done: 'DoneCallback') -> None:
+    """Self-provision a USER-level ydotoold service — the zero-terminal typing fix.
+
+    Writes a 5-line systemd user unit pointing at the HOST ydotoold (client and
+    daemon must protocol-match; see injector._get_ydotool_binary), enables it,
+    waits for the socket, and verifies delivery with a harmless Shift
+    press+release (types nothing). No root, no password: /dev/uinput access
+    comes from the distro's ACL (verified by can_self_provision_ydotoold).
+    """
+    def _run():
+        try:
+            ydotoold = _find_host_ydotoold()
+            if not ydotoold:
+                done(False, "No ydotoold on this system — typing will rely on wtype "
+                            "(install ydotool for the robust backend)")
+                return
+            if not os.access("/dev/uinput", os.W_OK):
+                done(False, "No /dev/uinput permission. Run: sudo systemctl enable --now ydotoold")
+                return
+            unit_dir = Path(os.path.expanduser("~/.config/systemd/user"))
+            unit_dir.mkdir(parents=True, exist_ok=True)
+            sock = Path(f"/run/user/{os.getuid()}/.ydotool_socket")
+
+            # Respect an EXISTING user ydotoold.service (theirs, not ours):
+            # never overwrite it — try starting it first; only if that fails do
+            # we install our own APP-OWNED unit under a distinct name, which is
+            # always safe to (re)write (Codex review). NOTE: no socket cleanup
+            # before this — the unit may already be ACTIVE (enable --now won't
+            # restart it) and unlinking its live socket would orphan it; it may
+            # also use a different socket path entirely.
+            existing = unit_dir / "ydotoold.service"
+            if existing.exists():
+                log("Found an existing user ydotoold.service — starting it…")
+                r = subprocess.run(
+                    ["systemctl", "--user", "enable", "--now", "ydotoold.service"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if r.returncode == 0:
+                    unit_name = "ydotoold.service"
+                else:
+                    log("Existing unit failed to start — installing Wayfinder's own unit…")
+                    unit_name = "wayfinder-ydotoold.service"
+            else:
+                unit_name = "wayfinder-ydotoold.service"
+
+            if unit_name == "wayfinder-ydotoold.service":
+                log("Installing user-level ydotoold service (no root needed)…")
+                # OUR unit binds the user socket path below: clear a STALE file
+                # there first (a dead daemon's leftover makes existence checks
+                # lie and connects fail with "Connection refused").
+                try:
+                    sock.unlink()
+                except OSError:
+                    pass
+                (unit_dir / unit_name).write_text(
+                    "[Unit]\n"
+                    "Description=ydotool daemon (user) — virtual input for Wayfinder Aura dictation\n"
+                    "Conflicts=ydotoold.service\n\n"
+                    "[Service]\n"
+                    f"ExecStart={ydotoold} --socket-path=%t/.ydotool_socket --socket-own=%U:%G\n"
+                    "Restart=on-failure\n\n"
+                    "[Install]\n"
+                    "WantedBy=default.target\n"
+                )
+                for cmd in (["systemctl", "--user", "daemon-reload"],
+                            ["systemctl", "--user", "enable", "--now", unit_name]):
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                    if r.returncode != 0:
+                        detail = r.stderr.strip() or r.stdout.strip() or "(no output)"
+                        done(False, f"{' '.join(cmd)} failed: {detail}")
+                        return
+            # Delivery check with retries: verify by CONNECTING, not by socket-file
+            # existence (a file can exist before the daemon binds it). Shift
+            # press+release exercises the daemon path and types nothing; the
+            # injector checker also rejects the silent "backend unavailable"
+            # direct-uinput fallback. The socket is FORCED to the one OUR
+            # daemon owns — _get_ydotool_env's priority order could otherwise
+            # select an inherited/system socket and verify the wrong daemon
+            # (Codex review).
+            log("Verifying typing backend…")
+            import time as _time
+            from wayfinder.core.injector import (
+                InjectionError, _check_ydotool_result, _get_ydotool_binary,
+                _get_ydotool_env, _probe_unix_socket,
+            )
+            ydotool_client = _get_ydotool_binary()
+            if not ydotool_client:
+                done(False, "ydotoold installed, but no host ydotool client found to verify with")
+                return
+            last_err = "ydotoold started but never became reachable"
+            for _ in range(20):
+                if unit_name == "wayfinder-ydotoold.service":
+                    # OUR daemon owns the user socket: verify exactly that one —
+                    # env priority could otherwise select an inherited/system
+                    # socket and verify the wrong daemon (Codex review).
+                    if not _probe_unix_socket(str(sock)):
+                        _time.sleep(0.25)
+                        continue
+                    verify_env = _get_ydotool_env()
+                    verify_env["YDOTOOL_SOCKET"] = str(sock)
+                else:
+                    # Pre-existing unit: it may bind ANY socket path. Selection
+                    # is connectable-aware, so wait for whichever socket its
+                    # daemon actually serves.
+                    verify_env = _get_ydotool_env()
+                    vsock = verify_env.get("YDOTOOL_SOCKET")
+                    if not vsock or not _probe_unix_socket(vsock):
+                        _time.sleep(0.25)
+                        continue
+                r = subprocess.run(
+                    [ydotool_client, "key", "42:1", "42:0"],
+                    capture_output=True, text=True, timeout=10, env=verify_env,
+                )
+                try:
+                    _check_ydotool_result(r, "verify")
+                    done(True, "Background typing service installed and verified")
+                    return
+                except InjectionError as e:
+                    last_err = str(e)
+                    _time.sleep(0.25)
+            done(False, last_err)
+        except Exception as e:
+            done(False, str(e))
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def install_pyautogui(log: 'LogCallback', done: 'DoneCallback') -> None:
@@ -827,7 +1003,10 @@ def get_dependencies(config: dict) -> list[Dependency]:
             description="Types transcribed text at your cursor",
             required=True,
             _check=check_text_injection,
-            _install=install_pyautogui if sys.platform == "darwin" else None,
+            # Linux: one-click, root-free ydotoold user-service install — makes
+            # typing survive compositors that refuse wtype (see check).
+            _install=install_pyautogui if sys.platform == "darwin"
+            else (install_ydotoold_user_service if sys.platform.startswith("linux") else None),
         ),
         Dependency(
             id="gpu_driver",
@@ -927,12 +1106,15 @@ def get_missing_system_packages() -> list[str]:
     """
     packages = []
     # ydotool is Linux-only; macOS uses pyautogui (pip package, not system).
-    # AppImage bundles its own ydotool (check_text_injection honors it) — don't
-    # demand a system copy there.
-    bundled_ydotool = bool(
-        IS_APPIMAGE and APPDIR and os.path.exists(os.path.join(APPDIR, "usr", "bin", "ydotool"))
-    )
-    if sys.platform != "darwin" and not bundled_ydotool and not shutil.which("ydotool"):
+    # Bundled runs (AppImage/Flatpak) don't demand it: wtype ships in the
+    # bundle for Wayland, X11 uses xdotool, and where a host ydotool exists
+    # Setup self-provisions its daemon. (ydotool is deliberately NOT bundled —
+    # the client must protocol-match the HOST daemon.)
+    if (
+        sys.platform != "darwin"
+        and not (IS_APPIMAGE or IS_FLATPAK)
+        and not shutil.which("ydotool")
+    ):
         packages.append("ydotool")
     # git/cmake/compilers/CUDA exist only to build whisper.cpp/llama.cpp from
     # source — a step get_dependencies already skips for AppImage/Flatpak runs

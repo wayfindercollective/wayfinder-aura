@@ -200,12 +200,19 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install system dependencies
+        # spirv-headers/spirv-tools: whisper.cpp/llama.cpp GGML_VULKAN cmake
+        # configure hard-requires SPIRV-Headers — without it the build script
+        # SILENTLY falls back to CPU-only inference binaries (smoke test below
+        # now asserts Vulkan). libgirepository/libdbus/libcairo dev: build deps
+        # for the pip PyGObject/dbus-python below.
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-tk portaudio19-dev \
-            cmake make g++ git \
+            cmake make gcc g++ git pkg-config \
             libvulkan-dev vulkan-tools glslang-tools \
-            ydotool wtype \
+            spirv-headers spirv-tools \
+            libgirepository1.0-dev libdbus-1-dev libcairo2-dev \
+            wtype \
             libfuse2 desktop-file-utils appstream
 
       - name: Install glslc for Vulkan builds
@@ -214,10 +221,23 @@ jobs:
         run: scripts/ci/install-glslc-if-needed.sh
 
       - name: Install Python dependencies
+        # PyGObject/dbus-python: setup-python is hermetic — without these pip
+        # packages the spec's HAS_GLIB_DBUS gate is False and the AppImage
+        # ships with NO gi/dbus (no Wayland GlobalShortcuts portal) and no
+        # bundled GI typelibs. PyGObject pinned <3.51: newer needs
+        # girepository-2.0, which jammy doesn't ship.
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
+          pip install "PyGObject==3.50.2" "dbus-python==1.4.0"
           pip install -r requirements.txt
+
+      - name: Preflight gi/dbus imports
+        # If these fail, the spec's HAS_GLIB_DBUS gate silently strips the
+        # Wayland GlobalShortcuts integration from the bundle — fail HERE with
+        # a clear cause instead of shipping a degraded artifact.
+        run: |
+          python -c "import dbus, gi; from dbus.mainloop.glib import DBusGMainLoop; from gi.repository import GLib"
 
       - name: Build full AppImage
         run: |
@@ -233,7 +253,28 @@ jobs:
           test -x squashfs-root/usr/bin/llama-cli
           test -x squashfs-root/usr/bin/llama-simple
           test -x squashfs-root/usr/bin/wtype
-          test -x squashfs-root/usr/bin/ydotool
+          # ydotool is deliberately NOT bundled: the client must protocol-match
+          # the HOST daemon (jammy's 0.1.8 doesn't even speak the app's CLI).
+          test ! -e squashfs-root/usr/bin/ydotool \
+            || { echo "ydotool must NOT be bundled (host-client-only policy)" >&2; exit 1; }
+          # Vulkan MUST be in the inference binaries: the build script silently
+          # falls back to CPU-only when the GGML_VULKAN configure fails, which
+          # would ship a release without GPU acceleration.
+          grep -aFq "ggml_vulkan" squashfs-root/usr/bin/whisper-cli \
+            || { echo "whisper-cli was built WITHOUT Vulkan (silent CPU fallback)" >&2; exit 1; }
+          grep -aFq "ggml_vulkan" squashfs-root/usr/bin/llama-cli \
+            || { echo "llama-cli was built WITHOUT Vulkan (silent CPU fallback)" >&2; exit 1; }
+          # GI typelibs + the gi/dbus C extensions MUST be bundled: without them
+          # frozen builds lose Wayland portal shortcuts or crash against a
+          # mismatched host GLib (Fedora 44 launch bug). File-then-grep so a
+          # future pipefail change can't mask pyi-archive_viewer failures.
+          pyi-archive_viewer -l squashfs-root/usr/bin/wayfinder-aura > /tmp/pyi-contents.txt
+          grep -Fq "gi_typelibs/GLib-2.0.typelib" /tmp/pyi-contents.txt \
+            || { echo "bundle is missing gi typelibs (PyGObject absent at build time)" >&2; exit 1; }
+          grep -Eq "_dbus_bindings.*\.so" /tmp/pyi-contents.txt \
+            || { echo "bundle is missing dbus-python bindings" >&2; exit 1; }
+          grep -Eq "gi[/\\]_gi.*\.so" /tmp/pyi-contents.txt \
+            || { echo "bundle is missing the PyGObject _gi extension" >&2; exit 1; }
           desktop-file-validate squashfs-root/io.wayfindercollective.WayfinderAura.desktop
           # AppStream metainfo uses modern tags (developer/, vcs-browser) that
           # Flathub accepts. Ubuntu 22.04 appstreamcli treats them as
