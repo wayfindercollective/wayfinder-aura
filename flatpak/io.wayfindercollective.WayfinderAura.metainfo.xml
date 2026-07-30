@@ -114,6 +114,15 @@
   </supports>
 
   <releases>
+    <release version="1.1.4" date="2026-07-30">
+      <description>
+        <p>Install experience and release-quality hardening:</p>
+        <ul>
+          <li>The AppImage now adds itself to your applications menu on first launch (icon included), and follows the file if you move it</li>
+          <li>Every release is now boot-tested before publishing, with GPU, typing, and packaging integrity gates</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.3" date="2026-07-30">
       <description>
         <p>Major reliability release — install-and-it-works on modern Linux desktops:</p>

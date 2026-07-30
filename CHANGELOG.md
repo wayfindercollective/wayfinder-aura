@@ -5,6 +5,24 @@ All notable changes to Wayfinder Aura are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.4] — 2026-07-30
+
+### Added
+
+- **AppImage self-integration:** first launch adds a menu entry + icon
+  pointing at the AppImage's current location; idempotent and self-repointing
+  when the file moves. ("I don't see an icon or install" — fixed.)
+
+### Fixed (release pipeline)
+
+- The v1.1.3 release surfaced and closed four silent release-killers, now
+  permanently gated in CI: Vulkan-less inference binaries (jammy needed modern
+  Vulkan-Headers), strip-corrupted numpy openblas (strip=False; jammy binutils
+  mangles 64KB-aligned libs), a PortAudio native crash on zero-audio machines
+  (CI gate runs a null-sink audio server; app-side guard tracked), and — the
+  gate that catches them all — every release AppImage must now literally BOOT
+  under xvfb before anything publishes.
+
 ## [1.1.3] — 2026-07-30
 
 Field-driven reliability release: a full "act as a customer" session on a
