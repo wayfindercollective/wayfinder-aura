@@ -356,12 +356,15 @@ jobs:
         # the swapfile covers the true peak. A resource-rich machine builds the
         # identical manifest clean (verified 2026-07-30), proving this is a
         # runner-resource issue, not a toolchain bug.
+        # /mnt is the runner's large ephemeral disk, and some runner images
+        # already have an active /swapfile (fallocate on it: "Text file busy")
+        # — use our own path there and keep any existing swap.
         run: |
           sudo sysctl vm.overcommit_memory=1
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo fallocate -l 8G /mnt/wf-swap || sudo dd if=/dev/zero of=/mnt/wf-swap bs=1M count=8192
+          sudo chmod 600 /mnt/wf-swap
+          sudo mkswap /mnt/wf-swap
+          sudo swapon /mnt/wf-swap
           free -h
 
       - name: Build Flatpak
