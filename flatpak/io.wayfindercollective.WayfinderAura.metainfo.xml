@@ -25,11 +25,12 @@
       app checks online for model updates (toggleable).
     </p>
     <p>
-      Free tier includes local whisper.cpp dictation, hotkeys, text injection, and the full
-      settings UI. Wayfinder Aura Ultra is an optional one-time purchase (launch price $29.99;
-      regular price $60) that unlocks GPU acceleration, larger models, longer recording sessions,
-      advanced audio options, and other premium features. Ultra is sold on wayfindercollective.io
-      (not through Flathub billing); enter a license key in Settings after purchase.
+      Free tier includes local GPU-accelerated whisper.cpp dictation on the standard models,
+      hotkeys, text injection, and the full settings UI. Wayfinder Aura Ultra is an optional
+      one-time purchase (launch price $29.99; regular price $60) that unlocks larger, more
+      accurate models (GPU-accelerated too), longer recording sessions, advanced audio options,
+      and other premium features. Ultra is sold on wayfindercollective.io (not through Flathub
+      billing); enter a license key in Settings after purchase.
     </p>
     <p>Features:</p>
     <ul>
@@ -113,6 +114,23 @@
   </supports>
 
   <releases>
+    <release version="1.1.3" date="2026-07-30">
+      <description>
+        <p>Major reliability release — install-and-it-works on modern Linux desktops:</p>
+        <ul>
+          <li>Fixed startup crash on newer distributions (GLib 2.88, e.g. Fedora 44 / Bazzite)</li>
+          <li>Typing now sets itself up: one-click background typing service, no terminal needed</li>
+          <li>Typing works reliably across desktops, with honest error reporting when it can't</li>
+          <li>First-run setup no longer attempts system package installs on immutable distros</li>
+          <li>The best installed speech model is selected automatically</li>
+          <li>Always On overlay now works in packaged builds, with polished rendering</li>
+          <li>New defaults: Ctrl+Alt+Space to dictate; optional auto-Enter after dictation</li>
+          <li>Background-noise annotations are no longer typed into your text</li>
+          <li>GPU detection fixed for recent AMD graphics cards</li>
+          <li>Flatpak builds now include GPU (Vulkan) dictation</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.2" date="2026-07-16">
       <description>
         <p>Tag CI hardening for AppImage smoke and release packaging</p>
