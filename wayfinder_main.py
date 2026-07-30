@@ -5965,6 +5965,16 @@ class WayfinderApp(ctk.CTk):
         
         # Initial log entries
         self.log("✓ Wayfinder Aura started")
+
+        # AppImage runs: self-integrate into the app menu (desktop entry +
+        # icon pointing at the current AppImage path). No-op for Flatpak and
+        # source runs; best-effort and idempotent — a moved/re-downloaded
+        # AppImage re-points its entry on next launch.
+        try:
+            from wayfinder.utils.desktop_integration import integrate_appimage
+            integrate_appimage(log=self.log)
+        except Exception:
+            pass
         self.log(f"⌨ Hotkey: {self.get_hotkey_display()}")
         
         # Log detected hardware + apply GPU-based ASR backend when Auto is on
