@@ -213,7 +213,7 @@ jobs:
             spirv-headers spirv-tools \
             libgirepository1.0-dev libdbus-1-dev libcairo2-dev \
             wtype \
-            xvfb libxft2 \
+            xvfb libxft2 pulseaudio \
             libfuse2 desktop-file-utils appstream
 
       - name: Install glslc for Vulkan builds
@@ -306,10 +306,17 @@ jobs:
           # whose numpy died at import — strip-corrupted openblas — while
           # every static check passed). 25s is enough to clear all imports
           # and reach the Tk mainloop; timeout exit 124 = healthy long-runner.
+          # Runners have NO audio system at all, and PortAudio's native init
+          # segfaults on zero-backend machines (tracked as app hardening; every
+          # real desktop has audio). A null-sink pulseaudio daemon makes the
+          # gate test the app as it exists on actual desktops.
+          pulseaudio --daemonize=yes --exit-idle-time=-1 || true
+          pactl load-module module-null-sink sink_name=ci_null || true
           set +e
           # PYTHONFAULTHANDLER: on SIGSEGV the boot log then contains the exact
           # Python stack — a bare rc=139 is undebuggable from CI logs.
-          HOME=$(mktemp -d) PYTHONFAULTHANDLER=1 timeout 25 xvfb-run -a squashfs-root/AppRun > /tmp/boot.log 2>&1
+          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME=$(mktemp -d) PYTHONFAULTHANDLER=1 \
+            timeout 25 xvfb-run -a squashfs-root/AppRun > /tmp/boot.log 2>&1
           BOOT_RC=$?
           set -e
           if grep -qE "Traceback|ImportError|ModuleNotFoundError|Failed to execute script" /tmp/boot.log; then
