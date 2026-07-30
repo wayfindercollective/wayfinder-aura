@@ -213,6 +213,7 @@ jobs:
             spirv-headers spirv-tools \
             libgirepository1.0-dev libdbus-1-dev libcairo2-dev \
             wtype \
+            xvfb libxft2 \
             libfuse2 desktop-file-utils appstream
 
       - name: Install glslc for Vulkan builds
@@ -300,6 +301,26 @@ jobs:
             || { echo "bundle is missing dbus-python bindings" >&2; exit 1; }
           grep -Eq "gi[/\\]_gi.*\.so" /tmp/pyi-contents.txt \
             || { echo "bundle is missing the PyGObject _gi extension" >&2; exit 1; }
+          # BOOT the bundle headlessly: content assertions can't catch a
+          # runtime-dead artifact (v1.1.3's first attempt shipped a bundle
+          # whose numpy died at import — strip-corrupted openblas — while
+          # every static check passed). 25s is enough to clear all imports
+          # and reach the Tk mainloop; timeout exit 124 = healthy long-runner.
+          set +e
+          HOME=$(mktemp -d) timeout 25 xvfb-run -a squashfs-root/AppRun > /tmp/boot.log 2>&1
+          BOOT_RC=$?
+          set -e
+          if grep -qE "Traceback|ImportError|ModuleNotFoundError|Failed to execute script" /tmp/boot.log; then
+            echo "AppImage DIED AT BOOT:" >&2
+            tail -30 /tmp/boot.log >&2
+            exit 1
+          fi
+          if [ "$BOOT_RC" -ne 124 ] && [ "$BOOT_RC" -ne 0 ]; then
+            echo "AppImage exited abnormally at boot (rc=$BOOT_RC):" >&2
+            tail -30 /tmp/boot.log >&2
+            exit 1
+          fi
+          echo "boot smoke passed (rc=$BOOT_RC)"
           desktop-file-validate squashfs-root/io.wayfindercollective.WayfinderAura.desktop
           # AppStream metainfo uses modern tags (developer/, vcs-browser) that
           # Flathub accepts. Ubuntu 22.04 appstreamcli treats them as

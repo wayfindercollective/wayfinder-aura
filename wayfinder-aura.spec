@@ -179,7 +179,13 @@ exe = EXE(
     name='wayfinder-aura',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,  # Strip symbols for smaller binary
+    # NEVER strip: jammy's binutils `strip` (2.38, the CI release builder)
+    # corrupts numpy's 64KB-aligned libscipy_openblas64 — the stripped .so has
+    # non-page-aligned LOAD segments and EVERY launch dies with "ELF load
+    # command address/offset not page-aligned" (v1.1.3 first release attempt).
+    # Newer binutils (24.04+) strip it fine, which is why local builds worked.
+    # Wheel libs ship pre-stripped anyway; the size win was negligible.
+    strip=False,
     upx=True,    # Use UPX compression
     upx_exclude=[
         # Some libraries don't work well with UPX
