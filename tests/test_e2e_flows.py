@@ -82,8 +82,9 @@ class TestFullDictationPipeline:
 
     @patch("wayfinder.core.injector.sys")
     @patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked"))
+    @patch("wayfinder.core.injector._get_ydotool_binary", return_value="/usr/bin/ydotool")
     @patch("subprocess.run")
-    def test_transcribe_then_inject(self, mock_run, _mock_ready, mock_injector_sys,
+    def test_transcribe_then_inject(self, mock_run, _mock_binary, _mock_ready, mock_injector_sys,
                                      temp_dir: Path, sample_audio_file: Path, sample_config: dict):
         """Full flow: transcribe audio, then inject the result text."""
         mock_injector_sys.platform = "linux"

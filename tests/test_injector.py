@@ -210,6 +210,7 @@ class TestInjectTextErrors:
         with patch("wayfinder.core.injector.sys") as mock_sys, \
              patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
              patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="/usr/bin/ydotool"), \
              patch("wayfinder.core.injector.subprocess.run",
                    side_effect=subprocess.TimeoutExpired(cmd="ydotool", timeout=120)):
             mock_sys.platform = "linux"
@@ -220,6 +221,7 @@ class TestInjectTextErrors:
         with patch("wayfinder.core.injector.sys") as mock_sys, \
              patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
              patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="/usr/bin/ydotool"), \
              patch("wayfinder.core.injector.subprocess.run",
                    side_effect=FileNotFoundError("ydotool")):
             mock_sys.platform = "linux"
