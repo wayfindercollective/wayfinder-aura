@@ -16,9 +16,9 @@ backends are there if you choose them.
   (OpenAI/Groq/Anthropic) are opt-in and off by default. The app checks online
   for model updates weekly (toggleable), and activating a license contacts the
   activation server.
-- **Fast where it counts.** Ultra adds Vulkan GPU acceleration on supported AMD,
-  Intel, and NVIDIA systems, with automatic CPU fallback when GPU inference
-  isn't available.
+- **Fast where it counts.** GPU (Vulkan) dictation out of the box on supported
+  AMD, Intel, and NVIDIA systems — free tier included — with automatic CPU
+  fallback. Ultra's larger, more accurate models run GPU-accelerated too.
 - **Writes like you, only cleaner.** A small local LLM (Gemma 3 1B by default)
   strips the "um"s, fixes punctuation, and matches your chosen tone — from
   boardroom-professional to commit-message-dev.
@@ -30,10 +30,10 @@ backends are there if you choose them.
 
 | | |
 |---|---|
-| 🎙️ **Hotkey dictation** | Super+F2 to start/stop (configurable), text lands at your cursor in any app |
+| 🎙️ **Hotkey dictation** | Ctrl+Alt+Space to start/stop (configurable), text lands at your cursor in any app |
 | 🔒 **100% local pipeline** | whisper.cpp transcription + llama.cpp cleanup, both on-device |
-| ⚡ **Ultra GPU acceleration** | Vulkan with per-machine CPU auto-fallback |
-| 🎨 **Tone presets** | Minimal, Professional, Casual, Dev, Personal — cycle with Super+F3 |
+| ⚡ **GPU acceleration** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU auto-fallback |
+| 🎨 **Tone presets** | Minimal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
 | 🎮 **Game-aware** | Hotkeys pause while a GameMode game is registered (Lutris/Steam) |
 | 🖥️ **Glassmorphic overlay** | Always-visible recording status, designed for Wayland |
 | 🎧 **Smart mic handling** | Picker shows exactly the mics your OS sees; selections survive device renumbering |
@@ -47,11 +47,11 @@ The free tier is the full dictation experience — not a demo.
 | | Free | Ultra ($60 one-time — **$29.99 launch price**) |
 |---|---|---|
 | Local transcription (whisper.cpp) | ✅ | ✅ |
-| GPU acceleration | — | ✅ |
+| GPU-accelerated dictation (standard models) | ✅ | ✅ |
 | Standard models (tiny/base/small) | ✅ | ✅ |
 | Local LLM cleanup | ✅ | ✅ |
 | Status overlay & tray | ✅ | ✅ |
-| Large models (medium, large-v3-turbo) | — | ✅ |
+| Large models (medium, large-v3-turbo) — GPU-accelerated too | — | ✅ |
 | Faster-Whisper backend (CTranslate2) | — | ✅ |
 | Cloud transcription (Groq / OpenAI, your keys) | — | ✅ |
 | Unlimited-length chunked recording | — | ✅ |
@@ -65,16 +65,26 @@ Keys activate online once and keep working offline.
 
 ## Install
 
-### Flatpak (recommended — coming to Flathub)
+### Download (recommended)
 
-The Flatpak bundles everything: whisper.cpp (GPU + CPU builds), a starter
-model, and text-injection tools. No dependencies to install.
+**[⬇ Download the latest AppImage](https://github.com/wayfindercollective/wayfinder-aura/releases/latest)** — one file, everything bundled: GPU (Vulkan) + CPU speech engines, text-injection tools, the works.
 
-```bash
-flatpak-builder --user --install --force-clean build-dir \
-  flatpak/io.wayfindercollective.WayfinderAura.yml
-flatpak run io.wayfindercollective.WayfinderAura
-```
+1. Download `Wayfinder_Aura-*-x86_64.AppImage` from the link above.
+2. Make it executable: right-click → **Properties** → check **"Executable as
+   Program"** (or `chmod +x Wayfinder_Aura-*.AppImage`).
+3. Run it. On first launch it **adds itself to your applications menu** with an
+   icon, walks you through a quick setup, and downloads a starter speech model.
+   That's it — press **Ctrl+Alt+Space** and start talking.
+
+Works on Linux distributions from 2022 onward — Ubuntu 22.04+, Debian 12+,
+Fedora 35+, Bazzite, and the Steam Deck. Wayland and X11.
+
+### Flathub (coming soon)
+
+One-click install from KDE Discover / GNOME Software is on the way. Until
+then, the AppImage above is the fastest path. (Developers can build the
+Flatpak locally from `flatpak/io.wayfindercollective.WayfinderAura.yml` with
+`flatpak-builder`.)
 
 ### From source
 
@@ -97,13 +107,15 @@ python main.py
 ## Quick start
 
 1. Launch Wayfinder Aura — it lives in your system tray.
-2. Press **Super+F2**, speak, press **Super+F2** again.
+2. Press **Ctrl+Alt+Space**, speak, press **Ctrl+Alt+Space** again.
 3. Your words are typed at the cursor, cleaned up and punctuated.
-4. Press **Super+F3** to cycle output styles (Minimal → Professional → Casual
-   → Dev → Personal).
+4. Press **Ctrl+Alt+Enter** to cycle output styles (Minimal → Professional →
+   Casual → Dev → Personal).
 
-First run walks you through model download and microphone selection. The
-defaults (base.en + auto-detected mic) work well on most machines.
+First run walks you through model download, microphone selection, and — where
+your system allows it — sets up the background typing service with one click,
+no terminal needed. The defaults (base.en + auto-detected mic) work well on
+most machines, and hotkeys are fully rebindable in Settings.
 
 ## Output styles
 
@@ -130,8 +142,8 @@ Settings live in the app; the file is `~/.config/wayfinder-aura/config.json`.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `hotkey_key` + `hotkey_modifiers` | Super+F2 | Recording toggle |
-| `style_toggle_key` + `style_toggle_modifiers` | Super+F3 | Style cycle |
+| `hotkey_key` + `hotkey_modifiers` | Ctrl+Alt+Space | Recording toggle |
+| `style_toggle_key` + `style_toggle_modifiers` | Ctrl+Alt+Enter | Style cycle |
 | `audio_device` / `audio_device_name` | auto | Microphone (saved by name — index-proof) |
 | `typing_speed` | instant | instant, fast, normal, slow, very_slow |
 | `ui_scale` | 1.0 | 0.7–2.5, or Ctrl +/- in app |
