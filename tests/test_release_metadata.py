@@ -738,10 +738,12 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
     assert "whisper-cli-cpu" in manifest
     assert "whisper-server-cpu" in manifest
     assert "llama-simple-cpu" in manifest
-    assert manifest.count("-DGGML_VULKAN=ON") >= 2
-    assert manifest.count(
-        "std::min(2u, std::thread::hardware_concurrency())"
-    ) == 2
+    # Vulkan is OFF for ALL Flatpak inference modules until the shader
+    # toolchain works inside flatpak-builder: the 2026-07-30 CI run failed at
+    # shader-gen ("Failed to fork") with the documented matmul_id_subgroup_*
+    # link failure behind it. Re-enable deliberately, never by drift.
+    assert manifest.count("-DGGML_VULKAN=ON") == 0
+    assert manifest.count("-DGGML_VULKAN=OFF") >= 4
 
 
 def test_flatpak_git_sources_are_all_tag_and_commit_pinned():
