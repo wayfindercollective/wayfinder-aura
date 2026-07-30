@@ -307,7 +307,9 @@ jobs:
           # every static check passed). 25s is enough to clear all imports
           # and reach the Tk mainloop; timeout exit 124 = healthy long-runner.
           set +e
-          HOME=$(mktemp -d) timeout 25 xvfb-run -a squashfs-root/AppRun > /tmp/boot.log 2>&1
+          # PYTHONFAULTHANDLER: on SIGSEGV the boot log then contains the exact
+          # Python stack — a bare rc=139 is undebuggable from CI logs.
+          HOME=$(mktemp -d) PYTHONFAULTHANDLER=1 timeout 25 xvfb-run -a squashfs-root/AppRun > /tmp/boot.log 2>&1
           BOOT_RC=$?
           set -e
           if grep -qE "Traceback|ImportError|ModuleNotFoundError|Failed to execute script" /tmp/boot.log; then
