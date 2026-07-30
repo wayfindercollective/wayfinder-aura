@@ -292,13 +292,19 @@ class FakeApp:
 
 
 @pytest.fixture
-def config():
+def config(tmp_path):
     from wayfinder.config import DEFAULT_CONFIG
     cfg = DEFAULT_CONFIG.copy()
     cfg["chunked_mode"] = False        # simple path by default; chunked tests override
     cfg["post_processing_enabled"] = False
     cfg["audio_ducking_enabled"] = False
     cfg["min_recording_duration"] = 0.5
+    # start_recording's no-model guard checks for a usable (license-permitted)
+    # model on disk; give the fixture a real free-tier weight so orchestration
+    # tests run on machines with no models installed (CI runners).
+    model = tmp_path / "ggml-base.en.bin"
+    model.write_bytes(b"\x00" * 1024)
+    cfg["model_path"] = str(model)
     return cfg
 
 
