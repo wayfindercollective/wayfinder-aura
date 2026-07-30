@@ -346,6 +346,24 @@ jobs:
             echo "manifest=io.wayfindercollective.WayfinderAura.yml" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Expand memory headroom for Vulkan shader generation
+        # vulkan-shaders-gen accumulates the mul_mm shader family in-process and
+        # forks glslc per variant; under the runner's default HEURISTIC
+        # overcommit, forking that multi-GB parent dies with ENOMEM ("Cannot
+        # allocate memory ... Failed to fork") even at --jobs=2 — which then
+        # surfaces as undefined matmul_id_subgroup_* at link. fork+exec never
+        # actually copies the pages, so always-overcommit makes the forks safe;
+        # the swapfile covers the true peak. A resource-rich machine builds the
+        # identical manifest clean (verified 2026-07-30), proving this is a
+        # runner-resource issue, not a toolchain bug.
+        run: |
+          sudo sysctl vm.overcommit_memory=1
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - name: Build Flatpak
         run: |
           cd flatpak

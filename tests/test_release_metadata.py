@@ -738,12 +738,14 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
     assert "whisper-cli-cpu" in manifest
     assert "whisper-server-cpu" in manifest
     assert "llama-simple-cpu" in manifest
-    # Vulkan is OFF for ALL Flatpak inference modules until the shader
-    # toolchain works inside flatpak-builder: the 2026-07-30 CI run failed at
-    # shader-gen ("Failed to fork") with the documented matmul_id_subgroup_*
-    # link failure behind it. Re-enable deliberately, never by drift.
-    assert manifest.count("-DGGML_VULKAN=ON") == 0
-    assert manifest.count("-DGGML_VULKAN=OFF") >= 4
+    # Vulkan ON for the primary whisper/llama modules (free tier promises GPU
+    # on Tiny/Base — CPU-only Flatpak is not viable). The historic CI failure
+    # ("Failed to fork" at mul_mm shader gen) was fork-ENOMEM under default
+    # heuristic overcommit on runners, fixed by the CI memory-headroom step
+    # (overcommit=1 + swap) — verified by a resource-rich local build linking
+    # the same manifest cleanly. CPU fallback modules stay OFF by design.
+    assert manifest.count("-DGGML_VULKAN=ON") == 2
+    assert manifest.count("-DGGML_VULKAN=OFF") >= 2
 
 
 def test_flatpak_git_sources_are_all_tag_and_commit_pinned():

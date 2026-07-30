@@ -142,10 +142,7 @@ modules:
       - -DGGML_FMA=ON
       - -DGGML_F16C=ON
       - -DGGML_BMI2=ON
-      # CI-proven broken (2026-07-30 run: shader-gen 'Failed to fork', and the
-      # documented matmul_id_subgroup_* link failure behind it) — CPU until the
-      # upstream/SDK shader toolchain works in flatpak-builder. See FLATHUB handoff.
-      - -DGGML_VULKAN=OFF
+      - -DGGML_VULKAN=ON
     sources:
       - type: git
         url: https://github.com/ggerganov/whisper.cpp.git
@@ -333,7 +330,7 @@ modules:
   - name: llama-cpp
     buildsystem: simple
     build-commands:
-      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
+      - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
       - cmake --build build --target llama-simple --parallel ${FLATPAK_BUILDER_N_JOBS:-2}
       # The app's CLI backend prefers llama-simple (stable echo+generation stdout
       # format its extraction is built around); config defaults to /app/bin/llama-simple
