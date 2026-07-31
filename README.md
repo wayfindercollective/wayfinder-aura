@@ -16,11 +16,11 @@ backends are there if you choose them.
   (OpenAI/Groq/Anthropic) are opt-in and off by default. The app checks online
   for model updates weekly (toggleable), and activating a license contacts the
   activation server.
-- **Fast where it counts.** GPU (Vulkan) dictation out of the box on supported
-  AMD, Intel, and NVIDIA systems — free tier included — with automatic CPU
-  fallback. Ultra's larger, more accurate models run GPU-accelerated too.
-- **Writes like you, only cleaner.** A small local LLM (Gemma 3 1B by default)
-  strips the "um"s, fixes punctuation, and matches your chosen tone — from
+- **Reliable where it counts.** Free runs the broadly compatible Base model on
+  CPU. Ultra unlocks Vulkan acceleration on supported AMD, Intel, and NVIDIA
+  systems plus additional, more accurate speech models.
+- **Writes like you, only cleaner.** Local cleanup strips the "um"s and fixes
+  punctuation. Ultra adds larger cleanup models and selectable tones, from
   boardroom-professional to commit-message-dev.
 - **Made for Linux, including the weird parts.** Targets Wayland and X11, KDE
   and GNOME, desktop PCs and Steam Deck workflows. Hotkeys pause automatically
@@ -32,8 +32,8 @@ backends are there if you choose them.
 |---|---|
 | 🎙️ **Hotkey dictation** | Ctrl+Alt+Space to start/stop (configurable), text lands at your cursor in any app |
 | 🔒 **100% local pipeline** | whisper.cpp transcription + llama.cpp cleanup, both on-device |
-| ⚡ **GPU acceleration** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU auto-fallback |
-| 🎨 **Tone presets** | Minimal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
+| ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
+| 🎨 **Tone presets (Ultra)** | Minimal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
 | 🎮 **Game-aware** | Hotkeys pause while a GameMode game is registered (Lutris/Steam) |
 | 🖥️ **Glassmorphic overlay** | Always-visible recording status, designed for Wayland |
 | 🎧 **Smart mic handling** | Picker shows exactly the mics your OS sees; selections survive device renumbering |
@@ -42,14 +42,16 @@ backends are there if you choose them.
 
 ## Free vs Ultra
 
-The free tier is the full dictation experience — not a demo.
+The free tier is a focused, usable local dictation experience — not a timed or
+watermarked demo. Ultra adds speed, model choice, long-form tools, and styles.
 
 | | Free | Ultra ($60 one-time — **$29.99 launch price**) |
 |---|---|---|
-| Local transcription (whisper.cpp) | ✅ | ✅ |
-| GPU-accelerated dictation (standard models) | ✅ | ✅ |
-| Standard models (tiny/base/small) | ✅ | ✅ |
-| Local LLM cleanup | ✅ | ✅ |
+| Base/Base.en transcription on CPU | ✅ | ✅ |
+| GPU acceleration (Vulkan) | — | ✅ |
+| Additional speech models | — | ✅ |
+| Local minimal cleanup | ✅ | ✅ |
+| Larger cleanup models | — | ✅ |
 | Status overlay & tray | ✅ | ✅ |
 | Large models (medium, large-v3-turbo) — GPU-accelerated too | — | ✅ |
 | Faster-Whisper backend (CTranslate2) | — | ✅ |
@@ -109,15 +111,15 @@ python main.py
 1. Launch Wayfinder Aura — it lives in your system tray.
 2. Press **Ctrl+Alt+Space**, speak, press **Ctrl+Alt+Space** again.
 3. Your words are typed at the cursor, cleaned up and punctuated.
-4. Press **Ctrl+Alt+Enter** to cycle output styles (Minimal → Professional →
-   Casual → Dev → Personal).
+4. With Ultra, press **Ctrl+Alt+Enter** to cycle output styles (Minimal →
+   Professional → Casual → Dev → Personal).
 
 First run walks you through model download, microphone selection, and — where
 your system allows it — sets up the background typing service with one click,
 no terminal needed. The defaults (base.en + auto-detected mic) work well on
 most machines, and hotkeys are fully rebindable in Settings.
 
-## Output styles
+## Output styles (Ultra)
 
 The local LLM guides your transcript without rewriting it:
 

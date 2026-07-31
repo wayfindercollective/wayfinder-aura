@@ -100,14 +100,14 @@ Try these before filing an issue — they cover the most common problems.
 
 ### Transcription is slow / GPU not being used
 
-- Wayfinder Aura uses Vulkan GPU acceleration where available and
+- Wayfinder Aura Ultra uses Vulkan GPU acceleration where available and
   **automatically falls back to CPU** when GPU inference isn't available.
-  Dictation still works on CPU — it's just slower.
+  Free intentionally uses Base on CPU.
 - A GPU→CPU fallback (and the reason) is recorded in
   `~/.cache/wayfinder-aura/activity.log`. Check there if transcription is
   unexpectedly slow.
-- GPU acceleration and the large models are Ultra features; the free tier
-  runs the standard models on CPU.
+- GPU acceleration and every speech model beyond Base/Base.en are Ultra
+  features; the free tier runs Base/Base.en on CPU.
 
 ### UI is too small (e.g. 4K)
 

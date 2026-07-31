@@ -394,6 +394,23 @@ def test_release_artifacts_probe_real_xft_renderer():
     assert "xvfb" in workflow
 
 
+def test_public_tier_copy_matches_runtime_gpu_and_model_gates():
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    support = (REPO / "SUPPORT.md").read_text(encoding="utf-8")
+    website_brief = (REPO / "WEBSITE_COPY_BRIEF.md").read_text(encoding="utf-8")
+    metainfo = (
+        REPO / "flatpak" / "io.wayfindercollective.WayfinderAura.metainfo.xml"
+    ).read_text(encoding="utf-8")
+
+    assert "| Base/Base.en transcription on CPU | ✅ | ✅ |" in readme
+    assert "| GPU acceleration (Vulkan) | — | ✅ |" in readme
+    assert "Free tier includes Base/Base.en transcription on CPU" in metainfo
+    assert "Free tier includes local GPU-accelerated" not in metainfo
+    assert "free tier included" not in readme.lower()
+    assert "free tier runs Base/Base.en on CPU" in support
+    assert "| Additional speech models | — | ✅ |" in website_brief
+
+
 def test_premium_storefront_defaults_are_consistent_across_release_surfaces():
     from wayfinder.config import DEFAULT_CONFIG
 

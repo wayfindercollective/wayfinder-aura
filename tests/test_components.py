@@ -54,6 +54,14 @@ class TestSettingTooltips:
         for key in expected_keys:
             assert key in SETTING_TOOLTIPS, f"Missing tooltip for setting: {key}"
 
+    def test_backend_and_processing_tooltips_disclose_free_ultra_boundary(self):
+        from wayfinder.ui.components import SETTING_TOOLTIPS
+
+        assert "Free: Base on CPU" in SETTING_TOOLTIPS["backend"]
+        assert "Ultra" in SETTING_TOOLTIPS["backend"]
+        assert "Free includes minimal" in SETTING_TOOLTIPS["post_processing"]
+        assert "Ultra" in SETTING_TOOLTIPS["post_processing"]
+
 
 class TestModelRecommendations:
     """Tests for the MODEL_RECOMMENDATIONS string."""

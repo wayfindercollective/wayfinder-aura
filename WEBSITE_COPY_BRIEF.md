@@ -40,10 +40,11 @@ Public product name for the paid tier: **Ultra** only.
 
 | | Free | Ultra ($60 one-time — **$29.99 launch**) |
 |---|---|---|
-| Local transcription (whisper.cpp) | ✅ | ✅ |
+| Base/Base.en transcription on CPU | ✅ | ✅ |
 | GPU acceleration | — | ✅ |
-| Standard models (tiny/base/small) | ✅ | ✅ |
-| Local LLM cleanup | ✅ | ✅ |
+| Additional speech models | — | ✅ |
+| Local minimal cleanup | ✅ | ✅ |
+| Larger cleanup models | — | ✅ |
 | Status overlay & tray | ✅ | ✅ |
 | Large models (medium, large-v3-turbo) | — | ✅ |
 | Faster-Whisper backend | — | ✅ |
@@ -51,7 +52,7 @@ Public product name for the paid tier: **Ultra** only.
 | Unlimited-length chunked recording | — | ✅ |
 | Tone presets & voice profiles | — | ✅ |
 | Custom vocabulary | — | ✅ |
-| High-accuracy beam search & audio preprocessing | — | ✅ |
+| Accuracy controls & audio preprocessing | ✅ | ✅ |
 
 Ultra is one-time — no subscription. Activate a key in-app; works offline after activation.
 

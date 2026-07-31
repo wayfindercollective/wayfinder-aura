@@ -25,12 +25,13 @@
       app checks online for model updates (toggleable).
     </p>
     <p>
-      Free tier includes local GPU-accelerated whisper.cpp dictation on the standard models,
-      hotkeys, text injection, and the full settings UI. Wayfinder Aura Ultra is an optional
-      one-time purchase (launch price $29.99; regular price $60) that unlocks larger, more
-      accurate models (GPU-accelerated too), longer recording sessions, advanced audio options,
-      and other premium features. Ultra is sold on wayfindercollective.io (not through Flathub
-      billing); enter a license key in Settings after purchase.
+      Free tier includes Base/Base.en transcription on CPU, local minimal cleanup, hotkeys,
+      text injection, the status overlay, and audio-processing controls. Wayfinder Aura Ultra
+      is an optional one-time purchase (launch price $29.99; regular price $60) that unlocks
+      GPU acceleration, additional speech and cleanup models, styles and voice profiles,
+      custom vocabulary, chunked long-form recording, and optional cloud backends. Ultra is
+      sold on wayfindercollective.io (not through Flathub billing); enter a license key in
+      Settings after purchase.
     </p>
     <p>Features:</p>
     <ul>
@@ -38,8 +39,8 @@
       <li>Hotkey Triggered — Press a key to start/stop recording</li>
       <li>Wayland &amp; X11 Support — Works on modern Linux desktops</li>
       <li>System Tray Integration — Runs quietly in the background</li>
-      <li>Multiple Whisper Models — Choose speed vs accuracy (tiny → large)</li>
-      <li>Smart Cleanup — Optional local LLM polishes grammar and tone</li>
+      <li>Base Dictation — Free local CPU transcription with optional minimal cleanup</li>
+      <li>Ultra Acceleration — GPU inference, additional models, styles, and long-form chunking</li>
       <li>Game Aware — Hotkeys pause automatically while a game is running</li>
       <li>Configurable Typing Speed — Instant paste or simulated typing</li>
     </ul>
@@ -65,7 +66,7 @@
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/overlay.png</image>
     </screenshot>
     <screenshot>
-      <caption>Tone-aware cleanup — Minimal, Professional, Casual, Dev, and more</caption>
+      <caption>Ultra tone-aware cleanup — Minimal, Professional, Casual, Dev, and more</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/style.png</image>
     </screenshot>
     <screenshot>

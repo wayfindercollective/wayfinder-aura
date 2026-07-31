@@ -1135,9 +1135,9 @@ SETTING_TOOLTIPS = {
     # GPU/Backend - Can dramatically change all timings
     "backend": (
         "Local transcription engine.\n\n"
-        "• Auto / default — always whisper.cpp (AMD, Intel, Apple, and NVIDIA).\n"
-        "  Recommended path; never auto-selects Faster-Whisper.\n\n"
-        "• whisper.cpp — Vulkan (AMD/Intel), CUDA, Metal, CPU. Supported default.\n\n"
+        "• Auto / default — Free uses Base on CPU with whisper.cpp. Ultra uses\n"
+        "  whisper.cpp and respects the GPU toggle. Never selects Faster-Whisper.\n\n"
+        "• whisper.cpp — CPU for Free; Vulkan/CUDA/Metal acceleration with Ultra.\n\n"
         "• Faster-Whisper (experimental) — Manual only, NVIDIA hosts only.\n"
         "  CTranslate2 CUDA path; not fully dogfooded. May fall back to slow CPU.\n"
         "  Ultra feature. Manual pick turns Auto off."
