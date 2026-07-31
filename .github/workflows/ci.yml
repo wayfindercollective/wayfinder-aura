@@ -500,9 +500,11 @@ jobs:
           flatpak run io.wayfindercollective.WayfinderAura \
             --audio-processing-self-test | tee /tmp/flatpak-audio-processing-self-test.log
           grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/flatpak-audio-processing-self-test.log
-          HOME=$(mktemp -d) xvfb-run -a \
-            flatpak run io.wayfindercollective.WayfinderAura \
-              --ui-renderer-self-test | tee /tmp/flatpak-ui-renderer-self-test.log
+          # Keep HOME unchanged: this is a per-user Flatpak installation under
+          # ~/.local/share/flatpak. Replacing HOME here makes `flatpak run`
+          # report the app as uninstalled before the renderer probe can start.
+          xvfb-run -a flatpak run io.wayfindercollective.WayfinderAura \
+            --ui-renderer-self-test | tee /tmp/flatpak-ui-renderer-self-test.log
           grep -Fq "UI_RENDERER_SELF_TEST_OK" /tmp/flatpak-ui-renderer-self-test.log
 
       - name: Build single-file bundle
