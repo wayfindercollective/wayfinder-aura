@@ -5,6 +5,23 @@ All notable changes to Wayfinder Aura are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.6] — 2026-07-31
+
+### Fixed
+
+- **AppImage dictation now records through the desktop PipeWire graph.** Frozen
+  builds prefer the host's killable `pw-record` client instead of opening a raw
+  ALSA device already owned by PipeWire, which previously produced silent
+  recordings or wedged the microphone on Bazzite/SteamOS. Host `parec` remains
+  a fallback for PulseAudio systems; ALSA-only distributions retain their
+  PortAudio fallback.
+- **Flatpak microphone capture uses its pinned Pulse/PipeWire boundary.** Both
+  package formats now run release-blocking input smoke tests against the same
+  capture helpers used by dictation and Mic Test.
+- **Manual microphone choices survive device refreshes.** Friendly desktop
+  source names are no longer overwritten with transient PortAudio names, and
+  Auto-detect remains Auto-detect across restarts.
+
 ## [1.1.5] — 2026-07-31
 
 Rendering + host-integration fixes from the first real customer-path install

@@ -115,6 +115,17 @@
   </supports>
 
   <releases>
+    <release version="1.1.6" date="2026-07-31">
+      <description>
+        <p>Reliable microphone capture in distributed Linux packages:</p>
+        <ul>
+          <li>AppImage dictation records through the host PipeWire graph instead of opening raw ALSA devices that can return silence or wedge on Bazzite and SteamOS</li>
+          <li>Flatpak capture uses its pinned Pulse/PipeWire sandbox boundary</li>
+          <li>AppImage and Flatpak builds now block release unless their real packaged microphone helpers receive audio frames</li>
+          <li>Manual microphone selections and Auto-detect mode remain stable across device refreshes and restarts</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.5" date="2026-07-31">
       <description>
         <p>Reliable packaged behavior on Bazzite, SteamOS, and modern Linux desktops:</p>

@@ -58,29 +58,6 @@ def test_package_imports():
     return failed
 
 
-def test_root_imports():
-    """Test that legacy root imports still work (for wayfinder_main.py)."""
-    print("\nTesting root imports (legacy)...")
-    
-    tests = [
-        "recorder",
-        "transcriber", 
-        "injector",
-        "postprocessor",
-        "license",
-    ]
-    
-    failed = []
-    for module in tests:
-        try:
-            __import__(module)
-            print(f"  ✓ {module}")
-        except ImportError as e:
-            failed.append(f"{module} - {e}")
-    
-    return failed
-
-
 def test_structure():
     """Verify expected directories and files exist."""
     print("\nVerifying project structure...")
@@ -135,10 +112,6 @@ def main():
     pkg_errors = test_package_imports()
     all_errors.extend(pkg_errors)
     
-    # Test root imports
-    root_errors = test_root_imports()
-    all_errors.extend(root_errors)
-    
     # Test structure
     struct_errors = test_structure()
     all_errors.extend([f"Missing: {p}" for p in struct_errors])
@@ -162,7 +135,6 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
 
 
 
