@@ -383,7 +383,7 @@ def _signal_existing_instance() -> bool:
 def _schedule_app_boot_self_test(
     app,
     argv: list[str] | None = None,
-    delay_ms: int = 3000,
+    delay_ms: int = 50,
 ) -> bool:
     """Prove the real GUI enters its event loop, then shut it down cleanly.
 
@@ -391,7 +391,9 @@ def _schedule_app_boot_self_test(
     PyInstaller/Tk/PortAudio process after 25 seconds. That external kill is
     flaky on hosted runners. The packaged probe still constructs the complete
     ``WayfinderApp`` and enters Tk's mainloop, but it exits through Aura's own
-    cleanup path after emitting a machine-checkable success marker.
+    cleanup path after the first mapped event-loop cycles. Delayed hardware and
+    network jobs have dedicated probes/tests and are intentionally outside this
+    hardware-less Xvfb boundary.
     """
     args = sys.argv if argv is None else argv
     if "--app-boot-self-test" not in args:

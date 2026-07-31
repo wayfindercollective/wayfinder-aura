@@ -79,9 +79,8 @@ def test_app_boot_self_test_schedules_clean_app_owned_exit(capsys):
     assert main._schedule_app_boot_self_test(
         app,
         argv=["wayfinder-aura", "--app-boot-self-test"],
-        delay_ms=25,
     )
-    assert scheduled[0][0] == 25
+    assert scheduled[0][0] == 50
 
     scheduled[0][1]()
 

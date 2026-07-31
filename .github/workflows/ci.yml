@@ -346,7 +346,9 @@ jobs:
           # runtime-dead artifact (v1.1.3's first attempt shipped a bundle
           # whose numpy died at import — strip-corrupted openblas — while
           # every static check passed). The app-owned probe constructs the full
-          # WayfinderApp, enters Tk's mainloop, and exits cleanly after 3s.
+          # WayfinderApp, maps it through Tk's mainloop, and exits cleanly.
+          # Delayed hardware/network jobs are covered by dedicated probes and
+          # tests; running those against a hardware-less Xvfb host is unstable.
           # timeout remains only as a hang guard; it is not the success path.
           # Runners have NO audio system at all, and PortAudio's native init
           # segfaults on zero-backend machines (tracked as app hardening; every
