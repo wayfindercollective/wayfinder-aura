@@ -8,6 +8,7 @@ venv/
 venv-gpu/
 .venv/
 ENV/
+*.egg-info/
 
 # PyInstaller build artifacts
 build/
