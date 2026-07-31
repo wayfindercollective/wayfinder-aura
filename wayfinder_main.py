@@ -506,7 +506,7 @@ class ToolTip:
         label = ctk.CTkLabel(
             frame,
             text=self.text,
-            font=("Inter", 12),  # module-scope: no font_sizes access
+            font=("DejaVu Sans", 12),  # module-scope: no font_sizes access
             text_color=COLORS["text_primary"],
             wraplength=260,
             justify="left",
@@ -589,7 +589,7 @@ class ConfettiOverlay(ctk.CTkFrame):
         ctk.CTkLabel(
             self,
             text="🎭 caricature mode unlocked",
-            font=("Inter", 15, "bold"),  # module-scope: no font_sizes access
+            font=("DejaVu Sans", 15, "bold"),  # module-scope: no font_sizes access
             text_color=COLORS["accent"],
         ).pack(padx=24, pady=(14, 4))
 
@@ -597,7 +597,7 @@ class ConfettiOverlay(ctk.CTkFrame):
         ctk.CTkLabel(
             self,
             text="🎉  ✨  🎭  ✨  🎉",
-            font=("Inter", 18),  # module-scope: no font_sizes access
+            font=("DejaVu Sans", 18),  # module-scope: no font_sizes access
             text_color=COLORS["text_primary"],
         ).pack(padx=24, pady=(0, 4))
 
@@ -605,7 +605,7 @@ class ConfettiOverlay(ctk.CTkFrame):
         ctk.CTkLabel(
             self,
             text="things are about to get silly (click to dismiss)",
-            font=("Inter", 11),  # module-scope: no font_sizes access
+            font=("DejaVu Sans", 11),  # module-scope: no font_sizes access
             text_color=COLORS["text_secondary"],
         ).pack(padx=24, pady=(0, 14))
 
@@ -695,7 +695,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.icon_label = ctk.CTkLabel(
             self.header,
             text="⚠",
-            font=("Inter", 14),  # module-scope: no font_sizes access
+            font=("DejaVu Sans", 14),  # module-scope: no font_sizes access
             text_color=COLORS["accent_yellow"],
         )
         self.icon_label.pack(side="left", padx=(0, 8))
@@ -703,7 +703,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.title_label = ctk.CTkLabel(
             self.header,
             text="Model Compatibility",
-            font=("Inter", 12, "bold"),  # module-scope: no font_sizes access
+            font=("DejaVu Sans", 12, "bold"),  # module-scope: no font_sizes access
             text_color=COLORS["text_bright"],
         )
         self.title_label.pack(side="left")
@@ -712,7 +712,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.issue_label = ctk.CTkLabel(
             self.content,
             text="",
-            font=("Inter", 11),  # module-scope: no font_sizes access
+            font=("DejaVu Sans", 11),  # module-scope: no font_sizes access
             text_color=COLORS["text_secondary"],
             wraplength=320,
             justify="left",
@@ -734,7 +734,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.suggestion_label = ctk.CTkLabel(
             self.suggestion_frame,
             text="",
-            font=("JetBrains Mono", 11),  # module-scope: no font_sizes access
+            font=("DejaVu Sans", 11),  # module-scope: no font_sizes access
             text_color=COLORS["accent"],
         )
         self.suggestion_label.pack(side="left", padx=10, pady=8)
@@ -793,7 +793,7 @@ class CompatibilityBanner(ctk.CTkFrame):
             rec_label = ctk.CTkLabel(
                 self.recommendations_frame,
                 text=f"• {rec}",
-                font=("Inter", 10),  # module-scope: no font_sizes access
+                font=("DejaVu Sans", 10),  # module-scope: no font_sizes access
                 text_color=COLORS["text_muted"],
                 wraplength=300,
                 justify="left",
@@ -876,7 +876,7 @@ class ModeSelector(ctk.CTkFrame):
             btn = ctk.CTkButton(
                 inner,
                 text=text,
-                font=("Inter", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
+                font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
                 fg_color=COLORS["bg_card"] if is_selected else "transparent",
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
@@ -901,7 +901,7 @@ class ModeSelector(ctk.CTkFrame):
             btn.configure(
                 fg_color=COLORS["bg_card"] if is_selected else "transparent",
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
-                font=("Inter", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
+                font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
             )
         
         # Call callback
@@ -921,7 +921,7 @@ class ModeSelector(ctk.CTkFrame):
                 btn.configure(
                     fg_color=COLORS["bg_card"] if is_selected else "transparent",
                     text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
-                    font=("Inter", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
+                    font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
                 )
 
 
@@ -3477,11 +3477,13 @@ def get_monitor_refresh_rate() -> int:
     """
     # Try xrandr first (works on X11 and XWayland)
     try:
+        from wayfinder.utils.hostexec import host_env
         result = subprocess.run(
             ["xrandr", "--current"],
             capture_output=True,
             text=True,
             timeout=2,
+            env=host_env(),
         )
         if result.returncode == 0:
             # Parse xrandr output for current refresh rate
@@ -3499,11 +3501,13 @@ def get_monitor_refresh_rate() -> int:
     
     # Try kscreen-doctor for KDE Plasma
     try:
+        from wayfinder.utils.hostexec import host_env
         result = subprocess.run(
             ["kscreen-doctor", "-o"],
             capture_output=True,
             text=True,
             timeout=2,
+            env=host_env(),
         )
         if result.returncode == 0:
             import re
@@ -3706,7 +3710,7 @@ class FloatingIndicator:
         self.label = ctk.CTkLabel(
             row,
             text=text,
-            font=("Geist Mono", 11) if self._font_exists("Geist Mono") else ("JetBrains Mono", 11),  # module-scope: no font_sizes access
+            font=("Geist Mono", 22) if self._font_exists("Geist Mono") else ("DejaVu Sans", 11),  # module-scope: no font_sizes access
             text_color=COLORS["text_bright"],
         )
         self.label.pack(side="left", padx=(0, 6))
@@ -4911,7 +4915,26 @@ class WayfinderApp(ctk.CTk):
 
         # Instance name (some DEs match this) — portal/desktop id without path.
         self.tk.call('tk', 'appname', get_portal_app_id())
-        
+
+        # Pixel-exact font rendering BEFORE any font/widget exists — otherwise
+        # Tk inflates every font by Xft.dpi/screen-dpi (2x on 200% desktops)
+        # while widget dimensions stay put. Font size tokens below are
+        # calibrated for this regime (see utils/tk_dpi.py).
+        from wayfinder.utils.tk_dpi import normalize_tk_font_dpi
+        _font_dpi = normalize_tk_font_dpi(self)
+        print(f"[ui] font rendering normalized to Xft.dpi={_font_dpi:g} (pixel-exact)")
+
+        # Widgets that fall back to CTk's theme default font (Roboto 13) must
+        # use the product typeface; size stays on the body token scale.
+        try:
+            _theme_font = ctk.ThemeManager.theme["CTkFont"]
+            for _plat in ("Linux", "Windows", "macOS"):
+                if _plat in _theme_font:
+                    _theme_font[_plat]["family"] = "DejaVu Sans"
+                    _theme_font[_plat]["size"] = 13
+        except Exception:
+            pass  # theme layout changed — default font stays, worst case wrong family
+
         self.config = load_config()
 
         # Merge remote model catalog (CDN) over built-in lists when available so
@@ -5276,9 +5299,13 @@ class WayfinderApp(ctk.CTk):
         # NOT window scaling - that would fight with manual window resizing
         ctk.set_widget_scaling(self.ui_scale)
         
-        # Save geometry when window is moved or resized (debounced)
+        # Save geometry when window is moved or resized (debounced).
+        # add="+": CTk's own <Configure> binding feeds its window-size tracker
+        # (_update_dimensions_event); replacing it froze the tracker at the
+        # 600x500 __init__ default, and every scale change snapped the window
+        # to that size ("tiny window on scale-down" field bug).
         self._geometry_save_pending = False
-        self.bind("<Configure>", self._on_window_configure)
+        self.bind("<Configure>", self._on_window_configure, add="+")
         
         if ICON_PATH.exists():
             try:
@@ -5680,7 +5707,9 @@ class WayfinderApp(ctk.CTk):
         # the panel can never run off-screen.
         try:
             import tkinter.font as _tkfont
-            _probe = _tkfont.Font(family=self.font_body[0], size=self.font_sizes["body"])
+            # Negative size = pixels: measures on the same pixel-exact path the
+            # rows render with (positive would be points, DPI-inflated by Xft).
+            _probe = _tkfont.Font(family=self.font_body[0], size=-self.font_sizes["body"])
             text_w = max(_probe.measure(str(v)) for v in values)
         except Exception:
             text_w = int(max((len(str(v)) for v in values), default=0)
@@ -5827,12 +5856,23 @@ class WayfinderApp(ctk.CTk):
     
     def scale_ui(self, factor: float):
         """Scale the UI by the given factor."""
-        new_scale = self.ui_scale * factor
+        self._set_scale(self.ui_scale * factor)
+
+    def scale_ui_step(self, delta: float):
+        """Step the UI scale by a fixed amount (header ± buttons).
+
+        Additive 25% steps: each _apply_scale rebuilds the whole layout, so
+        getting from 200% to 100% must not take a dozen slow clicks (field
+        feedback). The Settings slider remains the fine control.
+        """
+        self._set_scale(self.ui_scale + delta)
+
+    def _set_scale(self, new_scale: float):
         # Clamp between 0.7 and 2.5 (supports up to 4K displays)
         new_scale = max(0.7, min(2.5, new_scale))
         # Snap to 5% increments for cleaner values
         new_scale = round(new_scale * 20) / 20
-        
+
         if abs(new_scale - self.ui_scale) > 0.01:
             self.ui_scale = new_scale
             self.config["ui_scale"] = new_scale
@@ -5873,27 +5913,29 @@ class WayfinderApp(ctk.CTk):
             self.scale_value_label.configure(text=f"{int(self.ui_scale * 100)}%")
     
     def setup_ui(self) -> None:
-        # === Premium Typography System (2025) ===
-        # Inter & Segoe UI Variable: designed for screen legibility at all weights
-        # Light text on dark BG looks thinner - use Semi-Bold/Bold for headers
-        self.font_display = ("Inter", "Segoe UI Variable", "SF Pro Display", "Ubuntu")
-        self.font_header = ("Inter", "Segoe UI Variable", "SF Pro Display", "Ubuntu")
-        self.font_body = ("Inter", "Segoe UI Variable", "SF Pro Text", "system-ui")
-        self.font_mono = ("JetBrains Mono", "Cascadia Code", "SF Mono", "monospace")
-
-        # The UI references these as font_*[0]. In the Flatpak the design fonts (Inter /
-        # JetBrains Mono) aren't installed, so Tk 8.6 substitutes a font lacking the UI's
-        # symbol glyphs (sidebar ∿ ⚓ ✎ ◷, etc.) and — unlike the host's Tk — does NOT fall
-        # back, rendering them as literal \uXXXX. DejaVu Sans / DejaVu Sans Mono ship in the
-        # runtime and cover both Latin and those symbols, so make them the primary family.
-        # Gated to IS_FLATPAK — the from-source build resolves the design fonts on the host.
-        if IS_FLATPAK:
-            self.font_display = ("DejaVu Sans",) + self.font_display
-            self.font_header = ("DejaVu Sans",) + self.font_header
-            self.font_body = ("DejaVu Sans",) + self.font_body
-            self.font_mono = ("DejaVu Sans Mono",) + self.font_mono
+        # === Typography ===
+        # DejaVu Sans IS the product typeface, by decision (2026-07-30): the
+        # look the product was designed/approved against always rendered as
+        # DejaVu (the "Inter"/"JetBrains Mono" families were never installed
+        # anywhere, so fontconfig substituted DejaVu throughout — including
+        # the mono value chips). When the real design fonts finally shipped
+        # in 1.1.5 the owner rejected the change ("styling is SUPER off").
+        # DejaVu Sans is bundled (assets/fonts/dejavu) so this renders
+        # identically on every machine; it also covers the log symbol glyphs.
+        self.font_display = ("DejaVu Sans", "Ubuntu", "sans-serif")
+        self.font_header = ("DejaVu Sans", "Ubuntu", "sans-serif")
+        self.font_body = ("DejaVu Sans", "Ubuntu", "sans-serif")
+        # "Mono" contexts approved as DejaVu Sans too (see above) — keep the
+        # token so a deliberate mono flavor stays a one-line change.
+        self.font_mono = ("DejaVu Sans", "monospace")
         
-        # Font size tokens - optimized for dark mode readability
+        # Font size tokens — real pixels at ui_scale 1.0. Rendering is
+        # pixel-exact on every machine via normalize_tk_font_dpi (which fixes
+        # the AppImage's Tk otherwise inflating these 2x on HiDPI desktops).
+        # Values are the owner-approved originals — a 2x "recalibration" was
+        # tried and rejected in the field ("GINORMOUS"); widget fonts were
+        # already pixel-exact where the approved look was built. Keep in sync
+        # with theme.py FONT_SIZES and the CTk theme-default in __init__.
         self.font_sizes = {
             "display": 18,      # Main title
             "title": 15,        # Section titles - Semi-Bold
@@ -6259,7 +6301,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_primary"],
             font=(self.font_mono[0], 14),  # optical glyph size
             corner_radius=RADIUS["sm"],
-            command=lambda: self.scale_ui(0.9),
+            command=lambda: self.scale_ui_step(-0.25),
         )
         minus_btn.pack(side="left", padx=1)
         ToolTip(minus_btn, "Decrease UI Scale (Ctrl+-)")
@@ -6286,7 +6328,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_primary"],
             font=(self.font_mono[0], 14),  # optical glyph size
             corner_radius=RADIUS["sm"],
-            command=lambda: self.scale_ui(1.1),
+            command=lambda: self.scale_ui_step(0.25),
         )
         plus_btn.pack(side="left", padx=1)
         ToolTip(plus_btn, "Increase UI Scale (Ctrl++)")
@@ -9503,10 +9545,12 @@ class WayfinderApp(ctk.CTk):
             for sound_path in sound_paths:
                 if os.path.exists(sound_path):
                     try:
+                        from wayfinder.utils.hostexec import host_env
                         subprocess.Popen(
                             ["paplay", sound_path],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
+                            env=host_env(),
                         )
                         return
                     except:
@@ -13256,6 +13300,7 @@ class WayfinderApp(ctk.CTk):
         acceptable path for checkout/info links.
         """
         import shutil, subprocess, webbrowser
+        from wayfinder.utils.hostexec import host_env
         if IS_FLATPAK:
             for opener in (["gio", "open", url], ["xdg-open", url]):
                 if not shutil.which(opener[0]):
@@ -13265,6 +13310,22 @@ class WayfinderApp(ctk.CTk):
                     if r.returncode == 0:
                         self.log("🔗 Opening in your browser…")
                         return
+                except Exception:
+                    continue
+        else:
+            # AppImage/source: webbrowser.open inherits this process's env, and
+            # from the bundle that hands the browser jammy-era libraries — it can
+            # die on launch. Spawn the opener with a host-clean env instead.
+            for opener in (["xdg-open", url], ["gio", "open", url]):
+                if not shutil.which(opener[0]):
+                    continue
+                try:
+                    subprocess.Popen(
+                        opener, env=host_env(),
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    self.log("🔗 Opening in your browser…")
+                    return
                 except Exception:
                     continue
         try:

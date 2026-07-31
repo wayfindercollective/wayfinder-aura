@@ -406,9 +406,11 @@ def _pactl_input_sources() -> list[dict]:
     sandboxes without the socket). Monitor sources (sink loopbacks) are skipped — they
     are playback taps, not microphones.
     """
+    from wayfinder.utils.hostexec import host_env
+    _env = host_env()
     try:
         out = subprocess.run(["pactl", "list", "sources"],
-                             capture_output=True, text=True, timeout=3)
+                             capture_output=True, text=True, timeout=3, env=_env)
         if out.returncode != 0 or not out.stdout:
             return []
     except Exception:
@@ -417,7 +419,7 @@ def _pactl_input_sources() -> list[dict]:
     default_name = ""
     try:
         d = subprocess.run(["pactl", "get-default-source"],
-                           capture_output=True, text=True, timeout=3)
+                           capture_output=True, text=True, timeout=3, env=_env)
         if d.returncode == 0:
             default_name = d.stdout.strip()
     except Exception:

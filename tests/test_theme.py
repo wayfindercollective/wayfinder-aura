@@ -133,6 +133,10 @@ class TestFontSizes:
             assert value > 0, f"FONT_SIZES['{key}'] should be positive"
 
     def test_expected_size_values(self):
+        # Owner-approved original values — pixel-exact everywhere via
+        # utils/tk_dpi.normalize_tk_font_dpi. A 2x "recalibration" was tried
+        # and rejected in the field (2026-07-30): widget fonts were already
+        # pixel-exact where the approved look was built.
         assert FONT_SIZES["display"] == 18
         assert FONT_SIZES["title"] == 15
         assert FONT_SIZES["heading"] == 13

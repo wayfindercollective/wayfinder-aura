@@ -68,11 +68,13 @@ def get_sink_inputs() -> list[dict]:
         List of dicts with keys: id, volume_percent, app_name
     """
     try:
+        from wayfinder.utils.hostexec import host_env
         result = subprocess.run(
             ["pactl", "list", "sink-inputs"],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
+            env=host_env(),
         )
         if result.returncode != 0:
             return []
@@ -149,10 +151,12 @@ def set_sink_input_volume(sink_input_id: int, volume_percent: int) -> bool:
         # Clamp volume to reasonable range (allow over 100% but cap at 150%)
         volume_percent = max(0, min(150, volume_percent))
         
+        from wayfinder.utils.hostexec import host_env
         result = subprocess.run(
             ["pactl", "set-sink-input-volume", str(sink_input_id), f"{volume_percent}%"],
             capture_output=True,
-            timeout=5
+            timeout=5,
+            env=host_env(),
         )
         return result.returncode == 0
     except Exception as e:

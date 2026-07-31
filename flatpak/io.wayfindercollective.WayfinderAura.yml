@@ -387,6 +387,12 @@ modules:
       - mkdir -p ${FLATPAK_DEST}/lib/wayfinder-aura/assets/icons
       - install -Dm644 assets/icons/*.png -t ${FLATPAK_DEST}/lib/wayfinder-aura/assets/icons/
 
+      # Product fonts (DejaVu Sans; JetBrains Mono for the overlay) — /app/share/fonts is on
+      # the runtime's fontconfig path, so the UI gets its real typefaces instead
+      # of per-distro substitution.
+      - mkdir -p ${FLATPAK_DEST}/share/fonts
+      - cp -r assets/fonts/. ${FLATPAK_DEST}/share/fonts/
+
       # Launcher script
       - install -Dm755 flatpak/wayfinder-aura-launcher.sh ${FLATPAK_DEST}/bin/wayfinder-aura
       

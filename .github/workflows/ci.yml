@@ -301,6 +301,17 @@ jobs:
             || { echo "bundle is missing dbus-python bindings" >&2; exit 1; }
           grep -Eq "gi[/\\]_gi.*\.so" /tmp/pyi-contents.txt \
             || { echo "bundle is missing the PyGObject _gi extension" >&2; exit 1; }
+          # Design fonts MUST ship: without them fontconfig substitutes a random
+          # sans per distro and HiDPI text sizing regressed (1.1.4 field bug).
+          # DejaVu Sans is the product typeface by owner decision (2026-07-30).
+          test -f squashfs-root/usr/share/fonts/wayfinder-aura/dejavu/DejaVuSans.ttf \
+            || { echo "bundle is missing the DejaVu Sans product font" >&2; exit 1; }
+          grep -Fq "FONTCONFIG_FILE" squashfs-root/AppRun \
+            || { echo "AppRun does not expose bundled fonts to fontconfig" >&2; exit 1; }
+          # QtDBus MUST ship: overlay placement talks to KWin in-process (host
+          # qdbus dies against the bundle's older libstdc++).
+          grep -Eq "PyQt6[/\\]QtDBus" /tmp/pyi-contents.txt \
+            || { echo "bundle is missing PyQt6.QtDBus (KWin overlay placement)" >&2; exit 1; }
           # BOOT the bundle headlessly: content assertions can't catch a
           # runtime-dead artifact (v1.1.3's first attempt shipped a bundle
           # whose numpy died at import — strip-corrupted openblas — while

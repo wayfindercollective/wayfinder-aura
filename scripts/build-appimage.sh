@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-VERSION="1.1.4"
+VERSION="1.1.5"
 APP_NAME="WayfinderAura"
 APP_ID="io.wayfindercollective.WayfinderAura"
 APPDIR="AppDir"
@@ -313,6 +313,15 @@ if [ "$BUILD_MODE" = "--full" ]; then
     fi
 fi
 
+# ── Product fonts (DejaVu Sans; JetBrains Mono for the overlay) ──
+# Never installed on user machines — without them fontconfig substitutes a
+# random sans per distro (Noto on Fedora, DejaVu on Debian) and the UI reads
+# nothing like the design. AppRun points FONTCONFIG_FILE at a config that adds
+# this dir on top of the host's fonts.
+mkdir -p "$APPDIR/usr/share/fonts/wayfinder-aura"
+cp -r "$PROJECT_ROOT/assets/fonts/." "$APPDIR/usr/share/fonts/wayfinder-aura/"
+echo "   ✓ Product fonts bundled (DejaVu Sans, JetBrains Mono)"
+
 # ─── AppRun launcher ─────────────────────────────────────────────────────────
 
 cat > "$APPDIR/AppRun" << 'APPRUN_EOF'
@@ -326,6 +335,26 @@ export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
 
 # Tell the app we're running from an AppImage
 export APPDIR="${HERE}"
+
+# Make the bundled design fonts (Inter / JetBrains Mono) visible to
+# fontconfig ON TOP of the host's fonts. fontconfig has no "extra dir" env
+# var and its config can't expand arbitrary variables, so generate a tiny
+# config with the absolute AppDir path baked in. Best-effort: if anything
+# fails the app falls back to host font substitution (pre-1.1.5 behavior).
+WF_FC_DIR="${XDG_RUNTIME_DIR:-/tmp/wayfinder-aura-$(id -u)}/wayfinder-aura-fontconfig"
+if mkdir -p "$WF_FC_DIR" 2>/dev/null; then
+    cat > "$WF_FC_DIR/fonts.conf" << FCEOF
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <dir>${HERE}/usr/share/fonts/wayfinder-aura</dir>
+</fontconfig>
+FCEOF
+    if [ -s "$WF_FC_DIR/fonts.conf" ]; then
+        export FONTCONFIG_FILE="$WF_FC_DIR/fonts.conf"
+    fi
+fi
 
 # Inherit host Vulkan ICD if available (for GPU acceleration)
 if [ -z "$VK_ICD_FILENAMES" ]; then

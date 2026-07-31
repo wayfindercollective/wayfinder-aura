@@ -118,6 +118,9 @@ a = Analysis(
         'PyQt6.QtCore',
         'PyQt6.QtGui',
         'PyQt6.QtWidgets',
+        # In-process KWin scripting for overlay placement on KDE Wayland —
+        # host qdbus is unusable from the bundle (env/libstdc++ mismatch)
+        'PyQt6.QtDBus',
         # HTTP clients
         'requests',
         'httpx',

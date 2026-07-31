@@ -76,13 +76,16 @@ def integrate_appimage(log=print) -> bool:
         desktop_path.write_text(content, encoding="utf-8")
 
         # Refresh caches so the entry appears without a relog (best-effort).
+        # Host binaries — scrub the bundle's library path or they may not run.
+        from wayfinder.utils.hostexec import host_env
+        env = host_env()
         for cmd in (
             ["update-desktop-database", str(desktop_dir)],
             ["gtk-update-icon-cache", "-q", str(data / "icons" / "hicolor")],
         ):
             if shutil.which(cmd[0]):
                 try:
-                    subprocess.run(cmd, capture_output=True, timeout=10)
+                    subprocess.run(cmd, capture_output=True, timeout=10, env=env)
                 except Exception:
                     pass
 

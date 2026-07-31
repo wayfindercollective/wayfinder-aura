@@ -5,6 +5,48 @@ All notable changes to Wayfinder Aura are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.5] — 2026-07-30
+
+Rendering + host-integration fixes from the first real customer-path install
+of 1.1.4 (download from the site → run) on a 200%-scale KDE desktop.
+
+### Fixed
+
+- **Text rendered 2× too large on HiDPI desktops (AppImage).** The bundled
+  Tk 8.6.12 converts pixel font sizes through the screen DPI while Xft
+  renders them at the `Xft.dpi` resource (192 on 200% desktops) — every
+  widget font inflated 2× while widget dimensions stayed put (verified with
+  widget-level probes; Tk 8.6.13+ renders pixel-exact, which is why
+  from-source builds always looked right). The app now sets Tk's
+  pixels-per-point from `Xft.dpi` at startup, making the AppImage render
+  identically to the approved from-source look on every machine. Font size
+  tokens are unchanged.
+- **Overlay stuck mid-screen; placement/position controls did nothing
+  (AppImage on KDE).** KWin placement shelled out to `qdbus`, which is named
+  `qdbus-qt6` on Fedora and — worse — died loading the bundle's older
+  libstdc++ from the inherited `LD_LIBRARY_PATH`. Placement now talks to
+  KWin's scripting API in-process via Qt D-Bus (no host binary at all), with
+  a host-clean `qdbus`/`qdbus6`/`qdbus-qt6` fallback.
+- **Host tools launched with the bundle's libraries.** Every host-binary
+  spawn (ydotool, xdotool, systemctl/pkexec, pactl/paplay, xrandr,
+  kscreen-doctor, xdg-open for the Get Ultra checkout link, desktop-database
+  refreshers) now runs with a scrubbed environment that strips
+  bundle-owned path entries — the class of failure behind "browser doesn't
+  open" / "mic list empty" reports on newer distros.
+
+### Added
+
+- **The product typeface ships with the app.** The UI font is now DejaVu Sans
+  by decision — the typeface the product was actually designed and approved
+  against (the nominal Inter/JetBrains Mono families were never installed
+  anywhere, so fontconfig had silently substituted DejaVu all along). It is
+  bundled (with JetBrains Mono for the status overlay) and exposed to
+  fontconfig on top of the host's fonts, so the same build no longer looks
+  different on every distro (1.1.4 rendered Noto on Fedora).
+- **Coarser UI-scale stepping.** The header −/+ buttons now step 25% per
+  click (the Settings slider remains the fine control) — dropping from 200%
+  no longer takes a dozen full-relayout clicks.
+
 ## [1.1.4] — 2026-07-30
 
 ### Added

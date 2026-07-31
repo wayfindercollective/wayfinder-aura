@@ -19,6 +19,7 @@ from typing import Callable, Optional
 import requests
 
 from ..config import IS_APPIMAGE, IS_FLATPAK, APPDIR
+from ..utils.hostexec import host_env
 
 
 # ─── Model Catalog ───────────────────────────────────────────────
@@ -290,7 +291,7 @@ def install_ydotoold_user_service(log: 'LogCallback', done: 'DoneCallback') -> N
                 log("Found an existing user ydotoold.service — starting it…")
                 r = subprocess.run(
                     ["systemctl", "--user", "enable", "--now", "ydotoold.service"],
-                    capture_output=True, text=True, timeout=15,
+                    capture_output=True, text=True, timeout=15, env=host_env(),
                 )
                 if r.returncode == 0:
                     unit_name = "ydotoold.service"
@@ -321,7 +322,8 @@ def install_ydotoold_user_service(log: 'LogCallback', done: 'DoneCallback') -> N
                 )
                 for cmd in (["systemctl", "--user", "daemon-reload"],
                             ["systemctl", "--user", "enable", "--now", unit_name]):
-                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15,
+                                       env=host_env())
                     if r.returncode != 0:
                         detail = r.stderr.strip() or r.stdout.strip() or "(no output)"
                         done(False, f"{' '.join(cmd)} failed: {detail}")
@@ -702,7 +704,8 @@ def install_system_packages(
                 install_cmd = f"apt update -qq && apt install -y {' '.join(resolved)}"
                 cmd = ["pkexec", "bash", "-c", install_cmd]
 
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, env=host_env())
 
             for line in iter(proc.stdout.readline, ""):
                 log(line.rstrip())
@@ -719,16 +722,16 @@ def install_system_packages(
                         # NOT the system 'ydotoold' (STEAMDECK-INSTALL-LOG Issue 4). The input
                         # group needs a full logout to take effect — Issue 10.
                         subprocess.run(["systemctl", "--user", "enable", "--now", "ydotool.service"],
-                                       capture_output=True, timeout=30)
+                                       capture_output=True, timeout=30, env=host_env())
                         subprocess.run(["pkexec", "bash", "-c", f"usermod -aG input {user}"],
-                                       capture_output=True, timeout=30)
+                                       capture_output=True, timeout=30, env=host_env())
                         log("  ydotool.service (user) enabled; FULL logout needed for input group")
                     else:
                         subprocess.run(
                             ["pkexec", "bash", "-c",
                              "systemctl enable --now ydotoold && "
                              f"usermod -aG input {user}"],
-                            capture_output=True, timeout=30,
+                            capture_output=True, timeout=30, env=host_env(),
                         )
                         log("  ydotoold enabled (re-login needed for input group)")
 
@@ -1182,13 +1185,17 @@ def _detect_gpu_vendor() -> str:
 
 
 def _run_cmd(cmd: list[str], log: LogCallback, cwd: Optional[str] = None) -> None:
-    """Run a command, streaming output to log callback. Raises on failure."""
+    """Run a host command (git/cmake/make), streaming output. Raises on failure.
+
+    Host toolchain binaries must not see the bundle's library path.
+    """
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         cwd=cwd,
+        env=host_env(),
     )
     for line in iter(proc.stdout.readline, ""):
         log(line.rstrip())

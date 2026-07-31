@@ -51,11 +51,69 @@ if os.environ.get("XDG_SESSION_TYPE") == "wayland":
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
 
 
+try:
+    from wayfinder.utils.hostexec import host_env
+except ImportError:  # standalone script run — no bundle env to scrub
+    def host_env(overrides=None):
+        env = os.environ.copy()
+        if overrides:
+            env.update(overrides)
+        return env
+
+
+def _load_kwin_script(script_path: str) -> bool:
+    """Load+start a KWin script over D-Bus. In-process Qt D-Bus first.
+
+    The subprocess fallback historically ran plain `qdbus`, which fails two
+    ways in the AppImage: Fedora names the binary qdbus-qt6, and the host
+    binary dies loading the bundle's older libstdc++ from the inherited
+    LD_LIBRARY_PATH (proven live: "CXXABI_1.3.15 not found" → overlay stuck
+    at KWin's centered default, placement controls dead). QtDBus needs
+    neither a host binary nor an environment.
+    """
+    try:
+        from PyQt6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
+
+        bus = QDBusConnection.sessionBus()
+        if bus.isConnected():
+            iface = QDBusInterface(
+                "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus
+            )
+            if iface.isValid():
+                reply = iface.call("loadScript", script_path)
+                if reply.type() == QDBusMessage.MessageType.ReplyMessage:
+                    iface.call("start")
+                    return True
+    except Exception as e:
+        print(f"KWin QtDBus scripting failed: {e}", file=sys.stderr)
+
+    env = host_env()
+    for qdbus in ("qdbus6", "qdbus-qt6", "qdbus"):
+        try:
+            result = subprocess.run(
+                [qdbus, "org.kde.KWin", "/Scripting",
+                 "org.kde.kwin.Scripting.loadScript", script_path],
+                capture_output=True, text=True, timeout=2, env=env,
+            )
+        except FileNotFoundError:
+            continue
+        except Exception:
+            return False
+        if result.returncode == 0:
+            subprocess.run(
+                [qdbus, "org.kde.KWin", "/Scripting",
+                 "org.kde.kwin.Scripting.start"],
+                capture_output=True, timeout=1, env=env,
+            )
+            return True
+    return False
+
+
 def _force_kde_window_position(window_title: str, x: int, y: int, width: int, height: int) -> bool:
     """Force window position using KWin scripting - the ONLY way that works on Wayland."""
     try:
         import tempfile
-        
+
         # Create a KWin script that FORCES position via frameGeometry.
         # POSITION ONLY: width/height must come from the window's LIVE frame at
         # script-execution time, never the values Python captured. The script
@@ -91,16 +149,7 @@ def _force_kde_window_position(window_title: str, x: int, y: int, width: int, he
             script_path = f.name
         
         try:
-            result = subprocess.run([
-                "qdbus", "org.kde.KWin", "/Scripting",
-                "org.kde.kwin.Scripting.loadScript", script_path
-            ], capture_output=True, text=True, timeout=2)
-            
-            if result.returncode == 0:
-                subprocess.run([
-                    "qdbus", "org.kde.KWin", "/Scripting",
-                    "org.kde.kwin.Scripting.start"
-                ], capture_output=True, timeout=1)
+            if _load_kwin_script(script_path):
                 return True
         finally:
             try:
@@ -141,16 +190,7 @@ def _try_kde_window_setup(window_title: str, x: int, y: int, width: int, height:
             script_path = f.name
         
         try:
-            result = subprocess.run([
-                "qdbus", "org.kde.KWin", "/Scripting",
-                "org.kde.kwin.Scripting.loadScript", script_path
-            ], capture_output=True, text=True, timeout=2)
-            
-            if result.returncode == 0:
-                subprocess.run([
-                    "qdbus", "org.kde.KWin", "/Scripting",
-                    "org.kde.kwin.Scripting.start"
-                ], capture_output=True, timeout=1)
+            if _load_kwin_script(script_path):
                 return True
         finally:
             try:
@@ -203,16 +243,7 @@ def _setup_kwin_window_rule(x: int, y: int, width: int, height: int) -> bool:
             script_path = f.name
         
         try:
-            result = subprocess.run([
-                "qdbus", "org.kde.KWin", "/Scripting",
-                "org.kde.kwin.Scripting.loadScript", script_path
-            ], capture_output=True, text=True, timeout=2)
-            
-            if result.returncode == 0:
-                subprocess.run([
-                    "qdbus", "org.kde.KWin", "/Scripting",
-                    "org.kde.kwin.Scripting.start"
-                ], capture_output=True, timeout=1)
+            if _load_kwin_script(script_path):
                 return True
         finally:
             try:

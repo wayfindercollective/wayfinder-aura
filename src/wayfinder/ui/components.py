@@ -69,7 +69,7 @@ class ToolTip:
         label = ctk.CTkLabel(
             frame,
             text=self.text,
-            font=("Inter", 12),
+            font=("DejaVu Sans", 12),
             text_color=COLORS["text_primary"],
             wraplength=260,
             justify="left",
@@ -172,7 +172,7 @@ class ModeSelector(ctk.CTkFrame):
             btn = ctk.CTkButton(
                 inner,
                 text=text,
-                font=("Inter", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
+                font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
                 fg_color=COLORS["bg_card"] if is_selected else "transparent",
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
@@ -197,7 +197,7 @@ class ModeSelector(ctk.CTkFrame):
             btn.configure(
                 fg_color=COLORS["bg_card"] if is_selected else "transparent",
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
-                font=("Inter", 13, "bold" if is_selected else "normal"),
+                font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),
             )
         
         # Call callback
@@ -217,7 +217,7 @@ class ModeSelector(ctk.CTkFrame):
                 btn.configure(
                     fg_color=COLORS["bg_card"] if is_selected else "transparent",
                     text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
-                    font=("Inter", 13, "bold" if is_selected else "normal"),
+                    font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),
                 )
 
 
@@ -368,7 +368,7 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     return SETTING_TOOLTIPS.get(key, "")
 
 
-def create_section_header(parent, title: str, font_family: str = "Inter") -> ctk.CTkLabel:
+def create_section_header(parent, title: str, font_family: str = "DejaVu Sans") -> ctk.CTkLabel:
     """Create a styled section header label."""
     return ctk.CTkLabel(
         parent,
@@ -379,7 +379,7 @@ def create_section_header(parent, title: str, font_family: str = "Inter") -> ctk
     )
 
 
-def create_body_label(parent, text: str, font_family: str = "Inter") -> ctk.CTkLabel:
+def create_body_label(parent, text: str, font_family: str = "DejaVu Sans") -> ctk.CTkLabel:
     """Create a styled body text label."""
     return ctk.CTkLabel(
         parent,
@@ -446,7 +446,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.icon_label = ctk.CTkLabel(
             self.header,
             text="⚠",
-            font=("Inter", 14),
+            font=("DejaVu Sans", 14),
             text_color=COLORS["accent_yellow"],
         )
         self.icon_label.pack(side="left", padx=(0, 8))
@@ -454,7 +454,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.title_label = ctk.CTkLabel(
             self.header,
             text="Model Compatibility",
-            font=("Inter", 12, "bold"),
+            font=("DejaVu Sans", 12, "bold"),
             text_color=COLORS["text_bright"],
         )
         self.title_label.pack(side="left")
@@ -463,7 +463,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.issue_label = ctk.CTkLabel(
             self.content,
             text="",
-            font=("Inter", 11),
+            font=("DejaVu Sans", 11),
             text_color=COLORS["text_secondary"],
             wraplength=320,
             justify="left",
@@ -485,7 +485,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.suggestion_label = ctk.CTkLabel(
             self.suggestion_frame,
             text="",
-            font=("JetBrains Mono", 11),
+            font=("DejaVu Sans", 11),
             text_color=COLORS["accent"],
         )
         self.suggestion_label.pack(side="left", padx=10, pady=8)
@@ -544,7 +544,7 @@ class CompatibilityBanner(ctk.CTkFrame):
             rec_label = ctk.CTkLabel(
                 self.recommendations_frame,
                 text=f"• {rec}",
-                font=("Inter", 10),
+                font=("DejaVu Sans", 10),
                 text_color=COLORS["text_muted"],
                 wraplength=300,
                 justify="left",

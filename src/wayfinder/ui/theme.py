@@ -98,17 +98,23 @@ STATE_COLORS: dict[AppState, str] = {
 
 
 # === Typography System ===
-# Inter & Segoe UI Variable: designed for screen legibility at all weights
-# Light text on dark BG looks thinner - use Semi-Bold/Bold for headers
+# DejaVu Sans IS the product typeface, by decision (2026-07-30): the look the
+# product was designed and approved against always rendered as DejaVu (the
+# nominal "Inter"/"JetBrains Mono" families were never installed anywhere, so
+# fontconfig substituted DejaVu throughout — including the mono value chips).
+# DejaVu Sans is bundled (assets/fonts/dejavu) so every machine renders it.
+# Keep in sync with the self.font_* mirrors in wayfinder_main.py.
 
 FONTS: dict[str, tuple[str, ...]] = {
-    "display": ("Inter", "Segoe UI Variable", "SF Pro Display", "Ubuntu"),
-    "header": ("Inter", "Segoe UI Variable", "SF Pro Display", "Ubuntu"),
-    "body": ("Inter", "Segoe UI Variable", "SF Pro Text", "system-ui"),
-    "mono": ("JetBrains Mono", "Cascadia Code", "SF Mono", "monospace"),
+    "display": ("DejaVu Sans", "Ubuntu", "sans-serif"),
+    "header": ("DejaVu Sans", "Ubuntu", "sans-serif"),
+    "body": ("DejaVu Sans", "Ubuntu", "sans-serif"),
+    "mono": ("DejaVu Sans", "monospace"),
 }
 
-# Font size tokens - optimized for dark mode readability
+# Font size tokens — real pixels at ui_scale 1.0 (rendering is pixel-exact
+# via utils/tk_dpi.normalize_tk_font_dpi; owner-approved original values —
+# keep in sync with the self.font_sizes mirror in wayfinder_main.py)
 FONT_SIZES: dict[str, int] = {
     "display": 18,      # Main title
     "title": 15,        # Section titles - Semi-Bold

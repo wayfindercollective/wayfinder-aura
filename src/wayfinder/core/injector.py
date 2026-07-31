@@ -92,8 +92,12 @@ def _get_ydotool_env() -> dict:
     Setup self-provisions the user service — Codex review). Falls back to the
     first existing path when nothing is connectable, so error messages still
     name a concrete socket.
+
+    Built on host_env(): the ydotool client is host-only by contract, and a
+    host binary must not inherit the bundle's LD_LIBRARY_PATH.
     """
-    env = os.environ.copy()
+    from wayfinder.utils.hostexec import host_env
+    env = host_env()
 
     # A user-set YDOTOOL_SOCKET is authoritative (custom daemon setups) —
     # only probe the common locations when it's unset or stale.
@@ -331,8 +335,10 @@ def get_active_window() -> "str | None":
     during transcription (global-hotkey dictation). Best-effort; None on any failure.
     """
     try:
+        from wayfinder.utils.hostexec import host_env
         result = subprocess.run(
-            ["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=5
+            ["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=5,
+            env=host_env(),
         )
         if result.returncode == 0:
             wid = result.stdout.strip()
@@ -353,6 +359,10 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     else:
         key_delay = 2
 
+    # xdotool is a host binary — never feed it the bundle's library path.
+    from wayfinder.utils.hostexec import host_env
+    _env = host_env()
+
     # Refocus the record-start window ONLY if focus actually drifted off it. When it's already
     # focused (the common case) we must NOT windowactivate — a redundant activate immediately
     # before typing races the synthetic keys (window not input-ready for ~tens of ms) and
@@ -362,7 +372,8 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     if target_window:
         try:
             active = subprocess.run(
-                ["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=5
+                ["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=5,
+                env=_env,
             )
             already_focused = active.returncode == 0 and active.stdout.strip() == str(target_window)
         except Exception:
@@ -371,7 +382,7 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
             try:
                 subprocess.run(
                     ["xdotool", "windowactivate", "--sync", str(target_window)],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, timeout=5, env=_env,
                 )
                 import time as _t
                 _t.sleep(0.06)  # let the WM/app finish the focus-in before synthetic keys
@@ -390,6 +401,7 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
             capture_output=True,
             text=True,
             timeout=120,
+            env=_env,
         )
         if result.returncode != 0:
             error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"

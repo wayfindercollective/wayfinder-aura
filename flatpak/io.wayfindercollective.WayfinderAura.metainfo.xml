@@ -114,6 +114,18 @@
   </supports>
 
   <releases>
+    <release version="1.1.5" date="2026-07-30">
+      <description>
+        <p>Consistent rendering and desktop integration on every machine:</p>
+        <ul>
+          <li>Fixed text rendering roughly twice as large as intended on HiDPI (150–200%) desktops; the interface now looks identical on every display</li>
+          <li>The interface typeface now ships with the app instead of depending on what each distribution substitutes — the same build looks the same everywhere</li>
+          <li>Fixed the status overlay getting stuck mid-screen on KDE, and the placement and position controls that did nothing with it</li>
+          <li>Fixed system tools (typing service setup, browser links, microphone listing) being launched with the app's bundled libraries on newer distributions</li>
+          <li>UI scale buttons now step 25% per click, so large adjustments take a couple of clicks instead of a dozen</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.4" date="2026-07-30">
       <description>
         <p>Install experience and release-quality hardening:</p>

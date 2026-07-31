@@ -783,3 +783,82 @@ def test_flatpak_python_deps_are_offline_hashed_and_exclude_pyqt():
             assert source.get("type") == "file"
             assert source.get("url", "").startswith("https://")
             assert re.fullmatch(r"[0-9a-f]{64}", source.get("sha256", ""))
+
+
+# ── 1.1.5 rendering + host-spawn invariants ──────────────────────────────────
+
+
+def test_design_fonts_are_committed_with_licenses():
+    """DejaVu Sans is the product typeface BY DECISION (2026-07-30) — the
+    approved look always rendered as DejaVu via substitution; bundling makes
+    it deterministic. JetBrains Mono ships for the overlay pill only."""
+    fonts = REPO / "assets" / "fonts"
+    for path in (
+        fonts / "dejavu" / "DejaVuSans.ttf",
+        fonts / "dejavu" / "DejaVuSans-Bold.ttf",
+        fonts / "dejavu" / "LICENSE.txt",
+        fonts / "jetbrains-mono" / "JetBrainsMono-Regular.ttf",
+        fonts / "jetbrains-mono" / "JetBrainsMono-Bold.ttf",
+        fonts / "jetbrains-mono" / "OFL.txt",
+    ):
+        assert path.is_file(), f"missing bundled font asset: {path}"
+
+
+def test_ui_font_stacks_are_dejavu_first():
+    """Owner decision 2026-07-30: Inter/JetBrains-first stacks were rejected
+    in the field ('styling is SUPER off') — the approved product typeface is
+    DejaVu Sans everywhere, including the mono value chips."""
+    theme = (REPO / "src" / "wayfinder" / "ui" / "theme.py").read_text(encoding="utf-8")
+    main = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
+    for key in ("display", "header", "body", "mono"):
+        assert re.search(rf'"{key}": \("DejaVu Sans"', theme), f"theme FONTS[{key}] not DejaVu-first"
+    for attr in ("font_display", "font_header", "font_body", "font_mono"):
+        assert re.search(rf'self\.{attr} = \("DejaVu Sans"', main), f"{attr} not DejaVu-first"
+    assert 'font=("Inter"' not in main, "literal Inter font site survived the DejaVu decision"
+
+
+def test_appimage_bundles_fonts_and_fontconfig():
+    script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
+    assert "usr/share/fonts/wayfinder-aura" in script
+    assert "assets/fonts/." in script
+    # AppRun must expose the fonts to fontconfig without hiding host fonts
+    assert "FONTCONFIG_FILE" in script
+    assert '<include ignore_missing="yes">/etc/fonts/fonts.conf</include>' in script
+
+
+def test_flatpak_installs_design_fonts():
+    assert "share/fonts" in _manifest_text()
+
+
+def test_spec_ships_qtdbus_for_kwin_placement():
+    """Overlay placement talks to KWin in-process via QtDBus — host qdbus is
+    unusable from the bundle (env/libstdc++ mismatch, proven live)."""
+    spec = (REPO / "wayfinder-aura.spec").read_text(encoding="utf-8")
+    assert "'PyQt6.QtDBus'" in spec
+
+
+def test_overlay_uses_qtdbus_with_scrubbed_fallback():
+    overlay = (REPO / "src" / "wayfinder" / "ui" / "overlay.py").read_text(encoding="utf-8")
+    assert "QDBusInterface" in overlay
+    assert "qdbus-qt6" in overlay, "Fedora names the qdbus binary qdbus-qt6"
+    assert "host_env" in overlay
+
+
+def test_font_size_token_mirrors_stay_in_sync():
+    """theme.py FONT_SIZES and wayfinder_main self.font_sizes are mirrors."""
+    def extract(text: str, anchor: str) -> dict[str, int]:
+        block = re.search(anchor + r"\s*=\s*\{(.*?)\}", text, re.S)
+        assert block, f"could not locate token dict via {anchor!r}"
+        return {k: int(v) for k, v in re.findall(r'"(\w+)":\s*(\d+)', block.group(1))}
+
+    theme = extract(
+        (REPO / "src" / "wayfinder" / "ui" / "theme.py").read_text(encoding="utf-8"),
+        r"FONT_SIZES: dict\[str, int\]",
+    )
+    main = extract(
+        (REPO / "wayfinder_main.py").read_text(encoding="utf-8"),
+        r"self\.font_sizes",
+    )
+    assert theme == main, "font token mirrors drifted"
+    # Owner-approved original scale (the 2x recalibration was rejected)
+    assert theme["body"] == 13
