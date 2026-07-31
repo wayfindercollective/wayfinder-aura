@@ -2,6 +2,7 @@
 
 import os
 import sys
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,13 @@ def test_command_capture_stream_delivers_float_frames_and_closes():
     from wayfinder.utils.audio_input import CommandCaptureStream
 
     received = []
+    all_frames_received = threading.Event()
+
+    def callback(data, frames, _time, _status):
+        received.append((data.copy(), frames))
+        if sum(count for _block, count in received) >= 2048:
+            all_frames_received.set()
+
     command = [
         sys.executable,
         "-c",
@@ -26,13 +34,14 @@ def test_command_capture_stream_delivers_float_frames_and_closes():
         "test capture",
         command,
         os.environ.copy(),
-        lambda data, frames, _time, _status: received.append((data.copy(), frames)),
+        callback,
         channels=1,
         startup_timeout=1.0,
     )
 
     stream.start()
     assert stream.active
+    assert all_frames_received.wait(1.0)
     stream.close()
 
     assert received

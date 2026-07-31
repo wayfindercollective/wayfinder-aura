@@ -1061,6 +1061,14 @@ class TestRegenerateProfile:
         result = vp.regenerate_profile(mock_callback)
 
         assert result is True
+        # The worker writes into this test's temporary config directory. Wait
+        # for that promised background start to finish before fixture teardown;
+        # otherwise cleanup can race the final atomic profile save on CI.
+        deadline = time.monotonic() + 5.0
+        while (not mock_callback.called or vp.is_regenerating) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert mock_callback.called
+        assert not vp.is_regenerating
 
     def test_regen_updates_summary_via_callback(self, voice_profile_dir: Path):
         """After regen completes, the summary is updated from the LLM callback."""
