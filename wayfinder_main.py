@@ -15660,15 +15660,11 @@ class WayfinderApp(ctk.CTk):
         """Update the recorder with the new audio device setting."""
         # Re-resolve the audio device (handles intelligent selection)
         self._resolved_audio_device = resolve_audio_device(self.config)
-        
-        # Store the device name for persistence (device IDs can change)
-        if self._resolved_audio_device is not None:
-            try:
-                import sounddevice as sd
-                dev_info = sd.query_devices(self._resolved_audio_device)
-                self.config["audio_device_name"] = dev_info.get("name", "")
-            except Exception:
-                pass
+
+        # The selection handler already persisted the desktop source's friendly
+        # name. Never replace it with a transient PortAudio index/name here:
+        # packaged capture addresses PipeWire/Pulse sources by that saved name,
+        # and Auto-detect must keep audio_device_name=None across refreshes.
         
         # Repoint the warm mic at the new device and drop its current stream so the next
         # recording reopens on the chosen mic rather than the previously warmed one.

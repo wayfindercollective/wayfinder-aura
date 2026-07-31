@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -128,3 +129,33 @@ def test_stalled_packaged_capture_does_not_rescan_or_open_raw_alsa():
 
     rescan.assert_not_called()
     sounddevice.InputStream.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "saved_name",
+    ["Shure MV7 Mono", None],
+    ids=["manual-source", "auto-detect"],
+)
+def test_device_refresh_preserves_desktop_source_or_auto_mode(saved_name):
+    import wayfinder_main
+
+    warm_mic = MagicMock()
+    app = SimpleNamespace(
+        config={
+            "audio_device_name": saved_name,
+            "sample_rate": 16000,
+            "audio_preprocessing": "light",
+        },
+        warm_mic=warm_mic,
+    )
+    recorder = object()
+    with (
+        patch.object(wayfinder_main, "resolve_audio_device", return_value=7),
+        patch.object(wayfinder_main, "AudioRecorder", return_value=recorder),
+    ):
+        wayfinder_main.WayfinderApp.update_audio_device(app)
+
+    assert app.config["audio_device_name"] is saved_name
+    assert app._resolved_audio_device == 7
+    warm_mic.set_device.assert_called_once_with(7, preferred_name=saved_name)
+    assert app.recorder is recorder

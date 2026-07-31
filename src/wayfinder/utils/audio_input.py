@@ -13,12 +13,12 @@ Source runs keep their existing PortAudio path.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import shutil
 import subprocess
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 
