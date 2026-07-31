@@ -359,6 +359,9 @@ jobs:
             squashfs-root/AppRun --audio-output-self-test | tee /tmp/audio-self-test.log
           grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/audio-self-test.log
           grep -Fq "host PulseAudio/PipeWire" /tmp/audio-self-test.log
+          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
+            squashfs-root/AppRun --audio-input-self-test | tee /tmp/audio-input-self-test.log
+          grep -Fq "AUDIO_INPUT_SELF_TEST_OK" /tmp/audio-input-self-test.log
           # Medium depends on a dynamically imported scipy.signal module, and
           # preprocessing's stationary-noise guard is a release-critical defense
           # against confident Whisper hallucinations. Exercise the packaged path.
@@ -464,6 +467,8 @@ jobs:
         run: |
           pulseaudio --daemonize=yes --exit-idle-time=-1 || true
           pactl load-module module-null-sink sink_name=ci_null || true
+          pactl load-module module-null-source source_name=ci_mic || true
+          pactl set-default-source ci_mic || true
           flatpak remote-add --user --if-not-exists --no-gpg-verify \
             wayfinder-ci "$(pwd)/flatpak/repo"
           flatpak install --user -y wayfinder-ci \
@@ -474,6 +479,9 @@ jobs:
           flatpak run io.wayfindercollective.WayfinderAura \
             --audio-output-self-test | tee /tmp/flatpak-audio-self-test.log
           grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/flatpak-audio-self-test.log
+          flatpak run io.wayfindercollective.WayfinderAura \
+            --audio-input-self-test | tee /tmp/flatpak-audio-input-self-test.log
+          grep -Fq "AUDIO_INPUT_SELF_TEST_OK" /tmp/flatpak-audio-input-self-test.log
           flatpak run io.wayfindercollective.WayfinderAura \
             --audio-processing-self-test | tee /tmp/flatpak-audio-processing-self-test.log
           grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/flatpak-audio-processing-self-test.log

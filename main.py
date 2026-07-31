@@ -121,6 +121,32 @@ if "--audio-output-self-test" in sys.argv:
         sys.exit(1)
 
 
+# Packaged microphone probe. Unlike an import check, this opens the finished
+# AppImage/Flatpak capture boundary and requires real frames from its audio
+# server (CI provides a null source). It catches silent/wedged package routes.
+if "--audio-input-self-test" in sys.argv:
+    try:
+        from wayfinder.utils.audio_input import input_self_test
+
+        _audio_input_result = input_self_test()
+        print(
+            "AUDIO_INPUT_SELF_TEST_OK "
+            f"backend={_audio_input_result.backend!r} "
+            f"frames={_audio_input_result.frames} "
+            f"source={_audio_input_result.source_name!r}",
+            flush=True,
+        )
+        sys.exit(0)
+    except Exception as _audio_input_error:
+        print(
+            "AUDIO_INPUT_SELF_TEST_FAILED "
+            f"{_audio_input_error.__class__.__name__}: {_audio_input_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+
 # Packaged preprocessing probe. Medium silently degrades to Light when SciPy's
 # dynamically imported signal module is omitted from a bundle, while unbounded
 # normalization can turn stationary mic noise into hallucinated speech. Exercise

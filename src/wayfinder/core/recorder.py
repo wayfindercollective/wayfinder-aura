@@ -18,6 +18,13 @@ from typing import Callable
 
 import numpy as np
 
+from wayfinder.utils.audio_input import (
+    PackagedCaptureStalled,
+    PackagedCaptureUnavailable,
+    open_packaged_capture,
+    should_use_packaged_capture,
+)
+
 try:
     import sounddevice as sd
 except (ImportError, OSError) as _sounddevice_error:
@@ -504,6 +511,27 @@ def _pactl_input_sources() -> list[dict]:
     return result
 
 
+def _pulse_source_for_preference(preferred_name: str | None) -> str | None:
+    """Resolve a persisted friendly mic name to its Pulse/PipeWire source name."""
+    if not preferred_name:
+        return None
+    preferred = preferred_name.strip().lower()
+    base = preferred.split(":", 1)[0].split("(", 1)[0].strip()
+    sources = _pactl_input_sources()
+    for source in sources:
+        if preferred in (source["name"].lower(), source["description"].lower()):
+            return source["name"]
+    for source in sources:
+        description = source["description"].lower()
+        if (
+            preferred in description
+            or description in preferred
+            or (base and (base in description or description in base))
+        ):
+            return source["name"]
+    return None
+
+
 def _match_source_to_device(source: dict, devices, hostapis) -> int | None:
     """Map a pactl source to its PortAudio device index.
 
@@ -590,7 +618,9 @@ def list_input_devices(exclude_outputs: bool = False) -> list[dict]:
                             kw in s['description'].lower() for kw in PREFERRED_MIC_KEYWORDS),
                         'excluded': False,
                     })
-                if any(c['index'] is not None for c in curated):
+                # Packaged capture addresses these sources by PipeWire/Pulse
+                # name, so a PortAudio index is not required for them to work.
+                if should_use_packaged_capture() or any(c['index'] is not None for c in curated):
                     return curated
 
         for i, dev in enumerate(devices):
@@ -872,7 +902,8 @@ class WarmMic:
 
     def __init__(self, device: int | None = None, sample_rate: int = 16000,
                  channels: int = 1, idle_secs: float = 30.0,
-                 resolve_device: Callable[[], int | None] | None = None):
+                 resolve_device: Callable[[], int | None] | None = None,
+                 preferred_name: str | None = None):
         self.device = device
         self.target_sample_rate = sample_rate
         self.channels = channels
@@ -883,7 +914,8 @@ class WarmMic:
         # PortAudio (its device table is a snapshot from init and never updates), e.g.
         # a mic on a USB hub powered on after the app booted.
         self._resolve_device = resolve_device
-        self._stream: sd.InputStream | None = None
+        self.preferred_name = preferred_name
+        self._stream: object | None = None
         self._recording_sample_rate: int | None = None
         self._sink: Callable | None = None
         # RLock so acquire() can cancel the idle timer and open the stream while holding it,
@@ -934,6 +966,10 @@ class WarmMic:
             )
         try:
             self._open_chain()
+        except PackagedCaptureStalled:
+            # The subprocess has already been terminated safely. A PortAudio
+            # rescan/retry would cross back into the raw-device deadlock path.
+            raise
         except Exception as first_err:
             if self._abandoned_open:
                 # A watchdog-abandoned open may still be inside PortAudio; terminating
@@ -954,6 +990,33 @@ class WarmMic:
 
     def _open_chain(self) -> None:
         """Walk the fallback chain (configured -> system default -> None) once."""
+        if should_use_packaged_capture():
+            source_name = _pulse_source_for_preference(self.preferred_name)
+            try:
+                stream = open_packaged_capture(
+                    self._callback,
+                    self.target_sample_rate,
+                    self.channels,
+                    source_name=source_name,
+                )
+            except PackagedCaptureStalled:
+                # A connected-but-stalled desktop graph must not be followed by
+                # a raw ALSA open: that is the uncancellable AppImage deadlock.
+                raise
+            except PackagedCaptureUnavailable as exc:
+                # Preserve ALSA-only distro compatibility when there is no
+                # working PipeWire/Pulse server/client at all.
+                print(f"WarmMic: packaged capture unavailable ({exc}); trying PortAudio")
+            else:
+                with self._lock:
+                    self._stream = stream
+                    self._recording_sample_rate = self.target_sample_rate
+                print(
+                    f"WarmMic: using {stream.backend} capture"
+                    + (f" ({source_name})" if source_name else " (system default)")
+                )
+                return
+
         fallbacks: list[int | None] = []
         if self.device is not None:
             fallbacks.append(self.device)
@@ -1017,6 +1080,8 @@ class WarmMic:
         with self._lock:
             self._cancel_idle_timer()
             self._sink = sink
+            if self._stream is not None and not bool(getattr(self._stream, "active", True)):
+                self._close_stream()
             if self._stream is None:
                 self._open()
             return self.device
@@ -1085,10 +1150,11 @@ class WarmMic:
             self._sink = None
         self._close_stream()
 
-    def set_device(self, device: int | None) -> None:
+    def set_device(self, device: int | None, preferred_name: str | None = None) -> None:
         """Point at a new device and drop the warm stream so the next acquire reopens on it."""
         with self._lock:
             self.device = device
+            self.preferred_name = preferred_name
         self._close_stream()
 
     @property

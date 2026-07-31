@@ -5067,6 +5067,7 @@ class WayfinderApp(ctk.CTk):
             device=self._resolved_audio_device,
             sample_rate=self.config["sample_rate"],
             idle_secs=self.config.get("mic_warm_idle_secs", 30.0),
+            preferred_name=self.config.get("audio_device_name"),
             # Called after a PortAudio rescan when every input fails: re-resolves the
             # user's saved mic BY NAME against the fresh device table. Covers the
             # boot-while-mic-off case (USB-hub mic powered on after the app started) —
@@ -14644,6 +14645,7 @@ class WayfinderApp(ctk.CTk):
                 channels=1,
                 device=device_id,
                 preprocessing=preprocessing,
+                warm_mic=getattr(self, "warm_mic", None),
             )
             self._mic_test_recorder.start()
             self._mic_test_recording = True
@@ -15671,7 +15673,10 @@ class WayfinderApp(ctk.CTk):
         # Repoint the warm mic at the new device and drop its current stream so the next
         # recording reopens on the chosen mic rather than the previously warmed one.
         if getattr(self, "warm_mic", None) is not None:
-            self.warm_mic.set_device(self._resolved_audio_device)
+            self.warm_mic.set_device(
+                self._resolved_audio_device,
+                preferred_name=self.config.get("audio_device_name"),
+            )
 
         # Update standard recorder
         self.recorder = AudioRecorder(
