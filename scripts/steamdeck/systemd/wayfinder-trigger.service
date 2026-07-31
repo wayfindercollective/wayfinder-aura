@@ -8,7 +8,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/home/deck/.local/bin/wayfinder-trigger-daemon.py
+ExecStart=%h/.local/bin/wayfinder-trigger-daemon.py
 Restart=on-failure
 RestartSec=3
 StandardOutput=append:/tmp/wayfinder-trigger.log

@@ -13,6 +13,8 @@ set -euo pipefail
 BIN_DIR="${HOME}/.local/bin"
 UNIT_DIR="${HOME}/.config/systemd/user"
 DROPIN_DIR="${UNIT_DIR}/wayfinder-aura.service.d"
+APPLICATION_DIR="${HOME}/.local/share/applications"
+ICON_DIR="${HOME}/.local/share/icons/hicolor/256x256/apps"
 
 ACTIVE_SERVICES=(
   wayfinder-aura.service
@@ -24,6 +26,9 @@ ACTIVE_SERVICES=(
 INSTALLED_FILES=(
   "${BIN_DIR}/wayfinder-trigger-daemon.py"
   "${BIN_DIR}/wayfinder-mode-supervisor.py"
+  "${BIN_DIR}/wayfinder-aura-show-or-start"
+  "${APPLICATION_DIR}/wayfinder-aura.desktop"
+  "${ICON_DIR}/io.wayfindercollective.WayfinderAura.png"
   "${UNIT_DIR}/wayfinder-trigger.service"
   "${UNIT_DIR}/wayfinder-mode-supervisor.service"
   "${UNIT_DIR}/wayfinder-aura.service"

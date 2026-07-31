@@ -273,6 +273,66 @@ def test_appimage_full_build_has_cpu_fallback_when_vulkan_toolchain_is_missing()
     assert 'LLAMA_BUILD="$LLAMA_DIR/build-vulkan"' in script
     assert 'LLAMA_BUILD="$LLAMA_DIR/build-cpu"' in script
     assert "Falling back to CPU-only llama.cpp" in script
+    assert 'whisper-cli-cpu' in script
+    assert 'whisper-server-cpu' in script
+    assert 'llama-simple-cpu' in script
+    assert '--target "${targets[@]}"' in script
+
+    job = _workflow_job_body("build-appimage")
+    assert "test -x squashfs-root/usr/bin/whisper-server" in job
+    assert "test -x squashfs-root/usr/bin/whisper-cli-cpu" in job
+    assert "test -x squashfs-root/usr/bin/whisper-server-cpu" in job
+    assert "test -x squashfs-root/usr/bin/llama-simple-cpu" in job
+    assert "CPU safety twin unexpectedly links the Vulkan backend" in job
+
+
+def test_appimage_native_binaries_use_the_steam_deck_cpu_baseline():
+    """Release binaries must not inherit AVX-512 from their build worker."""
+    script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
+
+    assert 'GGML_CPU_BASELINE_OPTS=(' in script
+    assert '-DGGML_NATIVE=OFF' in script
+    assert '-DGGML_SSE42=ON' in script
+    assert '-DGGML_AVX=ON' in script
+    assert '-DGGML_AVX2=ON' in script
+    assert '-DGGML_FMA=ON' in script
+    assert '-DGGML_F16C=ON' in script
+    assert '-DGGML_BMI2=ON' in script
+    assert '-DGGML_AVX512=OFF' in script
+    assert '"${GGML_CPU_BASELINE_OPTS[@]}"' in script
+
+
+def test_appimage_keeps_alsa_core_host_owned_and_ci_tests_real_playback():
+    """Host pcm plugins and libasound must be one distro-matched ABI set."""
+    spec = (REPO / "wayfinder-aura.spec").read_text(encoding="utf-8")
+    script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
+    job = _workflow_job_body("build-appimage")
+
+    assert "def use_host_linux_audio_abi" in spec
+    assert "'libasound.so'" in spec
+    assert "'libpipewire-0.3.so'" in spec
+    assert "use_host_linux_audio_abi(remove_duplicate_entries(a.binaries))" in spec
+    assert 'rm -f "$APPDIR/usr/lib/libasound.so" "$APPDIR/usr/lib/libasound.so.2"' in script
+    assert "pyi-archive_viewer -l" in job
+    assert "bundle contains host-owned audio-server libraries" in job
+    assert "--audio-output-self-test" in job
+    assert "AUDIO_OUTPUT_SELF_TEST_OK" in job
+    assert "--audio-processing-self-test" in job
+    assert "AUDIO_PROCESSING_SELF_TEST_OK" in job
+
+
+def test_flatpak_audio_stack_is_runtime_coherent_and_release_probed():
+    manifest = _manifest_text()
+    job = _workflow_job_body("build-flatpak")
+
+    assert "--socket=pulseaudio" in manifest
+    assert "-DPA_USE_ALSA=ON" in manifest
+    assert "-DPA_USE_JACK=OFF" in manifest
+    assert "flatpak run io.wayfindercollective.WayfinderAura" in job
+    assert "--audio-output-self-test" in job
+    assert "AUDIO_OUTPUT_SELF_TEST_OK" in job
+    assert "--audio-processing-self-test" in job
+    assert "AUDIO_PROCESSING_SELF_TEST_OK" in job
 
 
 def test_appimage_builder_prints_build_mode_after_argument_parsing():
@@ -283,13 +343,47 @@ def test_appimage_builder_prints_build_mode_after_argument_parsing():
     assert parse_loop < banner
 
 
+def test_appimage_builder_allows_non_destructive_local_output_name():
+    script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
+
+    assert 'OUTPUT_NAME="${OUTPUT_NAME:-Wayfinder_Aura-${VERSION}-${ARCH}.AppImage}"' in script
+
+
 def test_appimage_builder_fails_fast_without_tkinter():
     script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
 
+    assert 'PYTHON_BIN="${PYTHON_BIN:-python3}"' in script
+    assert '"$PYTHON_BIN" -m PyInstaller' in script
     assert "import tkinter" in script
-    assert "python3 tkinter support not found" in script
+    assert "Tkinter support not found for $PYTHON_BIN" in script
     assert "sudo dnf install python3-tkinter" in script
     assert "sudo apt install python3-tk" in script
+    assert "require_compatible_tk_renderer" in script
+    assert "xvfb-run" in script
+    assert "Tk must be built with Xft" in script
+
+
+def test_pyinstaller_spec_collects_portable_python_tk_libraries():
+    """uv Python's combined Tcl/Tk 9 library evades normal hook discovery."""
+    spec = (REPO / "wayfinder-aura.spec").read_text(encoding="utf-8")
+
+    assert "def _python_standalone_tk_binaries" in spec
+    assert "Path(sys.base_prefix) / 'lib'" in spec
+    assert "'libtcl*.so*'" in spec
+    assert "'libtk*.so*'" in spec
+    assert "binaries=PYTHON_STANDALONE_TK_BINARIES" in spec
+
+
+def test_release_artifacts_probe_real_xft_renderer():
+    workflow = _workflow_text()
+    appimage = _workflow_job_body("build-appimage")
+    flatpak = _workflow_job_body("build-flatpak")
+
+    assert "--ui-renderer-self-test" in appimage
+    assert "--ui-renderer-self-test" in flatpak
+    assert appimage.count("UI_RENDERER_SELF_TEST_OK") >= 1
+    assert flatpak.count("UI_RENDERER_SELF_TEST_OK") >= 1
+    assert "xvfb" in workflow
 
 
 def test_premium_storefront_defaults_are_consistent_across_release_surfaces():
@@ -738,8 +832,8 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
     assert "whisper-cli-cpu" in manifest
     assert "whisper-server-cpu" in manifest
     assert "llama-simple-cpu" in manifest
-    # Vulkan ON for the primary whisper/llama modules (free tier promises GPU
-    # on Tiny/Base — CPU-only Flatpak is not viable). The historic CI failure
+    # Vulkan ON for the primary whisper/llama modules (Ultra needs GPU and the
+    # Free benchmark shows a GPU upgrade preview). The historic CI failure
     # ("Failed to fork" at mul_mm shader gen) was fork-ENOMEM under default
     # heuristic overcommit on runners, fixed by the CI memory-headroom step
     # (overcommit=1 + swap) — verified by a resource-rich local build linking
@@ -819,11 +913,18 @@ def test_ui_font_stacks_are_dejavu_first():
 
 def test_appimage_bundles_fonts_and_fontconfig():
     script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
+    spec = (REPO / "wayfinder-aura.spec").read_text(encoding="utf-8")
+    entrypoint = (REPO / "main.py").read_text(encoding="utf-8")
     assert "usr/share/fonts/wayfinder-aura" in script
     assert "assets/fonts/." in script
     # AppRun must expose the fonts to fontconfig without hiding host fonts
     assert "FONTCONFIG_FILE" in script
     assert '<include ignore_missing="yes">/etc/fonts/fonts.conf</include>' in script
+    # A directly-run PyInstaller binary has no AppRun wrapper; it must still
+    # expose the same product fonts so dogfood does not silently use Noto/fixed.
+    assert "('assets/fonts', 'assets/fonts')" in spec
+    assert "def _configure_frozen_fontconfig" in entrypoint
+    assert 'os.environ["FONTCONFIG_FILE"]' in entrypoint
 
 
 def test_flatpak_installs_design_fonts():

@@ -57,6 +57,29 @@ class TestTranscriptionBackends:
 
         assert isinstance(backend, OpenAIWhisperBackend)
 
+    @pytest.mark.parametrize(
+        "backend_id",
+        ["groq_whisper", "openai_whisper", "faster_whisper"],
+    )
+    def test_free_config_cannot_execute_paid_backend(
+        self, backend_id, sample_config, monkeypatch
+    ):
+        from wayfinder.core.transcriber import WhisperCppBackend, get_backend
+
+        monkeypatch.setattr(
+            "wayfinder.license.FeatureGate.has_feature", lambda self, f: False
+        )
+        sample_config.update({
+            "transcription_backend": backend_id,
+            "model_path": "/models/ggml-base.en.bin",
+            "whisper_server_mode": False,
+        })
+
+        backend = get_backend(sample_config)
+
+        assert isinstance(backend, WhisperCppBackend)
+        assert backend.use_gpu is False
+
     def test_large_model_downgrade_never_points_at_missing_path(self, sample_config, tmp_path, monkeypatch):
         """Regression: unlicensed + a large local model must downgrade to a free model that
         EXISTS in the same dir — never a hardcoded missing path. The old code set
@@ -94,8 +117,8 @@ class TestTranscriptionBackends:
         assert os.path.basename(resolved) == "ggml-base.en.bin"
         assert "large" not in os.path.basename(resolved).lower()
 
-    def test_free_gpu_enabled_for_base_model(self, sample_config, monkeypatch):
-        """Free tier may use GPU when the active model is Base/Tiny."""
+    def test_free_gpu_disabled_for_base_model(self, sample_config, monkeypatch):
+        """Free Base transcription remains CPU-only even if config requests GPU."""
         from wayfinder.core.transcriber import get_backend
 
         monkeypatch.setattr("wayfinder.license.FeatureGate.has_feature", lambda self, f: False)
@@ -104,7 +127,7 @@ class TestTranscriptionBackends:
         sample_config["use_gpu"] = True
         sample_config["whisper_server_mode"] = False
         backend = get_backend(sample_config)
-        assert getattr(backend, "use_gpu", None) is True
+        assert getattr(backend, "use_gpu", None) is False
 
     def test_free_gpu_disabled_for_small_model(self, sample_config, monkeypatch):
         """Free tier must not get GPU on Small — that is Ultra."""
@@ -132,6 +155,64 @@ class TestTranscriptionBackends:
         sample_config["whisper_server_mode"] = False
         backend = get_backend(sample_config)
         assert getattr(backend, "use_gpu", None) is True
+
+    def test_free_config_cannot_inject_custom_vocabulary(
+        self, sample_config, monkeypatch
+    ):
+        from wayfinder.core.transcriber import get_backend
+
+        monkeypatch.setattr(
+            "wayfinder.license.FeatureGate.has_feature", lambda self, f: False
+        )
+        sample_config.update({
+            "model_path": "/models/ggml-base.en.bin",
+            "whisper_server_mode": False,
+            "custom_vocabulary": ["PaidTerm"],
+        })
+
+        backend = get_backend(sample_config)
+
+        assert backend.custom_vocabulary == []
+
+    def test_ultra_custom_vocabulary_reaches_backend(
+        self, sample_config, monkeypatch
+    ):
+        from wayfinder.core.transcriber import get_backend
+
+        monkeypatch.setattr(
+            "wayfinder.license.FeatureGate.has_feature",
+            lambda self, f: f == "custom_vocabulary",
+        )
+        sample_config.update({
+            "model_path": "/models/ggml-base.en.bin",
+            "whisper_server_mode": False,
+            "custom_vocabulary": ["Wayfinder"],
+        })
+
+        backend = get_backend(sample_config)
+
+        assert backend.custom_vocabulary == ["Wayfinder"]
+
+    def test_dev_builtin_vocabulary_belongs_to_tone_feature(
+        self, sample_config, monkeypatch
+    ):
+        from wayfinder.core.transcriber import DEV_VOCABULARY, get_backend
+
+        monkeypatch.setattr(
+            "wayfinder.license.FeatureGate.has_feature",
+            lambda self, f: f == "tone_system",
+        )
+        sample_config.update({
+            "model_path": "/models/ggml-base.en.bin",
+            "whisper_server_mode": False,
+            "output_tone": "dev",
+            "custom_vocabulary": ["UnlicensedCustomTerm"],
+        })
+
+        backend = get_backend(sample_config)
+
+        assert DEV_VOCABULARY[0] in backend.custom_vocabulary
+        assert "UnlicensedCustomTerm" not in backend.custom_vocabulary
 
 
 class TestWhisperCppBackend:
@@ -1389,6 +1470,7 @@ class TestGpuCpuFallback:
         audio.write_bytes(b"\x00")
         backend = WhisperCppBackend(
             whisper_binary=str(gpu), model_path=str(model), timeout=10,
+            use_gpu=True,
         )
         return backend, str(audio)
 
@@ -1451,7 +1533,62 @@ class TestGpuCpuFallback:
     def test_cpu_only_install_unaffected(self, tmp_path):
         """From-source installs (no sibling) keep working exactly as before."""
         backend, audio = self._backend(tmp_path, gpu_body='echo "normal text"', cpu_body=None)
+        backend.use_gpu = False
         assert backend.transcribe(audio) == "normal text"
+
+    def test_explicit_cpu_uses_packaged_cpu_binary_only(self, tmp_path):
+        """Unchecked GPU must not even probe the packaged Vulkan executable."""
+        from wayfinder.core.transcriber import WhisperCppBackend
+
+        gpu_marker = tmp_path / "gpu-started"
+        gpu = tmp_path / "whisper-cli"
+        self._write_stub(gpu, f'touch "{gpu_marker}"; echo gpu-text')
+        cpu = tmp_path / "whisper-cli-cpu"
+        self._write_stub(
+            cpu,
+            'if [ "$1" = "--help" ]; then echo "--no-gpu --no-timestamps"; '
+            'exit 0; fi; echo cpu-text',
+        )
+        model = tmp_path / "model.bin"; model.write_bytes(b"x")
+        audio = tmp_path / "audio.wav"; audio.write_bytes(b"x")
+        backend = WhisperCppBackend(
+            whisper_binary=str(gpu), model_path=str(model), use_gpu=False
+        )
+
+        assert backend.transcribe(str(audio)) == "cpu-text"
+        assert not gpu_marker.exists()
+
+    def test_explicit_gpu_uses_gpu_binary(self, tmp_path):
+        backend, audio = self._backend(
+            tmp_path, gpu_body="echo gpu-text", cpu_body="echo cpu-text"
+        )
+
+        assert backend.use_gpu is True
+        assert backend.transcribe(audio) == "gpu-text"
+
+
+class TestPackagedServerCpuRouting:
+    def _backend(self, tmp_path, *, use_gpu):
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        gpu = tmp_path / "whisper-server"; gpu.write_text("#!/bin/sh\n"); gpu.chmod(0o755)
+        cpu = tmp_path / "whisper-server-cpu"; cpu.write_text("#!/bin/sh\n"); cpu.chmod(0o755)
+        model = tmp_path / "ggml-base.en.bin"; model.write_bytes(b"x")
+        return WhisperServerBackend(
+            whisper_server_binary=str(gpu), model_path=str(model), use_gpu=use_gpu
+        )
+
+    def test_cpu_mode_starts_cpu_server_without_gpu_flag(self, tmp_path):
+        attempts = self._backend(tmp_path, use_gpu=False)._server_cmd_attempts(8178)
+
+        assert attempts[0][0].endswith("whisper-server-cpu")
+        assert "-ng" not in attempts[0]
+
+    def test_gpu_mode_starts_gpu_server_first(self, tmp_path):
+        attempts = self._backend(tmp_path, use_gpu=True)._server_cmd_attempts(8178)
+
+        assert attempts[0][0].endswith("whisper-server")
+        assert "-ng" not in attempts[0]
 
 
 class TestGpuRecoveryProbe:
@@ -1484,6 +1621,7 @@ class TestGpuRecoveryProbe:
         audio.write_bytes(b"\x00")
         return WhisperCppBackend(
             whisper_binary=str(gpu), model_path=str(model), timeout=10,
+            use_gpu=True,
         ), str(audio)
 
     def test_fallback_logs_to_registered_app_logger(self, tmp_path):
@@ -1597,7 +1735,7 @@ class TestWhisperServerWarmup:
         from wayfinder.core.transcriber import get_backend, WhisperServerBackend
         binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
         server = tmp_path / "whisper-server"; server.write_text("#!/bin/sh\n"); server.chmod(0o755)
-        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        model = tmp_path / "ggml-base.en.bin"; model.write_bytes(b"\x00")
         config = {
             "whisper_server_mode": True,
             "whisper_binary": str(binary),
@@ -1660,10 +1798,10 @@ class TestWhisperServerWarmup:
         # get_backend only returns the server backend when the binary exists.
         (tmp_path / "whisper-cli").write_text("#!/bin/sh\n")
         (tmp_path / "whisper-server").write_text("#!/bin/sh\n")
-        (tmp_path / "m.bin").write_bytes(b"\x00")
+        (tmp_path / "ggml-base.en.bin").write_bytes(b"\x00")
         cfg = {"transcription_backend": "whisper_cpp", "whisper_server_mode": True,
                "whisper_binary": str(tmp_path / "whisper-cli"),
-               "model_path": str(tmp_path / "m.bin")}
+               "model_path": str(tmp_path / "ggml-base.en.bin")}
         with patch.object(transcriber.WhisperServerBackend, "warm_up") as warm:
             transcriber.warm_up_transcription(cfg)
             warm.assert_called_once()
@@ -1712,7 +1850,7 @@ class TestServerModeDefaultAndFallback:
         server.write_text("#!/bin/sh\n")
         cli = tmp_path / "whisper-cli"
         cli.write_text("#!/bin/sh\n")
-        model = tmp_path / "m.bin"
+        model = tmp_path / "ggml-base.en.bin"
         model.write_bytes(b"\x00")
         cfg = {"whisper_server_mode": True, "whisper_binary": str(cli),
                "model_path": str(model)}

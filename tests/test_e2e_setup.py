@@ -425,7 +425,7 @@ class TestCheckWhisperModel:
         """If configured model is missing but other models exist, report them."""
         models_dir = temp_dir / "whisper.cpp" / "models"
         models_dir.mkdir(parents=True)
-        alt_model = models_dir / "ggml-small.en.bin"
+        alt_model = models_dir / "ggml-base.en.bin"
         alt_model.write_bytes(b"\x00" * 466_000)
 
         config = {"model_path": str(models_dir / "nonexistent.bin")}
@@ -435,7 +435,7 @@ class TestCheckWhisperModel:
 
         assert status.installed is True
         assert status.warning != ""
-        assert "small" in status.detail.lower()
+        assert "base" in status.detail.lower()
 
 
 # =============================================================================
@@ -577,12 +577,15 @@ class TestModelCatalog:
         gate = MagicMock()
         gate.has_feature.return_value = False
         with patch("wayfinder.license.get_feature_gate", return_value=gate):
-            assert get_recommended_model() == "small.en"
+            assert get_recommended_model() == "base.en"
 
     @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="unknown")
-    def test_cpu_recommends_small(self, mock_vendor, mock_deck):
-        assert get_recommended_model() == "small.en"
+    def test_cpu_recommends_base_when_unlicensed(self, mock_vendor, mock_deck):
+        gate = MagicMock()
+        gate.has_feature.return_value = False
+        with patch("wayfinder.license.get_feature_gate", return_value=gate):
+            assert get_recommended_model() == "base.en"
 
     def test_download_url_format(self):
         for model_name in WHISPER_MODELS:

@@ -660,8 +660,22 @@ class SetupPane:
         ).pack(side="left", padx=(10, 6), pady=6)
 
         recommended = get_recommended_model()
-        model_options = [f"{v['label']} ({v['size']})" for v in WHISPER_MODELS.values()]
-        model_keys = list(WHISPER_MODELS.keys())
+        try:
+            from wayfinder.license import get_feature_gate
+            _more_models = get_feature_gate().has_feature("large_models")
+        except Exception:
+            _more_models = False
+        # First-run Free setup has one unambiguous working choice. Existing
+        # Ultra licenses retain the full catalog after reinstall.
+        self._model_choices = (
+            dict(WHISPER_MODELS)
+            if _more_models
+            else {"base.en": WHISPER_MODELS["base.en"]}
+        )
+        model_options = [
+            f"{v['label']} ({v['size']})" for v in self._model_choices.values()
+        ]
+        model_keys = list(self._model_choices.keys())
         default_idx = model_keys.index(recommended) if recommended in model_keys else 0
 
         self._model_var = ctk.StringVar(value=model_options[default_idx])
@@ -1030,7 +1044,7 @@ class SetupPane:
 
     def _get_selected_model(self) -> str:
         selected_label = self._model_var.get()
-        for key, info in WHISPER_MODELS.items():
+        for key, info in getattr(self, "_model_choices", WHISPER_MODELS).items():
             if selected_label.startswith(info["label"]):
                 return key
         return get_recommended_model()

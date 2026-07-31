@@ -37,6 +37,37 @@ def _distribution_available(name):
 OPTIONAL_HIDDENIMPORTS = []
 OPTIONAL_EXCLUDES = []
 
+
+def _python_standalone_tk_binaries():
+    """Return Tcl/Tk libraries shipped beside a portable Python runtime.
+
+    Astral's uv-managed Python builds use Tcl/Tk 9 and keep their matching
+    libraries in ``sys.base_prefix/lib``.  On Linux, PyInstaller's Tk hook can
+    find the Tcl library through the system loader while missing uv's combined
+    ``libtcl9tk9.0.so`` library.  The resulting executable contains Tk's data
+    files and _tkinter extension but dies at import time.
+
+    System Python builds (including the Ubuntu release builder) normally have
+    no Tcl/Tk libraries directly in this directory, so their standard
+    PyInstaller discovery remains unchanged.
+    """
+    if not sys.platform.startswith('linux'):
+        return []
+
+    runtime_lib_dir = Path(sys.base_prefix) / 'lib'
+    if not runtime_lib_dir.is_dir():
+        return []
+
+    libraries = {}
+    for pattern in ('libtcl*.so*', 'libtk*.so*'):
+        for library in runtime_lib_dir.glob(pattern):
+            if library.is_file():
+                libraries[library.name] = library
+    return [(str(library), '.') for library in libraries.values()]
+
+
+PYTHON_STANDALONE_TK_BINARIES = _python_standalone_tk_binaries()
+
 # dbus-python and PyGObject are optional runtime integrations. PyInstaller's
 # gi hook requires PyGObject package metadata; some system Python installs expose
 # a partial `gi` module without that metadata, which makes the build fail.
@@ -66,11 +97,12 @@ elif _module_available('pystray'):
 a = Analysis(
     ['main.py'],
     pathex=[str(PROJECT_ROOT), str(SRC_DIR)],
-    binaries=[],
+    binaries=PYTHON_STANDALONE_TK_BINARIES,
     datas=[
         # Include assets
         ('assets/icon.png', 'assets'),
         ('assets/icons', 'assets/icons'),
+        ('assets/fonts', 'assets/fonts'),
         # Include the wayfinder package
         ('src/wayfinder', 'wayfinder'),
     ],
@@ -98,6 +130,7 @@ a = Analysis(
         'wayfinder.utils',
         'wayfinder.utils.gpu',
         'wayfinder.utils.platform',
+        'wayfinder.utils.tk_renderer',
         # CustomTkinter and dependencies
         'customtkinter',
         'PIL',
@@ -167,7 +200,47 @@ def remove_duplicate_entries(entries, name_attr='name'):
             unique.append(entry)
     return unique
 
-a.binaries = remove_duplicate_entries(a.binaries)
+
+def use_host_linux_audio_abi(entries):
+    """Keep distro-owned ALSA core and its plugins on the same ABI.
+
+    PyInstaller follows sounddevice -> PortAudio -> libasound and normally puts
+    the build host's libasound into the one-file executable. That is unsafe in
+    an AppImage: ALSA discovers plugins from the *running host*. An ALSA core
+    copied from Ubuntu cannot necessarily load a newer Fedora/Bazzite PipeWire
+    plugin, leaving raw-device capture working while default-sink playback is
+    silent. libasound's public ABI is stable, so use the host copy together
+    with the host config and plugins.
+
+    The Flatpak does not use this spec. It builds PortAudio against its pinned
+    SDK and runs with that same runtime's libasound/plugins.
+    """
+    if not sys.platform.startswith('linux'):
+        return entries
+    # libpipewire/libpulse are loaded by the host's ALSA pcm plugin. Keeping an
+    # older copy beside PortAudio would recreate the same split-stack problem
+    # one dependency later. libjack stays bundled: official releases build on
+    # the old-glibc CI runner where it is the traditional JACK client library,
+    # not a PipeWire shim, and bundling it keeps non-JACK hosts launchable.
+    host_owned_prefixes = (
+        'libasound.so',
+        'libpipewire-0.3.so',
+        'libpulse.so',
+        'libpulsecommon-',
+    )
+    kept = []
+    for entry in entries:
+        fields = entry if isinstance(entry, tuple) else (
+            getattr(entry, 'name', ''), getattr(entry, 'src_name', '')
+        )
+        basenames = {Path(str(field)).name for field in fields if field}
+        if any(name.startswith(host_owned_prefixes) for name in basenames):
+            continue
+        kept.append(entry)
+    return kept
+
+
+a.binaries = use_host_linux_audio_abi(remove_duplicate_entries(a.binaries))
 a.datas = remove_duplicate_entries(a.datas)
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)

@@ -3,7 +3,7 @@
 # Creates a portable single-file executable for Linux
 #
 # This script supports two build modes:
-#   --full     Bundle whisper.cpp, llama.cpp, ydotool, wtype, models (self-contained, ~1.5GB)
+#   --full     Bundle whisper.cpp, llama.cpp, wtype, and optional models
 #   --lite     Bundle only the Python app (lightweight, ~100MB, user provides dependencies)
 #
 # Prerequisites:
@@ -12,7 +12,7 @@
 #   For --full mode:
 #   - cmake, make
 #   - optional: vulkan-headers/vulkan-devel + glslc for GPU-native whisper.cpp/llama.cpp
-#   - ydotool and wtype installed on the build system
+#   - wtype installed on the build system (optional; host ydotool is never bundled)
 #
 # Usage:
 #   ./scripts/build-appimage.sh          # Default: lite build
@@ -41,6 +41,23 @@ LLAMA_REPO="https://github.com/ggml-org/llama.cpp.git"
 LLAMA_TAG="b9608"
 LLAMA_COMMIT="70b54e140c90a92285ba699d77e1e32e0868a0e2"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+# Release CPU baseline shared with the Flatpak.  Never let ggml inherit the
+# build host's `-march=native`: GitHub runners and developer workstations may
+# expose AVX-512 instructions that do not exist on the Steam Deck's Zen 2 CPU.
+# Modern ggml also becomes scalar-only with GGML_NATIVE=OFF unless these SIMD
+# families are enabled explicitly, so spell out the performant Deck baseline.
+GGML_CPU_BASELINE_OPTS=(
+    -DGGML_NATIVE=OFF
+    -DGGML_SSE42=ON
+    -DGGML_AVX=ON
+    -DGGML_AVX2=ON
+    -DGGML_FMA=ON
+    -DGGML_F16C=ON
+    -DGGML_BMI2=ON
+    -DGGML_AVX512=OFF
+)
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 
@@ -81,23 +98,49 @@ echo ""
 
 # ─── Validate prerequisites ───────────────────────────────────────────────────
 
-if ! command -v python3 &> /dev/null; then
-    echo "❌ python3 not found"
+if ! command -v "$PYTHON_BIN" &> /dev/null; then
+    echo "❌ Python interpreter not found: $PYTHON_BIN"
     exit 1
 fi
 
-if ! command -v pyinstaller &> /dev/null; then
-    echo "❌ pyinstaller not found. Install with: pip install pyinstaller"
+if ! "$PYTHON_BIN" -m PyInstaller --version &> /dev/null; then
+    echo "❌ PyInstaller is not installed for $PYTHON_BIN"
+    echo "   Install with: $PYTHON_BIN -m pip install pyinstaller"
     exit 1
 fi
 
-if ! python3 - <<'PY' &> /dev/null
+if ! "$PYTHON_BIN" - <<'PY' &> /dev/null
 import tkinter
 PY
 then
-    echo "❌ python3 tkinter support not found. Install the system Tk package first:"
+    echo "❌ Tkinter support not found for $PYTHON_BIN. Install the matching Tk package first:"
     echo "   Fedora/Bazzite: sudo dnf install python3-tkinter"
     echo "   Ubuntu/Debian:  sudo apt install python3-tk"
+    exit 1
+fi
+
+# Importing Tk is not enough: portable Python distributions commonly ship a
+# no-Xft Tk that creates windows but exposes only legacy bitmap fonts. That
+# turns every requested family and size into the same tiny `fixed` face. Probe
+# the real renderer on this display (or a temporary Xvfb display in headless
+# release CI) and refuse to build a visually broken artifact.
+probe_tk_renderer() {
+    PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+        "$@" -c 'from wayfinder.utils.tk_renderer import require_compatible_tk_renderer as require; result = require(); print(f"Tk renderer: {result.patchlevel} / {result.font_system} / {result.actual_family}")'
+}
+
+if [ -n "${DISPLAY:-}" ]; then
+    TK_PROBE=("$PYTHON_BIN")
+elif command -v xvfb-run &> /dev/null; then
+    TK_PROBE=(xvfb-run -a "$PYTHON_BIN")
+else
+    echo "❌ Tk renderer validation needs DISPLAY or xvfb-run" >&2
+    exit 1
+fi
+
+if ! probe_tk_renderer "${TK_PROBE[@]}"; then
+    echo "❌ Tk must be built with Xft and resolve the bundled DejaVu Sans family" >&2
+    echo "   Use the Ubuntu AppImage build container or another Xft-enabled Python/Tk." >&2
     exit 1
 fi
 
@@ -149,13 +192,17 @@ cmake_native_build() {
     local src="$2"
     local build_dir="$3"
     local vulkan="$4"
+    shift 4
+    local targets=("$@")
 
     rm -rf "$build_dir"
     if cmake -S "$src" -B "$build_dir" \
         -DGGML_VULKAN="$vulkan" \
+        "${GGML_CPU_BASELINE_OPTS[@]}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF; then
-        cmake --build "$build_dir" --config Release -j"$BUILD_JOBS"
+        cmake --build "$build_dir" --config Release \
+            --parallel "$BUILD_JOBS" --target "${targets[@]}"
         return $?
     fi
     echo "   ⚠ $name configure failed with GGML_VULKAN=$vulkan"
@@ -168,7 +215,7 @@ if [ "$SKIP_BUILD" = "1" ]; then
     echo "🔨 Step 1: Reusing existing PyInstaller output (--skip-build)..."
 else
     echo "🔨 Step 1: Building with PyInstaller..."
-    pyinstaller wayfinder-aura.spec --clean --noconfirm --log-level WARN
+    "$PYTHON_BIN" -m PyInstaller wayfinder-aura.spec --clean --noconfirm --log-level WARN
 fi
 
 if [ ! -f "dist/wayfinder-aura" ]; then
@@ -196,6 +243,13 @@ echo "📦 Step 3: Populating AppDir..."
 # Copy the main executable
 cp dist/wayfinder-aura "$APPDIR/usr/bin/"
 
+# ALSA core is deliberately host-owned. Its pcm plugins are loaded from the
+# running distro, so bundling the build host's libasound while loading (for
+# example) Fedora's newer PipeWire plugin produces a symbol-version mismatch:
+# raw USB-mic capture can work while desktop-sink playback is silent. The
+# PyInstaller spec filters the one-file payload; this guards AppDir assembly.
+rm -f "$APPDIR/usr/lib/libasound.so" "$APPDIR/usr/lib/libasound.so.2"
+
 # Copy icons
 cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_ID}.png"
 cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/128x128/apps/${APP_ID}.png"
@@ -221,16 +275,32 @@ if [ "$BUILD_MODE" = "--full" ]; then
     clone_pinned_repo "whisper.cpp" "$WHISPER_REPO" "$WHISPER_TAG" "$WHISPER_COMMIT" "$WHISPER_DIR"
     echo "   🔨 Building whisper.cpp (Vulkan, CPU fallback)..."
     WHISPER_BUILD="$WHISPER_DIR/build-vulkan"
-    if ! cmake_native_build "whisper.cpp" "$WHISPER_DIR" "$WHISPER_BUILD" ON; then
+    WHISPER_HAS_VULKAN=1
+    if ! cmake_native_build "whisper.cpp" "$WHISPER_DIR" "$WHISPER_BUILD" ON \
+            whisper-cli whisper-server; then
         echo "   ↳ Falling back to CPU-only whisper.cpp"
+        WHISPER_HAS_VULKAN=0
         WHISPER_BUILD="$WHISPER_DIR/build-cpu"
-        cmake_native_build "whisper.cpp" "$WHISPER_DIR" "$WHISPER_BUILD" OFF
+        cmake_native_build "whisper.cpp" "$WHISPER_DIR" "$WHISPER_BUILD" OFF \
+            whisper-cli whisper-server
     fi
-    if [ -f "$WHISPER_BUILD/bin/whisper-cli" ]; then
-        cp "$WHISPER_BUILD/bin/whisper-cli" "$APPDIR/usr/bin/"
-        echo "   ✓ whisper-cli bundled ($(basename "$WHISPER_BUILD"))"
-    else
-        echo "   ⚠ whisper-cli build failed, skipping"
+    for binary in whisper-cli whisper-server; do
+        test -x "$WHISPER_BUILD/bin/$binary"
+        cp "$WHISPER_BUILD/bin/$binary" "$APPDIR/usr/bin/$binary"
+        echo "   ✓ $binary bundled ($(basename "$WHISPER_BUILD"))"
+    done
+
+    # A Vulkan binary can die during backend initialization before a no-GPU
+    # flag is processed (observed on Steam Deck/RADV after suspend).  Always
+    # ship an independently linked CPU twin when the primary is Vulkan.
+    if [ "$WHISPER_HAS_VULKAN" = "1" ]; then
+        WHISPER_CPU_BUILD="$WHISPER_DIR/build-cpu"
+        echo "   🔨 Building whisper.cpp CPU safety twins..."
+        cmake_native_build "whisper.cpp CPU" "$WHISPER_DIR" "$WHISPER_CPU_BUILD" OFF \
+            whisper-cli whisper-server
+        cp "$WHISPER_CPU_BUILD/bin/whisper-cli" "$APPDIR/usr/bin/whisper-cli-cpu"
+        cp "$WHISPER_CPU_BUILD/bin/whisper-server" "$APPDIR/usr/bin/whisper-server-cpu"
+        echo "   ✓ whisper-cli-cpu + whisper-server-cpu bundled"
     fi
 
     # ── llama.cpp ──
@@ -238,10 +308,14 @@ if [ "$BUILD_MODE" = "--full" ]; then
     clone_pinned_repo "llama.cpp" "$LLAMA_REPO" "$LLAMA_TAG" "$LLAMA_COMMIT" "$LLAMA_DIR"
     echo "   🔨 Building llama.cpp (Vulkan, CPU fallback)..."
     LLAMA_BUILD="$LLAMA_DIR/build-vulkan"
-    if ! cmake_native_build "llama.cpp" "$LLAMA_DIR" "$LLAMA_BUILD" ON; then
+    LLAMA_HAS_VULKAN=1
+    if ! cmake_native_build "llama.cpp" "$LLAMA_DIR" "$LLAMA_BUILD" ON \
+            llama-cli llama-simple; then
         echo "   ↳ Falling back to CPU-only llama.cpp"
+        LLAMA_HAS_VULKAN=0
         LLAMA_BUILD="$LLAMA_DIR/build-cpu"
-        cmake_native_build "llama.cpp" "$LLAMA_DIR" "$LLAMA_BUILD" OFF
+        cmake_native_build "llama.cpp" "$LLAMA_DIR" "$LLAMA_BUILD" OFF \
+            llama-cli llama-simple
     fi
     for binary in llama-cli llama-simple; do
         if [ -f "$LLAMA_BUILD/bin/$binary" ]; then
@@ -249,6 +323,14 @@ if [ "$BUILD_MODE" = "--full" ]; then
             echo "   ✓ $binary bundled ($(basename "$LLAMA_BUILD"))"
         fi
     done
+    if [ "$LLAMA_HAS_VULKAN" = "1" ]; then
+        LLAMA_CPU_BUILD="$LLAMA_DIR/build-cpu"
+        echo "   🔨 Building llama.cpp CPU safety twin..."
+        cmake_native_build "llama.cpp CPU" "$LLAMA_DIR" "$LLAMA_CPU_BUILD" OFF \
+            llama-simple
+        cp "$LLAMA_CPU_BUILD/bin/llama-simple" "$APPDIR/usr/bin/llama-simple-cpu"
+        echo "   ✓ llama-simple-cpu bundled"
+    fi
 
     # ── ydotool: deliberately NOT bundled ──
     # The ydotool client must protocol-match the HOST's ydotoold daemon: a
@@ -268,7 +350,14 @@ if [ "$BUILD_MODE" = "--full" ]; then
 
     # ── Shared libraries for bundled binaries ──
     echo "   📚 Bundling shared libraries..."
-    for bin in "$APPDIR/usr/bin/whisper-cli" "$APPDIR/usr/bin/llama-cli" "$APPDIR/usr/bin/llama-simple"; do
+    for bin in \
+        "$APPDIR/usr/bin/whisper-cli" \
+        "$APPDIR/usr/bin/whisper-server" \
+        "$APPDIR/usr/bin/whisper-cli-cpu" \
+        "$APPDIR/usr/bin/whisper-server-cpu" \
+        "$APPDIR/usr/bin/llama-cli" \
+        "$APPDIR/usr/bin/llama-simple" \
+        "$APPDIR/usr/bin/llama-simple-cpu"; do
         if [ -f "$bin" ]; then
             # Copy required shared libraries (excluding glibc/ld-linux)
             ldd "$bin" 2>/dev/null | grep "=> /" | awk '{print $3}' | while read lib; do
@@ -283,6 +372,9 @@ if [ "$BUILD_MODE" = "--full" ]; then
             done
         fi
     done
+    # Native inference dependency collection must not reintroduce a foreign
+    # ALSA core after the initial AppDir guard above.
+    rm -f "$APPDIR/usr/lib/libasound.so" "$APPDIR/usr/lib/libasound.so.2"
     echo "   ✓ Shared libraries bundled"
 
     # ── Models (optional, controlled by env var) ──
@@ -292,7 +384,7 @@ if [ "$BUILD_MODE" = "--full" ]; then
         mkdir -p "$APPDIR/usr/share/llm-models"
 
         # Whisper model
-        WHISPER_MODEL="${WHISPER_MODEL_PATH:-$HOME/whisper.cpp/models/ggml-small.en.bin}"
+        WHISPER_MODEL="${WHISPER_MODEL_PATH:-$HOME/whisper.cpp/models/ggml-base.en.bin}"
         if [ -f "$WHISPER_MODEL" ]; then
             cp "$WHISPER_MODEL" "$APPDIR/usr/share/whisper-models/"
             echo "   ✓ Whisper model bundled: $(basename "$WHISPER_MODEL")"
@@ -377,7 +469,7 @@ chmod +x "$APPDIR/AppRun"
 # ─── Step 4: Build AppImage ──────────────────────────────────────────────────
 
 echo "🎯 Step 4: Building AppImage..."
-OUTPUT_NAME="Wayfinder_Aura-${VERSION}-${ARCH}.AppImage"
+OUTPUT_NAME="${OUTPUT_NAME:-Wayfinder_Aura-${VERSION}-${ARCH}.AppImage}"
 
 # Use absolute paths so appimagetool works even with --appimage-extract-and-run
 ABS_APPDIR="$(cd "$APPDIR" && pwd)"

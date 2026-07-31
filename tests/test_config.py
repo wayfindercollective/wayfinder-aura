@@ -32,6 +32,15 @@ class TestConfigLoading:
         for key in required_keys:
             assert key in DEFAULT_CONFIG, f"Missing required key: {key}"
 
+    def test_free_product_defaults_are_base_cpu_minimal(self):
+        from wayfinder.config import DEFAULT_CONFIG
+
+        assert Path(DEFAULT_CONFIG["model_path"]).name == "ggml-base.en.bin"
+        assert DEFAULT_CONFIG["use_gpu"] is False
+        assert DEFAULT_CONFIG["output_tone"] == "minimal"
+        assert DEFAULT_CONFIG["strong_mode"] is False
+        assert DEFAULT_CONFIG["caricature_mode"] is False
+
     def test_welcome_completed_default(self):
         """The first-run welcome tour gate is present and defaults to False."""
         from wayfinder.config import DEFAULT_CONFIG
@@ -118,6 +127,17 @@ class TestConfigLoading:
         assert config["threads"] == 8
         # Should have default for missing keys
         assert config["sample_rate"] == DEFAULT_CONFIG["sample_rate"]
+
+    def test_old_chunk_profile_migrates_to_safer_defaults(self, temp_config_dir: Path):
+        from wayfinder.config import CONFIG_FILE, load_config
+
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps({"chunk_duration": 10, "chunk_overlap": 1}))
+
+        config = load_config()
+
+        assert config["chunk_duration"] == 15
+        assert config["chunk_overlap"] == 2
 
     def test_foreign_parent_flatpak_id_does_not_select_flatpak_defaults(self):
         """Import-time config must ignore FLATPAK_ID leaked by another Flatpak app."""
@@ -283,6 +303,78 @@ class TestStalePathRepair:
 
         config = cfg.load_config()
         assert config["whisper_binary"] == "/app/bin/whisper-cli"
+
+
+class TestLicenseConfigEnforcement:
+    def test_free_repairs_stale_gpu_style_model_and_backends(self, tmp_path: Path):
+        from wayfinder.config import DEFAULT_CONFIG, enforce_license_config
+
+        small = tmp_path / "ggml-small.en.bin"
+        base = tmp_path / "ggml-base.en.bin"
+        large_cleanup = tmp_path / "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+        free_cleanup = tmp_path / "google_gemma-3-1b-it-Q4_K_M.gguf"
+        small.write_bytes(b"x")
+        base.write_bytes(b"x")
+        large_cleanup.write_bytes(b"x")
+        free_cleanup.write_bytes(b"x")
+        cfg = DEFAULT_CONFIG.copy()
+        cfg.update({
+            "model_path": str(small),
+            "use_gpu": True,
+            "game_mode_use_gpu": True,
+            "output_tone": "casual",
+            "prompt": "styled",
+            "strong_mode": True,
+            "caricature_mode": True,
+            "chunked_mode": True,
+            "transcription_backend": "groq_whisper",
+            "processing_mode": "remote",
+            "post_processing_backend": "openai",
+            "llama_cpp_model_path": str(large_cleanup),
+            "llama_cpp_model_requires_feature": "large_cleanup_models",
+        })
+        gate = type("FreeGate", (), {"has_feature": lambda self, _f: False})()
+
+        changed = enforce_license_config(cfg, gate)
+
+        assert changed
+        assert cfg["model_path"] == str(base)
+        assert cfg["use_gpu"] is False
+        assert cfg["game_mode_use_gpu"] is False
+        assert cfg["output_tone"] == "minimal"
+        assert cfg["prompt"] == "Dictation with natural speech."
+        assert cfg["strong_mode"] is False
+        assert cfg["caricature_mode"] is False
+        assert cfg["chunked_mode"] is False
+        assert cfg["transcription_backend"] == "whisper_cpp"
+        assert cfg["processing_mode"] == "local"
+        assert cfg["post_processing_backend"] == "llama_cpp"
+        assert cfg["llama_cpp_model_path"] == str(free_cleanup)
+        assert cfg["llama_cpp_model_requires_feature"] is None
+
+    def test_ultra_preferences_are_not_rewritten(self, tmp_path: Path):
+        from wayfinder.config import DEFAULT_CONFIG, enforce_license_config
+
+        small = tmp_path / "ggml-small.en.bin"
+        large_cleanup = tmp_path / "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+        small.write_bytes(b"x")
+        large_cleanup.write_bytes(b"x")
+        cfg = DEFAULT_CONFIG.copy()
+        cfg.update({
+            "model_path": str(small),
+            "use_gpu": True,
+            "output_tone": "professional",
+            "prompt": "professional prompt",
+            "llama_cpp_model_path": str(large_cleanup),
+            "llama_cpp_model_requires_feature": "large_cleanup_models",
+        })
+        gate = type("UltraGate", (), {"has_feature": lambda self, _f: True})()
+
+        assert enforce_license_config(cfg, gate) == []
+        assert cfg["model_path"] == str(small)
+        assert cfg["use_gpu"] is True
+        assert cfg["output_tone"] == "professional"
+        assert cfg["llama_cpp_model_path"] == str(large_cleanup)
 
 
 class TestKeyCodeMappings:

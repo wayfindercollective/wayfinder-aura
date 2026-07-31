@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 SERVICE = "wayfinder-aura.service"
+COMMANDS = {"show", "toggle", "style", "hide"}
 
 
 def socket_path() -> Path:
@@ -22,13 +23,13 @@ def socket_path() -> Path:
     return Path(runtime) / "wayfinder-aura" / "wayfinder-aura.sock"
 
 
-def show_live_instance(timeout: float = 0.35) -> bool:
-    """Return True when a current or legacy live app accepts ``show``."""
+def send_to_live_instance(command: str = "show", timeout: float = 0.35) -> bool:
+    """Return True when a current or legacy live app accepts *command*."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout)
             client.connect(str(socket_path()))
-            client.sendall(b"show")
+            client.sendall(command.encode("ascii"))
             response = client.recv(16)
             # Current builds acknowledge with ``ok``. Pre-ACK builds process the command,
             # then immediately close their per-command connection, producing clean EOF.
@@ -47,14 +48,30 @@ def service_is_active() -> bool:
 
 
 def main() -> int:
-    if show_live_instance():
+    command = sys.argv[1] if len(sys.argv) > 1 else "show"
+    if command not in COMMANDS:
+        print(f"unknown Wayfinder command: {command}", file=sys.stderr)
+        return 2
+
+    if send_to_live_instance(command):
         return 0
 
     if not service_is_active():
-        return subprocess.run(
+        started = subprocess.run(
             ["systemctl", "--user", "start", SERVICE],
             check=False,
         ).returncode
+        if started != 0 or command == "show":
+            return started
+        # A desktop action may be the first activation after the mode
+        # supervisor stopped the app. Wait briefly for the control socket and
+        # deliver the requested action instead of dropping that first press.
+        import time
+        for _ in range(40):
+            time.sleep(0.1)
+            if send_to_live_instance(command):
+                return 0
+        return 1
 
     # Active service + unhealthy control socket: restart rather than leaving a dead taskbar
     # click. This is only the recovery path; healthy launches never restart the app.

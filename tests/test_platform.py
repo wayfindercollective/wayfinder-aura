@@ -50,6 +50,7 @@ from wayfinder.utils.platform import (
     get_steam_platform,
     get_steam_platform_label,
     is_steamos,
+    supports_steam_game_mode,
 )
 
 
@@ -523,6 +524,32 @@ class TestSteamPlatform:
         monkeypatch.setattr(platform_mod.Path, "read_text", boom)
         assert is_steamos() is False
 
+    @pytest.mark.parametrize("host_release,expected", [
+        ('ID=steamos\nID_LIKE=arch\n', True),
+        ('ID=bazzite\nID_LIKE=fedora\n', False),
+    ])
+    def test_flatpak_uses_authoritative_host_os_release(
+        self, monkeypatch, host_release, expected,
+    ):
+        real_exists = platform_mod.Path.exists
+        real_read_text = platform_mod.Path.read_text
+
+        def fake_exists(path, *args, **kwargs):
+            if str(path) == "/.flatpak-info":
+                return True
+            return real_exists(path, *args, **kwargs)
+
+        def fake_read_text(path, *args, **kwargs):
+            if str(path) == "/run/host/etc/os-release":
+                return host_release
+            if str(path) == "/etc/os-release":
+                return 'ID=org.freedesktop.Platform\n'
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(platform_mod.Path, "exists", fake_exists)
+        monkeypatch.setattr(platform_mod.Path, "read_text", fake_read_text)
+        assert is_steamos() is expected
+
     # --- label mapping + caching -------------------------------------------
 
     @pytest.mark.parametrize("key,label", [
@@ -544,3 +571,48 @@ class TestSteamPlatform:
         # Underlying hardware "changes" — cached result must not.
         monkeypatch.setattr(platform_mod, "_read_dmi", _dmi())
         assert get_steam_platform() == "deck"
+
+    # --- Game Mode capability is separate from Deck hardware identity ------
+
+    def _hide_game_mode_sessions(self, monkeypatch):
+        real_exists = platform_mod.Path.exists
+
+        def fake_exists(path, *args, **kwargs):
+            if "wayland-sessions" in str(path):
+                return False
+            return real_exists(path, *args, **kwargs)
+
+        monkeypatch.setattr(platform_mod.Path, "exists", fake_exists)
+
+    def test_game_mode_controls_show_on_steam_hardware(self, monkeypatch):
+        monkeypatch.setattr(platform_mod, "get_steam_platform", lambda: "machine")
+        monkeypatch.setattr(platform_mod, "read_mode_marker", lambda: None)
+        assert supports_steam_game_mode() is True
+
+    def test_game_mode_controls_show_for_supervisor_managed_bazzite(self, monkeypatch):
+        monkeypatch.setattr(platform_mod, "get_steam_platform", lambda: None)
+        monkeypatch.setattr(platform_mod, "read_mode_marker", lambda: "desktop")
+        assert supports_steam_game_mode() is True
+
+    def test_game_mode_controls_show_when_full_session_is_installed(self, monkeypatch):
+        monkeypatch.setattr(platform_mod, "get_steam_platform", lambda: None)
+        monkeypatch.setattr(platform_mod, "read_mode_marker", lambda: None)
+        monkeypatch.delenv("GAMESCOPE_WAYLAND_DISPLAY", raising=False)
+        real_exists = platform_mod.Path.exists
+
+        def fake_exists(path, *args, **kwargs):
+            if str(path) == "/usr/share/wayland-sessions/gamescope-session.desktop":
+                return True
+            if "wayland-sessions" in str(path):
+                return False
+            return real_exists(path, *args, **kwargs)
+
+        monkeypatch.setattr(platform_mod.Path, "exists", fake_exists)
+        assert supports_steam_game_mode() is True
+
+    def test_standalone_gamescope_on_regular_desktop_is_not_game_mode(self, monkeypatch):
+        monkeypatch.setattr(platform_mod, "get_steam_platform", lambda: None)
+        monkeypatch.setattr(platform_mod, "read_mode_marker", lambda: None)
+        monkeypatch.delenv("GAMESCOPE_WAYLAND_DISPLAY", raising=False)
+        self._hide_game_mode_sessions(monkeypatch)
+        assert supports_steam_game_mode() is False

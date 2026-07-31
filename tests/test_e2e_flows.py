@@ -100,7 +100,7 @@ class TestFullDictationPipeline:
         # Create fake binary and model files so path existence checks pass
         fake_binary = temp_dir / "whisper-cli"
         fake_binary.touch()
-        fake_model = temp_dir / "model.bin"
+        fake_model = temp_dir / "ggml-base.en.bin"
         fake_model.touch()
 
         # Disable post-processing so the transcribed text is returned directly
@@ -164,7 +164,7 @@ class TestChunkedRecordingPipeline:
         # Create fake binary and model files
         fake_binary = temp_dir / "whisper-cli"
         fake_binary.touch()
-        fake_model = temp_dir / "model.bin"
+        fake_model = temp_dir / "ggml-base.en.bin"
         fake_model.touch()
 
         # Disable post-processing for clean results
@@ -194,7 +194,7 @@ class TestChunkedRecordingPipeline:
         assert "chunked_mode" in DEFAULT_CONFIG
         assert "chunk_duration" in DEFAULT_CONFIG
         assert "chunk_overlap" in DEFAULT_CONFIG
-        assert DEFAULT_CONFIG["chunked_mode"] is True
+        assert DEFAULT_CONFIG["chunked_mode"] is False
         assert DEFAULT_CONFIG["chunk_duration"] > 0
 
 

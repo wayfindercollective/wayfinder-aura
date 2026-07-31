@@ -118,17 +118,23 @@ elif IS_APPIMAGE and APPDIR:
     _default_whisper_binary = _appimage_whisper if os.path.exists(_appimage_whisper) else "~/whisper.cpp/build/bin/whisper-cli"
     _appimage_model_dir = os.path.join(APPDIR, "usr", "share", "whisper-models")
     if os.path.isdir(_appimage_model_dir):
-        _default_model_path = os.path.join(_appimage_model_dir, "ggml-small.en.bin")
+        _default_model_path = os.path.join(_appimage_model_dir, "ggml-base.en.bin")
     else:
-        _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
+        _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
     # Prefer the bundled model, then any user-downloaded one (best-first).
     _appimage_llm_dir = os.path.join(APPDIR, "usr", "share", "llm-models")
     _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
     _default_llm_model_path = _pick_llm(_appimage_llm_dir, _user_llm_dir)
-    _default_llama_binary = "~/llama.cpp/build/bin/llama-cli"
+    _appimage_llama = os.path.join(APPDIR, "usr", "bin", "llama-cli")
+    _appimage_llama_simple = os.path.join(APPDIR, "usr", "bin", "llama-simple")
+    _default_llama_binary = (
+        _appimage_llama if os.path.exists(_appimage_llama)
+        else _appimage_llama_simple if os.path.exists(_appimage_llama_simple)
+        else "~/llama.cpp/build/bin/llama-cli"
+    )
 else:
     _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
-    _default_model_path = "~/whisper.cpp/models/ggml-large-v3-turbo.bin"
+    _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
     # LLM model for post-processing - prefer Qwen 3.5 if available, fall back to Qwen 2.5
     # Use platform-appropriate data dir (macOS: ~/Library/Application Support/, Linux: ~/.local/share/)
     if sys.platform == "darwin":
@@ -179,7 +185,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sample_rate": 16000,
     
     # Transcription settings
-    "prompt": "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next.",
+    "prompt": "Dictation with natural speech.",
     "threads": 4,  # Default to 4, auto-adjusted on first run based on CPU cores
     "timeout": 120,  # whisper-CLI fallback (per-dictation model load needs headroom)
     # whisper-SERVER request timeout. Deliberately MUCH shorter than the PROCESSING
@@ -230,13 +236,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "voice_learning_regen_interval": 20,  # Regenerate profile summary every N transcriptions
     
     # Chunked recording settings
-    # Goal: long dictations finish almost as soon as you stop speaking, because
-    # mid-recording chunks already transcribed in the background. Defaults pick
-    # speed with only a tiny accuracy tradeoff (golden ASR: 10s/1s ≈ whole-file
-    # WER on turbo-Q5; ≤6s starts losing content).
-    "chunked_mode": True,  # Enable chunked processing for long recordings
-    "chunk_duration": 10,  # Seconds of new audio per chunk (shorter → less left at stop)
-    "chunk_overlap": 1,  # Seconds re-included at each boundary (word-cut guard)
+    # Chunking is an opt-in Ultra latency tradeoff for genuinely long recordings:
+    # mid-recording chunks reduce the work left after Stop, but every splice can
+    # lose acoustic context or duplicate/drop boundary words. Keep one-shot ASR as
+    # the accuracy-first default for every tier; the feature gate is also enforced
+    # at the recording boundary (a stale/edited config cannot enable it on Free).
+    "chunked_mode": False,
+    "chunk_duration": 15,  # Empirical balance: fewer ASR boundary errors than 10s
+    "chunk_overlap": 2,  # Context re-included at each boundary (word-cut guard)
     # Optional safety cap (seconds). 0 = unlimited. When set, auto-stops and processes
     # like a normal toggle-off. Wired via the RECORDING watchdog in WayfinderApp.
     "max_recording_duration": 0,
@@ -248,7 +255,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Manual Backend dropdown sets this False. Auto never picks Faster-Whisper
     # (CUDA load can fail closed to slow CPU-large — Manual only).
     "transcription_backend_auto": True,
-    "use_gpu": True,  # Enable GPU acceleration
+    # GPU is an explicit Ultra opt-in. Even a newly activated Ultra install starts
+    # on CPU until the user enables this toggle; Free is also enforced at runtime.
+    "use_gpu": False,
     "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
     "gpu_device": "auto",  # "auto" = benchmark and pick fastest, or "0", "1", "2" for manual selection
     "gpu_benchmark_cache": {},  # Cached GPU benchmark results: {"0": 0.6, "1": 7.5, "2": 52.0, "fastest": "0"}
@@ -313,7 +322,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "audio_ducking_percent": 30,  # How much to lower other audio (0-50, higher = quieter)
     
     # Style settings (5 presets that cycle via hotkey)
-    "output_tone": "professional",  # minimal | professional | casual | dev | personal
+    # Minimal cleanup remains Free; the Style workspace/presets are Ultra.
+    "output_tone": "minimal",  # minimal | professional | casual | dev | personal
     "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
     "caricature_mode": False,  # 🎭 Secret easter egg! Unlocked by typing "lol" on Style tab.
     
@@ -326,6 +336,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # llama.cpp post-processing settings
     "llama_cpp_model_path": _default_llm_model_path,  # Path to GGUF model file
+    "llama_cpp_model_requires_feature": None,  # Catalog entitlement metadata
     "llama_cpp_binary": _default_llama_binary,  # llama CLI binary (Flatpak: bundled /app/bin/llama-simple)
     "llama_cpp_n_ctx": 2048,  # Context window size
     "llama_cpp_n_threads": 4,  # CPU threads
@@ -453,21 +464,22 @@ def _which_runtime_path(name: str) -> str | None:
 def _usable_model_candidates() -> list:
     """Existing whisper model files the CURRENT license may load, best first.
 
-    Ultra-gated weights (large/medium/turbo — mirror of the transcriber's
-    _is_large_model rule) are offered only when `large_models` is licensed;
-    the license check is lazy and fails closed to the free tier so config
-    loading never depends on the license path being importable.
+    Free may load Base/Base.en only. Every other speech model is offered only
+    when `large_models` is licensed. The check is lazy and fails closed.
     """
-    licensed = False
+    gate = None
     try:
         from wayfinder.license import get_feature_gate
-        licensed = get_feature_gate().has_feature("large_models")
+        gate = get_feature_gate()
     except Exception:
-        licensed = False
+        gate = None
 
-    def _ultra(name: str) -> bool:
-        n = name.lower()
-        return "large" in n or "medium" in n or "turbo" in n
+    def _allowed(name: str) -> bool:
+        try:
+            from wayfinder.license import transcription_model_allowed
+            return transcription_model_allowed(name, gate)
+        except Exception:
+            return name.lower() in ("ggml-base.bin", "ggml-base.en.bin")
 
     dirs = [Path(os.path.expanduser("~/whisper.cpp/models"))]
     if IS_APPIMAGE and APPDIR:
@@ -480,7 +492,7 @@ def _usable_model_candidates() -> list:
         try:
             if d.is_dir():
                 found.extend(
-                    p for p in d.glob("ggml-*.bin") if licensed or not _ultra(p.name)
+                    p for p in d.glob("ggml-*.bin") if _allowed(p.name)
                 )
         except OSError:
             continue
@@ -496,6 +508,127 @@ def _usable_model_candidates() -> list:
         return len(_order)
 
     return [str(p) for p in sorted(found, key=_rank)]
+
+
+def enforce_license_config(config: dict, gate) -> list[str]:
+    """Repair persisted settings that the current license may not execute.
+
+    This keeps the UI honest on upgrade/downgrade and prevents stale settings
+    from initializing a paid runtime path before its backend-level gate runs.
+    Runtime factories still enforce every boundary independently.
+    Returns the keys changed so callers can persist/log once.
+    """
+    changed: list[str] = []
+
+    def _has(feature: str) -> bool:
+        try:
+            return bool(gate is not None and gate.has_feature(feature))
+        except Exception:
+            return False
+
+    def _set(key: str, value: object) -> None:
+        if config.get(key) != value:
+            config[key] = value
+            changed.append(key)
+
+    if not _has("gpu_acceleration"):
+        _set("use_gpu", False)
+        _set("game_mode_use_gpu", False)
+
+    if not _has("tone_system"):
+        _set("output_tone", "minimal")
+        _set("prompt", "Dictation with natural speech.")
+        _set("strong_mode", False)
+        _set("caricature_mode", False)
+
+    # A previously installed 3B+ cleanup model must not remain executable after
+    # downgrade. Prefer an existing Free model beside it; otherwise retain a
+    # concrete Free download target. Runtime post-processing repeats this check.
+    free_cleanup_model_fallback = None
+    cleanup_path = str(config.get("llama_cpp_model_path", "") or "")
+    try:
+        from wayfinder.core.postprocessor import (
+            cleanup_model_allowed,
+            free_cleanup_model_fallback,
+        )
+
+        cleanup_allowed = cleanup_model_allowed(
+            cleanup_path,
+            gate,
+            config.get("llama_cpp_model_requires_feature"),
+        )
+    except Exception:
+        cleanup_allowed = False
+    if not cleanup_allowed:
+        default_cleanup = str(DEFAULT_CONFIG.get("llama_cpp_model_path", "") or "")
+        fallback = (
+            free_cleanup_model_fallback(cleanup_path, default_cleanup)
+            if free_cleanup_model_fallback is not None
+            else default_cleanup
+        )
+        _set("llama_cpp_model_path", fallback)
+        _set("llama_cpp_model_requires_feature", None)
+
+    # Free is one clear local path: Base/Base.en through whisper.cpp. A missing
+    # fallback remains a concrete Base path so Setup can diagnose/download it.
+    try:
+        from wayfinder.license import transcription_model_allowed
+        model_allowed = transcription_model_allowed(config.get("model_path", ""), gate)
+    except Exception:
+        model_allowed = False
+    if not model_allowed:
+        current = Path(os.path.expanduser(str(config.get("model_path", "") or "")))
+        dirs: list[Path] = []
+        if str(current.parent) not in ("", "."):
+            dirs.append(current.parent)
+        dirs.append(Path(os.path.expanduser("~/whisper.cpp/models")))
+        if IS_APPIMAGE and APPDIR:
+            dirs.append(Path(APPDIR) / "usr" / "share" / "whisper-models")
+        if IS_FLATPAK:
+            dirs.append(Path("/app/share/whisper-models"))
+
+        fallback = None
+        for directory in dirs:
+            for filename in ("ggml-base.en.bin", "ggml-base.bin"):
+                candidate = directory / filename
+                try:
+                    if candidate.exists():
+                        fallback = str(candidate)
+                        break
+                except OSError:
+                    continue
+            if fallback:
+                break
+        if fallback is None:
+            default = str(DEFAULT_CONFIG.get("model_path", "") or "")
+            fallback = default or str(
+                (current.parent if str(current.parent) not in ("", ".") else dirs[0])
+                / "ggml-base.en.bin"
+            )
+        _set("model_path", fallback)
+        _set("faster_whisper_model", "base")
+
+    backend = str(config.get("transcription_backend", "whisper_cpp") or "whisper_cpp")
+    backend_feature = {
+        "faster_whisper": "faster_whisper",
+        "groq_whisper": "cloud_backends",
+        "openai_whisper": "cloud_backends",
+    }.get(backend)
+    if backend_feature and not _has(backend_feature):
+        _set("transcription_backend", "whisper_cpp")
+        _set("transcription_backend_auto", True)
+        _set("processing_mode", "local")
+
+    if (
+        str(config.get("post_processing_backend", "llama_cpp")) in ("anthropic", "openai")
+        and not _has("cloud_backends")
+    ):
+        _set("post_processing_backend", "llama_cpp")
+
+    if config.get("chunked_mode", False) and not _has("chunked_recording"):
+        _set("chunked_mode", False)
+
+    return changed
 
 
 def _repair_config_path(key: str, saved: object) -> object:
@@ -515,6 +648,8 @@ def _repair_config_path(key: str, saved: object) -> object:
         ])
         if IS_FLATPAK:
             candidates.insert(1, "/app/bin/whisper-cli")
+        elif IS_APPIMAGE and APPDIR:
+            candidates.insert(1, os.path.join(APPDIR, "usr", "bin", "whisper-cli"))
     elif key == "llama_cpp_binary":
         candidates.extend([
             "~/llama.cpp/build/bin/llama-cli",
@@ -526,6 +661,11 @@ def _repair_config_path(key: str, saved: object) -> object:
         ])
         if IS_FLATPAK:
             candidates[1:1] = ["/app/bin/llama-simple", "/app/bin/llama-cli"]
+        elif IS_APPIMAGE and APPDIR:
+            candidates[1:1] = [
+                os.path.join(APPDIR, "usr", "bin", "llama-cli"),
+                os.path.join(APPDIR, "usr", "bin", "llama-simple"),
+            ]
     elif key == "model_path":
         # Auto-select the best INSTALLED model the current license may load.
         # Without this, a fresh free install kept pointing at the (nonexistent,
@@ -586,6 +726,17 @@ def load_config() -> dict:
             }
             if config.get("premium_url") in _stale_premium_urls:
                 config["premium_url"] = DEFAULT_CONFIG["premium_url"]
+
+            # Migrate the old globally shipped chunk profile. There was no UI for
+            # choosing these values, so 10s/1s in a saved config came from the old
+            # default rather than a user selection. Golden-audio adversarial runs
+            # showed materially more boundary errors at 10s/1s than 15s/2s.
+            if (
+                config.get("chunk_duration") == 10
+                and config.get("chunk_overlap") == 1
+            ):
+                config["chunk_duration"] = DEFAULT_CONFIG["chunk_duration"]
+                config["chunk_overlap"] = DEFAULT_CONFIG["chunk_overlap"]
 
             # Hotkey defaults changed for NEW installs over time (bare F3/F10 →
             # Super+F2/F3 to dodge in-game F-key collisions → Ctrl+Alt+Space/S

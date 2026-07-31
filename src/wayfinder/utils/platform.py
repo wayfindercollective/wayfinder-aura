@@ -227,6 +227,34 @@ def is_game_mode(wait_secs: float = 0.0) -> bool:
     return "gamescope" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
 
 
+def supports_steam_game_mode() -> bool:
+    """True when the host can plausibly enter the full Steam Gaming Mode session.
+
+    Deliberately do not treat the standalone ``gamescope`` binary as enough:
+    regular Bazzite Desktop includes it without the Steam Gaming Mode session.
+    Hardware identity, the supervisor marker, a live Gamescope environment, or
+    an installed Gamescope session file are concrete capability signals.
+    """
+    if not is_linux():
+        return False
+    if get_steam_platform() is not None:
+        return True
+    if read_mode_marker() is not None:
+        return True
+    if os.environ.get("GAMESCOPE_WAYLAND_DISPLAY"):
+        return True
+    session_dirs = (
+        Path("/usr/share/wayland-sessions"),
+        Path("/run/host/usr/share/wayland-sessions"),
+    )
+    session_names = (
+        "gamescope-session.desktop",
+        "gamescope-session-plus.desktop",
+        "steam.desktop",
+    )
+    return any((directory / name).exists() for directory in session_dirs for name in session_names)
+
+
 def write_game_mode_marker(enabled: bool) -> None:
     """Write the toggle marker the host supervisor polls.
 
@@ -280,12 +308,24 @@ _steam_platform_cache: tuple[str | None] | None = None
 def _read_dmi(field: str) -> str:
     """Read a /sys/class/dmi/id/<field>, stripped; '' on any failure.
 
-    Returns '' off Linux and inside sandboxes that don't expose DMI.
+    Flatpak normally exposes the kernel's read-only sysfs view, but runtimes
+    differ. Try both canonical sysfs spellings and host-mounted fallbacks so a
+    Deck is still identified when one path is hidden by the sandbox.
     """
-    try:
-        return (Path("/sys/class/dmi/id") / field).read_text().strip()
-    except OSError:
-        return ""
+    roots = (
+        Path("/sys/class/dmi/id"),
+        Path("/sys/devices/virtual/dmi/id"),
+        Path("/run/host/sys/class/dmi/id"),
+        Path("/run/host/sys/devices/virtual/dmi/id"),
+    )
+    for root in roots:
+        try:
+            value = (root / field).read_text().strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return ""
 
 
 def is_steamos() -> bool:
@@ -295,17 +335,29 @@ def is_steamos() -> bool:
     This catches SteamOS on generic hardware; Valve hardware is identified
     separately (and takes priority) via :func:`get_steam_platform`.
     """
-    try:
-        text = Path("/etc/os-release").read_text()
-    except OSError:
-        return False
-    for line in text.splitlines():
-        key, sep, value = line.partition("=")
-        if not sep:
+    # `/etc/os-release` belongs to the Freedesktop runtime in a Flatpak. The
+    # real host identity, when mounted, lives under `/run/host` and wins. Some
+    # immutable hosts also expose `/run/host` to normal host processes, so only
+    # give it that authority when Flatpak's standard marker is present.
+    paths = (Path("/etc/os-release"),)
+    if Path("/.flatpak-info").exists():
+        paths = (Path("/run/host/etc/os-release"), Path("/etc/os-release"))
+    for path in paths:
+        try:
+            text = path.read_text()
+        except OSError:
             continue
-        if key.strip().lower() in ("id", "id_like", "variant_id"):
-            if "steamos" in value.strip().strip('"').lower():
-                return True
+        for line in text.splitlines():
+            key, sep, value = line.partition("=")
+            if not sep:
+                continue
+            if key.strip().lower() in ("id", "id_like", "variant_id"):
+                if "steamos" in value.strip().strip('"').lower():
+                    return True
+        # A readable host file is authoritative. Do not mistake a sandbox
+        # runtime's identity for the host after successfully reading it.
+        if str(path).startswith("/run/host/"):
+            return False
     return False
 
 

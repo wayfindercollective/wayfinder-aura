@@ -657,3 +657,56 @@ class TestProbeDgramSocket:
         path = temp_dir / "stale"
         path.touch()
         assert _probe_unix_socket(str(path)) is False
+
+
+class TestYdotoolUserServiceRecovery:
+    """Recover the Bazzite login race after /dev/uinput gains its uaccess ACL."""
+
+    def test_resets_failed_loaded_user_unit_and_waits_for_socket(self, monkeypatch):
+        from wayfinder.core import injector as inj
+
+        monkeypatch.setattr(inj, "_YDOTOOL_USER_SERVICE_RESTART_ATTEMPTED", False)
+        monkeypatch.setattr("wayfinder.utils.platform.is_wayland", lambda: True)
+        monkeypatch.setattr(inj.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(inj.os.path, "exists", lambda path: path == "/dev/uinput")
+        monkeypatch.setattr(inj.os, "access", lambda path, mode: True)
+        monkeypatch.setattr("wayfinder.utils.hostexec.host_env", lambda: {"PATH": "/usr/bin"})
+        monkeypatch.setattr(
+            inj, "_get_ydotool_env", lambda: {"YDOTOOL_SOCKET": "/run/user/1000/.ydotool_socket"}
+        )
+        monkeypatch.setattr(inj, "_probe_unix_socket", lambda path, timeout=1.0: True)
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if "show" in cmd:
+                loaded = cmd[-1] == "ydotoold.service"
+                return MagicMock(returncode=0, stdout="loaded\n" if loaded else "not-found\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(inj.subprocess, "run", fake_run)
+
+        ready, detail = inj._restart_ydotool_user_service_once()
+
+        assert ready is True
+        assert detail == "restarted ydotoold.service"
+        assert ["systemctl", "--user", "reset-failed", "ydotoold.service"] in calls
+        assert ["systemctl", "--user", "start", "ydotoold.service"] in calls
+
+    def test_does_not_restart_without_uinput_access(self, monkeypatch):
+        from wayfinder.core import injector as inj
+
+        monkeypatch.setattr(inj, "_YDOTOOL_USER_SERVICE_RESTART_ATTEMPTED", False)
+        monkeypatch.setattr("wayfinder.utils.platform.is_wayland", lambda: True)
+        monkeypatch.setattr(inj.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(inj.os.path, "exists", lambda path: path == "/dev/uinput")
+        monkeypatch.setattr(inj.os, "access", lambda path, mode: False)
+        run = MagicMock()
+        monkeypatch.setattr(inj.subprocess, "run", run)
+
+        ready, detail = inj._restart_ydotool_user_service_once()
+
+        assert ready is False
+        assert "/dev/uinput is not writable" in detail
+        run.assert_not_called()

@@ -272,21 +272,32 @@ SETTING_TOOLTIPS: dict[str, str] = {
     # 🟢 Minimal latency impact (<10ms per invocation)
     "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
     "ensure_punctuation": "Extra punctuation fixes if model output lacks periods/caps.\n🟢 Latency: +1-3ms (optional, most models handle this well)",
-    "audio_preprocessing": "Audio signal processing before transcription.\n🟢 Off: 0ms | Light: +2ms | Medium: +5ms | Heavy: +10ms",
+    "audio_preprocessing": (
+        "Conditions microphone audio before speech recognition.\n\n"
+        "• Off — Leaves audio untouched. Use as a diagnostic baseline or when your "
+        "mic/interface already produces clean, consistently leveled audio.\n\n"
+        "• Light — Safely evens out quiet or inconsistent mic levels without huge "
+        "noise boosts. Best everyday default.\n\n"
+        "• Medium — Light plus an 80 Hz high-pass filter. Use for electrical hum, "
+        "desk vibration, handling noise, or low HVAC rumble. It does not remove fan hiss.\n\n"
+        "• Heavy — Medium plus a soft gate that lowers steady noise between words. "
+        "Use only when background noise remains; it can suppress soft consonants or quiet speech.\n\n"
+        "Processing cannot repair clipping or replace correct microphone gain."
+    ),
     
     # 🟡 Moderate latency impact (10-100ms)
-    "chunked_mode": "Split long recordings into segments, transcribe each,\nand splice results together. Enables unlimited length.\n🟡 Latency: +50-100ms overhead per segment boundary",
-    "chunk_duration": "Length of each audio segment (seconds).\nShorter = faster feedback but more splice points.\n🟡 15-30s recommended for best balance",
+    "chunked_mode": "Split long recordings into segments and transcribe while you speak.\nReduces work after Stop on very long dictations.\n⚠️ Each splice can lose context or duplicate/drop boundary words",
+    "chunk_duration": "Length of each audio segment (seconds).\nShorter = faster feedback but more context loss and splice points.\n⚠️ 15s/2s is the tested default; 30s is safer",
     
     # 🔴 MAJOR latency impact - These are the biggest factors
-    "whisper_model": "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed.\n🔴 GPU: Tiny ~0.5s | Base ~1s | Small ~1.5s | Medium ~3s | Large ~6s | Turbo ~2s\n🔴 CPU: Tiny ~2s | Base ~4s | Small ~6s | Medium ~12s | Large ~25s | Turbo ~8s",
+    "whisper_model": "Local on-device speech recognition model.\nBase is the Free default: fast and lightweight, but it can be inaccurate compared with Ultra models.\nProcessed entirely on your machine — no cloud API needed.",
     "accuracy_mode": "Speed vs accuracy preset - affects beam search depth.\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)",
     "beam_size": "Search width for finding best transcription.\n🔴 1 = fastest (-50%) | 5 = balanced | 10 = slowest (+100%)",
     
     # GPU/Backend - Can dramatically change all timings
     "backend": "Transcription engine selection.\n⚙️ whisper.cpp: Local, Vulkan GPU (default)\n⚙️ Faster-Whisper: Local, ROCm/CUDA GPU\n⚙️ Groq Whisper: Cloud API, ~10x faster!",
     "groq_whisper": "☁️ Groq Whisper API - Ultra-fast cloud transcription\n\n🚀 ~10x faster than local GPU!\n   ~0.3s for 10s audio (vs ~3s local)\n\n✅ Same Whisper Large-v3 model\n✅ Free tier: 14,400 requests/day\n\n⚠️ Requires internet connection\n⚠️ Audio sent to Groq servers\n\nGet API key: https://console.groq.com/keys",
-    "gpu_acceleration": "Use GPU for transcription.\n🚀 Enabled: 3-10x faster than CPU (requires CUDA/ROCm/Vulkan)",
+    "gpu_acceleration": "Ultra-only GPU acceleration for transcription and local cleanup.\nFree runs Base on CPU. Run Benchmark for a GPU upgrade preview.",
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
     
     # Post-processing tooltips
@@ -308,6 +319,14 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     # Model-specific tooltip with actual benchmarked speeds
     if key == "whisper_model":
         base_text = "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed."
+        import os
+        from pathlib import Path
+        selected_name = Path(os.path.expanduser(str(config.get("model_path", "") or ""))).name.lower()
+        if selected_name in ("ggml-base.en.bin", "ggml-base.bin"):
+            base_text += (
+                "\n\nBase is the Free default: fast and lightweight, but it can be "
+                "inaccurate compared with the higher-accuracy Ultra models."
+            )
         
         if not benchmark_results:
             return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
@@ -570,5 +589,3 @@ class CompatibilityBanner(ctk.CTkFrame):
     def is_visible(self) -> bool:
         """Check if the banner is currently visible."""
         return self._visible
-
-

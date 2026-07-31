@@ -99,6 +99,56 @@ class TestChunkedRecorder:
         assert recorder.chunk_duration == 5.0
         assert recorder.chunk_overlap == 1.0
 
+    @patch("wayfinder.core.recorder.sd")
+    def test_stop_does_not_emit_overlap_only_final_chunk(self, mock_sd):
+        """Stopping exactly at a completed boundary must not decode overlap twice."""
+        import numpy as np
+        from wayfinder.core.recorder import ChunkedRecorder
+
+        recorder = ChunkedRecorder(
+            sample_rate=16000,
+            chunk_duration=10.0,
+            chunk_overlap=1.0,
+            preprocessing="off",
+        )
+        recorder.recording_sample_rate = 16000
+        recorder._buffer = [np.zeros((160000, 1), dtype=np.float32)]
+        recorder._chunk_index = 1
+        recorder._last_chunk_end = 160000
+
+        final_path, _all_paths = recorder.stop()
+
+        assert final_path is None
+
+    @patch("wayfinder.core.recorder.sd")
+    def test_stop_keeps_overlap_when_enough_new_tail_audio_exists(self, mock_sd):
+        import os
+        import numpy as np
+        from wayfinder.core.recorder import ChunkedRecorder
+
+        recorder = ChunkedRecorder(
+            sample_rate=16000,
+            chunk_duration=10.0,
+            chunk_overlap=1.0,
+            preprocessing="off",
+        )
+        recorder.recording_sample_rate = 16000
+        # 0.6s genuinely new, plus the 1s context overlap in the saved final WAV.
+        recorder._buffer = [np.zeros((169600, 1), dtype=np.float32)]
+        recorder._chunk_index = 1
+        recorder._last_chunk_end = 160000
+
+        final_path, _all_paths = recorder.stop()
+        try:
+            assert final_path is not None
+            import wave
+            with wave.open(final_path, "rb") as wav_file:
+                assert wav_file.getnframes() == 25600
+        finally:
+            recorder.cleanup()
+            if final_path and os.path.exists(final_path):
+                os.unlink(final_path)
+
 
 class TestAudioProcessing:
     """Test audio processing utilities."""
@@ -149,6 +199,82 @@ class TestAudioProcessing:
         assert len(result) == len(audio)
         # Peak should be close to 0.707 after normalization
         assert abs(np.max(np.abs(result)) - 0.707) < 0.01
+
+    @pytest.mark.parametrize("level", ["off", "light", "medium", "heavy"])
+    def test_preprocess_empty_audio_is_safe(self, level):
+        import numpy as np
+        from wayfinder.core.recorder import preprocess_audio
+
+        result = preprocess_audio(np.array([], dtype=np.float32), 16000, level)
+        assert result.size == 0
+
+    @pytest.mark.parametrize("level", ["off", "light", "medium", "heavy"])
+    def test_preprocess_sanitizes_nonfinite_samples(self, level):
+        import numpy as np
+        from wayfinder.core.recorder import preprocess_audio
+
+        audio = np.array([0.1, np.nan, np.inf, -np.inf], dtype=np.float32)
+        result = preprocess_audio(audio, 16000, level)
+        assert np.all(np.isfinite(result))
+        assert np.max(np.abs(result)) <= 1.0
+
+    def test_light_normalization_caps_noise_floor_gain(self):
+        import numpy as np
+        from wayfinder.core.recorder import preprocess_audio
+
+        noise = np.full(16000, 0.002, dtype=np.float32)
+        result = preprocess_audio(noise, 16000, "light")
+
+        # Old behavior amplified 0.002 to 0.707 (+51dB). The +18dB cap keeps a
+        # low stationary noise floor low enough for the speech guard to reject.
+        assert np.max(np.abs(result)) == pytest.approx(0.016, abs=0.0001)
+
+    def test_heavy_gate_reduces_quiet_frames_and_preserves_speech(self):
+        import numpy as np
+        from wayfinder.core.recorder import preprocess_audio
+
+        rng = np.random.default_rng(7)
+        audio = rng.normal(0, 0.01, 16000).astype(np.float32)
+        t = np.arange(6400, dtype=np.float32) / 16000
+        audio[4800:11200] += 0.2 * np.sin(2 * np.pi * 220 * t)
+
+        medium = preprocess_audio(audio, 16000, "medium")
+        heavy = preprocess_audio(audio, 16000, "heavy")
+
+        assert np.sqrt(np.mean(heavy[:3200] ** 2)) < np.sqrt(np.mean(medium[:3200] ** 2)) * 0.4
+        assert np.sqrt(np.mean(heavy[6000:10000] ** 2)) > np.sqrt(np.mean(medium[6000:10000] ** 2)) * 0.9
+
+    def test_stationary_noise_is_not_speech_but_quiet_modulated_voice_is(self):
+        import numpy as np
+        from wayfinder.core.recorder import audio_has_speech_activity
+
+        rng = np.random.default_rng(11)
+        stationary = rng.normal(0, 0.01, 32000).astype(np.float32)
+        voice = np.zeros(32000, dtype=np.float32)
+        t = np.arange(8000, dtype=np.float32) / 16000
+        voice[4000:12000] = 0.01 * np.sin(2 * np.pi * 180 * t)
+        voice[18000:26000] = 0.008 * np.sin(2 * np.pi * 240 * t)
+
+        assert audio_has_speech_activity(stationary, 16000) is False
+        assert audio_has_speech_activity(voice, 16000) is True
+
+    def test_calibration_can_recommend_heavy_for_high_noise(self):
+        import numpy as np
+        from wayfinder.core.recorder import analyze_audio_calibration
+
+        rng = np.random.default_rng(19)
+        noisy = rng.normal(0, 0.08, 32000).astype(np.float32)
+        result = analyze_audio_calibration(noisy, 16000)
+        assert result.recommended_preprocessing == "heavy"
+
+    def test_empty_calibration_returns_actionable_result(self):
+        import numpy as np
+        from wayfinder.core.recorder import analyze_audio_calibration
+
+        result = analyze_audio_calibration(np.array([], dtype=np.float32), 16000)
+        assert result.peak_level == 0.0
+        assert result.recommended_preprocessing == "light"
+        assert "No audio captured" in result.issues
 
     def test_get_audio_level(self):
         """Test audio level calculation via AudioRecorder method."""

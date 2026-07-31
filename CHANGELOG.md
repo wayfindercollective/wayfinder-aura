@@ -5,13 +5,47 @@ All notable changes to Wayfinder Aura are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
-## [1.1.5] — 2026-07-30
+## [1.1.5] — 2026-07-31
 
 Rendering + host-integration fixes from the first real customer-path install
 of 1.1.4 (download from the site → run) on a 200%-scale KDE desktop.
 
 ### Fixed
 
+- **Mic-test playback was silent in the AppImage on Bazzite/Fedora.** The
+  bundle no longer carries Ubuntu's ALSA core into a newer host's PipeWire
+  plugin stack. Playback now selects a real output device, retries at its
+  native rate when 16 kHz is unsupported, and the completed AppImage and
+  Flatpak both exercise that exact playback path before publishing.
+- **CPU-only now means CPU-only in packaged builds.** Free installs and Ultra
+  users with GPU acceleration disabled invoke independently linked CPU Whisper
+  and llama.cpp binaries. They never initialize Vulkan first, so a broken or
+  unsupported GPU cannot crash the supposedly CPU path. The Steam Deck's Zen 2
+  instruction baseline is also explicit instead of inherited from the build
+  machine.
+- **Free-tier restrictions are enforced at runtime, not just hidden in the
+  interface.** Free is Base/Base.en transcription on CPU with local cleanup;
+  GPU acceleration, other speech models, large cleanup models, Style/voice
+  profiles, custom vocabulary, cloud/Faster-Whisper backends, and chunked
+  recording require Ultra. Stale or hand-edited settings are repaired before
+  any backend starts.
+- **Benchmark results now expose the upgrade tradeoff.** Base transcription
+  timing is always shown, and supported machines compare the current CPU path
+  with an explicitly labeled Ultra GPU preview rather than showing cleanup
+  timing alone.
+- **Audio-processing modes are now meaningfully distinct and package-tested.**
+  Light safely normalizes, Medium also filters low-frequency rumble, and Heavy
+  adds conservative noise gating. Stationary noise is no longer amplified into
+  likely Whisper hallucinations, and the settings tooltips describe when each
+  mode is useful.
+- **Chunking defaults favor accuracy.** One-shot transcription is now the
+  default. Ultra users can opt into chunked processing for long recordings;
+  its tested default is 15-second chunks with 2 seconds of overlap to reduce
+  boundary word loss and duplication.
+- **Steam Deck setup is rootless and hardware-aware.** Desktop Mode now shows
+  Deck-specific back-button guidance, while the optional helper installs from
+  the GitHub Flatpak release and manages Desktop/Game Mode without unlocking
+  SteamOS or installing system Python packages.
 - **Text rendered 2× too large on HiDPI desktops (AppImage).** The bundled
   Tk 8.6.12 converts pixel font sizes through the screen DPI while Xft
   renders them at the `Xft.dpi` resource (192 on 200% desktops) — every

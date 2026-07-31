@@ -36,7 +36,7 @@ def _touch(path: Path, data: bytes = b"ggml-fake"):
 
 def test_is_installed_finds_download_and_bundled(dl):
     d, models, bundled = dl
-    mid = "tiny.en"
+    mid = "base.en"
     filename = wm.WHISPER_CPP_MODELS[mid]["filename"]
     assert d.is_installed(mid) is False
     _touch(models / filename)
@@ -86,7 +86,7 @@ def test_delete_unknown_model(dl):
 def test_redownload_replaces_existing_file(dl, monkeypatch):
     """download_model must overwrite an existing dest (re-get after remove/partial)."""
     d, models, _ = dl
-    mid = "tiny.en"
+    mid = "base.en"
     filename = wm.WHISPER_CPP_MODELS[mid]["filename"]
     dest = models / filename
     _touch(dest, b"OLD")
@@ -127,3 +127,28 @@ def test_redownload_replaces_existing_file(dl, monkeypatch):
     assert dest.exists()
     assert dest.read_bytes() == b"NEW"
     assert "path" in done
+
+
+def test_free_download_rejects_every_non_base_speech_model(dl, monkeypatch):
+    d, models, _ = dl
+    gate = type(
+        "FreeGate",
+        (),
+        {
+            "has_feature": lambda self, _feature: False,
+            "get_bearer_token": lambda self: None,
+        },
+    )()
+    monkeypatch.setattr("wayfinder.license.get_feature_gate", lambda: gate)
+
+    for model_id, info in wm.WHISPER_CPP_MODELS.items():
+        if model_id in ("base", "base.en"):
+            assert info.get("requires_feature") is None
+            continue
+        assert info.get("requires_feature") == "large_models"
+        errors = []
+        d.download_model(model_id, error_callback=errors.append)
+        if d._current_download is not None:
+            d._current_download.join(timeout=5)
+        assert errors and "Ultra" in errors[-1]
+        assert not (models / info["filename"]).exists()

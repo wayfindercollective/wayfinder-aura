@@ -35,7 +35,88 @@ import subprocess
 import sys
 import time
 
-from evdev import InputDevice, ecodes, list_devices
+try:
+    from evdev import InputDevice, ecodes, list_devices
+
+    INPUT_BACKEND = "python-evdev"
+except ImportError:
+    # Stock SteamOS deliberately strips development headers, so `pip install
+    # evdev` cannot build and unlocking the immutable root just to install
+    # python-evdev is not an acceptable consumer setup.  The trigger needs only
+    # four tiny evdev operations; keep a stdlib implementation in this script.
+    import fcntl
+    import glob
+    import struct
+    from types import SimpleNamespace
+
+    INPUT_BACKEND = "stdlib-evdev"
+    _INPUT_EVENT = struct.Struct("llHHI")  # struct input_event on x86_64 Linux
+    _IOC_WRITE = 1
+    _IOC_READ = 2
+
+    def _ioc(direction: int, kind: str, number: int, size: int) -> int:
+        return (direction << 30) | (ord(kind) << 8) | number | (size << 16)
+
+    def _eviocgname(size: int) -> int:
+        return _ioc(_IOC_READ, "E", 0x06, size)
+
+    _EVIOCGRAB = _ioc(_IOC_WRITE, "E", 0x90, struct.calcsize("i"))
+
+    class _ECodes:
+        EV_KEY = 0x01
+        KEY_F2 = 60
+        KEY_F3 = 61
+        BTN_THUMBR = 0x13E
+        KEY = {KEY_F2: "KEY_F2", KEY_F3: "KEY_F3", BTN_THUMBR: "BTN_THUMBR"}
+
+    ecodes = _ECodes()
+
+    def list_devices():
+        return sorted(glob.glob("/dev/input/event*"))
+
+    class InputDevice:
+        """Minimal python-evdev-compatible reader for the Deck trigger."""
+
+        def __init__(self, path):
+            self.path = path
+            self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            self._grabbed = False
+            buf = bytearray(256)
+            try:
+                fcntl.ioctl(self.fd, _eviocgname(len(buf)), buf, True)
+                self.name = bytes(buf).split(b"\0", 1)[0].decode(
+                    "utf-8", errors="replace"
+                )
+            except OSError:
+                self.close()
+                raise
+
+        def grab(self):
+            fcntl.ioctl(self.fd, _EVIOCGRAB, struct.pack("i", 1))
+            self._grabbed = True
+
+        def ungrab(self):
+            if self._grabbed and self.fd >= 0:
+                fcntl.ioctl(self.fd, _EVIOCGRAB, struct.pack("i", 0))
+                self._grabbed = False
+
+        def read(self):
+            try:
+                data = os.read(self.fd, _INPUT_EVENT.size * 64)
+            except BlockingIOError:
+                return []
+            complete = len(data) - (len(data) % _INPUT_EVENT.size)
+            return [
+                SimpleNamespace(type=event_type, code=code, value=value)
+                for _sec, _usec, event_type, code, value in _INPUT_EVENT.iter_unpack(
+                    data[:complete]
+                )
+            ]
+
+        def close(self):
+            if getattr(self, "fd", -1) >= 0:
+                os.close(self.fd)
+                self.fd = -1
 
 SOCKET_PATH = os.path.join(
     os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
@@ -142,6 +223,7 @@ class Watch:
 
 
 def main() -> None:
+    log(f"input backend: {INPUT_BACKEND}")
     watches = [Watch(*w) for w in WATCHES]
 
     def shutdown(*_):
@@ -188,5 +270,29 @@ def main() -> None:
                 w.detach()
 
 
+def print_input_devices() -> int:
+    """Diagnostic that exercises discovery/name ioctls without grabbing input."""
+    print(f"backend={INPUT_BACKEND}")
+    accessible = 0
+    for path in list_devices():
+        try:
+            device = InputDevice(path)
+        except OSError as exc:
+            print(f"{path}\tUNREADABLE\t{exc}")
+            continue
+        try:
+            print(f"{path}\t{device.name}")
+            accessible += 1
+        finally:
+            device.close()
+    print(f"accessible={accessible}")
+    return 0 if accessible else 1
+
+
 if __name__ == "__main__":
+    if "--print-input-backend" in sys.argv:
+        print(INPUT_BACKEND)
+        sys.exit(0)
+    if "--list-input-devices" in sys.argv:
+        sys.exit(print_input_devices())
     main()

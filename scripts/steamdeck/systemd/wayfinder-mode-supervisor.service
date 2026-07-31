@@ -7,7 +7,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/home/deck/.local/bin/wayfinder-mode-supervisor.py
+ExecStart=%h/.local/bin/wayfinder-mode-supervisor.py
 Restart=on-failure
 RestartSec=3
 StandardOutput=append:/tmp/wayfinder-mode-supervisor.log

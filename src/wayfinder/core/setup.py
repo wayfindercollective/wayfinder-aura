@@ -528,23 +528,19 @@ def check_whisper_model(config: dict) -> DependencyStatus:
     """Check if a USABLE Whisper model exists — on disk AND permitted by license.
 
     A weight only satisfies the dependency if the current license lets the
-    transcriber load it (mirror of transcriber's _is_large_model gate). A
-    license-blind check saw a leftover Ultra weight (large/medium/turbo),
+    transcriber load it. A license-blind check saw a leftover Ultra weight,
     reported the model "installed", skipped the wizard's download step — and
     the user finished Setup with a model dictation then refused: recordings
     silently produced nothing.
     """
     def _usable(path: str) -> bool:
-        n = Path(path).name.lower()
-        if not ("large" in n or "medium" in n or "turbo" in n):
-            return True  # free-tier weight (tiny/base/small)
         try:
-            from wayfinder.license import get_feature_gate
-            return get_feature_gate().has_feature("large_models")
+            from wayfinder.license import get_feature_gate, transcription_model_allowed
+            return transcription_model_allowed(path, get_feature_gate())
         except Exception:
-            return False  # fail closed → Setup offers a free model download
+            return Path(path).name.lower() in ("ggml-base.bin", "ggml-base.en.bin")
 
-    model_path = os.path.expanduser(config.get("model_path", "~/whisper.cpp/models/ggml-large-v3-turbo.bin"))
+    model_path = os.path.expanduser(config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"))
 
     if Path(model_path).exists() and _usable(model_path):
         size_mb = Path(model_path).stat().st_size / 1_000_000
@@ -560,7 +556,7 @@ def check_whisper_model(config: dict) -> DependencyStatus:
             return DependencyStatus(True, detail=f"{best.name} ({size_mb:.0f} MB)",
                                     warning="Configured model not found, but others available")
 
-    return DependencyStatus(False, error="No usable Whisper model — download a free model (Tiny/Base/Small)")
+    return DependencyStatus(False, error="No usable Whisper model — download the Free Base model")
 
 
 # ─── Install Functions ───────────────────────────────────────────
@@ -1089,15 +1085,17 @@ def get_recommended_model() -> str:
     # for live dictation — default to base.en (STEAMDECK-INSTALL-LOG Issues 11/17).
     if is_steam_deck():
         return "base.en"
+    try:
+        from wayfinder.license import get_feature_gate
+        has_more_models = get_feature_gate().has_feature("large_models")
+    except Exception:
+        has_more_models = False
+    if not has_more_models:
+        return "base.en"
+
     vendor = _detect_gpu_vendor()
     if vendor in ("nvidia", "amd", "apple"):
-        try:
-            from wayfinder.license import get_feature_gate
-            if get_feature_gate().has_feature("large_models"):
-                return "large-v3-turbo"
-        except Exception:
-            pass  # any license-path hiccup → free-tier recommendation below
-        return "small.en"
+        return "large-v3-turbo"
     return "small.en"
 
 

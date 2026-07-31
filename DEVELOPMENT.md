@@ -217,6 +217,21 @@ on the overlay surface. Fix by routing place through KWin only (see
 overlay every dictation — that steals focus from the text field (ydotool types
 into the wrong surface).
 
+### AppImage records audio but playback is silent
+
+The AppImage must not bundle `libasound.so.2`. ALSA loads PCM plugins from the
+running distro; copying the build runner's ALSA core into the PyInstaller
+payload can make it ABI-incompatible with the host's PipeWire/Pulse plugin.
+The microphone may still record through a raw device while mic-test playback
+and feedback sounds fail. `wayfinder-aura.spec` leaves libasound host-owned,
+and AppImage CI opens the real mic-test playback path against an audio server.
+
+The Flatpak is the inverse boundary: PortAudio, libasound, and the PCM plugin
+all come from one pinned runtime, with `--socket=pulseaudio` providing access
+to the host audio server. Flatpak CI installs the built artifact and opens the
+same playback path inside its finished sandbox. Do not copy host audio
+libraries into the sandbox.
+
 ### Local ASR backend auto-select (GPU)
 
 Settings → **Backend** offers **Auto (whisper.cpp)** | whisper.cpp |
@@ -445,4 +460,3 @@ Set in Wayfinder Aura settings or `~/.config/wayfinder-aura/config.json`:
 - [ ] Voice activity detection (auto-stop recording)
 - [ ] Multiple language support
 - [ ] Custom wake word detection
-

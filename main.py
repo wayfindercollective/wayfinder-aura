@@ -39,6 +39,49 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 
+def _configure_frozen_fontconfig() -> Path | None:
+    """Expose bundled product fonts when the one-file binary runs directly.
+
+    AppRun already creates an equivalent config for the AppImage and Flatpak
+    installs fonts below /app/share/fonts.  A bare PyInstaller executable has
+    neither wrapper, so Fedora/Bazzite substitutes Noto Sans even though the
+    font files are inside the bundle.  Configure fontconfig before Tk/PyQt can
+    initialize it so dogfood and release artifacts render identically.
+    """
+    if not getattr(sys, "frozen", False) or os.environ.get("FONTCONFIG_FILE"):
+        return None
+
+    bundle_root = Path(getattr(sys, "_MEIPASS", _base_dir))
+    fonts_dir = bundle_root / "assets" / "fonts"
+    if not fonts_dir.is_dir():
+        return None
+
+    runtime_root = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    config_dir = runtime_root / "wayfinder-aura" / "fontconfig"
+    config_path = config_dir / "fonts.conf"
+    try:
+        from xml.sax.saxutils import escape
+
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "<?xml version=\"1.0\"?>\n"
+            "<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n"
+            "<fontconfig>\n"
+            "  <include ignore_missing=\"yes\">/etc/fonts/fonts.conf</include>\n"
+            f"  <dir>{escape(str(fonts_dir))}</dir>\n"
+            "</fontconfig>\n",
+            encoding="utf-8",
+        )
+        os.environ["FONTCONFIG_FILE"] = str(config_path)
+        return config_path
+    except OSError as exc:
+        print(f"[Fonts] Could not expose bundled fonts: {exc}", file=sys.stderr)
+        return None
+
+
+_configure_frozen_fontconfig()
+
+
 # Frozen overlay dispatch: PyInstaller builds can't spawn "python overlay.py"
 # (sys.executable IS the app binary — that spawn would relaunch the full app,
 # a fork bomb). Instead the binary doubles as the overlay when launched with
@@ -49,6 +92,106 @@ if "--overlay-subprocess" in sys.argv:
     from wayfinder.ui.overlay import run_overlay
     run_overlay()
     sys.exit(0)
+
+
+# Packaged audio release probe.  It runs before Tk, config, the single-instance
+# lock, or GPU setup so CI can validate AppImage/Flatpak playback headlessly.
+# The helper is also the mic-test UI's real playback implementation.
+if "--audio-output-self-test" in sys.argv:
+    try:
+        from wayfinder.utils.audio_output import output_self_test
+
+        _audio_result = output_self_test()
+        print(
+            "AUDIO_OUTPUT_SELF_TEST_OK "
+            f"device={_audio_result.output_name!r} "
+            f"requested_rate={_audio_result.requested_rate} "
+            f"used_rate={_audio_result.used_rate} "
+            f"resampled={_audio_result.resampled}",
+            flush=True,
+        )
+        sys.exit(0)
+    except Exception as _audio_error:
+        print(
+            "AUDIO_OUTPUT_SELF_TEST_FAILED "
+            f"{_audio_error.__class__.__name__}: {_audio_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+
+# Packaged preprocessing probe. Medium silently degrades to Light when SciPy's
+# dynamically imported signal module is omitted from a bundle, while unbounded
+# normalization can turn stationary mic noise into hallucinated speech. Exercise
+# those exact package boundaries without opening an audio device or Tk.
+if "--audio-processing-self-test" in sys.argv:
+    try:
+        import numpy as np
+        from wayfinder.core import recorder as _recorder
+
+        if _recorder._get_scipy_signal_functions() is None:
+            raise RuntimeError("scipy.signal unavailable; Medium rumble filter is disabled")
+
+        _rate = 16000
+        _rng = np.random.default_rng(20260731)
+        _noise = _rng.normal(0.0, 0.002, _rate * 2).astype(np.float32)
+        _light = _recorder.preprocess_audio(_noise, _rate, "light")
+        _medium = _recorder.preprocess_audio(_noise, _rate, "medium")
+        _heavy = _recorder.preprocess_audio(_noise, _rate, "heavy")
+
+        if float(np.max(np.abs(_light))) > float(np.max(np.abs(_noise))) * 8.01:
+            raise RuntimeError("Light normalization exceeded its +18dB safety cap")
+        if _recorder.audio_has_speech_activity(_light, _rate):
+            raise RuntimeError("stationary noise was classified as speech")
+        _medium_rms = float(np.sqrt(np.mean(_medium * _medium)))
+        _heavy_rms = float(np.sqrt(np.mean(_heavy * _heavy)))
+        if _heavy_rms >= _medium_rms * 0.4:
+            raise RuntimeError("Heavy soft gate did not reduce stationary noise")
+
+        print(
+            "AUDIO_PROCESSING_SELF_TEST_OK "
+            f"light_peak={float(np.max(np.abs(_light))):.6f} "
+            f"medium_rms={_medium_rms:.6f} heavy_rms={_heavy_rms:.6f}",
+            flush=True,
+        )
+        sys.exit(0)
+    except Exception as _processing_error:
+        print(
+            "AUDIO_PROCESSING_SELF_TEST_FAILED "
+            f"{_processing_error.__class__.__name__}: {_processing_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+
+# Packaged visual release probe. A no-Xft Tk build boots successfully but
+# silently renders every family/size as the same legacy bitmap font, so a
+# normal GUI liveness test cannot catch the resulting flat/jagged interface.
+if "--ui-renderer-self-test" in sys.argv:
+    try:
+        from wayfinder.utils.tk_renderer import require_compatible_tk_renderer
+
+        _renderer = require_compatible_tk_renderer()
+        print(
+            "UI_RENDERER_SELF_TEST_OK "
+            f"tk={_renderer.patchlevel!r} "
+            f"windowing={_renderer.windowing_system!r} "
+            f"fontsystem={_renderer.font_system!r} "
+            f"family={_renderer.actual_family!r} "
+            f"families={_renderer.family_count}",
+            flush=True,
+        )
+        sys.exit(0)
+    except Exception as _renderer_error:
+        print(
+            "UI_RENDERER_SELF_TEST_FAILED "
+            f"{_renderer_error.__class__.__name__}: {_renderer_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
 
 
 # Scaling cache file location
@@ -340,8 +483,16 @@ def main():
     # This sets GGML_VK_VISIBLE_DEVICES once, and all subprocesses inherit it
     try:
         from wayfinder.utils.gpu_simple import setup_gpu_environment
-        from wayfinder.config import load_config
+        from wayfinder.config import enforce_license_config, load_config, save_config
+        from wayfinder.license import get_feature_gate
         config = load_config()
+        _entitlement_repairs = enforce_license_config(config, get_feature_gate())
+        if _entitlement_repairs:
+            save_config(config)
+            print(
+                "[license] Repaired unavailable settings before runtime setup: "
+                + ", ".join(_entitlement_repairs)
+            )
         setup_gpu_environment(config)
     except Exception as e:
         print(f"[GPU] Warning: Could not setup GPU environment: {e}")

@@ -81,12 +81,17 @@ cleanup:
   - /lib/python*/site-packages/wheel*
 
 modules:
-  # PortAudio for sounddevice
+  # PortAudio for sounddevice. In the sandbox, route through the KDE runtime's
+  # ALSA -> Pulse/PipeWire plugin and --socket=pulseaudio; direct host ALSA
+  # devices are intentionally unavailable. Building against one pinned SDK
+  # keeps libasound and its pcm plugin on a matching ABI.
   - name: portaudio
     buildsystem: cmake-ninja
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
       - -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+      - -DPA_USE_ALSA=ON
+      - -DPA_USE_JACK=OFF
     sources:
       # git source, not GitHub's auto-generated tarball — that tarball's sha256 is unstable
       # and broke the build (manifest had ...8c405c8d64db, GitHub served ...40c3e1b83174fa0).

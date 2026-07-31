@@ -238,6 +238,11 @@ class FakeApp:
         self._welcome_pane = None
         self._game_mode = False
         self.last_transcription = ""
+        # Most orchestration tests exercise the Ultra chunk path explicitly.
+        # Individual entitlement tests replace this with a Free gate.
+        self.feature_gate = SimpleNamespace(
+            has_feature=lambda feature_id: feature_id == "chunked_recording"
+        )
 
         # voice-learning side channel (personal tone only)
         self.voice_learned = []
@@ -393,6 +398,29 @@ class TestStartRecording:
         # Chunk params come straight from config (single source of truth).
         assert created["kwargs"]["chunk_duration"] == app.config["chunk_duration"]
         assert created["kwargs"]["sample_rate"] == app.config["sample_rate"]
+
+    def test_free_tier_stale_chunked_setting_fails_closed(self, app):
+        """An old/edited config cannot cross the Ultra execution boundary."""
+        app.config["chunked_mode"] = True
+        app.feature_gate = SimpleNamespace(has_feature=lambda _feature_id: False)
+
+        app.start_recording()
+
+        assert app.recorder.started is True
+        assert app.chunked_recorder is None
+        assert any("unavailable on Free" in message for message in app.logs)
+
+    def test_broken_feature_gate_fails_closed(self, app):
+        app.config["chunked_mode"] = True
+
+        def broken_gate(_feature_id):
+            raise RuntimeError("license store unavailable")
+
+        app.feature_gate = SimpleNamespace(has_feature=broken_gate)
+        app.start_recording()
+
+        assert app.recorder.started is True
+        assert app.chunked_recorder is None
 
     def test_remote_backend_skips_chunked_mode(self, app):
         # Cloud whisper backends handle long audio natively → simple recorder even

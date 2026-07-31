@@ -1,8 +1,36 @@
-# Steam Deck host-side infrastructure
+# Steam Deck installation and host-side infrastructure
 
 Files that live OUTSIDE the flatpak on the Steam Deck. They are committed here
 for disaster recovery — if the Deck is wiped, this directory plus
 `STEAMDECK-INSTALL-LOG.md` is everything needed to rebuild the setup.
+
+## Fresh SteamOS installation
+
+Do this from Desktop Mode. The installer downloads the latest release Flatpak
+from GitHub when Wayfinder is not installed, installs it for the current user,
+and installs/enables the controller trigger and Game Mode lifecycle services:
+
+```sh
+git clone https://github.com/wayfindercollective/wayfinder-aura.git
+cd wayfinder-aura
+./scripts/steamdeck/install-steamdeck.sh
+```
+
+This path is rootless. It does not use `pacman`, disable SteamOS read-only
+mode, compile Python packages, or require ydotool. The host controller daemon
+has a Python-standard-library evdev backend for stock SteamOS; the Flatpak
+bundles its speech engines, model, X11 injection backend, and matching audio
+stack.
+
+To test an already-downloaded candidate before it is the latest release:
+
+```sh
+./scripts/steamdeck/install-steamdeck.sh \
+  --flatpak-bundle ~/Downloads/io.wayfindercollective.WayfinderAura.flatpak
+```
+
+Re-run with `--refresh-flatpak` to update from the latest GitHub release. The
+installer is idempotent.
 
 ## Install map
 
@@ -15,7 +43,6 @@ for disaster recovery — if the Deck is wiped, this directory plus
 | `systemd/wayfinder-trigger.service` | `~/.config/systemd/user/wayfinder-trigger.service` |
 | `systemd/wayfinder-mode-supervisor.service` | `~/.config/systemd/user/wayfinder-mode-supervisor.service` |
 | `systemd/wayfinder-aura.service` | `~/.config/systemd/user/wayfinder-aura.service` |
-| `systemd/wayfinder-aura.service.d-flatpak.conf` | `~/.config/systemd/user/wayfinder-aura.service.d/flatpak.conf` |
 | `systemd/wayfinder-aura-failed.service` | `~/.config/systemd/user/wayfinder-aura-failed.service` |
 | `r4-f3-bridge.py` (historical only; not installed) | `~/.local/bin/r4-f3-bridge.py` |
 | `systemd/r4-f3-bridge.service` (historical only; disabled) | `~/.config/systemd/user/r4-f3-bridge.service` |
@@ -33,6 +60,14 @@ The desktop entry uses the one-shot `wayfinder-aura-show-or-start` helper. A cli
 `show` to the existing app socket and returns immediately; only a genuinely stopped or
 unhealthy app touches systemd/Flatpak. The helper exits after the click and is not a daemon.
 
+The Steam client owns controller layout changes, so one manual mapping remains.
+In Steam's Desktop Layout, bind R4 (or another back/custom button) to **Right
+Joystick Click**. Game Mode uses per-game layouts, so repeat the assignment in
+each game's Controller Settings or apply a reusable layout template. The host
+trigger daemon converts that virtual button directly into a Wayfinder socket
+command; it does not synthesize an F-key. Because the virtual pad is not grabbed,
+the focused game may also receive its normal right-stick-click action.
+
 ## How dictation gets triggered
 
 Fresh app installs use **Super+F2** for record toggle and **Super+F3** for
@@ -44,7 +79,9 @@ commands directly to the app's Unix socket.
 ### `wayfinder-trigger-daemon.py` — the primary, mode-agnostic path
 
 A host-side evdev daemon (the Flatpak sandbox can't read `/dev/input`; the host
-can) that talks straight to the app's Unix socket
+can) that talks straight to the app's Unix socket. It uses `python-evdev` when
+already available and otherwise its bundled standard-library Linux input
+reader, so a stock immutable SteamOS install needs no Python package. The socket is
 `$XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock`. **No X11/Wayland
 involvement at all**, which is the whole point: it works identically in Desktop
 Mode and Game Mode. Logs to `/tmp/wayfinder-trigger.log`.

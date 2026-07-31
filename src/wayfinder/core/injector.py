@@ -33,6 +33,12 @@ class InjectionError(Exception):
 # straight to ydotool instead of re-failing every dictation.
 _WTYPE_UNSUPPORTED = False
 
+# A Bazzite/SteamOS user service can start before logind applies the session's
+# uaccess ACL to /dev/uinput. ydotoold then exhausts systemd's restart limit and
+# remains dead even though the device becomes writable moments later. Retry at
+# most once from the app after the graphical session is fully established.
+_YDOTOOL_USER_SERVICE_RESTART_ATTEMPTED = False
+
 
 def _note_wtype_failure(detail: str) -> None:
     global _WTYPE_UNSUPPORTED
@@ -176,11 +182,19 @@ def check_ydotool_ready() -> tuple[bool, str]:
     env = _get_ydotool_env()
     socket_path = env.get("YDOTOOL_SOCKET")
     if not socket_path:
+        restarted, restart_message = _restart_ydotool_user_service_once()
+        if restarted:
+            env = _get_ydotool_env()
+            socket_path = env.get("YDOTOOL_SOCKET")
+            if socket_path and _probe_unix_socket(socket_path):
+                return True, f"ydotool ready after user-service recovery (socket: {socket_path})"
         # No socket found - daemon may not be running
         if shutil.which("systemctl"):
             hint = "Start the daemon: sudo systemctl enable --now ydotoold"
         else:
             hint = "Start the ydotoold daemon with your init system"
+        if restart_message:
+            hint = f"{hint} ({restart_message})"
         return False, f"ydotool daemon socket not found. {hint}"
 
     # A socket FILE can outlive a dead daemon (stale after a stop/crash), and a
@@ -188,12 +202,92 @@ def check_ydotool_ready() -> tuple[bool, str]:
     # exact selected socket by CONNECTING (no input events, microseconds):
     # only a daemon actually listening there counts as ready (Codex review).
     if not _probe_unix_socket(socket_path):
+        restarted, restart_message = _restart_ydotool_user_service_once()
+        if restarted:
+            env = _get_ydotool_env()
+            recovered_path = env.get("YDOTOOL_SOCKET")
+            if recovered_path and _probe_unix_socket(recovered_path):
+                return True, (
+                    "ydotool ready after user-service recovery "
+                    f"(socket: {recovered_path})"
+                )
         return False, (
             f"ydotool socket exists ({socket_path}) but nothing is listening "
             "on it (stale socket or dead daemon). Restart the daemon."
+            + (f" ({restart_message})" if restart_message else "")
         )
 
     return True, f"ydotool ready (socket: {socket_path})"
+
+
+def _restart_ydotool_user_service_once() -> tuple[bool, str]:
+    """Recover a user ydotoold unit from the Bazzite /dev/uinput ACL race.
+
+    This is deliberately narrow and safe: Wayland only, an already-writable
+    uinput device, a host ydotoold binary, and an existing loaded user unit.
+    It never invokes sudo, installs files, or touches a system service.
+    """
+    global _YDOTOOL_USER_SERVICE_RESTART_ATTEMPTED
+    if _YDOTOOL_USER_SERVICE_RESTART_ATTEMPTED:
+        return False, "user-service recovery was already attempted"
+    _YDOTOOL_USER_SERVICE_RESTART_ATTEMPTED = True
+
+    try:
+        from wayfinder.utils.platform import is_wayland
+
+        if not is_wayland():
+            return False, "not a Wayland session"
+    except Exception:
+        return False, "could not identify the session type"
+
+    if not shutil.which("systemctl") or not shutil.which("ydotoold"):
+        return False, "systemctl or ydotoold is unavailable"
+    if not os.path.exists("/dev/uinput") or not os.access("/dev/uinput", os.W_OK):
+        return False, "/dev/uinput is not writable by this session"
+
+    from wayfinder.utils.hostexec import host_env
+
+    env = host_env()
+    for unit in ("wayfinder-ydotoold.service", "ydotoold.service"):
+        try:
+            loaded = subprocess.run(
+                ["systemctl", "--user", "show", "--property=LoadState", "--value", unit],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                env=env,
+            )
+            if loaded.returncode != 0 or loaded.stdout.strip() != "loaded":
+                continue
+            subprocess.run(
+                ["systemctl", "--user", "reset-failed", unit],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                env=env,
+            )
+            started = subprocess.run(
+                ["systemctl", "--user", "start", unit],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=env,
+            )
+            if started.returncode != 0:
+                detail = started.stderr.strip() or started.stdout.strip()
+                return False, f"{unit} failed to start: {detail or 'unknown error'}"
+
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                candidate_env = _get_ydotool_env()
+                candidate = candidate_env.get("YDOTOOL_SOCKET")
+                if candidate and _probe_unix_socket(candidate, timeout=0.1):
+                    return True, f"restarted {unit}"
+                time.sleep(0.05)
+            return False, f"{unit} started but its socket did not become ready"
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"could not restart {unit}: {exc}"
+    return False, "no user ydotoold service is installed"
 
 
 def _probe_unix_socket(path: str, timeout: float = 1.0) -> bool:

@@ -200,7 +200,7 @@ Config is stored at `~/.config/wayfinder-aura/config.json`
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `whisper_binary` | string | `~/whisper.cpp/build/bin/whisper-cli` | Path to whisper-cli |
-| `model_path` | string | `~/whisper.cpp/models/ggml-large-v3-turbo.bin` | Whisper model path |
+| `model_path` | string | `~/whisper.cpp/models/ggml-base.en.bin` | Whisper model path |
 
 ### Hotkey Settings
 
@@ -235,16 +235,16 @@ Config is stored at `~/.config/wayfinder-aura/config.json`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `chunked_mode` | bool | `true` | Enable chunked recording |
-| `chunk_duration` | int | `10` | Seconds of new audio per chunk (speed vs accuracy) |
-| `chunk_overlap` | int | `1` | Overlap between chunks (word-cut guard) |
+| `chunked_mode` | bool | `false` | Opt-in Ultra chunked recording (one-shot is accuracy-first) |
+| `chunk_duration` | int | `15` | Seconds of new audio per chunk (speed vs accuracy) |
+| `chunk_overlap` | int | `2` | Overlap between chunks (word-cut guard) |
 | `max_recording_duration` | int | `0` | Max duration (0 = unlimited) |
 
 ### GPU Settings
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `use_gpu` | bool | `true` | Enable GPU acceleration |
+| `use_gpu` | bool | `false` | Enable Ultra GPU acceleration |
 | `gpu_layers` | int | `0` | GPU layers (0 = all) |
 | `gpu_device` | string | `auto` | GPU device (`auto`, `0`, `1`, `2`) |
 
@@ -254,7 +254,7 @@ Config is stored at `~/.config/wayfinder-aura/config.json`
 |-----|------|---------|-------------|
 | `post_processing_enabled` | bool | `true` | Enable LLM cleanup |
 | `post_processing_backend` | string | `llama_cpp` | `llama_cpp`, `anthropic`, `openai` |
-| `output_tone` | string | `professional` | `minimal`, `professional`, `casual`, `dev`, `personal` |
+| `output_tone` | string | `minimal` | `minimal`, `professional`, `casual`, `dev`, `personal` |
 | `strong_mode` | bool | `false` | Allow sentence restructuring |
 | `llama_cpp_model_path` | string | (see config.py) | Path to GGUF model |
 

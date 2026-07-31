@@ -155,7 +155,7 @@ class TestAudioPreprocessingPipeline:
 
         levels = ["off", "light", "medium", "heavy"]
         for level in levels:
-            result = preprocess_audio(audio, level)
+            result = preprocess_audio(audio, 16000, level)
             assert result is not None
             assert len(result) > 0
 

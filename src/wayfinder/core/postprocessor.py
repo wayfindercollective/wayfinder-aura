@@ -295,6 +295,71 @@ def detect_model_tier(model_name: str, backend: str = "") -> str:
     return "small"
 
 
+FREE_CLEANUP_MODEL_FILENAMES = (
+    "google_gemma-3-1b-it-Q4_K_M.gguf",
+    "Qwen3.5-2B-Q4_K_M.gguf",
+    "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+    "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    "smollm2-360m-instruct-q8_0.gguf",
+    "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+)
+
+
+def cleanup_model_allowed(
+    model_ref: str,
+    gate=None,
+    requires_feature: str | None = None,
+) -> bool:
+    """Whether the current license may execute a local cleanup model.
+
+    Catalog metadata is authoritative when available. At the backend boundary,
+    where only a path remains, 3B+ capability tiers require the matching Ultra
+    feature. Unknown custom models default to the small/free tier, while names
+    that advertise 3B/4B/7B/etc. fail closed.
+    """
+    feature = requires_feature
+    if not feature:
+        tier = detect_model_tier(Path(str(model_ref or "")).stem)
+        if tier in ("standard", "large"):
+            feature = "large_cleanup_models"
+    if not feature:
+        return True
+    try:
+        if gate is None:
+            from ..license import get_feature_gate
+
+            gate = get_feature_gate()
+        return bool(gate.has_feature(feature))
+    except Exception:
+        return False
+
+
+def free_cleanup_model_fallback(model_ref: str, default_ref: str = "") -> str:
+    """Choose a Free cleanup model beside the selected/default model.
+
+    A concrete target is returned even when no file exists so setup can surface
+    the missing Free asset instead of silently executing a paid model.
+    """
+    current = Path(os.path.expanduser(str(model_ref or "")))
+    default = Path(os.path.expanduser(str(default_ref or "")))
+    dirs: list[Path] = []
+    for candidate in (current.parent, default.parent):
+        if str(candidate) not in ("", ".") and candidate not in dirs:
+            dirs.append(candidate)
+    for directory in dirs:
+        for filename in FREE_CLEANUP_MODEL_FILENAMES:
+            candidate = directory / filename
+            try:
+                if candidate.exists():
+                    return str(candidate)
+            except OSError:
+                continue
+    if default_ref and detect_model_tier(default.stem) in ("tiny", "small"):
+        return str(default)
+    directory = dirs[0] if dirs else Path.home() / ".local/share/wayfinder-aura/llm-models"
+    return str(directory / FREE_CLEANUP_MODEL_FILENAMES[0])
+
+
 def get_model_quirks(model_name: str) -> Dict[str, Any]:
     """Get known issues/quirks for a specific model."""
     model_norm = _normalize_model_name(model_name)
@@ -1892,7 +1957,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
         older Steam Deck Mesa) auto-route to the bundled CPU binary instead of hanging."""
         requested = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
         if requested == 0:
-            return self.llama_binary, 0  # CPU explicitly requested
+            # AppImage/Flatpak ship a separately linked CPU executable. Prefer
+            # it for an explicit CPU request because Vulkan can initialize (and
+            # crash) before a GPU-layer flag is honored. This guarantees that a
+            # Free or unchecked-GPU run never launches the GPU-capable binary.
+            return self._cpu_sibling() or self.llama_binary, 0
         key = (self.llama_binary, self.model_path)
         cache = LlamaCppCliBackend._gpu_probe
         if key not in cache:
@@ -2570,6 +2639,9 @@ def get_backend(config: dict) -> PostProcessorBackend:
     """
     backend_type = config.get("post_processing_backend", "llama_cpp")
     output_tone = config.get("output_tone", "professional")
+    _gpu_unlocked = False
+    _style_unlocked = False
+    _gate = None
 
     # === License gating (audit F1) ===
     # Cloud cleanup (OpenAI/Anthropic) and the styled tone presets are premium
@@ -2579,11 +2651,13 @@ def get_backend(config: dict) -> PostProcessorBackend:
     # gate hiccup never blocks post-processing.
     try:
         from ..license import get_feature_gate
-        gate = get_feature_gate()
+        _gate = get_feature_gate()
+        _gpu_unlocked = bool(_gate.has_feature("gpu_acceleration"))
+        _style_unlocked = bool(_gate.has_feature("tone_system"))
 
         # Cloud backends require the "cloud_backends" feature — downgrade to the
         # free local llama.cpp path when unlicensed (never send text to cloud).
-        if backend_type in CLOUD_BACKENDS and not gate.has_feature("cloud_backends"):
+        if backend_type in CLOUD_BACKENDS and not _gate.has_feature("cloud_backends"):
             print("[Post-processing] ⚠ Cloud cleanup is a premium feature — "
                   "falling back to local llama.cpp (unlicensed)")
             backend_type = "llama_cpp"
@@ -2591,7 +2665,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
         # The styled tone presets require the "tone_system" feature. Only
         # "minimal" is free, so downgrade any styled tone to minimal when
         # unlicensed rather than applying a premium preset.
-        if output_tone != "minimal" and not gate.has_feature("tone_system"):
+        if output_tone != "minimal" and not _gate.has_feature("tone_system"):
             print("[Post-processing] ⚠ Tone presets are a premium feature — "
                   "using minimal cleanup (unlicensed)")
             output_tone = "minimal"
@@ -2603,6 +2677,35 @@ def get_backend(config: dict) -> PostProcessorBackend:
             backend_type = "llama_cpp"
         if output_tone != "minimal":
             output_tone = "minimal"
+
+    # The visible GPU toggle is shared by ASR and local cleanup. Both intent and
+    # entitlement are required; direct config edits fail closed to zero offload.
+    _gpu_enabled = bool(config.get("use_gpu", False)) and _gpu_unlocked
+    _configured_gpu_layers = config.get("llama_cpp_n_gpu_layers", -1)
+    _effective_gpu_layers = _configured_gpu_layers if _gpu_enabled else 0
+    _effective_strong_mode = bool(config.get("strong_mode", False)) and _style_unlocked
+    _effective_caricature_mode = bool(config.get("caricature_mode", False)) and _style_unlocked
+
+    _effective_model_path = str(config.get("llama_cpp_model_path", "") or "")
+    if backend_type == "llama_cpp" and not cleanup_model_allowed(
+        _effective_model_path,
+        _gate,
+        config.get("llama_cpp_model_requires_feature"),
+    ):
+        try:
+            from ..config import DEFAULT_CONFIG
+
+            default_model = str(DEFAULT_CONFIG.get("llama_cpp_model_path", "") or "")
+        except Exception:
+            default_model = ""
+        denied_model = Path(os.path.expanduser(_effective_model_path)).name
+        _effective_model_path = free_cleanup_model_fallback(
+            _effective_model_path, default_model
+        )
+        print(
+            f"[Post-processing] ⚠ Cleanup model '{denied_model}' requires "
+            "'large_cleanup_models' — using a Free cleanup model instead"
+        )
 
     if backend_type == "anthropic":
         # API key is read from environment variable only (secure)
@@ -2643,27 +2746,27 @@ def get_backend(config: dict) -> PostProcessorBackend:
         if use_cli and _cli_present:
             return LlamaCppCliBackend(
                 llama_binary=llama_binary,
-                model_path=config.get("llama_cpp_model_path", ""),
+                model_path=_effective_model_path,
                 n_ctx=config.get("llama_cpp_n_ctx", 2048),
                 n_threads=config.get("llama_cpp_n_threads", 4),
-                n_gpu_layers=config.get("llama_cpp_n_gpu_layers", -1),
+                n_gpu_layers=_effective_gpu_layers,
                 max_tokens=config.get("post_processing_max_tokens", 1024),
                 temperature=config.get("post_processing_temperature", 0.1),
                 output_tone=output_tone,
-                strong_mode=config.get("strong_mode", False),
-                caricature_mode=config.get("caricature_mode", False),
+                strong_mode=_effective_strong_mode,
+                caricature_mode=_effective_caricature_mode,
                 force_subprocess=config.get("post_processing_force_subprocess", False),
             )
         
         # Fall back to Python bindings (llama-cpp-python)
         return LlamaCppBackend(
-            model_path=config.get("llama_cpp_model_path", ""),
+            model_path=_effective_model_path,
             n_ctx=config.get("llama_cpp_n_ctx", 2048),
             n_threads=config.get("llama_cpp_n_threads", 4),
-            n_gpu_layers=config.get("llama_cpp_n_gpu_layers", -1),
+            n_gpu_layers=_effective_gpu_layers,
             max_tokens=config.get("post_processing_max_tokens", 1024),
             temperature=config.get("post_processing_temperature", 0.1),
-            use_gpu=config.get("use_gpu", True),
+            use_gpu=_gpu_enabled,
         )
 
 
@@ -2690,12 +2793,29 @@ def process_with_config(text: str, config: dict) -> str:
     
     if not text or not text.strip():
         return text
-    
+    if not config.get("post_processing_enabled", True):
+        return text
+
+    # Enforce Style entitlement before Minimal's early path and before build_prompt().
+    # Gating only inside get_backend() was too late: a hand-edited caricature flag
+    # or styled config could shape the prompt before the backend was downgraded.
+    try:
+        from ..license import get_feature_gate
+        _style_allowed = get_feature_gate().has_feature("tone_system")
+    except Exception:
+        _style_allowed = False
+    if not _style_allowed:
+        config = dict(config)
+        config["output_tone"] = "minimal"
+        config["strong_mode"] = False
+        config["caricature_mode"] = False
+
     tone = config.get("output_tone", "professional")
 
-    # === MINIMAL STYLE: Always use regex-based filler removal (no LLM) ===
-    # Minimal style uses instant regex cleanup - runs even if LLM post-processing is disabled
-    # This is ~1000x faster than LLM processing
+    # === MINIMAL STYLE: neutral cleanup, with an explicit fast-regex option ===
+    # Free owns the neutral Minimal tone and still gets real local LLM cleanup.
+    # Regex-only cleanup is used when the user explicitly enables
+    # fast_filler_removal. The master post-processing toggle returns above.
     # EXCEPTION: caricature transforms even minimal — take the LLM path when the
     # easter egg is on AND the model can actually honor it (the tier cap would
     # downgrade caricature back to plain cleanup on a 1B/2B model, so skipping
@@ -2720,7 +2840,8 @@ def process_with_config(text: str, config: dict) -> str:
                 use_caricature = effective == "caricature"
             else:
                 use_caricature = False
-        if not use_caricature:
+        use_fast_regex = bool(config.get("fast_filler_removal", False))
+        if not use_caricature and use_fast_regex:
             start_time = time.time()
             input_words = len(text.split())
 

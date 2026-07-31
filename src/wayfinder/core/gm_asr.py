@@ -14,12 +14,13 @@ from typing import Any
 
 from wayfinder.config import IS_FLATPAK
 
-# Prefer English tiny/base first (Deck default is base.en); then multilingual.
+# Prefer Base first (the Free/default model); Ultra can still explicitly select
+# Tiny for a lighter Game Mode profile.
 _LIGHT_BASENAMES = (
-    "ggml-tiny.en.bin",
     "ggml-base.en.bin",
-    "ggml-tiny.bin",
     "ggml-base.bin",
+    "ggml-tiny.en.bin",
+    "ggml-tiny.bin",
     "ggml-small.en.bin",
     "ggml-small.bin",
 )

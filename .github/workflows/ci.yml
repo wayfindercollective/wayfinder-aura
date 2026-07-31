@@ -213,7 +213,7 @@ jobs:
             spirv-headers spirv-tools \
             libgirepository1.0-dev libdbus-1-dev libcairo2-dev \
             wtype \
-            xvfb libxft2 pulseaudio \
+            xvfb libxft2 pulseaudio libasound2-plugins \
             libfuse2 desktop-file-utils appstream
 
       - name: Install glslc for Vulkan builds
@@ -276,8 +276,12 @@ jobs:
           test -x squashfs-root/AppRun
           test -x squashfs-root/usr/bin/wayfinder-aura
           test -x squashfs-root/usr/bin/whisper-cli
+          test -x squashfs-root/usr/bin/whisper-server
+          test -x squashfs-root/usr/bin/whisper-cli-cpu
+          test -x squashfs-root/usr/bin/whisper-server-cpu
           test -x squashfs-root/usr/bin/llama-cli
           test -x squashfs-root/usr/bin/llama-simple
+          test -x squashfs-root/usr/bin/llama-simple-cpu
           test -x squashfs-root/usr/bin/wtype
           # ydotool is deliberately NOT bundled: the client must protocol-match
           # the HOST daemon (jammy's 0.1.8 doesn't even speak the app's CLI).
@@ -290,17 +294,44 @@ jobs:
             || { echo "whisper-cli was built WITHOUT Vulkan (silent CPU fallback)" >&2; exit 1; }
           grep -aFq "ggml_vulkan" squashfs-root/usr/bin/llama-cli \
             || { echo "llama-cli was built WITHOUT Vulkan (silent CPU fallback)" >&2; exit 1; }
+          if grep -aFq "ggml_vulkan" squashfs-root/usr/bin/whisper-cli-cpu \
+             || grep -aFq "ggml_vulkan" squashfs-root/usr/bin/llama-simple-cpu; then
+            echo "CPU safety twin unexpectedly links the Vulkan backend" >&2
+            exit 1
+          fi
           # GI typelibs + the gi/dbus C extensions MUST be bundled: without them
           # frozen builds lose Wayland portal shortcuts or crash against a
           # mismatched host GLib (Fedora 44 launch bug). File-then-grep so a
           # future pipefail change can't mask pyi-archive_viewer failures.
           pyi-archive_viewer -l squashfs-root/usr/bin/wayfinder-aura > /tmp/pyi-contents.txt
+          # ALSA plugins come from the running distro and must load against that
+          # distro's libasound. Bundling Jammy's libasound made Fedora/Bazzite's
+          # newer PipeWire plugin fail symbol resolution: capture worked but
+          # playback was silent. Guard both the one-file payload and AppDir.
+          if grep -Eq 'lib(asound\.so|pipewire-0\.3\.so|pulse\.so|pulsecommon-)' /tmp/pyi-contents.txt \
+             || find squashfs-root/usr/lib -maxdepth 1 \
+                  \( -name 'libasound.so*' -o -name 'libpipewire-0.3.so*' \
+                     -o -name 'libpulse.so*' -o -name 'libpulsecommon-*' \) \
+                  -print -quit | grep -q .; then
+            echo "bundle contains host-owned audio-server libraries; plugins would be ABI-mismatched" >&2
+            exit 1
+          fi
           grep -Fq "gi_typelibs/GLib-2.0.typelib" /tmp/pyi-contents.txt \
             || { echo "bundle is missing gi typelibs (PyGObject absent at build time)" >&2; exit 1; }
           grep -Eq "_dbus_bindings.*\.so" /tmp/pyi-contents.txt \
             || { echo "bundle is missing dbus-python bindings" >&2; exit 1; }
           grep -Eq "gi[/\\]_gi.*\.so" /tmp/pyi-contents.txt \
             || { echo "bundle is missing the PyGObject _gi extension" >&2; exit 1; }
+          # Tk's scripts and native library must both be present. Portable
+          # Python distributions can use a combined libtcl*tk*.so that
+          # PyInstaller's normal Linux dependency lookup does not discover.
+          grep -Fq "_tk_data/tk.tcl" /tmp/pyi-contents.txt \
+            || { echo "bundle is missing Tk runtime data" >&2; exit 1; }
+          grep -Eq "lib(tcl[^/ ]*tk|tk)[^/ ]*\.so" /tmp/pyi-contents.txt \
+            || { echo "bundle is missing the Tk native library" >&2; exit 1; }
+          HOME=$(mktemp -d) xvfb-run -a squashfs-root/AppRun \
+            --ui-renderer-self-test | tee /tmp/ui-renderer-self-test.log
+          grep -Fq "UI_RENDERER_SELF_TEST_OK" /tmp/ui-renderer-self-test.log
           # Design fonts MUST ship: without them fontconfig substitutes a random
           # sans per distro and HiDPI text sizing regressed (1.1.4 field bug).
           # DejaVu Sans is the product typeface by owner decision (2026-07-30).
@@ -323,6 +354,19 @@ jobs:
           # gate test the app as it exists on actual desktops.
           pulseaudio --daemonize=yes --exit-idle-time=-1 || true
           pactl load-module module-null-sink sink_name=ci_null || true
+          # Exercise the SAME helper as Settings -> Mic Test, beginning at the
+          # real 16 kHz recording rate. A GUI boot does not catch a broken ALSA
+          # plugin, default sink, or native-rate fallback.
+          AUDIO_HOME=$(mktemp -d)
+          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
+            squashfs-root/AppRun --audio-output-self-test | tee /tmp/audio-self-test.log
+          grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/audio-self-test.log
+          # Medium depends on a dynamically imported scipy.signal module, and
+          # preprocessing's stationary-noise guard is a release-critical defense
+          # against confident Whisper hallucinations. Exercise the packaged path.
+          HOME=$(mktemp -d) squashfs-root/AppRun \
+            --audio-processing-self-test | tee /tmp/audio-processing-self-test.log
+          grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/audio-processing-self-test.log
           set +e
           # PYTHONFAULTHANDLER: on SIGSEGV the boot log then contains the exact
           # Python stack — a bare rc=139 is undebuggable from CI logs.
@@ -387,7 +431,7 @@ jobs:
       - name: Install Flatpak tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          sudo apt-get install -y flatpak flatpak-builder pulseaudio xvfb
 
       - name: Add Flathub remote
         run: |
@@ -438,6 +482,28 @@ jobs:
           cd flatpak
           flatpak-builder --user --force-clean --jobs=2 \
             --repo=repo build-dir "${{ steps.flatpak-manifest.outputs.manifest }}"
+
+      - name: Smoke-test Flatpak audio boundary
+        run: |
+          pulseaudio --daemonize=yes --exit-idle-time=-1 || true
+          pactl load-module module-null-sink sink_name=ci_null || true
+          flatpak remote-add --user --if-not-exists --no-gpg-verify \
+            wayfinder-ci "$(pwd)/flatpak/repo"
+          flatpak install --user -y wayfinder-ci \
+            io.wayfindercollective.WayfinderAura
+          # Let Flatpak inject its sandbox-side PULSE_SERVER path for the
+          # --socket=pulseaudio bind mount; leaking the host path here would
+          # bypass the exact boundary this test is meant to validate.
+          flatpak run io.wayfindercollective.WayfinderAura \
+            --audio-output-self-test | tee /tmp/flatpak-audio-self-test.log
+          grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/flatpak-audio-self-test.log
+          flatpak run io.wayfindercollective.WayfinderAura \
+            --audio-processing-self-test | tee /tmp/flatpak-audio-processing-self-test.log
+          grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/flatpak-audio-processing-self-test.log
+          HOME=$(mktemp -d) xvfb-run -a \
+            flatpak run io.wayfindercollective.WayfinderAura \
+              --ui-renderer-self-test | tee /tmp/flatpak-ui-renderer-self-test.log
+          grep -Fq "UI_RENDERER_SELF_TEST_OK" /tmp/flatpak-ui-renderer-self-test.log
 
       - name: Build single-file bundle
         run: |

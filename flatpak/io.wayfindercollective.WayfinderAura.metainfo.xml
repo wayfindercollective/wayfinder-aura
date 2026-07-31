@@ -114,10 +114,17 @@
   </supports>
 
   <releases>
-    <release version="1.1.5" date="2026-07-30">
+    <release version="1.1.5" date="2026-07-31">
       <description>
-        <p>Consistent rendering and desktop integration on every machine:</p>
+        <p>Reliable packaged behavior on Bazzite, SteamOS, and modern Linux desktops:</p>
         <ul>
+          <li>Fixed silent AppImage mic-test playback caused by bundled ALSA libraries conflicting with the host PipeWire stack</li>
+          <li>Free and CPU-only modes now run independently linked CPU inference binaries without initializing Vulkan</li>
+          <li>Free-tier restrictions are enforced in the interface, saved configuration, and runtime backends; Free uses Base transcription on CPU</li>
+          <li>Benchmarks always show Base transcription speed and compare CPU with an explicitly labeled Ultra GPU preview where supported</li>
+          <li>Light, Medium, and Heavy audio processing now have distinct, package-tested behavior and clearer guidance</li>
+          <li>One-shot transcription is the accuracy-first default; optional Ultra chunking uses a tested 15-second/2-second-overlap profile</li>
+          <li>Steam Deck setup and back-button guidance are rootless, hardware-aware, and work with Desktop and Game Mode</li>
           <li>Fixed text rendering roughly twice as large as intended on HiDPI (150–200%) desktops; the interface now looks identical on every display</li>
           <li>The interface typeface now ships with the app instead of depending on what each distribution substitutes — the same build looks the same everywhere</li>
           <li>Fixed the status overlay getting stuck mid-screen on KDE, and the placement and position controls that did nothing with it</li>

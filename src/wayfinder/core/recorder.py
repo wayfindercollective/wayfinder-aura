@@ -137,6 +137,43 @@ EXCLUDED_DEVICE_KEYWORDS = [
 SILENCE_PEAK_THRESHOLD = 0.001
 
 
+def _frame_rms(audio_data: np.ndarray, sample_rate: int, frame_ms: float = 20.0) -> np.ndarray:
+    """Return non-overlapping short-time RMS values for mono/interleaved audio."""
+    samples = np.asarray(audio_data, dtype=np.float32).reshape(-1)
+    frame_samples = max(1, int(sample_rate * frame_ms / 1000.0))
+    usable = (samples.size // frame_samples) * frame_samples
+    if usable == 0:
+        return np.empty(0, dtype=np.float32)
+    frames = samples[:usable].reshape(-1, frame_samples)
+    return np.sqrt(np.mean(frames * frames, axis=1)).astype(np.float32)
+
+
+def audio_has_speech_activity(audio_data: np.ndarray, sample_rate: int = 16000) -> bool:
+    """Conservative speech-activity guard for Whisper hallucination prevention.
+
+    Peak-only silence detection treats a steady fan, hum, or low microphone noise
+    floor as speech. Normalization can then amplify that stationary sound into a
+    confident invented transcript. Speech has substantial short-time energy
+    variation; stationary noise does not. Reject only recordings at least 0.5s
+    long whose 20ms RMS distribution is very flat, otherwise fail open so unusual
+    but real speech is preserved.
+    """
+    samples = np.asarray(audio_data, dtype=np.float32).reshape(-1)
+    if samples.size == 0:
+        return False
+    samples = np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+    if float(np.max(np.abs(samples))) < SILENCE_PEAK_THRESHOLD:
+        return False
+
+    frame_levels = _frame_rms(samples, sample_rate)
+    if frame_levels.size < 25:  # less than 0.5s: peak guard only, fail open
+        return True
+    low = float(np.percentile(frame_levels, 20))
+    high = float(np.percentile(frame_levels, 90))
+    dynamic_ratio = high / max(low, 1e-7)
+    return dynamic_ratio >= 1.8
+
+
 def get_wav_peak_amplitude(audio_path: str | Path) -> float | None:
     """Return a mono/stereo PCM WAV's normalized peak, or ``None`` if unreadable.
 
@@ -158,6 +195,20 @@ def get_wav_peak_amplitude(audio_path: str | Path) -> float | None:
         # Promote before abs: abs(int16(-32768)) overflows in int16.
         return float(np.max(np.abs(samples.astype(np.int32)))) / 32768.0
     except (OSError, EOFError, wave.Error):
+        return None
+
+
+def wav_has_speech_activity(audio_path: str | Path) -> bool | None:
+    """Return speech activity for a 16-bit PCM WAV, or ``None`` if unreadable."""
+    try:
+        with wave.open(str(audio_path), "rb") as wav_file:
+            if wav_file.getsampwidth() != 2:
+                return None
+            sample_rate = wav_file.getframerate()
+            frames = wav_file.readframes(wav_file.getnframes())
+        samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        return audio_has_speech_activity(samples, sample_rate)
+    except (OSError, EOFError, wave.Error, ValueError):
         return None
 
 
@@ -730,22 +781,27 @@ def preprocess_audio(
     Returns:
         Preprocessed audio data
     """
+    # Work with a finite float copy. PortAudio should never emit NaN/Inf, but a
+    # malformed buffer must not become undefined int16 samples or poison SciPy.
+    audio = np.asarray(audio_data, dtype=np.float32).copy()
+    if audio.size == 0:
+        return audio
+    audio = np.nan_to_num(audio, nan=0.0, posinf=1.0, neginf=-1.0)
     if level == "off" or not level:
-        return audio_data
-    
-    # Work with a copy
-    audio = audio_data.copy()
+        return audio
     
     # Flatten if needed (mono)
     if audio.ndim > 1:
         audio = audio.flatten()
     
-    # Gain normalization - applied for all levels except "off"
-    # Normalize to -3dB peak (0.707) to ensure good signal level
+    # Gain normalization - applied for all levels except "off". Limit upward
+    # gain to +18dB: the previous unbounded target_peak/peak ratio could amplify
+    # a 0.2% stationary noise floor by 40-50dB and make Whisper invent paragraphs.
     peak = np.max(np.abs(audio))
     if peak > 0.001:  # Avoid division by near-zero
         target_peak = 0.707  # -3dB
-        audio = audio * (target_peak / peak)
+        gain = min(target_peak / peak, 8.0)
+        audio = audio * gain
     
     # Medium and Heavy: High-pass filter at 80Hz (remove rumble/noise)
     if level in ("medium", "heavy"):
@@ -761,17 +817,39 @@ def preprocess_audio(
             except Exception:
                 pass
     
-    # Heavy only: Noise gate (can cut off soft consonants - use with caution!)
+    # Heavy only: frame-based soft noise gate. A sample-by-sample gate changes
+    # gain at every waveform zero crossing, adding distortion while barely
+    # reducing actual background noise. Estimate the quiet-frame floor, retain
+    # 40ms of context around active frames, and interpolate the gain envelope.
     if level == "heavy":
-        noise_floor = 0.002  # -54dB - very gentle threshold
-        gate_reduction = 0.5  # Only reduce to 50%, don't kill the signal
-        audio = np.where(np.abs(audio) < noise_floor, audio * gate_reduction, audio)
+        frame_samples = max(1, int(sample_rate * 0.02))
+        frame_levels = _frame_rms(audio, sample_rate)
+        if frame_levels.size:
+            noise_floor = float(np.percentile(frame_levels, 20))
+            threshold = max(0.003, min(0.25, noise_floor * 1.5))
+            active = frame_levels >= threshold
+            if active.size > 1:
+                # Preserve word attacks/releases and soft consonants near a voiced frame.
+                active = np.convolve(active.astype(np.int8), np.ones(5, dtype=np.int8), mode="same") > 0
+            frame_gain = np.where(active, 1.0, 0.15).astype(np.float32)
+            centers = np.arange(frame_gain.size, dtype=np.float32) * frame_samples + frame_samples / 2
+            positions = np.arange(audio.size, dtype=np.float32)
+            envelope = np.interp(
+                positions,
+                centers,
+                frame_gain,
+                left=float(frame_gain[0]),
+                right=float(frame_gain[-1]),
+            ).astype(np.float32)
+            audio *= envelope
     
     # Ensure output shape matches input
     if audio_data.ndim > 1:
         audio = audio.reshape(audio_data.shape)
     
-    return audio.astype(np.float32)
+    # Filters can overshoot slightly. Clipping before int16 conversion prevents
+    # values above 1.0 from wrapping across the sign bit into severe distortion.
+    return np.clip(audio, -1.0, 1.0).astype(np.float32)
 
 
 class WarmMic:
@@ -1106,6 +1184,12 @@ class AudioRecorder:
         """Highest absolute sample seen since start() — compare to SILENCE_PEAK_THRESHOLD."""
         return self.last_peak
 
+    def has_speech_activity(self) -> bool:
+        """Whether captured audio looks like speech rather than stationary noise."""
+        if not self.frames:
+            return False
+        return audio_has_speech_activity(np.concatenate(self.frames, axis=0), self.sample_rate)
+
     def start(self) -> None:
         """Start recording audio.
 
@@ -1211,8 +1295,10 @@ class AudioRecorder:
         if level and level != "off":
             audio_data = preprocess_audio(audio_data, self.target_sample_rate, level=level)
 
-        # Convert float32 [-1.0, 1.0] to int16
-        audio_int16 = (audio_data * 32767).astype(np.int16)
+        # Sanitize and clip even when preprocessing is Off. Out-of-range/invalid
+        # floats otherwise wrap during int16 conversion and create loud corruption.
+        audio_data = np.nan_to_num(audio_data, nan=0.0, posinf=1.0, neginf=-1.0)
+        audio_int16 = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16)
 
         # Create temporary WAV file under the app-owned private temp dir (0700).
         from wayfinder.utils.fs_security import get_app_temp_dir
@@ -1375,6 +1461,14 @@ class ChunkedRecorder:
         """Highest absolute sample seen since start() — compare to SILENCE_PEAK_THRESHOLD."""
         return self.last_peak
 
+    def has_speech_activity(self) -> bool:
+        """Whether captured audio looks like speech rather than stationary noise."""
+        with self._buffer_lock:
+            if not self._buffer:
+                return False
+            audio = np.concatenate(self._buffer, axis=0)
+        return audio_has_speech_activity(audio, self.sample_rate)
+
     def _get_total_samples(self) -> int:
         """Get total number of samples in buffer."""
         with self._buffer_lock:
@@ -1452,8 +1546,9 @@ class ChunkedRecorder:
             if self.preprocessing and self.preprocessing != "off":
                 audio_data = preprocess_audio(audio_data, self.target_sample_rate, level=self.preprocessing)
             
-            # Convert float32 to int16
-            audio_int16 = (audio_data * 32767).astype(np.int16)
+            # Avoid invalid/out-of-range float wrap even with preprocessing Off.
+            audio_data = np.nan_to_num(audio_data, nan=0.0, posinf=1.0, neginf=-1.0)
+            audio_int16 = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16)
             
             # Create temp file under app-owned private temp dir (0700).
             from wayfinder.utils.fs_security import get_app_temp_dir
@@ -1576,16 +1671,24 @@ class ChunkedRecorder:
             if self._buffer:
                 all_audio = np.concatenate(self._buffer, axis=0)
                 
-                # Get remaining audio after last chunk
+                # Get remaining audio after last chunk. The overlap itself is not
+                # new speech: if Stop lands exactly on a completed boundary, the old
+                # code saved an overlap-only "final" WAV and asked Whisper to decode
+                # it again. Tiny repeated tails are especially hallucination-prone.
                 if self._chunk_index == 0:
                     # No chunks extracted yet, save everything
                     remaining = all_audio
+                    new_sample_count = len(all_audio)
                 else:
                     # Save from overlap point before last chunk end
                     start = max(0, self._last_chunk_end - self._overlap_samples)
                     remaining = all_audio[start:]
+                    new_sample_count = max(0, len(all_audio) - self._last_chunk_end)
                 
-                if len(remaining) > self.sample_rate * 0.5:  # At least 0.5 seconds
+                # Require 0.5s of genuinely NEW audio. ``remaining`` includes the
+                # overlap by design, so checking its total length accepts a tail that
+                # contains no post-boundary samples at all.
+                if new_sample_count > self.sample_rate * 0.5:
                     final_path = self._save_chunk(remaining)
         
         return final_path, self._temp_files.copy()
@@ -1702,12 +1805,24 @@ def analyze_audio_calibration(
     Returns:
         AudioCalibrationResult with analysis and recommendations
     """
-    # Flatten if multi-channel
-    if audio_data.ndim > 1:
-        audio_data = audio_data.flatten()
-    
+    # Flatten, sanitize, and handle an empty/invalid calibration capture without
+    # crashing the settings UI.
+    audio_data = np.asarray(audio_data, dtype=np.float32).reshape(-1)
+    audio_data = np.nan_to_num(audio_data, nan=0.0, posinf=1.0, neginf=-1.0)
     issues = []
     recommendations = []
+    if audio_data.size == 0:
+        return AudioCalibrationResult(
+            peak_level=0.0,
+            rms_level=0.0,
+            noise_floor=0.0,
+            clipping_detected=False,
+            clipping_percentage=0.0,
+            signal_to_noise=0.0,
+            recommended_preprocessing="light",
+            issues=["No audio captured"],
+            recommendations=["Check the selected microphone and try calibration again"],
+        )
     
     # === Basic level analysis ===
     peak_level = float(np.max(np.abs(audio_data)))
@@ -1722,10 +1837,12 @@ def analyze_audio_calibration(
     clipping_detected = clipping_percentage > 0.1  # More than 0.1% clipping
     
     # === Noise floor estimation ===
-    # Sort samples by absolute value and take the 10th percentile as noise floor
-    sorted_abs = np.sort(np.abs(audio_data))
-    noise_floor_idx = int(len(sorted_abs) * 0.1)
-    noise_floor = float(sorted_abs[noise_floor_idx]) if noise_floor_idx < len(sorted_abs) else 0.001
+    # Individual waveform samples cross zero even in loud noise, so their 10th
+    # percentile is not a noise floor. Use quiet 20ms frame RMS instead.
+    frame_levels = _frame_rms(audio_data, sample_rate)
+    noise_floor = (
+        float(np.percentile(frame_levels, 20)) if frame_levels.size else rms_level
+    )
     
     # Ensure noise floor isn't zero for SNR calculation
     noise_floor = max(noise_floor, 0.0001)
@@ -1771,20 +1888,20 @@ def analyze_audio_calibration(
     
     # === Determine recommended preprocessing ===
     if clipping_detected and clipping_percentage > 1.0:
-        # Hot signal - don't normalize, it will make clipping worse
+        # Digital processing cannot reconstruct samples already flattened at capture.
         recommended_preprocessing = "off"
-        recommendations.insert(0, "Disable audio preprocessing (normalization makes clipping worse)")
+        recommendations.insert(0, "Processing cannot repair clipping — reduce microphone gain first")
+    elif noise_floor > 0.05:
+        # Very noisy - use the soft frame gate after rumble filtering.
+        recommended_preprocessing = "heavy"
+    elif noise_floor > 0.02:
+        # Moderate noise - remove low-frequency rumble without gating words.
+        recommended_preprocessing = "medium"
     elif peak_level < 0.2:
         # Quiet signal - normalization will help
         recommended_preprocessing = "light"
         if "Consider turning up microphone gain" not in recommendations:
             recommendations.append("Audio normalization will boost your signal")
-    elif noise_floor > 0.03:
-        # Noisy environment - use filtering
-        recommended_preprocessing = "medium"
-    elif noise_floor > 0.05:
-        # Very noisy - use noise gate
-        recommended_preprocessing = "heavy"
     else:
         # Normal signal - light preprocessing is fine
         recommended_preprocessing = "light"

@@ -57,7 +57,7 @@ The free tier is the full dictation experience — not a demo.
 | Unlimited-length chunked recording | — | ✅ |
 | Tone presets & voice profiles | — | ✅ |
 | Custom vocabulary | — | ✅ |
-| High-accuracy beam search & audio preprocessing | — | ✅ |
+| Accuracy controls & audio preprocessing | ✅ | ✅ |
 
 Ultra is a one-time purchase — no subscription, ever. It's $60, and **$29.99
 during launch**. Hit **Get Ultra** in the app, enter your license key, done.
@@ -135,6 +135,25 @@ third one. Try typing something on the Style tab.)
 Wayfinder Aura runs on SteamOS with a CPU-tuned build that avoids the APU's
 instruction-set pitfalls. Bind a back button (R4 works great) to toggle
 dictation from Game Mode. Voice-to-chat in any game, no keyboard needed.
+
+For a fresh Deck, use the GitHub Flatpak plus the rootless host-helper
+installer from Desktop Mode:
+
+```bash
+git clone https://github.com/wayfindercollective/wayfinder-aura.git
+cd wayfinder-aura
+./scripts/steamdeck/install-steamdeck.sh
+```
+
+It downloads/installs the latest release Flatpak if needed and enables the
+controller trigger and Desktop/Game Mode lifecycle. It never unlocks the
+SteamOS root filesystem or installs pacman/Python packages. Afterwards, bind
+R4 (or another back/custom button) to **Right Joystick Click** in Steam's
+Desktop Layout. Game Mode uses per-game controller layouts, so repeat that
+assignment in each game or apply a reusable layout template. The game may also
+receive its normal right-stick-click action. See
+[`scripts/steamdeck/README.md`](scripts/steamdeck/README.md) for Game Mode and
+update options.
 
 ## Configuration
 

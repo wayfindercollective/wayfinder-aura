@@ -346,31 +346,38 @@ class TestFeatureGate:
         assert "gpu_acceleration" in PREMIUM_FEATURES
         assert "gpu_acceleration" not in FREE_FEATURES
 
-    def test_free_tier_gpu_models_tiny_and_base_only(self, temp_config_dir: Path):
-        """Free GPU applies to Tiny/Base only — not Small or larger."""
-        from wayfinder.license import is_free_tier_gpu_model
+    def test_free_transcription_model_is_exactly_base(self, temp_config_dir: Path):
+        """Free may run Base/Base.en only; substring tricks and Tiny/Small fail."""
+        from wayfinder.license import is_free_transcription_model
 
-        assert is_free_tier_gpu_model("ggml-tiny.en.bin")
-        assert is_free_tier_gpu_model("~/models/ggml-base.en.bin")
-        assert is_free_tier_gpu_model("base.en")
-        assert is_free_tier_gpu_model("tiny")
-        assert not is_free_tier_gpu_model("ggml-small.en.bin")
-        assert not is_free_tier_gpu_model("ggml-medium.en.bin")
-        assert not is_free_tier_gpu_model("ggml-large-v3-turbo.bin")
-        assert not is_free_tier_gpu_model("large-v3")
-        # Substring traps: path containing "base" must not free-GPU an Ultra weight.
-        assert not is_free_tier_gpu_model("/home/user/base-station/ggml-small.en.bin")
-        assert not is_free_tier_gpu_model("my-base-large-hack.bin")
+        assert is_free_transcription_model("~/models/ggml-base.en.bin")
+        assert is_free_transcription_model("ggml-base.bin")
+        assert is_free_transcription_model("base.en")
+        assert is_free_transcription_model("base")
+        assert not is_free_transcription_model("ggml-tiny.en.bin")
+        assert not is_free_transcription_model("ggml-small.en.bin")
+        assert not is_free_transcription_model("ggml-medium.en.bin")
+        assert not is_free_transcription_model("ggml-large-v3-turbo.bin")
+        assert not is_free_transcription_model("/home/user/base-station/ggml-small.en.bin")
+        assert not is_free_transcription_model("my-base-large-hack.bin")
 
-    def test_gpu_allowed_free_tiny_base_not_small(self, temp_config_dir: Path):
-        """Free user: GPU yes on Base, no on Small. Ultra: yes on Small."""
+    def test_gpu_allowed_free_is_always_false(self, temp_config_dir: Path):
+        """Free user cannot enable GPU, including with the Base model."""
         from wayfinder.license import FeatureGate, gpu_allowed_for_model
 
         free = FeatureGate()
         assert not free.is_premium
-        assert gpu_allowed_for_model("ggml-base.en.bin", free) is True
-        assert gpu_allowed_for_model("ggml-tiny.en.bin", free) is True
+        assert gpu_allowed_for_model("ggml-base.en.bin", free) is False
+        assert gpu_allowed_for_model("ggml-tiny.en.bin", free) is False
         assert gpu_allowed_for_model("ggml-small.en.bin", free) is False
+
+    def test_transcription_models_base_free_others_ultra(self, temp_config_dir: Path):
+        from wayfinder.license import FeatureGate, transcription_model_allowed
+
+        free = FeatureGate()
+        assert transcription_model_allowed("ggml-base.en.bin", free) is True
+        assert transcription_model_allowed("ggml-tiny.en.bin", free) is False
+        assert transcription_model_allowed("ggml-small.en.bin", free) is False
 
     def test_gpu_allowed_ultra_all_models(
         self, temp_config_dir: Path, mock_online_license

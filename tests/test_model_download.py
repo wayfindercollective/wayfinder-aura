@@ -89,7 +89,7 @@ class TestModelDownloader:
         completed = {}
 
         dl.download_model(
-            "tiny.en",
+            "base.en",
             progress_callback=lambda p, d, t: progress.append((p, d, t)),
             complete_callback=lambda path: (completed.update(path=path), done.set()),
             error_callback=lambda e: done.set(),
@@ -98,7 +98,7 @@ class TestModelDownloader:
         _wait(done)
 
         assert "path" in completed, "completion callback not called"
-        dest = tmp_path / wayfinder_main.WHISPER_CPP_MODELS["tiny.en"]["filename"]
+        dest = tmp_path / wayfinder_main.WHISPER_CPP_MODELS["base.en"]["filename"]
         assert dest.exists()
         # Progress is monotonic and reaches 1.0 with correct totals.
         assert progress[-1][0] == pytest.approx(1.0)
@@ -120,7 +120,7 @@ class TestModelDownloader:
             dl.cancel_download()
 
         dl.download_model(
-            "tiny.en",
+            "base.en",
             progress_callback=on_progress,
             complete_callback=lambda path: done.set(),
             error_callback=lambda e: (errors.append(e), done.set()),
@@ -129,7 +129,7 @@ class TestModelDownloader:
         _wait(done)
 
         assert errors and "cancelled" in errors[0].lower()
-        filename = wayfinder_main.WHISPER_CPP_MODELS["tiny.en"]["filename"]
+        filename = wayfinder_main.WHISPER_CPP_MODELS["base.en"]["filename"]
         # Neither the final file nor the .downloading temp survives a cancel.
         assert not (tmp_path / filename).exists()
         assert not (tmp_path / f"{filename}.downloading").exists()
@@ -142,17 +142,17 @@ class TestModelDownloader:
         dl = wayfinder_main.ModelDownloader(models_dir=tmp_path)
         done, errors = threading.Event(), []
         dl.download_model(
-            "tiny.en",
+            "base.en",
             complete_callback=lambda path: done.set(),
             error_callback=lambda e: (errors.append(e), done.set()),
         )
         dl._current_download.join(timeout=5)
         _wait(done)
         assert errors and "Network error" in errors[0]
-        assert not (tmp_path / wayfinder_main.WHISPER_CPP_MODELS["tiny.en"]["filename"]).exists()
+        assert not (tmp_path / wayfinder_main.WHISPER_CPP_MODELS["base.en"]["filename"]).exists()
 
     def test_retry_after_error_succeeds(self, tmp_path, monkeypatch):
-        filename = wayfinder_main.WHISPER_CPP_MODELS["tiny.en"]["filename"]
+        filename = wayfinder_main.WHISPER_CPP_MODELS["base.en"]["filename"]
         dl = wayfinder_main.ModelDownloader(models_dir=tmp_path)
 
         # 1) First attempt fails at the network layer.
@@ -161,7 +161,7 @@ class TestModelDownloader:
             lambda req, timeout=0: (_ for _ in ()).throw(urllib.error.URLError("down")),
         )
         done1, errors = threading.Event(), []
-        dl.download_model("tiny.en",
+        dl.download_model("base.en",
                           complete_callback=lambda p: done1.set(),
                           error_callback=lambda e: (errors.append(e), done1.set()))
         dl._current_download.join(timeout=5)
@@ -177,7 +177,7 @@ class TestModelDownloader:
             ),
         )
         done2, completed = threading.Event(), {}
-        dl.download_model("tiny.en",
+        dl.download_model("base.en",
                           complete_callback=lambda p: (completed.update(p=p), done2.set()),
                           error_callback=lambda e: done2.set())
         dl._current_download.join(timeout=5)
@@ -241,7 +241,12 @@ class LlamaDownloadApp:
         self._cancel_download = False
         self._llamacpp_model_var = SimpleNamespace(get=lambda: selection)
         self._llamacpp_model_data = {
-            selection: {"id": "gemma3-1b", "info": model_info, "installed": installed},
+            selection: {
+                "id": "gemma3-1b",
+                "info": model_info,
+                "installed": installed,
+                "unlocked": True,
+            },
         }
         self._llamacpp_download_btn = MagicMock()
         self._llamacpp_progress_frame = MagicMock()

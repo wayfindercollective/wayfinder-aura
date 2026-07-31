@@ -83,13 +83,20 @@ from wayfinder.config import (
 )
 from wayfinder.utils.platform import get_portal_app_id
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude, wav_has_speech_activity
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 from wayfinder.utils.audio_ducker import AudioDucker
 from wayfinder.ui.icons import get_icon, STYLE_ICONS, tint_icon
 from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
+from wayfinder.ui.steamdeck_help import (
+    STEAM_DECK_BUTTON_HELP_BODY,
+    STEAM_DECK_BUTTON_HELP_TITLE,
+    STEAM_DECK_BUTTON_HELP_TOOLTIP,
+    STEAM_DECK_GAME_MODE_HELP,
+    should_show_steam_deck_button_help,
+)
 
 
 # === Configuration ===
@@ -1103,14 +1110,25 @@ SETTING_TOOLTIPS = {
     "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
     "press_enter_after_dictation": "Press Enter automatically once dictated text finishes typing —\nchat messages send hands-free. Off by default.\n🟢 Latency: none (fires after injection)",
     "ensure_punctuation": "Extra punctuation fixes if model output lacks periods/caps.\n🟢 Latency: +1-3ms (optional, most models handle this well)",
-    "audio_preprocessing": "Audio signal processing before transcription.\n🟢 Off: 0ms | Light: +2ms | Medium: +5ms | Heavy: +10ms",
+    "audio_preprocessing": (
+        "Conditions microphone audio before speech recognition.\n\n"
+        "• Off — Leaves audio untouched. Use as a diagnostic baseline or when your "
+        "mic/interface already produces clean, consistently leveled audio.\n\n"
+        "• Light — Safely evens out quiet or inconsistent mic levels without huge "
+        "noise boosts. Best everyday default.\n\n"
+        "• Medium — Light plus an 80 Hz high-pass filter. Use for electrical hum, "
+        "desk vibration, handling noise, or low HVAC rumble. It does not remove fan hiss.\n\n"
+        "• Heavy — Medium plus a soft gate that lowers steady noise between words. "
+        "Use only when background noise remains; it can suppress soft consonants or quiet speech.\n\n"
+        "Processing cannot repair clipping or replace correct microphone gain."
+    ),
     
     # 🟡 Moderate latency impact (10-100ms)
-    "chunked_mode": "Split long recordings into segments, transcribe each while you speak,\nand splice results together. Makes very long dictations finish fast.\n🟢 Default 10s segments keep accuracy close to one-shot",
-    "chunk_duration": "New audio per segment (seconds).\nShorter = less work left when you stop, more splice points.\n🟢 8–12s: fast with little accuracy loss | 15–30s: safer, slower tail",
+    "chunked_mode": "Split long recordings into segments and transcribe while you speak.\nReduces work after Stop on very long dictations, but every splice risks a boundary error.\n⚠️ One-shot recording remains the accuracy-first default",
+    "chunk_duration": "New audio per segment (seconds).\nShorter = less work left when you stop, but more context loss and splice points.\n⚠️ 15s/2s is the tested default | 30s is safer with a slower tail",
     
     # 🔴 MAJOR latency impact - These are the biggest factors
-    "whisper_model": "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed.\n🔴 GPU: Tiny ~0.5s | Base ~1s | Small ~1.5s | Medium ~3s | Large ~6s | Turbo ~2s\n🔴 CPU: Tiny ~2s | Base ~4s | Small ~6s | Medium ~12s | Large ~25s | Turbo ~8s",
+    "whisper_model": "Local on-device speech recognition model.\nBase is the Free default: fast and lightweight, but it can be inaccurate compared with Ultra models.\nProcessed entirely on your machine — no cloud API needed.",
     "accuracy_mode": "Speed vs accuracy preset - affects beam search depth.\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)",
     "beam_size": "Search width for finding best transcription.\n🔴 1 = fastest (-50%) | 5 = balanced | 10 = slowest (+100%)",
     
@@ -1125,10 +1143,10 @@ SETTING_TOOLTIPS = {
         "  Ultra feature. Manual pick turns Auto off."
     ),
     "gpu_acceleration": (
-        "Use GPU for transcription when the backend supports it.\n"
+        "Ultra-only GPU acceleration for transcription and local cleanup.\n"
         "🚀 whisper.cpp: Vulkan (AMD/Intel), CUDA, Metal (recommended)\n"
         "🚀 Faster-Whisper (experimental): NVIDIA CUDA via CTranslate2 only\n"
-        "🚀 Free: Tiny & Base · Ultra: Small, Medium, Turbo, Large"
+        "Free runs Base on CPU. Run Benchmark for a GPU upgrade preview."
     ),
     "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
 
@@ -1148,6 +1166,12 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     # Model-specific tooltip with actual benchmarked speeds
     if key == "whisper_model":
         base_text = "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed."
+        selected_name = Path(os.path.expanduser(str(config.get("model_path", "") or ""))).name.lower()
+        if selected_name in ("ggml-base.en.bin", "ggml-base.bin"):
+            base_text += (
+                "\n\nBase is the Free default: fast and lightweight, but it can be "
+                "inaccurate compared with the higher-accuracy Ultra models."
+            )
         
         if not benchmark_results:
             return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
@@ -1214,7 +1238,7 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
             fw_hint = False
             rec, reason = recommend_local_transcription_backend(
                 allow_faster_whisper=fw_hint,
-                use_gpu=bool(config.get("use_gpu", True)),
+                use_gpu=bool(config.get("use_gpu", False)),
             )
         except Exception:
             rec, reason = "whisper_cpp", "whisper.cpp is the safe default."
@@ -1419,18 +1443,16 @@ class BenchmarkRunner:
         return _get_whisper_models_dir()  # writable default
     
     def _find_whisper_binary(self) -> str | None:
-        """Find whisper-cli binary."""
-        possible = [
-            Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli",
-            Path("/usr/bin/whisper-cli"),
-            Path("/app/bin/whisper-cli"),
-        ]
-        for p in possible:
-            if p.exists():
-                return str(p)
-        # Try system PATH
-        import shutil
-        return shutil.which("whisper-cli")
+        """Find whisper-cli in source, Flatpak, or the current AppImage mount."""
+        from wayfinder.utils.runtime_assets import find_whisper_binary
+
+        return find_whisper_binary(self.config)
+
+    def _find_whisper_cpu_binary(self) -> str | None:
+        """Prefer the independently linked CPU safety twin when packaged."""
+        from wayfinder.utils.runtime_assets import find_whisper_binary
+
+        return find_whisper_binary(self.config, cpu=True)
     
     def _create_test_audio(self, duration: int = 10) -> str:
         """Create a test audio file for benchmarking."""
@@ -1688,6 +1710,7 @@ class BenchmarkRunner:
                 "path": resolved,
                 "filename": filename or Path(resolved).name,
                 "is_current": is_current,
+                "requires_feature": info.get("requires_feature"),
             })
 
         # Current model not in catalog (user-dropped GGUF)
@@ -1772,14 +1795,30 @@ class BenchmarkRunner:
             self.log_callback(f"⏱ Cleanup {name} ({i}/{total})...")
             self.clear_llm_caches()
             try:
+                from wayfinder.core.postprocessor import cleanup_model_allowed
+                from wayfinder.license import get_feature_gate
+
+                if not cleanup_model_allowed(
+                    m["path"], get_feature_gate(), m.get("requires_feature")
+                ):
+                    results[mid] = {
+                        "model_name": name,
+                        "filename": m.get("filename", ""),
+                        "avg_time": None,
+                        "is_current": bool(m.get("is_current")),
+                        "error": "Requires Wayfinder Aura Ultra",
+                        "timestamp": int(time.time()),
+                    }
+                    self.log_callback(f"   🔒 {name}: Ultra required")
+                    continue
                 cfg = dict(config)
                 cfg["post_processing_enabled"] = True
                 cfg["post_processing_backend"] = "llama_cpp"
                 cfg["llama_cpp_model_path"] = m["path"]
-                # Force a styled tone so we exercise the real LLM path, not
-                # minimal-regex (which would make every model look "instant").
-                if cfg.get("output_tone", "professional") == "minimal":
-                    cfg["output_tone"] = "professional"
+                # Benchmark neutral cleanup without borrowing an Ultra writing
+                # style. fast_filler_removal must be off so every GGUF is timed.
+                cfg["output_tone"] = "minimal"
+                cfg["fast_filler_removal"] = False
 
                 # Warm-up (load + first tokens); discard timing
                 process_with_config(sample_text, cfg)
@@ -1913,6 +1952,7 @@ WHISPER_CPP_MODELS = {
         "speed": "Fastest · lightest quality",
         "speed_rating": 5,
         "accuracy_rating": 1,
+        "requires_feature": "large_models",
     },
     "base.en": {
         "name": "Base (English)",
@@ -1935,6 +1975,7 @@ WHISPER_CPP_MODELS = {
         "speed": "Fast · solid everyday",
         "speed_rating": 4,
         "accuracy_rating": 3,
+        "requires_feature": "large_models",
     },
     "medium.en": {
         "name": "Medium (English)",
@@ -1984,6 +2025,7 @@ WHISPER_CPP_MODELS = {
         "speed": "Fastest · lightest quality",
         "speed_rating": 5,
         "accuracy_rating": 1,
+        "requires_feature": "large_models",
     },
     "base": {
         "name": "Base (Multi-lang)",
@@ -2006,6 +2048,7 @@ WHISPER_CPP_MODELS = {
         "speed": "Fast · solid everyday",
         "speed_rating": 4,
         "accuracy_rating": 3,
+        "requires_feature": "large_models",
     },
     "medium": {
         "name": "Medium (Multi-lang)",
@@ -2069,7 +2112,7 @@ def format_model_tile_title(name: str, model_id: str | None = None) -> tuple[str
     """Compact title + optional badge for model picker tiles.
 
     Returns (title, badge) where badge is one of:
-    "Balanced" (recommended default), "EN", "Multi", or None.
+    "Balanced", "Free default", "EN", "Multi", or None.
     Language chips stay; quality guidance lives in Spd/Acc ratings, not a
     misleading single "Best" chip on full Turbo.
     """
@@ -2086,11 +2129,11 @@ def format_model_tile_title(name: str, model_id: str | None = None) -> tuple[str
         "large": ("Large", None),
         "medium.en": ("Medium", "EN"),
         "small.en": ("Small", "EN"),
-        "base.en": ("Base", "EN"),
+        "base.en": ("Base", "Free default"),
         "tiny.en": ("Tiny", "EN"),
         "medium": ("Medium", "Multi"),
         "small": ("Small", "Multi"),
-        "base": ("Base", "Multi"),
+        "base": ("Base", "Free default"),
         "tiny": ("Tiny", "Multi"),
     }
     if cat in id_map:
@@ -2425,6 +2468,11 @@ class ModelDownloader:
                 from wayfinder.config import load_config
 
                 gate = get_feature_gate()
+                from wayfinder.license import transcription_model_allowed
+                if not transcription_model_allowed(model_id, gate):
+                    if error_callback:
+                        error_callback("Additional speech models require Wayfinder Ultra")
+                    return
                 deny = assert_may_download(model_info, gate.has_feature)
                 if deny:
                     if error_callback:
@@ -4989,6 +5037,19 @@ class WayfinderApp(ctk.CTk):
         
         # License/feature gate for premium features
         self.feature_gate = get_feature_gate()
+
+        # Repair stale settings from older builds (GPU-on, styled tone, non-Base
+        # Free model, chunking, or premium backend). main.py performs the same
+        # repair before GPU environment setup; this second pass is defense in depth
+        # for alternate entry points and license changes between those phases.
+        from wayfinder.config import enforce_license_config
+        _entitlement_repairs = enforce_license_config(self.config, self.feature_gate)
+        if _entitlement_repairs:
+            save_config(self.config)
+            print(
+                "[license] Repaired unavailable settings: "
+                + ", ".join(_entitlement_repairs)
+            )
         
         # Resolve audio device (intelligent selection if not explicitly set). This is a
         # RUNTIME value only — do NOT write it back into config["audio_device"]. Persisting
@@ -5109,7 +5170,7 @@ class WayfinderApp(ctk.CTk):
             self.config.get("enable_tray_icon", True),
         )
         want_visual = overlay_enabled and not getattr(self, "_game_mode", False)
-        initial_style = self.config.get("output_tone", "professional")
+        initial_style = self.config.get("output_tone", "minimal")
 
         def _start_overlay_controller(*, tray_only: bool) -> bool:
             """Start Always On / tray-only subprocess. Returns True on success."""
@@ -6743,7 +6804,11 @@ class WayfinderApp(ctk.CTk):
         tabs = [
             ("dictate", "audio-waveform", "Dictate"),
             ("settings", "settings-2", "Settings"),
-            ("style", "pen-line", "Style"),
+            (
+                "style",
+                "pen-line",
+                "Style" if self.feature_gate.has_feature("tone_system") else "Style  🔒",
+            ),
             ("history", "history", "History"),
         ]
 
@@ -6838,6 +6903,16 @@ class WayfinderApp(ctk.CTk):
 
     def _switch_tab(self, tab_id: str) -> None:
         """Switch to the specified tab."""
+        if tab_id == "style":
+            gate = getattr(self, "feature_gate", None)
+            try:
+                unlocked = bool(gate and gate.has_feature("tone_system"))
+            except Exception:
+                unlocked = False
+            if not unlocked:
+                self._show_premium_prompt("tone_system")
+                return
+
         # Update button styles for sidebar
         for tid, btn in self.tab_buttons.items():
             color = self.tab_colors[tid]
@@ -7379,6 +7454,14 @@ class WayfinderApp(ctk.CTk):
         )
         self._detect_btn_record.pack(side="left")
 
+        # Steam owns the Deck's rear buttons, so an unassigned R4/L4/etc. never
+        # reaches Detect. Explain the one required Steam Input mapping exactly
+        # where a Deck user is trying to choose their recording button. Keep the
+        # panel off every other Linux machine.
+        from wayfinder.utils.platform import get_steam_platform
+        if should_show_steam_deck_button_help(get_steam_platform()):
+            self._create_steam_deck_button_help(system_content)
+
         # Hotkey modifier checkboxes (inline row) — form measure so checks
         # don't pin to the far edge on fullscreen.
         _mod_shell, mod_row = self._begin_form_row(system_content, padx=16, pady=(0, 10))
@@ -7544,10 +7627,11 @@ class WayfinderApp(ctk.CTk):
         # the overlay still when idle to save CPU/battery. Applies live (no restart).
         self._create_overlay_quality_toggle_row(overlay_content)
 
-        # Game Mode dictation toggle (SteamOS / Steam Deck only): in Game Mode the overlay
-        # can't render over a fullscreen game, so this swaps it for audio cues and keeps the
-        # dictation stack alive there (the host supervisor stops it when this is off).
-        if sys.platform.startswith("linux"):
+        # Game Mode is not a generic Linux feature. Only show this control when
+        # Steam hardware, a full Gamescope session, or Aura's host supervisor
+        # proves the machine can actually enter it.
+        from wayfinder.utils.platform import supports_steam_game_mode
+        if supports_steam_game_mode():
             self._create_game_mode_toggle_row(overlay_content)
 
         # === BENTO TILE 4: Benchmark (inline, no popup) ===
@@ -7597,6 +7681,8 @@ class WayfinderApp(ctk.CTk):
             benchmark_tile,
             text="Times your full pipeline: ASR (10s cold clip) + LLM cleanup (warm). "
                  "Live dictation keeps ASR loaded so it runs faster than the ASR figure. "
+                 "The ASR comparison always measures CPU and GPU directly. On Free, "
+                 "GPU is a benchmark-only Ultra preview and normal dictation stays on CPU. "
                  "Cleanup comparison lists every installed GGUF model.",
             font=(self.font_body[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
@@ -7633,7 +7719,7 @@ class WayfinderApp(ctk.CTk):
         
         self.benchmark_test_btn = ctk.CTkButton(
             btn_row,
-            text="Test Current Model",
+            text="Compare CPU vs GPU",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             height=40,
             width=180,
@@ -7833,11 +7919,12 @@ class WayfinderApp(ctk.CTk):
         benchmark_results = self.config.get("benchmark_results", {}) or {}
         pp_results = self.config.get("postprocessing_benchmark_results", {}) or {}
         pipeline = self.config.get("pipeline_benchmark", {}) or {}
+        asr_error = str(self.config.get("benchmark_last_asr_error") or "").strip()
 
-        has_any = bool(benchmark_results or pp_results or pipeline)
+        has_any = bool(benchmark_results or pp_results or pipeline or asr_error)
         if not has_any:
             _line(
-                "No benchmark results yet. Click 'Test Current Model' to measure "
+                "No benchmark results yet. Click 'Compare CPU vs GPU' to measure "
                 "ASR + cleanup on your hardware.",
                 muted=True,
             )
@@ -7869,14 +7956,19 @@ class WayfinderApp(ctk.CTk):
         # --- ASR per whisper model ---
         if benchmark_results:
             _section("TRANSCRIPTION (ASR)")
+            try:
+                gpu_unlocked = self.feature_gate.has_feature("gpu_acceleration")
+            except Exception:
+                gpu_unlocked = False
             for model_id, result in benchmark_results.items():
                 model_name = result.get("model_name", model_id)
                 gpu_time = result.get("gpu_10s")
                 cpu_time = result.get("cpu_10s")
                 model_fastest = result.get("fastest", "")
 
+                gpu_label = "GPU" if gpu_unlocked else "GPU Ultra preview"
                 gpu_str = (
-                    f"GPU {gpu_time:.1f}s ({10.0 / gpu_time:.0f}× RT)"
+                    f"{gpu_label} {gpu_time:.1f}s ({10.0 / gpu_time:.0f}× RT)"
                     if gpu_time else "GPU —"
                 )
                 cpu_str = (
@@ -7890,6 +7982,19 @@ class WayfinderApp(ctk.CTk):
                 else:
                     result_text = f"{model_name}: {gpu_str}  |  {cpu_str}"
                 _line(result_text)
+                if gpu_time and cpu_time and gpu_time > 0 and not gpu_unlocked:
+                    speedup = cpu_time / gpu_time
+                    if speedup > 1.0:
+                        _line(
+                            f"  Ultra GPU is {speedup:.1f}× faster here; Free uses the CPU result.",
+                            bright=True,
+                        )
+        elif asr_error:
+            # Partial runs used to show only the cleanup section, which made it
+            # look as though the free base.en model was intentionally hidden.
+            _section("TRANSCRIPTION (ASR)")
+            failed_name = pipeline.get("asr_model_name") or "Current speech model"
+            _line(f"{failed_name}: failed — {asr_error[:100]}", muted=True)
 
         # --- Cleanup model comparison ---
         if pp_results:
@@ -7963,6 +8068,10 @@ class WayfinderApp(ctk.CTk):
         """Run ASR + post-processing benchmarks with live timer feedback."""
         import subprocess
         import queue
+        try:
+            _gpu_is_preview = not self.feature_gate.has_feature("gpu_acceleration")
+        except Exception:
+            _gpu_is_preview = True
         
         # Result queue for thread-safe communication (dict payload)
         result_queue = queue.Queue()
@@ -7983,7 +8092,7 @@ class WayfinderApp(ctk.CTk):
             pass
         
         # Get current whisper model with proper display name
-        model_path_config = self.config.get("model_path", "~/whisper.cpp/models/ggml-large-v3-turbo.bin")
+        model_path_config = self.config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin")
         selected_model = Path(os.path.expanduser(model_path_config)).name
         
         model_id = selected_model.replace("ggml-", "").replace(".bin", "")
@@ -8050,21 +8159,15 @@ class WayfinderApp(ctk.CTk):
             gpu_time = None
             cpu_time = None
             error = None
+            asr_failures: list[str] = []
             pp_results: dict = {}
             pipeline: dict = {}
             
             try:
                 # Find whisper-cli
                 debug_log("Finding whisper-cli...")
-                whisper_cli = None
-                for path in [
-                    Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli",
-                    Path("/usr/bin/whisper-cli"),
-                    Path("/app/bin/whisper-cli"),
-                ]:
-                    if path.exists():
-                        whisper_cli = str(path)
-                        break
+                resolver = BenchmarkRunner(self.config)
+                whisper_cli = resolver._find_whisper_binary()
                 
                 if not whisper_cli:
                     error = "whisper-cli not found"
@@ -8075,15 +8178,7 @@ class WayfinderApp(ctk.CTk):
                     # devices (e.g. the Steam Deck's RDNA2) — which also kills the --no-gpu run,
                     # since the crash happens before the flag is read. Use the dedicated CPU-only
                     # binary (whisper-cli-cpu) when present so the CPU test still works there.
-                    whisper_cli_cpu = whisper_cli
-                    for path in [
-                        Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli-cpu",
-                        Path("/usr/bin/whisper-cli-cpu"),
-                        Path("/app/bin/whisper-cli-cpu"),
-                    ]:
-                        if path.exists():
-                            whisper_cli_cpu = str(path)
-                            break
+                    whisper_cli_cpu = resolver._find_whisper_cpu_binary() or whisper_cli
 
                 # Find model across all model dirs (download dir first)
                 model_path = _resolve_whisper_model(selected_model) if whisper_cli else None
@@ -8124,8 +8219,9 @@ class WayfinderApp(ctk.CTk):
                         # GPU TEST
                         debug_log("Starting GPU test...")
                         timer_state["phase"] = "GPU"
-                        self.after(0, lambda: self.benchmark_status_label.configure(text="Testing GPU ASR..."))
-                        self.after(0, lambda: self.log("   🔥 GPU ASR test starting..."))
+                        _gpu_phase = "GPU Ultra preview" if _gpu_is_preview else "GPU"
+                        self.after(0, lambda p=_gpu_phase: self.benchmark_status_label.configure(text=f"Testing {p} ASR..."))
+                        self.after(0, lambda p=_gpu_phase: self.log(f"   🔥 {p} ASR test starting..."))
                         
                         cmd_gpu = [whisper_cli, "-m", str(model_path), "-f", test_audio.name, 
                                    "-t", "6", "--no-timestamps", "--no-prints"]
@@ -8140,6 +8236,9 @@ class WayfinderApp(ctk.CTk):
                             self.after(0, lambda t=gpu_time: self.log(f"   ✅ GPU ASR: {t:.2f}s"))
                         else:
                             stderr = result.stderr.decode('utf-8', errors='replace')[:200]
+                            asr_failures.append(
+                                f"GPU exit {result.returncode}: {stderr.strip() or 'no diagnostic'}"
+                            )
                             debug_log(f"GPU stderr: {stderr}")
                             if result.returncode < 0:
                                 self.after(0, lambda: self.log("   ⚠️ GPU unavailable on this device (Vulkan crashed) — CPU only"))
@@ -8165,11 +8264,15 @@ class WayfinderApp(ctk.CTk):
                             self.after(0, lambda t=cpu_time: self.log(f"   ✅ CPU ASR: {t:.2f}s"))
                         else:
                             stderr = result.stderr.decode('utf-8', errors='replace')[:200]
+                            asr_failures.append(
+                                f"CPU exit {result.returncode}: {stderr.strip() or 'no diagnostic'}"
+                            )
                             debug_log(f"CPU stderr: {stderr}")
                             self.after(0, lambda: self.log(f"   ⚠️ CPU failed: exit {result.returncode}"))
                             
                     except subprocess.TimeoutExpired as e:
                         error = f"ASR test timed out: {e}"
+                        asr_failures.append(error)
                         debug_log(f"Timeout: {e}")
                         self.after(0, lambda: self.log(f"   ⚠️ {error}"))
                     finally:
@@ -8177,6 +8280,9 @@ class WayfinderApp(ctk.CTk):
                             os.unlink(test_audio.name)
                         except Exception:
                             pass
+
+                if gpu_time is None and cpu_time is None and not error:
+                    error = "; ".join(asr_failures) or "ASR tests returned no timing"
 
                 # --- Post-processing / cleanup model comparison ---
                 # Always attempt so users get Gemma vs Qwen timings even if ASR fails.
@@ -8205,7 +8311,7 @@ class WayfinderApp(ctk.CTk):
                     asr_model_name=model_name,
                     gpu_time=gpu_time,
                     cpu_time=cpu_time,
-                    use_gpu=bool(self.config.get("use_gpu", True)),
+                    use_gpu=bool(self.config.get("use_gpu", False)),
                     pp_results=pp_results,
                     current_pp_path=self.config.get("llama_cpp_model_path", ""),
                     pp_enabled=bool(self.config.get("post_processing_enabled", True)),
@@ -8252,7 +8358,7 @@ class WayfinderApp(ctk.CTk):
                 # Reset button
                 self.benchmark_test_btn.configure(
                     state="normal",
-                    text="Test Current Model",
+                    text="Compare CPU vs GPU",
                     fg_color=COLORS["accent"],
                 )
                 debug_log("Button reset done")
@@ -8312,6 +8418,10 @@ class WayfinderApp(ctk.CTk):
                 self.config["pipeline_benchmark"] = pipeline
                 if pipeline.get("fastest_postprocessor"):
                     self.config["benchmark_fastest_postprocessor"] = pipeline["fastest_postprocessor"]
+            if gpu_time is not None or cpu_time is not None:
+                self.config.pop("benchmark_last_asr_error", None)
+            elif error:
+                self.config["benchmark_last_asr_error"] = error
 
             save_config(self.config)
             
@@ -8340,7 +8450,10 @@ class WayfinderApp(ctk.CTk):
             elif cpu_time:
                 self.benchmark_status_label.configure(text=f"✓ CPU ASR: {cpu_time:.1f}s (GPU unavailable)")
             elif pp_results:
-                self.benchmark_status_label.configure(text="✓ Cleanup models timed (ASR failed)")
+                detail = (error or "unknown ASR error").splitlines()[0][:90]
+                self.benchmark_status_label.configure(
+                    text=f"Cleanup timed; ASR failed — {detail}"
+                )
             else:
                 self.benchmark_status_label.configure(text="Both ASR tests failed")
         
@@ -8690,20 +8803,12 @@ class WayfinderApp(ctk.CTk):
         
         # Note: Prompt button removed - now configured via Style tab
         
-        # GPU toggle: Ultra = all models. Free = Tiny/Base only (Small+ needs Ultra).
-        from wayfinder.license import gpu_allowed_for_model, is_free_tier_gpu_model
-        _gpu_full = self.feature_gate.has_feature("gpu_acceleration")
-        _model_ref = self.config.get("model_path", "")
-        _gpu_ok_now = gpu_allowed_for_model(_model_ref, self.feature_gate)
-        _want_gpu = bool(self.config.get("use_gpu", True))
-        # Reflect effective entitlement: free on Small shows off even if config says on.
-        self.gpu_var = ctk.BooleanVar(value=_want_gpu and _gpu_ok_now)
-        if _gpu_full:
-            _gpu_label = "GPU Acceleration"
-        elif is_free_tier_gpu_model(_model_ref):
-            _gpu_label = "GPU Acceleration"  # free on Tiny/Base
-        else:
-            _gpu_label = "GPU Acceleration  🔒 Ultra for Small+"
+        # GPU is an explicit Ultra opt-in. Reflect effective entitlement so an
+        # edited/stale Free config can never render the switch as enabled.
+        _gpu_unlocked = self.feature_gate.has_feature("gpu_acceleration")
+        _want_gpu = bool(self.config.get("use_gpu", False))
+        self.gpu_var = ctk.BooleanVar(value=_want_gpu and _gpu_unlocked)
+        _gpu_label = "GPU Acceleration" if _gpu_unlocked else "GPU Acceleration  🔒 Ultra"
         self.create_toggle_row(
             parent, _gpu_label,
             self.gpu_var, self.toggle_gpu,
@@ -8758,12 +8863,15 @@ class WayfinderApp(ctk.CTk):
             width=220,
         )
         
-        # Chunked Mode toggle (for unlimited recording length)
-        self.chunked_var = ctk.BooleanVar(value=self.config.get("chunked_mode", True))
+        # Chunked Mode toggle (Ultra). Display the effective value, not a stale
+        # config bit from a build that defaulted this premium feature to True.
+        _chunked_unlocked = self.feature_gate.has_feature("chunked_recording")
+        _chunked_enabled = bool(self.config.get("chunked_mode", False)) and _chunked_unlocked
+        self.chunked_var = ctk.BooleanVar(value=_chunked_enabled)
         self.create_toggle_row(
-            parent, "Chunked Mode",
+            parent, "Chunked Mode" if _chunked_unlocked else "Chunked Mode (Ultra)",
             self.chunked_var, self.toggle_chunked_mode,
-            tooltip="Split long recordings into segments and transcribe while you speak.\n\n✅ Long dictations finish fast (most work done mid-recording)\n✅ Unlimited length\n⚠️ Tiny accuracy tradeoff vs one-shot on short segments\n\nRecommended for recordings longer than ~20 seconds.",
+            tooltip="Split long recordings into segments and transcribe while you speak.\n\n✅ Less processing left after Stop on very long dictations\n✅ Supports indefinite recording\n⚠️ Can lose context or mis-splice words at segment boundaries\n\nFor accuracy, leave this off unless post-recording wait on long dictations is a problem.",
         )
         
         # === Post-Processing Section ===
@@ -9187,7 +9295,7 @@ class WayfinderApp(ctk.CTk):
         self.tone_buttons = {}
         self.tone_checkmarks = {}  # Store checkmark label references
         self.tone_title_labels = {}  # Store title label references
-        current_tone = self.config.get("output_tone", "professional")
+        current_tone = self.config.get("output_tone", "minimal")
         
         # 5 style presets - each with distinct purpose. Per-style line icons come
         # from STYLE_ICONS (wayfinder.ui.icons); the emoji that used to prefix the
@@ -9482,6 +9590,12 @@ class WayfinderApp(ctk.CTk):
     
     def _set_caricature_mode(self, enabled: bool, from_easter_egg: bool = False):
         """Set caricature mode state with optional celebration effects."""
+        if enabled and not self.feature_gate.has_feature("tone_system"):
+            self.config["caricature_mode"] = False
+            if hasattr(self, "caricature_mode_var"):
+                self.caricature_mode_var.set(False)
+            self._show_premium_prompt("tone_system")
+            return
         self.config["caricature_mode"] = enabled
         save_config(self.config)
         
@@ -9719,12 +9833,13 @@ class WayfinderApp(ctk.CTk):
 
     def _on_tone_selected(self, tone_id: str) -> None:
         """Handle tone selection from Style tab."""
-        # Gate non-minimal tones behind premium
-        if tone_id != "minimal" and not self.feature_gate.has_feature("tone_system"):
+        # The whole Style workspace is Ultra. Minimal remains the automatic Free
+        # cleanup behavior, not a back door into the styling controls.
+        if not self.feature_gate.has_feature("tone_system"):
             self._show_premium_prompt("tone_system")
             return
 
-        current_tone = self.config.get("output_tone", "professional")
+        current_tone = self.config.get("output_tone", "minimal")
         if tone_id == current_tone:
             return
 
@@ -9734,6 +9849,9 @@ class WayfinderApp(ctk.CTk):
     
     def _on_intensity_changed(self, tone_id: str, intensity_id: str) -> None:
         """Handle intensity change for a specific tone."""
+        if not self.feature_gate.has_feature("tone_system"):
+            self._show_premium_prompt("tone_system")
+            return
         intensity_key = f"{tone_id}_intensity"
         current_intensity = self.config.get(intensity_key, "standard")
         
@@ -9860,8 +9978,11 @@ class WayfinderApp(ctk.CTk):
     def _set_output_style(self, tone_id: str) -> None:
         """Single source of truth for changing the output style: writes config (tone +
         Whisper prompt), persists, logs, and syncs every UI surface. Used by BOTH the
-        Style tab click and the style-toggle hotkey. Premium gating, if any, is the
-        caller's responsibility."""
+        Style tab click and the style-toggle hotkey. This method also gates itself
+        so future callers cannot bypass the Ultra boundary."""
+        if not self.feature_gate.has_feature("tone_system"):
+            self._show_premium_prompt("tone_system")
+            return
         if tone_id == self.config.get("output_tone"):
             return  # already on this style — nothing to do
         self.config["output_tone"] = tone_id
@@ -9899,6 +10020,11 @@ class WayfinderApp(ctk.CTk):
     def _on_strong_mode_toggled(self) -> None:
         """Handle strong mode toggle."""
         enabled = self.strong_mode_var.get()
+        if enabled and not self.feature_gate.has_feature("tone_system"):
+            self.strong_mode_var.set(False)
+            self.config["strong_mode"] = False
+            self._show_premium_prompt("tone_system")
+            return
         self.config["strong_mode"] = enabled
         save_config(self.config)
 
@@ -10038,7 +10164,7 @@ class WayfinderApp(ctk.CTk):
             self.overlay_controller = OverlayController(
                 audio_level_callback=None if tray_only else self._audio_level_for_overlay,
                 mode="persistent",
-                initial_style=self.config.get("output_tone", "professional"),
+                initial_style=self.config.get("output_tone", "minimal"),
                 config=self.config,
                 log_callback=self.log,
                 want_tray=want_tray or tray_only,
@@ -10200,10 +10326,81 @@ class WayfinderApp(ctk.CTk):
         toggle.pack(side="right")
         ToolTip(
             row,
-            "Keep voice dictation working in SteamOS Game Mode — audio cues replace the\n"
+            "Optional: keep voice dictation working in SteamOS Game Mode. Audio cues replace the\n"
             "overlay (which can't draw over a game). Off = the dictation app is stopped in\n"
             "Game Mode to free resources for the game. Desktop Mode is unaffected.",
         )
+
+        # Keep Desktop Mode instructions beside the primary hotkey. The
+        # per-game Steam Input requirement belongs here with this optional mode.
+        from wayfinder.utils.platform import get_steam_platform
+        if should_show_steam_deck_button_help(get_steam_platform()):
+            _shell, measure = self._begin_form_row(parent, padx=8, pady=(0, 8))
+            game_help = ctk.CTkLabel(
+                measure,
+                text=STEAM_DECK_GAME_MODE_HELP,
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+                justify="left",
+                anchor="w",
+                wraplength=760,
+            )
+            game_help.pack(fill="x")
+
+            def _rewrap_game_help(event, label=game_help):
+                if event.widget is measure and event.width > 40:
+                    label.configure(wraplength=max(240, event.width))
+
+            measure.bind("<Configure>", _rewrap_game_help)
+
+    def _create_steam_deck_button_help(self, parent) -> None:
+        """Show Steam Input grip-button setup beside the hotkey assignment UI."""
+        _shell, measure = self._begin_form_row(parent, padx=16, pady=(0, 12))
+        card = ctk.CTkFrame(
+            measure,
+            fg_color=COLORS["accent_glow"],
+            corner_radius=RADIUS["sm"],
+            border_width=1,
+            border_color=COLORS["accent_dim"],
+        )
+        card.pack(fill="x")
+
+        heading = ctk.CTkFrame(card, fg_color="transparent")
+        heading.pack(fill="x", padx=14, pady=(12, 4))
+        ctk.CTkLabel(
+            heading,
+            text=STEAM_DECK_BUTTON_HELP_TITLE,
+            font=(self.font_header[0], self.font_sizes["caption"]),
+            text_color=COLORS["accent"],
+        ).pack(side="left")
+        info = ctk.CTkLabel(
+            heading,
+            text="ⓘ",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+            cursor="question_arrow",
+        )
+        info.pack(side="left", padx=(8, 0))
+        ToolTip(info, STEAM_DECK_BUTTON_HELP_TOOLTIP)
+
+        body = ctk.CTkLabel(
+            card,
+            text=STEAM_DECK_BUTTON_HELP_BODY,
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+            justify="left",
+            anchor="w",
+            wraplength=760,
+        )
+        body.pack(fill="x", padx=14, pady=(0, 12))
+
+        # Keep the copy readable on the Deck's 1280x800 panel and in a narrow
+        # settings window; CTk's fixed wraplength otherwise overflows at scale.
+        def _rewrap(event, label=body):
+            if event.widget is card and event.width > 40:
+                label.configure(wraplength=max(240, event.width - 28))
+
+        card.bind("<Configure>", _rewrap)
 
     def _on_game_mode_dictation_toggled(self) -> None:
         """Persist the Game Mode dictation toggle + mirror it to the host-visible marker."""
@@ -10394,9 +10591,9 @@ class WayfinderApp(ctk.CTk):
         """Get brief description for audio processing level with latency."""
         descs = {
             "off": "Raw audio • 0ms",
-            "light": "Volume only • +2ms",
-            "medium": "Filter noise • +5ms",
-            "heavy": "Full cleanup • +10ms",
+            "light": "Capped volume leveling • recommended",
+            "medium": "Light + 80 Hz rumble filter",
+            "heavy": "Medium + soft noise gate • may suppress quiet words",
         }
         return descs.get(level, "")
     
@@ -10615,16 +10812,13 @@ class WayfinderApp(ctk.CTk):
     def toggle_gpu(self):
         """Toggle GPU acceleration (applies live, no app restart).
 
-        Free: GPU allowed on Tiny/Base only. Small+ GPU requires Ultra.
-        Ultra: GPU for every model size.
+        GPU processing is Ultra-only for every model. The setting remains off on
+        new installs until an Ultra user explicitly enables it.
         """
         if not hasattr(self, 'gpu_var'):
             return
         want = self.gpu_var.get()
-        from wayfinder.license import gpu_allowed_for_model
-        model_ref = self.config.get("model_path", "")
-        if want and not gpu_allowed_for_model(model_ref, self.feature_gate):
-            # Free user on Small+ (or unknown) — upsell full GPU, leave toggle off.
+        if want and not self.feature_gate.has_feature("gpu_acceleration"):
             self.gpu_var.set(False)
             self._show_premium_prompt("gpu_acceleration")
             return
@@ -10823,6 +11017,9 @@ class WayfinderApp(ctk.CTk):
     
     def open_voice_profile_dialog(self, container=None):
         """Show an inline panel to view and edit the voice profile."""
+        if not self.feature_gate.has_feature("voice_profiles"):
+            self._show_premium_prompt("voice_profiles")
+            return
         if container is None:
             container = getattr(self, "tone_container", None)
         if container is None:
@@ -11126,6 +11323,19 @@ class WayfinderApp(ctk.CTk):
         
         if backend == "llama_cpp":
             self._build_llamacpp_inline_section(model_section)
+
+    def _cleanup_model_is_unlocked(self, model_path: str, model_info: dict | None = None) -> bool:
+        """Shared UI/runtime-compatible gate for local cleanup model choices."""
+        try:
+            from wayfinder.core.postprocessor import cleanup_model_allowed
+
+            return cleanup_model_allowed(
+                model_path,
+                self.feature_gate,
+                (model_info or {}).get("requires_feature"),
+            )
+        except Exception:
+            return False
     
     def _build_llamacpp_inline_section(self, parent) -> None:
         """Build inline llama.cpp model selection with download."""
@@ -11146,13 +11356,17 @@ class WayfinderApp(ctk.CTk):
         for model_id, model_info in LLM_GGUF_MODELS.items():
             model_file = models_dir / model_info["filename"]
             is_installed = model_file.exists()
-            is_selected = str(model_file) == current_model_path
+            is_unlocked = self._cleanup_model_is_unlocked(str(model_file), model_info)
+            is_selected = str(model_file) == current_model_path and is_unlocked
 
             tier = detect_model_tier(Path(model_info["filename"]).stem)
             supports_intense = MODEL_TIERS[tier]["max_intensity"] == "strong"
             intense_icon = " 🎭" if supports_intense else ""
             status_icon = "✓ " if is_installed else ""
-            display_name = f"{status_icon}{model_info['name']}{intense_icon}"
+            lock_suffix = "  ·  Ultra" if not is_unlocked else ""
+            display_name = (
+                f"{status_icon}{model_info['name']}{intense_icon}{lock_suffix}"
+            )
             model_options.append(display_name)
             model_data[display_name] = {
                 "id": model_id,
@@ -11160,6 +11374,7 @@ class WayfinderApp(ctk.CTk):
                 "path": str(model_file),
                 "installed": is_installed,
                 "selected": is_selected,
+                "unlocked": is_unlocked,
             }
         
         # Determine current selection display
@@ -11170,7 +11385,7 @@ class WayfinderApp(ctk.CTk):
                 current_display = display_name
                 break
             # Track the first installed model as fallback
-            if data["installed"] and first_installed is None:
+            if data["installed"] and data["unlocked"] and first_installed is None:
                 first_installed = display_name
         
         if not current_display:
@@ -11179,6 +11394,9 @@ class WayfinderApp(ctk.CTk):
                 current_display = first_installed
                 installed_data = model_data[first_installed]
                 self.config["llama_cpp_model_path"] = installed_data["path"]
+                self.config["llama_cpp_model_requires_feature"] = installed_data[
+                    "info"
+                ].get("requires_feature")
                 save_config(self.config)
                 print(f"[Config] Auto-selected installed model: {installed_data['info']['name']}")
             elif model_options:
@@ -11212,7 +11430,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         info_icon.pack(side="left", padx=(6, 0))
-        llamacpp_tooltip = f"GGUF models run locally via llama.cpp.\nModels are downloaded to {_get_llm_models_dir()}/\nGPU acceleration is automatic (Metal on macOS, CUDA/ROCm on Linux).\n🎭 = supports Strong & Caricature intensity (3B+). Smaller models fall back to standard."
+        llamacpp_tooltip = f"GGUF models run locally via llama.cpp.\nModels are downloaded to {_get_llm_models_dir()}/\nFree cleanup runs on CPU; the GPU Acceleration toggle requires Ultra.\n🎭 = supports Strong & Caricature intensity (3B+). Smaller models fall back to standard."
         ToolTip(label_widget, llamacpp_tooltip)
         ToolTip(info_icon, llamacpp_tooltip)
         
@@ -11238,6 +11456,7 @@ class WayfinderApp(ctk.CTk):
         # Model dropdown
         self._llamacpp_model_var = ctk.StringVar(value=current_display or "Select model")
         self._llamacpp_model_data = model_data
+        self._llamacpp_current_display = current_display
         
         model_dropdown = InlineOptionMenu(
             right_frame,
@@ -11355,10 +11574,22 @@ class WayfinderApp(ctk.CTk):
             return
         
         data = self._llamacpp_model_data[selection]
+        if not data.get("unlocked", False):
+            self._llamacpp_model_var.set(
+                getattr(self, "_llamacpp_current_display", "Select model")
+            )
+            self._show_premium_prompt(
+                data["info"].get("requires_feature") or "large_cleanup_models"
+            )
+            return
         if data["installed"]:
             # Select and save the model
             self.config["llama_cpp_model_path"] = data["path"]
+            self.config["llama_cpp_model_requires_feature"] = data["info"].get(
+                "requires_feature"
+            )
             save_config(self.config)
+            self._llamacpp_current_display = selection
             self.log(f"⚙ LLM Model: {data['info']['name']}")
         
         self._update_llamacpp_download_button()
@@ -11376,7 +11607,14 @@ class WayfinderApp(ctk.CTk):
         if selection in self._llamacpp_model_data:
             data = self._llamacpp_model_data[selection]
             size = data["info"].get("size", "")
-            if data["installed"]:
+            if not data.get("unlocked", False):
+                self._llamacpp_download_btn.configure(
+                    text="Ultra",
+                    fg_color=COLORS["accent"],
+                    hover_color=COLORS["accent_hover"],
+                    state="normal",
+                )
+            elif data["installed"]:
                 self._llamacpp_download_btn.configure(
                     text="✓ Installed",
                     fg_color=COLORS["bg_hover"],
@@ -11427,6 +11665,11 @@ class WayfinderApp(ctk.CTk):
             return
         
         data = self._llamacpp_model_data[selection]
+        if not data.get("unlocked", False):
+            self._show_premium_prompt(
+                data["info"].get("requires_feature") or "large_cleanup_models"
+            )
+            return
         if data["installed"]:
             return
         
@@ -11634,6 +11877,9 @@ class WayfinderApp(ctk.CTk):
                     
                     # Auto-select the downloaded model
                     self.config["llama_cpp_model_path"] = str(model_file)
+                    self.config["llama_cpp_model_requires_feature"] = model_info.get(
+                        "requires_feature"
+                    )
                     save_config(self.config)
                     
                     # Hide progress after 2 seconds and rebuild
@@ -11948,7 +12194,11 @@ class WayfinderApp(ctk.CTk):
         )
         
         if file_path:
+            if not self._cleanup_model_is_unlocked(file_path):
+                self._show_premium_prompt("large_cleanup_models")
+                return
             self.config["llama_cpp_model_path"] = file_path
+            self.config["llama_cpp_model_requires_feature"] = None
             save_config(self.config)
             model_name = Path(file_path).name
             self.log(f"⚙ LLM Model: {model_name}")
@@ -12520,7 +12770,10 @@ class WayfinderApp(ctk.CTk):
             command=command,
         )
         btn.grid(row=0, column=1, sticky="e", padx=(16, 0))
-        
+        if tooltip:
+            tt3 = ToolTip(btn, tooltip)
+            if tooltip_key:
+                self.dynamic_tooltips[tooltip_key].append(tt3)
         return btn
 
     def _create_scale_slider_row(self, parent):
@@ -13120,19 +13373,9 @@ class WayfinderApp(ctk.CTk):
             gate = getattr(self, "feature_gate", None)
             if gate is None:
                 return
-            # Ultra already has full GPU. Free on Tiny/Base with GPU on is already
-            # enjoying free GPU — don't nag; upsell only when they're on Small+ CPU
-            # or have GPU off and would benefit from Ultra's Small+/large-model GPU.
-            from wayfinder.license import gpu_allowed_for_model, is_free_tier_gpu_model
+            # Ultra users already have GPU available; Free always runs CPU.
             if gate.has_feature("gpu_acceleration"):
                 return
-            model_ref = self.config.get("model_path", "")
-            if (
-                self.config.get("use_gpu", True)
-                and is_free_tier_gpu_model(model_ref)
-                and gpu_allowed_for_model(model_ref, gate)
-            ):
-                return  # free Tiny/Base GPU path — happy path, no nudge
             # Don't upsell GPU acceleration to a machine with no usable GPU — the nudge
             # would promise a speedup the hardware can't deliver. Cheap, cached,
             # lspci/sysfs-based detector: model-independent (no whisper probe) and
@@ -13339,7 +13582,7 @@ class WayfinderApp(ctk.CTk):
     # License tile) — one list so the copy never drifts. Lucide row markers
     # (CLAUDE.md: no decorative emoji as UI chrome).
     ULTRA_BENEFITS = [
-        ("sparkles", "GPU for Small & larger", "Free already has GPU on Tiny/Base — Ultra unlocks Small, Turbo, Large"),
+        ("sparkles", "GPU Acceleration", "Faster transcription and local cleanup on supported GPUs"),
         ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),
         ("pen-line", "Tone Presets", "Professional, Casual, Dev and Personal styles"),
         ("audio-waveform", "Chunked Recording", "Unlimited length with live feedback"),
@@ -13503,6 +13746,7 @@ class WayfinderApp(ctk.CTk):
             self._license_feedback.configure(text="Ultra activated — welcome to the halo 😇", text_color=COLORS["accent"])
             self.log("😇 Ultra activated — halo on. Thanks for supporting Wayfinder!")
             self._rebuild_header()
+            self._refresh_entitlement_ui()
             self._show_ultra_banner()
         else:
             self._license_feedback.configure(text=result.error_message or "Activation failed", text_color=COLORS["error"])
@@ -13557,6 +13801,15 @@ class WayfinderApp(ctk.CTk):
         self._license_feedback.configure(text="License deactivated", text_color=COLORS["text_muted"])
         self._license_key_entry.delete(0, "end")
         self.log("License deactivated")
+        from wayfinder.config import enforce_license_config
+        repaired = enforce_license_config(self.config, self.feature_gate)
+        if repaired:
+            save_config(self.config)
+            try:
+                from wayfinder.core.transcriber import WhisperServerBackend
+                WhisperServerBackend.shutdown()
+            except Exception:
+                pass
         # Revert the badge/glow/underline/tier live.
         prior = getattr(self, "_ultra_banner", None)
         if prior is not None:
@@ -13566,6 +13819,22 @@ class WayfinderApp(ctk.CTk):
                 pass
             self._ultra_banner = None
         self._rebuild_header()
+        self._refresh_entitlement_ui()
+
+    def _refresh_entitlement_ui(self) -> None:
+        """Refresh controls whose lock state can change after live activation."""
+        try:
+            style_unlocked = self.feature_gate.has_feature("tone_system")
+            style_btn = self.tab_buttons.get("style")
+            if style_btn is not None:
+                style_btn.configure(text="Style" if style_unlocked else "Style  🔒")
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "mode_settings_container"):
+                self._build_mode_settings(self.config.get("processing_mode", "local"))
+        except Exception:
+            pass
 
     def get_hotkey_display(self) -> str:
         hotkey_key = self.config.get("hotkey_key", 67)
@@ -14498,35 +14767,23 @@ class WayfinderApp(ctk.CTk):
         
         def play_audio():
             try:
-                import sounddevice as sd
                 import wave
                 import numpy as np
+                from wayfinder.utils.audio_output import play_blocking
                 
                 with wave.open(self._mic_test_audio_path, 'rb') as wf:
                     sample_rate = wf.getframerate()
                     frames = wf.readframes(wf.getnframes())
                     audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
 
-                # Play audio (can be stopped with sd.stop())
-                try:
-                    sd.play(audio, sample_rate)
-                    sd.wait()
-                except sd.PortAudioError:
-                    # Output device refuses the recording rate ("Invalid sample
-                    # rate" — ALSA/PipeWire devices pinned to e.g. 48 kHz won't
-                    # open a 16 kHz stream). Resample to the device's default
-                    # rate and retry instead of failing the mic test.
-                    try:
-                        dev_rate = int(sd.query_devices(kind="output")["default_samplerate"])
-                    except Exception:
-                        dev_rate = 48000
-                    if dev_rate != sample_rate and len(audio):
-                        n_out = max(1, int(len(audio) * dev_rate / sample_rate))
-                        x_old = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)
-                        x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
-                        audio = np.interp(x_new, x_old, audio).astype(np.float32)
-                    sd.play(audio, dev_rate)
-                    sd.wait()
+                # Shared with the packaged-artifact release probe: CI exercises
+                # this exact 16 kHz -> native-rate fallback, not a toy code path.
+                result = play_blocking(audio, sample_rate)
+                if result.resampled:
+                    self.log(
+                        f"🔊 Playback: {result.output_name} at {result.used_rate} Hz "
+                        f"(resampled from {result.requested_rate} Hz)"
+                    )
                 
                 # Done (only update if we weren't stopped)
                 if self._mic_test_playing:
@@ -14608,7 +14865,7 @@ class WayfinderApp(ctk.CTk):
         elif "tiny.en" in model_path:
             return "Tiny (Fastest)"
         elif "base.en" in model_path:
-            return "Base (Fast)"
+            return "Base (Free Default)"
         elif "small.en" in model_path:
             return "Small"
         elif "medium.en" in model_path:
@@ -14617,7 +14874,7 @@ class WayfinderApp(ctk.CTk):
         elif "tiny" in model_path:
             return "Tiny (Multi)"
         elif "base" in model_path:
-            return "Base (Multi)"
+            return "Base Multi (Free Default)"
         elif "small" in model_path:
             return "Small (Multi)"
         elif "medium" in model_path:
@@ -14731,6 +14988,11 @@ class WayfinderApp(ctk.CTk):
 
         def build_panel(content, close_panel):
             downloader = ModelDownloader()
+            from wayfinder.license import transcription_model_allowed
+
+            def _model_unlocked(model_ref: str) -> bool:
+                return transcription_model_allowed(model_ref, self.feature_gate)
+
             fam = self.font_body[0]
             fs = self.font_sizes
             current_path = os.path.expanduser(self.config.get("model_path", ""))
@@ -14847,8 +15109,7 @@ class WayfinderApp(ctk.CTk):
                 selected = model_var.get()
                 if not selected:
                     return
-                large_keywords = ("medium", "large", "turbo")
-                if any(kw in selected.lower() for kw in large_keywords) and not self.feature_gate.has_feature("large_models"):
+                if not _model_unlocked(selected):
                     self._show_premium_prompt("large_models")
                     return
                 store = selected
@@ -14860,22 +15121,10 @@ class WayfinderApp(ctk.CTk):
                 if hasattr(self, "model_btn"):
                     self.model_btn.configure(text=self.get_model_display())
                 self.log(f"⚙ Model: {self.get_model_display()}")
-                # Free + GPU on + Small: keep use_gpu preference, but effective
-                # transcription is CPU until Ultra — surface that clearly.
-                try:
-                    from wayfinder.license import gpu_allowed_for_model
-                    if (
-                        self.config.get("use_gpu", True)
-                        and not gpu_allowed_for_model(store, self.feature_gate)
-                    ):
-                        self.log(
-                            "⚙ GPU for Small+ is Ultra — this model runs on CPU. "
-                            "Tiny/Base keep free GPU."
-                        )
-                        if hasattr(self, "gpu_var"):
-                            self.gpu_var.set(False)
-                except Exception:
-                    pass
+                if not self.feature_gate.has_feature("gpu_acceleration"):
+                    self.log("⚙ Free transcription uses Base on CPU; GPU requires Ultra.")
+                    if hasattr(self, "gpu_var"):
+                        self.gpu_var.set(False)
                 if close:
                     close_panel()
 
@@ -14943,6 +15192,8 @@ class WayfinderApp(ctk.CTk):
                     path = model["path"]
                     selected = os.path.expanduser(path) == current_path
                     title, badge = format_model_tile_title(model["name"], model.get("model_id"))
+                    if not _model_unlocked(model.get("model_id") or path):
+                        badge = "Ultra"
                     sp = model.get("speed_rating")
                     ac = model.get("accuracy_rating")
                     if sp is None or ac is None:
@@ -14986,7 +15237,7 @@ class WayfinderApp(ctk.CTk):
 
                     if badge:
                         # Balanced (recommended) uses accent; language chips stay muted
-                        chip_accent = badge in ("Balanced", "Best")
+                        chip_accent = badge in ("Balanced", "Best", "Free default")
                         chip = ctk.CTkLabel(
                             top, text=f" {badge} ",
                             font=(fam, fs["caption"], "bold"),
@@ -15093,6 +15344,8 @@ class WayfinderApp(ctk.CTk):
                         title, badge = format_model_tile_title(info["name"], model_id)
                         if info.get("recommended") and badge not in ("Balanced", "Best"):
                             badge = "Balanced"
+                        if not _model_unlocked(model_id):
+                            badge = "Ultra"
                         sp = info.get("speed_rating")
                         ac = info.get("accuracy_rating")
                         meta = format_model_tile_meta(
@@ -15128,7 +15381,7 @@ class WayfinderApp(ctk.CTk):
                         name_lbl.pack(side="left", fill="x", expand=True)
 
                         if badge and not is_installed:
-                            chip_accent = badge in ("Balanced", "Best")
+                            chip_accent = badge in ("Balanced", "Best", "Free default")
                             ctk.CTkLabel(
                                 top, text=f" {badge} ",
                                 font=(fam, fs["caption"], "bold"),
@@ -15195,7 +15448,10 @@ class WayfinderApp(ctk.CTk):
                             ).pack(side="left")
                         else:
                             ctk.CTkButton(
-                                top, text="Get", width=44, height=24,
+                                top,
+                                text="Get" if _model_unlocked(model_id) else "Ultra",
+                                width=52 if not _model_unlocked(model_id) else 44,
+                                height=24,
                                 font=(fam, fs["caption"], "bold"),
                                 corner_radius=RADIUS["xs"],
                                 fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
@@ -15254,6 +15510,13 @@ class WayfinderApp(ctk.CTk):
                 for mid, info in WHISPER_CPP_MODELS.items():
                     if mid == model_id:
                         continue
+                    try:
+                        from wayfinder.license import transcription_model_allowed
+                        if not transcription_model_allowed(mid, self.feature_gate):
+                            continue
+                    except Exception:
+                        if mid not in ("base", "base.en"):
+                            continue
                     p = _resolve_whisper_model(info["filename"])
                     if p is not None:
                         fallback = p
@@ -15306,6 +15569,9 @@ class WayfinderApp(ctk.CTk):
             def do_download(model_id: str):
                 """Download a model with inline progress."""
                 info = WHISPER_CPP_MODELS[model_id]
+                if not _model_unlocked(model_id):
+                    self._show_premium_prompt("large_models")
+                    return
                 clear_content()
                 set_tab("download")
 
@@ -15491,6 +15757,13 @@ class WayfinderApp(ctk.CTk):
             model_path = model["path"]
             model_name = model["name"]
             filename = model.get("filename", "")
+            try:
+                from wayfinder.license import transcription_model_allowed
+                model_unlocked = transcription_model_allowed(model_path, self.feature_gate)
+            except Exception:
+                model_unlocked = Path(model_path).name in (
+                    "ggml-base.en.bin", "ggml-base.bin"
+                )
             
             # Extract the model key from filename (e.g., "ggml-small.en.bin" -> "small.en")
             model_key = filename.replace("ggml-", "").replace(".bin", "") if filename else ""
@@ -15500,7 +15773,7 @@ class WayfinderApp(ctk.CTk):
                 return lambda item: os.path.expanduser(mp) == current_path
             
             items.append(pystray.MenuItem(
-                model_name,
+                model_name if model_unlocked else f"{model_name} (Ultra)",
                 self.create_model_setter(model_key),
                 checked=make_checker(model_path),
             ))
@@ -15520,6 +15793,11 @@ class WayfinderApp(ctk.CTk):
         model_path = _resolve_whisper_model(f"ggml-{model_name}.bin")
         
         if model_path is not None:
+            from wayfinder.license import transcription_model_allowed
+            if not transcription_model_allowed(str(model_path), self.feature_gate):
+                self.show_from_tray()
+                self._show_premium_prompt("large_models")
+                return
             # Store with ~ for portability (collapse $HOME -> ~ like the model panel does)
             home = str(Path.home())
             path_str = str(model_path)
@@ -16693,13 +16971,17 @@ class WayfinderApp(ctk.CTk):
         Args:
             target_style: If None, cycle to next style. Otherwise set to specified style.
         """
+        if not self.feature_gate.has_feature("tone_system"):
+            self._show_premium_prompt("tone_system")
+            return
+
         # Cycle order + labels live in module-level STYLE_CYCLE / STYLE_LABELS (single source).
         if target_style and target_style in STYLE_CYCLE:
             # Set specific style
             next_style = target_style
         else:
             # Cycle to next style
-            current_style = self.config.get("output_tone", "professional")
+            current_style = self.config.get("output_tone", "minimal")
             try:
                 current_index = STYLE_CYCLE.index(current_style)
             except ValueError:
@@ -16736,7 +17018,7 @@ class WayfinderApp(ctk.CTk):
                     self.log("⚠ No usable Whisper model installed — recording refused")
                     self._show_error_banner(
                         "No speech model installed — open Settings → Whisper Models "
-                        "and download a free model (Tiny, Base, or Small)."
+                        "and download the Free Base model."
                     )
                     return
 
@@ -16775,12 +17057,21 @@ class WayfinderApp(ctk.CTk):
             # so we skip chunked mode for them to avoid prompt length issues
             backend = self.config.get("transcription_backend", "whisper_cpp")
             is_remote = backend in ("groq_whisper", "openai_whisper")
-            use_chunked = self.config.get("chunked_mode", True) and not is_remote
+            chunked_requested = bool(self.config.get("chunked_mode", False))
+            try:
+                chunked_unlocked = self.feature_gate.has_feature("chunked_recording")
+            except Exception:
+                # Entitlements are an execution boundary: a broken/missing gate
+                # must never turn a premium path on.
+                chunked_unlocked = False
+            use_chunked = chunked_requested and chunked_unlocked and not is_remote
             
             if use_chunked:
                 self._start_chunked_recording(gen)
             else:
-                if is_remote and self.config.get("chunked_mode", True):
+                if chunked_requested and not chunked_unlocked:
+                    self.log("🔒 Chunked mode is unavailable on Free — using one-shot recording")
+                elif is_remote and chunked_requested:
                     self.log("ℹ️ Chunked mode skipped (cloud API handles long audio)")
                 self.recorder.start()
                 # Adopt the WarmMic's healed device index (see _start_chunked_recording).
@@ -16816,8 +17107,8 @@ class WayfinderApp(ctk.CTk):
             sample_rate=self.config["sample_rate"],
             device=self._resolved_audio_device,
             preprocessing=self.config.get("audio_preprocessing", "light"),
-            chunk_duration=self.config.get("chunk_duration", 10),
-            chunk_overlap=self.config.get("chunk_overlap", 1),
+            chunk_duration=self.config.get("chunk_duration", 15),
+            chunk_overlap=self.config.get("chunk_overlap", 2),
             on_chunk_ready=on_chunk_ready,
             warm_mic=self.warm_mic,
         )
@@ -16841,7 +17132,12 @@ class WayfinderApp(ctk.CTk):
             # inventing prose for such chunks, so mark this one empty without invoking
             # ASR.  Fail open when the WAV cannot be measured to avoid dropping speech.
             chunk_peak = get_wav_peak_amplitude(chunk_path)
-            if chunk_peak is not None and chunk_peak < SILENCE_PEAK_THRESHOLD:
+            chunk_has_speech = wav_has_speech_activity(chunk_path)
+            if (
+                chunk_has_speech is False
+                or (chunk_has_speech is None and chunk_peak is not None
+                    and chunk_peak < SILENCE_PEAK_THRESHOLD)
+            ):
                 with self.chunk_transcription_lock:
                     while len(store) <= chunk_index:
                         store.append("")
@@ -16970,7 +17266,12 @@ class WayfinderApp(ctk.CTk):
         # Silence guard: a muted/disconnected/wrong mic yields near-zero samples, and
         # whisper hallucinates text on silence. Tell the user what's actually wrong
         # instead of injecting junk or showing "no output".
-        if self.recorder.get_peak_amplitude() < SILENCE_PEAK_THRESHOLD:
+        speech_probe = getattr(self.recorder, "has_speech_activity", None)
+        has_speech = (
+            bool(speech_probe()) if callable(speech_probe)
+            else self.recorder.get_peak_amplitude() >= SILENCE_PEAK_THRESHOLD
+        )
+        if not has_speech:
             self.recorder.cleanup()
             self.on_error(self._silence_error_message(), gen)
             return
@@ -16988,9 +17289,10 @@ class WayfinderApp(ctk.CTk):
         """
         name = self.config.get("audio_device_name")
         if name:
-            return (f"No audio from “{name}” — check the mic's own mute button/gain, "
-                    "or pick another in Settings → Audio")
-        return "No audio detected — mic muted or wrong device (Settings → Audio)"
+            return (f"No speech detected from “{name}” — check the mic's mute/gain, "
+                    "reduce steady background noise, or pick another in Settings → Audio")
+        return ("No speech detected — check mic mute/gain, the selected device, "
+                "or steady background noise (Settings → Audio)")
 
     def _stop_chunked_recording(self, gen=None):
         """Stop chunked recording and process all chunks."""
@@ -17027,7 +17329,12 @@ class WayfinderApp(ctk.CTk):
             return
 
         # Silence guard — same rationale as the simple-recording path.
-        if recorder.get_peak_amplitude() < SILENCE_PEAK_THRESHOLD:
+        speech_probe = getattr(recorder, "has_speech_activity", None)
+        has_speech = (
+            bool(speech_probe()) if callable(speech_probe)
+            else recorder.get_peak_amplitude() >= SILENCE_PEAK_THRESHOLD
+        )
+        if not has_speech:
             recorder.cleanup()
             if self.chunked_recorder is recorder:
                 self.chunked_recorder = None
@@ -17152,54 +17459,9 @@ class WayfinderApp(ctk.CTk):
         Returns:
             Combined text with overlapping duplicates removed
         """
-        if not transcriptions:
-            return ""
-        
-        # Filter out empty transcriptions and error/empty markers
-        valid_transcriptions = [
-            t.strip() for t in transcriptions 
-            if t and t.strip() and t.strip() not in ("[error]", "[empty]")
-        ]
-        
-        if not valid_transcriptions:
-            return ""
-        
-        if len(valid_transcriptions) == 1:
-            return valid_transcriptions[0]
-        
-        # Start with the first chunk
-        combined = valid_transcriptions[0]
-        
-        for i in range(1, len(valid_transcriptions)):
-            next_chunk = valid_transcriptions[i]
-            
-            if not next_chunk:
-                continue
-            
-            # Find overlap between end of combined and start of next_chunk
-            overlap = self._find_text_overlap(combined, next_chunk)
+        from wayfinder.core.chunking import deduplicate_overlap_text
 
-            if overlap:
-                # Skip the overlapping part from the next chunk
-                remainder = next_chunk[len(overlap):].lstrip()
-                if not remainder:
-                    continue
-                # Whisper often ends the earlier chunk with sentence punctuation
-                # even when the next chunk continues the same clause after the
-                # audio overlap ("…word." + "that the speaker…" → drop the
-                # boundary period so we don't leave "word. that").
-                if remainder[:1].islower() and combined.rstrip()[-1:] in ".!?":
-                    combined = combined.rstrip().rstrip(".!?")
-                combined += " " + remainder
-            else:
-                # No overlap found, just append with space
-                combined += " " + next_chunk
-
-        # Clean up multiple spaces
-        import re
-        combined = re.sub(r'\s+', ' ', combined).strip()
-
-        return combined
+        return deduplicate_overlap_text(transcriptions)
     
     def _find_text_overlap(self, text1: str, text2: str, min_words: int = 2, max_words: int = 15) -> str:
         """
@@ -17221,26 +17483,9 @@ class WayfinderApp(ctk.CTk):
         Returns:
             The overlapping text (from text2, original casing), or "" if none
         """
-        words1 = text1.split()
-        words2 = text2.split()
+        from wayfinder.core.chunking import find_text_overlap
 
-        if len(words1) < min_words or len(words2) < min_words:
-            return ""
-
-        def _norm(w: str) -> str:
-            # Strip common trailing/leading punct so "today?" matches "today".
-            return w.lower().strip(".,!?;:\"'`")
-
-        # Longest full match first (more confident).
-        for overlap_len in range(min(max_words, len(words1), len(words2)), min_words - 1, -1):
-            end_norm = [_norm(w) for w in words1[-overlap_len:]]
-            start_norm = [_norm(w) for w in words2[:overlap_len]]
-            # Require every token to match after normalization; empty tokens
-            # (e.g. a bare "...") are not a real speech overlap.
-            if end_norm == start_norm and all(end_norm):
-                return " ".join(words2[:overlap_len])
-
-        return ""
+        return find_text_overlap(text1, text2, min_words=min_words, max_words=max_words)
 
     def transcribe_and_inject(self, audio_path, gen=None):
         import time as time_module
@@ -17647,6 +17892,8 @@ class WayfinderApp(ctk.CTk):
 
     def _add_to_voice_learning(self, text: str):
         """Add transcription to voice learning history."""
+        if not self.feature_gate.has_feature("voice_profiles"):
+            return
         try:
             from wayfinder.core.voice_profile import get_voice_profile
             

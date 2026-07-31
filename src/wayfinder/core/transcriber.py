@@ -246,7 +246,7 @@ class WhisperCppBackend(TranscriptionBackend):
     def __init__(
         self,
         whisper_binary: str = "~/whisper.cpp/build/bin/whisper-cli",
-        model_path: str = "~/whisper.cpp/models/ggml-small.bin",
+        model_path: str = "~/whisper.cpp/models/ggml-base.en.bin",
         prompt: str = "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next.",
         threads: int = 6,
         timeout: int = 120,
@@ -353,7 +353,9 @@ class WhisperCppBackend(TranscriptionBackend):
             self._gpu_supported = False
             return False
     
-    def _supported_flags(self, probe_timeout: float = 5) -> set:
+    def _supported_flags(
+        self, probe_timeout: float = 5, binary: str | None = None
+    ) -> set:
         """Long options the actual whisper-cli accepts (parsed from --help, cached).
 
         The Flatpak bundles whisper.cpp v1.7.2, which lacks --no-speech-thold and --suppress-nst
@@ -370,7 +372,7 @@ class WhisperCppBackend(TranscriptionBackend):
         try:
             import re
             h = subprocess.run(
-                [self.whisper_binary, "--help"],
+                [binary or self.whisper_binary, "--help"],
                 capture_output=True, text=True, timeout=probe_timeout,
             )
             flags = set(re.findall(r"--[a-z][a-z0-9-]+", (h.stdout or "") + (h.stderr or "")))
@@ -423,11 +425,23 @@ class WhisperCppBackend(TranscriptionBackend):
         # Build the final prompt with custom vocabulary and context
         final_prompt = self._build_prompt(context)
 
+        # Choose the executable before probing flags. CPU mode probes and executes
+        # the dedicated CPU sibling when packaged, so the Vulkan executable is
+        # never started—not even for --help.
+        if not self.use_gpu:
+            active_binary = _cpu_fallback_binary(self.whisper_binary) or self.whisper_binary
+        else:
+            active_binary = _CPU_FALLBACK_ACTIVE.get(
+                self.whisper_binary, self.whisper_binary
+            )
+
         # Some accuracy/suppression flags exist only in newer whisper.cpp; the bundled v1.7.2
         # lacks --no-speech-thold / --suppress-nst, and whisper-cli aborts (transcribing nothing)
         # on the first unknown flag. Emit version-fragile flags only when --help advertises them;
         # _flag_ok fails OPEN (empty set => no filtering) so an un-introspectable binary is safe.
-        _sup = self._supported_flags(probe_timeout=probe_timeout)
+        _sup = self._supported_flags(
+            probe_timeout=probe_timeout, binary=active_binary
+        )
         # Under a salvage DEADLINE the --help probe may have been truncated to empty, so
         # do NOT fail OPEN on the version-fragile flags (v1.7.2 aborts on them → silent
         # empty transcription — the very failure this filtering prevents). Emit those
@@ -442,9 +456,9 @@ class WhisperCppBackend(TranscriptionBackend):
         # Route to the CPU sibling if the GPU binary already crashed this session,
         # and (in the background) periodically re-test the GPU so it comes back
         # automatically once the driver recovers.
-        active_binary = _CPU_FALLBACK_ACTIVE.get(self.whisper_binary, self.whisper_binary)
         if active_binary != self.whisper_binary:
-            self._maybe_probe_gpu_recovery()
+            if self.use_gpu:
+                self._maybe_probe_gpu_recovery()
 
         cmd = [
             active_binary,
@@ -479,7 +493,11 @@ class WhisperCppBackend(TranscriptionBackend):
         
         # GPU is enabled by default in Vulkan builds of whisper.cpp
         # Use --no-gpu to disable it if user doesn't want GPU acceleration
-        if not self.use_gpu and _flag_ok("--no-gpu"):
+        if (
+            not self.use_gpu
+            and active_binary == self.whisper_binary
+            and _flag_ok("--no-gpu")
+        ):
             cmd.append("--no-gpu")
 
         # GPU device selection is handled at app startup via setup_gpu_environment()
@@ -685,11 +703,11 @@ class WhisperServerBackend(TranscriptionBackend):
     def __init__(
         self,
         whisper_server_binary: str = "~/whisper.cpp/build/bin/whisper-server",
-        model_path: str = "~/whisper.cpp/models/ggml-large-v3-turbo.bin",
+        model_path: str = "~/whisper.cpp/models/ggml-base.en.bin",
         port: int = 8178,
         threads: int = 4,
         timeout: int = 120,
-        use_gpu: bool = True,
+        use_gpu: bool = False,
         beam_size: int = 3,
         best_of: int = 2,
         language: str = "en",
@@ -796,8 +814,18 @@ class WhisperServerBackend(TranscriptionBackend):
         full modern flags -> v1.7.2-safe flags -> v1.7.2-safe + no-GPU (the same
         degradation whisper-cli's binary auto-fallback provides).
         """
+        cpu_server = self.whisper_server_binary.replace(
+            "whisper-server", "whisper-server-cpu"
+        )
+        cpu_server_exists = (
+            cpu_server != self.whisper_server_binary and _existing_file(cpu_server)
+        )
+        primary_server = (
+            cpu_server if not self.use_gpu and cpu_server_exists
+            else self.whisper_server_binary
+        )
         base = [
-            self.whisper_server_binary,
+            primary_server,
             "-m", self.model_path,
             "-t", str(self.threads),
             "--port", str(port),
@@ -807,7 +835,7 @@ class WhisperServerBackend(TranscriptionBackend):
             "-et", str(self.entropy_threshold),
             "-nf",  # No fallback (faster)
         ]
-        if not self.use_gpu:
+        if not self.use_gpu and primary_server == self.whisper_server_binary:
             base = base + ["-ng"]
 
         full = list(base)
@@ -823,8 +851,7 @@ class WhisperServerBackend(TranscriptionBackend):
         # on the Deck's RDNA2 in-sandbox), so no flag can save it. The Flatpak
         # ships a separate CPU-only server binary for exactly this; try it last
         # so instant (model-resident) transcription survives broken Vulkan.
-        cpu_server = self.whisper_server_binary.replace("whisper-server", "whisper-server-cpu")
-        if cpu_server != self.whisper_server_binary and _existing_file(cpu_server):
+        if self.use_gpu and cpu_server_exists:
             attempts.append([cpu_server] + base[1:])
         return attempts
 
@@ -1961,9 +1988,9 @@ def get_backend(config: dict) -> TranscriptionBackend:
     backend_type = config.get("transcription_backend", "whisper_cpp")
 
     # License gating (F1): a hand-edited config.json must not unlock a premium backend
-    # (Groq/OpenAI cloud, Faster-Whisper) or a large model without a license. When the
+    # (Groq/OpenAI cloud, Faster-Whisper) or a non-Base model without a license. When the
     # selected backend/model needs a premium feature the gate doesn't grant, fall back
-    # to the free local whisper.cpp backend (with a small model) and log one line. The
+    # to the free local whisper.cpp backend (with Base) and log one line. The
     # licensed path and the separate GPU gate below are untouched.
     try:
         from wayfinder.license import get_feature_gate
@@ -1977,9 +2004,16 @@ def get_backend(config: dict) -> TranscriptionBackend:
         except Exception:
             return False
 
-    def _is_large_model(name: str) -> bool:
-        n = (name or "").lower()
-        return "large" in n or "medium" in n or "turbo" in n
+    if not _has_feature("tone_system") and (
+        config.get("output_tone", "minimal") != "minimal"
+        or config.get("strong_mode", False)
+        or config.get("caricature_mode", False)
+    ):
+        config = dict(config)
+        config["output_tone"] = "minimal"
+        config["strong_mode"] = False
+        config["caricature_mode"] = False
+        config["prompt"] = "Dictation with natural speech."
 
     _premium_backend_feature = {
         "groq_whisper": "cloud_backends",
@@ -1999,28 +2033,38 @@ def get_backend(config: dict) -> TranscriptionBackend:
     if _premium_backend_feature and not _has_feature(_premium_backend_feature):
         _gate_reason = (f"backend '{backend_type}' requires the "
                         f"'{_premium_backend_feature}' license feature")
-    elif (backend_type not in ("groq_whisper", "openai_whisper")
-          and _is_large_model(_local_model) and not _has_feature("large_models")):
-        _gate_reason = (f"model '{_local_model}' requires the "
-                        f"'large_models' license feature")
+    elif backend_type not in ("groq_whisper", "openai_whisper"):
+        try:
+            from wayfinder.license import transcription_model_allowed
+            _model_allowed = transcription_model_allowed(_local_model, _gate)
+        except Exception:
+            _model_allowed = False
+        if not _model_allowed:
+            _gate_reason = (
+                f"model '{_local_model}' requires the 'large_models' license feature"
+            )
 
     if _gate_reason:
         print(f"[Transcription] {_gate_reason} — falling back to free local "
-              f"whisper.cpp (small model).")
+              f"whisper.cpp (Base model on CPU).")
         backend_type = "whisper_cpp"
         config = dict(config)
         config["transcription_backend"] = "whisper_cpp"
-        # Downgrade a large model to a FREE model. Prefer an existing free weight in the
-        # same directory, then Flatpak bundled base.en. If none exists, still leave the
-        # Ultra path — fail closed so unlicensed users cannot *use* Ultra weights
-        # (dictation may error; that is preferred over unlocking large_models).
-        if _is_large_model(config.get("model_path", "")):
+        # Downgrade any non-Base model to the Free model. Prefer an existing Base
+        # weight in the same directory, then Flatpak's bundled Base.en.
+        try:
+            from wayfinder.license import transcription_model_allowed
+            _saved_model_allowed = transcription_model_allowed(
+                config.get("model_path", ""), _gate
+            )
+        except Exception:
+            _saved_model_allowed = False
+        if not _saved_model_allowed:
             import os as _os
             _cur = _os.path.expanduser(config.get("model_path", ""))
             _dir = _os.path.dirname(_cur)
             _free = None
-            for _name in ("ggml-base.en.bin", "ggml-small.en.bin", "ggml-tiny.en.bin",
-                          "ggml-base.bin", "ggml-small.bin", "ggml-tiny.bin"):
+            for _name in ("ggml-base.en.bin", "ggml-base.bin"):
                 _cand = _os.path.join(_dir, _name) if _dir else _name
                 if _os.path.exists(_cand):
                     _free = _cand
@@ -2038,12 +2082,11 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 )
                 print(
                     "[Transcription] No free Whisper model found to replace Ultra weight; "
-                    "refusing large_models without license (install Base/Tiny to continue)."
+                    "refusing additional models without license (install Base to continue)."
                 )
 
-    # GPU entitlement: Ultra gets GPU for every model; free gets GPU on Tiny/Base
-    # only (Small+ GPU is Ultra). Enforced here so config.json cannot unlock
-    # Small-on-GPU without a license. Every GPU-capable backend below uses
+    # GPU entitlement: Ultra-only for every model. Enforced here so config.json
+    # cannot unlock acceleration without a license. Every GPU-capable backend below uses
     # use_gpu_effective instead of the raw config value.
     try:
         from wayfinder.license import gpu_allowed_for_model
@@ -2056,7 +2099,49 @@ def get_backend(config: dict) -> TranscriptionBackend:
         _gpu_allowed = gpu_allowed_for_model(_gpu_model_ref)
     except Exception:
         _gpu_allowed = False
-    use_gpu_effective = bool(config.get("use_gpu", True)) and _gpu_allowed
+    use_gpu_effective = bool(config.get("use_gpu", False)) and _gpu_allowed
+
+    # Prompt enrichment is entitlement-aware at the backend factory boundary.
+    # That keeps direct get_backend() callers and hand-edited configs from using
+    # paid custom vocabulary / voice-profile data while still allowing the
+    # built-in Dev and Casual dictionaries as part of the licensed tone system.
+    _effective_prompt = str(config.get("prompt", "") or "")
+    _effective_custom_vocabulary: list[str] = []
+    if _has_feature("custom_vocabulary"):
+        raw_vocab = config.get("custom_vocabulary", [])
+        if isinstance(raw_vocab, (list, tuple)):
+            _effective_custom_vocabulary = [
+                str(term).strip() for term in raw_vocab if str(term).strip()
+            ]
+
+    _effective_tone = str(config.get("output_tone", "minimal") or "minimal")
+    if _has_feature("tone_system") and _effective_tone in ("dev", "casual"):
+        builtin_vocab = DEV_VOCABULARY if _effective_tone == "dev" else CASUAL_VOCABULARY
+        seen_vocab = {term.lower() for term in _effective_custom_vocabulary}
+        _effective_custom_vocabulary.extend(
+            term for term in builtin_vocab if term.lower() not in seen_vocab
+        )
+
+    if (
+        _effective_tone == "personal"
+        and _has_feature("tone_system")
+        and _has_feature("voice_profiles")
+    ):
+        try:
+            from .voice_profile import get_voice_profile
+
+            voice_profile = get_voice_profile(
+                history_limit=config.get("voice_learning_history_limit", 100),
+                regen_interval=config.get("voice_learning_regen_interval", 20),
+            )
+            profile_context = voice_profile.get_prompt_context()
+            if profile_context:
+                _effective_prompt = f"{profile_context} {_effective_prompt}".strip()
+                print(
+                    f"[Personal Style] Using voice profile ({len(profile_context)} chars)"
+                )
+        except Exception as exc:
+            print(f"[Personal Style] ⚠ Could not load voice profile: {exc}")
 
     # Map accuracy_mode to beam_size/best_of overrides
     accuracy_mode = config.get("accuracy_mode", "balanced")
@@ -2076,12 +2161,12 @@ def get_backend(config: dict) -> TranscriptionBackend:
             model_size=config.get("faster_whisper_model", "small"),
             use_gpu=use_gpu_effective,
             compute_type=config.get("faster_whisper_compute_type", "float16"),
-            prompt=config.get("prompt", "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next."),
+            prompt=_effective_prompt,
             language=config.get("language", "en"),
             beam_size=config.get("beam_size", 5),
             best_of=config.get("best_of", 3),
             temperature=config.get("temperature", 0.0),
-            custom_vocabulary=config.get("custom_vocabulary", []),
+            custom_vocabulary=_effective_custom_vocabulary,
             no_speech_threshold=config.get("no_speech_threshold", 0.5),
             compression_ratio_threshold=config.get("compression_ratio_threshold", 2.4),
             temperature_fallback=config.get("temperature_fallback", 0.0),
@@ -2099,18 +2184,18 @@ def get_backend(config: dict) -> TranscriptionBackend:
             api_key=config.get("openai_api_key", ""),  # From config or OPENAI_API_KEY env var
             model=config.get("openai_whisper_model", "whisper-1"),
             language=config.get("language", "en"),
-            prompt=config.get("prompt", ""),
+            prompt=_effective_prompt,
             temperature=config.get("temperature", 0.0),
-            custom_vocabulary=config.get("custom_vocabulary", []),
+            custom_vocabulary=_effective_custom_vocabulary,
         )
     elif backend_type == "groq_whisper":
         return GroqWhisperBackend(
             api_key=config.get("groq_api_key", ""),  # From config or GROQ_API_KEY env var
             model=config.get("groq_whisper_model", "whisper-large-v3"),
             language=config.get("language", "en"),
-            prompt=config.get("prompt", ""),
+            prompt=_effective_prompt,
             temperature=config.get("temperature", 0.0),
-            custom_vocabulary=config.get("custom_vocabulary", []),
+            custom_vocabulary=_effective_custom_vocabulary,
         )
     else:
         # Default to whisper.cpp — use server mode if enabled (keeps model in memory
@@ -2125,7 +2210,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             server_binary = _derive_whisper_server_binary(cli_binary)
             server_backend = WhisperServerBackend(
                 whisper_server_binary=server_binary,
-                model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),
+                model_path=config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"),
                 port=config.get("whisper_server_port", 8178),
                 threads=config.get("threads", 4),
                 # Short, dedicated timeout (see config: whisper_server_timeout) so a
@@ -2139,8 +2224,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 entropy_threshold=config.get("entropy_threshold", 2.6),
                 no_speech_threshold=config.get("no_speech_threshold", 0.5),
                 suppress_nst=config.get("suppress_nst", False),
-                prompt=config.get("prompt", ""),
-                custom_vocabulary=config.get("custom_vocabulary", []),
+                prompt=_effective_prompt,
+                custom_vocabulary=_effective_custom_vocabulary,
             )
             if server_backend.is_available():
                 return server_backend
@@ -2148,8 +2233,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
                   "(per-dictation model load). Build whisper-server for instant mode.")
         return WhisperCppBackend(
             whisper_binary=cli_binary,
-            model_path=config.get("model_path", "~/whisper.cpp/models/ggml-small.bin"),
-            prompt=config.get("prompt", "I'm going to talk about what I've been working on today. The project is coming along well, and I don't think we'll have any issues. Let's take a look at the details and see what needs to happen next."),
+            model_path=config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"),
+            prompt=_effective_prompt or "Dictation with natural speech.",
             threads=config.get("threads", 6),
             timeout=config.get("timeout", 120),
             use_gpu=use_gpu_effective,
@@ -2162,7 +2247,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             temperature=config.get("temperature", 0.0),
             temperature_fallback=config.get("temperature_fallback", 0.0),
             # Vocabulary and suppression
-            custom_vocabulary=config.get("custom_vocabulary", []),
+            custom_vocabulary=_effective_custom_vocabulary,
             suppress_nst=config.get("suppress_nst", False),
         )
 
@@ -2570,42 +2655,6 @@ def transcribe_with_config(
     config = config.copy()
     original_prompt = config.get("prompt", "")
     
-    # Add vocabulary based on selected mode
-    # This helps Whisper recognize context-specific terms
-    output_tone = config.get("output_tone")
-    
-    if output_tone == "dev":
-        # Developer vocabulary: git commands, programming terms
-        existing_vocab = config.get("custom_vocabulary", [])
-        existing_lower = {v.lower() for v in existing_vocab}
-        new_vocab = [term for term in DEV_VOCABULARY if term.lower() not in existing_lower]
-        config["custom_vocabulary"] = existing_vocab + new_vocab
-        print(f"[Dev Mode] Added {len(new_vocab)} developer vocabulary terms for better recognition")
-    
-    elif output_tone == "casual":
-        # Casual vocabulary: informal speech patterns Whisper tends to formalize
-        existing_vocab = config.get("custom_vocabulary", [])
-        existing_lower = {v.lower() for v in existing_vocab}
-        new_vocab = [term for term in CASUAL_VOCABULARY if term.lower() not in existing_lower]
-        config["custom_vocabulary"] = existing_vocab + new_vocab
-        print(f"[Casual Mode] Added {len(new_vocab)} casual vocabulary terms to preserve informal speech")
-    
-    # Add voice profile context when "personal" style is selected
-    if config.get("output_tone") == "personal":
-        try:
-            from .voice_profile import get_voice_profile
-            voice_profile = get_voice_profile(
-                history_limit=config.get("voice_learning_history_limit", 100),
-                regen_interval=config.get("voice_learning_regen_interval", 20),
-            )
-            profile_context = voice_profile.get_prompt_context()
-            if profile_context:
-                # Prepend voice profile context to prompt for better recognition
-                original_prompt = f"{profile_context} {original_prompt}".strip()
-                print(f"[Personal Style] Using voice profile ({len(profile_context)} chars)")
-        except Exception as e:
-            print(f"[Personal Style] ⚠ Could not load voice profile: {e}")
-    
     if ensure_punct:
         # Add punctuation hint to the prompt
         punct_hint = "Use proper punctuation including periods, commas, and capitalization."
@@ -2619,7 +2668,9 @@ def transcribe_with_config(
 
     # Compatibility guard for a prompt marker used by older server-mode code.
     # Run before punctuation/caps cleanup so the marker remains exact.
-    text = drop_whisper_prompt_leak(text, config.get("custom_vocabulary", []))
+    text = drop_whisper_prompt_leak(
+        text, getattr(backend, "custom_vocabulary", [])
+    )
     
     # ALWAYS clean up Whisper artifacts (dots, [BLANK_AUDIO], <>, caps, etc.)
     # This runs regardless of post-processing settings
@@ -2685,7 +2736,7 @@ def transcribe_with_config(
 def transcribe(
     audio_path: str,
     whisper_binary: str = "~/whisper.cpp/build/bin/whisper-cli",
-    model_path: str = "~/whisper.cpp/models/ggml-small.bin",
+    model_path: str = "~/whisper.cpp/models/ggml-base.en.bin",
     prompt: str = "Hello, this is a dictation with proper punctuation and grammar.",
     threads: int = 6,
     timeout: int = 120,

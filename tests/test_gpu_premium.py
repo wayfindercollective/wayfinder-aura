@@ -58,7 +58,7 @@ def test_premium_user_gpu_respected(monkeypatch):
     )
     _reset_gate()
     # Use a free-tier path name so free GPU allowlist is not required; premium
-    # still needs gpu_acceleration for non-tiny/base, and we assert Ultra GPU.
+    # Every speech model needs gpu_acceleration, and we assert the Ultra GPU path.
     cfg = dict(BASE_CFG)
     cfg["model_path"] = "/x/ggml-small.en.bin"
     b = get_backend(cfg)

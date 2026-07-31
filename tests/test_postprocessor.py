@@ -586,6 +586,76 @@ class TestGetBackend:
         backend = get_backend(config)
         assert isinstance(backend, AnthropicBackend)
 
+    def test_free_forces_local_cleanup_to_cpu_and_minimal(self, tmp_path, monkeypatch):
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: False)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        fake_binary = tmp_path / "llama-simple"
+        fake_binary.write_text("#!/bin/sh\n")
+        fake_binary.chmod(0o755)
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"x")
+        config = {
+            "post_processing_backend": "llama_cpp",
+            "llama_cpp_use_cli": True,
+            "llama_cpp_binary": str(fake_binary),
+            "llama_cpp_model_path": str(model),
+            "llama_cpp_n_gpu_layers": -1,
+            "use_gpu": True,
+            "output_tone": "casual",
+            "strong_mode": True,
+            "caricature_mode": True,
+        }
+
+        backend = get_backend(config)
+
+        assert isinstance(backend, LlamaCppCliBackend)
+        assert backend.n_gpu_layers == 0
+        assert backend.output_tone == "minimal"
+        assert backend.intensity == "standard"
+
+    def test_free_large_cleanup_model_falls_back_to_installed_free_model(
+        self, tmp_path, monkeypatch
+    ):
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: False)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        large = tmp_path / "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"; large.write_bytes(b"x")
+        free = tmp_path / "google_gemma-3-1b-it-Q4_K_M.gguf"; free.write_bytes(b"x")
+        config = {
+            "post_processing_backend": "llama_cpp",
+            "llama_cpp_use_cli": True,
+            "llama_cpp_binary": str(binary),
+            "llama_cpp_model_path": str(large),
+        }
+
+        backend = get_backend(config)
+
+        assert Path(backend.model_path).name == free.name
+
+    def test_ultra_large_cleanup_model_is_respected(self, tmp_path, monkeypatch):
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(
+            has_feature=lambda feature: feature == "large_cleanup_models"
+        )
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        large = tmp_path / "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"; large.write_bytes(b"x")
+        config = {
+            "post_processing_backend": "llama_cpp",
+            "llama_cpp_use_cli": True,
+            "llama_cpp_binary": str(binary),
+            "llama_cpp_model_path": str(large),
+        }
+
+        backend = get_backend(config)
+
+        assert backend.model_path == str(large)
+
 
 class TestCliIntensityWiring:
     """The CLI backend used to hardcode intensity='standard', so the Strong toggle
@@ -683,10 +753,11 @@ class TestProcessWithConfig:
     """Tests for the top-level process_with_config() entry point."""
 
     def test_minimal_tone_uses_fast_filler_removal(self):
-        """Minimal tone should use regex, not LLM, so no backend needed."""
+        """Explicit fast cleanup keeps the regex-only path available."""
         config = {
             "output_tone": "minimal",
             "post_processing_enabled": True,
+            "fast_filler_removal": True,
         }
         result = process_with_config("Um, I went to the store", config)
         assert "um" not in result.lower().split()
@@ -710,9 +781,30 @@ class TestProcessWithConfig:
         assert result == text
 
     def test_minimal_tone_capitalizes_result(self):
-        config = {"output_tone": "minimal"}
+        config = {"output_tone": "minimal", "fast_filler_removal": True}
         result = process_with_config("um hello world", config)
         assert result[0].isupper()
+
+    def test_minimal_tone_uses_neutral_llm_cleanup_by_default(self):
+        backend = SimpleNamespace(
+            is_available=lambda: True,
+            process=MagicMock(return_value="This is neutral cleaned text."),
+        )
+        config = {
+            "output_tone": "minimal",
+            "post_processing_enabled": True,
+            "fast_filler_removal": False,
+            "post_processing_backend": "llama_cpp",
+            "llama_cpp_model_path": "/tmp/model.gguf",
+        }
+
+        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
+            result = process_with_config(
+                "um this is some neutral text that needs cleanup", config
+            )
+
+        assert result == "This is neutral cleaned text."
+        backend.process.assert_called_once()
 
 
 # =============================================================================
@@ -939,6 +1031,14 @@ class TestLlamaGpuCpuFallback:
         probe.assert_not_called()
         assert ngl == 0 and binary == b.llama_binary
 
+    def test_explicit_cpu_prefers_packaged_cpu_sibling(self, tmp_path):
+        b = self._backend(tmp_path, ngl=0, cpu_sibling=True)
+        with patch.object(b, "_probe_gpu_ok") as probe:
+            binary, ngl = b._subprocess_target()
+        probe.assert_not_called()
+        assert ngl == 0
+        assert binary.endswith("llama-simple-cpu")
+
     def test_cpu_sibling_detected_only_when_present(self, tmp_path):
         assert self._backend(tmp_path, cpu_sibling=False)._cpu_sibling() is None
         assert self._backend(tmp_path, cpu_sibling=True)._cpu_sibling().endswith("llama-simple-cpu")
@@ -1028,9 +1128,10 @@ class TestIntensityRouting:
         assert "SILLY" not in prompt
         assert "filler sounds" in prompt
 
-    def test_minimal_caricature_small_model_keeps_instant_regex_path(self):
+    def test_minimal_caricature_small_model_honors_explicit_fast_regex(self):
         cfg = {"output_tone": "minimal", "caricature_mode": True,
                "post_processing_enabled": True,
+               "fast_filler_removal": True,
                "post_processing_backend": "llama_cpp",
                "llama_cpp_model_path": self.SMALL}
         out = process_with_config("um so this is a test you know", cfg)

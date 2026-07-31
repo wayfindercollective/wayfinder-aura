@@ -79,13 +79,15 @@ PREMIUM_FEATURES = {
         "Faster-Whisper (experimental)",
         "Optional CTranslate2 engine for NVIDIA CUDA — manual only, not the default",
     ),
-    "large_models": ("Large Models", "Access to Medium.en and Large v3 Turbo models"),
-    # Full GPU for every model size. Free still gets GPU on Tiny/Base — see
-    # is_free_tier_gpu_model() / gpu_allowed_for_model().
+    # Keep the server-facing feature id for token compatibility. It now covers
+    # every speech model beyond the Free Base/Base.en model.
+    "large_models": (
+        "Additional Speech Models",
+        "Unlock Tiny, Small, Medium, Turbo, and Large speech models for more choices and higher accuracy",
+    ),
     "gpu_acceleration": (
-        "GPU Acceleration (all models)",
-        "GPU for Small, Medium, Turbo, and Large — faster long dictations. "
-        "Free already includes GPU on Tiny & Base.",
+        "GPU Acceleration",
+        "Use Vulkan, CUDA, ROCm, or Metal acceleration for much faster transcription and local cleanup",
     ),
     "cloud_backends": ("Cloud Processing", "Groq/OpenAI Whisper transcription + GPT/Claude text cleanup — best quality for Strong & Caricature modes"),
     "chunked_recording": ("Chunked Recording", "Unlimited duration with real-time feedback"),
@@ -103,9 +105,9 @@ PREMIUM_FEATURES = {
 FREE_FEATURES = {
     "basic_transcription": (
         "Basic Transcription",
-        "Local whisper.cpp — GPU on Tiny & Base; CPU on Small (Ultra unlocks GPU for Small+)",
+        "Local Base transcription on CPU",
     ),
-    "small_models": ("Standard Models", "Tiny.en, Base.en, Small.en"),
+    "base_model": ("Base Model", "Base/Base.en speech recognition on CPU"),
     "standard_recording": ("Standard Recording", "Single-session recording"),
     "light_preprocessing": ("Light Audio Processing", "Gain normalization"),
     "instant_typing": ("Instant Paste", "Clipboard-based text injection"),
@@ -114,54 +116,60 @@ FREE_FEATURES = {
 }
 
 
-# Exact free-tier GPU allowlist (basenames + catalog short ids). Avoid substring
-# matches so a renamed Ultra weight or a path containing "base" cannot sneak in.
-_FREE_TIER_GPU_BASENAMES = frozenset({
-    "ggml-tiny.bin",
-    "ggml-tiny.en.bin",
+# Exact free-tier speech-model allowlist (basenames + catalog short ids). Avoid
+# substring matches so a renamed Ultra weight or a path containing "base" cannot
+# sneak in. Base multilingual remains useful when Language is not English.
+_FREE_TRANSCRIPTION_MODEL_BASENAMES = frozenset({
     "ggml-base.bin",
     "ggml-base.en.bin",
 })
-_FREE_TIER_GPU_IDS = frozenset({
-    "tiny",
-    "tiny.en",
+_FREE_TRANSCRIPTION_MODEL_IDS = frozenset({
     "base",
     "base.en",
 })
 
 
-def is_free_tier_gpu_model(model_ref: str) -> bool:
-    """Return True if this Whisper model may use GPU on the free tier.
-
-    Free: Tiny and Base only (English or multilingual).
-    Ultra: GPU for Small, Medium, Large, Turbo as well (via gpu_acceleration).
-    """
+def is_free_transcription_model(model_ref: str) -> bool:
+    """True only for the Free tier's Base/Base.en Whisper models."""
     n = (model_ref or "").lower().replace("\\", "/").strip()
     if not n:
         return False
     base = Path(n).name
-    if base in _FREE_TIER_GPU_BASENAMES:
+    if base in _FREE_TRANSCRIPTION_MODEL_BASENAMES:
         return True
     # Catalog short ids / faster-whisper style names (no path, no .bin).
-    if "/" not in n and base in _FREE_TIER_GPU_IDS:
+    if "/" not in n and base in _FREE_TRANSCRIPTION_MODEL_IDS:
         return True
     return False
 
 
-def gpu_allowed_for_model(model_ref: str, gate: Optional["FeatureGate"] = None) -> bool:
-    """Whether GPU may be used for this model under the current license.
-
-    - Ultra (gpu_acceleration): always allowed when the user wants GPU.
-    - Free: only Tiny / Base paths (see is_free_tier_gpu_model).
-    """
+def transcription_model_allowed(
+    model_ref: str,
+    gate: Optional["FeatureGate"] = None,
+) -> bool:
+    """Whether the current license may run the referenced local speech model."""
+    if is_free_transcription_model(model_ref):
+        return True
     try:
         g = gate if gate is not None else get_feature_gate()
-        if g.has_feature("gpu_acceleration"):
-            return True
+        return bool(g.has_feature("large_models"))
     except Exception:
-        # No gate → treat as free-tier rules only (fail closed for larger models).
-        pass
-    return is_free_tier_gpu_model(model_ref)
+        return False
+
+
+def gpu_allowed_for_model(model_ref: str, gate: Optional["FeatureGate"] = None) -> bool:
+    """Whether GPU processing is licensed. ``model_ref`` is API-compatible only.
+
+    GPU is Ultra-only for every speech model. The model reference remains in the
+    signature because callers historically supplied it and third-party plugins may
+    do the same; it no longer creates a Free allowlist.
+    """
+    del model_ref
+    try:
+        g = gate if gate is not None else get_feature_gate()
+        return bool(g.has_feature("gpu_acceleration"))
+    except Exception:
+        return False
 
 
 # === Machine ID Generation ===

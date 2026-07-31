@@ -37,6 +37,36 @@ def test_trigger_daemon_sends_socket_commands_not_xdotool_f3():
     assert "/usr/bin/xdotool" not in daemon
 
 
+def test_trigger_daemon_has_a_no_package_stdlib_evdev_backend(tmp_path):
+    """Stock SteamOS cannot compile python-evdev against its stripped headers."""
+    daemon = _read("wayfinder-trigger-daemon.py")
+    assert "except ImportError:" in daemon
+    assert 'INPUT_BACKEND = "stdlib-evdev"' in daemon
+    assert 'glob.glob("/dev/input/event*")' in daemon
+    assert "fcntl.ioctl" in daemon
+
+    # Shadow a possibly installed evdev with a module that behaves like the
+    # dependency being absent, then exercise the script's diagnostic fast path.
+    (tmp_path / "evdev.py").write_text("raise ImportError('simulated missing evdev')\n")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(STEAMDECK / "wayfinder-trigger-daemon.py"),
+            "--print-input-backend",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=3,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "stdlib-evdev"
+
+
 def test_steamdeck_installer_installs_current_daemon_and_disables_legacy_bridge():
     installer = _read("install-steamdeck.sh")
 
@@ -46,17 +76,47 @@ def test_steamdeck_installer_installs_current_daemon_and_disables_legacy_bridge(
     assert 'install -Dm644 "${SYSTEMD_SRC}/wayfinder-trigger.service"' in installer
     assert 'install -Dm755 "${SCRIPT_DIR}/r4-f3-bridge.py"' not in installer
     assert "systemctl --user disable --now r4-f3-bridge.service" in installer
+    assert "releases/latest/download/${APP_ID}.flatpak" in installer
+    assert "flatpak install --user --noninteractive -y --or-update" in installer
+    assert "flatpak info --user" in installer
+    assert 'MIN_FLATPAK_VERSION="1.1.5"' in installer
+    assert "is older than the SteamOS-safe" in installer
+    assert "pacman -S" not in installer
+    assert "steamos-readonly disable" not in installer
+
+
+def test_steamdeck_services_are_home_portable_and_launch_flatpak_directly():
+    app_unit = _read("systemd/wayfinder-aura.service")
+    trigger_unit = _read("systemd/wayfinder-trigger.service")
+    supervisor_unit = _read("systemd/wayfinder-mode-supervisor.service")
+
+    assert "ExecStart=/usr/bin/flatpak run io.wayfindercollective.WayfinderAura" in app_unit
+    assert "ydotool.service" not in app_unit
+    assert "ExecStart=%h/.local/bin/wayfinder-trigger-daemon.py" in trigger_unit
+    assert "ExecStart=%h/.local/bin/wayfinder-mode-supervisor.py" in supervisor_unit
+    assert "/home/deck" not in app_unit + trigger_unit + supervisor_unit
 
 
 def test_taskbar_launcher_accepts_current_ack_and_legacy_eof_before_starting_service():
     launcher = _read("wayfinder-aura-show-or-start.py")
     desktop = _read("wayfinder-aura.desktop")
 
-    assert 'client.sendall(b"show")' in launcher
+    assert 'client.sendall(command.encode("ascii"))' in launcher
     assert 'response in (b"ok", b"")' in launcher
     assert 'os.execvp("flatpak"' not in launcher
     assert '"systemctl", "--user", "start", SERVICE' in launcher
-    assert "Exec=/home/deck/.local/bin/wayfinder-aura-show-or-start" in desktop
+    assert 'COMMANDS = {"show", "toggle", "style", "hide"}' in launcher
+    assert "Exec=@WAYFINDER_BIN_DIR@/wayfinder-aura-show-or-start" in desktop
+    assert "Exec=@WAYFINDER_BIN_DIR@/wayfinder-aura-show-or-start toggle" in desktop
+    assert "/home/deck/dev/wayfinder-aura" not in desktop
+
+
+def test_steamdeck_uninstaller_removes_every_installed_host_file():
+    uninstaller = _read("uninstall-steamdeck.sh")
+
+    assert '"${BIN_DIR}/wayfinder-aura-show-or-start"' in uninstaller
+    assert '"${APPLICATION_DIR}/wayfinder-aura.desktop"' in uninstaller
+    assert '"${ICON_DIR}/io.wayfindercollective.WayfinderAura.png"' in uninstaller
 
 
 def test_legacy_bridge_is_disabled_by_default_and_conflicts_with_current_daemon():
