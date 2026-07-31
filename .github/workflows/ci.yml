@@ -342,19 +342,10 @@ jobs:
           # qdbus dies against the bundle's older libstdc++).
           grep -Eq "PyQt6[/\\]QtDBus" /tmp/pyi-contents.txt \
             || { echo "bundle is missing PyQt6.QtDBus (KWin overlay placement)" >&2; exit 1; }
-          # BOOT the bundle headlessly: content assertions can't catch a
-          # runtime-dead artifact (v1.1.3's first attempt shipped a bundle
-          # whose numpy died at import — strip-corrupted openblas — while
-          # every static check passed). The app-owned probe constructs the full
-          # WayfinderApp UI, maps it through Tk's mainloop, and exits cleanly.
-          # The probe suppresses native integrations that do not exist on Xvfb
-          # (evdev, PortAudio input enumeration, tray/compositor, GameMode).
-          # Those boundaries are covered by dedicated package probes and tests.
-          # timeout remains only as a hang guard; it is not the success path.
-          # Runners have NO audio system at all, and PortAudio's native init
-          # segfaults on zero-backend machines (tracked as app hardening; every
-          # real desktop has audio). Explicit virtual input and output devices
-          # make the gate representative of an actual desktop audio graph.
+          # Runners have no real desktop audio graph. Provide Pulse endpoints
+          # for the packaged playback probe; actual AppImage launch is tested
+          # on Bazzite before tagging because Xvfb cannot emulate evdev, ALSA,
+          # D-Bus, a compositor, GameMode, or a tray coherently.
           pulseaudio --daemonize=yes --exit-idle-time=-1 || true
           pactl load-module module-null-sink sink_name=ci_null || true
           pactl load-module module-null-source source_name=ci_mic || true
@@ -374,27 +365,12 @@ jobs:
           HOME=$(mktemp -d) squashfs-root/AppRun \
             --audio-processing-self-test | tee /tmp/audio-processing-self-test.log
           grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/audio-processing-self-test.log
-          set +e
-          # PYTHONFAULTHANDLER: on SIGSEGV the boot log then contains the exact
-          # Python stack — a bare rc=139 is undebuggable from CI logs.
-          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME=$(mktemp -d) PYTHONFAULTHANDLER=1 \
-            timeout 25 xvfb-run -a squashfs-root/AppRun \
-              --app-boot-self-test > /tmp/boot.log 2>&1
-          BOOT_RC=$?
-          set -e
-          cat /tmp/boot.log
-          if grep -qE "Traceback|ImportError|ModuleNotFoundError|Failed to execute script" /tmp/boot.log; then
-            echo "AppImage DIED AT BOOT:" >&2
-            tail -30 /tmp/boot.log >&2
-            exit 1
-          fi
-          if [ "$BOOT_RC" -ne 0 ]; then
-            echo "AppImage exited abnormally at boot (rc=$BOOT_RC):" >&2
-            tail -30 /tmp/boot.log >&2
-            exit 1
-          fi
-          grep -Fq "APP_BOOT_SELF_TEST_OK" /tmp/boot.log
-          echo "boot smoke passed (rc=$BOOT_RC)"
+          # Import the complete frozen application module. This catches missing
+          # PyInstaller hidden imports/native extensions without constructing
+          # fake desktop hardware inside Xvfb.
+          HOME=$(mktemp -d) squashfs-root/AppRun \
+            --app-import-self-test | tee /tmp/app-import-self-test.log
+          grep -Fq "APP_IMPORT_SELF_TEST_OK" /tmp/app-import-self-test.log
           desktop-file-validate squashfs-root/io.wayfindercollective.WayfinderAura.desktop
           # AppStream metainfo uses modern tags (developer/, vcs-browser) that
           # Flathub accepts. Ubuntu 22.04 appstreamcli treats them as

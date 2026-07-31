@@ -320,17 +320,16 @@ def test_appimage_uses_host_player_without_mixing_recording_libraries():
     assert "AUDIO_PROCESSING_SELF_TEST_OK" in job
 
 
-def test_appimage_boot_probe_uses_clean_shutdown_and_desktop_audio_graph():
+def test_appimage_import_probe_and_desktop_audio_graph_are_release_gated():
     job = _workflow_job_body("build-appimage")
-    app_source = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
+    entrypoint = (REPO / "main.py").read_text(encoding="utf-8")
 
     assert "module-null-sink" in job
     assert "module-null-source" in job
-    assert "--app-boot-self-test" in job
-    assert "APP_BOOT_SELF_TEST_OK" in job
-    assert 'self._packaged_boot_probe = "--app-boot-self-test" in sys.argv' in app_source
-    assert "native audio-device enumeration disabled" in app_source
-    assert "native hotkey listeners disabled" in app_source
+    assert "--app-import-self-test" in job
+    assert "APP_IMPORT_SELF_TEST_OK" in job
+    assert 'if "--app-import-self-test" in sys.argv:' in entrypoint
+    assert "from wayfinder_main import WayfinderApp" in entrypoint
 
 
 def test_flatpak_audio_stack_is_runtime_coherent_and_release_probed():

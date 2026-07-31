@@ -5026,20 +5026,11 @@ class WayfinderApp(ctk.CTk):
         self._setup_active = False                     # first-run dependency setup pane up
         self._setup_pane = None                        # active SetupPane, or None
 
-        # The packaged CI boot probe runs under Xvfb with no real /dev/input,
-        # /dev/snd, desktop bus, compositor, or tray. It validates complete UI
-        # construction and Tk event-loop entry; native integration boundaries
-        # have dedicated packaged probes and unit/integration tests.
-        self._packaged_boot_probe = "--app-boot-self-test" in sys.argv
-
         # Start the hotkey listeners NOW, before the heavy UI build, so the evdev thread opens the
         # input devices during setup_window/tray/ui rather than after it. A press made while the
         # app is still loading then lands in the thread-safe event_queue (instead of being lost to
         # a not-yet-listening thread) and is handled once poll_events() runs at the end of __init__.
-        if not self._packaged_boot_probe:
-            self.start_hotkey_listener()
-        else:
-            print("[boot-test] native hotkey listeners disabled", flush=True)
+        self.start_hotkey_listener()
 
         # Store tooltips that need dynamic updates (keyed by tooltip type)
         self.dynamic_tooltips: dict[str, list[ToolTip]] = {}
@@ -5060,23 +5051,12 @@ class WayfinderApp(ctk.CTk):
                 + ", ".join(_entitlement_repairs)
             )
 
-        if self._packaged_boot_probe:
-            # Work on an ephemeral copy so the probe can suppress compositor
-            # and tray subprocesses without persisting test-only settings.
-            self.config = dict(self.config)
-            self.config["overlay_enabled"] = False
-            self.config["enable_tray_icon"] = False
-        
         # Resolve audio device (intelligent selection if not explicitly set). This is a
         # RUNTIME value only — do NOT write it back into config["audio_device"]. Persisting
         # the resolved index would turn an "Auto-detect" choice into a brittle fixed index
         # with no name, which breaks on the next device renumber (the "no transcription"
         # regression). The user's explicit choice lives in audio_device_name; auto stays None.
-        if self._packaged_boot_probe:
-            self._resolved_audio_device = None
-            print("[boot-test] native audio-device enumeration disabled", flush=True)
-        else:
-            self._resolved_audio_device = resolve_audio_device(self.config)
+        self._resolved_audio_device = resolve_audio_device(self.config)
 
         # Shared "warm" mic: one persistent capture stream kept open between recordings so
         # rapid-fire and short dictations don't lose their first words to the ~0.4-0.5s
@@ -5142,12 +5122,9 @@ class WayfinderApp(ctk.CTk):
         # so we always boot into the right snapshot rather than live-reconfiguring.
         try:
             from wayfinder.utils.platform import is_game_mode, write_game_mode_marker
-            if self._packaged_boot_probe:
-                self._game_mode_session = False
-            else:
-                self._game_mode_session = is_game_mode(wait_secs=2.0)
-                # Keep the host-visible toggle marker in sync with config (self-heal on every start).
-                write_game_mode_marker(self.config.get("game_mode_dictation", False))
+            self._game_mode_session = is_game_mode(wait_secs=2.0)
+            # Keep the host-visible toggle marker in sync with config (self-heal on every start).
+            write_game_mode_marker(self.config.get("game_mode_dictation", False))
         except Exception as e:
             self._game_mode_session = False
             self.log(f"⚠ Game Mode detection failed ({e}) — assuming Desktop")
@@ -5254,22 +5231,20 @@ class WayfinderApp(ctk.CTk):
         self.setup_ui()
         self.setup_scaling_shortcuts()
         # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
-        if not self._packaged_boot_probe:
-            self._start_hotkey_supervisor()
+        self._start_hotkey_supervisor()
         self.poll_events()
 
         # SciPy's signal stack is deliberately absent from the first-frame import path. Warm it
         # once immediately after the UI maps so first-dictation processing stays just as snappy.
         # The worker exits after the import; this does not add a resident background service.
-        if not self._packaged_boot_probe:
-            self.after(
-                100,
-                lambda: threading.Thread(
-                    target=preload_audio_processing,
-                    daemon=True,
-                    name="wayfinder-audio-preload",
-                ).start(),
-            )
+        self.after(
+            100,
+            lambda: threading.Thread(
+                target=preload_audio_processing,
+                daemon=True,
+                name="wayfinder-audio-preload",
+            ).start(),
+        )
         
         # Log animation refresh rate info
         if self._use_pyqt_overlay:
@@ -5290,12 +5265,10 @@ class WayfinderApp(ctk.CTk):
             self.after(100, self.hide_to_tray)
         
         # Run startup dependency checks
-        if not self._packaged_boot_probe:
-            self.after(300, self._check_startup_dependencies)
+        self.after(300, self._check_startup_dependencies)
 
         # Check for model updates in background (non-blocking, once per day)
-        if not self._packaged_boot_probe:
-            self.after(2000, self._check_model_updates_background)
+        self.after(2000, self._check_model_updates_background)
 
         # Start display wake-up listener for overlay recovery
         if self._use_pyqt_overlay:

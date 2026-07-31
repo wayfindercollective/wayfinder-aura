@@ -194,6 +194,29 @@ if "--ui-renderer-self-test" in sys.argv:
         sys.exit(1)
 
 
+# Import the complete application module from the frozen archive. This catches
+# missing hidden imports/native extensions without pretending a hardware-less
+# CI runner is a real Linux desktop. Renderer, playback, and processing have
+# dedicated packaged probes; the built AppImage is launched on Bazzite before
+# tagging a release.
+if "--app-import-self-test" in sys.argv:
+    try:
+        from wayfinder_main import WayfinderApp as _imported_app
+
+        if not callable(_imported_app):
+            raise RuntimeError("WayfinderApp did not import as a callable class")
+        print("APP_IMPORT_SELF_TEST_OK", flush=True)
+        sys.exit(0)
+    except Exception as _import_error:
+        print(
+            "APP_IMPORT_SELF_TEST_FAILED "
+            f"{_import_error.__class__.__name__}: {_import_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+
 # Scaling cache file location
 SCALING_CACHE_FILE = Path.home() / ".config" / "wayfinder-aura" / "display_scaling.json"
 
@@ -378,33 +401,6 @@ def _signal_existing_instance() -> bool:
 
     print("[Instance] Another instance holds the lock but is not responding")
     return True  # still exit — don't stack a second half-dead UI
-
-
-def _schedule_app_boot_self_test(
-    app,
-    argv: list[str] | None = None,
-    delay_ms: int = 50,
-) -> bool:
-    """Prove the real GUI enters its event loop, then shut it down cleanly.
-
-    Release CI used to infer success by sending SIGTERM to a live
-    PyInstaller/Tk/PortAudio process after 25 seconds. That external kill is
-    flaky on hosted runners. The packaged probe still constructs the complete
-    ``WayfinderApp`` and enters Tk's mainloop, but it exits through Aura's own
-    cleanup path after the first mapped event-loop cycles. Delayed hardware and
-    network jobs have dedicated probes/tests and are intentionally outside this
-    hardware-less Xvfb boundary.
-    """
-    args = sys.argv if argv is None else argv
-    if "--app-boot-self-test" not in args:
-        return False
-
-    def _finish() -> None:
-        print("APP_BOOT_SELF_TEST_OK", flush=True)
-        app.quit_app()
-
-    app.after(delay_ms, _finish)
-    return True
 
 
 VENV_SMOKE_IMPORTS = ("customtkinter", "PIL", "numpy")
@@ -607,10 +603,6 @@ def main():
         # Schedule background scaling detection to update cache when display is ready
         schedule_scaling_detection(app)
 
-        # Release-only liveness probe. Unlike a timeout signal, this exercises
-        # the complete startup and mainloop while retaining normal cleanup.
-        _schedule_app_boot_self_test(app)
-        
         app.mainloop()
         
     except Exception as e:

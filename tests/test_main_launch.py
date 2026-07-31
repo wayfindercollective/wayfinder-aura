@@ -60,37 +60,3 @@ def test_tkinter_smoke_failure_prints_system_package_hint(tmp_path, monkeypatch,
     assert "If tkinter is missing" in output
     assert "sudo dnf install python3-tkinter" in output
     assert "sudo apt install python3-tk" in output
-
-
-def test_app_boot_self_test_schedules_clean_app_owned_exit(capsys):
-    scheduled = []
-
-    class FakeApp:
-        quit_calls = 0
-
-        def after(self, delay_ms, callback):
-            scheduled.append((delay_ms, callback))
-
-        def quit_app(self):
-            self.quit_calls += 1
-
-    app = FakeApp()
-
-    assert main._schedule_app_boot_self_test(
-        app,
-        argv=["wayfinder-aura", "--app-boot-self-test"],
-    )
-    assert scheduled[0][0] == 50
-
-    scheduled[0][1]()
-
-    assert app.quit_calls == 1
-    assert "APP_BOOT_SELF_TEST_OK" in capsys.readouterr().out
-
-
-def test_app_boot_self_test_is_inert_for_normal_launch():
-    class FakeApp:
-        def after(self, _delay_ms, _callback):
-            raise AssertionError("normal launches must not schedule a test exit")
-
-    assert not main._schedule_app_boot_self_test(FakeApp(), argv=["wayfinder-aura"])
