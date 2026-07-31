@@ -380,6 +380,31 @@ def _signal_existing_instance() -> bool:
     return True  # still exit — don't stack a second half-dead UI
 
 
+def _schedule_app_boot_self_test(
+    app,
+    argv: list[str] | None = None,
+    delay_ms: int = 3000,
+) -> bool:
+    """Prove the real GUI enters its event loop, then shut it down cleanly.
+
+    Release CI used to infer success by sending SIGTERM to a live
+    PyInstaller/Tk/PortAudio process after 25 seconds. That external kill is
+    flaky on hosted runners. The packaged probe still constructs the complete
+    ``WayfinderApp`` and enters Tk's mainloop, but it exits through Aura's own
+    cleanup path after emitting a machine-checkable success marker.
+    """
+    args = sys.argv if argv is None else argv
+    if "--app-boot-self-test" not in args:
+        return False
+
+    def _finish() -> None:
+        print("APP_BOOT_SELF_TEST_OK", flush=True)
+        app.quit_app()
+
+    app.after(delay_ms, _finish)
+    return True
+
+
 VENV_SMOKE_IMPORTS = ("customtkinter", "PIL", "numpy")
 
 
@@ -579,6 +604,10 @@ def main():
         
         # Schedule background scaling detection to update cache when display is ready
         schedule_scaling_detection(app)
+
+        # Release-only liveness probe. Unlike a timeout signal, this exercises
+        # the complete startup and mainloop while retaining normal cleanup.
+        _schedule_app_boot_self_test(app)
         
         app.mainloop()
         

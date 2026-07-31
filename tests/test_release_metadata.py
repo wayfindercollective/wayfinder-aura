@@ -320,6 +320,15 @@ def test_appimage_uses_host_player_without_mixing_recording_libraries():
     assert "AUDIO_PROCESSING_SELF_TEST_OK" in job
 
 
+def test_appimage_boot_probe_uses_clean_shutdown_and_desktop_audio_graph():
+    job = _workflow_job_body("build-appimage")
+
+    assert "module-null-sink" in job
+    assert "module-null-source" in job
+    assert "--app-boot-self-test" in job
+    assert "APP_BOOT_SELF_TEST_OK" in job
+
+
 def test_flatpak_audio_stack_is_runtime_coherent_and_release_probed():
     manifest = _manifest_text()
     job = _workflow_job_body("build-flatpak")
