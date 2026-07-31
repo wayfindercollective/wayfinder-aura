@@ -302,19 +302,18 @@ def test_appimage_native_binaries_use_the_steam_deck_cpu_baseline():
     assert '"${GGML_CPU_BASELINE_OPTS[@]}"' in script
 
 
-def test_appimage_keeps_alsa_core_host_owned_and_ci_tests_real_playback():
-    """Host pcm plugins and libasound must be one distro-matched ABI set."""
+def test_appimage_uses_host_player_without_mixing_recording_libraries():
+    """Playback crosses the bundle boundary via a host-clean process."""
     spec = (REPO / "wayfinder-aura.spec").read_text(encoding="utf-8")
     script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
+    output = (REPO / "src" / "wayfinder" / "utils" / "audio_output.py").read_text(encoding="utf-8")
     job = _workflow_job_body("build-appimage")
 
-    assert "def use_host_linux_audio_abi" in spec
-    assert "'libasound.so'" in spec
-    assert "'libpipewire-0.3.so'" in spec
-    assert "use_host_linux_audio_abi(remove_duplicate_entries(a.binaries))" in spec
-    assert 'rm -f "$APPDIR/usr/lib/libasound.so" "$APPDIR/usr/lib/libasound.so.2"' in script
-    assert "pyi-archive_viewer -l" in job
-    assert "bundle contains host-owned audio-server libraries" in job
+    assert "use_host_linux_audio_abi" not in spec
+    assert 'rm -f "$APPDIR/usr/lib/libasound.so"' not in script
+    assert 'shutil.which("paplay"' in output
+    assert "host_env()" in output
+    assert '"--raw"' in output
     assert "--audio-output-self-test" in job
     assert "AUDIO_OUTPUT_SELF_TEST_OK" in job
     assert "--audio-processing-self-test" in job

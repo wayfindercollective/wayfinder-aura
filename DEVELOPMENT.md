@@ -219,12 +219,13 @@ into the wrong surface).
 
 ### AppImage records audio but playback is silent
 
-The AppImage must not bundle `libasound.so.2`. ALSA loads PCM plugins from the
-running distro; copying the build runner's ALSA core into the PyInstaller
-payload can make it ABI-incompatible with the host's PipeWire/Pulse plugin.
-The microphone may still record through a raw device while mic-test playback
-and feedback sounds fail. `wayfinder-aura.spec` leaves libasound host-owned,
-and AppImage CI opens the real mic-test playback path against an audio server.
+Keep the AppImage's proven recording stack self-contained. Mixing its Ubuntu
+PortAudio build with a newer host ALSA core/plugins can crash during a normal
+GUI boot. Mic-test playback instead runs the host's `paplay` with a scrubbed
+environment, so Bazzite/Fedora's own PipeWire/Pulse libraries talk to its audio
+server. If `paplay` is absent, playback falls back to PortAudio. AppImage CI
+opens this exact host-command path against a real audio server and then boots
+the complete bundle.
 
 The Flatpak is the inverse boundary: PortAudio, libasound, and the PCM plugin
 all come from one pinned runtime, with `--socket=pulseaudio` providing access

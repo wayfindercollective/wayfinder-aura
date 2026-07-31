@@ -201,46 +201,7 @@ def remove_duplicate_entries(entries, name_attr='name'):
     return unique
 
 
-def use_host_linux_audio_abi(entries):
-    """Keep distro-owned ALSA core and its plugins on the same ABI.
-
-    PyInstaller follows sounddevice -> PortAudio -> libasound and normally puts
-    the build host's libasound into the one-file executable. That is unsafe in
-    an AppImage: ALSA discovers plugins from the *running host*. An ALSA core
-    copied from Ubuntu cannot necessarily load a newer Fedora/Bazzite PipeWire
-    plugin, leaving raw-device capture working while default-sink playback is
-    silent. libasound's public ABI is stable, so use the host copy together
-    with the host config and plugins.
-
-    The Flatpak does not use this spec. It builds PortAudio against its pinned
-    SDK and runs with that same runtime's libasound/plugins.
-    """
-    if not sys.platform.startswith('linux'):
-        return entries
-    # libpipewire/libpulse are loaded by the host's ALSA pcm plugin. Keeping an
-    # older copy beside PortAudio would recreate the same split-stack problem
-    # one dependency later. libjack stays bundled: official releases build on
-    # the old-glibc CI runner where it is the traditional JACK client library,
-    # not a PipeWire shim, and bundling it keeps non-JACK hosts launchable.
-    host_owned_prefixes = (
-        'libasound.so',
-        'libpipewire-0.3.so',
-        'libpulse.so',
-        'libpulsecommon-',
-    )
-    kept = []
-    for entry in entries:
-        fields = entry if isinstance(entry, tuple) else (
-            getattr(entry, 'name', ''), getattr(entry, 'src_name', '')
-        )
-        basenames = {Path(str(field)).name for field in fields if field}
-        if any(name.startswith(host_owned_prefixes) for name in basenames):
-            continue
-        kept.append(entry)
-    return kept
-
-
-a.binaries = use_host_linux_audio_abi(remove_duplicate_entries(a.binaries))
+a.binaries = remove_duplicate_entries(a.binaries)
 a.datas = remove_duplicate_entries(a.datas)
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)

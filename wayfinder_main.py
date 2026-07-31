@@ -14769,7 +14769,7 @@ class WayfinderApp(ctk.CTk):
             try:
                 import wave
                 import numpy as np
-                from wayfinder.utils.audio_output import play_blocking
+                from wayfinder.utils.audio_output import PlaybackCancelled, play_blocking
                 
                 with wave.open(self._mic_test_audio_path, 'rb') as wf:
                     sample_rate = wf.getframerate()
@@ -14789,6 +14789,8 @@ class WayfinderApp(ctk.CTk):
                 if self._mic_test_playing:
                     self.after(0, self._on_playback_done)
                 
+            except PlaybackCancelled:
+                return
             except Exception as e:
                 error = str(e)
                 self.after(0, lambda error=error: self._on_playback_error(error))
@@ -14798,9 +14800,10 @@ class WayfinderApp(ctk.CTk):
     
     def _stop_playback(self):
         """Stop audio playback."""
-        import sounddevice as sd
+        from wayfinder.utils.audio_output import stop_playback
+
         self._mic_test_playing = False
-        sd.stop()
+        stop_playback()
         self._on_playback_done()
     
     def _on_playback_done(self):

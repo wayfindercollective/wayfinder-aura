@@ -12,11 +12,11 @@ of 1.1.4 (download from the site → run) on a 200%-scale KDE desktop.
 
 ### Fixed
 
-- **Mic-test playback was silent in the AppImage on Bazzite/Fedora.** The
-  bundle no longer carries Ubuntu's ALSA core into a newer host's PipeWire
-  plugin stack. Playback now selects a real output device, retries at its
-  native rate when 16 kHz is unsupported, and the completed AppImage and
-  Flatpak both exercise that exact playback path before publishing.
+- **Mic-test playback was silent in the AppImage on Bazzite/Fedora.** AppImage
+  playback now uses the host's Pulse/PipeWire client with bundle library paths
+  scrubbed, while its proven recording stack remains self-contained. Flatpak
+  stays entirely within its pinned runtime. The completed AppImage and Flatpak
+  both exercise their exact playback paths before publishing.
 - **CPU-only now means CPU-only in packaged builds.** Free installs and Ultra
   users with GPU acceleration disabled invoke independently linked CPU Whisper
   and llama.cpp binaries. They never initialize Vulkan first, so a broken or

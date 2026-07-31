@@ -270,6 +270,17 @@ jobs:
           chmod +x scripts/build-appimage.sh
           ./scripts/build-appimage.sh --full
 
+      # Upload before smoke so a failed candidate remains available for local
+      # Bazzite debugging. Tag releases still require this whole job to pass.
+      - name: Upload AppImage candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: wayfinder-aura-appimage
+          path: |
+            Wayfinder_Aura-*.AppImage
+            Wayfinder_Aura-*.AppImage.zsync
+          retention-days: 14
+
       - name: Smoke-test AppImage contents
         run: |
           ./Wayfinder_Aura-*.AppImage --appimage-extract >/tmp/wayfinder-appimage-extract.log
@@ -304,18 +315,6 @@ jobs:
           # mismatched host GLib (Fedora 44 launch bug). File-then-grep so a
           # future pipefail change can't mask pyi-archive_viewer failures.
           pyi-archive_viewer -l squashfs-root/usr/bin/wayfinder-aura > /tmp/pyi-contents.txt
-          # ALSA plugins come from the running distro and must load against that
-          # distro's libasound. Bundling Jammy's libasound made Fedora/Bazzite's
-          # newer PipeWire plugin fail symbol resolution: capture worked but
-          # playback was silent. Guard both the one-file payload and AppDir.
-          if grep -Eq 'lib(asound\.so|pipewire-0\.3\.so|pulse\.so|pulsecommon-)' /tmp/pyi-contents.txt \
-             || find squashfs-root/usr/lib -maxdepth 1 \
-                  \( -name 'libasound.so*' -o -name 'libpipewire-0.3.so*' \
-                     -o -name 'libpulse.so*' -o -name 'libpulsecommon-*' \) \
-                  -print -quit | grep -q .; then
-            echo "bundle contains host-owned audio-server libraries; plugins would be ABI-mismatched" >&2
-            exit 1
-          fi
           grep -Fq "gi_typelibs/GLib-2.0.typelib" /tmp/pyi-contents.txt \
             || { echo "bundle is missing gi typelibs (PyGObject absent at build time)" >&2; exit 1; }
           grep -Eq "_dbus_bindings.*\.so" /tmp/pyi-contents.txt \
@@ -361,6 +360,7 @@ jobs:
           PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
             squashfs-root/AppRun --audio-output-self-test | tee /tmp/audio-self-test.log
           grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/audio-self-test.log
+          grep -Fq "host PulseAudio/PipeWire" /tmp/audio-self-test.log
           # Medium depends on a dynamically imported scipy.signal module, and
           # preprocessing's stationary-noise guard is a release-critical defense
           # against confident Whisper hallucinations. Exercise the packaged path.
@@ -402,15 +402,6 @@ jobs:
           if [ "$VALIDATE_RC" -ne 0 ]; then
             echo "appstreamcli non-zero exit ($VALIDATE_RC) with only warnings/info/pedantic — accepting for jammy CI"
           fi
-
-      - name: Upload AppImage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wayfinder-aura-appimage
-          path: |
-            Wayfinder_Aura-*.AppImage
-            Wayfinder_Aura-*.AppImage.zsync
-          retention-days: 14
 
   # Flatpak build (optional, requires flatpak-builder)
   build-flatpak:

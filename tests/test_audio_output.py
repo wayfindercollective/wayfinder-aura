@@ -74,6 +74,37 @@ def test_playback_surfaces_failure_when_native_rate_also_cannot_open(monkeypatch
         audio_output.play_blocking(np.zeros(160, dtype=np.float32), 16000)
 
 
+def test_appimage_prefers_host_audio_client(monkeypatch):
+    fake = _fake_sounddevice(fail_rates={16000, 48000})
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    monkeypatch.setattr(audio_output, "_is_appimage_runtime", lambda: True)
+    expected = audio_output.PlaybackResult(
+        16000, 16000, "System default (host PulseAudio/PipeWire)", False
+    )
+    monkeypatch.setattr(audio_output, "_play_via_host", lambda _audio, _rate: expected)
+
+    result = audio_output.play_blocking(np.zeros(160, dtype=np.float32), 16000)
+
+    assert result is expected
+    assert fake.calls == []
+
+
+def test_appimage_falls_back_to_portaudio_when_host_client_is_missing(monkeypatch):
+    fake = _fake_sounddevice()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    monkeypatch.setattr(audio_output, "_is_appimage_runtime", lambda: True)
+    monkeypatch.setattr(
+        audio_output,
+        "_play_via_host",
+        lambda _audio, _rate: (_ for _ in ()).throw(FileNotFoundError("paplay")),
+    )
+
+    result = audio_output.play_blocking(np.zeros(160, dtype=np.float32), 16000)
+
+    assert result.output_name == "PipeWire Default"
+    assert [rate for _audio, rate in fake.calls] == [16000]
+
+
 def test_packaged_self_test_uses_real_mic_test_starting_rate(monkeypatch):
     captured = {}
 

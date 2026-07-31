@@ -243,13 +243,6 @@ echo "📦 Step 3: Populating AppDir..."
 # Copy the main executable
 cp dist/wayfinder-aura "$APPDIR/usr/bin/"
 
-# ALSA core is deliberately host-owned. Its pcm plugins are loaded from the
-# running distro, so bundling the build host's libasound while loading (for
-# example) Fedora's newer PipeWire plugin produces a symbol-version mismatch:
-# raw USB-mic capture can work while desktop-sink playback is silent. The
-# PyInstaller spec filters the one-file payload; this guards AppDir assembly.
-rm -f "$APPDIR/usr/lib/libasound.so" "$APPDIR/usr/lib/libasound.so.2"
-
 # Copy icons
 cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_ID}.png"
 cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/128x128/apps/${APP_ID}.png"
@@ -372,9 +365,6 @@ if [ "$BUILD_MODE" = "--full" ]; then
             done
         fi
     done
-    # Native inference dependency collection must not reintroduce a foreign
-    # ALSA core after the initial AppDir guard above.
-    rm -f "$APPDIR/usr/lib/libasound.so" "$APPDIR/usr/lib/libasound.so.2"
     echo "   ✓ Shared libraries bundled"
 
     # ── Models (optional, controlled by env var) ──
