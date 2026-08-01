@@ -418,6 +418,15 @@ export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
 # Tell the app we're running from an AppImage
 export APPDIR="${HERE}"
 
+# PyInstaller's one-file payload is large enough to exhaust or heavily pressure
+# distro tmpfs mounts (notably Bazzite/SteamOS). Extract into the user's
+# disk-backed cache instead; the bootloader still removes its per-run _MEI
+# directory on exit. Fall back to the inherited TMPDIR if this is unavailable.
+WF_RUNTIME_TMP="${XDG_CACHE_HOME:-${HOME}/.cache}/wayfinder-aura/runtime"
+if mkdir -p "$WF_RUNTIME_TMP" 2>/dev/null && chmod 700 "$WF_RUNTIME_TMP" 2>/dev/null; then
+    export TMPDIR="$WF_RUNTIME_TMP"
+fi
+
 # Make the bundled design fonts (Inter / JetBrains Mono) visible to
 # fontconfig ON TOP of the host's fonts. fontconfig has no "extra dir" env
 # var and its config can't expand arbitrary variables, so generate a tiny

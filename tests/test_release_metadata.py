@@ -98,6 +98,22 @@ def test_root_appimage_builder_delegates_to_maintained_script():
     assert "SKIP_BUILD=1" in maintained
 
 
+def test_release_artifacts_bundle_and_probe_portable_tls_trust():
+    spec = (REPO / "wayfinder-aura.spec").read_text(encoding="utf-8")
+    workflow = _workflow_text()
+    requirements = (REPO / "requirements.txt").read_text(encoding="utf-8")
+    flatpak_sources = PYTHON_DEPS.read_text(encoding="utf-8")
+
+    assert "CERTIFI_CA_BUNDLE" in spec
+    assert "(str(CERTIFI_CA_BUNDLE), 'certifi')" in spec
+    assert "certifi>=2024.0.0" in requirements
+    assert "certifi-" in flatpak_sources
+    assert workflow.count("--tls-self-test") >= 2
+    assert workflow.count("TLS_SELF_TEST_OK") >= 2
+    appimage_builder = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
+    assert 'export TMPDIR="$WF_RUNTIME_TMP"' in appimage_builder
+
+
 def test_release_shell_scripts_parse_with_bash():
     for script in RELEASE_SHELL_SCRIPTS:
         result = subprocess.run(

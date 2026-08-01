@@ -38,6 +38,14 @@ src_dir = os.path.join(_base_dir, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
+# Configure certificate trust before any license, catalog, cloud, or model
+# download code can create an HTTP client. This is essential for AppImages:
+# their bundled OpenSSL otherwise searches the build distro's CA paths, which
+# may not exist on Bazzite/Fedora or SteamOS.
+from wayfinder.tls import configure_tls_ca_bundle
+
+_TLS_CA_BUNDLE = configure_tls_ca_bundle()
+
 
 def _configure_frozen_fontconfig() -> Path | None:
     """Expose bundled product fonts when the one-file binary runs directly.
@@ -80,6 +88,29 @@ def _configure_frozen_fontconfig() -> Path | None:
 
 
 _configure_frozen_fontconfig()
+
+
+# Packaged network release probe. It validates the same urllib + CA path used
+# by speech-model downloads without downloading a model payload.
+if "--tls-self-test" in sys.argv:
+    try:
+        from wayfinder.tls import probe_tls
+
+        _tls_status, _tls_bundle = probe_tls()
+        print(
+            "TLS_SELF_TEST_OK "
+            f"status={_tls_status} ca_bundle={str(_tls_bundle)!r}",
+            flush=True,
+        )
+        sys.exit(0)
+    except Exception as _tls_error:
+        print(
+            "TLS_SELF_TEST_FAILED "
+            f"{_tls_error.__class__.__name__}: {_tls_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
 
 
 # Frozen overlay dispatch: PyInstaller builds can't spawn "python overlay.py"

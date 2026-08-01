@@ -323,6 +323,8 @@ jobs:
             || { echo "bundle is missing dbus-python bindings" >&2; exit 1; }
           grep -Eq "gi[/\\]_gi.*\.so" /tmp/pyi-contents.txt \
             || { echo "bundle is missing the PyGObject _gi extension" >&2; exit 1; }
+          grep -Fq "certifi/cacert.pem" /tmp/pyi-contents.txt \
+            || { echo "bundle is missing the TLS CA trust store" >&2; exit 1; }
           # Tk's scripts and native library must both be present. Portable
           # Python distributions can use a combined libtcl*tk*.so that
           # PyInstaller's normal Linux dependency lookup does not discover.
@@ -376,6 +378,12 @@ jobs:
           HOME=$(mktemp -d) squashfs-root/AppRun \
             --app-import-self-test | tee /tmp/app-import-self-test.log
           grep -Fq "APP_IMPORT_SELF_TEST_OK" /tmp/app-import-self-test.log
+          # Exercise a real verified handshake from the finished AppImage.
+          # The CDN may reject an anonymous request; an HTTP response still
+          # proves the packaged OpenSSL trusted its certificate chain.
+          HOME=$(mktemp -d) squashfs-root/AppRun \
+            --tls-self-test | tee /tmp/tls-self-test.log
+          grep -Fq "TLS_SELF_TEST_OK" /tmp/tls-self-test.log
           desktop-file-validate squashfs-root/io.wayfindercollective.WayfinderAura.desktop
           # AppStream metainfo uses modern tags (developer/, vcs-browser) that
           # Flathub accepts. Ubuntu 22.04 appstreamcli treats them as
@@ -487,6 +495,9 @@ jobs:
           flatpak run io.wayfindercollective.WayfinderAura \
             --audio-processing-self-test | tee /tmp/flatpak-audio-processing-self-test.log
           grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/flatpak-audio-processing-self-test.log
+          flatpak run io.wayfindercollective.WayfinderAura \
+            --tls-self-test | tee /tmp/flatpak-tls-self-test.log
+          grep -Fq "TLS_SELF_TEST_OK" /tmp/flatpak-tls-self-test.log
           # Keep HOME unchanged: this is a per-user Flatpak installation under
           # ~/.local/share/flatpak. Replacing HOME here makes `flatpak run`
           # report the app as uninstalled before the renderer probe can start.

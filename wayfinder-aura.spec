@@ -10,6 +10,7 @@ import sys
 import os
 import importlib.util
 import importlib.metadata
+import certifi
 from pathlib import Path
 from datetime import datetime
 
@@ -23,6 +24,9 @@ SRC_DIR = PROJECT_ROOT / 'src'
 VERSION = '1.1.0'
 VERSION_TUPLE = (1, 1, 0, 0)  # (major, minor, patch, build)
 BUILD_DATE = datetime.now().strftime('%Y-%m-%d')
+CERTIFI_CA_BUNDLE = Path(certifi.where())
+if not CERTIFI_CA_BUNDLE.is_file():
+    raise RuntimeError(f'certifi CA bundle not found: {CERTIFI_CA_BUNDLE}')
 
 def _module_available(name):
     return importlib.util.find_spec(name) is not None
@@ -103,6 +107,9 @@ a = Analysis(
         ('assets/icon.png', 'assets'),
         ('assets/icons', 'assets/icons'),
         ('assets/fonts', 'assets/fonts'),
+        # urllib does not consult certifi automatically. main.py selects this
+        # embedded bundle before any packaged network request.
+        (str(CERTIFI_CA_BUNDLE), 'certifi'),
         # Include the wayfinder package
         ('src/wayfinder', 'wayfinder'),
     ],
@@ -157,6 +164,7 @@ a = Analysis(
         # HTTP clients
         'requests',
         'httpx',
+        'certifi',
     ] + OPTIONAL_HIDDENIMPORTS,
     hookspath=[],
     hooksconfig={},

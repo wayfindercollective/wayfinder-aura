@@ -21,6 +21,12 @@ def main():
     As more functionality is extracted to the wayfinder package, this will
     be updated to use the new modular structure directly.
     """
+    # Console/module entry points bypass root main.py, so configure the same
+    # portable CA trust before importing any network-capable app modules.
+    from .tls import configure_tls_ca_bundle
+
+    configure_tls_ca_bundle()
+
     # Add the project root to path so we can import the legacy main module
     # This allows gradual migration to the new package structure
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
