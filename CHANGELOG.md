@@ -5,6 +5,22 @@ All notable changes to Wayfinder Aura are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.7] — 2026-08-01
+
+### Fixed
+
+- **Model downloads now verify HTTPS correctly in portable Linux packages.**
+  AppImage and Flatpak builds explicitly bundle and select a current CA trust
+  store before license, catalog, cloud, or model-download traffic begins. This
+  fixes `CERTIFICATE_VERIFY_FAILED` on Bazzite/Fedora and SteamOS without
+  weakening TLS verification.
+- **AppImage startup no longer depends on tmpfs capacity.** The large
+  PyInstaller payload extracts into Wayfinder Aura's private, disk-backed user
+  cache, avoiding failures when `/tmp` is a small RAM-backed filesystem.
+- **Release artifacts prove real certificate trust before publishing.** CI now
+  performs a verified production-CDN handshake from the finished AppImage and
+  installed Flatpak, and rejects AppImages missing their CA bundle.
+
 ## [1.1.6] — 2026-07-31
 
 ### Fixed

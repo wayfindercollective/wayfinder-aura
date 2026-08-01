@@ -79,7 +79,7 @@ def test_steamdeck_installer_installs_current_daemon_and_disables_legacy_bridge(
     assert "releases/latest/download/${APP_ID}.flatpak" in installer
     assert "flatpak install --user --noninteractive -y --or-update" in installer
     assert "flatpak info --user" in installer
-    assert 'MIN_FLATPAK_VERSION="1.1.6"' in installer
+    assert 'MIN_FLATPAK_VERSION="1.1.7"' in installer
     assert "is older than the SteamOS-safe" in installer
     assert "pacman -S" not in installer
     assert "steamos-readonly disable" not in installer
