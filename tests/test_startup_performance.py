@@ -106,6 +106,113 @@ def test_inactive_tab_is_created_once_on_first_switch():
     assert app.tab_frames["dictate"].packed is False
 
 
+def test_settings_preload_advances_one_slice_and_reschedules():
+    from wayfinder_main import AppState, WayfinderApp
+
+    built: list[str] = []
+    scheduled: list[tuple[int, object]] = []
+
+    def steps():
+        built.append("audio")
+        yield "audio"
+        built.append("processing")
+        yield "processing"
+
+    app = SimpleNamespace(
+        _settings_preload_job="current",
+        _settings_build_complete=False,
+        _settings_build_iterator=None,
+        _setup_active=False,
+        _welcome_active=False,
+        app_state=AppState.IDLE,
+        winfo_viewable=lambda: True,
+        _create_settings_tab_steps=steps,
+        after=lambda delay, callback: scheduled.append((delay, callback)) or "next",
+    )
+    app._schedule_settings_preload = (
+        WayfinderApp._schedule_settings_preload.__get__(app)
+    )
+    app._preload_settings_slice = WayfinderApp._preload_settings_slice.__get__(app)
+
+    WayfinderApp._preload_settings_slice(app)
+
+    assert built == ["audio"]
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == 25
+    assert scheduled[0][1].__func__ is WayfinderApp._preload_settings_slice
+    assert app._settings_preload_job == "next"
+
+
+def test_settings_preload_skips_hidden_or_first_run_without_retry():
+    from wayfinder_main import AppState, WayfinderApp
+
+    for visible, setup_active in ((False, False), (True, True)):
+        scheduled = []
+        app = SimpleNamespace(
+            _settings_preload_job="current",
+            _settings_build_complete=False,
+            _settings_build_iterator=None,
+            _setup_active=setup_active,
+            _welcome_active=False,
+            app_state=AppState.IDLE,
+            winfo_viewable=lambda visible=visible: visible,
+            after=lambda delay, callback: scheduled.append((delay, callback)),
+        )
+
+        WayfinderApp._preload_settings_slice(app)
+
+        assert app._settings_build_iterator is None
+        assert scheduled == []
+
+
+def test_early_settings_click_drains_an_existing_staged_build():
+    from wayfinder_main import WayfinderApp
+
+    built: list[str] = []
+    app = SimpleNamespace(
+        _settings_build_complete=False,
+        _settings_build_iterator=None,
+    )
+
+    def steps():
+        built.append("audio")
+        yield "audio"
+        built.append("processing")
+        yield "processing"
+        app._settings_build_complete = True
+
+    app._create_settings_tab_steps = steps
+    app._settings_build_iterator = steps()
+    next(app._settings_build_iterator)
+
+    WayfinderApp._finish_settings_build(app)
+
+    assert built == ["audio", "processing"]
+    assert app._settings_build_complete is True
+    assert app._settings_build_iterator is None
+
+
+def test_hotkey_scan_publishes_all_names_before_filter(monkeypatch):
+    import wayfinder_main
+
+    keyboard = SimpleNamespace(name="Keyboard")
+    mouse = SimpleNamespace(name="Mouse")
+    monkeypatch.setattr(
+        wayfinder_main,
+        "get_all_input_devices",
+        lambda: [
+            {"name": "Keyboard", "device": keyboard},
+            {"name": "Mouse", "device": mouse},
+        ],
+    )
+    snapshots = []
+
+    selected = wayfinder_main.find_keyboard_devices(["Mouse"], snapshots.append)
+
+    assert snapshots == [["Keyboard", "Mouse"]]
+    assert selected == [mouse]
+
+
 def test_log_lines_buffer_until_history_tab_exists():
     from wayfinder_main import WayfinderApp
 

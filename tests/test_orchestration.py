@@ -584,6 +584,100 @@ class TestHappyPath:
         app.pump_events()
         assert injected == ["line one line two end"]
 
+    def test_auto_enter_waits_for_final_text_then_target_settle(
+        self, app, monkeypatch
+    ):
+        events = []
+        app.config["press_enter_after_dictation"] = True
+        app._inject_target_window = "window-42"
+
+        monkeypatch.setattr(
+            wayfinder_main,
+            "inject_text",
+            lambda text, **_kwargs: events.append(("inject", text)),
+        )
+        import time as time_module
+        monkeypatch.setattr(
+            time_module, "sleep", lambda seconds: events.append(("sleep", seconds))
+        )
+        import wayfinder.core.injector as injector
+        monkeypatch.setattr(injector, "get_active_window", lambda: "window-42")
+        monkeypatch.setattr(injector, "press_enter", lambda: events.append(("enter", None)))
+        monkeypatch.setattr(
+            "wayfinder.utils.platform.get_text_injector", lambda: "ydotool"
+        )
+
+        app.do_inject("final processed text", app.session_generation)
+
+        assert events == [
+            ("sleep", 0.08),
+            ("inject", "final processed text"),
+            ("sleep", wayfinder_main._AUTO_ENTER_SETTLE_S),
+            ("enter", None),
+        ]
+        assert any("after 350ms settle" in message for message in app.logs)
+
+    def test_auto_enter_is_after_post_processing_in_full_pipeline(
+        self, app, monkeypatch
+    ):
+        events = []
+        app.config["post_processing_enabled"] = True
+        app.config["press_enter_after_dictation"] = True
+
+        def transcribe_and_postprocess(_path, config, **_kwargs):
+            assert config["post_processing_enabled"] is True
+            events.append("post-process")
+            return "cleaned final prompt"
+
+        monkeypatch.setattr(
+            wayfinder_main, "transcribe_with_config", transcribe_and_postprocess
+        )
+        monkeypatch.setattr(
+            wayfinder_main,
+            "inject_text",
+            lambda text, **_kwargs: events.append(f"inject:{text}"),
+        )
+        import time as time_module
+        monkeypatch.setattr(time_module, "sleep", lambda _seconds: None)
+        import wayfinder.core.injector as injector
+        monkeypatch.setattr(injector, "get_active_window", lambda: "window-42")
+        monkeypatch.setattr(injector, "press_enter", lambda: events.append("enter"))
+        monkeypatch.setattr(
+            "wayfinder.utils.platform.get_text_injector", lambda: "ydotool"
+        )
+
+        app.transcribe_and_inject("/tmp/fake-auto-enter.wav", app.session_generation)
+        app.pump_events()
+
+        assert events == [
+            "post-process",
+            "inject:cleaned final prompt",
+            "enter",
+        ]
+
+    def test_auto_enter_skips_if_focus_changes_during_settle(
+        self, app, monkeypatch
+    ):
+        app.config["press_enter_after_dictation"] = True
+        app._inject_target_window = "window-42"
+        windows = iter(("window-42", "window-99"))
+        entered = []
+
+        monkeypatch.setattr(wayfinder_main, "inject_text", lambda *_a, **_k: None)
+        import time as time_module
+        monkeypatch.setattr(time_module, "sleep", lambda _seconds: None)
+        import wayfinder.core.injector as injector
+        monkeypatch.setattr(injector, "get_active_window", lambda: next(windows))
+        monkeypatch.setattr(injector, "press_enter", lambda: entered.append(True))
+        monkeypatch.setattr(
+            "wayfinder.utils.platform.get_text_injector", lambda: "ydotool"
+        )
+
+        app.do_inject("do not submit to the next window", app.session_generation)
+
+        assert entered == []
+        assert any("focus changed" in message for message in app.logs)
+
     def test_personal_tone_feeds_voice_learning(self, app, monkeypatch):
         monkeypatch.setattr(wayfinder_main, "inject_text", lambda *a, **k: None)
         app.config["output_tone"] = "personal"

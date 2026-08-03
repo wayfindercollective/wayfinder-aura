@@ -17,6 +17,22 @@ class _Var:
         self.value = value
 
 
+class _Entry:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+
+class _Label:
+    def __init__(self):
+        self.options = {}
+
+    def configure(self, **kwargs):
+        self.options.update(kwargs)
+
+
 def _free_app():
     prompts = []
     app = SimpleNamespace(
@@ -351,3 +367,62 @@ def test_benchmark_can_compare_gpu_while_free_pipeline_remains_cpu():
 
     assert summary["asr_mode"] == "cpu"
     assert summary["asr_time"] == 4.0
+
+
+def test_successful_activation_replaces_form_with_active_state():
+    events = []
+    feedback = _Label()
+    gate = SimpleNamespace(is_premium=True)
+    result = SimpleNamespace(is_valid=True, error_message=None)
+    app = SimpleNamespace(
+        _license_key_entry=_Entry("wv-test-key"),
+        _license_feedback=feedback,
+        update_idletasks=lambda: events.append("paint"),
+        log=lambda _message: events.append("log"),
+        _rebuild_header=lambda: events.append("header"),
+        _refresh_entitlement_ui=lambda: events.append("entitlements"),
+        _render_license_tile=lambda: events.append("license"),
+        _show_ultra_banner=lambda: events.append("banner"),
+    )
+
+    with patch("wayfinder.license.store_license", return_value=result), patch(
+        "wayfinder.license.get_feature_gate", return_value=gate
+    ):
+        wayfinder_main.WayfinderApp._activate_license(app)
+
+    assert app.feature_gate is gate
+    assert feedback.options["text"] == "Activating…"
+    assert events[-4:] == ["header", "entitlements", "license", "banner"]
+
+
+def test_license_removal_rerenders_free_state_and_explains_scope():
+    feedback = _Label()
+    gate = SimpleNamespace(is_premium=False)
+    events = []
+    app = SimpleNamespace(
+        config={},
+        _license_feedback=feedback,
+        _ultra_banner=None,
+        log=events.append,
+        _rebuild_header=lambda: events.append("header"),
+        _refresh_entitlement_ui=lambda: events.append("entitlements"),
+        _render_license_tile=lambda: events.append("license"),
+    )
+
+    with patch("wayfinder.license.remove_license") as remove, patch(
+        "wayfinder.license.get_feature_gate", return_value=gate
+    ), patch("wayfinder.config.enforce_license_config", return_value=False):
+        wayfinder_main.WayfinderApp._deactivate_license(app)
+
+    remove.assert_called_once_with()
+    assert app.feature_gate is gate
+    assert "removed from this device" in feedback.options["text"].lower()
+    assert events[-3:] == ["header", "entitlements", "license"]
+
+
+def test_license_activation_date_is_human_readable_and_safe():
+    formatter = wayfinder_main.WayfinderApp._format_license_activation_date
+
+    assert formatter("2026-08-03T12:34:56") == "Aug 03, 2026"
+    assert formatter("not-a-date") == ""
+    assert formatter(None) == ""

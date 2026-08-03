@@ -2792,9 +2792,24 @@ def get_all_input_devices() -> list[dict]:
     return result
 
 
-def find_keyboard_devices(enabled_devices: list[str] = None) -> list:
-    """Find input devices to listen to based on config."""
+def find_keyboard_devices(
+    enabled_devices: list[str] = None,
+    device_snapshot_callback=None,
+) -> list:
+    """Find input devices to listen to based on config.
+
+    ``device_snapshot_callback`` receives the complete eligible device-name
+    list before the configured filter is applied. The hotkey thread already
+    performs this comparatively expensive scan, so the Settings UI can reuse
+    its metadata instead of reopening every evdev node on first display.
+    """
     all_devices = get_all_input_devices()
+
+    if device_snapshot_callback is not None:
+        try:
+            device_snapshot_callback([d["name"] for d in all_devices])
+        except Exception:
+            pass
     
     if enabled_devices:
         # Only use explicitly enabled devices
@@ -2844,6 +2859,12 @@ def resolve_status_indicator_target(
 # gently surface that GPU acceleration is much faster. Long enough that it never
 # fires on ordinary short dictations — only when the CPU path actually hurt.
 _GPU_NUDGE_MIN_DURATION_S = 45.0
+
+# A completed injector subprocess means its synthetic key events were handed
+# to the OS, not necessarily consumed by the target terminal/chat UI. Give the
+# target event loop one brief turn before an opt-in submit key; without this,
+# ydotool's separate Return command can overtake the tail of a long injection.
+_AUTO_ENTER_SETTLE_S = 0.35
 
 
 def _keycode_display(code: int) -> str:
@@ -3034,8 +3055,18 @@ def should_host_qt_tray(
     return True
 
 
-def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabled_devices=None, log_callback=None,
-                    style_toggle_key=None, style_toggle_modifiers=None, grabbed_devices=None):
+def hotkey_listener(
+    event_queue,
+    hotkey_key,
+    hotkey_modifiers,
+    stop_event,
+    enabled_devices=None,
+    log_callback=None,
+    style_toggle_key=None,
+    style_toggle_modifiers=None,
+    grabbed_devices=None,
+    device_snapshot_callback=None,
+):
     import select
 
     def log(msg):
@@ -3044,11 +3075,19 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                 log_callback(msg)
             except:
                 pass
+
+    def scan_devices():
+        # Preserve the historical one-argument call when no observer is
+        # present. Focused tests and third-party integrations commonly replace
+        # this helper with a one-argument fake.
+        if device_snapshot_callback is None:
+            return find_keyboard_devices(enabled_devices)
+        return find_keyboard_devices(enabled_devices, device_snapshot_callback)
     
     log(f"🔧 Hotkey listener starting (record={hotkey_key}, style={style_toggle_key})...")
     print(f"[DEBUG] Hotkey listener thread started: record={hotkey_key}, style={style_toggle_key}", flush=True)
     
-    devices = find_keyboard_devices(enabled_devices)
+    devices = scan_devices()
     print(f"[DEBUG] Found {len(devices)} devices to monitor:", flush=True)
     for d in devices:
         print(f"[DEBUG]   - {d.name} ({d.path})", flush=True)
@@ -3187,7 +3226,7 @@ def hotkey_listener(event_queue, hotkey_key, hotkey_modifiers, stop_event, enabl
                 if stop_event.wait(RESCAN_BACKOFF):
                     break
                 pressed_modifiers.clear()  # avoid a stuck-modifier state across device loss
-                rescanned = find_keyboard_devices(enabled_devices)
+                rescanned = scan_devices()
                 fd_to_device = {dev.fd: dev for dev in rescanned}
                 if fd_to_device:
                     log(f"🔌 Input device(s) available ({len(fd_to_device)}) — resuming hotkey monitoring")
@@ -5064,12 +5103,22 @@ class WayfinderApp(ctk.CTk):
         self._hotkey_thread = None                     # live evdev listener thread (for supervision)
         self._socket_thread = None                     # socket listener thread (supervised for liveness)
         self._hotkey_restart_lock = threading.Lock()   # serialize evdev restarts (config change + supervisor)
+        # Published by the evdev listener's initial scan. Settings needs names
+        # only; keeping this immutable snapshot avoids a second ~300ms /dev/input
+        # enumeration without sharing listener-owned file descriptors with Tk.
+        self._hotkey_device_names_snapshot: tuple[str, ...] | None = None
         self.session_generation = 0                    # bumped per recording / force_reset; discards stale work
         self._finish_injection_job = None              # pending after() id for the delayed overlay reset
         self._welcome_active = False                   # first-run welcome tour up → suppress text injection
         self._welcome_pane = None                      # active WelcomePane, or None
         self._setup_active = False                     # first-run dependency setup pane up
         self._setup_pane = None                        # active SetupPane, or None
+        # Returning-user Settings is built after the first visible frame in
+        # short Tk-thread slices. These fields also let an early click drain the
+        # remaining work synchronously through the existing loading fallback.
+        self._settings_build_iterator = None
+        self._settings_build_complete = False
+        self._settings_preload_job = None
 
         # Start the hotkey listeners NOW, before the heavy UI build, so the evdev thread opens the
         # input devices during setup_window/tray/ui rather than after it. A press made while the
@@ -5276,6 +5325,7 @@ class WayfinderApp(ctk.CTk):
         self.setup_tray()
         self.setup_ui()
         self.setup_scaling_shortcuts()
+        self._schedule_settings_preload()
         # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
         self._start_hotkey_supervisor()
         self.poll_events()
@@ -6905,7 +6955,12 @@ class WayfinderApp(ctk.CTk):
     
     def _ensure_tab_created(self, tab_id: str) -> None:
         """Build a tab once, immediately before its first display."""
-        if tab_id in self.tab_frames:
+        settings_staged = (
+            tab_id == "settings" and hasattr(self, "_settings_build_complete")
+        )
+        if tab_id in self.tab_frames and (
+            not settings_staged or self._settings_build_complete
+        ):
             return
         builders = {
             "dictate": self._create_dictate_tab,
@@ -6946,6 +7001,94 @@ class WayfinderApp(ctk.CTk):
                     loading_frame.destroy()
                 except Exception:
                     pass
+
+    def _schedule_settings_preload(self, delay_ms: int = 900) -> None:
+        """Schedule the one-shot returning-user Settings warm-up.
+
+        Delaying this until after the first mapped frame preserves fast startup.
+        A hidden/tray-only window intentionally does no Settings work; opening
+        the window schedules it again from ``_show_window``.
+        """
+        if getattr(self, "_settings_build_complete", False):
+            return
+        if getattr(self, "_settings_preload_job", None) is not None:
+            return
+        try:
+            self._settings_preload_job = self.after(
+                max(0, int(delay_ms)), self._preload_settings_slice
+            )
+        except Exception:
+            self._settings_preload_job = None
+
+    def _preload_settings_slice(self) -> None:
+        """Advance hidden Settings construction by one bounded UI-thread slice."""
+        self._settings_preload_job = None
+        if getattr(self, "_settings_build_complete", False):
+            return
+
+        # Tk widgets must be created on the Tk thread. Do no hidden work while
+        # minimized, and yield completely to an active dictation. Recording is
+        # short-lived, so a cheap delayed retry is sufficient and non-resident.
+        try:
+            if not self.winfo_viewable():
+                return
+        except Exception:
+            return
+        # First-run setup/welcome owns the foreground and should receive the
+        # entire idle budget. Settings remains available through normal lazy
+        # creation afterward; no retry loop is needed for a one-time flow.
+        if getattr(self, "_setup_active", False) or getattr(
+            self, "_welcome_active", False
+        ):
+            return
+        if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+            self._schedule_settings_preload(delay_ms=500)
+            return
+
+        iterator = getattr(self, "_settings_build_iterator", None)
+        if iterator is None:
+            iterator = self._create_settings_tab_steps()
+            self._settings_build_iterator = iterator
+
+        try:
+            next(iterator)
+        except StopIteration:
+            self._settings_build_iterator = None
+            return
+        except Exception as exc:
+            # A preload failure must not strand a partial tab. Remove it so the
+            # existing click-time builder remains a clean fallback.
+            self._settings_build_iterator = None
+            self._settings_build_complete = False
+            partial = self.tab_frames.pop("settings", None)
+            if partial is not None:
+                try:
+                    partial.destroy()
+                except Exception:
+                    pass
+            try:
+                self.log(f"⚠ Settings preload skipped: {exc}")
+            except Exception:
+                pass
+            return
+
+        # Let the 15 Hz overlay/header animation and input queue run between
+        # tiles. This is a finite one-shot chain, not an idle polling loop.
+        self._schedule_settings_preload(delay_ms=25)
+
+    def _finish_settings_build(self) -> None:
+        """Drain any staged build now (first-run or an unusually early click)."""
+        if getattr(self, "_settings_build_complete", False):
+            return
+        iterator = getattr(self, "_settings_build_iterator", None)
+        if iterator is None:
+            iterator = self._create_settings_tab_steps()
+            self._settings_build_iterator = iterator
+        try:
+            for _slice_complete in iterator:
+                pass
+        finally:
+            self._settings_build_iterator = None
 
     def _switch_tab(self, tab_id: str) -> None:
         """Switch to the specified tab."""
@@ -7329,7 +7472,11 @@ class WayfinderApp(ctk.CTk):
         return content
     
     def _create_settings_tab(self) -> None:
-        """Create the Settings tab with Local/Remote processing modes."""
+        """Create Settings immediately, draining any staged preload in progress."""
+        self._finish_settings_build()
+
+    def _create_settings_tab_steps(self):
+        """Yield after each hidden Settings tile to keep the UI responsive."""
         frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
         self.tab_frames["settings"] = frame
         
@@ -7404,6 +7551,8 @@ class WayfinderApp(ctk.CTk):
         
         # Audio Ducking controls
         self._build_audio_ducking_section(audio_content)
+
+        yield "audio"
         
         # === BENTO TILE 2: Processing Mode ===
         mode_tile = ctk.CTkFrame(
@@ -7440,6 +7589,8 @@ class WayfinderApp(ctk.CTk):
         
         # Build initial mode settings
         self._build_mode_settings(current_mode)
+
+        yield "processing"
         
         # === BENTO TILE 3: System (expanded with Hotkey and Typing Speed) ===
         system_tile = ctk.CTkFrame(
@@ -7543,8 +7694,14 @@ class WayfinderApp(ctk.CTk):
             device_names = []
             device_options = ["All Devices (Global)"]
         else:
-            all_devices = get_all_input_devices()
-            device_names = [d["name"] for d in all_devices]
+            cached_names = getattr(self, "_hotkey_device_names_snapshot", None)
+            if cached_names is None:
+                # First-run/setup paths can reach Settings before the hotkey
+                # listener publishes its scan. Preserve the synchronous fallback.
+                all_devices = get_all_input_devices()
+                device_names = [d["name"] for d in all_devices]
+            else:
+                device_names = list(cached_names)
             device_options = ["All Devices"] + device_names
         enabled = self.config.get("enabled_input_devices", [])
         if not enabled or len(enabled) == len(device_names):
@@ -7589,6 +7746,8 @@ class WayfinderApp(ctk.CTk):
                 "Press Enter automatically after dictated text is typed — chat messages send hands-free.",
             ),
         )
+
+        yield "system"
 
         # === BENTO TILE: Status Overlay ===
         overlay_tile = ctk.CTkFrame(
@@ -7679,6 +7838,8 @@ class WayfinderApp(ctk.CTk):
         from wayfinder.utils.platform import supports_steam_game_mode
         if supports_steam_game_mode():
             self._create_game_mode_toggle_row(overlay_content)
+
+        yield "overlay"
 
         # === BENTO TILE 4: Benchmark (inline, no popup) ===
         # This tile is for local mode only - hidden in remote mode
@@ -7804,116 +7965,13 @@ class WayfinderApp(ctk.CTk):
         if current_mode == "remote":
             self.local_benchmark_tile.pack_forget()
 
+        yield "benchmark"
+
         # === BENTO TILE: License ===
         license_tile = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
         license_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
-        self._license_tile = license_tile  # for the live activation banner
-
-        ctk.CTkLabel(
-            license_tile, text="License",
-            font=(self.font_header[0], self.font_sizes["caption"], "bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 4))
-
-        license_info = self.feature_gate.license_info
-        is_premium = license_info.is_premium
-
-        # Status badge
-        status_text = "Ultra 😇" if is_premium else "Free"
-        status_color = COLORS["accent"] if is_premium else COLORS["text_muted"]
-        self._license_status_label = ctk.CTkLabel(
-            license_tile, text=status_text,
-            font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            text_color=status_color,
-        )
-        self._license_status_label.pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 8))
-
-        # License key input row
-        key_row = ctk.CTkFrame(license_tile, fg_color="transparent")
-        key_row.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, 4))
-
-        self._license_key_entry = ctk.CTkEntry(
-            key_row, placeholder_text="WV-XXXX-XXXX-XXXX-XXXX",
-            font=(self.font_body[0], self.font_sizes["body"]), height=34, corner_radius=RADIUS["sm"],
-            fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
-            border_color=COLORS["border_subtle"],
-        )
-        self._license_key_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-        if license_info.license_key:
-            self._license_key_entry.insert(0, license_info.license_key)
-
-        ctk.CTkButton(
-            key_row, text="Activate", font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            width=90, height=34, corner_radius=RADIUS["sm"],
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
-            text_color="#FFFFFF",
-            command=self._activate_license,
-        ).pack(side="left")
-
-        # Feedback label
-        self._license_feedback = ctk.CTkLabel(
-            license_tile, text="",
-            font=(self.font_body[0], self.font_sizes["small"]), text_color=COLORS["text_muted"],
-        )
-        self._license_feedback.pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, 4))
-
-        # Free tier: pitch the upgrade — everything Ultra unlocks, then the CTA.
-        # Premium: just the Deactivate button.
-        if not is_premium:
-            ctk.CTkFrame(license_tile, fg_color=COLORS["border_subtle"], height=1).pack(
-                fill="x", padx=SPACING["tile_pad"], pady=(SPACING["xs"], SPACING["md"]))
-
-            ctk.CTkLabel(
-                license_tile, text="Upgrade to Ultra and unlock",
-                font=(self.font_header[0], self.font_sizes["heading"], "bold"),
-                text_color=COLORS["text_bright"],
-            ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"]))
-
-            benefits_box = ctk.CTkFrame(license_tile, fg_color="transparent")
-            benefits_box.pack(fill="x", padx=SPACING["tile_pad"])
-            self._build_ultra_benefit_rows(benefits_box)
-
-            price = self.config.get("premium_price", "$29.99")
-            price_row = ctk.CTkFrame(license_tile, fg_color="transparent")
-            price_row.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["md"], SPACING["sm"]))
-            ctk.CTkLabel(
-                price_row, text=price,
-                font=(self.font_header[0], self.font_sizes["title"], "bold"),
-                text_color=COLORS["accent"],
-            ).pack(side="left")
-            ctk.CTkLabel(
-                price_row, text=self.config.get("premium_price_regular", "$60"),
-                font=(self.font_body[0], self.font_sizes["body"], "overstrike"),
-                text_color=COLORS["text_muted"],
-            ).pack(side="left", padx=(SPACING["sm"], 0))
-            ctk.CTkLabel(
-                price_row, text="launch price",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_muted"],
-            ).pack(side="left", padx=(SPACING["sm"], 0))
-
-        action_row = ctk.CTkFrame(license_tile, fg_color="transparent")
-        action_row.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
-
-        if not is_premium:
-            ctk.CTkButton(
-                action_row, text=f"Get Ultra — {self.config.get('premium_price', '$29.99')}",
-                font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                height=36, width=200, corner_radius=RADIUS["sm"],
-                fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-                text_color="#000000",
-                command=lambda: self._show_premium_prompt("ultra"),
-            ).pack(side="left")
-        else:
-            ctk.CTkButton(
-                action_row, text="Deactivate",
-                font=(self.font_body[0], self.font_sizes["small"]),
-                height=28, corner_radius=RADIUS["sm"],
-                fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
-                text_color=COLORS["text_muted"],
-                command=self._deactivate_license,
-            ).pack(side="left")
+        self._license_tile = license_tile
+        self._render_license_tile()
 
         # === Version signature (quiet footer, bottom of the scroll) =========
         try:
@@ -7936,6 +7994,7 @@ class WayfinderApp(ctk.CTk):
         ).pack(pady=(2, SPACING["md"]))
 
         self._settings_scroll = scroll
+        self._settings_build_complete = True
     
     def _update_benchmark_results_display(self):
         """Update the inline benchmark results display (pipeline + ASR + cleanup)."""
@@ -13703,6 +13762,269 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["text_secondary"], anchor="w", justify="left",
             ).pack(fill="x")
 
+    @staticmethod
+    def _format_license_activation_date(value: str | None) -> str:
+        """Return a quiet, human-readable date without exposing license secrets."""
+        if not value:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.strftime("%b %d, %Y")
+        except (TypeError, ValueError):
+            return ""
+
+    def _render_license_tile(self) -> None:
+        """Render mutually exclusive Free and activated-Ultra license states."""
+        tile = getattr(self, "_license_tile", None)
+        if tile is None:
+            return
+        for child in tile.winfo_children():
+            child.destroy()
+
+        self._ultra_banner = None
+        self._license_key_entry = None
+        self._license_activation_button = None
+        self._license_feedback = None
+        self._license_management_panel = None
+        self._license_removal_confirmation = None
+        self._license_management_open = False
+
+        ctk.CTkLabel(
+            tile, text="LICENSE",
+            font=(self.font_header[0], self.font_sizes["caption"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).pack(
+            anchor="w", padx=SPACING["tile_pad"],
+            pady=(SPACING["tile_pad_y"], SPACING["sm"]),
+        )
+
+        license_info = self.feature_gate.license_info
+        is_premium = bool(license_info and license_info.is_premium)
+        if is_premium:
+            self._render_active_license_state(tile, license_info)
+        else:
+            self._render_free_license_state(tile)
+
+    def _render_active_license_state(self, tile, license_info) -> None:
+        """Show persistent activation confirmation without another key form."""
+        active_card = ctk.CTkFrame(
+            tile, fg_color=COLORS["success_bg"], corner_radius=RADIUS["sm"],
+            border_width=1, border_color=COLORS["accent"],
+        )
+        active_card.pack(
+            fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["md"])
+        )
+
+        icon_label = ctk.CTkLabel(active_card, text="", width=26)
+        try:
+            icon_label.configure(image=get_icon("check", 18, COLORS["accent"]))
+        except Exception:
+            icon_label.configure(text="✓", text_color=COLORS["accent"])
+        icon_label.pack(side="left", anchor="n", padx=(SPACING["md"], SPACING["xs"]), pady=SPACING["md"])
+
+        copy = ctk.CTkFrame(active_card, fg_color="transparent")
+        copy.pack(side="left", fill="x", expand=True, padx=(0, SPACING["md"]), pady=SPACING["md"])
+        self._license_status_label = ctk.CTkLabel(
+            copy, text="Ultra is active",
+            font=(self.font_header[0], self.font_sizes["heading"], "bold"),
+            text_color=COLORS["text_bright"], anchor="w",
+        )
+        self._license_status_label.pack(fill="x")
+        ctk.CTkLabel(
+            copy,
+            text="This device is activated and all Ultra features are unlocked.",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"], anchor="w", justify="left",
+        ).pack(fill="x", pady=(2, 0))
+        activated = self._format_license_activation_date(
+            getattr(license_info, "activated_date", None)
+        )
+        if activated:
+            ctk.CTkLabel(
+                copy, text=f"Activated {activated}",
+                font=(self.font_body[0], self.font_sizes["caption"]),
+                text_color=COLORS["text_muted"], anchor="w",
+            ).pack(fill="x", pady=(SPACING["xs"], 0))
+
+        ctk.CTkButton(
+            tile, text="Manage license",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            height=28, width=112, corner_radius=RADIUS["sm"],
+            fg_color="transparent", hover_color=COLORS["bg_hover"],
+            border_width=1, border_color=COLORS["border_subtle"],
+            text_color=COLORS["text_muted"],
+            command=self._toggle_license_management,
+        ).pack(
+            anchor="w", padx=SPACING["tile_pad"],
+            pady=(0, SPACING["tile_pad_y"]),
+        )
+
+        panel = ctk.CTkFrame(
+            tile, fg_color=COLORS["bg_hover"], corner_radius=RADIUS["sm"]
+        )
+        self._license_management_panel = panel
+        ctk.CTkLabel(
+            panel,
+            text=(
+                "Remove the stored license from this device and return Aura to Free. "
+                "This does not release a server activation slot."
+            ),
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"], wraplength=520,
+            anchor="w", justify="left",
+        ).pack(fill="x", padx=SPACING["md"], pady=(SPACING["md"], SPACING["sm"]))
+        ctk.CTkButton(
+            panel, text="Remove from this device",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            height=30, corner_radius=RADIUS["sm"],
+            fg_color=COLORS["warning_bg"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["error"],
+            command=self._show_license_removal_confirmation,
+        ).pack(anchor="w", padx=SPACING["md"], pady=(0, SPACING["md"]))
+
+        confirmation = ctk.CTkFrame(
+            panel, fg_color=COLORS["warning_bg"], corner_radius=RADIUS["sm"]
+        )
+        self._license_removal_confirmation = confirmation
+        ctk.CTkLabel(
+            confirmation, text="Remove Ultra from this device?",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=SPACING["md"], pady=(SPACING["sm"], SPACING["xs"]))
+        confirm_actions = ctk.CTkFrame(confirmation, fg_color="transparent")
+        confirm_actions.pack(fill="x", padx=SPACING["md"], pady=(0, SPACING["sm"]))
+        ctk.CTkButton(
+            confirm_actions, text="Confirm removal",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            height=28, corner_radius=RADIUS["sm"],
+            fg_color=COLORS["error"], hover_color=COLORS["warning_bg"],
+            text_color="#FFFFFF", command=self._deactivate_license,
+        ).pack(side="left")
+        ctk.CTkButton(
+            confirm_actions, text="Cancel",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            height=28, corner_radius=RADIUS["sm"],
+            fg_color="transparent", hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_secondary"],
+            command=self._cancel_license_removal,
+        ).pack(side="left", padx=(SPACING["sm"], 0))
+
+    def _render_free_license_state(self, tile) -> None:
+        """Show the activation form and Ultra upgrade details for Free users."""
+        self._license_status_label = ctk.CTkLabel(
+            tile, text="Free",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            text_color=COLORS["text_muted"],
+        )
+        self._license_status_label.pack(
+            anchor="w", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"])
+        )
+
+        key_row = ctk.CTkFrame(tile, fg_color="transparent")
+        key_row.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["xs"]))
+        self._license_key_entry = ctk.CTkEntry(
+            key_row, placeholder_text="WV-XXXX-XXXX-XXXX-XXXX",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            height=34, corner_radius=RADIUS["sm"],
+            fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
+            border_color=COLORS["border_subtle"],
+        )
+        self._license_key_entry.pack(
+            side="left", fill="x", expand=True, padx=(0, SPACING["sm"])
+        )
+        self._license_activation_button = ctk.CTkButton(
+            key_row, text="Activate",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            width=90, height=34, corner_radius=RADIUS["sm"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color="#FFFFFF", command=self._activate_license,
+        )
+        self._license_activation_button.pack(side="left")
+
+        self._license_feedback = ctk.CTkLabel(
+            tile, text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._license_feedback.pack(
+            anchor="w", padx=SPACING["tile_pad"], pady=(0, SPACING["xs"])
+        )
+
+        ctk.CTkFrame(tile, fg_color=COLORS["border_subtle"], height=1).pack(
+            fill="x", padx=SPACING["tile_pad"],
+            pady=(SPACING["xs"], SPACING["md"]),
+        )
+        ctk.CTkLabel(
+            tile, text="Upgrade to Ultra and unlock",
+            font=(self.font_header[0], self.font_sizes["heading"], "bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"]))
+        benefits_box = ctk.CTkFrame(tile, fg_color="transparent")
+        benefits_box.pack(fill="x", padx=SPACING["tile_pad"])
+        self._build_ultra_benefit_rows(benefits_box)
+
+        price = self.config.get("premium_price", "$29.99")
+        price_row = ctk.CTkFrame(tile, fg_color="transparent")
+        price_row.pack(
+            fill="x", padx=SPACING["tile_pad"],
+            pady=(SPACING["md"], SPACING["sm"]),
+        )
+        ctk.CTkLabel(
+            price_row, text=price,
+            font=(self.font_header[0], self.font_sizes["title"], "bold"),
+            text_color=COLORS["accent"],
+        ).pack(side="left")
+        ctk.CTkLabel(
+            price_row, text=self.config.get("premium_price_regular", "$60"),
+            font=(self.font_body[0], self.font_sizes["body"], "overstrike"),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left", padx=(SPACING["sm"], 0))
+        ctk.CTkLabel(
+            price_row, text="launch price",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left", padx=(SPACING["sm"], 0))
+
+        ctk.CTkButton(
+            tile, text=f"Get Ultra — {price}",
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            height=36, width=200, corner_radius=RADIUS["sm"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            text_color="#000000",
+            command=lambda: self._show_premium_prompt("ultra"),
+        ).pack(
+            anchor="w", padx=SPACING["tile_pad"],
+            pady=(0, SPACING["tile_pad_y"]),
+        )
+
+    def _toggle_license_management(self) -> None:
+        panel = getattr(self, "_license_management_panel", None)
+        if panel is None:
+            return
+        self._license_management_open = not getattr(
+            self, "_license_management_open", False
+        )
+        if self._license_management_open:
+            panel.pack(
+                fill="x", padx=SPACING["tile_pad"],
+                pady=(0, SPACING["tile_pad_y"]),
+            )
+        else:
+            panel.pack_forget()
+            self._cancel_license_removal()
+
+    def _show_license_removal_confirmation(self) -> None:
+        confirmation = getattr(self, "_license_removal_confirmation", None)
+        if confirmation is not None:
+            confirmation.pack(
+                fill="x", padx=SPACING["md"], pady=(0, SPACING["md"])
+            )
+
+    def _cancel_license_removal(self) -> None:
+        confirmation = getattr(self, "_license_removal_confirmation", None)
+        if confirmation is not None:
+            confirmation.pack_forget()
+
     def _show_premium_prompt(self, feature_id: str) -> None:
         """Ultra upgrade panel: the locked feature + benefits + pricing + Buy Now / More Info.
 
@@ -13816,28 +14138,36 @@ class WayfinderApp(ctk.CTk):
 
     def _activate_license(self) -> None:
         """Activate a license key from the Settings UI."""
-        key = self._license_key_entry.get().strip().upper()
+        entry = getattr(self, "_license_key_entry", None)
+        feedback = getattr(self, "_license_feedback", None)
+        if entry is None or feedback is None:
+            return
+        key = entry.get().strip().upper()
         if not key:
-            self._license_feedback.configure(text="Please enter a license key", text_color=COLORS["error"])
+            feedback.configure(
+                text="Please enter a license key", text_color=COLORS["error"]
+            )
             return
 
         # store_license() is the authoritative activation: it validates the key against the
         # licensing service and writes the signed offline token on success.
         from wayfinder.license import store_license, get_feature_gate
-        self._license_feedback.configure(text="Activating…", text_color=COLORS["text_muted"])
+        feedback.configure(text="Activating…", text_color=COLORS["text_muted"])
         self.update_idletasks()  # paint the feedback before the blocking network call
         result = store_license(key)
         self.feature_gate = get_feature_gate(force_refresh=True)
         if result.is_valid and self.feature_gate.is_premium:
-            self._license_status_label.configure(text="Ultra 😇", text_color=COLORS["accent"])
-            # Live activation — the badge/glow/underline/tier flip without a restart.
-            self._license_feedback.configure(text="Ultra activated — welcome to the halo 😇", text_color=COLORS["accent"])
             self.log("😇 Ultra activated — halo on. Thanks for supporting Wayfinder!")
             self._rebuild_header()
             self._refresh_entitlement_ui()
+            # Replace the activation form with persistent confirmation.
+            self._render_license_tile()
             self._show_ultra_banner()
         else:
-            self._license_feedback.configure(text=result.error_message or "Activation failed", text_color=COLORS["error"])
+            feedback.configure(
+                text=result.error_message or "Activation failed",
+                text_color=COLORS["error"],
+            )
 
     def _show_ultra_banner(self) -> None:
         """Slim gold banner inside the License tile confirming activation.
@@ -13881,14 +14211,11 @@ class WayfinderApp(ctk.CTk):
             pass
 
     def _deactivate_license(self) -> None:
-        """Deactivate the current license."""
+        """Remove the locally stored license after the inline confirmation."""
         from wayfinder.license import remove_license, get_feature_gate
         remove_license()
         self.feature_gate = get_feature_gate(force_refresh=True)
-        self._license_status_label.configure(text="Free", text_color=COLORS["text_muted"])
-        self._license_feedback.configure(text="License deactivated", text_color=COLORS["text_muted"])
-        self._license_key_entry.delete(0, "end")
-        self.log("License deactivated")
+        self.log("License removed from this device")
         from wayfinder.config import enforce_license_config
         repaired = enforce_license_config(self.config, self.feature_gate)
         if repaired:
@@ -13908,6 +14235,13 @@ class WayfinderApp(ctk.CTk):
             self._ultra_banner = None
         self._rebuild_header()
         self._refresh_entitlement_ui()
+        self._render_license_tile()
+        feedback = getattr(self, "_license_feedback", None)
+        if feedback is not None:
+            feedback.configure(
+                text="License removed from this device.",
+                text_color=COLORS["text_muted"],
+            )
 
     def _refresh_entitlement_ui(self) -> None:
         """Refresh controls whose lock state can change after live activation."""
@@ -16157,6 +16491,10 @@ class WayfinderApp(ctk.CTk):
             self.focus_force()
         except Exception:
             pass
+        # A start-minimized launch intentionally skips hidden Settings work.
+        # Once the user opens the window, give its first frame a moment to paint
+        # and then resume/start the same one-shot staged preload.
+        self._schedule_settings_preload(delay_ms=500)
         # Brief topmost pulse — helps on KDE/Wayland when the window was withdrawn.
         try:
             self.attributes("-topmost", True)
@@ -16934,10 +17272,22 @@ class WayfinderApp(ctk.CTk):
             target=hotkey_listener,
             args=(self.event_queue, hotkey_key, hotkey_modifiers, self._evdev_stop_event,
                   enabled_devices, self.log, style_toggle_key, style_toggle_modifiers,
-                  self.config.get("grabbed_input_devices", [])),
+                  self.config.get("grabbed_input_devices", []),
+                  self._cache_hotkey_device_names),
             daemon=True,
         )
         self._hotkey_thread.start()
+
+    def _cache_hotkey_device_names(self, names) -> None:
+        """Publish listener-discovered device names for one-shot Settings use.
+
+        Called from the evdev worker. Tuple assignment is atomic under CPython;
+        no Tk APIs are touched here, and no listener-owned InputDevice objects
+        cross the thread boundary.
+        """
+        self._hotkey_device_names_snapshot = tuple(
+            dict.fromkeys(str(name) for name in (names or []) if name)
+        )
 
     def restart_evdev_listener(self, reason: str = ""):
         """Cleanly restart only the evdev listener (config changes + the health supervisor).
@@ -17765,15 +18115,46 @@ class WayfinderApp(ctk.CTk):
                         self.config.get("game_mode_paste_fallback", True)
                     ),
                 )
-            # Opt-in auto-send ("Auto press Enter after dictation"): fire Enter
-            # right here in the worker so it lands immediately after the text,
-            # in the same focus context. Never fail a successful injection over
-            # it — a missed Enter is a shrug, un-typed text is a bug report.
+            # Opt-in auto-send ("Auto press Enter after dictation"). Injector
+            # process exit only proves the events were handed to the OS; the
+            # target terminal/chat may still be consuming them. Let that event
+            # queue settle, then confirm focus is still on the window that
+            # received the text before sending Return.
             if text.strip() and self.config.get("press_enter_after_dictation", False):
                 try:
-                    from wayfinder.core.injector import press_enter
-                    press_enter()
-                    self.log("↵ Auto-Enter sent")
+                    injected_window = (
+                        target if can_retarget and target else (now_focused or target)
+                    )
+                    _time.sleep(_AUTO_ENTER_SETTLE_S)
+
+                    # A new dictation/reset during the settle window supersedes
+                    # this session. Never submit stale or partial text.
+                    if gen is not None and gen != self.session_generation:
+                        return
+                    if not self.config.get("press_enter_after_dictation", False):
+                        self.log("↵ Auto-Enter cancelled while text settled")
+                    else:
+                        try:
+                            from wayfinder.core.injector import get_active_window
+                            enter_window = get_active_window()
+                        except Exception:
+                            enter_window = None
+
+                        if (
+                            injected_window
+                            and enter_window
+                            and injected_window != enter_window
+                        ):
+                            self.log(
+                                "⚠ Auto-Enter skipped: focus changed after text injection"
+                            )
+                        else:
+                            from wayfinder.core.injector import press_enter
+                            press_enter()
+                            self.log(
+                                f"↵ Auto-Enter sent after "
+                                f"{int(_AUTO_ENTER_SETTLE_S * 1000)}ms settle"
+                            )
                 except Exception as _enter_err:
                     self.log(f"⚠ Auto-Enter failed: {_enter_err}")
             self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
