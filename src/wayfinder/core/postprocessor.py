@@ -10,6 +10,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from wayfinder.utils.hostexec import bundle_binary_env
+
 
 class PostProcessingError(Exception):
     """Raised when post-processing fails."""
@@ -1945,6 +1947,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
             r = subprocess.run(
                 [self.llama_binary, "-m", self.model_path, "-ngl", str(ngl), "-n", "16", "warm up"],
                 capture_output=True, text=True, timeout=_GPU_PROBE_TIMEOUT,
+                env=bundle_binary_env(),
             )
         except Exception:
             return False
@@ -2156,6 +2159,7 @@ Cleaned text:"""
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, errors="replace",
                     timeout=self.timeout,
+                    env=bundle_binary_env(),
                 )
                 if result.returncode != 0:
                     stderr = result.stderr.strip()

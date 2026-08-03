@@ -300,7 +300,7 @@ class FakeApp:
 def config(tmp_path):
     from wayfinder.config import DEFAULT_CONFIG
     cfg = DEFAULT_CONFIG.copy()
-    cfg["chunked_mode"] = False        # simple path by default; chunked tests override
+    cfg["chunked_mode"] = "off"        # simple path by default; chunked tests override
     cfg["post_processing_enabled"] = False
     cfg["audio_ducking_enabled"] = False
     cfg["min_recording_duration"] = 0.5
@@ -362,7 +362,7 @@ class TestRecordButtonDispatch:
 
 class TestStartRecording:
     def test_simple_mode_transitions_to_recording_and_starts_recorder(self, app):
-        app.config["chunked_mode"] = False
+        app.config["chunked_mode"] = "off"
         app.on_hotkey()  # from IDLE
         assert app.app_state == AppState.RECORDING
         assert app.states == [AppState.RECORDING]
@@ -380,7 +380,7 @@ class TestStartRecording:
         assert ("show", "listening") in app.overlay_controller.commands
 
     def test_chunked_mode_creates_chunked_recorder(self, app, monkeypatch):
-        app.config["chunked_mode"] = True
+        app.config["chunked_mode"] = "on"
         created = {}
 
         def fake_chunked(**kwargs):
@@ -397,11 +397,30 @@ class TestStartRecording:
         assert app.chunked_recorder is created["rec"]
         # Chunk params come straight from config (single source of truth).
         assert created["kwargs"]["chunk_duration"] == app.config["chunk_duration"]
+        assert created["kwargs"]["first_chunk_duration"] == app.config["chunk_duration"]
         assert created["kwargs"]["sample_rate"] == app.config["sample_rate"]
+
+    def test_auto_mode_defers_first_chunk_to_threshold(self, app, monkeypatch):
+        app.config["chunked_mode"] = "auto"
+        app.config["chunk_auto_threshold"] = 30
+        created = {}
+
+        def fake_chunked(**kwargs):
+            created["kwargs"] = kwargs
+            created["rec"] = FakeChunkedRecorder()
+            return created["rec"]
+
+        monkeypatch.setattr(wayfinder_main, "ChunkedRecorder", fake_chunked)
+
+        app.start_recording()
+
+        assert created["rec"].started is True
+        assert created["kwargs"]["chunk_duration"] == 15
+        assert created["kwargs"]["first_chunk_duration"] == 30
 
     def test_free_tier_stale_chunked_setting_fails_closed(self, app):
         """An old/edited config cannot cross the Ultra execution boundary."""
-        app.config["chunked_mode"] = True
+        app.config["chunked_mode"] = "on"
         app.feature_gate = SimpleNamespace(has_feature=lambda _feature_id: False)
 
         app.start_recording()
@@ -411,7 +430,7 @@ class TestStartRecording:
         assert any("unavailable on Free" in message for message in app.logs)
 
     def test_broken_feature_gate_fails_closed(self, app):
-        app.config["chunked_mode"] = True
+        app.config["chunked_mode"] = "on"
 
         def broken_gate(_feature_id):
             raise RuntimeError("license store unavailable")
@@ -425,14 +444,14 @@ class TestStartRecording:
     def test_remote_backend_skips_chunked_mode(self, app):
         # Cloud whisper backends handle long audio natively → simple recorder even
         # with chunked_mode on.
-        app.config["chunked_mode"] = True
+        app.config["chunked_mode"] = "on"
         app.config["transcription_backend"] = "groq_whisper"
         app.start_recording()
         assert app.recorder.started is True
         assert app.chunked_recorder is None
 
     def test_recorder_start_failure_routes_to_error(self, app, monkeypatch):
-        app.config["chunked_mode"] = False
+        app.config["chunked_mode"] = "off"
 
         def boom():
             raise RuntimeError("no mic")
@@ -448,7 +467,7 @@ class TestStartRecording:
         self, app, monkeypatch
     ):
         """A stop press during a timed-out mic open must not replay as a new start."""
-        app.config["chunked_mode"] = False
+        app.config["chunked_mode"] = "off"
         starts = 0
 
         def boom():
@@ -474,7 +493,7 @@ class TestStartRecording:
 
 class TestStopSimplePath:
     def _record(self, app):
-        app.config["chunked_mode"] = False
+        app.config["chunked_mode"] = "off"
         app.start_recording()
         return app.session_generation
 
@@ -527,7 +546,7 @@ class TestHappyPath:
         monkeypatch.setattr(wayfinder_main, "inject_text",
                             lambda text, **k: injected.append(text))
 
-        app.config["chunked_mode"] = False
+        app.config["chunked_mode"] = "off"
 
         # 1) hotkey from IDLE → RECORDING
         app.on_record_button()
@@ -595,7 +614,7 @@ class TestFailurePaths:
 
         monkeypatch.setattr(wayfinder_main, "transcribe_with_config", boom)
 
-        app.config["chunked_mode"] = False
+        app.config["chunked_mode"] = "off"
         app.on_record_button()   # RECORDING
         app.on_record_button()   # PROCESSING → transcribe (raises) → TRANSCRIPTION_ERROR
         app.pump_events()
@@ -807,7 +826,7 @@ class TestStopChunkedPath:
     def test_stop_chunked_submits_final_chunk_and_finalizer(self, app, monkeypatch):
         monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
                             lambda *a, **k: "final text")
-        app.config["chunked_mode"] = True
+        app.config["chunked_mode"] = "on"
         # chunk_count=0 → the only chunk is the final one, so the finalizer's
         # expected count (0 + 1) is met immediately (no 120s wait for phantom chunks).
         rec = FakeChunkedRecorder(duration=45.0, peak=0.5, chunk_count=0)
@@ -885,7 +904,7 @@ class TestStopChunkedPath:
         assert not any("Permission denied: ''" in msg for msg in app.logs)
 
     def test_stop_chunked_too_short_errors(self, app):
-        app.config["chunked_mode"] = True
+        app.config["chunked_mode"] = "on"
         rec = FakeChunkedRecorder(duration=0.1)
         app.chunked_recorder = rec
         rec.started = True
@@ -899,7 +918,7 @@ class TestStopChunkedPath:
         """M4: a chunk that failed to save must be surfaced to the activity log at
         stop time, not silently dropped. (duration below min → the recording is
         then rejected, but the drop must already have been logged.)"""
-        app.config["chunked_mode"] = True
+        app.config["chunked_mode"] = "on"
         rec = FakeChunkedRecorder(duration=0.1)
         rec.dropped_chunk_count = 3  # three chunks failed to save this session
         app.chunked_recorder = rec
@@ -911,7 +930,7 @@ class TestStopChunkedPath:
 
     def test_stop_chunked_no_drop_no_noise(self, app):
         """The drop warning appears ONLY when chunks were actually lost."""
-        app.config["chunked_mode"] = True
+        app.config["chunked_mode"] = "on"
         rec = FakeChunkedRecorder(duration=0.1)  # dropped_chunk_count defaults to 0
         app.chunked_recorder = rec
         rec.started = True

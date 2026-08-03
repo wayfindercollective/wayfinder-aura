@@ -192,9 +192,11 @@ class TestChunkedRecordingPipeline:
     def test_chunked_config_defaults(self):
         """DEFAULT_CONFIG should have chunked mode settings."""
         assert "chunked_mode" in DEFAULT_CONFIG
+        assert "chunk_auto_threshold" in DEFAULT_CONFIG
         assert "chunk_duration" in DEFAULT_CONFIG
         assert "chunk_overlap" in DEFAULT_CONFIG
-        assert DEFAULT_CONFIG["chunked_mode"] is False
+        assert DEFAULT_CONFIG["chunked_mode"] == "auto"
+        assert DEFAULT_CONFIG["chunk_auto_threshold"] == 30
         assert DEFAULT_CONFIG["chunk_duration"] > 0
 
 

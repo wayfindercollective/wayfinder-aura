@@ -467,6 +467,53 @@ class TestWhisperServerBackend:
         assert result == "salvaged words"
         assert cli.transcribe.called, "malformed post-restart response must fall through to salvage"
 
+    def test_server_retry_exhaustion_still_leaves_fresh_cli_salvage_budget(
+        self, sample_audio_file: Path
+    ):
+        """A retry that consumes the server deadline must not starve CLI salvage.
+
+        This is the live failure from 2026-08-03: two 5s server attempts used the
+        entire recovery window, then CLI was handed that expired deadline and
+        returned zero text despite seven seconds of captured speech.
+        """
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=True, timeout=5)
+        now = [1000.0]
+
+        def fake_start(*_args, **_kwargs):
+            WhisperServerBackend._server_port = 8178
+
+        calls = [0]
+
+        def fake_urlopen(*_args, **_kwargs):
+            calls[0] += 1
+            if calls[0] == 2:
+                # The post-restart request consumes more than the 5s server
+                # recovery deadline before failing.
+                now[0] += 6.0
+            raise TimeoutError("wedged")
+
+        cli = MagicMock()
+
+        def salvage(_audio, _context, deadline=None):
+            assert deadline is not None and deadline > now[0] + 40.0
+            return "rescued dictation"
+
+        cli.transcribe.side_effect = salvage
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch.object(WhisperServerBackend, "_stop_server_internal"), \
+             patch.object(WhisperServerBackend, "_cli_fallback", return_value=cli), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+             patch("time.monotonic", side_effect=lambda: now[0]):
+            result = backend.transcribe(str(sample_audio_file))
+
+        assert result == "rescued dictation"
+        assert cli.transcribe.called
+
     def test_recovery_retry_is_clamped_to_watchdog_budget(self, sample_audio_file: Path):
         """Finding-1 regression (retry leg): the post-restart retry timeout is DERIVED
         from the monotonic recovery deadline (now + self.timeout), not the full

@@ -286,8 +286,13 @@ SETTING_TOOLTIPS: dict[str, str] = {
     ),
     
     # 🟡 Moderate latency impact (10-100ms)
-    "chunked_mode": "Split long recordings into segments and transcribe while you speak.\nReduces work after Stop on very long dictations.\n⚠️ Each splice can lose context or duplicate/drop boundary words",
-    "chunk_duration": "Length of each audio segment (seconds).\nShorter = faster feedback but more context loss and splice points.\n⚠️ 15s/2s is the tested default; 30s is safer",
+    "chunked_mode": (
+        "Choose when recordings are split for background transcription.\n"
+        "Off: always one pass. Auto: one pass under 30s, then chunks. "
+        "On: chunks from the first 15s segment.\n"
+        "Auto is recommended."
+    ),
+    "chunk_duration": "Length of each segment after chunking begins.\nShorter = faster feedback but more splice points.\n⚠️ 15s with 2s overlap is the tested default",
     
     # 🔴 MAJOR latency impact - These are the biggest factors
     "whisper_model": "Local on-device speech recognition model.\nBase is the Free default: fast and lightweight, but it can be inaccurate compared with Ultra models.\nProcessed entirely on your machine — no cloud API needed.",

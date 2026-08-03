@@ -13,12 +13,13 @@ def _make_executable(path: Path) -> Path:
 def test_appimage_whisper_cli_is_resolved_from_the_current_mount(tmp_path, monkeypatch):
     appdir = tmp_path / "mount"
     primary = _make_executable(appdir / "usr" / "bin" / "whisper-cli")
+    stale = _make_executable(tmp_path / ".mount_stale" / "usr" / "bin" / "whisper-cli")
     monkeypatch.setattr(runtime_assets, "get_wayfinder_appimage_dir", lambda: appdir)
     monkeypatch.setattr(runtime_assets, "is_wayfinder_flatpak_env", lambda: False)
     monkeypatch.setattr(runtime_assets.shutil, "which", lambda _name: None)
 
     found = runtime_assets.find_whisper_binary(
-        {"whisper_binary": "/tmp/.mount_stale/usr/bin/whisper-cli"}
+        {"whisper_binary": str(stale)}
     )
 
     assert found == str(primary)

@@ -15,7 +15,7 @@ import sys
 import pytest
 
 from wayfinder.utils import hostexec
-from wayfinder.utils.hostexec import host_env
+from wayfinder.utils.hostexec import bundle_binary_env, host_env
 
 
 @pytest.fixture
@@ -84,3 +84,42 @@ def test_path_never_ends_up_missing(bundle, monkeypatch):
     monkeypatch.setenv("PATH", f"{bundle['appdir']}/usr/bin")
     env = host_env()
     assert env["PATH"] == hostexec._FALLBACK_PATH
+
+
+def test_bundle_binary_env_restores_pre_pyinstaller_library_path(bundle, monkeypatch):
+    original = f"{bundle['appdir']}/usr/lib:/opt/vendor/lib"
+    monkeypatch.setenv(
+        "LD_LIBRARY_PATH",
+        f"{bundle['mei']}:{original}",
+    )
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", original)
+
+    env = bundle_binary_env()
+
+    assert env["LD_LIBRARY_PATH"] == original
+    assert env["LD_LIBRARY_PATH_ORIG"] == original
+
+
+def test_bundle_binary_env_without_orig_drops_only_meipass(bundle, monkeypatch):
+    monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
+    monkeypatch.setenv(
+        "LD_LIBRARY_PATH",
+        f"{bundle['mei']}:{bundle['appdir']}/usr/lib:/usr/lib64",
+    )
+
+    env = bundle_binary_env()
+
+    assert env["LD_LIBRARY_PATH"] == (
+        f"{bundle['appdir']}/usr/lib:/usr/lib64"
+    )
+
+
+def test_bundle_binary_env_source_run_is_passthrough(monkeypatch):
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/custom/lib")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/opt/original/lib")
+
+    env = bundle_binary_env({"EXTRA": "1"})
+
+    assert env["LD_LIBRARY_PATH"] == "/opt/custom/lib"
+    assert env["EXTRA"] == "1"

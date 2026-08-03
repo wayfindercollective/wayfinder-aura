@@ -33,15 +33,20 @@ def find_whisper_binary(config: dict | None = None, *, cpu: bool = False) -> str
     names = ["whisper-cli-cpu", "whisper-cli"] if cpu else ["whisper-cli"]
     candidates: list[Path | str] = []
 
+    # A prior AppImage's FUSE mount can remain visible after exit: stat/access
+    # may still claim its files are executable, but exec then fails with
+    # ENOTCONN ("Transport endpoint is not connected"). The current APPDIR is
+    # authoritative and must precede any persisted/configured mount path.
+    appdir = get_wayfinder_appimage_dir()
+    if appdir is not None:
+        candidates.extend(appdir / "usr" / "bin" / name for name in names)
+
     if configured:
         configured_path = Path(os.path.expanduser(configured))
         if cpu and configured_path.name == "whisper-cli":
             candidates.append(configured_path.with_name("whisper-cli-cpu"))
         candidates.append(configured_path)
 
-    appdir = get_wayfinder_appimage_dir()
-    if appdir is not None:
-        candidates.extend(appdir / "usr" / "bin" / name for name in names)
     if is_wayfinder_flatpak_env():
         candidates.extend(Path("/app/bin") / name for name in names)
 

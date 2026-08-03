@@ -5,6 +5,36 @@ All notable changes to Wayfinder Aura are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Chunk Processing now supports Off, Auto, and On.** Auto is the first-run
+  Ultra default: recordings under 30 seconds remain one Whisper request, while
+  longer sessions begin with a 30-second segment and continue in the tested
+  15-second/2-second-overlap profile. Existing Off/On preferences are preserved.
+
+### Changed
+
+- **New installs start with LLM post-processing disabled.** Raw Whisper output
+  is the fastest and least surprising first experience; cleanup and Style
+  transformations remain opt-in. Existing installs retain their saved choice.
+
+### Fixed
+
+- **Packaged Vulkan inference no longer inherits PyInstaller's private library
+  directory.** On AMD this reduced Turbo Q5 transcription from roughly eight
+  seconds to under half a second and also accelerated local Gemma cleanup.
+- **Whisper server recovery can no longer starve its CLI salvage path.** A
+  failed restart gets a fresh bounded fallback window instead of returning an
+  empty transcription after the server deadline expires.
+- **AppImage inference paths follow the current mount.** Saved paths from a
+  disconnected prior AppImage no longer break downloads, benchmarks, Whisper,
+  or local cleanup with `Transport endpoint is not connected`.
+- **Opening and closing inline Settings panels no longer multiplies row
+  spacing at HiDPI scales.** CustomTkinter pack padding is restored in logical
+  units instead of being scaled twice.
+
 ## [1.1.7] — 2026-08-01
 
 ### Fixed

@@ -137,36 +137,36 @@ def test_ultra_gpu_toggle_off_persists_cpu_and_restarts_runtime(monkeypatch):
     shutdown.assert_called_once()
 
 
-def test_free_chunk_toggle_snaps_off_and_prompts():
+def test_free_chunk_selector_snaps_off_and_prompts():
     prompts = []
     app = SimpleNamespace(
         feature_gate=SimpleNamespace(has_feature=lambda _feature: False),
-        config={"chunked_mode": False},
-        chunked_var=_Var(True),
+        config={"chunked_mode": "off"},
+        chunked_mode_var=_Var("Auto (Recommended)"),
         _show_premium_prompt=prompts.append,
     )
 
-    wayfinder_main.WayfinderApp.toggle_chunked_mode(app)
+    wayfinder_main.WayfinderApp.on_chunked_mode_changed(app, "Auto (Recommended)")
 
-    assert app.chunked_var.get() is False
-    assert app.config["chunked_mode"] is False
+    assert app.chunked_mode_var.get() == "Off"
+    assert app.config["chunked_mode"] == "off"
     assert prompts == ["chunked_recording"]
 
 
-def test_ultra_chunk_toggle_persists(monkeypatch):
+def test_ultra_chunk_selector_persists_auto(monkeypatch):
     app = SimpleNamespace(
         feature_gate=SimpleNamespace(
             has_feature=lambda feature: feature == "chunked_recording"
         ),
-        config={"chunked_mode": False},
-        chunked_var=_Var(True),
+        config={"chunked_mode": "off", "chunk_auto_threshold": 30},
+        chunked_mode_var=_Var("Auto (Recommended)"),
         log=lambda _message: None,
     )
     monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
 
-    wayfinder_main.WayfinderApp.toggle_chunked_mode(app)
+    wayfinder_main.WayfinderApp.on_chunked_mode_changed(app, "Auto (Recommended)")
 
-    assert app.config["chunked_mode"] is True
+    assert app.config["chunked_mode"] == "auto"
 
 
 def test_free_remote_mode_resets_selector_and_prompts():

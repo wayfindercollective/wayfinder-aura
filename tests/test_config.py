@@ -40,6 +40,9 @@ class TestConfigLoading:
         assert DEFAULT_CONFIG["output_tone"] == "minimal"
         assert DEFAULT_CONFIG["strong_mode"] is False
         assert DEFAULT_CONFIG["caricature_mode"] is False
+        assert DEFAULT_CONFIG["chunked_mode"] == "auto"
+        assert DEFAULT_CONFIG["chunk_auto_threshold"] == 30
+        assert DEFAULT_CONFIG["post_processing_enabled"] is False
 
     def test_welcome_completed_default(self):
         """The first-run welcome tour gate is present and defaults to False."""
@@ -138,6 +141,34 @@ class TestConfigLoading:
 
         assert config["chunk_duration"] == 15
         assert config["chunk_overlap"] == 2
+
+    @pytest.mark.parametrize(
+        ("legacy", "expected"),
+        [(False, "off"), (True, "on")],
+    )
+    def test_boolean_chunk_preference_migrates_without_changing_intent(
+        self, temp_config_dir: Path, legacy: bool, expected: str
+    ):
+        from wayfinder.config import CONFIG_FILE, load_config
+
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps({"chunked_mode": legacy}))
+
+        assert load_config()["chunked_mode"] == expected
+
+    def test_existing_partial_config_keeps_legacy_processing_defaults(
+        self, temp_config_dir: Path
+    ):
+        """Only a true first run gets Auto + cleanup Off."""
+        from wayfinder.config import CONFIG_FILE, load_config
+
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps({"threads": 8}))
+
+        config = load_config()
+
+        assert config["chunked_mode"] == "off"
+        assert config["post_processing_enabled"] is True
 
     def test_foreign_parent_flatpak_id_does_not_select_flatpak_defaults(self):
         """Import-time config must ignore FLATPAK_ID leaked by another Flatpak app."""
@@ -252,6 +283,46 @@ class TestStalePathRepair:
         config = cfg.load_config()
         assert config["whisper_binary"] == str(host_cli)
 
+    def test_appimage_replaces_stat_able_stale_mount_with_current_cli(
+        self, temp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A disconnected old FUSE mount can pass exists(); APPDIR still wins."""
+        from wayfinder import config as cfg
+
+        current_appdir = tmp_path / ".mount_current"
+        current_cli = current_appdir / "usr" / "bin" / "whisper-cli"
+        current_cli.parent.mkdir(parents=True)
+        current_cli.write_text("#!/bin/sh\n")
+
+        stale_cli = tmp_path / ".mount_stale" / "usr" / "bin" / "whisper-cli"
+        stale_cli.parent.mkdir(parents=True)
+        stale_cli.write_text("#!/bin/sh\n")
+
+        monkeypatch.setattr(cfg, "IS_APPIMAGE", True)
+        monkeypatch.setattr(cfg, "APPDIR", str(current_appdir))
+
+        assert cfg._repair_config_path("whisper_binary", str(stale_cli)) == str(current_cli)
+
+    def test_appimage_replaces_stat_able_stale_mount_with_current_llama(
+        self, temp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Cleanup must not execute llama from a disconnected prior mount."""
+        from wayfinder import config as cfg
+
+        current_appdir = tmp_path / ".mount_current"
+        current_cli = current_appdir / "usr" / "bin" / "llama-cli"
+        current_cli.parent.mkdir(parents=True)
+        current_cli.write_text("#!/bin/sh\n")
+
+        stale_cli = tmp_path / ".mount_stale" / "usr" / "bin" / "llama-cli"
+        stale_cli.parent.mkdir(parents=True)
+        stale_cli.write_text("#!/bin/sh\n")
+
+        monkeypatch.setattr(cfg, "IS_APPIMAGE", True)
+        monkeypatch.setattr(cfg, "APPDIR", str(current_appdir))
+
+        assert cfg._repair_config_path("llama_cpp_binary", str(stale_cli)) == str(current_cli)
+
     def test_source_mode_ignores_existing_flatpak_app_path(
         self, temp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -326,7 +397,7 @@ class TestLicenseConfigEnforcement:
             "prompt": "styled",
             "strong_mode": True,
             "caricature_mode": True,
-            "chunked_mode": True,
+            "chunked_mode": "on",
             "transcription_backend": "groq_whisper",
             "processing_mode": "remote",
             "post_processing_backend": "openai",
@@ -345,7 +416,7 @@ class TestLicenseConfigEnforcement:
         assert cfg["prompt"] == "Dictation with natural speech."
         assert cfg["strong_mode"] is False
         assert cfg["caricature_mode"] is False
-        assert cfg["chunked_mode"] is False
+        assert cfg["chunked_mode"] == "off"
         assert cfg["transcription_backend"] == "whisper_cpp"
         assert cfg["processing_mode"] == "local"
         assert cfg["post_processing_backend"] == "llama_cpp"

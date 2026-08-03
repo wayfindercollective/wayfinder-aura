@@ -1445,6 +1445,7 @@ class ChunkedRecorder:
         preprocessing: bool | str = "light",
         chunk_duration: float = 30.0,
         chunk_overlap: float = 2.0,
+        first_chunk_duration: float | None = None,
         on_chunk_ready: Callable[[str, int], None] | None = None,
         warm_mic: "WarmMic | None" = None,
     ):
@@ -1462,6 +1463,9 @@ class ChunkedRecorder:
                 - "heavy": Full processing with noise gate
             chunk_duration: Duration of each chunk in seconds
             chunk_overlap: Overlap between chunks in seconds
+            first_chunk_duration: Optional longer first boundary. Auto mode uses
+                30 seconds here, then ``chunk_duration`` for later segments. If
+                recording stops before this boundary, one final WAV is emitted.
             on_chunk_ready: Callback when a chunk is ready (path, chunk_index)
             warm_mic: Optional shared WarmMic. When given, this recorder attaches to the warm
                 stream on start() (instant capture) instead of opening its own each time.
@@ -1479,6 +1483,11 @@ class ChunkedRecorder:
             self.preprocessing = preprocessing
         self.chunk_duration = chunk_duration
         self.chunk_overlap = chunk_overlap
+        self.first_chunk_duration = (
+            float(first_chunk_duration)
+            if first_chunk_duration is not None and first_chunk_duration > 0
+            else float(chunk_duration)
+        )
         self.on_chunk_ready = on_chunk_ready
         
         # Audio buffer (ring buffer style)
@@ -1506,6 +1515,7 @@ class ChunkedRecorder:
 
         # Calculate samples (will be updated based on actual recording rate)
         self._chunk_samples = int(chunk_duration * sample_rate)
+        self._first_chunk_samples = int(self.first_chunk_duration * sample_rate)
         self._overlap_samples = int(chunk_overlap * sample_rate)
 
     @property
@@ -1554,44 +1564,54 @@ class ChunkedRecorder:
             
             return all_audio[start_sample:end_sample].copy()
 
+    def _emit_ready_chunks(self) -> int:
+        """Save and publish every complete chunk currently in the buffer.
+
+        The first boundary can be longer than later chunks, which is how Auto
+        stays one-shot for short recordings but begins background work at 30s.
+        Returns the number emitted during this call.
+        """
+        emitted = 0
+        while True:
+            total_samples = self._get_total_samples()
+            next_chunk_end = (
+                self._first_chunk_samples
+                if self._chunk_index == 0
+                else self._last_chunk_end + self._chunk_samples
+            )
+            if total_samples < next_chunk_end:
+                return emitted
+
+            start = (
+                0
+                if self._chunk_index == 0
+                else max(0, self._last_chunk_end - self._overlap_samples)
+            )
+            chunk_audio = self._extract_chunk(start, next_chunk_end)
+            if chunk_audio is None:
+                return emitted
+            chunk_path = self._save_chunk(chunk_audio)
+            if not chunk_path:
+                return emitted
+
+            chunk_index = self._chunk_index
+            self._chunk_queue.put((chunk_path, chunk_index))
+            if self.on_chunk_ready:
+                try:
+                    self.on_chunk_ready(chunk_path, chunk_index)
+                except Exception as e:
+                    print(f"Chunk callback error: {e}")
+
+            self._chunk_index += 1
+            self._last_chunk_end = next_chunk_end
+            emitted += 1
+
     def _chunk_monitor_thread(self) -> None:
         """Background thread that monitors for ready chunks."""
         while not self._stop_event.is_set():
-            total_samples = self._get_total_samples()
-            
-            # Calculate if we have enough for a new chunk
-            next_chunk_end = self._last_chunk_end + self._chunk_samples
-            
-            if total_samples >= next_chunk_end:
-                # We have enough audio for a chunk
-                # Start with overlap from previous chunk (except first)
-                if self._chunk_index == 0:
-                    start = 0
-                else:
-                    start = self._last_chunk_end - self._overlap_samples
-                    start = max(0, start)
-                
-                end = next_chunk_end
-                
-                # Extract and save chunk
-                chunk_audio = self._extract_chunk(start, end)
-                if chunk_audio is not None:
-                    chunk_path = self._save_chunk(chunk_audio)
-                    if chunk_path:
-                        self._chunk_queue.put((chunk_path, self._chunk_index))
-                        
-                        # Call callback if provided
-                        if self.on_chunk_ready:
-                            try:
-                                self.on_chunk_ready(chunk_path, self._chunk_index)
-                            except Exception as e:
-                                print(f"Chunk callback error: {e}")
-                        
-                        self._chunk_index += 1
-                        self._last_chunk_end = end
-            
+            self._emit_ready_chunks()
             # Small sleep to avoid busy waiting
-            self._stop_event.wait(0.5)
+            self._stop_event.wait(0.25)
 
     def _save_chunk(self, audio_data: np.ndarray) -> str | None:
         """Save a chunk to a temporary WAV file."""
@@ -1665,6 +1685,9 @@ class ChunkedRecorder:
             self.device = self.warm_mic.acquire(self._audio_callback)
             self.recording_sample_rate = self.warm_mic.sample_rate
             self._chunk_samples = int(self.chunk_duration * self.recording_sample_rate)
+            self._first_chunk_samples = int(
+                self.first_chunk_duration * self.recording_sample_rate
+            )
             self._overlap_samples = int(self.chunk_overlap * self.recording_sample_rate)
         else:
             # Open the audio stream. If the configured device fails (renumbered index, or a JACK
@@ -1686,6 +1709,9 @@ class ChunkedRecorder:
                         print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
                     # Recalculate chunk samples based on actual recording rate
                     self._chunk_samples = int(self.chunk_duration * self.recording_sample_rate)
+                    self._first_chunk_samples = int(
+                        self.first_chunk_duration * self.recording_sample_rate
+                    )
                     self._overlap_samples = int(self.chunk_overlap * self.recording_sample_rate)
                     self._stream = sd.InputStream(
                         samplerate=self.recording_sample_rate,
@@ -1730,6 +1756,12 @@ class ChunkedRecorder:
         if self._chunk_thread is not None:
             self._chunk_thread.join(timeout=2.0)
             self._chunk_thread = None
+
+        # Stop can land just after the Auto threshold but before the monitor's
+        # next 250ms tick. Flush completed boundaries synchronously so a 30.1s
+        # recording really does activate chunking instead of reverting to one
+        # large final request by timing accident.
+        self._emit_ready_chunks()
         
         # Save any remaining audio as final chunk
         final_path = None

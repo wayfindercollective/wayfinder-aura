@@ -26,6 +26,23 @@ _appimage_dir = get_wayfinder_appimage_dir()
 IS_APPIMAGE = _appimage_dir is not None
 APPDIR = str(_appimage_dir) if _appimage_dir else ""
 
+CHUNKED_PROCESSING_MODES = ("off", "auto", "on")
+
+
+def normalize_chunked_mode(value: object, default: str = "off") -> str:
+    """Return the canonical Off/Auto/On recording mode.
+
+    Releases through 1.1.7 stored a boolean.  Treat those values as explicit
+    user preferences during migration: False remains Off and True remains On.
+    Unknown values fail closed to ``default`` rather than enabling chunking.
+    """
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    normalized = str(value or "").strip().lower()
+    if normalized in CHUNKED_PROCESSING_MODES:
+        return normalized
+    return default if default in CHUNKED_PROCESSING_MODES else "off"
+
 def _default_config_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "wayfinder-aura"
@@ -188,15 +205,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "prompt": "Dictation with natural speech.",
     "threads": 4,  # Default to 4, auto-adjusted on first run based on CPU cores
     "timeout": 120,  # whisper-CLI fallback (per-dictation model load needs headroom)
-    # whisper-SERVER request timeout. Deliberately MUCH shorter than the PROCESSING
-    # watchdog (processing_timeout_secs, 120s): the server occasionally wedges its
-    # inference worker (keeps answering health checks but never returns a result —
-    # seen after an audio "input overflow" glitch or suspend/resume). A short request
-    # timeout detects the wedge fast, so the backend can restart the server and retry
-    # on a healthy one and still PASTE the dictation almost immediately. A resident GPU
-    # server transcribes a 10-15s chunk in well under a second on current hardware; 5s
-    # leaves ample contention headroom without ever imposing the old 30s dead-air wait.
-    "whisper_server_timeout": 5,
+    # whisper-SERVER request timeout. Keep it below the 120s processing watchdog:
+    # the server can wedge its inference worker after an input overflow or resume,
+    # while health checks still pass. A resident Turbo request is normally far
+    # faster, but can exceed the previous 5s timeout under transient GPU contention.
+    # Thirty seconds leaves bounded room for restart/retry and independent CLI
+    # salvage instead of turning a recoverable delay into "No speech detected."
+    "whisper_server_timeout": 30,
     "min_recording_duration": 0.5,
 
     # Whisper server mode: keep model loaded in memory for fast inference
@@ -235,13 +250,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "voice_learning_history_limit": 100,  # Max transcriptions to keep in learning history
     "voice_learning_regen_interval": 20,  # Regenerate profile summary every N transcriptions
     
-    # Chunked recording settings
-    # Chunking is an opt-in Ultra latency tradeoff for genuinely long recordings:
-    # mid-recording chunks reduce the work left after Stop, but every splice can
-    # lose acoustic context or duplicate/drop boundary words. Keep one-shot ASR as
-    # the accuracy-first default for every tier; the feature gate is also enforced
-    # at the recording boundary (a stale/edited config cannot enable it on Free).
-    "chunked_mode": False,
+    # Chunked recording settings. Auto keeps short dictations as one Whisper
+    # request, then begins background chunks only after 30 seconds. This is the
+    # first-run Ultra default; existing boolean preferences migrate to Off/On.
+    # The feature gate is still enforced at the recording boundary.
+    "chunked_mode": "auto",  # off | auto | on
+    "chunk_auto_threshold": 30,  # First chunk boundary in Auto mode (seconds)
     "chunk_duration": 15,  # Empirical balance: fewer ASR boundary errors than 10s
     "chunk_overlap": 2,  # Context re-included at each boundary (word-cut guard)
     # Optional safety cap (seconds). 0 = unlimited. When set, auto-stops and processes
@@ -328,7 +342,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "caricature_mode": False,  # 🎭 Secret easter egg! Unlocked by typing "lol" on Style tab.
     
     # Post-processing settings (LLM cleanup)
-    "post_processing_enabled": True,  # Enable LLM post-processing
+    # First-run default is raw Whisper output: fastest and least surprising.
+    # Existing installs preserve their saved cleanup preference during migration.
+    "post_processing_enabled": False,  # Enable LLM post-processing
     "post_processing_backend": "llama_cpp",  # llama_cpp | anthropic | openai
     "fast_filler_removal": False,  # When True, use instant regex-based filler removal (no LLM) - best for "minimal" style
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
@@ -625,14 +641,33 @@ def enforce_license_config(config: dict, gate) -> list[str]:
     ):
         _set("post_processing_backend", "llama_cpp")
 
-    if config.get("chunked_mode", False) and not _has("chunked_recording"):
-        _set("chunked_mode", False)
+    chunked_mode = normalize_chunked_mode(config.get("chunked_mode"), default="off")
+    _set("chunked_mode", chunked_mode)
+    if chunked_mode != "off" and not _has("chunked_recording"):
+        _set("chunked_mode", "off")
 
     return changed
 
 
 def _repair_config_path(key: str, saved: object) -> object:
     """Repair blank/stale critical paths without treating '' as cwd."""
+    # AppImage FUSE mount names change on every launch. Old mounts can remain
+    # stat-able even after their transport disconnects, so a plain exists()
+    # check is not enough: always select this process's bundled CLI first.
+    if IS_APPIMAGE and APPDIR:
+        if key == "whisper_binary":
+            current_appimage_cli = os.path.join(APPDIR, "usr", "bin", "whisper-cli")
+            if _path_exists(current_appimage_cli):
+                return current_appimage_cli
+        elif key == "llama_cpp_binary":
+            # LlamaCppCliBackend converts llama-cli to the preferred
+            # llama-simple sibling after this repair. Starting from the current
+            # AppDir is essential: a disconnected old mount can still pass
+            # exists() and otherwise poison cleanup/warm-up after an update.
+            current_appimage_llama = os.path.join(APPDIR, "usr", "bin", "llama-cli")
+            if _path_exists(current_appimage_llama):
+                return current_appimage_llama
+
     if _path_exists(saved):
         return saved
 
@@ -709,6 +744,22 @@ def load_config() -> dict:
             # Merge with defaults (user config overrides defaults)
             config = DEFAULT_CONFIG.copy()
             config.update(user_config)
+
+            # Migrate the old boolean Chunked Mode toggle into the new
+            # Off/Auto/On selector. An existing config that somehow predates the
+            # key keeps the legacy Off behavior; only a true first run gets Auto.
+            if "chunked_mode" in user_config:
+                config["chunked_mode"] = normalize_chunked_mode(
+                    user_config.get("chunked_mode"), default="off"
+                )
+            else:
+                config["chunked_mode"] = "off"
+
+            # Post-processing changed to opt-in for new installs. Preserve the
+            # historical enabled behavior for partial existing configs that do
+            # not contain the setting, rather than silently changing an update.
+            if "post_processing_enabled" not in user_config:
+                config["post_processing_enabled"] = True
 
             # Migrate: upgrade weak default prompt to stronger one
             _old_prompt = "Hello, this is a dictation with proper punctuation and grammar."

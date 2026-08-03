@@ -10,7 +10,9 @@ escape hatch: AppRun already polluted it. The only safe environment for a
 host binary strips every bundle-owned path entry and bundle-only variable.
 
 Bundled binaries (wtype, whisper-cli, llama server, the overlay subprocess)
-NEED the bundle environment — never use this helper for them.
+NEED the AppImage environment — never use ``host_env`` for them.  They must,
+however, drop PyInstaller's private extraction directory; use
+``bundle_binary_env`` for those native subprocesses.
 """
 
 from __future__ import annotations
@@ -76,6 +78,46 @@ def host_env(overrides: dict | None = None) -> dict:
         for var in _DROP_VARS:
             env.pop(var, None)
         env.setdefault("PATH", _FALLBACK_PATH)
+    if overrides:
+        env.update(overrides)
+    return env
+
+
+def bundle_binary_env(overrides: dict | None = None) -> dict:
+    """Environment for native binaries shipped beside a frozen Python app.
+
+    PyInstaller prepends ``sys._MEIPASS`` to ``LD_LIBRARY_PATH`` so extension
+    modules load its private libraries.  A native Vulkan child must not inherit
+    that directory: on AMD it can silently select incompatible loader libraries
+    and make the same whisper-cli invocation run more than twenty times slower.
+
+    PyInstaller preserves the pre-bootloader value in
+    ``LD_LIBRARY_PATH_ORIG``.  In an AppImage that value still contains
+    ``$APPDIR/usr/lib``, which bundled whisper/llama binaries need, so restore it
+    verbatim rather than using ``host_env`` (which intentionally strips all
+    bundle paths).  Source runs remain a plain environment copy.
+    """
+    env = os.environ.copy()
+    mei = getattr(sys, "_MEIPASS", None)
+    if mei:
+        original = env.get("LD_LIBRARY_PATH_ORIG")
+        if original is not None:
+            if original:
+                env["LD_LIBRARY_PATH"] = original
+            else:
+                env.pop("LD_LIBRARY_PATH", None)
+        else:
+            # Defensive fallback for nonstandard bootloaders: remove only the
+            # PyInstaller extraction tree and retain AppImage-owned paths.
+            value = env.get("LD_LIBRARY_PATH", "")
+            kept = [
+                entry for entry in value.split(os.pathsep)
+                if entry and not _is_under(entry, [os.path.realpath(mei)])
+            ]
+            if kept:
+                env["LD_LIBRARY_PATH"] = os.pathsep.join(kept)
+            else:
+                env.pop("LD_LIBRARY_PATH", None)
     if overrides:
         env.update(overrides)
     return env

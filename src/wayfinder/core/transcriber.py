@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from wayfinder.config import IS_FLATPAK
+from wayfinder.utils.hostexec import bundle_binary_env
 
 
 # Developer vocabulary - common terms that Whisper often mishears
@@ -338,6 +339,7 @@ class WhisperCppBackend(TranscriptionBackend):
                 capture_output=True,
                 text=True,
                 timeout=5,
+                env=bundle_binary_env(),
             )
             # Check for GPU-related flags in help output
             # Vulkan builds have --no-gpu (GPU on by default)
@@ -374,6 +376,7 @@ class WhisperCppBackend(TranscriptionBackend):
             h = subprocess.run(
                 [binary or self.whisper_binary, "--help"],
                 capture_output=True, text=True, timeout=probe_timeout,
+                env=bundle_binary_env(),
             )
             flags = set(re.findall(r"--[a-z][a-z0-9-]+", (h.stdout or "") + (h.stderr or "")))
         except subprocess.TimeoutExpired:
@@ -547,7 +550,9 @@ class WhisperCppBackend(TranscriptionBackend):
                     capture_output=True,
                     text=True,
                     timeout=attempt_timeout,
-                    # No env= needed - subprocess inherits GGML_VK_VISIBLE_DEVICES from parent
+                    # Preserve Vulkan selection while dropping PyInstaller's
+                    # private library directory from native GPU children.
+                    env=bundle_binary_env(),
                 )
             except subprocess.TimeoutExpired:
                 # A deadline-CLAMPED timeout means the caller's salvage budget ran
@@ -660,6 +665,7 @@ class WhisperCppBackend(TranscriptionBackend):
                  "--no-timestamps"],
                 capture_output=True,
                 timeout=60,
+                env=bundle_binary_env(),
             )
             return result.returncode == 0
         except Exception:
@@ -699,6 +705,15 @@ class WhisperServerBackend(TranscriptionBackend):
     # then delegates straight to the per-call CLI backend instead of paying
     # the failed-startup cost on every dictation.
     _server_disabled: bool = False
+
+    # The server has its own short request/restart budget. CLI salvage must not
+    # share the already-expired tail of that budget: it needs enough time to
+    # load Turbo once on GPU, with a smaller remainder available for the CPU
+    # safety twin. 30s + a 45s total salvage window keeps the complete default
+    # ladder below the 120s PROCESSING watchdog (30s request + 30s recovery +
+    # 45s salvage = 105s).
+    _CLI_SALVAGE_ATTEMPT_TIMEOUT = 30.0
+    _CLI_SALVAGE_TOTAL_BUDGET = 45.0
 
     def __init__(
         self,
@@ -992,6 +1007,7 @@ class WhisperServerBackend(TranscriptionBackend):
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
+                    env=bundle_binary_env(),
                 )
                 WhisperServerBackend._server_process = proc
                 WhisperServerBackend._server_port = port
@@ -1145,7 +1161,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 model_path=self.model_path,
                 prompt=self.prompt,
                 threads=self.threads,
-                timeout=self.timeout,
+                timeout=self._CLI_SALVAGE_ATTEMPT_TIMEOUT,
                 use_gpu=self.use_gpu,
                 beam_size=self.beam_size,
                 best_of=self.best_of,
@@ -1259,12 +1275,10 @@ class WhisperServerBackend(TranscriptionBackend):
                 # avoids the needless model reload; the restart is reserved for a
                 # genuine failure.
                 #
-                # Bound the ENTIRE recovery — restart, retry, AND whisper-cli salvage —
-                # with ONE absolute deadline, so no cascade of failures can push
-                # transcribe() past the PROCESSING watchdog (config:
-                # processing_timeout_secs, 120s), which on expiry bumps the session
-                # generation and DROPS this result. self.timeout of recovery budget on
-                # top of the initial attempt keeps the worst case well under 120s.
+                # Bound the server recovery (restart + one retry) with one deadline.
+                # CLI salvage gets a separate, fixed window below: sharing this
+                # deadline starved salvage whenever the retry consumed the last
+                # second, producing a false "No speech detected" after valid audio.
                 import time
                 recovery_deadline = time.monotonic() + float(self.timeout)
                 print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
@@ -1283,15 +1297,19 @@ class WhisperServerBackend(TranscriptionBackend):
                 except Exception as retry_err:
                     # Any recovery failure — still-dead server, _start_server() failure,
                     # malformed response, or exhausted budget — falls to the per-call
-                    # whisper-cli salvage, itself bounded by the SAME deadline so its
-                    # GPU→CPU attempts cannot blow the watchdog either. The salvage
-                    # backend loads the model in its own process, independent of the
-                    # (possibly wedged) server.
+                    # whisper-cli salvage. Give it a FRESH bounded window: the server
+                    # retry may have consumed its complete deadline, but that must not
+                    # prevent an independent CLI process from saving the user's words.
+                    # The fixed attempt/total budgets above keep the whole default
+                    # cascade safely below the PROCESSING watchdog.
                     print(f"[Whisper Server] recovery failed ({retry_err}); "
                           "salvaging this chunk via whisper-cli.")
                     try:
+                        cli_deadline = (
+                            time.monotonic() + self._CLI_SALVAGE_TOTAL_BUDGET
+                        )
                         return self._cli_fallback().transcribe(
-                            audio_path, context, deadline=recovery_deadline)
+                            audio_path, context, deadline=cli_deadline)
                     except Exception as cli_err:
                         raise TranscriptionError(
                             f"whisper-server failed after restart ({retry_err}); "

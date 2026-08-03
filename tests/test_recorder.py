@@ -94,10 +94,69 @@ class TestChunkedRecorder:
         """Test ChunkedRecorder can be initialized."""
         from wayfinder.core.recorder import ChunkedRecorder
 
-        recorder = ChunkedRecorder(chunk_duration=5.0, chunk_overlap=1.0)
+        recorder = ChunkedRecorder(
+            chunk_duration=5.0,
+            chunk_overlap=1.0,
+            first_chunk_duration=30.0,
+        )
 
         assert recorder.chunk_duration == 5.0
         assert recorder.chunk_overlap == 1.0
+        assert recorder.first_chunk_duration == 30.0
+
+    @patch("wayfinder.core.recorder.sd")
+    def test_auto_defers_first_chunk_then_uses_normal_segment_length(self, mock_sd):
+        import numpy as np
+        from wayfinder.core.recorder import ChunkedRecorder
+
+        ready = []
+        recorder = ChunkedRecorder(
+            sample_rate=10,
+            chunk_duration=5.0,
+            chunk_overlap=1.0,
+            first_chunk_duration=10.0,
+            preprocessing="off",
+            on_chunk_ready=lambda path, index: ready.append((path, index)),
+        )
+        recorder.recording_sample_rate = 10
+        recorder._save_chunk = lambda audio: f"/tmp/chunk-{len(audio)}.wav"
+
+        recorder._buffer = [np.zeros((99, 1), dtype=np.float32)]
+        assert recorder._emit_ready_chunks() == 0
+        assert ready == []
+
+        recorder._buffer.append(np.zeros((1, 1), dtype=np.float32))
+        assert recorder._emit_ready_chunks() == 1
+        assert ready == [("/tmp/chunk-100.wav", 0)]
+
+        # Later chunks return to the configured 5s cadence and include 1s overlap.
+        recorder._buffer.append(np.zeros((50, 1), dtype=np.float32))
+        assert recorder._emit_ready_chunks() == 1
+        assert ready[-1] == ("/tmp/chunk-60.wav", 1)
+
+    @patch("wayfinder.core.recorder.sd")
+    def test_stop_flushes_auto_boundary_before_monitor_tick(self, mock_sd):
+        import numpy as np
+        from wayfinder.core.recorder import ChunkedRecorder
+
+        ready = []
+        recorder = ChunkedRecorder(
+            sample_rate=10,
+            chunk_duration=5.0,
+            chunk_overlap=1.0,
+            first_chunk_duration=10.0,
+            preprocessing="off",
+            on_chunk_ready=lambda path, index: ready.append((path, index)),
+        )
+        recorder.recording_sample_rate = 10
+        recorder._buffer = [np.zeros((101, 1), dtype=np.float32)]
+        recorder._save_chunk = lambda _audio: "/tmp/first-auto-chunk.wav"
+
+        final_path, _all_paths = recorder.stop()
+
+        assert recorder.get_chunk_count() == 1
+        assert ready == [("/tmp/first-auto-chunk.wav", 0)]
+        assert final_path is None  # only 0.1s of genuinely new tail audio
 
     @patch("wayfinder.core.recorder.sd")
     def test_stop_does_not_emit_overlap_only_final_chunk(self, mock_sd):

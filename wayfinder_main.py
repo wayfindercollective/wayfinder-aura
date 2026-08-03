@@ -79,6 +79,7 @@ from wayfinder.config import (
     FLATPAK_APP_ID,
     IS_FLATPAK,
     load_config,
+    normalize_chunked_mode,
     save_config,
 )
 from wayfinder.utils.platform import get_portal_app_id
@@ -97,6 +98,7 @@ from wayfinder.ui.steamdeck_help import (
     STEAM_DECK_GAME_MODE_HELP,
     should_show_steam_deck_button_help,
 )
+from wayfinder.utils.hostexec import bundle_binary_env
 
 
 # === Configuration ===
@@ -1124,7 +1126,13 @@ SETTING_TOOLTIPS = {
     ),
     
     # 🟡 Moderate latency impact (10-100ms)
-    "chunked_mode": "Split long recordings into segments and transcribe while you speak.\nReduces work after Stop on very long dictations, but every splice risks a boundary error.\n⚠️ One-shot recording remains the accuracy-first default",
+    "chunked_mode": (
+        "Choose when long recordings are split for background transcription.\n\n"
+        "• Off — Always one Whisper request.\n"
+        "• Auto — One request under 30s; chunk longer recordings.\n"
+        "• On — Begin chunking from the first 15s segment.\n\n"
+        "Auto is the recommended balance of short-dictation speed and long-recording latency."
+    ),
     "chunk_duration": "New audio per segment (seconds).\nShorter = less work left when you stop, but more context loss and splice points.\n⚠️ 15s/2s is the tested default | 30s is safer with a slower tail",
     
     # 🔴 MAJOR latency impact - These are the biggest factors
@@ -4914,6 +4922,43 @@ def clamp_dropdown_width(content_w, ctrl_w, win_w, margin=8):
     return int(min(max(ctrl_w, content_w), budget))
 
 
+def _logical_pack_info_for_restore(widget, pack_info: dict) -> dict:
+    """Convert ``pack_info()`` padding back to CustomTkinter design units.
+
+    ``CTkBaseClass.pack`` scales ``padx``/``pady`` before handing them to Tk,
+    while Tk's ``pack_info`` reports those already-scaled pixel values. Passing
+    that result back through ``child.pack(**pack_info)`` scales the padding a
+    second time. Inline panels do exactly that when hiding/restoring Settings
+    rows, so every visit used to multiply their spacing (20 -> 40 -> 80 px at
+    200% UI scale). Store logical values instead; restore then applies the
+    current scale exactly once, including when scale changes while a panel is
+    open.
+    """
+    info = dict(pack_info or {})
+    try:
+        scale = float(widget._get_widget_scaling())
+    except Exception:
+        scale = 1.0
+    if scale <= 0 or abs(scale - 1.0) < 1e-9:
+        return info
+
+    def _logical(value):
+        if isinstance(value, tuple):
+            return tuple(_logical(part) for part in value)
+        if isinstance(value, list):
+            return [_logical(part) for part in value]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return value
+        converted = float(value) / scale
+        rounded = round(converted)
+        return int(rounded) if abs(converted - rounded) < 1e-9 else converted
+
+    for key in ("padx", "pady"):
+        if key in info:
+            info[key] = _logical(info[key])
+    return info
+
+
 class InlineOptionMenu(ctk.CTkOptionMenu):
     """A CTkOptionMenu whose OPEN list renders as an in-window panel instead of
     a native tkinter.Menu (``tk_popup``).
@@ -8228,7 +8273,10 @@ class WayfinderApp(ctk.CTk):
                                    "-t", "6", "--no-timestamps", "--no-prints"]
                         
                         start = time.perf_counter()
-                        result = subprocess.run(cmd_gpu, capture_output=True, timeout=60)
+                        result = subprocess.run(
+                            cmd_gpu, capture_output=True, timeout=60,
+                            env=bundle_binary_env(),
+                        )
                         gpu_elapsed = time.perf_counter() - start
                         debug_log(f"GPU done: {gpu_elapsed:.2f}s, exit={result.returncode}")
                         
@@ -8256,7 +8304,10 @@ class WayfinderApp(ctk.CTk):
                                    "-t", "6", "--no-timestamps", "--no-prints", "--no-gpu"]
                         
                         start = time.perf_counter()
-                        result = subprocess.run(cmd_cpu, capture_output=True, timeout=120)
+                        result = subprocess.run(
+                            cmd_cpu, capture_output=True, timeout=120,
+                            env=bundle_binary_env(),
+                        )
                         cpu_elapsed = time.perf_counter() - start
                         debug_log(f"CPU done: {cpu_elapsed:.2f}s, exit={result.returncode}")
                         
@@ -8315,7 +8366,7 @@ class WayfinderApp(ctk.CTk):
                     use_gpu=bool(self.config.get("use_gpu", False)),
                     pp_results=pp_results,
                     current_pp_path=self.config.get("llama_cpp_model_path", ""),
-                    pp_enabled=bool(self.config.get("post_processing_enabled", True)),
+                    pp_enabled=bool(self.config.get("post_processing_enabled", False)),
                     audio_seconds=10,
                 )
                 if pipeline.get("total_time") is not None:
@@ -8864,22 +8915,42 @@ class WayfinderApp(ctk.CTk):
             width=220,
         )
         
-        # Chunked Mode toggle (Ultra). Display the effective value, not a stale
-        # config bit from a build that defaulted this premium feature to True.
+        # Three-state chunk processing (Ultra). Existing booleans are normalized
+        # by config migration; keep the boundary defensive for in-memory tests and
+        # hand-edited configs.
         _chunked_unlocked = self.feature_gate.has_feature("chunked_recording")
-        _chunked_enabled = bool(self.config.get("chunked_mode", False)) and _chunked_unlocked
-        self.chunked_var = ctk.BooleanVar(value=_chunked_enabled)
-        self.create_toggle_row(
-            parent, "Chunked Mode" if _chunked_unlocked else "Chunked Mode (Ultra)",
-            self.chunked_var, self.toggle_chunked_mode,
-            tooltip="Split long recordings into segments and transcribe while you speak.\n\n✅ Less processing left after Stop on very long dictations\n✅ Supports indefinite recording\n⚠️ Can lose context or mis-splice words at segment boundaries\n\nFor accuracy, leave this off unless post-recording wait on long dictations is a problem.",
+        _chunked_mode = normalize_chunked_mode(
+            self.config.get("chunked_mode"), default="off"
+        )
+        if not _chunked_unlocked:
+            _chunked_mode = "off"
+        self._chunked_display_to_mode = {
+            "Off": "off",
+            "Auto (Recommended)": "auto",
+            "On": "on",
+        }
+        self._chunked_mode_to_display = {
+            mode: label for label, mode in self._chunked_display_to_mode.items()
+        }
+        self.chunked_mode_var = ctk.StringVar(
+            value=self._chunked_mode_to_display[_chunked_mode]
+        )
+        self.create_dropdown_row(
+            parent,
+            "Chunk Processing" if _chunked_unlocked else "Chunk Processing (Ultra)",
+            list(self._chunked_display_to_mode),
+            self.chunked_mode_var,
+            self.on_chunked_mode_changed,
+            tooltip=SETTING_TOOLTIPS["chunked_mode"],
+            tooltip_key="chunked_mode",
+            width=210,
         )
         
         # === Post-Processing Section ===
         self._create_mode_section_header(parent, "Post-Processing (LLM Cleanup)")
         
         # Post-processing toggle
-        postproc_enabled = self.config.get("post_processing_enabled", True)
+        postproc_enabled = self.config.get("post_processing_enabled", False)
         self.postproc_enabled_var = ctk.BooleanVar(value=postproc_enabled)
         self.create_toggle_row(
             parent, "Enable Post-Processing",
@@ -9026,7 +9097,7 @@ class WayfinderApp(ctk.CTk):
         ).pack(side="left")
         
         # Post-processing toggle
-        postproc_enabled = self.config.get("post_processing_enabled", True)
+        postproc_enabled = self.config.get("post_processing_enabled", False)
         self.postproc_enabled_var = ctk.BooleanVar(value=postproc_enabled)
         self.create_toggle_row(
             parent, "Enable Text Cleanup",
@@ -10770,7 +10841,7 @@ class WayfinderApp(ctk.CTk):
             if self.config.get("transcription_backend") in ("openai_whisper", "groq_whisper"):
                 self.config["transcription_backend"] = "whisper_cpp"
             # Ensure post-processing uses llama_cpp if enabled
-            if self.config.get("post_processing_enabled", True):
+            if self.config.get("post_processing_enabled", False):
                 backend = self.config.get("post_processing_backend", "llama_cpp")
                 if backend != "llama_cpp":
                     self.config["post_processing_backend"] = "llama_cpp"
@@ -10792,16 +10863,28 @@ class WayfinderApp(ctk.CTk):
         # Rebuild the mode-specific settings panel
         self._build_mode_settings(mode)
     
-    def toggle_chunked_mode(self):
-        """Toggle chunked recording mode."""
-        if self.chunked_var.get() and not self.feature_gate.has_feature("chunked_recording"):
-            self.chunked_var.set(False)
+    def on_chunked_mode_changed(self, display_value: str):
+        """Persist Off/Auto/On chunk processing with entitlement enforcement."""
+        display_map = getattr(
+            self,
+            "_chunked_display_to_mode",
+            {"Off": "off", "Auto (Recommended)": "auto", "On": "on"},
+        )
+        mode = display_map.get(display_value, normalize_chunked_mode(display_value))
+        if mode != "off" and not self.feature_gate.has_feature("chunked_recording"):
+            if hasattr(self, "chunked_mode_var"):
+                self.chunked_mode_var.set("Off")
+            self.config["chunked_mode"] = "off"
             self._show_premium_prompt("chunked_recording")
             return
-        self.config["chunked_mode"] = self.chunked_var.get()
+        self.config["chunked_mode"] = mode
         save_config(self.config)
-        mode = "chunked (unlimited)" if self.chunked_var.get() else "simple"
-        self.log(f"⚙ Recording mode: {mode}")
+        descriptions = {
+            "off": "one-shot",
+            "auto": f"auto (chunks after {self.config.get('chunk_auto_threshold', 30)}s)",
+            "on": "always chunked",
+        }
+        self.log(f"⚙ Chunk processing: {descriptions[mode]}")
     
     def toggle_punctuation(self):
         """Toggle punctuation enforcement."""
@@ -11164,7 +11247,7 @@ class WayfinderApp(ctk.CTk):
                     self.log(f"⚠ Error saving profile: {e}")
 
             def regenerate_profile():
-                if not self.config.get("post_processing_enabled", True):
+                if not self.config.get("post_processing_enabled", False):
                     self.log("⚠ Enable Post-Processing to regenerate profile")
                     return
 
@@ -12592,7 +12675,11 @@ class WayfinderApp(ctk.CTk):
         # Store hidden children so we can restore them
         hidden = []
         for child in container.winfo_children():
-            info = child.pack_info() if child.winfo_manager() == "pack" else None
+            info = (
+                _logical_pack_info_for_restore(child, child.pack_info())
+                if child.winfo_manager() == "pack"
+                else None
+            )
             child.pack_forget()
             hidden.append((child, info))
 
@@ -17061,7 +17148,10 @@ class WayfinderApp(ctk.CTk):
             # so we skip chunked mode for them to avoid prompt length issues
             backend = self.config.get("transcription_backend", "whisper_cpp")
             is_remote = backend in ("groq_whisper", "openai_whisper")
-            chunked_requested = bool(self.config.get("chunked_mode", False))
+            chunked_mode = normalize_chunked_mode(
+                self.config.get("chunked_mode"), default="off"
+            )
+            chunked_requested = chunked_mode != "off"
             try:
                 chunked_unlocked = self.feature_gate.has_feature("chunked_recording")
             except Exception:
@@ -17071,7 +17161,7 @@ class WayfinderApp(ctk.CTk):
             use_chunked = chunked_requested and chunked_unlocked and not is_remote
             
             if use_chunked:
-                self._start_chunked_recording(gen)
+                self._start_chunked_recording(gen, chunked_mode)
             else:
                 if chunked_requested and not chunked_unlocked:
                     self.log("🔒 Chunked mode is unavailable on Free — using one-shot recording")
@@ -17092,8 +17182,8 @@ class WayfinderApp(ctk.CTk):
             self._record_toggle_suppress_until = time.monotonic() + 0.75
             self.on_error(f"Microphone: {e}")
     
-    def _start_chunked_recording(self, gen=None):
-        """Start recording with chunked processing for indefinite duration."""
+    def _start_chunked_recording(self, gen=None, mode="on"):
+        """Start On/Auto chunk capture without switching mic streams mid-session."""
         self.chunk_transcriptions = []
         # Per-session chunk store: workers hold THIS list reference, so a stale worker can never
         # read/write a newer session's chunk state even if start_recording rebinds the attribute.
@@ -17107,12 +17197,22 @@ class WayfinderApp(ctk.CTk):
                 self._transcribe_chunk, chunk_path, chunk_index, gen, store
             )
         
+        chunk_duration = self.config.get("chunk_duration", 15)
+        first_chunk_duration = (
+            max(
+                float(chunk_duration),
+                float(self.config.get("chunk_auto_threshold", 30)),
+            )
+            if normalize_chunked_mode(mode, default="on") == "auto"
+            else float(chunk_duration)
+        )
         self.chunked_recorder = ChunkedRecorder(
             sample_rate=self.config["sample_rate"],
             device=self._resolved_audio_device,
             preprocessing=self.config.get("audio_preprocessing", "light"),
-            chunk_duration=self.config.get("chunk_duration", 15),
+            chunk_duration=chunk_duration,
             chunk_overlap=self.config.get("chunk_overlap", 2),
+            first_chunk_duration=first_chunk_duration,
             on_chunk_ready=on_chunk_ready,
             warm_mic=self.warm_mic,
         )
@@ -17312,7 +17412,13 @@ class WayfinderApp(ctk.CTk):
         final_path, all_paths = recorder.stop()
         duration = recorder.get_duration()
         chunk_count = recorder.get_chunk_count()
-        self.log(f"⏱ Duration: {duration:.1f}s ({chunk_count} chunks)")
+        chunked_mode = normalize_chunked_mode(
+            self.config.get("chunked_mode"), default="on"
+        )
+        if chunked_mode == "auto" and chunk_count == 0:
+            self.log(f"⏱ Duration: {duration:.1f}s (Auto stayed one-shot)")
+        else:
+            self.log(f"⏱ Duration: {duration:.1f}s ({chunk_count} chunks)")
 
         # Surface any dropped chunks (resample/preprocess/WAV-write failures). Without
         # this a failed chunk is an invisible hole in the middle of the transcript;
@@ -17407,7 +17513,7 @@ class WayfinderApp(ctk.CTk):
 
             # Apply post-processing to the final combined text (not per-chunk)
             # This gives the LLM full context and avoids per-chunk prompt leakage issues
-            if combined_text.strip() and self.config.get("post_processing_enabled", True):
+            if combined_text.strip() and self.config.get("post_processing_enabled", False):
                 try:
                     from wayfinder.core.postprocessor import process_with_config
                     self.log("🔧 Post-processing combined text...")
@@ -17908,7 +18014,7 @@ class WayfinderApp(ctk.CTk):
             
             # Create LLM callback for profile regeneration (uses post-processing backend)
             llm_callback = None
-            if self.config.get("post_processing_enabled", True):
+            if self.config.get("post_processing_enabled", False):
                 llm_callback = self._get_llm_callback_for_voice_learning()
             
             voice_profile.add_transcription(text, llm_callback=llm_callback)
