@@ -45,10 +45,23 @@ class TestReservedPanel:
         assert y == 1080 - self.WIDGET_H  # 1040 — physical screen bottom
         assert y + self.WIDGET_H == 1080
 
+    def test_large_positive_offset_puts_visible_pill_at_screen_bottom(self):
+        y = self._y(5000, visual_inset=10)
+        # The transparent bottom glow may hang off-screen; visible content reaches 1080.
+        assert y == 1080 - (self.WIDGET_H - 10)
+        assert y + self.WIDGET_H - 10 == 1080
+
     def test_top_anchor_rests_below_top_edge(self):
         y = clamp_overlay_y(self.AVAIL_Y, self.AVAIL_H, self.FULL_Y, self.FULL_H,
                             self.WIDGET_H, 0, self.GAP, vertical="top")
         assert y == self.AVAIL_Y + self.GAP  # 12
+
+    def test_top_anchor_can_also_move_visible_pill_to_screen_bottom(self):
+        y = clamp_overlay_y(
+            self.AVAIL_Y, self.AVAIL_H, self.FULL_Y, self.FULL_H,
+            self.WIDGET_H, 5000, self.GAP, vertical="top", visual_inset=10,
+        )
+        assert y + self.WIDGET_H - 10 == 1080
 
     def test_drag_fully_up_clamps_to_top_of_available(self):
         y = self._y(-5000)

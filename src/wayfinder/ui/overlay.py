@@ -140,6 +140,9 @@ def _force_kde_window_position(window_title: str, x: int, y: int, width: int, he
                 w.skipTaskbar = true;
                 w.skipPager = true;
                 w.skipSwitcher = true;
+                // Plasma's panel and keep-above windows can share a KWin layer.
+                // Explicitly put Aura last so the panel cannot cover the pill.
+                workspace.raiseWindow(w);
             }}
         }}
         '''
@@ -181,6 +184,7 @@ def _try_kde_window_setup(window_title: str, x: int, y: int, width: int, height:
                 w.skipPager = true;
                 w.skipSwitcher = true;
                 w.demandsAttention = false;
+                workspace.raiseWindow(w);
             }}
         }}
         '''
@@ -221,6 +225,7 @@ def _setup_kwin_window_rule(x: int, y: int, width: int, height: int) -> bool:
                 client.skipPager = true;
                 client.skipSwitcher = true;
                 client.demandsAttention = false;
+                workspace.raiseWindow(client);
             }}
         }});
         
@@ -234,6 +239,7 @@ def _setup_kwin_window_rule(x: int, y: int, width: int, height: int) -> bool:
                 w.skipPager = true;
                 w.skipSwitcher = true;
                 w.demandsAttention = false;
+                workspace.raiseWindow(w);
             }}
         }}
         '''
@@ -1259,8 +1265,11 @@ class GlassmorphicOverlay(QWidget):
         screen = QApplication.primaryScreen()
         if screen:
             full = screen.geometry()
-            # Sanity check: y should be positive and widget should be on screen
-            if y < 0 or y > full.y() + full.height() - h:
+            # Sanity check: visible content should be on screen. The transparent
+            # bottom glow is intentionally allowed off-screen at maximum offset so
+            # the pill itself can reach the physical bottom edge.
+            max_y = full.y() + full.height() - (h - self.glow_margin)
+            if y < full.y() or y > max_y:
                 # Position seems wrong, use a safe fallback (60px from bottom)
                 y = full.y() + full.height() - 60 - h
 
@@ -1279,6 +1288,11 @@ class GlassmorphicOverlay(QWidget):
                 self.windowHandle().setPosition(QPoint(x, y))
         except Exception:
             pass
+        # Flatpak deliberately runs this branch through XWayland. Moving an
+        # already-mapped keep-above window can leave Plasma's panel stacked after
+        # it, so restack once after the final native position is applied.
+        if self.isVisible():
+            self.raise_()
     
     def _update_size(self):
         """Update widget width based on current width (called during animations)."""

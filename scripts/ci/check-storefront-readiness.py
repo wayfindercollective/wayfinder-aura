@@ -179,6 +179,13 @@ def live_readiness_errors(
             ("Wayfinder Aura", "One-time license", "Pay with card", launch_price),
         ),
     }
+    forbidden_markers = {
+        # Product decision (2026-08-04): every GPU path requires Ultra. This
+        # exact stale claim shipped on /aura once, so keep it as a live release
+        # gate instead of relying only on the desktop repo's correct table.
+        "premium_info_url": ("GPU support on the lighter models",),
+        "premium_url": (),
+    }
 
     for key, (url, markers) in pages.items():
         try:
@@ -204,6 +211,16 @@ def live_readiness_errors(
             joined = ", ".join(repr(marker) for marker in missing_markers)
             source_name = "rendered page" if browser else "HTML"
             errors.append(f"{key} {url} {source_name} is missing release markers: {joined}")
+
+        stale_markers = [
+            marker for marker in forbidden_markers[key] if marker in marker_source
+        ]
+        if stale_markers:
+            joined = ", ".join(repr(marker) for marker in stale_markers)
+            source_name = "rendered page" if browser else "HTML"
+            errors.append(
+                f"{key} {url} {source_name} contains stale release claims: {joined}"
+            )
 
     return errors
 

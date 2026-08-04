@@ -271,6 +271,11 @@ SETTING_TOOLTIPS: dict[str, str] = {
     
     # 🟢 Minimal latency impact (<10ms per invocation)
     "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
+    "press_enter_after_dictation": (
+        "Press Enter automatically once dictated text finishes typing. Off by default.\n"
+        "⚠️ This immediately submits chat messages, terminal commands, and AI prompts.\n"
+        "Keep it off when you need to review dictated text first."
+    ),
     "ensure_punctuation": "Extra punctuation fixes if model output lacks periods/caps.\n🟢 Latency: +1-3ms (optional, most models handle this well)",
     "audio_preprocessing": (
         "Conditions microphone audio before speech recognition.\n\n"

@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.8-beta.1] — 2026-08-04
+
 ### Added
 
 - **Chunk Processing now supports Off, Auto, and On.** Auto is the first-run
@@ -34,6 +36,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - **Opening and closing inline Settings panels no longer multiplies row
   spacing at HiDPI scales.** CustomTkinter pack padding is restored in logical
   units instead of being scaled twice.
+- **The overlay remains above the Plasma panel at low screen positions.** KDE
+  Wayland placement now explicitly restacks Aura after positioning, while the
+  Flatpak's XWayland path restacks after native geometry changes.
+- **The overlay position control reaches the physical screen bottom.** Its
+  transparent glow may extend off-screen so the visible pill no longer stops
+  short of the selected edge.
+- **Custom vocabulary survives cleanup in every writing style.** Minimal,
+  Professional, Casual, Dev, and Personal now protect user-provided spelling
+  through both full prompts and the packaged `llama-simple` cleanup path.
 
 ## [1.1.7] — 2026-08-01
 

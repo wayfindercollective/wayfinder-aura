@@ -26,6 +26,7 @@ from wayfinder.core.postprocessor import (
     get_tone_guidance,
     get_formatting_rules,
     get_filler_rules,
+    build_prompt,
     fast_filler_removal,
     is_refusal_response,
     is_hallucination,
@@ -656,6 +657,44 @@ class TestGetBackend:
 
         assert backend.model_path == str(large)
 
+    def test_returns_openai_backend(self, monkeypatch):
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        config = {"post_processing_backend": "openai"}
+        backend = get_backend(config)
+        assert isinstance(backend, OpenAIBackend)
+
+    def test_gate_failure_fails_closed_for_cloud(self, tmp_path, monkeypatch):
+        """When get_feature_gate raises, cloud backends must not be selected."""
+        from wayfinder.core import postprocessor as pp
+
+        def boom():
+            raise RuntimeError("gate broken")
+
+        monkeypatch.setattr(pp, "get_feature_gate", boom, raising=False)
+        # Patch the import site used inside get_backend
+        import wayfinder.license as lic
+
+        monkeypatch.setattr(lic, "get_feature_gate", boom)
+
+        fake_binary = tmp_path / "llama-cli"
+        fake_binary.write_text("#!/bin/sh\n")
+        fake_binary.chmod(0o755)
+        config = {
+            "post_processing_backend": "openai",
+            "output_tone": "professional",
+            "llama_cpp_use_cli": True,
+            "llama_cpp_binary": str(fake_binary),
+            "llama_cpp_model_path": str(tmp_path / "m.gguf"),
+        }
+        backend = get_backend(config)
+        assert not isinstance(backend, OpenAIBackend)
+        assert not isinstance(backend, AnthropicBackend)
+        # Local path selected
+        assert isinstance(backend, (LlamaCppBackend, LlamaCppCliBackend))
+
 
 class TestCliIntensityWiring:
     """The CLI backend used to hardcode intensity='standard', so the Strong toggle
@@ -705,43 +744,62 @@ class TestDevToneGuidance:
         assert "Cleaned text:" in p
         assert "Remove only filler" not in p  # that's the minimal-only prompt
 
-    def test_returns_openai_backend(self, monkeypatch):
+
+class TestCustomVocabularyAcrossStyles:
+    """Pinned vocabulary must survive both ASR and cleanup regardless of style."""
+
+    @pytest.mark.parametrize(
+        "tone", ["minimal", "professional", "casual", "dev", "personal"]
+    )
+    def test_full_prompt_protects_vocabulary_in_every_style(self, tone):
+        prompt, _ = build_prompt(
+            "please update way finder aura today",
+            {
+                "output_tone": tone,
+                "custom_vocabulary": ["Wayfinder Aura", "Daan"],
+            },
+            apply_compatibility=False,
+        )
+
+        assert "Protected vocabulary: Wayfinder Aura, Daan." in prompt
+        assert "Preserve the spelling and capitalization" in prompt
+        assert "phonetic, spacing, or case variants" in prompt
+        assert "no output style may rephrase" in prompt
+
+    @pytest.mark.parametrize(
+        "tone", ["minimal", "professional", "casual", "dev", "personal"]
+    )
+    def test_cli_prompt_protects_vocabulary_in_every_style(self, tone):
+        backend = LlamaCppCliBackend(
+            model_path="/x/google_gemma-3-1b-it-Q4_K_M.gguf",
+            output_tone=tone,
+            custom_vocabulary=["Wayfinder Aura", "Daan"],
+        )
+
+        prompt = backend.build_cli_prompt("some input text", tone, "standard")
+
+        assert "Protected vocabulary: Wayfinder Aura, Daan." in prompt
+
+    def test_cli_factory_does_not_forward_unlicensed_vocabulary(
+        self, tmp_path, monkeypatch
+    ):
         import wayfinder.license as license_module
 
-        gate = SimpleNamespace(has_feature=lambda _feature: True)
-        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
-        config = {"post_processing_backend": "openai"}
-        backend = get_backend(config)
-        assert isinstance(backend, OpenAIBackend)
-
-    def test_gate_failure_fails_closed_for_cloud(self, tmp_path, monkeypatch):
-        """When get_feature_gate raises, cloud backends must not be selected."""
-        from wayfinder.core import postprocessor as pp
-
-        def boom():
-            raise RuntimeError("gate broken")
-
-        monkeypatch.setattr(pp, "get_feature_gate", boom, raising=False)
-        # Patch the import site used inside get_backend
-        import wayfinder.license as lic
-
-        monkeypatch.setattr(lic, "get_feature_gate", boom)
-
-        fake_binary = tmp_path / "llama-cli"
-        fake_binary.write_text("#!/bin/sh\n")
-        fake_binary.chmod(0o755)
-        config = {
-            "post_processing_backend": "openai",
-            "output_tone": "professional",
+        monkeypatch.setattr(
+            license_module.FeatureGate, "has_feature", lambda self, _feature: False
+        )
+        binary = tmp_path / "llama-simple"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        backend = get_backend({
+            "post_processing_backend": "llama_cpp",
             "llama_cpp_use_cli": True,
-            "llama_cpp_binary": str(fake_binary),
-            "llama_cpp_model_path": str(tmp_path / "m.gguf"),
-        }
-        backend = get_backend(config)
-        assert not isinstance(backend, OpenAIBackend)
-        assert not isinstance(backend, AnthropicBackend)
-        # Local path selected
-        assert isinstance(backend, (LlamaCppBackend, LlamaCppCliBackend))
+            "llama_cpp_binary": str(binary),
+            "llama_cpp_model_path": str(tmp_path / "model.gguf"),
+            "custom_vocabulary": ["PaidTerm"],
+        })
+
+        assert backend.custom_vocabulary == []
 
 
 # =============================================================================
@@ -805,6 +863,58 @@ class TestProcessWithConfig:
 
         assert result == "This is neutral cleaned text."
         backend.process.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "tone", ["minimal", "professional", "casual", "dev", "personal"]
+    )
+    def test_licensed_vocabulary_reaches_cleanup_prompt_in_every_style(
+        self, monkeypatch, tone
+    ):
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        backend = SimpleNamespace(
+            is_available=lambda: True,
+            process=MagicMock(return_value="Please update Wayfinder Aura today."),
+        )
+        config = {
+            "output_tone": tone,
+            "post_processing_enabled": True,
+            "post_processing_backend": "llama_cpp",
+            "llama_cpp_model_path": "/tmp/model.gguf",
+            "custom_vocabulary": ["Wayfinder Aura"],
+        }
+
+        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
+            process_with_config("please update way finder aura today", config)
+
+        prompt = backend.process.call_args.args[1]
+        assert "Protected vocabulary: Wayfinder Aura." in prompt
+
+    def test_unlicensed_vocabulary_is_removed_before_cleanup_prompt(self, monkeypatch):
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: False)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        backend = SimpleNamespace(
+            is_available=lambda: True,
+            process=MagicMock(return_value="Please update the project today."),
+        )
+        config = {
+            "output_tone": "personal",
+            "post_processing_enabled": True,
+            "post_processing_backend": "llama_cpp",
+            "llama_cpp_model_path": "/tmp/model.gguf",
+            "custom_vocabulary": ["PaidTerm"],
+        }
+
+        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
+            process_with_config("please update the paid term project today", config)
+
+        prompt = backend.process.call_args.args[1]
+        assert "Protected vocabulary" not in prompt
+        assert "PaidTerm" not in prompt
 
 
 # =============================================================================

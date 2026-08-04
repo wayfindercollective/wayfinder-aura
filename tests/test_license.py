@@ -439,6 +439,51 @@ class TestFeatureGate:
         assert info.is_premium is False
         assert token is None
 
+    @pytest.mark.parametrize(
+        ("reason", "expected_message"),
+        [
+            ("not_found", "License key not found"),
+            (
+                "activation_limit",
+                "Contact support@wayfindercoaching.net to recover a device slot",
+            ),
+            ("revoked", "Contact support if this is unexpected"),
+            ("refunded", "no longer active"),
+            ("unexpected_reason", "License invalid (unexpected_reason)"),
+        ],
+    )
+    def test_activate_online_returns_actionable_invalid_reason(
+        self,
+        temp_config_dir: Path,
+        reason: str,
+        expected_message: str,
+    ):
+        from unittest.mock import MagicMock, patch
+        from wayfinder.license import activate_online
+
+        fake = MagicMock()
+        fake.json.return_value = {"valid": False, "reason": reason}
+        with patch("requests.post", return_value=fake):
+            info, token, reachable = activate_online("WF-TEST", "MACHINE")
+
+        assert reachable is True
+        assert token is None
+        assert info.is_valid is False
+        assert expected_message in (info.error_message or "")
+
+    def test_activate_online_reports_offline_without_invalidating_cached_flow(
+        self, temp_config_dir: Path
+    ):
+        from unittest.mock import patch
+        from wayfinder.license import activate_online
+
+        with patch("requests.post", side_effect=OSError("network unavailable")):
+            info, token, reachable = activate_online("WF-TEST", "MACHINE")
+
+        assert reachable is False
+        assert token is None
+        assert info.error_message == "offline"
+
     def test_premium_user_has_all_features(self, temp_config_dir: Path, mock_online_license):
         """Test that premium user can access all premium features."""
         from wayfinder.license import FeatureGate, PREMIUM_FEATURES

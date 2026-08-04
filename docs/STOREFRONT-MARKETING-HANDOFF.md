@@ -127,7 +127,7 @@ Sources of product truth in the **desktop** repo (do not invent features):
 ### What Aura *is*
 - **Local-first voice dictation for Linux**  
 - Hotkey → speak → cleaned text **typed/pasted wherever the cursor is** (any app)  
-- Default: **whisper.cpp + local LLM cleanup on-device** — voice does not leave the machine unless the user opts into cloud backends with **their own** keys  
+- Default: **whisper.cpp transcription on-device** — optional local LLM cleanup stays on-device when enabled, and voice does not leave the machine unless the user opts into cloud backends with **their own** keys
 - Built for **Wayland + X11**, **KDE/GNOME**, desktop **and Steam Deck** (including Game Mode workflows)  
 - Glassmorphic status overlay, system tray, game-aware hotkeys (pause while GameMode game is active)  
 - Free tier is a **full dictation product**, not a trial watermark demo  
@@ -137,8 +137,8 @@ Public tier name: **Ultra only** (not “Premium” in user-facing copy).
 
 | Free includes | Ultra unlocks |
 |---------------|---------------|
-| Local whisper.cpp dictation | GPU acceleration for Small+ / long dictations (Free already has GPU on Tiny/Base) |
-| Standard models (tiny / base / small) | Large models (medium, large-v3-turbo) |
+| Base/Base.en local CPU dictation | GPU acceleration plus additional speech models |
+| Base/Base.en speech model | Tiny, Small, Medium, Turbo, and Large speech models |
 | Local LLM cleanup (light models) | Large cleanup models (CDN-gated) |
 | Overlay + tray | Faster-Whisper backend |
 | Instant paste / typing | Cloud transcription + cleanup with **user’s** API keys |

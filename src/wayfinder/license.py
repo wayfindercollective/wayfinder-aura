@@ -345,9 +345,12 @@ def activate_online(key: str, machine_id: str):
     reason = data.get("reason", "invalid")
     msg = {
         "not_found": "License key not found",
-        "activation_limit": "Activation limit reached for this license",
-        "revoked": "This license has been revoked",
-        "refunded": "This license was refunded",
+        "activation_limit": (
+            "Activation limit reached. Contact support@wayfindercoaching.net "
+            "to recover a device slot."
+        ),
+        "revoked": "This license has been revoked. Contact support if this is unexpected.",
+        "refunded": "This license was refunded and is no longer active.",
         "missing_fields": "Invalid request",
     }.get(reason, f"License invalid ({reason})")
     return (LicenseInfo(is_valid=False, is_premium=False, error_message=msg), None, True)

@@ -18,7 +18,7 @@ between the repo and a live listing.
   Flathub pattern (Sublime Text, Bitwig, Master PDF Editor); Flathub has no
   native payments as of mid-2026.
 - ✅ Metainfo: real developer/URLs, ≤35-char summary, OARS rating, branding
-  colors, 1.1.0 release notes with date.
+  colors, and a dated `1.1.8-beta.1` candidate entry.
 - ✅ Screenshot paths referenced by AppStream exist and are refreshed at
   1920×1080:
   `screenshots/main-window.png` and `screenshots/settings.png`.
@@ -45,11 +45,14 @@ reviewer Ultra keys, human PR only).
 
 ### 1. Production license + storefront
 - ✅ Production activation URL is set (`shiny-goshawk-432`).
+- Deploy the pending storefront correction so Free is Base/Base.en on CPU and
+  every GPU path is Ultra-only, then rerun the browser storefront gate.
 - Confirm checkout fee/copy is final (`premium_url` stable alias).
 - See `docs/GO-LIVE-INPUTS.md`.
 
 ### 2. Public repo + tag
-- Repo is public. Ship **`v1.1.1`** (do not move `v1.1.0`).
+- Repo is public. Build **`v1.1.8-beta.1`** first; create stable **`v1.1.8`**
+  only after prerelease signoff. Never move an existing tag.
 - CI on `main` must be green before tagging.
 
 ### 3. Git source for the app module (tag-time blocker)
@@ -57,7 +60,7 @@ The `wayfinder-aura` module uses `type: dir, path: ..` (local builds only).
 After the release commit is tagged:
 
 ```bash
-python3 flatpak/prepare-release-manifest.py --tag v1.1.1
+python3 flatpak/prepare-release-manifest.py --tag v1.1.8
 ```
 
 ### 4. Clean Flatpak build on the target manifest
@@ -96,7 +99,8 @@ dashboard for the verified checkmark.
   user binds the shortcut once in their DE's settings when prompted.
 
 ## Non-Flatpak channels (later)
-- AppImage: lite and full CPU-fallback builds verified locally. PyInstaller
+- AppImage: historical lite and full CPU-fallback builds were verified locally.
+  PyInstaller
   6.17.0 under `venv-gpu` produced `dist/wayfinder-aura`;
   `scripts/build-appimage.sh --lite --skip-build` produced
   `Wayfinder_Aura-1.1.0-x86_64.AppImage` (201 MB) and `.zsync`;

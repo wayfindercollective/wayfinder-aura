@@ -1,8 +1,9 @@
 # Ship Verification Runbook — Wayfinder Aura
 
 _How to prove the build is ship-ready. Complements `docs/SHIP-READINESS.md` (release
-blockers) and `SHIPPING.md` (Flathub). Automated layers run themselves; the on-device
-rows are yours (Peter) to work on a real Deck before tagging `v1.1.0`._
+blockers) and `SHIPPING.md` (Flathub). Automated layers run themselves; complete
+the on-device rows against the downloaded candidate before promoting
+`v1.1.8-beta.1`._
 
 ---
 
@@ -113,11 +114,12 @@ Deck systemd + host-trigger install is automated: `scripts/steamdeck/install-ste
 ## 5. Release blockers (see `docs/SHIP-READINESS.md`)
 
 Still gated on you and NOT covered by the automated layers above:
-- License → production (`LICENSE_API_URL` **and** `LICENSE_PUBLIC_KEY_HEX` together).
-  `flatpak/prepare-release-manifest.py` blocks submission-manifest generation
-  until these defaults no longer point at the dev backend.
-- Confirm checkout fee/copy treatment; then the activation matrix (locked / activate / offline-grace).
-- Bump the metainfo `<release>` date at tag time (`test_metainfo_release_matches_pyproject`
-  guards the version; the date is manual).
-- Author terms/refund for the paid tier; the privacy + support notices are in
-  `PRIVACY.md` / `SUPPORT.md`.
+- Deploy the storefront correction that makes every GPU path Ultra-only, then
+  pass the tag CI browser check.
+- Confirm the internal support procedure can view and release obsolete device
+  activations without exposing a full key.
+- Run the exact GitHub-built AppImage and Flatpak through the clean-system,
+  activation/offline, 20-dictation, long-dictation, and hardware matrix in
+  `docs/PROMOTION-READINESS-CHECKLIST.md`.
+- Complete one real purchase and key-delivery flow; confirm checkout fee/copy,
+  terms, privacy, support, and refund behavior.

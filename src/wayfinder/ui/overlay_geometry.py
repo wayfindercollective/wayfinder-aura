@@ -61,7 +61,9 @@ def clamp_overlay_y(
     offset could only travel through the ``gap`` (~12px). The settings slider goes to
     +200, so anything past ~gap looked "stuck" with a permanent gap above the panel.
     The lower clamp is now the **physical screen bottom**, so the slider can pull the
-    overlay down over the reserved panel strip when the user asks for it.
+    overlay down over the reserved panel strip when the user asks for it. When a
+    ``visual_inset`` is present, the visible pill reaches that edge and its transparent
+    glow is allowed to hang off-screen.
 
     Args:
         avail_y, avail_h: ``QScreen.availableGeometry()`` (excludes reserved panels).
@@ -94,11 +96,13 @@ def clamp_overlay_y(
         # above that (widget_h - inset of that height is content+top glow).
         y = usable_bottom - gap - (widget_h - inset) + offset
 
-    # Keep the whole widget on the physical screen (never fully off the top or bottom).
+    # Keep the *visible content* on the physical screen. The transparent glow may extend
+    # below it, so allow that inset to hang off-screen at the maximum slider position;
+    # otherwise the pill itself stops ``visual_inset`` pixels short of the bottom.
     # Deliberately allow y large enough that the widget covers the panel strip — that is
     # what the positive half of the overlay-position slider is for.
     upper_bound = avail_y
-    lower_bound = screen_bottom - widget_h
+    lower_bound = screen_bottom - (widget_h - inset)
     if lower_bound < upper_bound:
         # Tiny screen / huge widget — pin to the top of the usable area.
         return upper_bound

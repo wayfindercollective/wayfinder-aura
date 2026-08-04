@@ -174,8 +174,11 @@ class TestTranscriptionBackends:
 
         assert backend.custom_vocabulary == []
 
-    def test_ultra_custom_vocabulary_reaches_backend(
-        self, sample_config, monkeypatch
+    @pytest.mark.parametrize(
+        "tone", ["minimal", "professional", "casual", "dev", "personal"]
+    )
+    def test_ultra_custom_vocabulary_reaches_backend_in_every_style(
+        self, sample_config, monkeypatch, tone
     ):
         from wayfinder.core.transcriber import get_backend
 
@@ -186,6 +189,7 @@ class TestTranscriptionBackends:
         sample_config.update({
             "model_path": "/models/ggml-base.en.bin",
             "whisper_server_mode": False,
+            "output_tone": tone,
             "custom_vocabulary": ["Wayfinder"],
         })
 

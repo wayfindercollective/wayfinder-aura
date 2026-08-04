@@ -11,6 +11,29 @@ Bug reports and feature requests go to the GitHub issue tracker:
 
 Please search existing issues first — your question may already be answered.
 
+## Ultra activation and device slots
+
+One Ultra key supports up to three activated devices. **Remove from this
+device** deletes only that machine's local credential; it does not release a
+server activation slot. If Aura reports `activation_limit` after replacing or
+reinstalling a computer, email **support@wayfindercoaching.net** from the address
+used for the purchase and include only the last four characters of the key.
+Never post your purchase email or full license key in a public GitHub issue.
+Support verifies ownership before any slot-recovery action.
+
+License responses have these meanings:
+
+- `activation_limit`: all device slots are currently in use; contact support as
+  described above.
+- `revoked`: Ultra access has been disabled for that key; contact support if
+  this is unexpected.
+- `refunded`: the refunded license is no longer active.
+- `offline`: Aura could not reach the license server. An existing verified
+  license continues during its offline grace window; a new activation requires
+  a connection.
+- Invalid or not-found key: check the key exactly as delivered, then contact
+  support if it is still rejected.
+
 ## What to include in a bug report
 
 A good report gets a fast fix. Please include:
@@ -126,6 +149,14 @@ Try these before filing an issue — they cover the most common problems.
   `desktop_paste_on_focus_drift` (default **off**) pastes via clipboard when
   drift is detected — it can still paste into the wrong app if you switched
   windows on purpose.
+
+### Auto-Enter submitted text before I could review it
+
+- **Auto press Enter after dictation** is off by default. When enabled, it sends
+  Enter after injection and can immediately submit chat messages, terminal
+  commands, or AI prompts.
+- Disable it under **Settings → System** anywhere you need to review dictated
+  text before submission.
 
 ### Overlay jumps when I hit record / “Listening…”
 

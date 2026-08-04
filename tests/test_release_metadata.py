@@ -421,6 +421,9 @@ def test_public_tier_copy_matches_runtime_gpu_and_model_gates():
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     support = (REPO / "SUPPORT.md").read_text(encoding="utf-8")
     website_brief = (REPO / "WEBSITE_COPY_BRIEF.md").read_text(encoding="utf-8")
+    marketing_handoff = (
+        REPO / "docs" / "STOREFRONT-MARKETING-HANDOFF.md"
+    ).read_text(encoding="utf-8")
     metainfo = (
         REPO / "flatpak" / "io.wayfindercollective.WayfinderAura.metainfo.xml"
     ).read_text(encoding="utf-8")
@@ -432,6 +435,38 @@ def test_public_tier_copy_matches_runtime_gpu_and_model_gates():
     assert "free tier included" not in readme.lower()
     assert "free tier runs Base/Base.en on CPU" in support
     assert "| Additional speech models | — | ✅ |" in website_brief
+    assert "Optional local cleanup, Ultra GPU acceleration" in website_brief
+    assert "Post-processing: **Off** by default" in website_brief
+    assert "Standard models (tiny / base / small)" not in marketing_handoff
+    assert "| Base/Base.en speech model | Tiny, Small, Medium, Turbo, and Large speech models |" in marketing_handoff
+
+
+def test_documented_dictation_defaults_and_auto_enter_warning_match_runtime():
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    support = (REPO / "SUPPORT.md").read_text(encoding="utf-8")
+    main = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
+    normalized_docs = [" ".join(text.split()) for text in (readme, support, main)]
+
+    assert "Post-processing starts off on new installs" in readme
+    assert "Ultra Chunk Processing defaults to Auto" in readme
+    assert "Auto press Enter starts off" in readme
+    for warning_term in ("terminal commands", "AI prompts"):
+        for document in normalized_docs:
+            assert warning_term in document
+
+
+def test_support_documents_activation_slot_recovery_without_full_key_disclosure():
+    support = (REPO / "SUPPORT.md").read_text(encoding="utf-8")
+    normalized = " ".join(support.split())
+
+    assert "up to three activated devices" in normalized
+    assert "does not release a server activation slot" in normalized
+    assert "support@wayfindercoaching.net" in normalized
+    assert "last four characters" in normalized
+    assert "Never post your purchase email or full license key" in normalized
+    assert "Support verifies ownership before any slot-recovery action" in normalized
+    for response in ("activation_limit", "revoked", "refunded", "offline"):
+        assert f"`{response}`" in support
 
 
 def test_premium_storefront_defaults_are_consistent_across_release_surfaces():
@@ -617,6 +652,33 @@ def test_storefront_readiness_checker_accepts_client_rendered_checkout_markers()
     )
 
     assert errors == []
+
+
+def test_storefront_readiness_checker_rejects_free_gpu_claim():
+    checker = _load_storefront_checker()
+    defaults = {
+        "premium_url": "https://wayfindercollective.io/checkout/product",
+        "premium_info_url": "https://wayfindercollective.io/aura",
+        "premium_price": "$29.99",
+        "premium_price_regular": "$60",
+    }
+    pages = {
+        defaults["premium_info_url"]: (
+            "Wayfinder Aura - Press a key. Speak. Your words land at your cursor. "
+            "GPU support on the lighter models"
+        ),
+        defaults["premium_url"]: (
+            "Wayfinder Aura One-time license Pay with card $29.99"
+        ),
+    }
+
+    errors = checker.live_readiness_errors(
+        defaults=defaults,
+        fetcher=lambda url, _timeout: (200, pages[url]),
+    )
+
+    assert any("stale release claims" in error for error in errors)
+    assert any("GPU support on the lighter models" in error for error in errors)
 
 
 def test_storefront_readiness_checker_accepts_release_markers(tmp_path):

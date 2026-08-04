@@ -1110,7 +1110,12 @@ SETTING_TOOLTIPS = {
     
     # 🟢 Minimal latency impact (<10ms per invocation)
     "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
-    "press_enter_after_dictation": "Press Enter automatically once dictated text finishes typing —\nchat messages send hands-free. Off by default.\n🟢 Latency: none (fires after injection)",
+    "press_enter_after_dictation": (
+        "Press Enter automatically once dictated text finishes typing. Off by default.\n"
+        "⚠️ This immediately submits chat messages, terminal commands, and AI prompts.\n"
+        "Keep it off when you need to review dictated text first.\n"
+        "🟢 Latency: none (fires after injection)"
+    ),
     "ensure_punctuation": "Extra punctuation fixes if model output lacks periods/caps.\n🟢 Latency: +1-3ms (optional, most models handle this well)",
     "audio_preprocessing": (
         "Conditions microphone audio before speech recognition.\n\n"
@@ -11246,7 +11251,7 @@ class WayfinderApp(ctk.CTk):
 
             ctk.CTkLabel(
                 content,
-                text='one term per line — add names or fix spellings ("Daan"); your edits stick',
+                text='one term per line — exact names and spellings are protected in every style',
                 font=(self.font_body[0], self.font_sizes["caption"]),
                 text_color=COLORS["text_muted"],
                 wraplength=490,

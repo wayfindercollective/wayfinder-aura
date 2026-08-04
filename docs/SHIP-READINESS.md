@@ -1,45 +1,33 @@
 # Ship Readiness — Wayfinder Aura
 
-_Last updated: 2026-07-07. Tracks what remains before a paid public release. Complements `SHIPPING.md`, `docs/GO-LIVE-INPUTS.md`, and `docs/SHIP-VERIFICATION-RUNBOOK.md`._
+_Last updated: 2026-08-04. Tracks what remains before a paid public release. Complements `SHIPPING.md`, `docs/GO-LIVE-INPUTS.md`, `docs/SHIP-VERIFICATION-RUNBOOK.md`, and the current `docs/PROMOTION-READINESS-CHECKLIST.md`._
 
 ---
 
 ## What Still Blocks Shipping
 
-1. **Production license backend.** `src/wayfinder/license.py` still defaults to the dev Convex deployment:
-   - `LICENSE_API_URL`: `https://shiny-goshawk-432.convex.site/activate` (prod)
-   - `LICENSE_PUBLIC_KEY_HEX`: dev Ed25519 public key
+1. **Deploy the corrected storefront truth.** The live `/aura` page still says
+   Free includes GPU support on lighter models. The product decision and runtime
+   are GPU-requires-Ultra. Corrected website source and a regression test are
+   prepared, and the Aura tag gate now rejects the stale live claim. Deploy the
+   website fix and rerun the browser-rendered storefront check before tagging.
 
-   I need the production activation URL and matching production Ed25519 public key. They must change together; switching only one side makes production tokens fail offline verification after activation. The release manifest helper now refuses to generate a submission manifest while these defaults are still dev values.
+2. **Build the exact candidate from a tag.** The local source is prepared as
+   `v1.1.8-beta.1`, but it is not committed or tagged. GitHub Actions must build
+   the AppImage and Flatpak from the approved commit, after which their hashes
+   and packaged self-tests must be recorded. Local or older installed packages
+   do not count as candidate signoff.
 
-2. **Storefront confirmation.** The in-repo values are internally consistent,
-   and the public checkout is browser-verified as of the 2026-07-07 audit.
-   Direct HTTP probes returned HTTP 200. The Aura landing route server-rendered
-   the expected Wayfinder Aura shell, while the checkout route server-rendered
-   only a `Loading checkout...` shell. After installing Playwright Chromium in
-   the local audit venv, the rendered checkout was verified to show a real card
-   form, `Wayfinder Aura`, `One-time license`, subtotal `$29.99`, a `$0.90`
-   processing fee, and total `$30.89`. Confirm the processing-fee copy and
-   whether the checkout intentionally omits the words `Ultra` and `$60` regular
-   price:
-   - `premium_url` in `src/wayfinder/config.py`
-   - `premium_info_url` in `src/wayfinder/config.py`
-   - README pricing copy
-   - in-app Ultra upgrade prompts
+3. **Verify activation operations.** The customer-facing ownership and error
+   guidance is documented, but an internal procedure to inspect active machines
+   and release an obsolete activation still needs to be confirmed with the
+   production licensing service.
 
-3. **Ship channel decision.** Flathub is still the strictest channel. The manifest now has PyQt BaseApp + SHA256-pinned Python deps and tag+commit-pinned third-party git sources, but submission still needs:
-   - Public repo + `v1.1.0` tag.
-   - Production license defaults set in `src/wayfinder/license.py`.
-   - App source generated from the release tag/commit instead of the local `type: dir` source. Local dry-run rendering was verified with `--allow-dev-license --allow-dirty --commit fa483ccf3211fff9041a7a225bf1806815c73c4b` and produced a tag+commit-pinned app source for `v1.1.0`; real tag resolution is still unverified because the `v1.1.0` tag does not exist yet.
-   - A clean Flatpak build from that release manifest after production license defaults and the public tag exist. The GitHub `build-flatpak` job now generates and builds the release manifest on tag refs; the remaining gate is a real tag run proving that artifact. The local `type: dir` manifest now builds cleanly on this machine using the `org.flatpak.Builder` app with explicit Flatpak installation-dir env vars.
-   - Final tag-time metadata verification.
-
-4. **On-device final QA.** Automated tests cover most behavior, but the following still need real hardware validation:
-   - One full microphone → transcription → injection run on Wayland.
-   - One full run on X11.
-   - Steam Deck Desktop Mode and Game Mode trigger flow.
-   - Full microphone → injection path on a dedicated-GPU desktop. The AMD RX 9060 XT turbo/GPU ASR path itself passed golden-audio verification in the installed Flatpak build.
-   - Tray menu actions on the real desktop shell.
+4. **Complete exact-artifact manual QA.** Run the GitHub-built candidate through
+   the clean-machine matrix in `docs/PROMOTION-READINESS-CHECKLIST.md`, including
+   Wayland, X11, Steam Deck Desktop/Game Mode, CPU fallback, an Ultra GPU path,
+   multi-device/offline licensing, 20 dictations per system, and one real
+   production purchase and delivery flow.
 
 ---
 
@@ -71,10 +59,10 @@ _Last updated: 2026-07-07. Tracks what remains before a paid public release. Com
 | Release identity metadata | Fixed. The macOS PyInstaller bundle identifier now matches the current app ID (`io.wayfindercollective.WayfinderAura`) instead of the old `io.github...` identifier, and release metadata tests guard against that stale ID returning. The AppStream `1.1.0` release date is aligned to the 2026-07-07 audit baseline and has ISO-date coverage. |
 | Flathub reproducibility | Improved. The manifest now uses PyQt BaseApp, generated SHA256-pinned Python deps, and commit-pinned third-party git sources. |
 | Flatpak static release guards | Added. Tests now verify the KDE/PyQt BaseApp runtime, scoped permissions, bundled Wayland/X11 injectors, CPU fallback binaries, all git source commit pins, and offline hashed Python deps without PyQt6 in pip sources. |
-| Release manifest helper | Hardened. `prepare-release-manifest.py` now rejects tags that do not match `pyproject.toml`, validates full commit SHAs, refuses dirty-tree generation unless explicitly overridden, refuses submission-manifest generation while license defaults still point at the dev backend, refuses to overwrite the local manifest, and is covered through its CLI entry point. Local dry-runs require the explicit `--allow-dev-license` escape hatch until production license values are set. It writes `release/io.wayfindercollective.WayfinderAura.yml` with `python-deps.json` beside it so Flathub's app-id filename lint is satisfied. |
-| Release license gate | Added. `scripts/ci/check-release-license-defaults.py` parses `src/wayfinder/license.py` without importing the app and fails release-artifact builds while `LICENSE_API_URL` or `LICENSE_PUBLIC_KEY_HEX` still default to the dev backend. Current tree correctly fails that check until production values are provided. |
-| Storefront release gate | Added. `scripts/ci/check-storefront-readiness.py` checks that config, README, and in-app fallback values stay synced. Tag/manual release-readiness now installs Playwright Chromium and probes the rendered Aura landing + checkout URLs for positive release markers: product identity, one-time license, card payment, and launch price. Local Playwright verification now reaches the rendered checkout; the remaining storefront call is copy/business confirmation around the visible `$0.90` processing fee and the absence of `Ultra`/`$60` on the checkout page. |
-| Hardware preflight | Added. `scripts/ship_preflight.py` performs non-invasive host checks for the remaining manual hardware matrix, including foreign-Flatpak host access, Wayland/X11 session signal, host `wtype`/`xdotool`/`ydotool`/`flatpak`, ydotool daemon socket, Wayfinder control socket ping, Vulkan GPU visibility, dedicated-GPU detection, and Steam Deck OS detection. Current host preflight confirms KDE Wayland, host injectors, ydotool socket, live Wayfinder control socket `pong`, and Vulkan-visible AMD RX 9060 XT dGPU. |
+| Release manifest helper | Hardened. `prepare-release-manifest.py` rejects tags that do not match `pyproject.toml`, validates full commit SHAs, refuses dirty-tree generation unless explicitly overridden, refuses dev license defaults, and will not overwrite the local manifest. A `v1.1.8-beta.1` dry run against the current base commit renders successfully; the final run must use the candidate's committed SHA. |
+| Release license gate | Passing. `scripts/ci/check-release-license-defaults.py` parses `src/wayfinder/license.py` without importing the app and confirms the production activation URL/public-key defaults are release-ready. |
+| Storefront release gate | Blocking as designed. Static config, README, and in-app fallback checks pass. The live check now also rejects the stale Free-GPU claim still deployed on `/aura`; after the corrected website source is deployed, tag CI must rerun the browser-rendered landing and checkout checks. |
+| Hardware preflight | Added. `scripts/ship_preflight.py` performs non-invasive host checks for the remaining manual hardware matrix. The 2026-08-04 host check confirms KDE Wayland, a live Wayfinder control-socket `pong`, and a Vulkan-visible AMD RX 9060 XT dGPU. Host `wtype` and the `ydotool` socket are missing, and this host is not a Steam Deck. |
 | Source launch venv guard | Fixed. `main.py` no longer exits solely because `venv-gpu/pyvenv.cfg` contains stale Python-version metadata after an OS update. It now smoke-tests essential imports first: if imports pass, launch continues with a warning; if imports fail, it still blocks with rebuild instructions and names the failed imports. Missing Tk now gets an explicit OS-package hint (`python3-tkinter` on Fedora/Bazzite, `python3-tk` on Debian/Ubuntu) before asking for a venv rebuild. |
 | GitHub release gate | Added. The CI workflow now triggers on `v*` tag pushes, and tag-triggered PyInstaller, AppImage, Flatpak, and GitHub Release jobs depend on a `release-readiness` job that runs the guarded release-manifest generation without `--allow-dev-license`, so tag artifacts are not built or published from CI while dev license defaults remain embedded. Manual artifact builds also run the production-license-default check. PyInstaller/AppImage artifacts are limited to tag or manual runs, while normal main-branch pushes no longer upload PyInstaller artifacts. The Flatpak tag job now performs a full checkout, generates `release/io.wayfindercollective.WayfinderAura.yml` with `python-deps.json` beside it, and passes that selected release manifest to `flatpak-builder`; main-branch builds continue to use the local manifest. |
 | AppStream screenshots | Refreshed. `screenshots/main-window.png` and `screenshots/settings.png` are clean free-tier 1920×1080 captures from the current UI on KDE Wayland using a temporary clean profile. They were visually inspected in this audit, and AppStream local validation passes against the screenshot-bearing metadata. |
@@ -82,7 +70,7 @@ _Last updated: 2026-07-07. Tracks what remains before a paid public release. Com
 | Release shell scripts | Covered. Release-facing shell scripts are parsed with `bash -n` by the release metadata suite, and the root AppImage wrapper is checked for executable mode and delegation to the maintained builder. |
 | Runtime path fallback isolation | Fixed. Source/test runs no longer accidentally select `/app/bin` or `/app/share` Flatpak-bundled tools unless `IS_FLATPAK` is true; installed Flatpak smoke confirms bundled `/app` paths still resolve inside the bundle. |
 | Wayland/X11 injection packaging | Verified inside the installed Flatpak build. `/app/bin/wtype` and `/app/bin/xdotool` are present; Tk, CustomTkinter, and PyQt6 import successfully. The platform selector returns `wtype` for a simulated Wayland session and `xdotool` for a simulated X11 session. Focused rerun passed `tests/test_platform.py tests/test_injector.py`: 127 passed. Real focused-window injection still remains in the manual hardware QA matrix. |
-| Automated suite | Verified on the current tree. Latest host audit venv full suite: 1157 collected with 9 collection-time skips; 1141 passed, 25 skipped after installing `evdev` and `cryptography` in `venv-gpu`. Live host socket smoke passed 7/7 through `flatpak-spawn --host`. Installed Flatpak runtime suite with current source mounted into the installed app runtime: 1276 collected, 1263 passed, 13 skipped. Skips are opt-in live/hardware, UI-display, or golden-audio checks. |
+| Automated suite | Verified on the current tree. The CI-equivalent 2026-08-04 gate passed 1,619 tests with 7 live-environment skips and 40 UI/slow/network/performance deselections. The performance gate passed 2/2 separately, and the currently running AppImage passed its 7/7 live smoke checks. |
 | Perf gate | Verified. `pytest -m perf` passed 2/2 with `QT_QPA_PLATFORM=offscreen`. |
 | Golden ASR | Verified in the installed Flatpak runtime and again against the freshly installed local build artifact. With the host turbo model mounted read-only, `WAYFINDER_GOLDEN=1 tests/test_golden_asr.py` passed 6/6 including the premium GPU/turbo aggregate check on the AMD RX 9060 XT. `scripts/eval_asr.py` reported free/base.en mean WER `0.089` and premium/turbo GPU mean WER `0.023`; both kept all configured key phrases. The free model still visibly misheard two phrases (“riding oats...” and “public west”), so free-tier ASR quality remains a product caveat, not a gate failure. |
 | Soak smoke | Verified in the installed Flatpak runtime and again against the freshly installed local build artifact after the silence-hallucination fix. `scripts/soak.py --iters 5 --orphan-check` passed RSS leak, child census, temp WAV cleanup, and latency drift; VRAM was advisory/stable, and orphan check skipped because no whisper-server process was started by that run. This is not a substitute for the 30-minute Mode B Deck soak. |
@@ -94,8 +82,12 @@ _Last updated: 2026-07-07. Tracks what remains before a paid public release. Com
 
 ## Current Verdict
 
-Not ship-ready yet.
+**Source candidate: code-ready for prerelease after the website fix is deployed.
+Public stable promotion: NO-GO.**
 
-The app is much closer: the immediate dictation-path failure, stale tray handoff, dev unlock backdoor, dead local license-key path, impossible CI lint gate, and major Flathub reproducibility gaps have been addressed locally. The remaining hard blockers are production licensing material, storefront confirmation, release-source packaging, and real hardware sign-off across Wayland, X11, Steam Deck, and dedicated GPU systems.
-
-Do not tag a paid public release until the production license URL/public key pair is set and the hardware matrix above is checked.
+Production license defaults and local automated gates pass. Do not create the
+paid prerelease tag while the deployed storefront advertises Free GPU support.
+After that copy is corrected, build the exact tagged artifacts in GitHub Actions
+and complete the activation-operations, clean-hardware, dictation, and real
+purchase checks in `docs/PROMOTION-READINESS-CHECKLIST.md`. Stable promotion is
+allowed only after those results are recorded against the downloaded candidate.

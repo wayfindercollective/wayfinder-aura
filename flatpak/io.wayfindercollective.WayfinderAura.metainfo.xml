@@ -115,6 +115,19 @@
   </supports>
 
   <releases>
+    <release version="1.1.8-beta.1" date="2026-08-04" type="development">
+      <description>
+        <p>Prerelease candidate for faster packaged inference and more reliable dictation:</p>
+        <ul>
+          <li>Automatic long-recording chunk processing preserves the complete transcript before cleanup and Auto-Enter</li>
+          <li>AppImage inference follows the current mount and no longer inherits PyInstaller's private library directory</li>
+          <li>Whisper server recovery preserves a bounded CLI salvage path instead of returning an avoidable empty result</li>
+          <li>The status overlay stays above the Plasma panel and its position control can place visible content at the physical screen edge</li>
+          <li>Custom vocabulary is protected through every writing style and both packaged local-cleanup paths</li>
+          <li>Inline Settings spacing remains stable across repeated opens on HiDPI displays</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.7" date="2026-08-01">
       <description>
         <p>Portable HTTPS and startup reliability across Linux distributions:</p>

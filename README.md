@@ -4,15 +4,15 @@
 
 Wayfinder Aura is local-first voice dictation for Linux. By default,
 transcription runs on *your* machine with whisper.cpp, offline, in any app.
-In local mode your voice never leaves your computer; optional GPU and cloud
-backends are there if you choose them.
+In local mode your voice never leaves your computer; optional local cleanup,
+Ultra GPU acceleration, and cloud backends are available when you choose them.
 
 ![Wayfinder Aura UI](assets/icon.png)
 
 ## Why Wayfinder Aura
 
-- **Local by default.** Out of the box, speech-to-text and AI cleanup both run
-  locally — no audio uploads. Optional cloud transcription backends
+- **Local by default.** Out of the box, speech-to-text runs locally — no audio
+  uploads. Optional cleanup also runs locally when enabled. Cloud backends
   (OpenAI/Groq/Anthropic) are opt-in and off by default. The app checks online
   for model updates weekly (toggleable), and activating a license contacts the
   activation server.
@@ -31,7 +31,7 @@ backends are there if you choose them.
 | | |
 |---|---|
 | 🎙️ **Hotkey dictation** | Ctrl+Alt+Space to start/stop (configurable), text lands at your cursor in any app |
-| 🔒 **100% local pipeline** | whisper.cpp transcription + llama.cpp cleanup, both on-device |
+| 🔒 **100% local pipeline** | whisper.cpp transcription plus optional llama.cpp cleanup, both on-device |
 | ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
 | 🎨 **Tone presets (Ultra)** | Minimal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
 | 🎮 **Game-aware** | Hotkeys pause while a GameMode game is registered (Lutris/Steam) |
@@ -110,7 +110,8 @@ python main.py
 
 1. Launch Wayfinder Aura — it lives in your system tray.
 2. Press **Ctrl+Alt+Space**, speak, press **Ctrl+Alt+Space** again.
-3. Your words are typed at the cursor, cleaned up and punctuated.
+3. Your raw transcript is typed at the cursor. Enable local LLM cleanup in
+   Settings when you want filler removal, punctuation cleanup, or styles.
 4. With Ultra, press **Ctrl+Alt+Enter** to cycle output styles (Minimal →
    Professional → Casual → Dev → Personal).
 
@@ -118,6 +119,17 @@ First run walks you through model download, microphone selection, and — where
 your system allows it — sets up the background typing service with one click,
 no terminal needed. The defaults (base.en + auto-detected mic) work well on
 most machines, and hotkeys are fully rebindable in Settings.
+
+### Dictation defaults and safety
+
+- **Post-processing starts off on new installs.** Raw transcription is the
+  lowest-latency default. Existing installs retain their saved cleanup choice.
+- **Ultra Chunk Processing defaults to Auto.** Recordings under 30 seconds stay
+  one-shot; longer recordings are chunked and fully assembled before cleanup,
+  injection, or Auto-Enter. Free remains one-shot. Off and On remain available.
+- **Auto press Enter starts off.** Turning it on submits after text injection,
+  which can send chat messages, terminal commands, or AI prompts immediately.
+  Keep it off anywhere you need to review dictated text before submission.
 
 ## Output styles (Ultra)
 
@@ -167,6 +179,9 @@ Settings live in the app; the file is `~/.config/wayfinder-aura/config.json`.
 | `style_toggle_key` + `style_toggle_modifiers` | Ctrl+Alt+Enter | Style cycle |
 | `audio_device` / `audio_device_name` | auto | Microphone (saved by name — index-proof) |
 | `typing_speed` | instant | instant, fast, normal, slow, very_slow |
+| `post_processing_enabled` | false | Optional local LLM cleanup; existing installs keep their saved choice |
+| `chunked_mode` | Auto for Ultra; Off for Free | Under 30s stays one-shot in Auto; Off and On are selectable |
+| `press_enter_after_dictation` | false | Automatically submits after injection; review terminal/AI text before enabling |
 | `ui_scale` | 1.0 | 0.7–2.5, or Ctrl +/- in app |
 | `start_minimized` | true | Start in system tray |
 

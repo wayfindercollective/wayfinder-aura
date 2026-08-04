@@ -1320,6 +1320,42 @@ SIMPLE_TONES = {
 }
 
 
+def _normalized_custom_vocabulary(config: dict) -> list[str]:
+    """Return safe, de-duplicated user terms for recognition/preservation prompts."""
+    raw_terms = config.get("custom_vocabulary", [])
+    if not isinstance(raw_terms, (list, tuple)):
+        return []
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_terms:
+        # Vocabulary is one term/phrase per entry. Collapse pasted whitespace so a
+        # newline cannot break the prompt structure, and bound the prompt contribution.
+        term = " ".join(str(raw).split())[:80]
+        key = term.casefold()
+        if not term or key in seen:
+            continue
+        seen.add(key)
+        terms.append(term)
+        if len(terms) >= 50:
+            break
+    return terms
+
+
+def _with_custom_vocabulary(prompt: str, config: dict) -> str:
+    """Tell every cleanup style to preserve user-supplied names and terminology."""
+    terms = _normalized_custom_vocabulary(config)
+    if not terms:
+        return prompt
+    vocabulary = ", ".join(terms)
+    return (
+        "Protected vocabulary: " + vocabulary + ".\n"
+        "Preserve the spelling and capitalization of these terms exactly. Treat "
+        "likely phonetic, spacing, or case variants in the input as matches; no "
+        "output style may rephrase these terms.\n\n" + prompt
+    )
+
+
 def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> tuple[str, Dict[str, Any]]:
     """
     Build the appropriate prompt based on config settings.
@@ -1393,14 +1429,14 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
         # Use simplified prompt for tiny models
         tone_simple = SIMPLE_TONES.get(tone, "clear")
         prompt = SIMPLE_CLEANUP_PROMPT.format(tone_simple=tone_simple, text=text)
-        return prompt, compatibility
+        return _with_custom_vocabulary(prompt, config), compatibility
     
     # === MINIMAL STYLE: Special case - just remove filler sounds ===
     # Caricature transforms even minimal — but only when the model tier allows it
     # (a downgraded caricature lands back here as intensity "standard").
     if tone == "minimal" and intensity != "caricature":
         prompt = MINIMAL_PROMPT.format(text=text)
-        return prompt, compatibility
+        return _with_custom_vocabulary(prompt, config), compatibility
     
     # === STYLED PROCESSING ===
     
@@ -1451,7 +1487,7 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
             text=text
         )
     
-    return prompt, compatibility
+    return _with_custom_vocabulary(prompt, config), compatibility
 
 
 # Legacy compatibility - keeping for any external code that might use these
@@ -1817,6 +1853,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         strong_mode: bool = False,
         caricature_mode: bool = False,
         force_subprocess: bool = False,
+        custom_vocabulary: list[str] | None = None,
     ):
         # When True, skip the resident llama-cpp-python wheel and always use the
         # llama-simple subprocess (see config: post_processing_force_subprocess).
@@ -1845,6 +1882,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # Tone is threaded in from config so the CLI path applies real per-tone
         # guidance instead of collapsing every styled tone onto one generic prompt.
         self.output_tone = output_tone or "professional"
+        # Whisper receives these terms for recognition; cleanup receives the same
+        # terms so every output style preserves their exact spelling/capitalization.
+        self.custom_vocabulary = _normalized_custom_vocabulary(
+            {"custom_vocabulary": custom_vocabulary or []}
+        )
         # Thread the intensity through from config so the Strong toggle and the
         # caricature easter egg actually change the prompt (they were previously
         # accepted but ignored — every styled tone collapsed onto standard output).
@@ -2053,6 +2095,10 @@ Output ONLY the cleaned text, nothing else.
 Text: {text}
 
 Cleaned text:"""
+
+        prompt = _with_custom_vocabulary(
+            prompt, {"custom_vocabulary": self.custom_vocabulary}
+        )
 
         # For reasoning models, pre-fill an empty think block so the model skips
         # its <think> reasoning and continues straight to the cleaned text. Without
@@ -2645,6 +2691,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
     output_tone = config.get("output_tone", "professional")
     _gpu_unlocked = False
     _style_unlocked = False
+    _vocabulary_unlocked = False
     _gate = None
 
     # === License gating (audit F1) ===
@@ -2658,6 +2705,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
         _gate = get_feature_gate()
         _gpu_unlocked = bool(_gate.has_feature("gpu_acceleration"))
         _style_unlocked = bool(_gate.has_feature("tone_system"))
+        _vocabulary_unlocked = bool(_gate.has_feature("custom_vocabulary"))
 
         # Cloud backends require the "cloud_backends" feature — downgrade to the
         # free local llama.cpp path when unlicensed (never send text to cloud).
@@ -2689,6 +2737,9 @@ def get_backend(config: dict) -> PostProcessorBackend:
     _effective_gpu_layers = _configured_gpu_layers if _gpu_enabled else 0
     _effective_strong_mode = bool(config.get("strong_mode", False)) and _style_unlocked
     _effective_caricature_mode = bool(config.get("caricature_mode", False)) and _style_unlocked
+    _effective_custom_vocabulary = (
+        _normalized_custom_vocabulary(config) if _vocabulary_unlocked else []
+    )
 
     _effective_model_path = str(config.get("llama_cpp_model_path", "") or "")
     if backend_type == "llama_cpp" and not cleanup_model_allowed(
@@ -2760,6 +2811,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 strong_mode=_effective_strong_mode,
                 caricature_mode=_effective_caricature_mode,
                 force_subprocess=config.get("post_processing_force_subprocess", False),
+                custom_vocabulary=_effective_custom_vocabulary,
             )
         
         # Fall back to Python bindings (llama-cpp-python)
@@ -2805,14 +2857,20 @@ def process_with_config(text: str, config: dict) -> str:
     # or styled config could shape the prompt before the backend was downgraded.
     try:
         from ..license import get_feature_gate
-        _style_allowed = get_feature_gate().has_feature("tone_system")
+        _gate = get_feature_gate()
+        _style_allowed = _gate.has_feature("tone_system")
+        _vocabulary_allowed = _gate.has_feature("custom_vocabulary")
     except Exception:
         _style_allowed = False
-    if not _style_allowed:
+        _vocabulary_allowed = False
+    if not _style_allowed or not _vocabulary_allowed:
         config = dict(config)
-        config["output_tone"] = "minimal"
-        config["strong_mode"] = False
-        config["caricature_mode"] = False
+        if not _style_allowed:
+            config["output_tone"] = "minimal"
+            config["strong_mode"] = False
+            config["caricature_mode"] = False
+        if not _vocabulary_allowed:
+            config["custom_vocabulary"] = []
 
     tone = config.get("output_tone", "professional")
 

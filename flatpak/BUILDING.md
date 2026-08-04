@@ -95,19 +95,20 @@ developer), the desktop file (Icon), `flatpak/resize-icons.py`, and the
 1. Push your code to the public GitHub repository
 2. Create a signed release/tag for the version
 3. Confirm the screenshots in `screenshots/` match the current UI
-4. Set the production license activation URL and matching Ed25519 public key in
-   `src/wayfinder/license.py`; see `docs/GO-LIVE-INPUTS.md`
+4. Confirm the production license activation URL and matching Ed25519 public key
+   pass `scripts/ci/check-release-license-defaults.py`; see
+   `docs/GO-LIVE-INPUTS.md`
 5. Generate a release manifest from the tag:
 
 ```bash
-python flatpak/prepare-release-manifest.py --tag v1.1.0
+python flatpak/prepare-release-manifest.py --tag v1.1.8
 ```
 
 The helper writes `release/io.wayfindercollective.WayfinderAura.yml` and copies
 `python-deps.json` beside it, replacing the local `type: dir` source with the
 pinned public git tag and commit that Flathub expects. It refuses to run while
-the checked-in license defaults still point at the dev backend.
-`--allow-dev-license` is for local dry-runs only, not submission builds.
+the checked-in license defaults point at a known dev backend.
+`--allow-dev-license` is for deliberate local dry-runs only, not submission builds.
 
 ### 2. Submit to Flathub
 

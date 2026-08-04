@@ -206,6 +206,40 @@ def test_overlay_signal_handler_does_not_raise_through_qt():
     assert "print" not in calls
 
 
+def test_kwin_placement_raises_overlay_above_plasma_panel():
+    """A keep-above Aura window can share Plasma's layer with its dock panel.
+
+    Position/setup scripts must explicitly restack Aura last or an overlapping
+    panel covers the bottom of the pill even though ``keepAbove`` is true.
+    """
+    overlay = (
+        Path(__file__).resolve().parent.parent
+        / "src"
+        / "wayfinder"
+        / "ui"
+        / "overlay.py"
+    ).read_text(encoding="utf-8")
+
+    assert overlay.count("workspace.raiseWindow(w);") >= 3
+    assert "workspace.raiseWindow(client);" in overlay
+
+
+def test_x11_placement_restacks_visible_overlay_for_flatpak():
+    """The Flatpak runs under XWayland and must restack after repositioning."""
+    overlay = (
+        Path(__file__).resolve().parent.parent
+        / "src"
+        / "wayfinder"
+        / "ui"
+        / "overlay.py"
+    ).read_text(encoding="utf-8")
+    x11_branch = overlay.split("# X11 (and non-Wayland): Qt owns geometry.", 1)[1]
+    x11_branch = x11_branch.split("def _update_size", 1)[0]
+
+    assert "self.isVisible()" in x11_branch
+    assert "self.raise_()" in x11_branch
+
+
 class TestStylePalettes:
     """Tests for the STYLE_PALETTES dict and STYLE_CYCLE list."""
 
