@@ -85,6 +85,22 @@ def test_steamdeck_installer_installs_current_daemon_and_disables_legacy_bridge(
     assert "steamos-readonly disable" not in installer
 
 
+def test_steamdeck_installer_reads_app_version_with_a_supported_flatpak_flag():
+    """`flatpak info` has no --show-version (checked against 1.16).
+
+    The version gate runs under `set -e` before any host file is installed, so
+    an unsupported flag aborts the whole install with "Unknown option" and the
+    trigger daemon never lands — the back-button trigger then looks broken in
+    the app with nothing listening on the socket.
+    """
+    installer = _read("install-steamdeck.sh")
+
+    assert "--show-version" not in installer
+    assert "installed_version=" in installer
+    # Parse the human-readable `Version:` field instead.
+    assert "Version:" in installer
+
+
 def test_steamdeck_services_are_home_portable_and_launch_flatpak_directly():
     app_unit = _read("systemd/wayfinder-aura.service")
     trigger_unit = _read("systemd/wayfinder-trigger.service")

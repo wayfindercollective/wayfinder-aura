@@ -146,7 +146,10 @@ elif [[ "${SKIP_FLATPAK}" -eq 1 ]]; then
 fi
 
 flatpak info --user "${APP_ID}" >/dev/null
-installed_version="$(flatpak info --user --show-version "${APP_ID}")"
+# `flatpak info` exposes no version flag (verified on 1.16), so read the
+# human-readable Version: field. This gate runs before any host file is
+# installed — an unsupported flag here aborts the whole install.
+installed_version="$(flatpak info --user "${APP_ID}" | awk '/^[[:space:]]*Version:/{print $2; exit}')"
 oldest="$(printf '%s\n%s\n' "${MIN_FLATPAK_VERSION}" "${installed_version}" | sort -V | head -n 1)"
 if [[ "${oldest}" != "${MIN_FLATPAK_VERSION}" ]]; then
   echo "ERROR: installed Wayfinder Aura ${installed_version} is older than the SteamOS-safe ${MIN_FLATPAK_VERSION}." >&2
