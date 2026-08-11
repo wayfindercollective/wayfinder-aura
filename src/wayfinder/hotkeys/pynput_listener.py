@@ -77,6 +77,10 @@ _raw_evdev_map = {
     108: _k("down"),
     105: _k("left"),
     106: _k("right"),
+    # Offered by the Settings hotkey dropdown — both must stay mappable or
+    # selecting them yields a hotkey that never fires (tests/test_hotkey_dropdown.py).
+    70:  _k("scroll_lock"),
+    119: _k("pause"),
     # Media keys
     164: _k("media_play_pause"),
     163: _k("media_next"),
@@ -107,6 +111,7 @@ for _names, _label in [
     (("delete",), "Delete"), (("insert",), "Insert"),
     (("home",), "Home"), (("end",), "End"),
     (("page_up",), "PageUp"), (("page_down",), "PageDown"),
+    (("scroll_lock",), "ScrollLock"), (("pause",), "Pause"),
     (("up",), "Up"), (("down",), "Down"), (("left",), "Left"), (("right",), "Right"),
 ]:
     _key = _k(*_names)
