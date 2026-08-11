@@ -2707,6 +2707,7 @@ def resolve_audio_device(config: dict) -> int | None:
 
 # Single source of truth for EventType — shared with hotkey listeners
 from wayfinder.hotkeys.types import EventType
+from wayfinder.hotkeys.detect_gate import detect_availability
 
 
 # === Tray Icon ===
@@ -14327,11 +14328,16 @@ class WayfinderApp(ctk.CTk):
           - Else (typical when KDE owns F3 and defers evdev) → start a
             capture-only temporary listener so Detect still sees keys.
         """
-        if IS_FLATPAK and not HAS_EVDEV:
-            self.log("🎯 Detect needs host input access — in Flatpak use System Settings → Shortcuts")
-            return
-        if not HAS_EVDEV and not getattr(self, "_pynput_listener_started", False):
-            self.log("🎯 Detect unavailable (no evdev / pynput listener)")
+        # A live pynput listener can capture on its own, so no evdev in the
+        # Flatpak is not fatal — gating on evdev alone made Detect dead in
+        # every Flatpak install (src/wayfinder/hotkeys/detect_gate.py).
+        can_detect, gate_message = detect_availability(
+            is_flatpak=IS_FLATPAK,
+            has_evdev=HAS_EVDEV,
+            pynput_started=bool(getattr(self, "_pynput_listener_started", False)),
+        )
+        if not can_detect:
+            self.log(gate_message)
             return
 
         # Debounce: a just-finished Detect must not re-arm from the same physical press
