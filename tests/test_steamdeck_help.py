@@ -23,8 +23,10 @@ def test_help_explains_the_complete_supported_trigger_path():
         "R5",
         "Desktop Layout",
         "Back Grips",
-        "Right Joystick Click (R3)",
         "Desktop Mode",
+        "keyboard key",
+        "Insert",
+        "Detect",
     )
     for phrase in required_copy:
         assert phrase in STEAM_DECK_BUTTON_HELP_BODY
@@ -34,3 +36,15 @@ def test_help_explains_the_complete_supported_trigger_path():
     assert "Game Mode" not in STEAM_DECK_BUTTON_HELP_BODY
     assert "separate layout for each game" in STEAM_DECK_GAME_MODE_HELP
     assert "normal R3 action" in STEAM_DECK_GAME_MODE_HELP
+
+
+def test_desktop_help_warns_that_detect_cannot_see_controller_buttons():
+    """The old copy sent Desktop users to Right Joystick Click, which Detect
+    can never capture — a gamepad button is not a keyboard event. Keep the
+    warning next to the instruction so nobody repeats that loop."""
+    body = STEAM_DECK_BUTTON_HELP_BODY
+
+    assert "Right Joystick Click (R3)" in body
+    assert "cannot see" in body
+    # The Desktop instruction must not tell users to *assign* R3.
+    assert "Assign R4, R5, L4, L5, or another custom button to Right Joystick" not in body
