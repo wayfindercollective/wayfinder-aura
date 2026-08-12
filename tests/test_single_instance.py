@@ -353,6 +353,11 @@ class TestHotkeyDetect:
         the new hotkey with F3. Cooldown must reject that re-arm."""
         import time
         app, _saved, logs = self._make_detect_app(monkeypatch)
+        # Detect is only reachable from the UI while a listener is running, and
+        # the availability gate now requires a USABLE capture source — a CI
+        # runner has no input devices, so without this the gate refuses before
+        # the cooldown is ever consulted.
+        app._pynput_listener_started = True
         app._detect_rearm_after = time.monotonic() + 5.0
 
         app._start_hotkey_detect("record")

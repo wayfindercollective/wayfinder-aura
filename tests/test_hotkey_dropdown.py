@@ -13,11 +13,19 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
-try:  # pynput is absent in some CI lanes; the source-level checks still run.
-    from wayfinder.hotkeys.pynput_listener import EVDEV_TO_PYNPUT, PYNPUT_TO_EVDEV
-    _HAVE_PYNPUT = True
+# pynput is absent in some CI lanes. Importing the module still SUCCEEDS
+# there — it sets Key = None, so every _k() yields None and the maps come out
+# empty. Guard on the module's own availability flag, not on the import, or
+# these tests "run" against empty maps and fail for the wrong reason.
+try:
+    from wayfinder.hotkeys.pynput_listener import (
+        PYNPUT_AVAILABLE as _HAVE_PYNPUT,
+        EVDEV_TO_PYNPUT,
+        PYNPUT_TO_EVDEV,
+    )
 except Exception:  # pragma: no cover - depends on the environment
     _HAVE_PYNPUT = False
+    EVDEV_TO_PYNPUT = PYNPUT_TO_EVDEV = {}
 
 # Mouse buttons are handled by the mouse listener, not the keyboard key map.
 MOUSE_BUTTON_CODES = {274, 275, 276, 277, 278}
