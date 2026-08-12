@@ -383,6 +383,7 @@ def test_successful_activation_replaces_form_with_active_state():
         _refresh_entitlement_ui=lambda: events.append("entitlements"),
         _render_license_tile=lambda: events.append("license"),
         _show_ultra_banner=lambda: events.append("banner"),
+        _write_status_breadcrumb=lambda: events.append("breadcrumb"),
     )
 
     with patch("wayfinder.license.store_license", return_value=result), patch(
@@ -393,6 +394,9 @@ def test_successful_activation_replaces_form_with_active_state():
     assert app.feature_gate is gate
     assert feedback.options["text"] == "Activating…"
     assert events[-4:] == ["header", "entitlements", "license", "banner"]
+    # Entitlements changed, so locked_tabs must be republished — a stale
+    # breadcrumb would misreport the Style tab as locked after activation.
+    assert "breadcrumb" in events
 
 
 def test_license_removal_rerenders_free_state_and_explains_scope():
@@ -407,6 +411,7 @@ def test_license_removal_rerenders_free_state_and_explains_scope():
         _rebuild_header=lambda: events.append("header"),
         _refresh_entitlement_ui=lambda: events.append("entitlements"),
         _render_license_tile=lambda: events.append("license"),
+        _write_status_breadcrumb=lambda: events.append("breadcrumb"),
     )
 
     with patch("wayfinder.license.remove_license") as remove, patch(
