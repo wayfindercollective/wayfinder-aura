@@ -328,24 +328,47 @@ def pynput_hotkey_listener(
     # Start the listener
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
+    # Readiness barrier before any liveness monitoring: pynput's backend comes
+    # up asynchronously, so sampling liveness straight after start() can race
+    # and read "already stopped" — which would tear down a perfectly good
+    # listener and have the supervisor start another one.
+    try:
+        listener.wait()
+    except Exception:  # a backend that fails to come up is handled by the monitor
+        pass
 
     print(f"[Hotkey] pynput listener started, waiting for: {get_key_name(target_key)}", flush=True)
     log("🎧 Cross-platform hotkey listener active (pynput)")
     
     try:
-        while not stop_event.is_set():
-            # pynput's Listener runs in its OWN thread. If it dies (lost X
-            # connection, backend error) this loop would otherwise keep
-            # spinning, so callers watching this thread would still believe a
-            # listener is alive — and Detect would arm against nothing. Exiting
-            # here makes this thread a faithful proxy for the real listener,
-            # which also lets the hotkey supervisor restart it.
-            if not listener.running:
-                log("⚠️ pynput listener stopped unexpectedly")
-                break
-            time.sleep(0.1)
+        monitor_listener(listener, stop_event, log)
     finally:
         listener.stop()
+        # Never let the caller believe this listener is gone while it can still
+        # deliver events: the caller clears its started flag when this thread
+        # exits, and the hotkey supervisor starts a fresh listener on that
+        # signal. Returning early would risk two live listeners double-firing.
+        try:
+            listener.join(timeout=2.0)
+        except RuntimeError:
+            pass
+
+
+def monitor_listener(listener, stop_event, log, poll_seconds: float = 0.1, sleep=time.sleep) -> bool:
+    """Poll until ``stop_event`` is set or the inner listener dies.
+
+    Returns True for a normal stop, False when the listener died on its own.
+
+    Uses ``is_alive()`` rather than pynput's ``running`` flag: ``running`` can
+    remain True after the listener thread has returned, so it does not catch a
+    backend that fell over (e.g. a lost X connection).
+    """
+    while not stop_event.is_set():
+        if not listener.is_alive():
+            log("⚠️ pynput listener stopped unexpectedly")
+            return False
+        sleep(poll_seconds)
+    return True
 
 
 def get_available_hotkey_backends() -> list[str]:
