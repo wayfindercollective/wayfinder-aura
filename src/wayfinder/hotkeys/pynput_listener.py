@@ -328,47 +328,26 @@ def pynput_hotkey_listener(
     # Start the listener
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
-    # NO readiness barrier here on purpose. listener.wait() is unbounded: a
-    # backend that dies during X/XRecord init never signals ready and never
-    # raises, so the wrapper would hang forever with the started flag set and
-    # the supervisor unable to restart it. None is needed either — Listener is
-    # a Thread, so is_alive() (what monitor_listener watches) is True from
-    # start() until run() returns. Verified over 200 starts: zero races.
 
     print(f"[Hotkey] pynput listener started, waiting for: {get_key_name(target_key)}", flush=True)
     log("🎧 Cross-platform hotkey listener active (pynput)")
     
     try:
-        monitor_listener(listener, stop_event, log)
+        while not stop_event.is_set():
+            time.sleep(0.1)
     finally:
+        # DELIBERATELY no liveness monitoring here. Watching the inner listener
+        # and reporting its death upward was implemented and then reverted:
+        # pynput's Xorg stop() itself performs an unbounded wait() when X init
+        # failed before its context existed, so any teardown path that touches
+        # a half-started listener can hang this thread forever. Earlier
+        # attempts also produced a startup race that could leave two live
+        # listeners double-firing every hotkey.
+        #
+        # The cost of leaving it out is small and bounded: Detect can arm when
+        # the listener is already gone and then time out. That is strictly
+        # better than a hang or duplicate hotkey delivery.
         listener.stop()
-        # Best-effort: give the listener a moment to wind down before the
-        # caller clears its started flag, since the supervisor starts a fresh
-        # listener on that signal. A stopped pynput listener no longer
-        # delivers events, so a timeout here is not a correctness hole — but
-        # the wait is bounded, so this is "very likely settled", not a
-        # guarantee.
-        try:
-            listener.join(timeout=2.0)
-        except RuntimeError:
-            pass
-
-
-def monitor_listener(listener, stop_event, log, poll_seconds: float = 0.1, sleep=time.sleep) -> bool:
-    """Poll until ``stop_event`` is set or the inner listener dies.
-
-    Returns True for a normal stop, False when the listener died on its own.
-
-    Uses ``is_alive()`` rather than pynput's ``running`` flag: ``running`` can
-    remain True after the listener thread has returned, so it does not catch a
-    backend that fell over (e.g. a lost X connection).
-    """
-    while not stop_event.is_set():
-        if not listener.is_alive():
-            log("⚠️ pynput listener stopped unexpectedly")
-            return False
-        sleep(poll_seconds)
-    return True
 
 
 def get_available_hotkey_backends() -> list[str]:

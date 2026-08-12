@@ -11,33 +11,7 @@ from wayfinder.hotkeys.detect_gate import (
     NO_LISTENER_MESSAGE,
     detect_availability,
     evdev_capture_usable,
-    listener_is_live,
 )
-
-
-class _FakeThread:
-    def __init__(self, alive):
-        self._alive = alive
-
-    def is_alive(self):
-        return self._alive
-
-
-def test_a_dead_thread_beats_a_stale_started_flag():
-    """_start_pynput_listener sets its flag before the thread runs, and the
-    listener can return normally (an unmappable saved hotkey code does exactly
-    that) without clearing it. Trusting the flag arms Detect with nothing
-    listening, so capture can only time out."""
-    assert listener_is_live(True, _FakeThread(alive=False)) is False
-
-
-def test_a_live_thread_is_live():
-    assert listener_is_live(True, _FakeThread(alive=True)) is True
-
-
-def test_falls_back_to_the_flag_when_no_thread_handle_exists():
-    assert listener_is_live(True, None) is True
-    assert listener_is_live(False, None) is False
 
 
 def test_flatpak_without_evdev_can_still_detect_via_pynput():
@@ -99,13 +73,3 @@ def test_a_raising_probe_is_not_usable():
     assert evdev_capture_usable(boom) is False
 
 
-def test_deviceless_flatpak_with_a_dead_listener_refuses_detect():
-    """The real shipped combination: evdev imports, no devices, listener dead."""
-    can_detect, message = detect_availability(
-        is_flatpak=True,
-        evdev_usable=evdev_capture_usable(lambda: []),
-        pynput_started=listener_is_live(True, _FakeThread(alive=False)),
-    )
-
-    assert can_detect is False
-    assert message == FLATPAK_NO_INPUT_MESSAGE

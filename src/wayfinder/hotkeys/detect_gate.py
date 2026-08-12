@@ -38,20 +38,6 @@ def evdev_capture_usable(list_devices: Optional[Callable[[], list]]) -> bool:
         return False
 
 
-def listener_is_live(started_flag: bool, thread) -> bool:
-    """Whether the pynput listener is actually running.
-
-    Prefer the thread over the flag: ``_start_pynput_listener`` sets its flag
-    before the thread starts and the listener can return normally without
-    clearing it (an unmappable saved hotkey code returns early), so the flag
-    alone can claim a listener that is gone. ``thread`` is None on callers that
-    have no handle, where the flag is the only signal available.
-    """
-    if thread is not None:
-        return bool(thread.is_alive())
-    return bool(started_flag)
-
-
 def detect_availability(
     *, is_flatpak: bool, evdev_usable: bool, pynput_started: bool
 ) -> tuple[bool, str | None]:
