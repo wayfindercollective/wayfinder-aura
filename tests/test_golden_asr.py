@@ -153,6 +153,11 @@ def test_silence_produces_no_words():
     not (_CLI and _BASE_MODEL and _TURBO_MODEL and _CLIPS_PRESENT and _gpu_present()),
     reason="premium path needs the turbo model + a usable GPU (on-device only)",
 )
+# Two passes over the corpus (base.en + turbo), and _find_model prefers the full
+# 1.6GB ggml-large-v3-turbo. Measured 145s on a Steam Deck where Vulkan does not
+# engage, so the run is CPU-bound — the global 60s addopts timeout can never hold
+# it. Generous headroom so a loaded machine does not turn this red.
+@pytest.mark.timeout(600)
 def test_premium_at_least_as_accurate_as_free():
     """Premium (turbo/GPU) should be at least as accurate as free (base.en) IN
     AGGREGATE. Advisory, aggregate-only: a short clean clip can let base.en match
