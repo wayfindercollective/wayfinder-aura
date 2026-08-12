@@ -10,7 +10,33 @@ from wayfinder.hotkeys.detect_gate import (
     FLATPAK_NO_INPUT_MESSAGE,
     NO_LISTENER_MESSAGE,
     detect_availability,
+    listener_is_live,
 )
+
+
+class _FakeThread:
+    def __init__(self, alive):
+        self._alive = alive
+
+    def is_alive(self):
+        return self._alive
+
+
+def test_a_dead_thread_beats_a_stale_started_flag():
+    """_start_pynput_listener sets its flag before the thread runs, and the
+    listener can return normally (an unmappable saved hotkey code does exactly
+    that) without clearing it. Trusting the flag arms Detect with nothing
+    listening, so capture can only time out."""
+    assert listener_is_live(True, _FakeThread(alive=False)) is False
+
+
+def test_a_live_thread_is_live():
+    assert listener_is_live(True, _FakeThread(alive=True)) is True
+
+
+def test_falls_back_to_the_flag_when_no_thread_handle_exists():
+    assert listener_is_live(True, None) is True
+    assert listener_is_live(False, None) is False
 
 
 def test_flatpak_without_evdev_can_still_detect_via_pynput():

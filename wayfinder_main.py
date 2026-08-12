@@ -2707,7 +2707,7 @@ def resolve_audio_device(config: dict) -> int | None:
 
 # Single source of truth for EventType — shared with hotkey listeners
 from wayfinder.hotkeys.types import EventType
-from wayfinder.hotkeys.detect_gate import detect_availability
+from wayfinder.hotkeys.detect_gate import detect_availability, listener_is_live
 from wayfinder.ui.tab_gates import feature_for_tab, locked_tabs
 
 
@@ -14336,7 +14336,10 @@ class WayfinderApp(ctk.CTk):
         can_detect, gate_message = detect_availability(
             is_flatpak=IS_FLATPAK,
             has_evdev=HAS_EVDEV,
-            pynput_started=bool(getattr(self, "_pynput_listener_started", False)),
+            pynput_started=listener_is_live(
+                getattr(self, "_pynput_listener_started", False),
+                getattr(self, "_pynput_thread", None),
+            ),
         )
         if not can_detect:
             self.log(gate_message)
@@ -17183,9 +17186,15 @@ class WayfinderApp(ctk.CTk):
                 print(f"[Hotkey] pynput listener crashed: {e}", flush=True)
                 import traceback
                 traceback.print_exc()
+            finally:
+                # A NORMAL return also means the listener is gone — e.g. an
+                # unmappable saved hotkey code returns early without raising.
+                # Leaving the flag set makes Detect arm with nothing listening,
+                # so capture could only ever time out.
                 self._pynput_listener_started = False
 
-        threading.Thread(target=_pynput_wrapper, daemon=True).start()
+        self._pynput_thread = threading.Thread(target=_pynput_wrapper, daemon=True)
+        self._pynput_thread.start()
 
     def _start_portal_listener(self):
         """Start the XDG GlobalShortcuts portal listener (Wayland/Flatpak) in a daemon thread.
