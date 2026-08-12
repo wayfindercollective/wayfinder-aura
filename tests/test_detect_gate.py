@@ -10,6 +10,7 @@ from wayfinder.hotkeys.detect_gate import (
     FLATPAK_NO_INPUT_MESSAGE,
     NO_LISTENER_MESSAGE,
     detect_availability,
+    evdev_capture_usable,
     listener_is_live,
 )
 
@@ -42,7 +43,7 @@ def test_falls_back_to_the_flag_when_no_thread_handle_exists():
 def test_flatpak_without_evdev_can_still_detect_via_pynput():
     """The regression: this combination is every Flatpak install on X11."""
     can_detect, message = detect_availability(
-        is_flatpak=True, has_evdev=False, pynput_started=True
+        is_flatpak=True, evdev_usable=False, pynput_started=True
     )
 
     assert can_detect is True
@@ -51,7 +52,7 @@ def test_flatpak_without_evdev_can_still_detect_via_pynput():
 
 def test_evdev_alone_is_enough():
     can_detect, message = detect_availability(
-        is_flatpak=False, has_evdev=True, pynput_started=False
+        is_flatpak=False, evdev_usable=True, pynput_started=False
     )
 
     assert can_detect is True
@@ -60,7 +61,7 @@ def test_evdev_alone_is_enough():
 
 def test_flatpak_with_no_listener_at_all_explains_the_flatpak_limitation():
     can_detect, message = detect_availability(
-        is_flatpak=True, has_evdev=False, pynput_started=False
+        is_flatpak=True, evdev_usable=False, pynput_started=False
     )
 
     assert can_detect is False
@@ -69,8 +70,42 @@ def test_flatpak_with_no_listener_at_all_explains_the_flatpak_limitation():
 
 def test_native_install_with_no_listener_gets_the_generic_message():
     can_detect, message = detect_availability(
-        is_flatpak=False, has_evdev=False, pynput_started=False
+        is_flatpak=False, evdev_usable=False, pynput_started=False
     )
 
     assert can_detect is False
     assert message == NO_LISTENER_MESSAGE
+
+
+def test_importable_but_deviceless_evdev_is_not_usable():
+    """The Flatpak bundles evdev (HAS_EVDEV is True) but has no /dev/input, so
+    list_devices() returns []. Treating import success as a capture source let
+    Detect arm with nothing able to see keys."""
+    assert evdev_capture_usable(lambda: []) is False
+
+
+def test_evdev_with_devices_is_usable():
+    assert evdev_capture_usable(lambda: ["/dev/input/event0"]) is True
+
+
+def test_absent_evdev_is_not_usable():
+    assert evdev_capture_usable(None) is False
+
+
+def test_a_raising_probe_is_not_usable():
+    def boom():
+        raise OSError("permission denied")
+
+    assert evdev_capture_usable(boom) is False
+
+
+def test_deviceless_flatpak_with_a_dead_listener_refuses_detect():
+    """The real shipped combination: evdev imports, no devices, listener dead."""
+    can_detect, message = detect_availability(
+        is_flatpak=True,
+        evdev_usable=evdev_capture_usable(lambda: []),
+        pynput_started=listener_is_live(True, _FakeThread(alive=False)),
+    )
+
+    assert can_detect is False
+    assert message == FLATPAK_NO_INPUT_MESSAGE

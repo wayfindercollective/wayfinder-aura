@@ -2707,7 +2707,11 @@ def resolve_audio_device(config: dict) -> int | None:
 
 # Single source of truth for EventType — shared with hotkey listeners
 from wayfinder.hotkeys.types import EventType
-from wayfinder.hotkeys.detect_gate import detect_availability, listener_is_live
+from wayfinder.hotkeys.detect_gate import (
+    detect_availability,
+    evdev_capture_usable,
+    listener_is_live,
+)
 from wayfinder.ui.tab_gates import feature_for_tab, locked_tabs
 
 
@@ -14164,6 +14168,8 @@ class WayfinderApp(ctk.CTk):
         self.update_idletasks()  # paint the feedback before the blocking network call
         result = store_license(key)
         self.feature_gate = get_feature_gate(force_refresh=True)
+        # Entitlements changed — republish so locked_tabs is not stale.
+        self._write_status_breadcrumb()
         if result.is_valid and self.feature_gate.is_premium:
             self.log("😇 Ultra activated — halo on. Thanks for supporting Wayfinder!")
             self._rebuild_header()
@@ -14223,6 +14229,8 @@ class WayfinderApp(ctk.CTk):
         from wayfinder.license import remove_license, get_feature_gate
         remove_license()
         self.feature_gate = get_feature_gate(force_refresh=True)
+        # Entitlements changed — republish so locked_tabs is not stale.
+        self._write_status_breadcrumb()
         self.log("License removed from this device")
         from wayfinder.config import enforce_license_config
         repaired = enforce_license_config(self.config, self.feature_gate)
@@ -14335,7 +14343,10 @@ class WayfinderApp(ctk.CTk):
         # every Flatpak install (src/wayfinder/hotkeys/detect_gate.py).
         can_detect, gate_message = detect_availability(
             is_flatpak=IS_FLATPAK,
-            has_evdev=HAS_EVDEV,
+            # Usable, not merely importable: the Flatpak bundles evdev but has
+            # no /dev/input, so HAS_EVDEV alone would short-circuit this True
+            # and arm Detect against nothing.
+            evdev_usable=evdev_capture_usable(evdev.list_devices if HAS_EVDEV else None),
             pynput_started=listener_is_live(
                 getattr(self, "_pynput_listener_started", False),
                 getattr(self, "_pynput_thread", None),

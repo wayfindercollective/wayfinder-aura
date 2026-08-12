@@ -334,6 +334,15 @@ def pynput_hotkey_listener(
     
     try:
         while not stop_event.is_set():
+            # pynput's Listener runs in its OWN thread. If it dies (lost X
+            # connection, backend error) this loop would otherwise keep
+            # spinning, so callers watching this thread would still believe a
+            # listener is alive — and Detect would arm against nothing. Exiting
+            # here makes this thread a faithful proxy for the real listener,
+            # which also lets the hotkey supervisor restart it.
+            if not listener.running:
+                log("⚠️ pynput listener stopped unexpectedly")
+                break
             time.sleep(0.1)
     finally:
         listener.stop()
