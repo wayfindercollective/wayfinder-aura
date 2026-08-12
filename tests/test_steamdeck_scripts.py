@@ -9,6 +9,7 @@ bridge.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -99,6 +100,61 @@ def test_steamdeck_installer_reads_app_version_with_a_supported_flatpak_flag():
     assert "installed_version=" in installer
     # Parse the human-readable `Version:` field instead.
     assert "Version:" in installer
+
+
+_SAMPLE_FLATPAK_INFO = """\
+Wayfinder Aura - Local voice dictation for Linux
+
+          ID: io.wayfindercollective.WayfinderAura
+         Ref: app/io.wayfindercollective.WayfinderAura/x86_64/master
+        Arch: x86_64
+      Branch: master
+     Version: 1.1.7
+     License: Elastic-2.0
+      Origin: wayfinder
+"""
+
+
+def _installed_version_awk_program() -> str:
+    """The awk program the installer uses, read out of the script itself."""
+    installer = _read("install-steamdeck.sh")
+    line = next(
+        (ln for ln in installer.splitlines() if ln.strip().startswith("installed_version=")),
+        None,
+    )
+    assert line, "installed_version assignment not found"
+    match = re.search(r"awk '([^']+)'", line)
+    assert match, f"version parse no longer uses a single-quoted awk program: {line}"
+    return match.group(1)
+
+
+def test_installer_version_parse_actually_extracts_the_version():
+    """Exercise the parse, not just its source text.
+
+    Asserting the string "Version:" appears somewhere in the script is
+    satisfied by a comment, so it cannot catch a broken expression.
+    """
+    result = subprocess.run(
+        ["awk", _installed_version_awk_program()],
+        input=_SAMPLE_FLATPAK_INFO,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "1.1.7"
+
+
+def test_installer_pins_the_c_locale_and_refuses_an_unparsable_version():
+    """`flatpak info` field labels go through gettext, so a translated
+    "Version:" would yield an empty parse — and an empty version makes the
+    `sort -V` gate reject a perfectly good install with a nonsense message."""
+    installer = _read("install-steamdeck.sh")
+
+    assert "LC_ALL=C flatpak info" in installer, "version read must pin the C locale"
+    assert "could not read the installed Wayfinder Aura version" in installer, (
+        "an unparsable version must fail loudly, not fall through to the sort -V gate"
+    )
 
 
 def test_steamdeck_services_are_home_portable_and_launch_flatpak_directly():
