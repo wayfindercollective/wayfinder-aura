@@ -25,8 +25,10 @@ STEAM_DECK_GAME_MODE_HELP = (
     "Optional Game Mode setup: Steam uses a separate layout for each game, and "
     "in Game Mode Aura cannot listen for keyboard keys at all. Map the same "
     "back/custom button to Right Joystick Click (R3) in that game's Controller "
-    "Settings, then install Aura's host helper "
-    "(scripts/steamdeck/install-steamdeck.sh), which watches the pad directly. "
+    "Settings, then install Aura's host helper, which watches the pad "
+    "directly. Get it from the Steam Deck setup guide at "
+    "https://github.com/wayfindercollective/wayfinder-aura — the helper lives "
+    "outside the sandbox, so it cannot be installed from this window. "
     "The game may also receive its normal R3 action."
 )
 
