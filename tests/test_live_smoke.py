@@ -106,28 +106,60 @@ def test_ping_replies_pong():
     assert _ping() == b"pong"
 
 
+def _is_locked(tab: str) -> bool:
+    """Whether the running app's licence denies ``tab``.
+
+    Absent on an app predating the field, in which case nothing is treated as
+    locked and the caller's normal assertions apply.
+    """
+    status = _read_status() or {}
+    return tab in (status.get("locked_tabs") or [])
+
+
 @pytest.mark.parametrize("tab", ["dictate", "settings", "style", "history"])
 def test_tab_switch_actually_switches(tab):
     """Send tab:<name> and verify via the status breadcrumb that the app REALLY
-    switched — not merely that the socket accepted the bytes."""
+    switched — not merely that the socket accepted the bytes.
+
+    A licence-gated tab must REFUSE instead: asserting it switches made this
+    fail on every unlicensed build, which reads as a regression when it is the
+    gate working. Both outcomes are checked, so neither can silently break.
+    """
     _require_running_app()
-    _send(f"tab:{tab}")
-    result = _await_tab(tab)
-    if result == "absent":
+    if _read_status() is None:
         pytest.skip("app predates the status breadcrumb (no status.json)")
-    assert result == "ok", f"tab never switched to {tab} (last status: {_read_status()})"
+
+    before = (_read_status() or {}).get("tab")
+    locked = _is_locked(tab)
+    _send(f"tab:{tab}")
+    result = _await_tab(tab, timeout=1.0 if locked else 3.0)
+
+    if locked:
+        assert result != "ok", (
+            f"{tab} is licence-locked but the app switched to it anyway — "
+            f"premium gate bypassed (status: {_read_status()})"
+        )
+        assert (_read_status() or {}).get("tab") == before, (
+            f"refusing {tab} must leave the current tab alone "
+            f"(was {before}, now {(_read_status() or {}).get('tab')})"
+        )
+    else:
+        assert result == "ok", f"tab never switched to {tab} (last status: {_read_status()})"
 
 
 def test_full_tab_sweep_verified_in_sequence():
-    """Sweep every tab back-to-back, verifying each switch through the breadcrumb."""
+    """Sweep every unlocked tab back-to-back, verifying each through the breadcrumb."""
     _require_running_app()
+    if _read_status() is None:
+        pytest.skip("app predates the status breadcrumb (no status.json)")
     _send("show")
-    saw_breadcrumb = False
+
+    swept = 0
     for tab in ("dictate", "settings", "style", "history"):
+        if _is_locked(tab):
+            continue  # covered by the per-tab refusal assertion above
         _send(f"tab:{tab}")
-        result = _await_tab(tab)
-        if result == "absent":
-            pytest.skip("app predates the status breadcrumb (no status.json)")
-        saw_breadcrumb = True
-        assert result == "ok", f"tab never switched to {tab}: {_read_status()}"
-    assert saw_breadcrumb
+        assert _await_tab(tab) == "ok", f"tab never switched to {tab}: {_read_status()}"
+        swept += 1
+
+    assert swept, "no unlocked tabs to sweep — breadcrumb or licence state is wrong"

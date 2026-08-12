@@ -2708,6 +2708,7 @@ def resolve_audio_device(config: dict) -> int | None:
 # Single source of truth for EventType — shared with hotkey listeners
 from wayfinder.hotkeys.types import EventType
 from wayfinder.hotkeys.detect_gate import detect_availability
+from wayfinder.ui.tab_gates import feature_for_tab, locked_tabs
 
 
 # === Tray Icon ===
@@ -7098,14 +7099,15 @@ class WayfinderApp(ctk.CTk):
 
     def _switch_tab(self, tab_id: str) -> None:
         """Switch to the specified tab."""
-        if tab_id == "style":
+        required_feature = feature_for_tab(tab_id)
+        if required_feature:
             gate = getattr(self, "feature_gate", None)
             try:
-                unlocked = bool(gate and gate.has_feature("tone_system"))
+                unlocked = bool(gate and gate.has_feature(required_feature))
             except Exception:
                 unlocked = False
             if not unlocked:
-                self._show_premium_prompt("tone_system")
+                self._show_premium_prompt(required_feature)
                 return
 
         # Update button styles for sidebar
@@ -16614,12 +16616,18 @@ class WayfinderApp(ctk.CTk):
             import tempfile as _tempfile
             from wayfinder.config import STATUS_PATH
             state = getattr(self, "app_state", None)
+            gate = getattr(self, "feature_gate", None)
             payload = {
                 "pid": _os.getpid(),
                 "ts": time.time(),
                 "state": state.name if hasattr(state, "name") else str(state),
                 "tab": getattr(self, "active_tab", None),
                 "generation": getattr(self, "session_generation", 0),
+                # So a harness can tell "the licence gate refused" from "tab
+                # switching is broken" — the two look identical from outside.
+                "locked_tabs": locked_tabs(
+                    gate.has_feature if gate is not None else lambda _f: False
+                ),
             }
             d = _os.path.dirname(STATUS_PATH)
             if d:
