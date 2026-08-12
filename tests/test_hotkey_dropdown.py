@@ -9,7 +9,15 @@ fired, which is indistinguishable from a broken trigger chain.
 import ast
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
+
+try:  # pynput is absent in some CI lanes; the source-level checks still run.
+    from wayfinder.hotkeys.pynput_listener import EVDEV_TO_PYNPUT, PYNPUT_TO_EVDEV
+    _HAVE_PYNPUT = True
+except Exception:  # pragma: no cover - depends on the environment
+    _HAVE_PYNPUT = False
 
 # Mouse buttons are handled by the mouse listener, not the keyboard key map.
 MOUSE_BUTTON_CODES = {274, 275, 276, 277, 278}
@@ -58,3 +66,37 @@ def test_scroll_lock_and_pause_are_mappable():
 
     assert 70 in mappable, "ScrollLock (70) missing from _raw_evdev_map"
     assert 119 in mappable, "Pause (119) missing from _raw_evdev_map"
+
+
+@pytest.mark.skipif(not _HAVE_PYNPUT, reason="needs pynput installed")
+def test_dropdown_keys_survive_the_runtime_none_filter():
+    """Presence in _raw_evdev_map is not enough to make a hotkey work.
+
+    Entries are written as _k("name"); an unknown-to-pynput name yields None
+    and is dropped when EVDEV_TO_PYNPUT is built, so a typo like
+    _k("scrolllock") passes every source-level check while the hotkey never
+    fires — exactly the failure this file exists to prevent.
+    """
+    unusable = {
+        name: code
+        for name, code in _dropdown_codes().items()
+        if code not in MOUSE_BUTTON_CODES and code not in EVDEV_TO_PYNPUT
+    }
+
+    assert not unusable, (
+        "dropdown keys resolved to None and were filtered out of the live "
+        f"map — the pynput key name is wrong: {unusable}"
+    )
+
+
+@pytest.mark.skipif(not _HAVE_PYNPUT, reason="needs pynput installed")
+def test_dropdown_keys_round_trip_for_detect_capture():
+    """Settings -> Detect maps pynput key -> evdev code, so a one-way entry
+    would bind the hotkey but silently fail to capture it."""
+    for name, code in _dropdown_codes().items():
+        if code in MOUSE_BUTTON_CODES:
+            continue
+        key = EVDEV_TO_PYNPUT.get(code)
+        assert PYNPUT_TO_EVDEV.get(key) == code, (
+            f"{name} ({code}) does not round-trip: Detect cannot capture it"
+        )
