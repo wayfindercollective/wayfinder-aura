@@ -2709,6 +2709,7 @@ def resolve_audio_device(config: dict) -> int | None:
 from wayfinder.hotkeys.types import EventType
 from wayfinder.hotkeys.detect_gate import detect_availability, evdev_capture_usable
 from wayfinder.ui.tab_gates import feature_for_tab, locked_tabs
+from wayfinder.ui.clipboard import attach_secret_paste
 
 
 # === Tray Icon ===
@@ -9307,6 +9308,10 @@ class WayfinderApp(ctk.CTk):
                 height=40,
                 show="•",
             )
+            # Credential field: give it a right-click Paste menu. Without this
+            # there is no way to paste a key at all (CTkEntry has no context
+            # menu), which blocks activation for anyone who copied their key.
+            attach_secret_paste(key_entry, tk, log=self.log)
             key_entry.pack(anchor="w", padx=16, pady=(0, 8))
 
             # Show/hide toggle
@@ -12515,6 +12520,10 @@ class WayfinderApp(ctk.CTk):
                     width=350,
                     show="•",
                 )
+                # Credential field: give it a right-click Paste menu. Without this
+                # there is no way to paste a key at all (CTkEntry has no context
+                # menu), which blocks activation for anyone who copied their key.
+                attach_secret_paste(key_entry, tk, log=self.log)
                 key_entry.pack(anchor="w", padx=16, pady=(0, 4))
                 
                 show_key_var = ctk.BooleanVar(value=False)
@@ -12598,6 +12607,10 @@ class WayfinderApp(ctk.CTk):
                     width=350,
                     show="•",
                 )
+                # Credential field: give it a right-click Paste menu. Without this
+                # there is no way to paste a key at all (CTkEntry has no context
+                # menu), which blocks activation for anyone who copied their key.
+                attach_secret_paste(key_entry, tk, log=self.log)
                 key_entry.pack(anchor="w", padx=16, pady=(0, 4))
                 
                 show_key_var = ctk.BooleanVar(value=False)
@@ -13937,6 +13950,10 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
             border_color=COLORS["border_subtle"],
         )
+        # Credential field: give it a right-click Paste menu. Without this
+        # there is no way to paste a key at all (CTkEntry has no context
+        # menu), which blocks activation for anyone who copied their key.
+        attach_secret_paste(self._license_key_entry, tk, log=self.log)
         self._license_key_entry.pack(
             side="left", fill="x", expand=True, padx=(0, SPACING["sm"])
         )
