@@ -5,7 +5,33 @@ offset travel down toward/into the panel zone (lower clamp = physical screen
 bottom). Negative offset raises. visual_inset accounts for transparent bottom glow.
 """
 
-from wayfinder.ui.overlay_geometry import clamp_overlay_y, anchor_x, parse_anchor
+from wayfinder.ui.overlay_geometry import (
+    anchor_x,
+    clamp_overlay_y,
+    parse_anchor,
+    positioning_backend,
+)
+
+
+class TestPositioningBackend:
+    """Placement mechanism is chosen by the ACTUAL Qt platform, never by session
+    env vars: the Flatpak forces xcb on a Wayland desktop, where env sniffing
+    picked the KWin path the sandbox cannot reach — while the real bug was KWin
+    clamping the *managed* X11 window to the work area (field bug 2026-08)."""
+
+    def test_native_wayland_uses_kwin_scripting(self):
+        assert positioning_backend("wayland") == "kwin"
+        assert positioning_backend("wayland-egl") == "kwin"
+
+    def test_xcb_uses_qt_native_geometry(self):
+        # True for the Flatpak (forced xcb over XWayland) and any X11 session.
+        assert positioning_backend("xcb") == "x11"
+
+    def test_unknown_platforms_default_to_qt_geometry(self):
+        # offscreen (tests), eglfs, or a future platform: Qt-native geometry is
+        # harmless; KWin scripting would be meaningless.
+        for name in ("offscreen", "eglfs", "", None):
+            assert positioning_backend(name) == "x11"
 
 
 class TestReservedPanel:

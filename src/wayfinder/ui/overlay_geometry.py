@@ -8,6 +8,30 @@ then defers the actual coordinate math to here.
 from __future__ import annotations
 
 
+def positioning_backend(platform_name: str) -> str:
+    """Which placement mechanism owns the overlay's position: ``x11`` or ``kwin``.
+
+    Decided by the ACTUAL Qt platform, never by session environment variables:
+    the Flatpak forces ``QT_QPA_PLATFORM=xcb`` on a Wayland desktop, so
+    ``XDG_SESSION_TYPE``/``WAYLAND_DISPLAY`` sniffing answers a different
+    question than "which protocol is this window actually speaking".
+
+    * ``x11`` — Qt owns geometry, with the override-redirect bypass hint.
+      Proven on KWin (Plasma 6, Wayland session, XWayland client): KWin clamps
+      a *managed* X11 window's configure requests to the work area, so the
+      position slider could never push the pill over the taskbar — the window
+      pinned at the panel strut (field bug, 2026-08). An override-redirect
+      window escapes the clamp and renders above the panel.
+    * ``kwin`` — the KWin scripting path (``frameGeometry`` over D-Bus), the
+      only placement that sticks for a native Wayland window.
+
+    Anything that is not native Wayland ends up on the x11 path: on the odd
+    platforms (offscreen tests, eglfs) Qt-native geometry is the harmless
+    default and KWin scripting would be meaningless anyway.
+    """
+    return "kwin" if (platform_name or "").lower().startswith("wayland") else "x11"
+
+
 def parse_anchor(anchor: str) -> tuple[str, str]:
     """Split an anchor like 'bottom-center' into (vertical, horizontal).
 

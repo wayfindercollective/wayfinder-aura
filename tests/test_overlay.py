@@ -233,11 +233,118 @@ def test_x11_placement_restacks_visible_overlay_for_flatpak():
         / "ui"
         / "overlay.py"
     ).read_text(encoding="utf-8")
-    x11_branch = overlay.split("# X11 (and non-Wayland): Qt owns geometry.", 1)[1]
+    x11_branch = overlay.split("# x11 backend: Qt owns geometry.", 1)[1]
     x11_branch = x11_branch.split("def _update_size", 1)[0]
 
     assert "self.isVisible()" in x11_branch
     assert "self.raise_()" in x11_branch
+
+
+class TestLoadKwinScriptStartFailures:
+    """A loaded-but-never-started KWin script positions nothing, so a failed
+    `start` must not read as success — on either the QtDBus path or the qdbus
+    subprocess fallback (whose `start` call could previously raise
+    TimeoutExpired straight out of the function)."""
+
+    @staticmethod
+    def _fake_qtdbus(start_ok: bool):
+        import types
+
+        mod = types.ModuleType("PyQt6.QtDBus")
+
+        class MessageType:
+            ReplyMessage = 1
+            ErrorMessage = 2
+
+        class QDBusMessage:
+            pass
+
+        QDBusMessage.MessageType = MessageType
+
+        class _Reply:
+            def __init__(self, ok):
+                self._ok = ok
+
+            def type(self):
+                return MessageType.ReplyMessage if self._ok else MessageType.ErrorMessage
+
+            def errorMessage(self):
+                return "" if self._ok else "start refused"
+
+        class QDBusConnection:
+            @staticmethod
+            def sessionBus():
+                class _Bus:
+                    def isConnected(self):
+                        return True
+
+                return _Bus()
+
+        class QDBusInterface:
+            def __init__(self, *a, **k):
+                pass
+
+            def isValid(self):
+                return True
+
+            def call(self, method, *a):
+                return _Reply(True) if method == "loadScript" else _Reply(start_ok)
+
+        mod.QDBusConnection = QDBusConnection
+        mod.QDBusInterface = QDBusInterface
+        mod.QDBusMessage = QDBusMessage
+        return mod
+
+    @pytest.fixture
+    def no_qdbus_binaries(self, overlay_module, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            raise FileNotFoundError(cmd[0])
+
+        monkeypatch.setattr(overlay_module.subprocess, "run", fake_run)
+
+    def test_qtdbus_start_error_is_not_success(
+        self, overlay_module, no_qdbus_binaries, monkeypatch
+    ):
+        monkeypatch.setitem(sys.modules, "PyQt6.QtDBus", self._fake_qtdbus(start_ok=False))
+        assert overlay_module._load_kwin_script("/tmp/x.js") is False
+
+    def test_qtdbus_start_success_is_success(self, overlay_module, no_qdbus_binaries, monkeypatch):
+        monkeypatch.setitem(sys.modules, "PyQt6.QtDBus", self._fake_qtdbus(start_ok=True))
+        assert overlay_module._load_kwin_script("/tmp/x.js") is True
+
+    def _qdbus_fallback(self, overlay_module, monkeypatch, start_behaviour):
+        # Break the in-process path so the qdbus subprocess fallback runs.
+        monkeypatch.setitem(sys.modules, "PyQt6.QtDBus", None)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[3].endswith(".loadScript"):
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return start_behaviour(cmd)
+
+        monkeypatch.setattr(overlay_module.subprocess, "run", fake_run)
+        return overlay_module._load_kwin_script("/tmp/x.js")
+
+    def test_qdbus_start_nonzero_exit_is_not_success(self, overlay_module, monkeypatch):
+        result = self._qdbus_fallback(
+            overlay_module, monkeypatch,
+            lambda cmd: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no such script"),
+        )
+        assert result is False
+
+    def test_qdbus_start_timeout_is_not_success_and_does_not_raise(
+        self, overlay_module, monkeypatch
+    ):
+        def raise_timeout(cmd):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+        assert self._qdbus_fallback(overlay_module, monkeypatch, raise_timeout) is False
+
+    def test_qdbus_start_zero_exit_is_success(self, overlay_module, monkeypatch):
+        result = self._qdbus_fallback(
+            overlay_module, monkeypatch,
+            lambda cmd: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+        )
+        assert result is True
 
 
 class TestStylePalettes:

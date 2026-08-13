@@ -35,9 +35,13 @@ except ImportError:
 # Pure positioning math (Qt-free; unit-tested in tests/test_overlay_geometry.py). Works
 # whether this file is imported as wayfinder.ui.overlay or run as a bare-script subprocess.
 try:
-    from wayfinder.ui.overlay_geometry import clamp_overlay_y, anchor_x, parse_anchor
+    from wayfinder.ui.overlay_geometry import (
+        clamp_overlay_y, anchor_x, parse_anchor, positioning_backend,
+    )
 except ImportError:  # standalone script — its own directory is on sys.path
-    from overlay_geometry import clamp_overlay_y, anchor_x, parse_anchor
+    from overlay_geometry import (
+        clamp_overlay_y, anchor_x, parse_anchor, positioning_backend,
+    )
 
 # Blocking stdin reader thread (Qt-free; unit-tested in tests/test_stdin_reader.py).
 try:
@@ -71,23 +75,51 @@ def _load_kwin_script(script_path: str) -> bool:
     at KWin's centered default, placement controls dead). QtDBus needs
     neither a host binary nor an environment.
     """
+    # Every failure branch logs distinctly: this path used to fail into silence
+    # (invalid interface returned False mutely, the fallback swallowed its own
+    # errors), which made "placement controls dead" undiagnosable in the field.
     try:
         from PyQt6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
 
         bus = QDBusConnection.sessionBus()
-        if bus.isConnected():
+        if not bus.isConnected():
+            print("KWin scripting: session bus not connected", file=sys.stderr)
+        else:
             iface = QDBusInterface(
                 "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus
             )
-            if iface.isValid():
+            if not iface.isValid():
+                # In the Flatpak this is the sandbox bus filter hiding
+                # org.kde.KWin (no --talk-name) — expected on the x11 backend,
+                # fatal for placement on the kwin backend.
+                print(
+                    "KWin scripting: org.kde.KWin interface invalid "
+                    f"({bus.lastError().message() or 'name not reachable'})",
+                    file=sys.stderr,
+                )
+            else:
                 reply = iface.call("loadScript", script_path)
-                if reply.type() == QDBusMessage.MessageType.ReplyMessage:
-                    iface.call("start")
-                    return True
+                if reply.type() != QDBusMessage.MessageType.ReplyMessage:
+                    print(
+                        f"KWin scripting: loadScript failed ({reply.errorMessage()})",
+                        file=sys.stderr,
+                    )
+                else:
+                    # A loaded-but-never-started script positions nothing, so a
+                    # failed start must not read as success.
+                    start_reply = iface.call("start")
+                    if start_reply.type() != QDBusMessage.MessageType.ReplyMessage:
+                        print(
+                            f"KWin scripting: start failed ({start_reply.errorMessage()})",
+                            file=sys.stderr,
+                        )
+                    else:
+                        return True
     except Exception as e:
         print(f"KWin QtDBus scripting failed: {e}", file=sys.stderr)
 
     env = host_env()
+    tried = []
     for qdbus in ("qdbus6", "qdbus-qt6", "qdbus"):
         try:
             result = subprocess.run(
@@ -96,16 +128,31 @@ def _load_kwin_script(script_path: str) -> bool:
                 capture_output=True, text=True, timeout=2, env=env,
             )
         except FileNotFoundError:
+            tried.append(f"{qdbus}: not installed")
             continue
-        except Exception:
+        except Exception as e:
+            print(f"KWin scripting: {qdbus} failed ({e})", file=sys.stderr)
             return False
         if result.returncode == 0:
-            subprocess.run(
-                [qdbus, "org.kde.KWin", "/Scripting",
-                 "org.kde.kwin.Scripting.start"],
-                capture_output=True, timeout=1, env=env,
+            try:
+                start = subprocess.run(
+                    [qdbus, "org.kde.KWin", "/Scripting",
+                     "org.kde.kwin.Scripting.start"],
+                    capture_output=True, text=True, timeout=1, env=env,
+                )
+            except Exception as e:
+                print(f"KWin scripting: {qdbus} start failed ({e})", file=sys.stderr)
+                return False
+            if start.returncode == 0:
+                return True
+            print(
+                f"KWin scripting: {qdbus} start exit {start.returncode} "
+                f"({(start.stderr or '').strip()[:120]})",
+                file=sys.stderr,
             )
-            return True
+            return False
+        tried.append(f"{qdbus}: exit {result.returncode} ({(result.stderr or '').strip()[:120]})")
+    print(f"KWin scripting: every fallback failed — {'; '.join(tried)}", file=sys.stderr)
     return False
 
 
@@ -842,6 +889,15 @@ class GlassmorphicOverlay(QWidget):
         self._vertical_offset = vertical_offset  # pixels: negative = higher, positive = lower
         self._anchor = anchor  # corner/edge placement: {top,bottom}-{left,center,right}
 
+        # Which mechanism owns this window's position — decided by the ACTUAL Qt
+        # platform, not session env (the Flatpak is xcb on a Wayland desktop, so
+        # XDG_SESSION_TYPE/WAYLAND_DISPLAY answer the wrong question). Needed
+        # before _setup_kwin_positioning_rule, hence set before anything else.
+        try:
+            self._backend = positioning_backend(QApplication.platformName())
+        except Exception:
+            self._backend = "x11"
+
         # Render quality: "high" = ambient wave animates continuously (smoothest look);
         # "performance" = freeze the render loop once idle in READY to save CPU/battery on
         # handhelds. Visual output is IDENTICAL in both — only whether the idle wave moves.
@@ -1015,19 +1071,32 @@ class GlassmorphicOverlay(QWidget):
     def _setup_window(self):
         """Configure window flags for overlay behavior (Wayland-proof)."""
         # CRITICAL: All flags must be combined in a SINGLE call
-        # 
+        #
         # Window flags for overlay:
         # - Tool: Helper window (better Wayland support)
         # - FramelessWindowHint: No decorations
         # - WindowStaysOnTopHint: Stay on top
-        # 
+        #
         # Note: Actual positioning on Wayland is done via KWin scripting
-        self.setWindowFlags(
+        flags = (
             Qt.WindowType.Tool |
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.WindowDoesNotAcceptFocus  # Never steal focus from text fields
         )
+        if self._backend == "x11":
+            # KWin clamps a managed X11 window's configure requests to the work
+            # area, so the position slider could never move the pill over the
+            # taskbar (field bug: pinned at the panel strut). Override-redirect
+            # escapes the clamp and renders above the panel — and because an
+            # unmanaged window covering the taskbar would otherwise swallow the
+            # clicks meant for it, input transparency is NOT optional here.
+            # The pill has no mouse handlers, so nothing is lost.
+            flags |= (
+                Qt.WindowType.X11BypassWindowManagerHint |
+                Qt.WindowType.WindowTransparentForInput
+            )
+        self.setWindowFlags(flags)
         
         # Critical for ARGB transparency on all platforms
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -1127,8 +1196,11 @@ class GlassmorphicOverlay(QWidget):
         # One delayed retry to handle WM not being ready yet
         QTimer.singleShot(500, self._position_at_bottom)
         
-        # Try KDE-specific always-on-top via KWin script (once, with delay)
-        if os.environ.get("XDG_CURRENT_DESKTOP", "").upper() == "KDE":
+        # KWin backend only: keep-above + position via KWin script (once, with
+        # delay). On the x11 backend this used to fire whenever the desktop was
+        # KDE — useless in the Flatpak (bus name filtered) and actively harmful
+        # on SteamOS X11, where loadScript spam can freeze the overlay.
+        if self._backend == "kwin":
             try:
                 if self.windowHandle():
                     QTimer.singleShot(1000, self._try_kde_keep_above)
@@ -1207,6 +1279,10 @@ class GlassmorphicOverlay(QWidget):
     
     def _setup_kwin_positioning_rule(self):
         """Setup KWin rule to position overlay before window is created."""
+        # KWin backend only — on x11 the window is override-redirect and KWin
+        # never manages it, so a placement rule would match nothing.
+        if self._backend != "kwin":
+            return
         if os.environ.get("XDG_CURRENT_DESKTOP", "").upper() != "KDE":
             return
         
@@ -1239,24 +1315,25 @@ class GlassmorphicOverlay(QWidget):
         except Exception as e:
             print(f"KWin positioning rule setup failed: {e}", file=sys.stderr)
     
-    @staticmethod
-    def _is_wayland_session() -> bool:
-        return (
-            os.environ.get("XDG_SESSION_TYPE") == "wayland"
-            or bool(os.environ.get("WAYLAND_DISPLAY"))
-        )
-
     def _position_at_bottom(self):
         """Position overlay on the configured anchor (default bottom-center).
 
-        On **Wayland/KDE**, Qt ``setGeometry`` / ``move`` do not reliably set absolute
-        position — they often flash the window to the compositor default (center /
-        top-left) for a frame, then KWin corrects it. That is the listen-button
-        "overlay jumps" bug. So on Wayland we **never** call setGeometry for on-screen
-        placement; only KWin ``frameGeometry`` (the path that actually sticks).
+        Two backends, chosen from the ACTUAL Qt platform (``self._backend``):
 
-        On X11, native setGeometry/move work and we skip KWin scripting (loadScript
-        spam can freeze the overlay on SteamOS X11).
+        On the **kwin** backend (native Wayland), Qt ``setGeometry`` / ``move`` do
+        not reliably set absolute position — they often flash the window to the
+        compositor default (center / top-left) for a frame, then KWin corrects it.
+        That is the listen-button "overlay jumps" bug. So we **never** call
+        setGeometry for on-screen placement; only KWin ``frameGeometry`` (the path
+        that actually sticks).
+
+        On the **x11** backend, Qt owns geometry and the window is
+        override-redirect (``X11BypassWindowManagerHint``): a *managed* X11
+        window's configure requests are clamped by KWin to the work area, which
+        is exactly why the position slider could never move the pill over the
+        taskbar in the Flatpak (field bug 2026-08). KWin scripting is skipped
+        entirely here — it was unreachable in the sandbox anyway, and loadScript
+        spam can freeze the overlay on SteamOS X11.
         """
         w, h = self.width(), self.height()
         x, y = self._calculate_position(w, h)
@@ -1273,13 +1350,21 @@ class GlassmorphicOverlay(QWidget):
                 # Position seems wrong, use a safe fallback (60px from bottom)
                 y = full.y() + full.height() - 60 - h
 
-        if self._is_wayland_session():
+        if self._backend == "kwin":
             # Size-only via Qt is OK (setFixedWidth in _update_size); position = KWin only.
             if self.isVisible():
-                _force_kde_window_position("Wayfinder Aura Overlay", x, y, w, h)
+                if not _force_kde_window_position("Wayfinder Aura Overlay", x, y, w, h):
+                    print(
+                        "overlay placement: KWin scripting path failed — "
+                        "position not applied (see errors above)",
+                        file=sys.stderr,
+                    )
             return
 
-        # X11 (and non-Wayland): Qt owns geometry.
+        # x11 backend: Qt owns geometry. The window carries
+        # X11BypassWindowManagerHint (set in _setup_window), so these are real
+        # coordinates, not requests for KWin to clamp to the work area — that
+        # clamp is what pinned the pill at the panel strut in the Flatpak.
         self.setGeometry(x, y, w, h)
         self.move(x, y)
         try:
@@ -1288,9 +1373,8 @@ class GlassmorphicOverlay(QWidget):
                 self.windowHandle().setPosition(QPoint(x, y))
         except Exception:
             pass
-        # Flatpak deliberately runs this branch through XWayland. Moving an
-        # already-mapped keep-above window can leave Plasma's panel stacked after
-        # it, so restack once after the final native position is applied.
+        # The Flatpak runs this branch through XWayland. Restack once after the
+        # final native position is applied so nothing sits over the pill.
         if self.isVisible():
             self.raise_()
     
@@ -1533,11 +1617,11 @@ class GlassmorphicOverlay(QWidget):
         # Calculate new width
         target_width = self._calculate_target_width(label)
 
-        # On Wayland, animating width fires setFixedWidth + KWin every tick. Even without
-        # setGeometry, multi-step size changes can still reflow the surface. Snap width
-        # instantly so READY→Listening is one size + one KWin place (no jump train).
-        # Color/glow still animate for polish.
-        width_duration = 0 if self._is_wayland_session() else duration
+        # On the kwin backend (native Wayland), animating width fires setFixedWidth +
+        # KWin every tick. Even without setGeometry, multi-step size changes can still
+        # reflow the surface. Snap width instantly so READY→Listening is one size +
+        # one KWin place (no jump train). Color/glow still animate for polish.
+        width_duration = 0 if self._backend == "kwin" else duration
         
         # Animate properties (guarded: a bad color/NaN must not abort the transition or stop
         # future repaints — the new state has already been committed above).
@@ -1630,14 +1714,20 @@ class GlassmorphicOverlay(QWidget):
         # Calculate position using unified method
         x, y = self._calculate_position(final_width, final_height)
 
-        # Wayland: do NOT setGeometry first — that is what flashes the pill off-anchor
-        # (often to center) before KWin can place it. X11 uses Qt geometry.
-        if self._is_wayland_session():
-            _force_kde_window_position(
+        # KWin backend (native Wayland): do NOT setGeometry first — that is what
+        # flashes the pill off-anchor (often to center) before KWin can place it.
+        # x11 backend uses Qt geometry (bypass hint: no WM clamp).
+        if self._backend == "kwin":
+            if not _force_kde_window_position(
                 "Wayfinder Aura Overlay",
                 x, y,
                 final_width, final_height,
-            )
+            ):
+                print(
+                    "overlay placement: KWin scripting path failed on show — "
+                    "pill stays at compositor default",
+                    file=sys.stderr,
+                )
         else:
             self.setGeometry(x, y, final_width, final_height)
         
@@ -2194,11 +2284,8 @@ def run_overlay():
         x, y = overlay._calculate_position(final_width, final_height)
 
         overlay.setFixedSize(final_width, final_height)
-        # Wayland: avoid setGeometry (center flash); KWin places after map.
-        if not (
-            os.environ.get("XDG_SESSION_TYPE") == "wayland"
-            or os.environ.get("WAYLAND_DISPLAY")
-        ):
+        # KWin backend: avoid setGeometry (center flash); KWin places after map.
+        if overlay._backend != "kwin":
             overlay.setGeometry(x, y, final_width, final_height)
         # Map INVISIBLE and hold the reveal until KWin placement has landed.
         # The placement script is async: any visible frame rendered at the
@@ -2214,23 +2301,26 @@ def run_overlay():
         overlay.set_state(OverlayState.READY, animate=False)
 
         def _boot_place():
-            _force_kde_window_position(
+            if not _force_kde_window_position(
                 "Wayfinder Aura Overlay", x, y, final_width, final_height
-            )
+            ):
+                print(
+                    "overlay boot: KWin placement failed — pill may sit at "
+                    "the compositor default until repositioned",
+                    file=sys.stderr,
+                )
 
         def _boot_reveal():
             overlay._boot_hold_reveal = False
             overlay._opacity.animate_to(1.0, overlay.FADE_MS)
 
-        if (
-            os.environ.get("XDG_SESSION_TYPE") == "wayland"
-            or os.environ.get("WAYLAND_DISPLAY")
-        ):
+        if overlay._backend == "kwin":
             QTimer.singleShot(50, _boot_place)
             QTimer.singleShot(150, _boot_place)
             QTimer.singleShot(400, _boot_reveal)
         else:
-            QTimer.singleShot(100, _boot_place)
+            # x11 backend: setGeometry above is authoritative (override-redirect,
+            # no WM clamp) — no KWin nudge needed, reveal sooner.
             QTimer.singleShot(250, _boot_reveal)
     # In "standard" mode, window starts hidden
     
