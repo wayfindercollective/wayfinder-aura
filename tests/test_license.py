@@ -441,15 +441,22 @@ class TestFeatureGate:
 
     @pytest.mark.parametrize(
         ("reason", "expected_message"),
+        # Every message now names support; most also ask for the order number
+        # (missing_fields does not — it signals an app bug, not a key
+        # problem). A bare "License key not found" could not tell a typo from a
+        # key issued against a different deployment, a dead end for someone who
+        # has already paid.
         [
-            ("not_found", "License key not found"),
+            ("not_found", "isn't recognized by the license server"),
             (
                 "activation_limit",
-                "Contact support@wayfindercoaching.net to recover a device slot",
+                "Contact support@wayfindercoaching.net with your order number",
             ),
-            ("revoked", "Contact support if this is unexpected"),
+            ("revoked", "revoked"),
             ("refunded", "no longer active"),
-            ("unexpected_reason", "License invalid (unexpected_reason)"),
+            # Unknown codes are NOT echoed: unrecognised server input cannot be
+            # proven non-secret, so it never reaches the UI.
+            ("unexpected_reason", "the license server sent an unexpected response"),
         ],
     )
     def test_activate_online_returns_actionable_invalid_reason(

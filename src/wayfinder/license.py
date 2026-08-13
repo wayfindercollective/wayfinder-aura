@@ -53,6 +53,66 @@ LICENSE_API_URL = os.environ.get(
 )
 LICENSE_HTTP_TIMEOUT = 10  # seconds for the activation request
 
+SUPPORT_EMAIL = "support@wayfindercoaching.net"
+
+# Server `reason` -> what the customer should actually DO about it.
+# Every branch routes to support: an activation failure is the one moment a
+# paying customer is stuck with no way to help themselves, and a bare
+# restatement of the server code ("License key not found") cannot distinguish
+# a typo from a key that was never issued against this deployment.
+_ACTIVATION_ERRORS = {
+    "not_found": (
+        "This license key isn't recognized by the license server. Double-check "
+        "for a typo, then contact {support} with your order number — your key "
+        "may have been issued before a server change."
+    ),
+    "activation_limit": (
+        "Activation limit reached. Contact {support} with your order number to "
+        "recover a device slot."
+    ),
+    "revoked": (
+        "This license has been revoked. Contact {support} with your order "
+        "number if that is unexpected."
+    ),
+    "refunded": (
+        "This license was refunded and is no longer active. Contact {support} "
+        "with your order number if that is unexpected."
+    ),
+    "missing_fields": (
+        "The activation request was rejected as incomplete. This is a bug in "
+        "the app, not your key — please report it to {support}."
+    ),
+}
+
+
+def activation_error_message(reason: str) -> str:
+    """Human-actionable text for an activation failure.
+
+    Known codes get bespoke guidance. Unknown ones are NOT echoed: no shape
+    check can prove an unrecognised server string is not a token or key, and
+    it would land on screen and in any screenshot sent to support.
+    """
+    # Malformed JSON can make `reason` a list or dict, which is unhashable and
+    # would raise at the lookup below before any sanitising runs.
+    if not isinstance(reason, str):
+        reason = ""
+
+    template = _ACTIVATION_ERRORS.get(reason)
+    if template is not None:
+        return template.format(support=SUPPORT_EMAIL)
+
+    # Unknown code: never echoed. A shape check cannot prove an unrecognised
+    # server string is not a secret — the server could put a token or the key
+    # itself in this field, and it would land on screen and in any screenshot
+    # sent to support. Two rounds of tightening a regex leaked anyway (a
+    # trailing newline slips past `$`; a 40-char token matches the shape), so
+    # the echo is gone rather than guarded. Known codes above carry bespoke
+    # guidance; anything else routes to support, who can read the server logs.
+    return (
+        "Activation failed: the license server sent an unexpected response. "
+        f"Contact {SUPPORT_EMAIL} with your order number."
+    )
+
 
 @dataclass
 class LicenseInfo:
@@ -343,16 +403,7 @@ def activate_online(key: str, machine_id: str):
         )
 
     reason = data.get("reason", "invalid")
-    msg = {
-        "not_found": "License key not found",
-        "activation_limit": (
-            "Activation limit reached. Contact support@wayfindercoaching.net "
-            "to recover a device slot."
-        ),
-        "revoked": "This license has been revoked. Contact support if this is unexpected.",
-        "refunded": "This license was refunded and is no longer active.",
-        "missing_fields": "Invalid request",
-    }.get(reason, f"License invalid ({reason})")
+    msg = activation_error_message(reason)
     return (LicenseInfo(is_valid=False, is_premium=False, error_message=msg), None, True)
 
 
