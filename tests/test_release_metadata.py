@@ -6,6 +6,7 @@ import re
 import json
 import importlib.util
 import shutil
+import pytest
 import subprocess
 import sys
 import tomllib
@@ -1073,3 +1074,196 @@ def test_font_size_token_mirrors_stay_in_sync():
     assert theme == main, "font token mirrors drifted"
     # Owner-approved original scale (the 2x recalibration was rejected)
     assert theme["body"] == 13
+
+
+def test_release_license_checker_rejects_a_pubkey_that_is_not_productions(tmp_path):
+    """Presence of a pubkey is not enough — it must be PRODUCTION's.
+
+    The activate URL and the embedded Ed25519 pubkey must both belong to the
+    same deployment. A wrong-but-present pubkey passes a presence check, then
+    fails at token verification after the server has already said the key is
+    valid: a second silent cross-system divergence, which is exactly the class
+    of bug that let the storefront mint against dev for three weeks while the
+    app activated against prod.
+    """
+    checker = REPO / "scripts" / "ci" / "check-release-license-defaults.py"
+    wrong_pubkey = tmp_path / "license-wrong-pubkey.py"
+    wrong_pubkey.write_text(
+        """
+import os
+LICENSE_PUBLIC_KEY_HEX = os.environ.get("WAYFINDER_LICENSE_PUBKEY", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+LICENSE_API_URL = os.environ.get("WAYFINDER_LICENSE_API_URL", "https://shiny-goshawk-432.convex.site/activate")
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(checker), "--license-file", str(wrong_pubkey)],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "LICENSE_PUBLIC_KEY_HEX" in result.stderr
+
+
+def test_release_license_checker_accepts_the_real_shipping_defaults():
+    """Guard against the pin being tightened into something the repo fails."""
+    checker = REPO / "scripts" / "ci" / "check-release-license-defaults.py"
+
+    result = subprocess.run(
+        [sys.executable, str(checker)],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_release_license_checker_rejects_other_convex_deployments(tmp_path):
+    """A Convex deployment that is neither dev nor prod must not ship."""
+    checker = REPO / "scripts" / "ci" / "check-release-license-defaults.py"
+    lic = tmp_path / "license-other-convex.py"
+    lic.write_text(
+        '''
+import os
+LICENSE_PUBLIC_KEY_HEX = os.environ.get("WAYFINDER_LICENSE_PUBKEY", "e45d352f85af09afd208ca55458964aae2c018f4a538e17a11fd47211190c60a")
+LICENSE_API_URL = os.environ.get("WAYFINDER_LICENSE_API_URL", "https://some-other-deploy-999.convex.site/activate")
+''',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(checker), "--license-file", str(lic)],
+        cwd=REPO, capture_output=True, text=True, timeout=10,
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_pubkey_pin_applies_only_to_the_exact_production_url(tmp_path):
+    """The pin matched the deployment name as a SUBSTRING, so a lookalike host
+    like shiny-goshawk-432.convex.site.evil was treated as production and
+    pinned against production's keypair. Match exactly instead."""
+    checker = REPO / "scripts" / "ci" / "check-release-license-defaults.py"
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("relcheck", checker)
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod.PROD_LICENSE_PUBLIC_KEY_HEX, "production pubkey must be pinned"
+    # Exact production URL + wrong pubkey => rejected.
+    lic = tmp_path / "license-prod-wrong-key.py"
+    lic.write_text(
+        '''
+import os
+LICENSE_PUBLIC_KEY_HEX = os.environ.get("WAYFINDER_LICENSE_PUBKEY", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+LICENSE_API_URL = os.environ.get("WAYFINDER_LICENSE_API_URL", "https://shiny-goshawk-432.convex.site/activate")
+''',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker), "--license-file", str(lic)],
+        cwd=REPO, capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 2
+    assert "LICENSE_PUBLIC_KEY_HEX" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "prod_variant",
+    [
+        "https://shiny-goshawk-432.convex.site/activate?build=1",
+        "https://shiny-goshawk-432.convex.site/activate/",
+        "https://shiny-goshawk-432.convex.site/activate#frag",
+    ],
+)
+def test_pubkey_pin_covers_equivalent_production_urls(tmp_path, prod_variant):
+    """Exact string equality let a URL that still hits PRODUCTION skip the pin,
+    so a release could ship the production endpoint with a foreign keypair."""
+    checker = REPO / "scripts" / "ci" / "check-release-license-defaults.py"
+    lic = tmp_path / "license-variant.py"
+    lic.write_text(
+        f'''
+import os
+LICENSE_PUBLIC_KEY_HEX = os.environ.get("WAYFINDER_LICENSE_PUBKEY", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+LICENSE_API_URL = os.environ.get("WAYFINDER_LICENSE_API_URL", "{prod_variant}")
+''',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(checker), "--license-file", str(lic)],
+        cwd=REPO, capture_output=True, text=True, timeout=10,
+    )
+
+    assert result.returncode == 2, (
+        f"{prod_variant} hits production but skipped the pubkey pin: "
+        f"{result.stdout}{result.stderr}"
+    )
+
+
+@pytest.mark.parametrize(
+    "routable_variant",
+    [
+        # Explicit default port — same host, same request.
+        "https://shiny-goshawk-432.convex.site:443/activate",
+        # Userinfo does not change where the request goes.
+        "https://user:pass@shiny-goshawk-432.convex.site/activate",
+        "https://SHINY-GOSHAWK-432.CONVEX.SITE/activate",
+    ],
+)
+def test_pubkey_pin_covers_production_urls_with_port_or_userinfo(tmp_path, routable_variant):
+    """netloc includes userinfo and port, so comparing it raw let URLs that
+    still reach production skip the keypair pin."""
+    checker = REPO / "scripts" / "ci" / "check-release-license-defaults.py"
+    lic = tmp_path / "license-routable.py"
+    lic.write_text(
+        f'''
+import os
+LICENSE_PUBLIC_KEY_HEX = os.environ.get("WAYFINDER_LICENSE_PUBKEY", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+LICENSE_API_URL = os.environ.get("WAYFINDER_LICENSE_API_URL", "{routable_variant}")
+''',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(checker), "--license-file", str(lic)],
+        cwd=REPO, capture_output=True, text=True, timeout=10,
+    )
+
+    assert result.returncode == 2, (
+        f"{routable_variant} reaches production but skipped the pin: "
+        f"{result.stdout}{result.stderr}"
+    )
+
+
+@pytest.mark.parametrize(
+    "dotted",
+    [
+        "https://shiny-goshawk-432.convex.site/x/../activate",
+        "https://shiny-goshawk-432.convex.site/activate/.",
+    ],
+)
+def test_pubkey_pin_covers_dot_segment_paths(tmp_path, dotted):
+    """requests resolves dot segments before sending, so these still reach
+    production and must be held to production's keypair."""
+    checker = REPO / "scripts" / "ci" / "check-release-license-defaults.py"
+    lic = tmp_path / "license-dotted.py"
+    lic.write_text(
+        f'''
+import os
+LICENSE_PUBLIC_KEY_HEX = os.environ.get("WAYFINDER_LICENSE_PUBKEY", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+LICENSE_API_URL = os.environ.get("WAYFINDER_LICENSE_API_URL", "{dotted}")
+''',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker), "--license-file", str(lic)],
+        cwd=REPO, capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr

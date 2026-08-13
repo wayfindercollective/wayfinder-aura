@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import ast
 import sys
+import posixpath
+from urllib.parse import urlsplit
 from pathlib import Path
 
 # Known non-production backends (must not ship in release artifacts).
@@ -14,7 +16,55 @@ DEV_LICENSE_API_URLS = {
 }
 # Production activate URL (same Ed25519 keypair as pilot is OK).
 PROD_LICENSE_API_URL = "https://shiny-goshawk-432.convex.site/activate"
+# Ed25519 pubkey owned by the production deployment above. Pinned, not merely
+# required to exist: the activate URL and the embedded pubkey must belong to
+# the SAME deployment, or the server accepts the key and the app then rejects
+# the token it signed. Rotating the keypair must be a deliberate two-line
+# change here, not something that drifts silently.
+PROD_LICENSE_PUBLIC_KEY_HEX = (
+    "e45d352f85af09afd208ca55458964aae2c018f4a538e17a11fd47211190c60a"
+)
 REQUIRED_DEFAULTS = {"LICENSE_API_URL", "LICENSE_PUBLIC_KEY_HEX"}
+
+
+def _norm_path(path: str) -> str:
+    """Collapse dot segments and the trailing slash.
+
+    `requests` resolves `/x/../activate` and `/activate/.` to `/activate`
+    before sending, so a raw string compare let those reach production while
+    skipping the keypair pin.
+    """
+    return posixpath.normpath(path or "/").rstrip("/")
+
+
+def _same_endpoint(url: str, reference: str) -> bool:
+    """True when `url` addresses the same endpoint as `reference`.
+
+    Compared on scheme, HOST, port and path, ignoring query and fragment and
+    normalising the trailing slash. `.../activate?build=1`, an explicit `:443`,
+    and `user:pass@host` all still reach production, so all must be held to
+    production's keypair. Comparing raw netloc let the port and userinfo
+    variants skip the pin, and plain string equality missed the rest.
+    """
+    try:
+        a, b = urlsplit(url), urlsplit(reference)
+    except ValueError:
+        return False
+
+    def _port(parts):
+        # Treat an explicit default port as equivalent to omitting it.
+        default = {"https": 443, "http": 80}.get(parts.scheme)
+        try:
+            return parts.port or default
+        except ValueError:  # malformed port
+            return None
+
+    return (
+        a.scheme == b.scheme
+        and (a.hostname or "").lower() == (b.hostname or "").lower()
+        and _port(a) == _port(b)
+        and _norm_path(a.path) == _norm_path(b.path)
+    )
 
 
 def _env_get_default(node: ast.AST) -> str | None:
@@ -64,7 +114,14 @@ def dev_license_defaults(license_file: Path) -> list[str]:
         # Unknown non-prod URL — still block release until explicitly production.
         if "convex.site/activate" in api and "shiny-goshawk-432" not in api:
             offenders.append("LICENSE_API_URL")
-    if not defaults.get("LICENSE_PUBLIC_KEY_HEX"):
+    pubkey = defaults.get("LICENSE_PUBLIC_KEY_HEX")
+    if not pubkey:
+        offenders.append("LICENSE_PUBLIC_KEY_HEX")
+    elif _same_endpoint(api, PROD_LICENSE_API_URL) and pubkey != PROD_LICENSE_PUBLIC_KEY_HEX:
+        # Only pin the pubkey when we are actually shipping against OUR
+        # production deployment. A self-hosted or third-party licensing
+        # backend owns its own keypair, and pinning there would block a
+        # legitimate configuration.
         offenders.append("LICENSE_PUBLIC_KEY_HEX")
     return offenders
 
