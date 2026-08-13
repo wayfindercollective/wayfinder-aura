@@ -26,3 +26,4 @@ class EventType(Enum):
     CHUNKED_TRANSCRIPTION_DONE = auto()  # All chunks transcribed
     LOG_MESSAGE = auto()  # Thread-safe log message (avoids Tk threading crash)
     SWITCH_TAB = auto()  # Dev/verification: switch main-window tab via socket ("tab:<id>")
+    URL_CLIPBOARD_OFFER = auto()  # Failed browser open — copy the link to the clipboard on the Tk thread

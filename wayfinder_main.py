@@ -12,7 +12,6 @@ import signal
 import socket
 import subprocess
 import sys
-import webbrowser
 import threading
 import time
 import urllib.request
@@ -13706,45 +13705,53 @@ class WayfinderApp(ctk.CTk):
     def _open_url(self, url: str) -> None:
         """Open a URL in the user's default browser.
 
-        In the Flatpak, prefer portal-aware openers inside the sandbox. Avoid
-        `flatpak-spawn --host`: Flathub flags host-spawn access and the portal is the
-        acceptable path for checkout/info links.
+        The chain lives in `wayfinder.utils.open_url`: the desktop portal first,
+        spoken in-process over D-Bus so the `Response` signal — the only thing
+        that actually says the URL was opened — can be waited for, then the exec
+        openers. Nothing is logged as opened until an opener proves it.
+
+        The old code spawned `xdg-open` fire-and-forget onto DEVNULL and wrote
+        "Opening in your browser…" the moment `fork` returned, so seventeen
+        clicks that opened nothing produced seventeen success lines. Announcing
+        the attempt up front would repeat exactly that, so the log line waits
+        for the verdict.
+
+        Runs off the Tk main thread. `self.log` is thread-safe (it goes through
+        `event_queue`), and the clipboard touch rides the same queue — `after()`
+        is itself a Tk call and unsafe from a worker.
         """
-        import shutil, subprocess, webbrowser
-        from wayfinder.utils.hostexec import host_env
-        if IS_FLATPAK:
-            for opener in (["gio", "open", url], ["xdg-open", url]):
-                if not shutil.which(opener[0]):
-                    continue
-                try:
-                    r = subprocess.run(opener, timeout=8, capture_output=True)
-                    if r.returncode == 0:
-                        self.log("🔗 Opening in your browser…")
-                        return
-                except Exception:
-                    continue
-        else:
-            # AppImage/source: webbrowser.open inherits this process's env, and
-            # from the bundle that hands the browser jammy-era libraries — it can
-            # die on launch. Spawn the opener with a host-clean env instead.
-            for opener in (["xdg-open", url], ["gio", "open", url]):
-                if not shutil.which(opener[0]):
-                    continue
-                try:
-                    subprocess.Popen(
-                        opener, env=host_env(),
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                    self.log("🔗 Opening in your browser…")
-                    return
-                except Exception:
-                    continue
-        try:
-            if webbrowser.open(url):
+        from wayfinder.utils.open_url import describe_failure, open_url_async
+
+        def _on_result(result) -> None:
+            if result.ok:
+                if result.confirmed:
+                    # Only the portal's Response is a verdict; everything else
+                    # is a hand-off and must not be reported as an open.
+                    self.log(f"🔗 Opened in your browser ({result.opener})")
+                else:
+                    self.log(f"🔗 Handed to {result.opener} — the link should appear in your browser")
                 return
-            self.log("⚠ Couldn't open the link — check your default browser.")
-        except Exception as e:
-            self.log(f"⚠ Couldn't open {url}: {e}")
+            for line in describe_failure(url, result):
+                self.log(line)
+            try:
+                self.event_queue.put((EventType.URL_CLIPBOARD_OFFER, url))
+            except Exception:
+                self.log("   Copy the link above into your browser to continue.")
+
+        open_url_async(url, _on_result)
+
+    def _offer_url_clipboard(self, url: str) -> None:
+        """Put a link we failed to open on the clipboard. Tk thread only.
+
+        A dismissed upgrade panel would otherwise leave the user with no way to
+        reach checkout at all.
+        """
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(url)
+            self.log("   Link copied to your clipboard — paste it into your browser.")
+        except Exception:
+            self.log("   Copy the link above into your browser to continue.")
 
     # Ultra benefits are rendered in two places (the upgrade panel and the Settings
     # License tile) — one list so the copy never drifts. Lucide row markers
@@ -17441,6 +17448,8 @@ class WayfinderApp(ctk.CTk):
             self.on_transcription_done(text, gen)
         elif event_type == EventType.LOG_MESSAGE:
             self._do_log(data)
+        elif event_type == EventType.URL_CLIPBOARD_OFFER:
+            self._offer_url_clipboard(data)
 
     def on_hotkey(self):
         if self.app_state == AppState.IDLE:
