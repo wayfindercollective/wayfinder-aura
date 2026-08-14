@@ -16,10 +16,17 @@ from wayfinder.core.injector import (
     InjectionError,
     TYPING_SPEEDS,
     inject_text,
+    press_enter,
     prime_wayland_injection,
     _get_ydotool_binary,
     _get_ydotool_env,
+    _inject_text_type_linux,
     _inject_text_xdotool,
+    _open_modifier_probe,
+    _send_ctrl_v_linux,
+    _wait_for_modifier_release,
+    _x11_held_modifiers,
+    _X_HELD_MODIFIER_BITS,
 )
 
 
@@ -710,3 +717,150 @@ class TestYdotoolUserServiceRecovery:
         assert ready is False
         assert "/dev/uinput is not writable" in detail
         run.assert_not_called()
+
+
+# =============================================================================
+# Modifier-release gate — injection must wait for the user's hands
+# =============================================================================
+class _FakeProbe:
+    """Stands in for _ModifierProbe: yields queued masks, then 0 (clear)."""
+
+    def __init__(self, masks):
+        self.masks = list(masks)
+        self.closed = False
+
+    def query(self):
+        return self.masks.pop(0) if self.masks else 0
+
+    def close(self):
+        self.closed = True
+
+
+class TestModifierReleaseGate:
+    """xdotool's --clearmodifiers is unreliable under XWayland (the compositor
+    re-asserts physically-held keys), so every synthetic-key path must first
+    wait for the live X modifier mask to clear. Field bug: a 267-char dictation
+    typed ~1s after hotkey release, with a hand back on Shift, landed fully
+    shifted (`I"M ... NOW<`)."""
+
+    def test_returns_true_immediately_when_mask_clear(self):
+        probe = _FakeProbe([0])
+        with patch("wayfinder.core.injector._open_modifier_probe", return_value=probe), \
+             patch("wayfinder.core.injector.time.sleep") as slept:
+            assert _wait_for_modifier_release() is True
+        slept.assert_not_called()
+        assert probe.closed  # one connection per wait, always released
+
+    def test_unavailable_probe_never_blocks_injection(self):
+        # None = no DISPLAY / no libxcb / connect failure — behave exactly
+        # like the pre-gate code (no wait, no error).
+        with patch("wayfinder.core.injector._open_modifier_probe", return_value=None), \
+             patch("wayfinder.core.injector.time.sleep") as slept:
+            assert _wait_for_modifier_release() is True
+        slept.assert_not_called()
+
+    def test_waits_until_shift_released(self):
+        probe = _FakeProbe([0x01, 0x01, 0])
+        with patch("wayfinder.core.injector._open_modifier_probe", return_value=probe), \
+             patch("wayfinder.core.injector.time.sleep") as slept, \
+             patch("wayfinder.core.injector.time.monotonic", return_value=0.0):
+            assert _wait_for_modifier_release() is True
+        assert slept.call_count == 2
+        assert probe.closed
+
+    def test_times_out_and_reports_still_held(self):
+        # Clock: deadline computed at 0.0, then checks march past timeout.
+        probe = _FakeProbe([0x01] * 10)
+        clock = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+        with patch("wayfinder.core.injector._open_modifier_probe", return_value=probe), \
+             patch("wayfinder.core.injector.time.sleep"), \
+             patch("wayfinder.core.injector.time.monotonic", side_effect=clock):
+            assert _wait_for_modifier_release(timeout=2.0) is False
+        assert probe.closed  # released even on the timeout path
+
+    def test_poll_interval_honors_no_sub_100ms_rule(self):
+        probe = _FakeProbe([0x01, 0])
+        with patch("wayfinder.core.injector._open_modifier_probe", return_value=probe), \
+             patch("wayfinder.core.injector.time.sleep") as slept, \
+             patch("wayfinder.core.injector.time.monotonic", return_value=0.0):
+            _wait_for_modifier_release()
+        assert slept.call_args[0][0] >= 0.1
+
+    def test_latched_lock_bits_never_gate(self):
+        # CapsLock (Lock, 0x02) and NumLock (Mod2, 0x10) are latched states,
+        # not held keys — a caps-lock user must not stall 2s per dictation.
+        assert _X_HELD_MODIFIER_BITS & 0x02 == 0
+        assert _X_HELD_MODIFIER_BITS & 0x10 == 0
+
+    def test_corrupting_modifiers_all_gate(self):
+        # Shift, Ctrl, Alt (Mod1), Super (Mod4), AltGr (Mod5) held → corruption.
+        for bit in (0x01, 0x04, 0x08, 0x40, 0x80):
+            assert _X_HELD_MODIFIER_BITS & bit == bit
+
+    def test_one_shot_query_closes_probe(self):
+        probe = _FakeProbe([0x05])
+        with patch("wayfinder.core.injector._open_modifier_probe", return_value=probe):
+            assert _x11_held_modifiers() == 0x05
+        assert probe.closed
+
+    def test_probe_unavailable_without_display(self):
+        with patch.dict(os.environ, {}, clear=True):
+            assert _open_modifier_probe() is None
+            assert _x11_held_modifiers() is None
+
+    def test_xdotool_type_waits_after_refocus_before_keys(self):
+        order = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.core.injector._wait_for_modifier_release",
+                   side_effect=lambda *a, **k: order.append("wait") or True), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=lambda *a, **k: order.append(a[0][:2]) or ok):
+            _inject_text_xdotool("hello")
+        assert order == ["wait", ["xdotool", "type"]]
+
+    def test_wtype_waits_before_keys(self):
+        order = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.core.injector._wait_for_modifier_release",
+                   side_effect=lambda *a, **k: order.append("wait") or True), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=lambda *a, **k: order.append("keys") or ok), \
+             patch("wayfinder.core.injector.time.sleep"):
+            from wayfinder.core.injector import _inject_text_wtype
+            _inject_text_wtype("hello")
+        assert order == ["wait", "keys"]
+
+    def test_ydotool_type_waits_before_keys(self):
+        order = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="/usr/bin/ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector._wait_for_modifier_release",
+                   side_effect=lambda *a, **k: order.append("wait") or True), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=lambda *a, **k: order.append("keys") or ok):
+            _inject_text_type_linux("hello")
+        assert order == ["wait", "keys"]
+
+    def test_ctrl_v_waits_before_keypress(self):
+        order = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.core.injector._wait_for_modifier_release",
+                   side_effect=lambda *a, **k: order.append("wait") or True), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=lambda *a, **k: order.append("key") or ok):
+            _send_ctrl_v_linux("xdotool")
+        assert order == ["wait", "key"]
+
+    def test_press_enter_waits_before_return_key(self):
+        order = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector._wait_for_modifier_release",
+                   side_effect=lambda *a, **k: order.append("wait") or True), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=lambda *a, **k: order.append("key") or ok):
+            press_enter()
+        assert order == ["wait", "key"]

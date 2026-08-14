@@ -11,6 +11,7 @@ Platform dispatch:
 - macOS: clipboard paste via pbcopy + Cmd-V
 """
 
+import ctypes
 import os
 import subprocess
 import shutil
@@ -442,6 +443,206 @@ def get_active_window() -> "str | None":
     return None
 
 
+# X core modifier-mask bits (X.h). Lock (CapsLock, 0x02) and Mod2 (NumLock,
+# 0x10) are latched states, not keys the user is holding — excluded so
+# caps-lock/numlock users never stall an injection.
+_X_HELD_MODIFIER_BITS = 0x01 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80  # Shift Ctrl Mod1 Mod3 Mod4 Mod5
+
+
+# Minimal xcb ABI (stable since libxcb 1.0). xcb — NOT Xlib — because injection
+# runs off the Tk main thread and Tk already owns Xlib there without
+# XInitThreads() (which is only safe as the very first Xlib call of the
+# process, so it cannot be retrofitted). libxcb is thread-safe by design.
+class _XcbScreen(ctypes.Structure):
+    # Only the leading field is dereferenced; no iteration over the struct.
+    _fields_ = [("root", ctypes.c_uint32)]
+
+
+class _XcbScreenIterator(ctypes.Structure):
+    _fields_ = [
+        ("data", ctypes.POINTER(_XcbScreen)),
+        ("rem", ctypes.c_int),
+        ("index", ctypes.c_int),
+    ]
+
+
+class _XcbQueryPointerCookie(ctypes.Structure):
+    _fields_ = [("sequence", ctypes.c_uint)]
+
+
+class _XcbQueryPointerReply(ctypes.Structure):
+    _fields_ = [
+        ("response_type", ctypes.c_uint8),
+        ("same_screen", ctypes.c_uint8),
+        ("sequence", ctypes.c_uint16),
+        ("length", ctypes.c_uint32),
+        ("root", ctypes.c_uint32),
+        ("child", ctypes.c_uint32),
+        ("root_x", ctypes.c_int16),
+        ("root_y", ctypes.c_int16),
+        ("win_x", ctypes.c_int16),
+        ("win_y", ctypes.c_int16),
+        ("mask", ctypes.c_uint16),
+    ]
+
+
+# Lazy singleton: (libxcb, libc) or None. Loaded at most once per process —
+# repeated CDLL() would leak dlopen refs and find_library() shells out to
+# ldconfig (~2ms) on every call (Codex review).
+_XCB_HANDLES = None
+_XCB_LOAD_ATTEMPTED = False
+
+
+def _load_xcb():
+    global _XCB_HANDLES, _XCB_LOAD_ATTEMPTED
+    if _XCB_LOAD_ATTEMPTED:
+        return _XCB_HANDLES
+    _XCB_LOAD_ATTEMPTED = True
+    try:
+        try:
+            lib = ctypes.CDLL("libxcb.so.1")
+        except OSError:
+            # NOT `import ctypes.util` — inside a function that statement
+            # makes `ctypes` function-local and every use above it explodes.
+            from ctypes.util import find_library
+            name = find_library("xcb")
+            if not name:
+                return None
+            lib = ctypes.CDLL(name)
+        libc = ctypes.CDLL(None)
+        lib.xcb_connect.restype = ctypes.c_void_p
+        lib.xcb_connect.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)]
+        lib.xcb_connection_has_error.restype = ctypes.c_int
+        lib.xcb_connection_has_error.argtypes = [ctypes.c_void_p]
+        lib.xcb_disconnect.restype = None
+        lib.xcb_disconnect.argtypes = [ctypes.c_void_p]
+        lib.xcb_get_setup.restype = ctypes.c_void_p
+        lib.xcb_get_setup.argtypes = [ctypes.c_void_p]
+        lib.xcb_setup_roots_iterator.restype = _XcbScreenIterator
+        lib.xcb_setup_roots_iterator.argtypes = [ctypes.c_void_p]
+        lib.xcb_query_pointer.restype = _XcbQueryPointerCookie
+        lib.xcb_query_pointer.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        lib.xcb_query_pointer_reply.restype = ctypes.POINTER(_XcbQueryPointerReply)
+        lib.xcb_query_pointer_reply.argtypes = [
+            ctypes.c_void_p, _XcbQueryPointerCookie, ctypes.c_void_p,
+        ]
+        libc.free.restype = None
+        libc.free.argtypes = [ctypes.c_void_p]
+        _XCB_HANDLES = (lib, libc)
+    except Exception:
+        _XCB_HANDLES = None
+    return _XCB_HANDLES
+
+
+class _ModifierProbe:
+    """One xcb connection reused across a wait's polls; close() is mandatory."""
+
+    def __init__(self, lib, libc, conn, root):
+        self._lib = lib
+        self._libc = libc
+        self._conn = conn
+        self._root = root
+
+    def query(self) -> "int | None":
+        """Held-modifier bits right now, or None when the query fails."""
+        try:
+            cookie = self._lib.xcb_query_pointer(self._conn, self._root)
+            reply = self._lib.xcb_query_pointer_reply(self._conn, cookie, None)
+            if not reply:
+                return None
+            try:
+                return reply.contents.mask & _X_HELD_MODIFIER_BITS
+            finally:
+                self._libc.free(reply)
+        except Exception:
+            return None
+
+    def close(self) -> None:
+        try:
+            self._lib.xcb_disconnect(self._conn)
+        except Exception:
+            pass
+
+
+def _open_modifier_probe() -> "_ModifierProbe | None":
+    """Connect to the X server for modifier queries; None when unavailable.
+
+    Works on native X11 and, via XWayland's mirrored seat state, on Wayland
+    sessions too (where DISPLAY points at XWayland). No DISPLAY / no libxcb /
+    connection failure → None, and callers skip the gate entirely.
+    """
+    if not os.environ.get("DISPLAY"):
+        return None
+    loaded = _load_xcb()
+    if loaded is None:
+        return None
+    lib, libc = loaded
+    conn = None
+    try:
+        conn = lib.xcb_connect(None, None)
+        # xcb_connect never returns NULL — a failed connect is an error-state
+        # object that must still be disconnected to free it.
+        if not conn or lib.xcb_connection_has_error(conn):
+            if conn:
+                lib.xcb_disconnect(conn)
+            return None
+        it = lib.xcb_setup_roots_iterator(lib.xcb_get_setup(conn))
+        if not it.data:
+            lib.xcb_disconnect(conn)
+            return None
+        return _ModifierProbe(lib, libc, conn, it.data.contents.root)
+    except Exception:
+        if conn:
+            try:
+                lib.xcb_disconnect(conn)
+            except Exception:
+                pass
+        return None
+
+
+def _x11_held_modifiers() -> "int | None":
+    """One-shot: modifier bits the X server considers held, or None."""
+    probe = _open_modifier_probe()
+    if probe is None:
+        return None
+    try:
+        return probe.query()
+    finally:
+        probe.close()
+
+
+def _wait_for_modifier_release(timeout: float = 2.0, poll: float = 0.1) -> bool:
+    """Bounded wait until no modifier key is physically held. True when clear.
+
+    Why: under XWayland the compositor keeps re-asserting the physical
+    keyboard state, so xdotool's --clearmodifiers cannot neutralize a key the
+    user is still holding — a dictation injected ~1s after hotkey release,
+    with a hand back on Shift, lands fully shifted (field bug: `I"M ... NOW<`
+    for "I'm ... now,"). Held Ctrl is worse: letters become shortcuts fired at
+    the focused app.
+
+    Runs once per injection immediately before synthetic keys — a transient
+    bounded wait, not a repeating idle timer, and the 100ms poll honors the
+    project's no-sub-100ms-polling rule. The common case returns on the first
+    query (mask clear, or probe unavailable — which must never block).
+    False means the user still held a modifier at *timeout*; callers proceed
+    anyway with --clearmodifiers as the best-effort backstop.
+    """
+    probe = _open_modifier_probe()
+    if probe is None:
+        return True
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            if not probe.query():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll)
+    finally:
+        probe.close()
+
+
 def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window: "str | None" = None) -> None:
     """Inject text on Linux/X11 using xdotool type.
 
@@ -482,6 +683,12 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
                 _t.sleep(0.06)  # let the WM/app finish the focus-in before synthetic keys
             except Exception:
                 pass
+
+    # Gate immediately before the synthetic keys (after refocus/settling, so
+    # no later pre-work re-opens the race): the user's hand is often still on
+    # the keyboard ~1s after hotkey release, and under XWayland
+    # --clearmodifiers cannot neutralize a physically-held modifier.
+    _wait_for_modifier_release()
 
     cmd = [
         "xdotool", "type",
@@ -524,6 +731,10 @@ def _inject_text_wtype(text: str) -> None:
     if _wtype_first_injection:
         _wtype_first_injection = False
         time.sleep(0.35)
+    # Gate immediately before the synthetic keys (after the first-injection
+    # settle): a physically-held modifier corrupts virtual-keyboard typing the
+    # same way it corrupts XTEST typing.
+    _wait_for_modifier_release()
     try:
         result = subprocess.run(
             ["wtype", text],
@@ -628,6 +839,9 @@ def _clipboard_read_linux() -> "str | None":
 
 def _send_ctrl_v_linux(tool: str) -> None:
     """Synthesize Ctrl+V with the active injection tool."""
+    # A physically-held Shift would turn this into Ctrl+Shift+V (app-dependent
+    # behavior) — same XWayland --clearmodifiers gap as the type path.
+    _wait_for_modifier_release()
     if tool == "xdotool":
         result = subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
@@ -681,6 +895,9 @@ def press_enter() -> None:
         return
 
     from wayfinder.utils.platform import get_text_injector
+    # Held Shift would send Shift+Return — newline instead of submit in most
+    # chat inputs, silently breaking the auto-Enter promise.
+    _wait_for_modifier_release()
     tool = get_text_injector()
     if tool == "xdotool":
         result = subprocess.run(
@@ -822,6 +1039,10 @@ def _inject_text_type_linux(
             "--", text,
         ]
         env = _get_ydotool_env()
+        # Gate immediately before the synthetic keys (after readiness checks):
+        # uinput-level typing merges with physically-held modifiers in the
+        # compositor exactly like the other backends.
+        _wait_for_modifier_release()
         result = subprocess.run(
             cmd,
             capture_output=True,
