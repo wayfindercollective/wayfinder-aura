@@ -8017,7 +8017,21 @@ class WayfinderApp(ctk.CTk):
             text="handcrafted for Linux",
             font=(self.font_mono[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
-        ).pack(pady=(2, SPACING["md"]))
+        ).pack(pady=(2, 2))
+        # Quiet footer link that opens the inline feedback panel below
+        # (project rule 2: inline panels, never popups).
+        ctk.CTkButton(
+            scroll,
+            text="we'd love your feedback",
+            command=self._toggle_feedback_panel,
+            fg_color="transparent",
+            hover_color=COLORS["bg_card"],
+            text_color=COLORS["text_secondary"],
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            width=1,
+            height=22,
+        ).pack(pady=(0, SPACING["md"]))
+        self._feedback_panel = None
 
         self._settings_scroll = scroll
         self._settings_build_complete = True
@@ -14296,6 +14310,124 @@ class WayfinderApp(ctk.CTk):
                 text="License removed from this device.",
                 text_color=COLORS["text_muted"],
             )
+
+    # === "We'd love your feedback" (inline panel + background POST) =========
+
+    def _toggle_feedback_panel(self) -> None:
+        """Show/hide the inline feedback panel at the bottom of Settings."""
+        panel = getattr(self, "_feedback_panel", None)
+        if panel is not None:
+            try:
+                if panel.winfo_exists():
+                    panel.destroy()
+            except Exception:
+                pass
+            self._feedback_panel = None
+            return
+        scroll = getattr(self, "_settings_scroll", None)
+        if scroll is None:
+            return
+
+        panel = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
+        panel.pack(fill="x", pady=(0, SPACING["gutter"]))
+        self._feedback_panel = panel
+
+        ctk.CTkLabel(
+            panel,
+            text="We'd love your feedback",
+            font=(self.font_body[0], self.font_sizes["heading"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 0))
+        ctk.CTkLabel(
+            panel,
+            text="What's working? What's broken? What's missing?",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=SPACING["tile_pad"])
+        box = ctk.CTkTextbox(
+            panel,
+            height=96,
+            fg_color=COLORS["bg_input"],
+            corner_radius=RADIUS["sm"],
+            font=(self.font_body[0], self.font_sizes["body"]),
+        )
+        box.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["sm"], SPACING["sm"]))
+        self._feedback_textbox = box
+        email_entry = ctk.CTkEntry(
+            panel,
+            placeholder_text="email, if you'd like a reply (optional)",
+            fg_color=COLORS["bg_input"],
+            font=(self.font_body[0], self.font_sizes["small"]),
+        )
+        email_entry.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"]))
+        self._feedback_email_entry = email_entry
+        status = ctk.CTkLabel(
+            panel,
+            text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        )
+        status.pack(anchor="w", padx=SPACING["tile_pad"])
+        self._feedback_status_label = status
+        send_btn = ctk.CTkButton(panel, text="Send feedback", command=self._send_feedback)
+        send_btn.pack(anchor="e", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        self._feedback_send_btn = send_btn
+
+    def _send_feedback(self) -> None:
+        """Validate, then POST from a worker thread; UI updates via after(0)."""
+        box = getattr(self, "_feedback_textbox", None)
+        status = getattr(self, "_feedback_status_label", None)
+        btn = getattr(self, "_feedback_send_btn", None)
+        if box is None or status is None or btn is None:
+            return
+        message = box.get("1.0", "end").strip()
+        if len(message) < 3:
+            status.configure(text="Write a few words first :)", text_color=COLORS["error"])
+            return
+        entry = getattr(self, "_feedback_email_entry", None)
+        email = entry.get().strip() if entry is not None else ""
+
+        btn.configure(state="disabled", text="Sending…")
+        status.configure(text="", text_color=COLORS["text_muted"])
+
+        try:
+            from wayfinder import __version__ as app_version
+        except Exception:
+            app_version = "unknown"
+        gate = getattr(self, "feature_gate", None)
+        plan = "ultra" if (gate is not None and gate.is_premium) else "free"
+        import platform as _platform
+        platform_desc = _platform.platform()
+
+        def _worker():
+            from wayfinder.core.feedback import submit_feedback
+            ok, detail = submit_feedback(
+                message, email or None, app_version, plan, platform_desc
+            )
+
+            def _done():
+                try:
+                    if not btn.winfo_exists():
+                        return
+                    if ok:
+                        box.delete("1.0", "end")
+                        status.configure(
+                            text="Sent — thank you! We read every one.",
+                            text_color=COLORS["accent"],
+                        )
+                        btn.configure(state="normal", text="Send more")
+                    else:
+                        status.configure(text=detail, text_color=COLORS["error"])
+                        btn.configure(state="normal", text="Send feedback")
+                except Exception:
+                    pass
+
+            try:
+                self.after(0, _done)
+            except Exception:
+                pass  # app teardown mid-flight — nothing left to update
+
+        threading.Thread(target=_worker, daemon=True, name="feedback-post").start()
 
     def _refresh_entitlement_ui(self) -> None:
         """Refresh controls whose lock state can change after live activation."""
