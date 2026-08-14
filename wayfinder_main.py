@@ -6520,10 +6520,10 @@ class WayfinderApp(ctk.CTk):
                 pass
 
         # Re-sync the sidebar tier label (badge/glow already rebuilt above).
+        is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         tier_label = getattr(self, "_sidebar_tier_label", None)
         tier_pill = getattr(self, "_sidebar_tier_pill", None)
         if tier_label is not None:
-            is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
             try:
                 tier_label.configure(
                     text="Ultra 😇" if is_ultra else "Free",
@@ -6533,6 +6533,18 @@ class WayfinderApp(ctk.CTk):
                     tier_pill.configure(
                         border_color=COLORS["accent_yellow"] if is_ultra else COLORS["border_subtle"],
                     )
+            except Exception:
+                pass
+
+        # Footer "wayfinder aura vX · TIER" — same live flip as the sidebar.
+        footer = getattr(self, "_footer_tier_label", None)
+        if footer is not None:
+            _tier = "Ultra 😇" if is_ultra else "Free"
+            try:
+                footer.configure(
+                    text=f"wayfinder aura v{getattr(self, '_footer_version', '?')} · {_tier}",
+                    text_color=COLORS["accent_yellow"] if is_ultra else COLORS["text_muted"],
+                )
             except Exception:
                 pass
 
@@ -7988,12 +8000,18 @@ class WayfinderApp(ctk.CTk):
             _wf_version = "1.1.2"
         _is_premium = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         _tier = "Ultra 😇" if _is_premium else "Free"
-        ctk.CTkLabel(
+        footer_tier = ctk.CTkLabel(
             scroll,
             text=f"wayfinder aura v{_wf_version} · {_tier}",
             font=(self.font_mono[0], self.font_sizes["caption"]),
             text_color=COLORS["accent_yellow"] if _is_premium else COLORS["text_muted"],
-        ).pack(pady=(SPACING["xl"], 0))
+        )
+        footer_tier.pack(pady=(SPACING["xl"], 0))
+        # Kept for _rebuild_header(): the tier half must flip live on
+        # activate/deactivate like the sidebar label, not stay whatever it
+        # was when the settings page was first built.
+        self._footer_tier_label = footer_tier
+        self._footer_version = _wf_version
         ctk.CTkLabel(
             scroll,
             text="handcrafted for Linux",

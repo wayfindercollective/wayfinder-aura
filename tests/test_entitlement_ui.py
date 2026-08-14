@@ -431,3 +431,38 @@ def test_license_activation_date_is_human_readable_and_safe():
     assert formatter("2026-08-03T12:34:56") == "Aug 03, 2026"
     assert formatter("not-a-date") == ""
     assert formatter(None) == ""
+
+
+def test_rebuild_header_flips_footer_tier_label_live():
+    """The settings footer ("wayfinder aura vX · TIER") must flip on
+    activate/deactivate like the sidebar label — field bug: it stayed
+    "· Free" while the License tile already said "Ultra is active"."""
+    footer = _Label()
+    sidebar = _Label()
+    app = SimpleNamespace(
+        _header_parent=None,  # skip the Tk header rebuild — label sync only
+        _sidebar_tier_label=sidebar,
+        _sidebar_tier_pill=None,
+        _footer_tier_label=footer,
+        _footer_version="1.1.8-beta.3",
+        feature_gate=SimpleNamespace(is_premium=True),
+    )
+
+    wayfinder_main.WayfinderApp._rebuild_header(app)
+    assert footer.options["text"] == "wayfinder aura v1.1.8-beta.3 · Ultra 😇"
+
+    app.feature_gate = SimpleNamespace(is_premium=False)
+    wayfinder_main.WayfinderApp._rebuild_header(app)
+    assert footer.options["text"] == "wayfinder aura v1.1.8-beta.3 · Free"
+    assert sidebar.options["text"] == "Free"
+
+
+def test_rebuild_header_survives_settings_page_not_built_yet():
+    """Activation can happen before the settings page (and its footer label)
+    exists — the sync must not raise."""
+    app = SimpleNamespace(
+        _header_parent=None,
+        feature_gate=SimpleNamespace(is_premium=True),
+    )
+
+    wayfinder_main.WayfinderApp._rebuild_header(app)  # must not raise
