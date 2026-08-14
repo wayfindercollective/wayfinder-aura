@@ -457,6 +457,68 @@ def test_rebuild_header_flips_footer_tier_label_live():
     assert sidebar.options["text"] == "Free"
 
 
+def test_premium_prompt_refuses_to_sell_an_owned_feature():
+    """Field bug: after activation, the GPU nudge's Upgrade button opened the
+    Buy Now panel for a paying user. Owned feature → log, never build UI."""
+    events = []
+    app = SimpleNamespace(
+        feature_gate=SimpleNamespace(has_feature=lambda _f: True),
+        log=events.append,
+    )
+
+    # No Tk objects exist on the stub — reaching UI construction would raise.
+    wayfinder_main.WayfinderApp._show_premium_prompt(app, "gpu_acceleration")
+
+    assert any("already active" in str(e) for e in events)
+
+
+class _Destroyable:
+    def __init__(self):
+        self.destroyed = False
+
+    def destroy(self):
+        self.destroyed = True
+
+
+def test_refresh_entitlement_ui_retires_visible_upsell_surfaces():
+    """Field bug: the free-tier GPU nudge banner and the Ultra purchase panel
+    both lingered on screen after key activation."""
+    hidden = []
+    banner = _Destroyable()
+    app = SimpleNamespace(
+        feature_gate=SimpleNamespace(
+            has_feature=lambda _f: True, is_premium=True
+        ),
+        _hide_gpu_nudge=lambda: hidden.append("nudge"),
+        _premium_banner=banner,
+    )
+
+    wayfinder_main.WayfinderApp._refresh_entitlement_ui(app)
+
+    assert hidden == ["nudge"]
+    assert banner.destroyed
+    assert app._premium_banner is None
+
+
+def test_refresh_entitlement_ui_leaves_upsells_alone_for_free_tier():
+    """Deactivation direction: a Free user's visible surfaces are untouched."""
+    hidden = []
+    banner = _Destroyable()
+    app = SimpleNamespace(
+        feature_gate=SimpleNamespace(
+            has_feature=lambda _f: False, is_premium=False
+        ),
+        _hide_gpu_nudge=lambda: hidden.append("nudge"),
+        _premium_banner=banner,
+    )
+
+    wayfinder_main.WayfinderApp._refresh_entitlement_ui(app)
+
+    assert hidden == []
+    assert banner.destroyed is False
+    assert app._premium_banner is banner
+
+
 def test_rebuild_header_survives_settings_page_not_built_yet():
     """Activation can happen before the settings page (and its footer label)
     exists — the sync must not raise."""

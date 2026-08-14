@@ -14094,6 +14094,15 @@ class WayfinderApp(ctk.CTk):
 
         Inline centered panel over a scrim (no popup window / CTkToplevel, per rule #2).
         Does NOT auto-dismiss — a purchase decision shouldn't vanish mid-read."""
+        # Already unlocked — e.g. Upgrade clicked on a nudge banner that was
+        # on screen before activation. Never show a Buy Now page to someone
+        # who already owns the feature (field bug).
+        try:
+            if self.feature_gate.has_feature(feature_id):
+                self.log("😇 Ultra is already active — that feature is yours, nothing to buy.")
+                return
+        except Exception:
+            pass
         if getattr(self, '_premium_banner', None) is not None:
             try:
                 self._premium_banner.destroy()
@@ -14441,6 +14450,21 @@ class WayfinderApp(ctk.CTk):
         try:
             if hasattr(self, "mode_settings_container"):
                 self._build_mode_settings(self.config.get("processing_mode", "local"))
+        except Exception:
+            pass
+        # Retire upsell surfaces that are already ON SCREEN when the tier
+        # flips (field bug: the free-tier GPU nudge banner and the Ultra
+        # purchase panel both lingered after key activation).
+        try:
+            if self.feature_gate.has_feature("gpu_acceleration"):
+                self._hide_gpu_nudge()
+        except Exception:
+            pass
+        try:
+            banner = getattr(self, "_premium_banner", None)
+            if banner is not None and self.feature_gate.is_premium:
+                banner.destroy()
+                self._premium_banner = None
         except Exception:
             pass
 
