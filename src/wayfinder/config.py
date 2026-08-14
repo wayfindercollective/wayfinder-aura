@@ -387,6 +387,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "premium_price_regular": "$60",   # regular price (shown struck-through / as "reg.")
     # Free-tier GPU upsell nudge: set True once the user dismisses it for good.
     "gpu_nudge_dismissed": False,
+    # Ultra utilization launch cue ("you can still switch on GPU / better
+    # models / …") — dismiss-forever flag.
+    "ultra_tips_dismissed": False,
 
     # Setup wizard
     "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)

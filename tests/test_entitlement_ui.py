@@ -519,6 +519,95 @@ def test_refresh_entitlement_ui_leaves_upsells_alone_for_free_tier():
     assert app._premium_banner is banner
 
 
+class _Banner:
+    def __init__(self, managed=False):
+        self.managed = managed
+        self.pack_kwargs = None
+        self.forgot = False
+
+    def winfo_manager(self):
+        return "pack" if self.managed else ""
+
+    def pack(self, **kwargs):
+        self.managed = True
+        self.pack_kwargs = kwargs
+
+    def pack_forget(self):
+        self.managed = False
+        self.forgot = True
+
+
+def _ultra_tips_app(*, premium=True, dismissed=False, banner=None):
+    return SimpleNamespace(
+        config={
+            "ultra_tips_dismissed": dismissed,
+            "model_path": "/models/ggml-base.en.bin",
+            "use_gpu": False,
+            "llama_cpp_model_requires_feature": None,
+            "chunked_mode": "off",
+        },
+        feature_gate=SimpleNamespace(is_premium=premium, has_feature=lambda _f: premium),
+        ultra_tips_banner=banner if banner is not None else _Banner(),
+        ultra_tips_label=_Label(),
+        _dictate_banner_anchor=None,
+        _hide_ultra_tips=lambda: None,
+    )
+
+
+def test_ultra_tips_show_for_underutilized_ultra_user():
+    app = _ultra_tips_app()
+    with patch("wayfinder_main.get_gpu_info", return_value=SimpleNamespace(has_gpu=True)):
+        wayfinder_main.WayfinderApp._maybe_show_ultra_tips(app)
+
+    assert app.ultra_tips_banner.managed
+    text = app.ultra_tips_label.options["text"]
+    assert text.startswith("Ultra tip")
+    assert "speech model" in text and "GPU" in text
+
+
+def test_ultra_tips_never_show_for_free_user_or_after_dismissal():
+    free = _ultra_tips_app(premium=False)
+    with patch("wayfinder_main.get_gpu_info", return_value=SimpleNamespace(has_gpu=True)):
+        wayfinder_main.WayfinderApp._maybe_show_ultra_tips(free)
+    assert free.ultra_tips_banner.managed is False
+
+    dismissed = _ultra_tips_app(dismissed=True)
+    with patch("wayfinder_main.get_gpu_info", return_value=SimpleNamespace(has_gpu=True)):
+        wayfinder_main.WayfinderApp._maybe_show_ultra_tips(dismissed)
+    assert dismissed.ultra_tips_banner.managed is False
+
+
+def test_ultra_tips_self_hide_when_nothing_left_to_suggest():
+    # Visible banner + everything now in use → the cue retires itself.
+    hidden = []
+    app = _ultra_tips_app(banner=_Banner(managed=True))
+    app.config.update(
+        model_path="/models/ggml-large-v3-turbo.bin",
+        use_gpu=True,
+        llama_cpp_model_requires_feature="large_cleanup_models",
+        chunked_mode="auto",
+    )
+    app._hide_ultra_tips = lambda: hidden.append(True)
+    with patch("wayfinder_main.get_gpu_info", return_value=SimpleNamespace(has_gpu=True)):
+        wayfinder_main.WayfinderApp._maybe_show_ultra_tips(app)
+    assert hidden == [True]
+
+
+def test_ultra_tips_dismiss_persists_and_hides():
+    hidden = []
+    app = SimpleNamespace(
+        config={},
+        log=lambda _m: None,
+        _hide_ultra_tips=lambda: hidden.append(True),
+    )
+    with patch("wayfinder_main.save_config") as saved:
+        wayfinder_main.WayfinderApp._dismiss_ultra_tips(app)
+
+    assert hidden == [True]
+    assert app.config["ultra_tips_dismissed"] is True
+    saved.assert_called_once_with(app.config)
+
+
 def test_rebuild_header_survives_settings_page_not_built_yet():
     """Activation can happen before the settings page (and its footer label)
     exists — the sync must not raise."""

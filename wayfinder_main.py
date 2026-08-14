@@ -7314,6 +7314,42 @@ class WayfinderApp(ctk.CTk):
             command=self._upgrade_from_gpu_nudge,
         ).pack(side="right", padx=(SPACING["sm"], 0))
 
+        # (F) Ultra utilization tip — light launch cue for Ultra owners who
+        # haven't switched their upgrades on yet (an activated install starts
+        # exactly like Free: GPU off, Base model, free cleanup model). Built
+        # once, packed on demand like the other banners; text set at show time.
+        self.ultra_tips_banner = ctk.CTkFrame(
+            scroll, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"],
+        )
+        _ut_inner = ctk.CTkFrame(self.ultra_tips_banner, fg_color="transparent")
+        _ut_inner.pack(fill="x", padx=SPACING["md"], pady=SPACING["sm"])
+        self.ultra_tips_label = ctk.CTkLabel(
+            _ut_inner,
+            text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_primary"],
+            wraplength=300,
+            justify="left",
+            anchor="w",
+        )
+        self.ultra_tips_label.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            _ut_inner, text="Dismiss",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            height=28, width=80, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=self._dismiss_ultra_tips,
+        ).pack(side="right", padx=(SPACING["sm"], 0))
+        ctk.CTkButton(
+            _ut_inner, text="Open Settings",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            height=28, width=110, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color=COLORS["bg_base"],
+            command=self._open_settings_from_ultra_tips,
+        ).pack(side="right", padx=(SPACING["sm"], 0))
+
         # Card header
         header = ctk.CTkFrame(trans_card, fg_color="transparent")
         header.pack(fill="x", padx=16, pady=(12, 8))
@@ -7417,6 +7453,13 @@ class WayfinderApp(ctk.CTk):
             self._maybe_show_setup_cue()
         except Exception as e:
             self.log(f"⚠ Setup cue check error: {e}")
+
+        # (F) Ultra owners who haven't switched their upgrades on get one
+        # light, dismissible cue at launch.
+        try:
+            self._maybe_show_ultra_tips()
+        except Exception as e:
+            self.log(f"⚠ Ultra tip check error: {e}")
 
     def _dictate_setup_chip_text(self) -> str:
         """One-line current setup for the Dictate empty state (model · mode · hotkey)."""
@@ -13621,6 +13664,67 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self.log(f"⚠ Could not open upgrade: {e}")
 
+    # === Ultra utilization tip (F) — launch cue for switched-off upgrades ===
+
+    def _maybe_show_ultra_tips(self) -> None:
+        """Show the cue when an Ultra owner hasn't switched upgrades on yet;
+        hide it when there is nothing left to suggest (or tier dropped).
+
+        Recomputed at launch and after live activation/deactivation. Never
+        raises — a cosmetic cue must not break the tab."""
+        try:
+            if self.config.get("ultra_tips_dismissed", False):
+                return
+            gate = getattr(self, "feature_gate", None)
+            banner = getattr(self, "ultra_tips_banner", None)
+            label = getattr(self, "ultra_tips_label", None)
+            if gate is None or banner is None or label is None:
+                return
+            from wayfinder.core.ultra_tips import underutilization_signals, nudge_text
+            try:
+                has_gpu = get_gpu_info().has_gpu
+            except Exception:
+                has_gpu = False
+            text = nudge_text(underutilization_signals(self.config, gate, has_gpu))
+            if not text:
+                self._hide_ultra_tips()
+                return
+            label.configure(text=text)
+            if not banner.winfo_manager():
+                anchor = getattr(self, "_dictate_banner_anchor", None)
+                if anchor is not None:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+                else:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
+    def _hide_ultra_tips(self) -> None:
+        """Hide the cue without persisting a dismissal."""
+        banner = getattr(self, "ultra_tips_banner", None)
+        if banner is not None:
+            try:
+                banner.pack_forget()
+            except Exception:
+                pass
+
+    def _dismiss_ultra_tips(self) -> None:
+        """Dismiss button: hide the cue and never show it again."""
+        self._hide_ultra_tips()
+        try:
+            self.config["ultra_tips_dismissed"] = True
+            save_config(self.config)
+        except Exception as e:
+            self.log(f"⚠ Could not persist Ultra-tip dismissal: {e}")
+
+    def _open_settings_from_ultra_tips(self) -> None:
+        """Open Settings so the user can switch the upgrades on; the cue stays
+        up until acted on or dismissed."""
+        try:
+            self._switch_tab("settings")
+        except Exception:
+            pass
+
     def _restart_for_overlay_change(self):
         """Kill the overlay and re-exec the app to apply a status-indicator change."""
         import sys
@@ -14465,6 +14569,14 @@ class WayfinderApp(ctk.CTk):
             if banner is not None and self.feature_gate.is_premium:
                 banner.destroy()
                 self._premium_banner = None
+        except Exception:
+            pass
+        # Freshly flipped tier: recompute the Ultra utilization cue right away
+        # (on activation everything starts switched off — the upgrade must not
+        # feel identical to Free until the next launch; on deactivation the
+        # cue self-hides).
+        try:
+            self._maybe_show_ultra_tips()
         except Exception:
             pass
 
