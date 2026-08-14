@@ -2096,3 +2096,75 @@ class TestServerFlagLadderAndCliDelegation:
         assert len(attempts) == 4
         assert attempts[-1][0].endswith("whisper-server-cpu")
         assert "-nth" not in attempts[-1]
+
+
+class TestServerReuseIdentity:
+    """The resident server's identity for reuse = (alive, model path, CPU/GPU
+    mode). A use_gpu flip — e.g. the toggle a user hits right after activating
+    Ultra — must FAIL reuse so the next dictation respawns with GPU flags,
+    even if nothing calls shutdown() explicitly. Previously only toggle_gpu()'s
+    explicit shutdown enforced this (single-write-site invariant)."""
+
+    MODEL = "/models/ggml-base.en.bin"
+
+    def _set_state(self, alive=True, model=MODEL, gpu=False):
+        from wayfinder.core.transcriber import WhisperServerBackend
+        proc = MagicMock()
+        proc.poll.return_value = None if alive else 1
+        WhisperServerBackend._server_process = proc
+        WhisperServerBackend._server_model_path = model
+        WhisperServerBackend._server_use_gpu = gpu
+
+    def _backend(self, gpu=False, model=MODEL):
+        from wayfinder.core.transcriber import WhisperServerBackend
+        return WhisperServerBackend(model_path=model, use_gpu=gpu, timeout=1)
+
+    def teardown_method(self):
+        from wayfinder.core.transcriber import WhisperServerBackend
+        WhisperServerBackend._server_process = None
+        WhisperServerBackend._server_model_path = ""
+        WhisperServerBackend._server_use_gpu = None
+
+    def test_same_model_same_mode_is_reusable(self):
+        self._set_state(gpu=False)
+        assert self._backend(gpu=False)._server_reusable() is True
+
+    def test_gpu_flip_fails_reuse(self):
+        # CPU server resident from the pre-activation warm-up; the user just
+        # enabled GPU → the server must NOT be mistaken for suitable.
+        self._set_state(gpu=False)
+        assert self._backend(gpu=True)._server_reusable() is False
+
+    def test_gpu_to_cpu_flip_also_fails_reuse(self):
+        self._set_state(gpu=True)
+        assert self._backend(gpu=False)._server_reusable() is False
+
+    def test_model_change_fails_reuse(self):
+        self._set_state()
+        assert self._backend(model="/models/ggml-large-v3-turbo.bin")._server_reusable() is False
+
+    def test_dead_process_fails_reuse(self):
+        self._set_state(alive=False)
+        assert self._backend()._server_reusable() is False
+
+    def test_unknown_mode_fails_reuse(self):
+        # _server_use_gpu None (adopted server / reset state) must never match
+        # a request — not even a None/None coincidence.
+        self._set_state()
+        from wayfinder.core.transcriber import WhisperServerBackend
+        WhisperServerBackend._server_use_gpu = None
+        assert self._backend(gpu=False)._server_reusable() is False
+        backend = self._backend(gpu=False)
+        backend.use_gpu = None
+        assert backend._server_reusable() is False
+
+    def test_stop_clears_identity_even_without_local_process(self):
+        # Adopted-server identity has no local Popen; shutdown must still
+        # clear it so stale identity can't satisfy a future reuse check.
+        from wayfinder.core.transcriber import WhisperServerBackend
+        WhisperServerBackend._server_process = None
+        WhisperServerBackend._server_model_path = self.MODEL
+        WhisperServerBackend._server_use_gpu = True
+        WhisperServerBackend._stop_server_internal()
+        assert WhisperServerBackend._server_model_path == ""
+        assert WhisperServerBackend._server_use_gpu is None

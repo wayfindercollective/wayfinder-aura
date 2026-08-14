@@ -695,6 +695,12 @@ class WhisperServerBackend(TranscriptionBackend):
     _server_port: int = 0
     _server_lock = None  # Initialized lazily
     _server_model_path: str = ""
+    # CPU/GPU mode the resident server was spawned with. Part of the server's
+    # identity for reuse checks: the flags are fixed at spawn, so a use_gpu
+    # change (e.g. the toggle right after an Ultra activation) must MISS reuse
+    # and respawn. Previously only toggle_gpu()'s explicit shutdown enforced
+    # this — a single-write-site invariant nothing here guaranteed.
+    _server_use_gpu: Optional[bool] = None
     # whisper-server is intentionally verbose (several KB per request). Its stdout
     # MUST be consumed continuously: leaving Popen(stdout=PIPE) unread eventually
     # fills the kernel pipe and blocks the server in write(), which looks exactly like
@@ -924,6 +930,20 @@ class WhisperServerBackend(TranscriptionBackend):
             thread.join(timeout=0.2)
         return "\n".join(cls._server_log_tail or ())
 
+    def _server_reusable(self) -> bool:
+        """True when the resident server can serve THIS backend's requests:
+        alive, same model, same CPU/GPU mode. GPU mode is part of the match —
+        the server's flags are fixed at spawn, so a use_gpu flip (the toggle a
+        user hits right after activating Ultra) must fail reuse and respawn."""
+        return (
+            WhisperServerBackend._server_process is not None
+            and WhisperServerBackend._server_process.poll() is None
+            and WhisperServerBackend._server_model_path == self.model_path
+            # Unknown mode (None: adopted server / reset state) never matches.
+            and WhisperServerBackend._server_use_gpu is not None
+            and WhisperServerBackend._server_use_gpu == bool(self.use_gpu)
+        )
+
     def _start_server(self, deadline: float = None, force: bool = False) -> None:
         """Start the whisper-server process if not already running.
 
@@ -960,12 +980,10 @@ class WhisperServerBackend(TranscriptionBackend):
                 raise TranscriptionError(
                     "recovery deadline hit while acquiring the server lock")
         try:
-            # Already running with the right model? Skipped when force=True so a
-            # wedged-but-alive server is replaced instead of mistaken for healthy.
-            if (not force
-                    and WhisperServerBackend._server_process is not None
-                    and WhisperServerBackend._server_process.poll() is None
-                    and WhisperServerBackend._server_model_path == self.model_path):
+            # Already running with the right model AND the right CPU/GPU mode?
+            # Skipped when force=True so a wedged-but-alive server is replaced
+            # instead of mistaken for healthy.
+            if not force and self._server_reusable():
                 return
 
             # Kill any existing server (different config, or force-replace a wedge).
@@ -987,6 +1005,13 @@ class WhisperServerBackend(TranscriptionBackend):
             if not force and self._is_our_server(port, timeout=_probe_budget()):
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
+                # An adopted pre-existing server's actual spawn flags are
+                # unknowable — record honest-unknown (None). _server_reusable
+                # treats None as never-matching, so the next start re-probes
+                # adoption instead of trusting an unverified mode (Codex
+                # review; adoption also leaves _server_process None, so the
+                # in-memory reuse fast path never applied to it anyway).
+                WhisperServerBackend._server_use_gpu = None
                 print(f"[Whisper Server] Reusing existing server on port {port}")
                 return
 
@@ -1012,6 +1037,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 WhisperServerBackend._server_process = proc
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
+                WhisperServerBackend._server_use_gpu = self.use_gpu
                 # Start draining BEFORE readiness probes. A chatty startup or repeated
                 # requests must never be able to fill stdout and deadlock inference.
                 WhisperServerBackend._start_server_output_drain(proc)
@@ -1052,6 +1078,7 @@ class WhisperServerBackend(TranscriptionBackend):
 
             WhisperServerBackend._server_process = None
             WhisperServerBackend._server_model_path = ""
+            WhisperServerBackend._server_use_gpu = None
             WhisperServerBackend._server_disabled = True
             raise TranscriptionError(f"whisper-server failed to start: {last_error}")
         finally:
@@ -1081,8 +1108,12 @@ class WhisperServerBackend(TranscriptionBackend):
                     cls._server_process.wait(timeout=kill_wait)
             except Exception:
                 pass
-            cls._server_process = None
-            cls._server_model_path = ""
+        # Identity clears even when no local Popen exists (adopted server /
+        # already-reaped process) — stale identity must never satisfy a future
+        # reuse check for a server we do not control (Codex review).
+        cls._server_process = None
+        cls._server_model_path = ""
+        cls._server_use_gpu = None
 
     @classmethod
     def shutdown(cls) -> None:
