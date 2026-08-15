@@ -115,6 +115,19 @@
   </supports>
 
   <releases>
+    <release version="1.1.8-beta.6" date="2026-08-15" type="development">
+      <description>
+        <p>Prerelease focused on dictation reliability and a smoother Ultra experience:</p>
+        <ul>
+          <li>Dictated text is no longer corrupted when the hotkey's modifier keys are still held as typing starts</li>
+          <li>Activating Ultra now updates the footer tier label and retires upgrade prompts immediately; deactivating restores the Free footer label</li>
+          <li>A dismissible launch tip points Ultra users to upgrades they haven't switched on yet, like GPU acceleration and premium models</li>
+          <li>Switching GPU acceleration on or off always restarts the speech engine so the new mode takes effect</li>
+          <li>An inline feedback form in Settings sends your thoughts straight to the Wayfinder team</li>
+          <li>The status overlay can cross the Plasma taskbar on X11, and links reliably open through the desktop portal</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.8-beta.5" date="2026-08-12" type="development">
       <description>
         <p>Prerelease candidate for faster packaged inference and more reliable dictation:</p>
