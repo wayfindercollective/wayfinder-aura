@@ -306,6 +306,23 @@ modules:
         url: https://www.python.org/ftp/python/3.13.14/Python-3.13.14.tar.xz
         sha256: 639e43243c620a308f968213df9e00f2f8f62332f7adbaa7a7eeb9783057c690
 
+  # PyGObject (Gio/GLib bindings) for the GlobalShortcuts portal hotkey
+  # listener (wayfinder.hotkeys.dbus). The KDE Platform already ships
+  # libgirepository-2.0 and the GLib/Gio typelibs — only the Python binding is
+  # missing. Built without cairo integration (the listener speaks D-Bus, not
+  # drawing) so pycairo never enters the bundle; dbus-python stays out
+  # deliberately — it would drag a native libdbus + dbus-glib chain the
+  # runtime does not guarantee.
+  - name: pygobject
+    buildsystem: meson
+    config-opts:
+      - -Dpycairo=disabled
+      - -Dtests=false
+    sources:
+      - type: archive
+        url: https://download.gnome.org/sources/pygobject/3.52/pygobject-3.52.4.tar.gz
+        sha256: 5947250b27d8e5f4797e8e0ed801dcd1512a9433d5637a0b36065a850b3a5c5c
+
   # llama.cpp — local LLM post-processing (tone cleanup) via the llama-simple
   # subprocess. GPU (Vulkan) build with a CPU twin + runtime GPU->CPU fallback
   # (see the long note below). NOT the resident llama-cpp-python path the

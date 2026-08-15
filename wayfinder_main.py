@@ -44,7 +44,9 @@ except Exception as _pystray_err:  # backend probe can raise non-ImportError
     HAS_PYSTRAY = False
     print(f"[Tray] pystray unavailable ({_pystray_err}); running without a tray icon", flush=True)
 
-# D-Bus for Wayland GlobalShortcuts
+# dbus-python, for the login1 sleep/wake listener ONLY. Portal hotkeys moved
+# off this stack to Gio (wayfinder.hotkeys.dbus) so the Flatpak needs no
+# native libdbus chain; do not add new dbus-python consumers.
 try:
     import dbus
     from dbus.mainloop.glib import DBusGMainLoop
@@ -56,7 +58,15 @@ try:
     DBUS_AVAILABLE = True
 except Exception as _dbus_err:
     DBUS_AVAILABLE = False
-    print(f"[Hotkeys] D-Bus/GLib unavailable ({_dbus_err.__class__.__name__}: {_dbus_err}); portal shortcuts disabled", flush=True)
+    print(f"[Hotkeys] dbus-python/GLib unavailable ({_dbus_err.__class__.__name__}: {_dbus_err}); sleep/wake overlay recovery disabled", flush=True)
+
+# Portal hotkeys need only PyGObject (Gio). Probed separately from dbus-python
+# so bundling one never silently switches the other's behavior.
+from wayfinder.hotkeys.dbus import portal_shortcuts_available, portal_unavailable_detail
+
+PORTAL_HOTKEYS_AVAILABLE = portal_shortcuts_available()
+if not PORTAL_HOTKEYS_AVAILABLE:
+    print(f"[Hotkeys] PyGObject unavailable ({portal_unavailable_detail()}); portal shortcuts disabled", flush=True)
 
 # pynput for cross-platform hotkeys (macOS/Windows)
 try:
@@ -2998,24 +3008,26 @@ def kde_binding_matches_config(active: str, config_code: int,
     return kde_code == config_code and kde_mods == cfg_mods
 
 
-def resolve_hotkey_backend(platform: str, is_flatpak: bool, dbus_available: bool,
+def resolve_hotkey_backend(platform: str, is_flatpak: bool, portal_available: bool,
                            session_type: str) -> str:
     """Pick the global-hotkey backend for the current environment.
 
     Pure mirror of start_hotkey_listener's top-level dispatch, so the
     cross-desktop behavior is provable without every environment on hand:
 
-      "pynput"      — macOS, OR Flatpak-on-X11 without dbus (XRecord global grab)
-      "portal"      — Flatpak with dbus-python: the XDG GlobalShortcuts portal,
+      "pynput"      — macOS, OR Flatpak-on-X11 without PyGObject (XRecord grab)
+      "portal"      — Flatpak with PyGObject: the XDG GlobalShortcuts portal,
                       the cross-desktop standard (works on KDE *and* GNOME)
       "evdev"       — native (non-Flatpak) Linux, reading /dev/input directly.
                       IDENTICAL on X11 and Wayland — the session type only changes
                       a log line. _start_evdev_listener then decides bind-vs-defer
                       (it defers when KDE owns the shortcut; see
                       _compositor_owns_hotkeys).
-      "unavailable" — Flatpak-on-Wayland without dbus: no portal, no uinput; only
-                      the socket trigger works.
+      "unavailable" — Flatpak-on-Wayland without PyGObject: no portal, no uinput;
+                      only the socket trigger works.
 
+    `portal_available` is the Gio probe (wayfinder.hotkeys.dbus), NOT dbus-python —
+    the portal listener speaks GDBus and needs only PyGObject.
     `session_type` is $XDG_SESSION_TYPE (case-insensitive; anything other than
     "wayland" — "x11", "tty", "" — is treated as not-Wayland). Pure/headless.
     """
@@ -3023,7 +3035,7 @@ def resolve_hotkey_backend(platform: str, is_flatpak: bool, dbus_available: bool
         return "pynput"
     is_wayland = session_type.lower() == "wayland"
     if is_flatpak:
-        if dbus_available:
+        if portal_available:
             return "portal"
         return "unavailable" if is_wayland else "pynput"
     return "evdev"
@@ -3446,128 +3458,15 @@ def socket_listener(event_queue, stop_event, log_callback=None):
     return _package_socket_listener(event_queue, stop_event, log_callback)
 
 
-def wayland_hotkey_listener(event_queue, hotkey_display, stop_event, log_callback=None):
-    """Global hotkey listener via the XDG GlobalShortcuts portal (Wayland / Flatpak).
+def wayland_hotkey_listener(event_queue, shortcuts, stop_event, log_callback=None):
+    """Delegate to the package GlobalShortcuts portal listener (single implementation).
 
-    This is the sandbox-correct path: in a Flatpak, evdev can't read /dev/input and pynput
-    can't see Wayland global keys, so the portal is the only option in the bundle.
-
-    Implements the proper portal request/response lifecycle. The previous version called
-    CreateSession then slept 0.5s and *guessed* the session path, which is unreliable
-    (Codex review). The portal returns results asynchronously via a Response signal on a
-    per-call Request object whose path is derived from the caller's unique bus name +
-    handle_token — so we subscribe BEFORE issuing the call and avoid the race:
-        CreateSession -> Request.Response (real session_handle)
-                      -> BindShortcuts -> Request.Response
-                      -> Activated signals -> HOTKEY_PRESSED
-
-    NOTE: needs validation against the live KDE portal on the Steam Deck — portal presence and
-    the bind UX vary by compositor. Falls through cleanly (returns False) when unavailable.
+    Legacy body lived here; the hardened Gio implementation lives in
+    ``wayfinder.hotkeys.dbus`` so tests and the live app share one path.
+    ``shortcuts`` is a list of ``wayfinder.hotkeys.dbus.ShortcutSpec``.
     """
-    def log(msg):
-        if log_callback:
-            try:
-                log_callback(msg)
-            except Exception:
-                pass
-
-    if not DBUS_AVAILABLE:
-        log("⚠️ D-Bus/GLib not available — portal hotkeys disabled")
-        return False
-
-    app_id = get_portal_app_id()
-
-    try:
-        DBusGMainLoop(set_as_default=True)
-        bus = dbus.SessionBus()
-        portal = bus.get_object("org.freedesktop.portal.Desktop",
-                                "/org/freedesktop/portal/desktop")
-        shortcuts_iface = dbus.Interface(portal, "org.freedesktop.portal.GlobalShortcuts")
-
-        # Request object paths are /request/<sender>/<token>, where <sender> is our unique
-        # bus name without the leading ':' and with '.'->'_'. Subscribe before the call.
-        unique = bus.get_unique_name().lstrip(":").replace(".", "_")
-        token = app_id.replace(".", "_").replace("-", "_")
-        sess_token = f"{token}_sess"
-        create_req = f"/org/freedesktop/portal/desktop/request/{unique}/{sess_token}"
-
-        def _on_create_response(response, results):
-            if response != 0:
-                log(f"⚠️ Portal CreateSession denied (code {response})")
-                return
-            session_handle = results.get("session_handle")
-            if not session_handle:
-                log("⚠️ Portal returned no session_handle")
-                return
-            log("✓ Portal session established")
-
-            shortcuts = dbus.Array([
-                dbus.Struct([
-                    dbus.String("record-toggle"),
-                    dbus.Dictionary({
-                        "description": dbus.String("Toggle voice recording"),
-                        "preferred_trigger": dbus.String(hotkey_display or ""),
-                    }, signature="sv"),
-                ], signature="(sa{sv})"),
-            ], signature="(sa{sv})")
-            bind_token = f"{token}_bind"
-            bind_req = f"/org/freedesktop/portal/desktop/request/{unique}/{bind_token}"
-
-            def _on_bind_response(bresp, bresults):
-                if bresp == 0:
-                    log(f"✓ Shortcut registered (default trigger: {hotkey_display or 'unset'})")
-                else:
-                    log("⚠️ Shortcut bind cancelled — set it in System Settings → Shortcuts")
-
-            bus.add_signal_receiver(
-                _on_bind_response, signal_name="Response",
-                dbus_interface="org.freedesktop.portal.Request", path=bind_req,
-            )
-            try:
-                shortcuts_iface.BindShortcuts(
-                    dbus.ObjectPath(session_handle), shortcuts, "",
-                    dbus.Dictionary({"handle_token": dbus.String(bind_token)}, signature="sv"),
-                )
-            except dbus.exceptions.DBusException as e:
-                log(f"⚠️ BindShortcuts failed: {e}")
-
-        bus.add_signal_receiver(
-            _on_create_response, signal_name="Response",
-            dbus_interface="org.freedesktop.portal.Request", path=create_req,
-        )
-
-        def _on_activated(session_handle, shortcut_id, timestamp, options):
-            if shortcut_id == "record-toggle":
-                event_queue.put((EventType.HOTKEY_PRESSED, None))
-
-        bus.add_signal_receiver(
-            _on_activated, signal_name="Activated",
-            dbus_interface="org.freedesktop.portal.GlobalShortcuts",
-            path="/org/freedesktop/portal/desktop",
-        )
-
-        log(f"\U0001f517 Requesting GlobalShortcuts portal session as '{app_id}'...")
-        shortcuts_iface.CreateSession(dbus.Dictionary({
-            "handle_token": dbus.String(sess_token),
-            "session_handle_token": dbus.String(sess_token),
-        }, signature="sv"))
-
-        loop = GLib.MainLoop()
-
-        def check_stop():
-            if stop_event.is_set():
-                loop.quit()
-                return False
-            return True
-
-        GLib.timeout_add(500, check_stop)
-        log("\U0001f3a7 Listening for Wayland global shortcuts (portal)...")
-        loop.run()
-        return True
-
-    except Exception as e:
-        log(f"⚠️ Wayland portal hotkey setup failed: {e}")
-        return False
+    from wayfinder.hotkeys.dbus import wayland_hotkey_listener as _package_portal_listener
+    return _package_portal_listener(event_queue, shortcuts, stop_event, log_callback)
 
 
 # === Floating Status Indicator ===
@@ -12363,16 +12262,22 @@ class WayfinderApp(ctk.CTk):
                     self.log("🔄 Socket listener unreachable - restarting...")
                     self._ensure_socket_listener(force_restart=True)
                 # In a Flatpak the in-app global-hotkey path is the GlobalShortcuts portal when
-                # dbus-python is bundled, else the pynput X11 fallback (see start_hotkey_listener).
-                # Supervise whichever the app ACTUALLY chose — NOT the portal unconditionally, or
-                # we churn every 10s restarting a portal listener that can't run without dbus and
-                # clears its own _portal_listener_started flag on each failed start (log spam +
-                # wasted KWin/dbus attempts). Mirror the backend selection here.
-                if IS_FLATPAK and DBUS_AVAILABLE:
+                # PyGObject is bundled, else the pynput X11 fallback (see start_hotkey_listener).
+                # Supervise whichever the app ACTUALLY chose by mirroring resolve_hotkey_backend
+                # EXACTLY — not the portal unconditionally (that churns every 10s restarting a
+                # listener that can't run without Gio, log spam + wasted portal attempts), and
+                # not pynput as a blind else (Flatpak-Wayland without PyGObject resolved to
+                # "unavailable" at startup; starting pynput there burns a thread on an XRecord
+                # grab Wayland never delivers) (Codex review).
+                flatpak_backend = resolve_hotkey_backend(
+                    sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
+                    os.environ.get("XDG_SESSION_TYPE", ""),
+                ) if IS_FLATPAK else None
+                if flatpak_backend == "portal":
                     if not getattr(self, '_portal_listener_started', False):
                         self.log("🔄 Portal hotkey listener not running - restarting...")
                         self._start_portal_listener()
-                elif IS_FLATPAK and not getattr(self, '_pynput_listener_started', False):
+                elif flatpak_backend == "pynput" and not getattr(self, '_pynput_listener_started', False):
                     self.log("🔄 pynput hotkey listener not running - restarting...")
                     self._start_pynput_listener()
             except Exception as e:
@@ -17339,13 +17244,13 @@ class WayfinderApp(ctk.CTk):
         # Single source of truth for the environment→backend decision (mirrored,
         # and matrix-tested, in resolve_hotkey_backend). Rationale kept below:
         # inside a Flatpak sandbox evdev can't read /dev/input, so hotkeys ride the
-        # GlobalShortcuts portal — BUT the portal needs dbus-python, which the bundle
+        # GlobalShortcuts portal — BUT the portal needs PyGObject, which the bundle
         # may not ship; on X11 pynput's XRecord listener works through the shared X
         # socket, so fall back to it rather than dying silently (F3 was dead in every
         # Flatpak build while the socket path masked it). Non-sandboxed installs use
         # evdev + the 'input' group, identically on X11 and Wayland.
         backend = resolve_hotkey_backend(
-            sys.platform, IS_FLATPAK, DBUS_AVAILABLE,
+            sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
             os.environ.get("XDG_SESSION_TYPE", ""),
         )
         if backend == "portal":
@@ -17354,13 +17259,13 @@ class WayfinderApp(ctk.CTk):
             return
         if backend == "pynput":
             if IS_FLATPAK:  # macOS uses pynput silently; the Flatpak-X11 fallback logs why
-                msg = "Flatpak X11 — dbus-python missing, portal unavailable; using pynput global listener"
+                msg = "Flatpak X11 — PyGObject missing, portal unavailable; using pynput global listener"
                 self.log(f"🖥️ {msg}")
                 print(f"[Hotkeys] {msg}", flush=True)
             self._start_pynput_listener()
             return
         if backend == "unavailable":
-            msg = ("Flatpak Wayland without dbus-python — global hotkeys UNAVAILABLE "
+            msg = ("Flatpak Wayland without PyGObject — global hotkeys UNAVAILABLE "
                    "(socket trigger still works)")
             self.log(f"⚠️ {msg}")
             print(f"[Hotkeys] {msg}", flush=True)
@@ -17513,11 +17418,14 @@ class WayfinderApp(ctk.CTk):
         if getattr(self, '_portal_listener_started', False):
             return
         self._portal_listener_started = True
-        hotkey_display = self.get_hotkey_display()
+        # Both global shortcuts, triggers encoded from config by the protocol
+        # encoder — the UI display label is presentation, not protocol.
+        from wayfinder.hotkeys.dbus import shortcut_specs_from_config
+        shortcuts = shortcut_specs_from_config(self.config)
 
         def _portal_wrapper():
             try:
-                wayland_hotkey_listener(self.event_queue, hotkey_display, self.stop_event, self.log)
+                wayland_hotkey_listener(self.event_queue, shortcuts, self.stop_event, self.log)
             except Exception as e:
                 print(f"[Hotkey] portal listener crashed: {e}", flush=True)
             finally:

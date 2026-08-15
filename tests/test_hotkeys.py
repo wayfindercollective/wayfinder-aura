@@ -863,121 +863,26 @@ class TestEvdevHotkeyListener:
 
 
 # =============================================================================
-# D-Bus Module Tests
+# GlobalShortcuts portal module — surface pins
+# (the full portal lifecycle suite lives in tests/test_portal_hotkeys.py)
 # =============================================================================
 
 
-@pytest.mark.skipif(not HAS_DBUS_MODULE, reason="dbus module not importable")
-class TestDbusAvailability:
-    """Test D-Bus availability detection."""
+class TestPortalModuleSurface:
+    """Pin the portal module's public surface used by wayfinder_main."""
 
-    def test_is_dbus_available_function_exists(self):
-        """is_dbus_available is callable."""
-        from wayfinder.hotkeys.dbus import is_dbus_available
+    def test_probe_returns_bool(self):
+        from wayfinder.hotkeys.dbus import portal_shortcuts_available
 
-        assert callable(is_dbus_available)
+        assert isinstance(portal_shortcuts_available(), bool)
 
-    def test_is_dbus_available_returns_bool(self):
-        """is_dbus_available returns a boolean."""
-        from wayfinder.hotkeys.dbus import is_dbus_available
-
-        result = is_dbus_available()
-        assert isinstance(result, bool)
-
-    def test_is_dbus_available_matches_import_flag(self):
-        """is_dbus_available reflects the DBUS_AVAILABLE module flag."""
-        from wayfinder.hotkeys.dbus import is_dbus_available, DBUS_AVAILABLE
-
-        assert is_dbus_available() == DBUS_AVAILABLE
-
-
-@pytest.mark.skipif(not HAS_DBUS_MODULE, reason="dbus module not importable")
-class TestDbusAvailabilityMocked:
-    """Test D-Bus availability with mocked import states."""
-
-    def test_dbus_unavailable_when_import_fails(self):
-        """DBUS_AVAILABLE is False when dbus-python isn't installed."""
-        # We test by checking the module's behavior: if dbus import fails,
-        # the module sets DBUS_AVAILABLE = False
-        import importlib
-        import wayfinder.hotkeys.dbus as dbus_mod
-
-        with patch.dict("sys.modules", {"dbus": None}):
-            # Re-check: the flag was set at import time, so we verify the
-            # function still returns a boolean consistent with the flag
-            result = dbus_mod.is_dbus_available()
-            assert isinstance(result, bool)
-
-    def test_dbus_available_with_mock(self):
-        """is_dbus_available returns True when dbus is importable."""
-        import wayfinder.hotkeys.dbus as dbus_mod
-
-        original = dbus_mod.DBUS_AVAILABLE
-        try:
-            dbus_mod.DBUS_AVAILABLE = True
-            assert dbus_mod.is_dbus_available() is True
-        finally:
-            dbus_mod.DBUS_AVAILABLE = original
-
-    def test_dbus_unavailable_with_mock(self):
-        """is_dbus_available returns False when flag is False."""
-        import wayfinder.hotkeys.dbus as dbus_mod
-
-        original = dbus_mod.DBUS_AVAILABLE
-        try:
-            dbus_mod.DBUS_AVAILABLE = False
-            assert dbus_mod.is_dbus_available() is False
-        finally:
-            dbus_mod.DBUS_AVAILABLE = original
-
-
-@pytest.mark.skipif(not HAS_DBUS_MODULE, reason="dbus module not importable")
-class TestWaylandHotkeyListener:
-    """Test the wayland_hotkey_listener function."""
-
-    def test_wayland_listener_signature(self):
-        """wayland_hotkey_listener has the expected parameters."""
+    def test_listener_signature(self):
         import inspect
+
         from wayfinder.hotkeys.dbus import wayland_hotkey_listener
 
-        sig = inspect.signature(wayland_hotkey_listener)
-        params = list(sig.parameters.keys())
-
-        assert "event_queue" in params
-        assert "hotkey_display" in params
-        assert "stop_event" in params
-        assert "log_callback" in params
-
-    def test_wayland_listener_returns_false_without_dbus(self):
-        """wayland_hotkey_listener returns False when dbus is unavailable."""
-        import wayfinder.hotkeys.dbus as dbus_mod
-
-        original = dbus_mod.DBUS_AVAILABLE
-        try:
-            dbus_mod.DBUS_AVAILABLE = False
-
-            event_queue = Queue()
-            stop_event = Event()
-            log_messages = []
-
-            result = dbus_mod.wayland_hotkey_listener(
-                event_queue=event_queue,
-                hotkey_display="F9",
-                stop_event=stop_event,
-                log_callback=log_messages.append,
-            )
-
-            assert result is False
-            assert any("not available" in msg for msg in log_messages)
-        finally:
-            dbus_mod.DBUS_AVAILABLE = original
-
-    def test_app_id_constant(self):
-        """APP_ID defaults to 'wayfinder-aura' when not in Flatpak."""
-        from wayfinder.hotkeys.dbus import APP_ID
-
-        # In test env, FLATPAK_ID is unset (cleaned by conftest)
-        assert APP_ID == "wayfinder-aura"
+        params = list(inspect.signature(wayland_hotkey_listener).parameters)
+        assert params == ["event_queue", "shortcuts", "stop_event", "log_callback"]
 
 
 # =============================================================================
@@ -1019,12 +924,17 @@ class TestHotkeysPackageExports:
         assert callable(send_style)
 
     @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only")
-    def test_dbus_exports(self):
-        """On Linux, dbus functions are exported from the package."""
-        from wayfinder.hotkeys import wayland_hotkey_listener, is_dbus_available
+    def test_portal_exports(self):
+        """On Linux, portal functions are exported from the package."""
+        from wayfinder.hotkeys import (
+            portal_shortcuts_available,
+            shortcut_specs_from_config,
+            wayland_hotkey_listener,
+        )
 
         assert callable(wayland_hotkey_listener)
-        assert callable(is_dbus_available)
+        assert callable(portal_shortcuts_available)
+        assert callable(shortcut_specs_from_config)
 
     def test_get_best_hotkey_listener_exists(self):
         """get_best_hotkey_listener is importable and callable."""

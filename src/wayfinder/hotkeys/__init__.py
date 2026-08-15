@@ -35,7 +35,13 @@ if sys.platform.startswith('linux'):
         MOUSE_BUTTON_CODES,
     )
     from .socket import socket_listener, send_toggle, send_style
-    from .dbus import wayland_hotkey_listener, is_dbus_available
+    from .dbus import (
+        ShortcutSpec,
+        encode_trigger,
+        portal_shortcuts_available,
+        shortcut_specs_from_config,
+        wayland_hotkey_listener,
+    )
 else:
     # Stub implementations for non-Linux platforms
     def hotkey_listener(*args, **kwargs):
@@ -70,12 +76,22 @@ else:
             return False
     
     def wayland_hotkey_listener(*args, **kwargs):
-        """Wayland D-Bus hotkey listener - Linux only."""
+        """GlobalShortcuts portal listener - Linux only."""
         return False
-    
-    def is_dbus_available():
-        """Check D-Bus availability - Linux only."""
+
+    def portal_shortcuts_available():
+        """Portal availability probe - Linux only."""
         return False
+
+    def encode_trigger(key_code, modifiers):
+        """Shortcuts-spec trigger encoding - Linux only."""
+        return ""
+
+    def shortcut_specs_from_config(config):
+        """Portal shortcut specs - Linux only."""
+        return []
+
+    ShortcutSpec = None
 
 
 def get_best_hotkey_listener():
@@ -124,7 +140,10 @@ __all__ = [
     "socket_listener",
     "send_toggle",
     "send_style",
-    # Linux Wayland D-Bus
+    # Linux GlobalShortcuts portal (Gio)
     "wayland_hotkey_listener",
-    "is_dbus_available",
+    "portal_shortcuts_available",
+    "encode_trigger",
+    "shortcut_specs_from_config",
+    "ShortcutSpec",
 ]
