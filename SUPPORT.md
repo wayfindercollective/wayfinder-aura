@@ -92,10 +92,12 @@ Try these before filing an issue — they cover the most common problems.
 
 ### Hotkey does nothing
 
-- **On Wayland (desktop):** the app uses the GlobalShortcuts portal. Approve
-  the shortcut prompt from your desktop, or bind it in **System Settings →
-  Shortcuts**. The default hotkeys are **Super+F2** (start/stop) and
-  **Super+F3** (cycle style).
+- **Flatpak installs:** the app registers its hotkeys through the
+  GlobalShortcuts portal. Approve the prompt from your desktop, or bind them
+  in **System Settings → Shortcuts**. The defaults are **Ctrl+Alt+Space**
+  (start/stop) and **Ctrl+Alt+Enter** (cycle style). AppImage and
+  from-source installs don't use the portal — they read input devices
+  directly (evdev, next item).
 - **"No input devices found" (from-source installs):** add yourself to the
   `input` group, then log out and back in:
   ```sh

@@ -95,8 +95,14 @@ dashboard for the verified checkmark.
   `whisper-cli` plus `whisper-cli-cpu`, and the app has fallback logic for
   machines where Vulkan init fails. Final runtime signoff is still required on
   Steam Deck and at least one dedicated GPU system before a paid public release.
-- Global hotkeys inside the sandbox use the XDG GlobalShortcuts portal — the
-  user binds the shortcut once in their DE's settings when prompted.
+- Global hotkeys inside the sandbox use the XDG GlobalShortcuts portal
+  (PyGObject is bundled for this; record and style-cycle are both registered).
+  The user approves the binding once when prompted, or sets it in System
+  Settings → Shortcuts. Note the portal only makes the hotkeys *fire* on
+  Wayland — text injection into native Wayland windows remains a separate,
+  open limitation (the bundled xdotool injects into X11/XWayland windows).
+  AppImage and from-source installs do not use the portal; they read
+  /dev/input directly via evdev.
 
 ## Non-Flatpak channels (later)
 - AppImage: historical lite and full CPU-fallback builds were verified locally.

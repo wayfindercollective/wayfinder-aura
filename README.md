@@ -189,9 +189,11 @@ Settings live in the app; the file is `~/.config/wayfinder-aura/config.json`.
 
 - **"No audio detected" after recording** — your mic is muted or the wrong
   input device is selected. Settings → Audio, or pick "Auto-detect".
-- **Hotkey does nothing on Wayland** — the app uses the GlobalShortcuts portal;
-  approve the shortcut prompt from your desktop, or bind it in System
-  Settings → Shortcuts.
+- **Hotkey does nothing on Wayland** — Flatpak installs register hotkeys
+  through the GlobalShortcuts portal: approve the shortcut prompt from your
+  desktop, or bind it in System Settings → Shortcuts. From-source and
+  AppImage installs don't use the portal — they read input devices directly
+  (evdev), so see the next item instead.
 - **"No input devices found" (from-source installs)** —
   `sudo usermod -aG input $USER`, then log out and back in.
 - **UI too small on 4K** — Ctrl+Plus, or Settings → UI Scale.

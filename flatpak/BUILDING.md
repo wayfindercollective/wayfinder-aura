@@ -183,7 +183,12 @@ The manifest requests these permissions:
 The app needs PulseAudio socket access. Make sure `--socket=pulseaudio` is set.
 
 ### Hotkey not working
-Flatpak can't access `/dev/input` directly. Use the GlobalShortcuts portal or configure a system shortcut to send a D-Bus signal.
+Flatpak can't access `/dev/input` directly, so the app registers its hotkeys
+through the XDG GlobalShortcuts portal (the `pygobject` manifest module
+bundles the binding it needs). Approve the bind prompt, or set the shortcuts
+in System Settings → Shortcuts. On X11 sessions the app falls back to a
+pynput global listener if the portal is unavailable, and the Unix-socket
+trigger works regardless.
 
 ### Whisper model not found
 Bundled models live under `/app/share/whisper-models`; user-downloaded models
