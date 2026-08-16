@@ -16,7 +16,10 @@ block_cipher = None
 PROJECT_ROOT = Path(SPECPATH)
 SRC_DIR = PROJECT_ROOT / 'src'
 
-VERSION = '1.1.0'
+# Derived from pyproject.toml (single source; the literal here drifted).
+import re as _re
+_pyproject = (PROJECT_ROOT / 'pyproject.toml').read_text()
+VERSION = _re.search(r'^version = "([^"]+)"', _pyproject, _re.MULTILINE).group(1)
 BUILD_DATE = datetime.now().strftime('%Y-%m-%d')
 
 a = Analysis(

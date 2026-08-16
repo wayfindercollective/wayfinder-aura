@@ -20,9 +20,13 @@ block_cipher = None
 PROJECT_ROOT = Path(SPECPATH)
 SRC_DIR = PROJECT_ROOT / 'src'
 
-# Version info - update this for releases
-VERSION = '1.1.0'
-VERSION_TUPLE = (1, 1, 0, 0)  # (major, minor, patch, build)
+# Version info — derived from pyproject.toml (single source; literals here
+# drifted for four releases before anyone noticed).
+import re as _re
+_pyproject = (PROJECT_ROOT / 'pyproject.toml').read_text()
+VERSION = _re.search(r'^version = "([^"]+)"', _pyproject, _re.MULTILINE).group(1)
+_numeric = [int(p) for p in _re.match(r'(\d+)\.(\d+)\.(\d+)', VERSION).groups()]
+VERSION_TUPLE = (*_numeric, 0)  # (major, minor, patch, build)
 BUILD_DATE = datetime.now().strftime('%Y-%m-%d')
 CERTIFI_CA_BUNDLE = Path(certifi.where())
 if not CERTIFI_CA_BUNDLE.is_file():

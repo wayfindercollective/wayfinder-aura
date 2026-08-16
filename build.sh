@@ -7,7 +7,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-VERSION="1.1.0"
+# Derived from pyproject.toml (single source; the literal here drifted).
+VERSION="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
 BUILD_TYPE="${1:-release}"
 
 echo "╔════════════════════════════════════════════════════════════╗"

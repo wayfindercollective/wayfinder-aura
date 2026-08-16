@@ -115,6 +115,17 @@
   </supports>
 
   <releases>
+    <release version="1.1.8-beta.9" date="2026-08-16" type="development">
+      <description>
+        <p>Prerelease making the speed benchmark honest and easier to read:</p>
+        <ul>
+          <li>CPU-vs-GPU comparisons now warm caches first and report model loading separately from speech-to-text time, making results closer to warmed-up dictation and preventing one-time startup costs from skewing the comparison</li>
+          <li>Fast results display with enough precision instead of rounding to a misleading zero</li>
+          <li>The benchmark panel speaks plainly: speech-to-text instead of ASR, realtime instead of RT, and it says exactly how it measures</li>
+          <li>Older benchmark numbers measured the old cold way are retired rather than shown next to incomparable warm results</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.8-beta.8" date="2026-08-15" type="development">
       <description>
         <p>Prerelease hardening the new portal hotkeys:</p>
