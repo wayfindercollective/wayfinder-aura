@@ -1107,7 +1107,7 @@ SETTING_TOOLTIPS = {
     "hotkey": "The keyboard shortcut to start/stop voice recording.\n⚡ Latency: None",
     "microphone": "Select which microphone/audio input device to use.\n⚡ Latency: None",
     "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\n⚡ Latency: None",
-    "benchmark": "Measure end-to-end dictation speed on your hardware.\nTimes ASR + post-processing cleanup, with a per-model breakdown.\n⏱️ Run once to get accurate timing predictions.",
+    "benchmark": "Measure end-to-end dictation speed on your hardware.\nTimes speech-to-text + cleanup, with a per-model breakdown.\n⏱️ Run once to get accurate timing predictions.",
     "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
     "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
     "overlay_type": "Choose the status indicator style:\n• Always On: Stays visible, never steals focus (PyQt6)\n• Disappearing: Shows only during recording (CTk)\n⚠️ Requires restart to take effect.",
@@ -1177,12 +1177,15 @@ SETTING_TOOLTIPS = {
 }
 
 
+from wayfinder.core.whisper_timings import format_bench_seconds, warm_benchmark_results
+
+
 def get_dynamic_tooltip(key: str, config: dict) -> str:
     """
     Generate dynamic tooltip text based on benchmark results.
     Falls back to static text with TBD for unbenchmarked values.
     """
-    benchmark_results = config.get("benchmark_results", {})
+    benchmark_results = warm_benchmark_results(config)
     fastest = config.get("benchmark_fastest_processor", None)
     
     # Model-specific tooltip with actual benchmarked speeds
@@ -1213,9 +1216,9 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
             if model_id in benchmark_results:
                 result = benchmark_results[model_id]
                 if fastest == "gpu" and result.get("gpu_10s") is not None:
-                    time_str = f"{result['gpu_10s']:.1f}s"
+                    time_str = format_bench_seconds(result["gpu_10s"])
                 elif result.get("cpu_10s") is not None:
-                    time_str = f"{result['cpu_10s']:.1f}s"
+                    time_str = format_bench_seconds(result["cpu_10s"])
                 else:
                     time_str = "TBD"
                 name = model_names.get(model_id, model_id)
@@ -1290,15 +1293,17 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
         )
         pp_results = config.get("postprocessing_benchmark_results", {}) or {}
         pipeline = config.get("pipeline_benchmark", {}) or {}
+        if pipeline.get("method") != "warm":  # legacy cold pipeline: retire
+            pipeline = {}
         lines = []
         if pipeline.get("total_time") is not None:
             asr = pipeline.get("asr_time")
             ppt = pipeline.get("pp_time")
-            asr_s = f"{asr:.1f}s" if asr is not None else "—"
-            pp_s = f"{ppt:.1f}s" if ppt is not None else "off"
+            asr_s = format_bench_seconds(asr)
+            pp_s = format_bench_seconds(ppt) if ppt is not None else "off"
             lines.append(
-                f"Your setup total: {pipeline['total_time']:.1f}s "
-                f"(ASR {asr_s} + cleanup {pp_s})"
+                f"Your setup total: {format_bench_seconds(pipeline['total_time'])} "
+                f"(speech-to-text {asr_s} + cleanup {pp_s})"
             )
         if pp_results:
             ranked = sorted(
@@ -1311,7 +1316,7 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
             for mid, r in ranked[:6]:
                 mark = " ← current" if r.get("is_current") else ""
                 name = r.get("model_name", mid)
-                lines.append(f"  {name}: {r['avg_time']:.1f}s{mark}")
+                lines.append(f"  {name}: {format_bench_seconds(r['avg_time'])}{mark}")
         if lines:
             return base_text + "\n\n⏱ Measured on your hardware:\n" + "\n".join(lines)
         return base_text + "\n🟡 Latency: +100ms–few seconds depending on model\n⏱️ Run Benchmark for measured times."
@@ -1504,46 +1509,38 @@ class BenchmarkRunner:
         
         return temp_file.name
     
-    def _run_single_benchmark(self, whisper_cli: str, model_path: str, 
-                               audio_file: str, use_gpu: bool, timeout: int = 60) -> float | None:
-        """Run a single transcription and return time in seconds.
-        
-        Uses simple subprocess.run which handles timeouts correctly.
+    def _run_single_benchmark(self, whisper_cli: str, model_path: str,
+                               audio_file: str, use_gpu: bool, timeout: int = 60,
+                               warmup_audio: str | None = None):
+        """Measure one configuration warmed up; a MeasureResult, or None.
+
+        A cold single shot lumped model load + GPU pipeline compilation into
+        the number, once — punishing the GPU exactly where the benchmark is
+        meant to showcase it, and measuring a state dictation never runs in
+        (the resident whisper-server keeps the model loaded). See
+        wayfinder.core.whisper_timings for the recipe.
         """
-        import subprocess
-        
-        cmd = [
+        from wayfinder.core.whisper_timings import measure_transcription
+
+        argv = [
             whisper_cli,
             "-m", model_path,
-            "-f", audio_file,
             "-t", "6",  # threads
             "--no-timestamps",
-            "--no-prints",
         ]
-        
+
         # GPU is ON by default in Vulkan builds of whisper.cpp
         # Use --no-gpu to disable it for CPU-only testing
         if not use_gpu:
-            cmd.append("--no-gpu")
-        
-        try:
-            start = time.perf_counter()
-            result = subprocess.run(cmd, capture_output=True, timeout=timeout)
-            elapsed = time.perf_counter() - start
-            
-            if result.returncode == 0:
-                return elapsed
-            else:
-                stderr_text = result.stderr.decode('utf-8', errors='replace')[:200]
-                self.log_callback(f"   ⚠️ Exit code {result.returncode}: {stderr_text}")
-                return None
-                
-        except subprocess.TimeoutExpired:
-            self.log_callback(f"   ⚠️ Timed out after {timeout}s")
-            return None
-        except Exception as e:
-            self.log_callback(f"   ⚠️ Error: {e}")
-            return None
+            argv.append("--no-gpu")
+
+        m = measure_transcription(
+            argv, audio_file, warmup_audio, timeout=timeout,
+        )
+        if m.ok:
+            return m
+        self.log_callback(f"   ⚠️ {m.stderr_tail[:200] or f'exit {m.returncode}'}")
+        return None
     
     def run_benchmarks(self, test_gpu: bool = True, test_cpu: bool = True, 
                        quick_mode: bool = False, selected_model: str = None) -> tuple:
@@ -1589,9 +1586,11 @@ class BenchmarkRunner:
         
         self.log_callback(f"📦 Testing {len(available)} model(s)")
         
-        # Create test audio (10 seconds)
+        # Create test audio (10 seconds) plus a short warmup clip that primes
+        # caches untimed so measurements reflect dictation's warm steady state.
         self.log_callback("🎤 Creating 10s test audio...")
         test_audio = self._create_test_audio(10)
+        warmup_audio = self._create_test_audio(1)
         
         try:
             total_tests = len(available) * (int(test_cpu) + int(test_gpu))
@@ -1601,7 +1600,7 @@ class BenchmarkRunner:
                 if self._cancel_requested:
                     break
                 
-                self.results[model_id] = {"model_name": display_name}
+                self.results[model_id] = {"model_name": display_name, "method": "warm"}
                 
                 # GPU benchmark first (usually faster)
                 if test_gpu and not self._cancel_requested:
@@ -1610,12 +1609,17 @@ class BenchmarkRunner:
                     self.progress_callback(progress, f"Testing {display_name} (GPU)...")
                     self.log_callback(f"⏱️ {display_name} GPU...")
                     
-                    gpu_time = self._run_single_benchmark(
-                        whisper_cli, model_path, test_audio, use_gpu=True, timeout=60
+                    gpu_measured = self._run_single_benchmark(
+                        whisper_cli, model_path, test_audio, use_gpu=True, timeout=60,
+                        warmup_audio=warmup_audio,
                     )
-                    if gpu_time:
-                        self.results[model_id]["gpu_10s"] = round(gpu_time, 2)
-                        self.log_callback(f"   ✅ GPU: {gpu_time:.1f}s")
+                    if gpu_measured:
+                        self.results[model_id]["gpu_10s"] = round(gpu_measured.seconds, 3)
+                        if gpu_measured.load_seconds:
+                            self.results[model_id]["gpu_load"] = round(gpu_measured.load_seconds, 3)
+                        self.results[model_id]["gpu_timing"] = gpu_measured.timing_source
+                        self.log_callback(
+                            f"   ✅ GPU (warmed up): {gpu_measured.seconds:.2f}s")
                     else:
                         self.log_callback(f"   ⚠️ GPU test failed")
                 
@@ -1626,12 +1630,17 @@ class BenchmarkRunner:
                     self.progress_callback(progress, f"Testing {display_name} (CPU)...")
                     self.log_callback(f"⏱️ {display_name} CPU...")
                     
-                    cpu_time = self._run_single_benchmark(
-                        whisper_cli, model_path, test_audio, use_gpu=False, timeout=120
+                    cpu_measured = self._run_single_benchmark(
+                        whisper_cli, model_path, test_audio, use_gpu=False, timeout=120,
+                        warmup_audio=warmup_audio,
                     )
-                    if cpu_time:
-                        self.results[model_id]["cpu_10s"] = round(cpu_time, 2)
-                        self.log_callback(f"   ✅ CPU: {cpu_time:.1f}s")
+                    if cpu_measured:
+                        self.results[model_id]["cpu_10s"] = round(cpu_measured.seconds, 3)
+                        if cpu_measured.load_seconds:
+                            self.results[model_id]["cpu_load"] = round(cpu_measured.load_seconds, 3)
+                        self.results[model_id]["cpu_timing"] = cpu_measured.timing_source
+                        self.log_callback(
+                            f"   ✅ CPU (warmed up): {cpu_measured.seconds:.2f}s")
                     else:
                         self.log_callback(f"   ⚠️ CPU test failed")
                 
@@ -1651,11 +1660,12 @@ class BenchmarkRunner:
         
         finally:
             # Cleanup test audio
-            try:
-                os.unlink(test_audio)
-            except:
-                pass
-        
+            for tmp in (test_audio, warmup_audio):
+                try:
+                    os.unlink(tmp)
+                except:
+                    pass
+
         # Determine overall fastest processor
         gpu_wins = sum(1 for r in self.results.values() if r.get("fastest") == "gpu")
         cpu_wins = sum(1 for r in self.results.values() if r.get("fastest") == "cpu")
@@ -1769,7 +1779,7 @@ class BenchmarkRunner:
         models = models if models is not None else self.discover_pp_models(config)
         results: dict = {}
         if not models:
-            self.log_callback("⚠ No GGUF cleanup models found to benchmark")
+            self.log_callback("⚠ No cleanup models found to benchmark")
             return results
 
         backend = config.get("post_processing_backend", "llama_cpp")
@@ -1887,18 +1897,18 @@ class BenchmarkRunner:
         """
         Build the headline "your current setup" pipeline numbers.
 
-        ASR mode follows the user's use_gpu preference when that path succeeded,
-        otherwise falls back to whichever ASR timing we have.
+        STRICTLY the active processor's result (use_gpu). No cross-processor
+        fallback: on Free (use_gpu=False) with the CPU test failed and the
+        GPU Ultra-preview succeeded, the old fallback headlined the preview
+        as "your setup" — a speed the Free tier does not deliver (Codex
+        review). The alternate processor's number belongs only in the
+        comparison section.
         """
         asr_mode = None
         asr_time = None
         if use_gpu and gpu_time is not None:
             asr_mode, asr_time = "gpu", gpu_time
         elif (not use_gpu) and cpu_time is not None:
-            asr_mode, asr_time = "cpu", cpu_time
-        elif gpu_time is not None:
-            asr_mode, asr_time = "gpu", gpu_time
-        elif cpu_time is not None:
             asr_mode, asr_time = "cpu", cpu_time
 
         pp_time = None
@@ -6124,7 +6134,7 @@ class WayfinderApp(ctk.CTk):
         else:
             self.log("⚪ GPU: Not detected (using CPU)")
         if reason and self.config.get("transcription_backend_auto", True):
-            self.log(f"   ASR: {rec} — {reason}")
+            self.log(f"   Speech-to-text: {rec} — {reason}")
 
         threads_config = self.config.get("threads", 4)
         if cpu_count < threads_config:
@@ -7854,16 +7864,17 @@ class WayfinderApp(ctk.CTk):
                 text_color=COLORS["accent"],
             ).pack(padx=10, pady=4)
 
-        # Headline is end-to-end pipeline (ASR + cleanup). ASR is a 10s clip from
-        # a COLD start (model load included); live whisper-server is faster.
-        # Cleanup times are WARM (after one load) to match live dictation.
+        # Both halves are measured WARM to match live dictation: the resident
+        # whisper-server keeps the speech model loaded (so one-time model load
+        # is excluded via whisper_timings), and cleanup is timed after one
+        # untimed warmup run.
         ctk.CTkLabel(
             benchmark_tile,
-            text="Times your full pipeline: ASR (10s cold clip) + LLM cleanup (warm). "
-                 "Live dictation keeps ASR loaded so it runs faster than the ASR figure. "
-                 "The ASR comparison always measures CPU and GPU directly. On Free, "
+            text="Times your full setup on a 10-second clip: speech-to-text + "
+                 "cleanup, measured warmed up — close to how live dictation runs. "
+                 "The comparison always measures CPU and GPU directly. On Free, "
                  "GPU is a benchmark-only Ultra preview and normal dictation stays on CPU. "
-                 "Cleanup comparison lists every installed GGUF model.",
+                 "Cleanup comparison lists every installed cleanup model.",
             font=(self.font_body[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
             wraplength=520, justify="left",
@@ -8014,46 +8025,54 @@ class WayfinderApp(ctk.CTk):
                 text_color=color,
             ).pack(anchor="w", pady=1)
 
-        benchmark_results = self.config.get("benchmark_results", {}) or {}
+        # Legacy cold single-shot results are retired, not relabeled.
+        benchmark_results = warm_benchmark_results(self.config)
         pp_results = self.config.get("postprocessing_benchmark_results", {}) or {}
         pipeline = self.config.get("pipeline_benchmark", {}) or {}
+        if pipeline.get("method") != "warm":
+            pipeline = {}
         asr_error = str(self.config.get("benchmark_last_asr_error") or "").strip()
 
         has_any = bool(benchmark_results or pp_results or pipeline or asr_error)
         if not has_any:
             _line(
-                "No benchmark results yet. Click 'Compare CPU vs GPU' to measure "
-                "ASR + cleanup on your hardware.",
+                "No results yet. Click 'Compare CPU vs GPU' to measure "
+                "speech-to-text + cleanup speed on your hardware.",
                 muted=True,
             )
             return
 
         # --- Pipeline headline (current setup) ---
         if pipeline.get("total_time") is not None or pipeline.get("asr_time") is not None:
-            _section("YOUR SETUP (pipeline)")
+            _section("YOUR SETUP")
             total = pipeline.get("total_time")
             asr_t = pipeline.get("asr_time")
             pp_t = pipeline.get("pp_time")
-            asr_name = pipeline.get("asr_model_name") or pipeline.get("asr_model") or "ASR"
+            asr_name = pipeline.get("asr_model_name") or pipeline.get("asr_model") or "speech model"
             asr_mode = (pipeline.get("asr_mode") or "").upper() or "?"
             pp_name = pipeline.get("pp_model_name") or "cleanup"
             if total is not None:
-                _line(f"Total: {total:.1f}s  (10s audio + cleanup)", bright=True)
-            asr_part = f"{asr_t:.1f}s" if asr_t is not None else "—"
+                _line(f"Total: {format_bench_seconds(total)}  (10s of speech + cleanup)", bright=True)
+            asr_part = format_bench_seconds(asr_t)
             if asr_t and pipeline.get("audio_seconds"):
                 rtf = pipeline["audio_seconds"] / asr_t
-                asr_part = f"{asr_t:.1f}s ({rtf:.0f}× realtime)"
-            _line(f"  ASR  ({asr_name} · {asr_mode}):  {asr_part}")
+                asr_part = f"{format_bench_seconds(asr_t)} ({rtf:.0f}× realtime)"
+            _line(f"  Speech-to-text ({asr_name} · {asr_mode}):  {asr_part}")
             if pipeline.get("pp_enabled") and pp_t is not None:
-                _line(f"  Cleanup ({pp_name}):  {pp_t:.1f}s")
+                _line(f"  Cleanup ({pp_name}):  {format_bench_seconds(pp_t)}")
             elif not pipeline.get("pp_enabled", True):
                 _line("  Cleanup: off", muted=True)
             else:
                 _line("  Cleanup: —", muted=True)
 
-        # --- ASR per whisper model ---
+        # --- Speech-to-text per whisper model ---
         if benchmark_results:
-            _section("TRANSCRIPTION (ASR)")
+            _section("SPEECH-TO-TEXT (warmed up)")
+            _line(
+                "Measured warmed up — close to how dictation runs. Model load "
+                "is paid once, at startup or when switching models.",
+                muted=True,
+            )
             try:
                 gpu_unlocked = self.feature_gate.has_feature("gpu_acceleration")
             except Exception:
@@ -8066,11 +8085,11 @@ class WayfinderApp(ctk.CTk):
 
                 gpu_label = "GPU" if gpu_unlocked else "GPU Ultra preview"
                 gpu_str = (
-                    f"{gpu_label} {gpu_time:.1f}s ({10.0 / gpu_time:.0f}× RT)"
+                    f"{gpu_label} {format_bench_seconds(gpu_time)} ({10.0 / gpu_time:.0f}× realtime)"
                     if gpu_time else "GPU —"
                 )
                 cpu_str = (
-                    f"CPU {cpu_time:.1f}s ({10.0 / cpu_time:.0f}× RT)"
+                    f"CPU {format_bench_seconds(cpu_time)} ({10.0 / cpu_time:.0f}× realtime)"
                     if cpu_time else "CPU —"
                 )
                 if model_fastest == "gpu":
@@ -8080,6 +8099,36 @@ class WayfinderApp(ctk.CTk):
                 else:
                     result_text = f"{model_name}: {gpu_str}  |  {cpu_str}"
                 _line(result_text)
+                loads = []
+                if result.get("gpu_load"):
+                    loads.append(f"GPU {format_bench_seconds(result['gpu_load'])}")
+                if result.get("cpu_load"):
+                    loads.append(f"CPU {format_bench_seconds(result['cpu_load'])}")
+                if loads:
+                    _line(
+                        f"  model load (at startup or when switching models): {' · '.join(loads)}",
+                        muted=True,
+                    )
+                # Honesty qualifiers (Codex review): the caption promises warm,
+                # load-free numbers — say so when a side couldn't deliver that.
+                wall_sides = [
+                    side.upper() for side in ("gpu", "cpu")
+                    if result.get(f"{side}_10s") and result.get(f"{side}_timing") == "wall"
+                ]
+                if wall_sides:
+                    _line(
+                        f"  {' and '.join(wall_sides)} measured by wall clock — includes model load",
+                        muted=True,
+                    )
+                cold_sides = [
+                    side.upper() for side in ("gpu", "cpu")
+                    if result.get(f"{side}_10s") and result.get(f"{side}_warmed") is False
+                ]
+                if cold_sides:
+                    _line(
+                        f"  {' and '.join(cold_sides)} warm-up run failed — may include first-run overhead",
+                        muted=True,
+                    )
                 if gpu_time and cpu_time and gpu_time > 0 and not gpu_unlocked:
                     speedup = cpu_time / gpu_time
                     if speedup > 1.0:
@@ -8090,13 +8139,13 @@ class WayfinderApp(ctk.CTk):
         elif asr_error:
             # Partial runs used to show only the cleanup section, which made it
             # look as though the free base.en model was intentionally hidden.
-            _section("TRANSCRIPTION (ASR)")
+            _section("SPEECH-TO-TEXT (warmed up)")
             failed_name = pipeline.get("asr_model_name") or "Current speech model"
             _line(f"{failed_name}: failed — {asr_error[:100]}", muted=True)
 
         # --- Cleanup model comparison ---
         if pp_results:
-            _section("CLEANUP MODELS (warm)")
+            _section("CLEANUP MODELS (warmed up)")
             ranked = sorted(
                 pp_results.items(),
                 key=lambda item: (
@@ -8114,7 +8163,7 @@ class WayfinderApp(ctk.CTk):
                     _line(f"{name}: —", muted=True)
                     continue
                 mark = "  ← current" if result.get("is_current") else ""
-                _line(f"{name}: {t:.1f}s{mark}")
+                _line(f"{name}: {format_bench_seconds(t)}{mark}")
 
         # Timestamp from newest of any section
         timestamps = []
@@ -8256,6 +8305,12 @@ class WayfinderApp(ctk.CTk):
             
             gpu_time = None
             cpu_time = None
+            gpu_load = None
+            cpu_load = None
+            gpu_source = None
+            cpu_source = None
+            gpu_warmed = None
+            cpu_warmed = None
             error = None
             asr_failures: list[str] = []
             pp_results: dict = {}
@@ -8310,83 +8365,99 @@ class WayfinderApp(ctk.CTk):
                         wav.setsampwidth(2)
                         wav.setframerate(sample_rate)
                         wav.writeframes(speech.tobytes())
-                    
+
+                    # Short clip for the untimed warmup pass (see
+                    # wayfinder.core.whisper_timings): primes the OS file cache
+                    # and the GPU driver's pipeline cache so the measured run
+                    # reflects dictation's warm steady state, cheaply.
+                    warmup_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    with wave.open(warmup_audio.name, "wb") as wav:
+                        wav.setnchannels(1)
+                        wav.setsampwidth(2)
+                        wav.setframerate(sample_rate)
+                        wav.writeframes(speech[:sample_rate].tobytes())
+
                     debug_log(f"Audio created: {test_audio.name}")
                     
                     try:
-                        # GPU TEST
+                        from wayfinder.core.whisper_timings import measure_transcription
+
+                        # GPU TEST — warmed up, one-time model load reported
+                        # separately (a cold single shot punished the GPU with
+                        # setup costs dictation never pays; the resident
+                        # whisper-server keeps the model loaded).
                         debug_log("Starting GPU test...")
                         timer_state["phase"] = "GPU"
                         _gpu_phase = "GPU Ultra preview" if _gpu_is_preview else "GPU"
-                        self.after(0, lambda p=_gpu_phase: self.benchmark_status_label.configure(text=f"Testing {p} ASR..."))
-                        self.after(0, lambda p=_gpu_phase: self.log(f"   🔥 {p} ASR test starting..."))
-                        
-                        cmd_gpu = [whisper_cli, "-m", str(model_path), "-f", test_audio.name, 
-                                   "-t", "6", "--no-timestamps", "--no-prints"]
-                        
-                        start = time.perf_counter()
-                        result = subprocess.run(
-                            cmd_gpu, capture_output=True, timeout=60,
-                            env=bundle_binary_env(),
+                        self.after(0, lambda p=_gpu_phase: self.benchmark_status_label.configure(text=f"Testing {p} speech-to-text..."))
+                        self.after(0, lambda p=_gpu_phase: self.log(f"   🔥 {p} speech-to-text test starting..."))
+
+                        argv_gpu = [whisper_cli, "-m", str(model_path),
+                                    "-t", "6", "--no-timestamps"]
+                        m = measure_transcription(
+                            argv_gpu, test_audio.name, warmup_audio.name,
+                            env=bundle_binary_env(), timeout=60,
                         )
-                        gpu_elapsed = time.perf_counter() - start
-                        debug_log(f"GPU done: {gpu_elapsed:.2f}s, exit={result.returncode}")
-                        
-                        if result.returncode == 0:
-                            gpu_time = gpu_elapsed
-                            self.after(0, lambda t=gpu_time: self.log(f"   ✅ GPU ASR: {t:.2f}s"))
+                        debug_log(
+                            f"GPU done: ok={m.ok} steady={m.seconds} load={m.load_seconds} "
+                            f"wall={m.wall_seconds} exit={m.returncode}"
+                        )
+                        if m.ok:
+                            gpu_time = m.seconds
+                            gpu_load = m.load_seconds
+                            gpu_source = m.timing_source
+                            gpu_warmed = m.warmed_ok
+                            self.after(0, lambda t=gpu_time: self.log(
+                                f"   ✅ GPU speech-to-text (warmed up): {t:.2f}s"))
                         else:
-                            stderr = result.stderr.decode('utf-8', errors='replace')[:200]
                             asr_failures.append(
-                                f"GPU exit {result.returncode}: {stderr.strip() or 'no diagnostic'}"
+                                f"GPU exit {m.returncode}: {m.stderr_tail[:200].strip() or 'no diagnostic'}"
                             )
-                            debug_log(f"GPU stderr: {stderr}")
-                            if result.returncode < 0:
+                            debug_log(f"GPU stderr: {m.stderr_tail[:200]}")
+                            if m.returncode is not None and m.returncode < 0:
                                 self.after(0, lambda: self.log("   ⚠️ GPU unavailable on this device (Vulkan crashed) — CPU only"))
                             else:
-                                self.after(0, lambda: self.log(f"   ⚠️ GPU failed: exit {result.returncode}"))
-                        
-                        # CPU TEST  
+                                self.after(0, lambda: self.log(f"   ⚠️ GPU failed: exit {m.returncode}"))
+
+                        # CPU TEST — same warm recipe so the comparison is fair
                         debug_log("Starting CPU test...")
                         timer_state["phase"] = "CPU"
-                        self.after(0, lambda: self.benchmark_status_label.configure(text="Testing CPU ASR..."))
-                        self.after(0, lambda: self.log("   🧠 CPU ASR test starting..."))
-                        
-                        cmd_cpu = [whisper_cli_cpu, "-m", str(model_path), "-f", test_audio.name,
-                                   "-t", "6", "--no-timestamps", "--no-prints", "--no-gpu"]
-                        
-                        start = time.perf_counter()
-                        result = subprocess.run(
-                            cmd_cpu, capture_output=True, timeout=120,
-                            env=bundle_binary_env(),
+                        self.after(0, lambda: self.benchmark_status_label.configure(text="Testing CPU speech-to-text..."))
+                        self.after(0, lambda: self.log("   🧠 CPU speech-to-text test starting..."))
+
+                        argv_cpu = [whisper_cli_cpu, "-m", str(model_path),
+                                    "-t", "6", "--no-timestamps", "--no-gpu"]
+                        m = measure_transcription(
+                            argv_cpu, test_audio.name, warmup_audio.name,
+                            env=bundle_binary_env(), timeout=120,
                         )
-                        cpu_elapsed = time.perf_counter() - start
-                        debug_log(f"CPU done: {cpu_elapsed:.2f}s, exit={result.returncode}")
-                        
-                        if result.returncode == 0:
-                            cpu_time = cpu_elapsed
-                            self.after(0, lambda t=cpu_time: self.log(f"   ✅ CPU ASR: {t:.2f}s"))
+                        debug_log(
+                            f"CPU done: ok={m.ok} steady={m.seconds} load={m.load_seconds} "
+                            f"wall={m.wall_seconds} exit={m.returncode}"
+                        )
+                        if m.ok:
+                            cpu_time = m.seconds
+                            cpu_load = m.load_seconds
+                            cpu_source = m.timing_source
+                            cpu_warmed = m.warmed_ok
+                            self.after(0, lambda t=cpu_time: self.log(
+                                f"   ✅ CPU speech-to-text (warmed up): {t:.2f}s"))
                         else:
-                            stderr = result.stderr.decode('utf-8', errors='replace')[:200]
                             asr_failures.append(
-                                f"CPU exit {result.returncode}: {stderr.strip() or 'no diagnostic'}"
+                                f"CPU exit {m.returncode}: {m.stderr_tail[:200].strip() or 'no diagnostic'}"
                             )
-                            debug_log(f"CPU stderr: {stderr}")
-                            self.after(0, lambda: self.log(f"   ⚠️ CPU failed: exit {result.returncode}"))
-                            
-                    except subprocess.TimeoutExpired as e:
-                        error = f"ASR test timed out: {e}"
-                        asr_failures.append(error)
-                        debug_log(f"Timeout: {e}")
-                        self.after(0, lambda: self.log(f"   ⚠️ {error}"))
+                            debug_log(f"CPU stderr: {m.stderr_tail[:200]}")
+                            self.after(0, lambda: self.log(f"   ⚠️ CPU failed: exit {m.returncode}"))
+
                     finally:
-                        try:
-                            os.unlink(test_audio.name)
-                        except Exception:
-                            pass
+                        for tmp in (test_audio, warmup_audio):
+                            try:
+                                os.unlink(tmp.name)
+                            except Exception:
+                                pass
 
                 if gpu_time is None and cpu_time is None and not error:
-                    error = "; ".join(asr_failures) or "ASR tests returned no timing"
+                    error = "; ".join(asr_failures) or "speech-to-text tests returned no timing"
 
                 # --- Post-processing / cleanup model comparison ---
                 # Always attempt so users get Gemma vs Qwen timings even if ASR fails.
@@ -8421,6 +8492,8 @@ class WayfinderApp(ctk.CTk):
                     pp_enabled=bool(self.config.get("post_processing_enabled", False)),
                     audio_seconds=10,
                 )
+                if pipeline:
+                    pipeline["method"] = "warm"  # ASR side measured warm/load-free
                 if pipeline.get("total_time") is not None:
                     self.after(0, lambda t=pipeline["total_time"]: self.log(
                         f"   📦 Pipeline total (current setup): {t:.2f}s"
@@ -8439,6 +8512,12 @@ class WayfinderApp(ctk.CTk):
             result_queue.put({
                 "gpu_time": gpu_time,
                 "cpu_time": cpu_time,
+                "gpu_load": gpu_load,
+                "cpu_load": cpu_load,
+                "gpu_source": gpu_source,
+                "cpu_source": cpu_source,
+                "gpu_warmed": gpu_warmed,
+                "cpu_warmed": cpu_warmed,
                 "error": error,
                 "pp_results": pp_results,
                 "pipeline": pipeline,
@@ -8451,6 +8530,12 @@ class WayfinderApp(ctk.CTk):
             self._benchmark_running = False
             gpu_time = payload.get("gpu_time") if isinstance(payload, dict) else None
             cpu_time = payload.get("cpu_time") if isinstance(payload, dict) else None
+            gpu_load = payload.get("gpu_load") if isinstance(payload, dict) else None
+            cpu_load = payload.get("cpu_load") if isinstance(payload, dict) else None
+            gpu_source = payload.get("gpu_source") if isinstance(payload, dict) else None
+            cpu_source = payload.get("cpu_source") if isinstance(payload, dict) else None
+            gpu_warmed = payload.get("gpu_warmed") if isinstance(payload, dict) else None
+            cpu_warmed = payload.get("cpu_warmed") if isinstance(payload, dict) else None
             error = payload.get("error") if isinstance(payload, dict) else str(payload)
             pp_results = payload.get("pp_results", {}) if isinstance(payload, dict) else {}
             pipeline = payload.get("pipeline", {}) if isinstance(payload, dict) else {}
@@ -8478,11 +8563,12 @@ class WayfinderApp(ctk.CTk):
                 if gpu_time and cpu_time:
                     faster = "GPU" if gpu_time < cpu_time else "CPU"
                     speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
-                    self.log(f"      🚀 ASR: {faster} is {speedup:.1f}x faster!")
+                    self.log(f"      🚀 Speech-to-text: {faster} is {speedup:.1f}x faster (warmed up)")
                 if pipeline.get("total_time") is not None:
                     self.log(
-                        f"      📦 Your setup: {pipeline['total_time']:.1f}s total "
-                        f"(ASR {pipeline.get('asr_time')}s + cleanup {pipeline.get('pp_time')}s)"
+                        f"      📦 Your setup: {format_bench_seconds(pipeline['total_time'])} total "
+                        f"(speech-to-text {format_bench_seconds(pipeline.get('asr_time'))} "
+                        f"+ cleanup {format_bench_seconds(pipeline.get('pp_time'))})"
                     )
                 debug_log("Summary logged")
             except Exception as ex:
@@ -8497,8 +8583,18 @@ class WayfinderApp(ctk.CTk):
             if gpu_time is not None or cpu_time is not None:
                 existing[asr_model_id] = {
                     "model_name": model_name,
-                    "gpu_10s": round(gpu_time, 2) if gpu_time else None,
-                    "cpu_10s": round(cpu_time, 2) if cpu_time else None,
+                    "gpu_10s": round(gpu_time, 3) if gpu_time else None,
+                    "cpu_10s": round(cpu_time, 3) if cpu_time else None,
+                    "gpu_load": round(gpu_load, 3) if gpu_load else None,
+                    "cpu_load": round(cpu_load, 3) if cpu_load else None,
+                    "gpu_timing": gpu_source,
+                    "cpu_timing": cpu_source,
+                    "gpu_warmed": gpu_warmed,
+                    "cpu_warmed": cpu_warmed,
+                    # Warm, load-free measurement (whisper_timings). Results
+                    # without this marker are legacy cold single shots and the
+                    # display retires them rather than relabeling them.
+                    "method": "warm",
                     "fastest": (
                         "gpu" if (gpu_time and cpu_time and gpu_time < cpu_time)
                         else "cpu" if cpu_time
@@ -8509,8 +8605,11 @@ class WayfinderApp(ctk.CTk):
                 }
                 self.config["benchmark_results"] = existing
                 
-                gpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "gpu")
-                cpu_wins = sum(1 for r in existing.values() if r.get("fastest") == "cpu")
+                # Vote over warm entries only — legacy cold results held the
+                # GPU's one-time setup against it and would skew the pick.
+                warm = warm_benchmark_results(self.config)
+                gpu_wins = sum(1 for r in warm.values() if r.get("fastest") == "gpu")
+                cpu_wins = sum(1 for r in warm.values() if r.get("fastest") == "cpu")
                 self.config["benchmark_fastest_processor"] = (
                     "gpu" if gpu_wins > cpu_wins else "cpu" if cpu_wins > 0 else None
                 )
@@ -8538,28 +8637,32 @@ class WayfinderApp(ctk.CTk):
                 asr_s = pipeline.get("asr_time")
                 pp_s = pipeline.get("pp_time")
                 pp_label = pipeline.get("pp_model_name") or "cleanup"
-                asr_bit = f"ASR {asr_s:.1f}s" if asr_s is not None else "ASR —"
-                pp_bit = f"{pp_label} {pp_s:.1f}s" if pp_s is not None else "cleanup off"
+                asr_bit = (f"speech-to-text {format_bench_seconds(asr_s)}"
+                           if asr_s is not None else "speech-to-text —")
+                pp_bit = f"{pp_label} {format_bench_seconds(pp_s)}" if pp_s is not None else "cleanup off"
                 self.benchmark_status_label.configure(
-                    text=f"✓ Pipeline {pipeline['total_time']:.1f}s  ({asr_bit} + {pp_bit})"
+                    text=f"✓ Your setup {format_bench_seconds(pipeline['total_time'])}  ({asr_bit} + {pp_bit})"
                 )
             elif gpu_time and cpu_time:
                 faster = "GPU" if gpu_time < cpu_time else "CPU"
                 speedup = max(gpu_time, cpu_time) / min(gpu_time, cpu_time)
                 self.benchmark_status_label.configure(
-                    text=f"✓ ASR {faster} {speedup:.1f}x faster (GPU:{gpu_time:.1f}s CPU:{cpu_time:.1f}s)"
+                    text=f"✓ Speech-to-text: {faster} {speedup:.1f}× faster "
+                         f"(GPU {format_bench_seconds(gpu_time)} · CPU {format_bench_seconds(cpu_time)})"
                 )
             elif gpu_time:
-                self.benchmark_status_label.configure(text=f"✓ GPU ASR: {gpu_time:.1f}s (CPU failed)")
-            elif cpu_time:
-                self.benchmark_status_label.configure(text=f"✓ CPU ASR: {cpu_time:.1f}s (GPU unavailable)")
-            elif pp_results:
-                detail = (error or "unknown ASR error").splitlines()[0][:90]
                 self.benchmark_status_label.configure(
-                    text=f"Cleanup timed; ASR failed — {detail}"
+                    text=f"✓ GPU speech-to-text: {format_bench_seconds(gpu_time)} (CPU failed)")
+            elif cpu_time:
+                self.benchmark_status_label.configure(
+                    text=f"✓ CPU speech-to-text: {format_bench_seconds(cpu_time)} (GPU unavailable)")
+            elif pp_results:
+                detail = (error or "unknown speech-to-text error").splitlines()[0][:90]
+                self.benchmark_status_label.configure(
+                    text=f"Cleanup timed; speech-to-text failed — {detail}"
                 )
             else:
-                self.benchmark_status_label.configure(text="Both ASR tests failed")
+                self.benchmark_status_label.configure(text="Both speech-to-text tests failed")
         
         # Start benchmark in background thread
         threading.Thread(target=run_benchmark_thread, daemon=True).start()
@@ -8777,7 +8880,8 @@ class WayfinderApp(ctk.CTk):
             # Show completion message (with widget existence check)
             try:
                 if hasattr(self, 'api_benchmark_status_label') and self.api_benchmark_status_label.winfo_exists():
-                    self.api_benchmark_status_label.configure(text=f"✓ Done! Latency: {latency:.1f}s")
+                    self.api_benchmark_status_label.configure(
+                        text=f"✓ Done! Latency: {format_bench_seconds(latency)}")
             except Exception:
                 pass
         
@@ -8828,7 +8932,7 @@ class WayfinderApp(ctk.CTk):
             if latency:
                 ctk.CTkLabel(
                     self.api_benchmark_results_frame,
-                    text=f"{provider_name} Whisper: {latency:.1f}s ({audio_duration} audio)",
+                    text=f"{provider_name} Whisper: {format_bench_seconds(latency)} ({audio_duration} audio)",
                     font=(self.font_body[0], self.font_sizes["body"]),
                     text_color=COLORS["text_primary"],
                 ).pack(anchor="w", pady=2)
@@ -15617,8 +15721,9 @@ class WayfinderApp(ctk.CTk):
             "ggml-large.bin": ("Large (Multi-lang)", "3GB", "large"),
         }
         
-        # Get benchmark results for optional measured timing
-        benchmark_results = self.config.get("benchmark_results", {})
+        # Get benchmark results for optional measured timing (warm-recipe
+        # entries only — legacy cold numbers are retired everywhere).
+        benchmark_results = warm_benchmark_results(self.config)
         fastest = self.config.get("benchmark_fastest_processor", None)
         
         for filename, (name, size, model_id) in model_info.items():
@@ -15627,10 +15732,10 @@ class WayfinderApp(ctk.CTk):
                 timing = ""
                 if model_id in benchmark_results:
                     result = benchmark_results[model_id]
-                    if fastest == "gpu" and "gpu_10s" in result:
-                        timing = f"GPU: {result['gpu_10s']}s"
-                    elif "cpu_10s" in result:
-                        timing = f"CPU: {result['cpu_10s']}s"
+                    if fastest == "gpu" and result.get("gpu_10s") is not None:
+                        timing = f"GPU: {format_bench_seconds(result['gpu_10s'])}"
+                    elif result.get("cpu_10s") is not None:
+                        timing = f"CPU: {format_bench_seconds(result['cpu_10s'])}"
                 cat = resolve_whisper_model_catalog_id(model_id)
                 cat_info = WHISPER_CPP_MODELS.get(cat or "", {})
                 sp, ac = get_whisper_model_ratings(model_id)

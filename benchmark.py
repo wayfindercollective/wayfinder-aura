@@ -39,6 +39,16 @@ from typing import Any
 
 import numpy as np
 
+# Warm timing contract shared with the in-app benchmark: steady-state
+# (load-free) seconds parsed from whisper.cpp's own report. Falls back to
+# wall clock (and says so in provenance) when running outside the repo.
+try:
+    sys.path.insert(0, str(Path(__file__).parent / "src"))
+    from wayfinder.core.whisper_timings import steady_state_seconds
+except ImportError:
+    def steady_state_seconds(_stderr, wall):
+        return wall, None, "wall"
+
 # Track test files for cleanup on interrupt
 _test_files_to_cleanup = []
 
@@ -199,10 +209,16 @@ class BenchmarkSuite:
         for r in self.transcription_results:
             if r.error:
                 continue
-            key = r.name.lower().replace(" ", "_")
+            # Catalog model id ("base.en"), NOT the display name — tooltips
+            # and the model picker look results up by id (Codex review).
+            key = (r.extra or {}).get("model_id") or r.name.lower().replace(" ", "_")
             if key not in transcription:
-                transcription[key] = {}
+                # Warm contract marker: the timed runs follow a warmup and
+                # report steady-state (load-free) seconds, so the app's
+                # consumers may show these next to in-app warm results.
+                transcription[key] = {"method": "warm"}
             transcription[key][f"{r.mode}_{int(r.duration_seconds)}s"] = round(r.avg_time, 3)
+            transcription[key][f"{r.mode}_timing"] = (r.extra or {}).get("timing_source", "wall")
             transcription[key]["fastest"] = r.mode if r.avg_time == min(
                 t.avg_time for t in self.transcription_results 
                 if t.name == r.name and not t.error
@@ -420,17 +436,24 @@ def benchmark_whisper_cpp(
     except Exception as e:
         return {"error": f"Warm-up failed: {e}"}
     
-    # Timed runs
+    # Timed runs. Each run's steady-state time comes from whisper.cpp's own
+    # timing report (total − load) so per-process model load doesn't count
+    # against the number — the same warm contract as the in-app benchmark
+    # (wayfinder.core.whisper_timings); wall clock is the fallback.
     times = []
+    sources = []
     errors = []
     for i in range(3):  # 3 runs for average
         try:
             start = time.perf_counter()
             result = subprocess.run(cmd, capture_output=True, timeout=180)
             elapsed = time.perf_counter() - start
-            
+
             if result.returncode == 0:
-                times.append(elapsed)
+                stderr_text = result.stderr.decode("utf-8", errors="replace")
+                steady, _load, source = steady_state_seconds(stderr_text, elapsed)
+                times.append(steady)
+                sources.append(source)
             else:
                 stderr = result.stderr.decode('utf-8', errors='replace')[:200]
                 errors.append(f"Run {i+1}: exit code {result.returncode}, {stderr}")
@@ -448,6 +471,9 @@ def benchmark_whisper_cpp(
         "max": max(times),
         "avg": sum(times) / len(times),
         "runs": len(times),
+        # "report" only when every run's number came from the timing report
+        # (load-free); any wall-clock fallback taints the average with load.
+        "timing_source": "report" if sources and all(s == "report" for s in sources) else "wall",
     }
 
 
@@ -522,7 +548,10 @@ def run_transcription_benchmarks(
                             min_time=result["min"],
                             max_time=result["max"],
                             rtf=rtf,
-                            extra={"model_id": model_id},
+                            extra={
+                                "model_id": model_id,
+                                "timing_source": result.get("timing_source", "wall"),
+                            },
                         ))
                         
                 except Exception as e:

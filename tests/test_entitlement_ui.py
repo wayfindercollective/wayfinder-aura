@@ -369,6 +369,56 @@ def test_benchmark_can_compare_gpu_while_free_pipeline_remains_cpu():
     assert summary["asr_time"] == 4.0
 
 
+def test_your_setup_never_headlines_the_inactive_processor():
+    """Free (use_gpu=False) with the CPU test failed and the GPU Ultra
+    preview succeeded: the old fallback headlined the preview as 'your
+    setup' — a speed Free does not deliver (Codex review)."""
+    summary = wayfinder_main.BenchmarkRunner.build_pipeline_summary(
+        asr_model_id="base.en",
+        asr_model_name="Base",
+        gpu_time=0.5,
+        cpu_time=None,
+        use_gpu=False,
+        pp_results={},
+        pp_enabled=False,
+    )
+
+    assert summary["asr_mode"] is None
+    assert summary["asr_time"] is None
+    assert summary["total_time"] is None
+
+    # And symmetrically: an Ultra GPU user whose GPU test failed must not be
+    # shown the CPU number as their setup.
+    summary = wayfinder_main.BenchmarkRunner.build_pipeline_summary(
+        asr_model_id="base.en",
+        asr_model_name="Base",
+        gpu_time=None,
+        cpu_time=4.0,
+        use_gpu=True,
+        pp_results={},
+        pp_enabled=False,
+    )
+
+    assert summary["asr_mode"] is None
+    assert summary["total_time"] is None
+
+
+def test_root_tooltip_retires_legacy_cold_benchmarks():
+    """Entries without the warm marker were cold single shots; the root
+    get_dynamic_tooltip copy must retire them like every other consumer."""
+    tip = wayfinder_main.get_dynamic_tooltip(
+        "whisper_model",
+        {
+            "model_path": "/models/ggml-base.en.bin",
+            "benchmark_results": {"base.en": {"cpu_10s": 0.6, "gpu_10s": 0.8}},
+            "benchmark_fastest_processor": "cpu",
+        },
+    )
+
+    assert "0.6" not in tip and "0.8" not in tip
+    assert "Run benchmark" in tip
+
+
 def test_successful_activation_replaces_form_with_active_state():
     events = []
     feedback = _Label()

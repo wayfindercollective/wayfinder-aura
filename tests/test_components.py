@@ -113,8 +113,8 @@ class TestGetDynamicTooltip:
 
         config = {
             "benchmark_results": {
-                "base.en": {"cpu_10s": 4.0, "gpu_10s": 0.8},
-                "small.en": {"cpu_10s": 6.0, "gpu_10s": 1.2},
+                "base.en": {"cpu_10s": 4.0, "gpu_10s": 0.8, "method": "warm"},
+                "small.en": {"cpu_10s": 6.0, "gpu_10s": 1.2, "method": "warm"},
             },
             "benchmark_fastest_processor": "gpu",
         }
@@ -122,6 +122,22 @@ class TestGetDynamicTooltip:
         # Should contain speed data from benchmarks
         assert "GPU" in result or "gpu" in result
         assert "Base" in result or "Small" in result
+
+    def test_legacy_cold_benchmarks_are_retired(self):
+        """Entries without the warm-method marker were cold single shots that
+        lumped model load + GPU pipeline compile into the number — tooltips
+        must not present them as hardware speeds."""
+        from wayfinder.ui.components import get_dynamic_tooltip
+
+        config = {
+            "benchmark_results": {
+                "base.en": {"cpu_10s": 0.6, "gpu_10s": 0.8},  # legacy, no marker
+            },
+            "benchmark_fastest_processor": "cpu",
+        }
+        result = get_dynamic_tooltip("whisper_model", config)
+        assert "0.8" not in result and "0.6" not in result
+        assert "Run benchmark" in result
 
     def test_unknown_key_returns_empty_string(self):
         """get_dynamic_tooltip for an unknown key should return empty string."""

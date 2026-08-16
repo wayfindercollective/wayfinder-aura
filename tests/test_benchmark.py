@@ -51,10 +51,13 @@ class TestBenchmarkWhisperCpp:
                 "/fake/whisper-cli", "/fake/model.bin", "/fake/audio.wav",
                 use_gpu=False, threads=4,
             )
-        assert set(result) == {"min", "max", "avg", "runs"}
+        assert set(result) == {"min", "max", "avg", "runs", "timing_source"}
         assert result["runs"] == 3
         assert result["min"] <= result["avg"] <= result["max"]
         assert result["avg"] >= 0
+        # The fake runs emit no whisper timing report, so the provenance must
+        # honestly say the average is wall clock (model load included).
+        assert result["timing_source"] == "wall"
         assert mock_run.call_count == 4  # warm-up + 3
 
     def test_cpu_mode_passes_no_gpu_flag(self):
@@ -107,12 +110,12 @@ class TestBenchmarkWhisperCpp:
 # BenchmarkResult / to_config_format — the config contract
 # ===========================================================================
 
-def _tx(name, mode, dur, avg, error=""):
+def _tx(name, mode, dur, avg, error="", model_id=None, timing="report"):
     return BenchmarkResult(
         name=name, backend="whisper_cpp", mode=mode,
         duration_seconds=dur, avg_time=avg, min_time=avg, max_time=avg,
         rtf=avg / dur if dur else 0.0, error=error,
-        extra={"model_id": name.lower()},
+        extra={"model_id": model_id or name.lower(), "timing_source": timing},
     )
 
 
@@ -127,7 +130,9 @@ class TestConfigFormatContract:
             _tx("Tiny", "gpu", 10, 0.5),
             _tx("Tiny", "cpu", 30, 6.0),
             _tx("Tiny", "gpu", 30, 1.5),
-            _tx("Base", "cpu", 10, 4.0),
+            # Catalog id differs from the name-derived key — the config must
+            # use "base.en", not "base_english" (Codex review).
+            _tx("Base English", "cpu", 10, 4.0, model_id="base.en", timing="wall"),
             _tx("Broken", "cpu", 10, 0.0, error="crashed"),  # must be excluded
         ]
         s.postprocessing_results = [
@@ -178,6 +183,14 @@ class TestConfigFormatContract:
         assert tiny["cpu_10s"] == 2.0
         assert tiny["gpu_10s"] == 0.5
         assert tiny["fastest"] == "gpu"  # 0.5 < 2.0
+        # Warm-contract stamps the app's consumers depend on:
+        assert tiny["method"] == "warm"
+        assert tiny["cpu_timing"] == "report"
+        # Keyed by CATALOG id, not the display-name-derived slug — tooltips
+        # and the model picker look results up by id (Codex review).
+        assert "base.en" in out["benchmark_results"]
+        assert "base_english" not in out["benchmark_results"]
+        assert out["benchmark_results"]["base.en"]["cpu_timing"] == "wall"
 
     def test_postprocessing_and_api_shapes(self):
         out = self._suite().to_config_format()

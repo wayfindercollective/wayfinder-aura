@@ -323,7 +323,13 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     Generate dynamic tooltip text based on benchmark results.
     Falls back to static text with TBD for unbenchmarked values.
     """
-    benchmark_results = config.get("benchmark_results", {})
+    from wayfinder.core.whisper_timings import (
+        format_bench_seconds,
+        warm_benchmark_results,
+    )
+
+    # Warm results only — legacy cold single shots are retired everywhere.
+    benchmark_results = warm_benchmark_results(config)
     fastest = config.get("benchmark_fastest_processor", None)
     
     # Model-specific tooltip with actual benchmarked speeds
@@ -356,9 +362,9 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
             if model_id in benchmark_results:
                 result = benchmark_results[model_id]
                 if fastest == "gpu" and "gpu_10s" in result:
-                    time_str = f"{result['gpu_10s']:.1f}s"
+                    time_str = format_bench_seconds(result["gpu_10s"])
                 elif "cpu_10s" in result:
-                    time_str = f"{result['cpu_10s']:.1f}s"
+                    time_str = format_bench_seconds(result["cpu_10s"])
                 else:
                     time_str = "TBD"
                 name = model_names.get(model_id, model_id)
