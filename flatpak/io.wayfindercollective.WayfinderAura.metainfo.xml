@@ -115,6 +115,16 @@
   </supports>
 
   <releases>
+    <release version="1.1.8-beta.8" date="2026-08-15" type="development">
+      <description>
+        <p>Prerelease hardening the new portal hotkeys:</p>
+        <ul>
+          <li>Hotkeys recover automatically if the desktop portal restarts or the compositor closes the shortcut session, instead of staying silently dead until relaunch</li>
+          <li>Repeated portal failures retry with increasing delays instead of every ten seconds</li>
+          <li>Hand-edited configuration files with malformed hotkey modifiers can no longer prevent startup</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.8-beta.7" date="2026-08-15" type="development">
       <description>
         <p>Prerelease bringing working global hotkeys to sandboxed Wayland sessions:</p>
