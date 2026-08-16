@@ -69,9 +69,17 @@ def test_encode_trigger_known_chords(code, mods, expected):
     (57, ["hyper"]),      # unknown modifier: no trigger beats a wrong chord
     ("x", ["ctrl"]),      # garbage keycode
     (None, []),
+    (57, 7),              # config merges user JSON blindly — must not raise
+    (57, "ctrl"),         # a string iterates characters, not modifier names
+    (57, {"ctrl": True}),  # a dict iterates keys — reject the type outright
 ])
 def test_encode_trigger_unencodable_yields_empty(code, mods):
     assert encode_trigger(code, mods) == ""
+
+
+def test_encode_trigger_deduplicates_modifiers():
+    # "ctrl,ctrl" in a hand-edited config must not encode CTRL+CTRL+space.
+    assert encode_trigger(57, ["ctrl", "ctrl", "alt"]) == "CTRL+ALT+space"
 
 
 def test_specs_from_default_config():
@@ -144,7 +152,8 @@ class _FakeBus:
     """
 
     def __init__(self, create_code=0, bind_code=0, bound_ids=None,
-                 answers=True, bind_answers=True, mismatch=False, activations=()):
+                 answers=True, bind_answers=True, mismatch=False, activations=(),
+                 close_session=False, portal_owner_change=None):
         self._create_code = create_code
         self._bind_code = bind_code
         self._bound_ids = bound_ids
@@ -152,6 +161,8 @@ class _FakeBus:
         self._bind_answers = bind_answers
         self._mismatch = mismatch
         self._activations = list(activations)
+        self._close_session = close_session
+        self._portal_owner_change = portal_owner_change  # (old, new) owners
         self.subscriptions = {}
         self.events = []
         self.bind_shortcut_args = None
@@ -243,6 +254,25 @@ class _FakeBus:
                 if sig == "Activated":
                     cb(None, sender, spath, "org.freedesktop.portal.GlobalShortcuts",
                        "Activated", _Reply((session_handle, shortcut_id, 12345, {})))
+        if self._close_session:
+            self._close_session = False
+            for sender, _iface, sig, _spath, cb in list(self.subscriptions.values()):
+                if sig == "Closed":
+                    cb(None, sender, SESSION_HANDLE,
+                       "org.freedesktop.portal.Session", "Closed", _Reply(({},)))
+        if self._portal_owner_change is not None:
+            old, new = self._portal_owner_change
+            self._portal_owner_change = None
+            for sender, _iface, sig, spath, cb in list(self.subscriptions.values()):
+                if sig == "NameOwnerChanged":
+                    cb(None, sender, spath, "org.freedesktop.DBus", "NameOwnerChanged",
+                       _Reply(("org.freedesktop.portal.Desktop", old, new)))
+
+    def connect(self, signal_name, cb):
+        """GObject-style signal connect (the module watches "closed")."""
+        self.gobject_handlers = getattr(self, "gobject_handlers", {})
+        self.gobject_handlers[signal_name] = cb
+        return 1
 
     def close_sync(self, cancellable):
         self.events.append(("close",))
@@ -331,13 +361,20 @@ def test_subscribes_before_creating_the_session(monkeypatch):
     assert kinds.index("subscribe") < kinds.index("call")
 
 
-def test_pins_the_portal_as_signal_sender(monkeypatch):
-    """Unpinned subscriptions let any connection forge a Response or an
-    Activated that toggles recording."""
+def test_every_subscription_pins_its_sender(monkeypatch):
+    """Unpinned subscriptions let any connection forge a Response, an
+    Activated that toggles recording, or a fake session Closed. Portal
+    signals pin the portal; NameOwnerChanged pins the bus daemon that
+    actually emits it."""
     bus = _install_fake_gi(monkeypatch, _FakeBus())
     _run(bus)
-    senders = [e[1] for e in bus.events if e[0] == "subscribe"]
-    assert senders and all(s == "org.freedesktop.portal.Desktop" for s in senders)
+    pins = {(e[2], e[1]) for e in bus.events if e[0] == "subscribe"}
+    assert pins == {
+        ("Response", "org.freedesktop.portal.Desktop"),
+        ("Activated", "org.freedesktop.portal.Desktop"),
+        ("Closed", "org.freedesktop.portal.Desktop"),
+        ("NameOwnerChanged", "org.freedesktop.DBus"),
+    }
 
 
 def test_unique_tokens_across_runs(monkeypatch):
@@ -498,13 +535,55 @@ def test_unknown_shortcut_id_is_ignored(monkeypatch):
     assert events == []
 
 
+# ── session death: dead sessions must not be listened to forever ─────────────
+
+def test_session_closed_returns_false_for_restart(monkeypatch):
+    """Session.Closed is the spec's termination signal. The listener must exit
+    False so the supervisor can build a fresh session — a dead session can
+    never deliver another Activated, and 'still listening' would leave the
+    hotkeys silently broken until app restart (Codex review)."""
+    logs = []
+    bus = _FakeBus(activations=[(SESSION_HANDLE, "record-toggle")], close_session=True)
+    result, events = _run(_install_fake_gi(monkeypatch, bus), logs=logs)
+    assert result is False
+    assert events == [(EventType.HOTKEY_PRESSED, None)]  # pre-close events kept
+    assert any("session closed" in msg for msg in logs)
+
+
+def test_portal_exit_returns_false_for_restart(monkeypatch):
+    """A crashed portal never emits Closed for the sessions it took down —
+    NameOwnerChanged is the only tell."""
+    logs = []
+    bus = _FakeBus(portal_owner_change=(":1.5", ""))
+    result, _events = _run(_install_fake_gi(monkeypatch, bus), logs=logs)
+    assert result is False
+    assert any("portal exited" in msg for msg in logs)
+
+
+def test_portal_restart_returns_false_for_restart(monkeypatch):
+    logs = []
+    bus = _FakeBus(portal_owner_change=(":1.5", ":1.99"))
+    result, _events = _run(_install_fake_gi(monkeypatch, bus), logs=logs)
+    assert result is False
+    assert any("portal restarted" in msg for msg in logs)
+
+
+def test_portal_first_ownership_is_not_a_loss(monkeypatch):
+    """old_owner == "" is the name being claimed, not lost — must keep
+    listening and exit True on stop, not False."""
+    bus = _FakeBus(portal_owner_change=("", ":1.5"))
+    result, _events = _run(_install_fake_gi(monkeypatch, bus))
+    assert result is True
+
+
 # ── teardown ─────────────────────────────────────────────────────────────────
 
 def test_unsubscribes_and_closes_on_exit(monkeypatch):
     bus = _install_fake_gi(monkeypatch, _FakeBus())
     _run(bus)
     kinds = [e[0] for e in bus.events]
-    assert kinds.count("unsubscribe") == 2
+    # Response, Activated, Session.Closed, NameOwnerChanged — all released.
+    assert kinds.count("unsubscribe") == 4
     assert kinds[-1] == "close"
 
 
@@ -603,6 +682,93 @@ def test_poll_ends_the_untimed_bind_wait(monkeypatch):
 
     assert result is True
     assert elapsed < 10, f"poll failed to end the untimed wait ({elapsed:.1f}s)"
+
+
+def test_session_closed_ends_real_blocking_listen_loop(monkeypatch):
+    """REAL GLib loops: the steady-state listen loop genuinely blocks, and only
+    a Closed delivery may end it here (no stop_event). Proves the liveness fix
+    end-to-end under real dispatch semantics — a fake loop that returns after
+    one dispatch cannot (Codex review)."""
+    import time
+
+    real_glib = pytest.importorskip("gi.repository.GLib")
+
+    class _ClosingBus(_FakeBus):
+        context = None
+
+        def _schedule(self, delay_ms, fn):
+            source = real_glib.timeout_source_new(delay_ms)
+
+            def _cb(*_a):
+                fn()
+                return real_glib.SOURCE_REMOVE
+
+            source.set_callback(_cb)
+            source.attach(_ClosingBus.context)
+
+        def call_sync(self, *args, **kwargs):
+            reply = super().call_sync(*args, **kwargs)
+            if self._pending is not None:
+                pending, self._pending = self._pending, None
+
+                def deliver(_p=pending):
+                    path, code, results = _p
+                    for sender, _i, sig, spath, cb in list(self.subscriptions.values()):
+                        if sig == "Response" and (spath is None or spath == path):
+                            cb(None, sender, path, "org.freedesktop.portal.Request",
+                               "Response", _Reply((code, results)))
+
+                self._schedule(10, deliver)
+            if args[3] == "BindShortcuts":
+                def close_session():
+                    for sender, _i, sig, _sp, cb in list(self.subscriptions.values()):
+                        if sig == "Closed":
+                            cb(None, sender, SESSION_HANDLE,
+                               "org.freedesktop.portal.Session", "Closed", _Reply(({},)))
+
+                self._schedule(300, close_session)
+            return reply
+
+    bus = _ClosingBus()
+
+    class _ContextFactory:
+        @staticmethod
+        def new():
+            context = real_glib.MainContext.new()
+            _ClosingBus.context = context
+            return context
+
+    class _GLibProxy:
+        MainContext = _ContextFactory
+
+        def __getattr__(self, name):
+            return getattr(real_glib, name)
+
+    gio = types.SimpleNamespace(
+        BusType=types.SimpleNamespace(SESSION=2),
+        DBusConnectionFlags=types.SimpleNamespace(
+            AUTHENTICATION_CLIENT=1, MESSAGE_BUS_CONNECTION=2
+        ),
+        DBusCallFlags=types.SimpleNamespace(NONE=0),
+        DBusSignalFlags=types.SimpleNamespace(NONE=0),
+        dbus_address_get_for_bus_sync=lambda bus_type, cancellable: "unix:fake",
+        DBusConnection=types.SimpleNamespace(new_for_address_sync=lambda *a, **k: bus),
+    )
+    repo = types.ModuleType("gi.repository")
+    repo.Gio, repo.GLib = gio, _GLibProxy()
+    gi = types.ModuleType("gi")
+    gi.repository = repo
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", repo)
+
+    logs = []
+    started = time.monotonic()
+    result = portal.wayland_hotkey_listener(Queue(), _specs(), Event(), logs.append)
+    elapsed = time.monotonic() - started
+
+    assert result is False, "a closed session must exit False for a restart"
+    assert elapsed < 10, f"listen loop failed to notice the closed session ({elapsed:.1f}s)"
+    assert any("session closed" in msg for msg in logs)
 
 
 def test_builds_variants_the_real_glib_accepts(monkeypatch):

@@ -76,3 +76,23 @@ def test_session_type_is_case_insensitive():
     # $XDG_SESSION_TYPE casing must not flip Flatpak-Wayland into the X11 fallback.
     assert resolve_hotkey_backend("linux", is_flatpak=True,
                                   portal_available=False, session_type="WAYLAND") == "unavailable"
+
+
+# ── portal listener retry backoff ────────────────────────────────────────────
+
+def test_portal_retry_delay_doubles_then_caps():
+    from wayfinder_main import portal_retry_delay
+
+    assert portal_retry_delay(1) == 20.0
+    assert portal_retry_delay(2) == 40.0
+    assert portal_retry_delay(5) == 320.0
+    assert portal_retry_delay(6) == 600.0
+
+
+def test_portal_retry_delay_saturates_without_overflow():
+    # 10.0 * 2**1024 raises OverflowError on float conversion; a week-long
+    # portal outage must not permanently disable retries (Codex review).
+    from wayfinder_main import portal_retry_delay
+
+    assert portal_retry_delay(1024) == 600.0
+    assert portal_retry_delay(10_000_000) == 600.0

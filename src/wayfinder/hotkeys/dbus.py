@@ -42,6 +42,7 @@ from .types import EventType
 _PORTAL_DEST = "org.freedesktop.portal.Desktop"
 _PORTAL_PATH = "/org/freedesktop/portal/desktop"
 _REQUEST_IFACE = "org.freedesktop.portal.Request"
+_SESSION_IFACE = "org.freedesktop.portal.Session"
 _SHORTCUTS_IFACE = "org.freedesktop.portal.GlobalShortcuts"
 
 # org.freedesktop.portal.Request.Response codes.
@@ -108,12 +109,18 @@ def encode_trigger(key_code: object, modifiers: object) -> str:
         return ""
     if not keysym:
         return ""
+    # Config merges user JSON blindly, so modifiers can be any type. A string
+    # is deliberately rejected too — iterating "ctrl" yields characters, not
+    # modifier names (Codex review).
+    if not isinstance(modifiers, (list, tuple, set, frozenset)) and modifiers is not None:
+        return ""
     tokens = []
     for mod in modifiers or []:
         token = _MODIFIER_TOKENS.get(str(mod).lower())
         if token is None:
             return ""  # unknown modifier — no trigger beats a wrong chord
-        tokens.append(token)
+        if token not in tokens:  # "ctrl,ctrl" must not encode CTRL+CTRL
+            tokens.append(token)
     return "+".join(tokens + [keysym])
 
 
@@ -161,8 +168,11 @@ def wayland_hotkey_listener(
     """Register global shortcuts via the portal and emit events until stopped.
 
     Blocking — run in a dedicated thread. Returns False when setup failed
-    (no PyGObject, no portal, session denied) so the caller can fall back;
-    True when the listener ran and exited via stop_event.
+    (no PyGObject, no portal, session denied) OR when a live session died
+    (Session.Closed, portal restart, connection loss) — either way the
+    caller may retry to build a fresh session. True only for a stop_event
+    exit. A cancelled bind is neither: the session stays valid and the
+    listener keeps running (see module docstring).
     """
     def log(msg: str) -> None:
         if log_callback:
@@ -187,6 +197,8 @@ def wayland_hotkey_listener(
     bus = None
     response_sub = None
     activated_sub = None
+    session_closed_sub = None
+    owner_sub = None
     stop_source = None
     try:
         address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
@@ -207,14 +219,20 @@ def wayland_hotkey_listener(
         create_path = f"{_PORTAL_PATH}/request/{sender}/{create_token}"
 
         responses: dict[str, tuple[int, dict]] = {}
+        closed_paths: set = set()
         # Mutable cells shared with handlers across the setup and listen phases.
         target = {"path": create_path}
-        state = {"session_handle": "", "loop": None, "waiting_path": ""}
+        state = {"session_handle": "", "loop": None, "waiting_path": "", "closed": ""}
 
         def _quit_loop() -> None:
             loop = state["loop"]
             if loop is not None:
                 loop.quit()
+
+        def _mark_closed(reason: str) -> None:
+            if not state["closed"]:
+                state["closed"] = reason
+            _quit_loop()
 
         def _on_response(_conn, _sender, path, _iface, _signal, params):
             try:
@@ -266,6 +284,59 @@ def wayland_hotkey_listener(
             _on_activated,
         )
 
+        # A dead session must not be listened to forever (Codex review): the
+        # compositor can close it, and a portal restart silently voids it while
+        # this loop would keep "listening" and the supervisor would believe the
+        # hotkeys are healthy. Three watchers, all present BEFORE CreateSession
+        # so no closure can slip between session birth and subscription:
+        #   1. Session.Closed — the spec's own termination signal. All paths,
+        #      sender-pinned; paths are recorded so a session closed before its
+        #      handle is even known is still caught.
+        #   2. NameOwnerChanged for the portal — a crashed/restarted portal
+        #      never emits Closed for the sessions it took down with it.
+        #   3. The private connection's "closed" GObject signal — a dead bus
+        #      delivers nothing, including the two signals above.
+        # On any of these the listener returns False so the supervisor can
+        # build a fresh session.
+        def _on_session_closed(_conn, _sender, path, _iface, _signal, _params):
+            closed_paths.add(path)
+            if path == state["session_handle"]:
+                _mark_closed("session closed by the portal")
+
+        session_closed_sub = bus.signal_subscribe(
+            _PORTAL_DEST,
+            _SESSION_IFACE,
+            "Closed",
+            None,
+            None,
+            Gio.DBusSignalFlags.NONE,
+            _on_session_closed,
+        )
+
+        def _on_portal_owner_changed(_conn, _sender, _path, _iface, _signal, params):
+            try:
+                _name, old_owner, new_owner = params.unpack()
+            except Exception:
+                return
+            if old_owner:  # first-time ownership (old == "") is not a loss
+                _mark_closed("portal restarted" if new_owner else "portal exited")
+
+        owner_sub = bus.signal_subscribe(
+            "org.freedesktop.DBus",
+            "org.freedesktop.DBus",
+            "NameOwnerChanged",
+            "/org/freedesktop/DBus",
+            _PORTAL_DEST,
+            Gio.DBusSignalFlags.NONE,
+            _on_portal_owner_changed,
+        )
+
+        def _on_bus_closed(_conn, _remote_peer_vanished, _error):
+            if not stop_event.is_set():
+                _mark_closed("bus connection closed")
+
+        bus.connect("closed", _on_bus_closed)
+
         # A 500ms poll that stays attached across every phase (Rule #1: no
         # sub-100ms polling; this is the same cadence the old listener used).
         # It quits the current loop on stop, and also when the awaited Response
@@ -278,7 +349,11 @@ def wayland_hotkey_listener(
         stop_source = GLib.timeout_source_new(500)
 
         def _poll(*_args) -> bool:
-            if stop_event.is_set() or state["waiting_path"] in responses:
+            if (
+                stop_event.is_set()
+                or state["closed"]
+                or state["waiting_path"] in responses
+            ):
                 _quit_loop()
             return GLib.SOURCE_CONTINUE
 
@@ -333,6 +408,9 @@ def wayland_hotkey_listener(
         created = _wait_for(create_actual, _CREATE_TIMEOUT_SECONDS)
         if stop_event.is_set():
             return True
+        if state["closed"]:
+            log(f"⚠️ Portal hotkeys: {state['closed']} during setup")
+            return False
         if created is None:
             log(f"⚠️ Portal CreateSession: no Response within {_CREATE_TIMEOUT_SECONDS}s")
             return False
@@ -345,6 +423,11 @@ def wayland_hotkey_listener(
             log("⚠️ Portal returned no session_handle")
             return False
         state["session_handle"] = session_handle
+        if session_handle in closed_paths:
+            # Closed before the handle was even known — the all-paths
+            # subscription recorded it, so the race costs nothing.
+            log("⚠️ Portal hotkeys: session closed by the portal during setup")
+            return False
         log("✓ Portal session established")
 
         bind_token = f"wayfinder_{secrets.token_hex(16)}"
@@ -387,7 +470,8 @@ def wayland_hotkey_listener(
         if stop_event.is_set():
             return True
         if bound is None:
-            log("⚠️ Shortcut bind: no Response — listening anyway")
+            if not state["closed"]:
+                log("⚠️ Shortcut bind: no Response — listening anyway")
         else:
             bcode, bresults = bound
             if bcode == _RESPONSE_OK:
@@ -413,14 +497,21 @@ def wayland_hotkey_listener(
                 log(f"⚠️ Shortcut bind failed (code {bcode})"
                     " — set them in System Settings → Shortcuts")
 
-        # Listen until stopped. Even after a cancelled bind the session is
-        # valid: bindings made later in System Settings deliver Activated here.
-        log("🎧 Listening for global shortcuts (portal)…")
-        loop = GLib.MainLoop.new(context, False)
-        state["loop"] = loop
-        if not stop_event.is_set():
-            loop.run()
-        state["loop"] = None
+        # Listen until stopped or the session dies. Even after a cancelled
+        # bind the session is valid: bindings made later in System Settings
+        # deliver Activated here.
+        if not state["closed"]:
+            log("🎧 Listening for global shortcuts (portal)…")
+            loop = GLib.MainLoop.new(context, False)
+            state["loop"] = loop
+            if not stop_event.is_set() and not state["closed"]:
+                loop.run()
+            state["loop"] = None
+        if state["closed"] and not stop_event.is_set():
+            # False → the supervisor rebuilds a fresh session (the dead one
+            # can never deliver another Activated).
+            log(f"⚠️ Portal hotkeys: {state['closed']} — restarting listener")
+            return False
         return True
 
     except Exception as exc:
@@ -431,10 +522,9 @@ def wayland_hotkey_listener(
             if stop_source is not None:
                 stop_source.destroy()
             if bus is not None:
-                if response_sub is not None:
-                    bus.signal_unsubscribe(response_sub)
-                if activated_sub is not None:
-                    bus.signal_unsubscribe(activated_sub)
+                for sub in (response_sub, activated_sub, session_closed_sub, owner_sub):
+                    if sub is not None:
+                        bus.signal_unsubscribe(sub)
                 bus.close_sync(None)
         except Exception:
             pass

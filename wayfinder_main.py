@@ -3041,6 +3041,17 @@ def resolve_hotkey_backend(platform: str, is_flatpak: bool, portal_available: bo
     return "evdev"
 
 
+def portal_retry_delay(failures: int) -> float:
+    """Backoff before re-arming the portal hotkey listener: 20s doubling to a
+    10-minute cap. The exponent is saturated BEFORE exponentiation — Python's
+    int 2**failures never overflows, but multiplying it by 10.0 converts to
+    float and raises OverflowError around failure 1024, which would kill the
+    wrapper's finally block mid-flight and permanently disable retries
+    (Codex review). Pure/headless.
+    """
+    return min(600.0, 10.0 * (2 ** min(max(failures, 1), 6)))
+
+
 def should_host_qt_tray(
     platform: str,
     has_pystray: bool,
@@ -12274,7 +12285,8 @@ class WayfinderApp(ctk.CTk):
                     os.environ.get("XDG_SESSION_TYPE", ""),
                 ) if IS_FLATPAK else None
                 if flatpak_backend == "portal":
-                    if not getattr(self, '_portal_listener_started', False):
+                    if (not getattr(self, '_portal_listener_started', False)
+                            and time.monotonic() >= getattr(self, '_portal_next_retry', 0.0)):
                         self.log("🔄 Portal hotkey listener not running - restarting...")
                         self._start_portal_listener()
                 elif flatpak_backend == "pynput" and not getattr(self, '_pynput_listener_started', False):
@@ -17417,22 +17429,39 @@ class WayfinderApp(ctk.CTk):
         """
         if getattr(self, '_portal_listener_started', False):
             return
-        self._portal_listener_started = True
         # Both global shortcuts, triggers encoded from config by the protocol
-        # encoder — the UI display label is presentation, not protocol.
+        # encoder — the UI display label is presentation, not protocol. Built
+        # BEFORE the started flag: if this raises, the flag must not be left
+        # set with no thread running (Codex review).
         from wayfinder.hotkeys.dbus import shortcut_specs_from_config
         shortcuts = shortcut_specs_from_config(self.config)
+        self._portal_listener_started = True
 
         def _portal_wrapper():
+            started_at = time.monotonic()
+            clean_stop = False
             try:
-                wayland_hotkey_listener(self.event_queue, shortcuts, self.stop_event, self.log)
+                clean_stop = wayland_hotkey_listener(
+                    self.event_queue, shortcuts, self.stop_event, self.log)
             except Exception as e:
                 print(f"[Hotkey] portal listener crashed: {e}", flush=True)
             finally:
-                # Clear the flag on ANY exit — a normal False return (D-Bus unavailable /
-                # setup failed) as well as an exception — UNLESS we're shutting down, so the
-                # hotkey supervisor can re-arm the portal listener. (Codex #4)
+                # Clear the flag on ANY exit — a False return (setup failed /
+                # session died) as well as an exception — UNLESS we're shutting
+                # down, so the hotkey supervisor can re-arm the listener.
+                # Failures back off exponentially (20s → 10min cap): a portal
+                # that is down stays down for a while, and unbounded 10s churn
+                # is pure log spam. A listener that ran for a minute had a
+                # working session, so its eventual death resets the backoff
+                # rather than compounding it (Codex review).
                 if not self.stop_event.is_set():
+                    if clean_stop or time.monotonic() - started_at > 60:
+                        self._portal_failures = 0
+                        self._portal_next_retry = 0.0
+                    else:
+                        self._portal_failures = getattr(self, '_portal_failures', 0) + 1
+                        self._portal_next_retry = (
+                            time.monotonic() + portal_retry_delay(self._portal_failures))
                     self._portal_listener_started = False
 
         threading.Thread(target=_portal_wrapper, daemon=True).start()
