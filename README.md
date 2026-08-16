@@ -1,9 +1,12 @@
 # Wayfinder Aura
 
-**Press a key. Speak. Your words appear wherever your cursor is.**
+**Press a key. Speak. Your words appear at your cursor.**
 
 Wayfinder Aura is local-first voice dictation for Linux. By default,
-transcription runs on *your* machine with whisper.cpp, offline, in any app.
+transcription runs on *your* machine with whisper.cpp, offline. Text lands in
+any X11/XWayland app — which is most Linux apps today; on Wayland, native
+windows need a from-source/AppImage install with ydotool or wtype (see
+Troubleshooting).
 In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
@@ -30,7 +33,7 @@ Ultra GPU acceleration, and cloud backends are available when you choose them.
 
 | | |
 |---|---|
-| 🎙️ **Hotkey dictation** | Ctrl+Alt+Space to start/stop (configurable), text lands at your cursor in any app |
+| 🎙️ **Hotkey dictation** | Ctrl+Alt+Space to start/stop (configurable), text lands at your cursor in any X11/XWayland app |
 | 🔒 **100% local pipeline** | whisper.cpp transcription plus optional llama.cpp cleanup, both on-device |
 | ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
 | 🎨 **Tone presets (Ultra)** | Minimal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
@@ -193,7 +196,12 @@ Settings live in the app; the file is `~/.config/wayfinder-aura/config.json`.
   through the GlobalShortcuts portal: approve the shortcut prompt from your
   desktop, or bind it in System Settings → Shortcuts. From-source and
   AppImage installs don't use the portal — they read input devices directly
-  (evdev), so see the next item instead.
+  (evdev), so see the input-devices item below instead.
+- **Text doesn't appear in native Wayland apps** — the Flatpak types through
+  X11/XWayland, which covers most Linux apps. For native-Wayland windows,
+  use the from-source or AppImage build with `ydotool` installed (and its
+  `ydotoold` daemon running) or `wtype` — the app selects them
+  automatically on Wayland sessions.
 - **"No input devices found" (from-source installs)** —
   `sudo usermod -aG input $USER`, then log out and back in.
 - **UI too small on 4K** — Ctrl+Plus, or Settings → UI Scale.

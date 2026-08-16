@@ -576,6 +576,27 @@ def test_portal_first_ownership_is_not_a_loss(monkeypatch):
     assert result is True
 
 
+def test_bus_connection_closed_returns_false_for_restart(monkeypatch):
+    """A dead private connection delivers nothing — including Closed and
+    NameOwnerChanged — so its own "closed" GObject signal must end the
+    listener with False (Codex review: this handler had no direct test)."""
+
+    class _ClosingConnBus(_FakeBus):
+        def dispatch(self):
+            if self._pending is not None:
+                super().dispatch()
+                return
+            handler = getattr(self, "gobject_handlers", {}).get("closed")
+            if handler is not None:
+                self.gobject_handlers = {}
+                handler(self, True, None)  # remote peer vanished
+
+    logs = []
+    result, _events = _run(_install_fake_gi(monkeypatch, _ClosingConnBus()), logs=logs)
+    assert result is False
+    assert any("bus connection closed" in msg for msg in logs)
+
+
 # ── teardown ─────────────────────────────────────────────────────────────────
 
 def test_unsubscribes_and_closes_on_exit(monkeypatch):
