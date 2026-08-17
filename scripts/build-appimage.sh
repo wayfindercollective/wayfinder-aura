@@ -156,13 +156,45 @@ fi
 
 # ─── Get appimagetool ─────────────────────────────────────────────────────────
 
-if ! command -v appimagetool &> /dev/null; then
-    echo "⚠ appimagetool not found. Downloading..."
-    wget -q -O /tmp/appimagetool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-    chmod +x /tmp/appimagetool
-    APPIMAGETOOL="/tmp/appimagetool"
+# Pinned tool. The old AppImageKit "continuous" asset was fetched with no
+# integrity check: whoever could replace it would alter every AppImage cut from
+# then on (security audit 2026-08-17, F-E).
+#
+# The DIGEST is the pin, not the tag — GitHub release assets stay mutable, and
+# this very asset has already been replaced upstream once (the 1.9.1 tag now
+# serves a build dated after the tag). A mismatch here means the bytes changed:
+# re-verify what upstream is shipping, then bump version + digest together.
+APPIMAGETOOL_VERSION="1.9.1"
+APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
+
+# Deliberately ignore any appimagetool already on PATH: a CI image or dev box
+# could carry a different version, or a replaced binary earlier on PATH, and it
+# would build the release with none of the pinning claimed above. Set
+# APPIMAGETOOL to opt out explicitly (unverified, and it says so).
+if [ -n "${APPIMAGETOOL:-}" ]; then
+    echo "⚠ Using APPIMAGETOOL override: $APPIMAGETOOL (NOT hash-verified)"
 else
-    APPIMAGETOOL="appimagetool"
+    TOOL_CACHE="$PROJECT_ROOT/.build-tools"
+    TOOL_PATH="$TOOL_CACHE/appimagetool-${APPIMAGETOOL_VERSION}.AppImage"
+    mkdir -p "$TOOL_CACHE"
+
+    if [ ! -f "$TOOL_PATH" ] || ! echo "$APPIMAGETOOL_SHA256  $TOOL_PATH" | sha256sum -c - &> /dev/null; then
+        echo "⤓ Fetching pinned appimagetool ${APPIMAGETOOL_VERSION}..."
+        wget -q -O "$TOOL_PATH.part" "$APPIMAGETOOL_URL"
+        if ! echo "$APPIMAGETOOL_SHA256  $TOOL_PATH.part" | sha256sum -c - &> /dev/null; then
+            rm -f "$TOOL_PATH.part"
+            echo "❌ appimagetool checksum mismatch — refusing to build with an unverified tool"
+            echo "   expected sha256: $APPIMAGETOOL_SHA256"
+            echo "   from: $APPIMAGETOOL_URL"
+            exit 1
+        fi
+        mv "$TOOL_PATH.part" "$TOOL_PATH"
+    fi
+
+    chmod +x "$TOOL_PATH"
+    APPIMAGETOOL="$TOOL_PATH"
+    echo "✓ appimagetool ${APPIMAGETOOL_VERSION} verified (sha256 ${APPIMAGETOOL_SHA256:0:12}…)"
 fi
 
 clone_pinned_repo() {

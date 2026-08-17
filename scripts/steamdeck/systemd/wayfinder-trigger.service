@@ -9,10 +9,14 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/wayfinder-trigger-daemon.py
+RuntimeDirectory=wayfinder-aura-logs
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
 Restart=on-failure
 RestartSec=3
-StandardOutput=append:/tmp/wayfinder-trigger.log
-StandardError=append:/tmp/wayfinder-trigger.log
+StandardOutput=append:%t/wayfinder-aura-logs/wayfinder-trigger.log
+StandardError=append:%t/wayfinder-aura-logs/wayfinder-trigger.log
 
 [Install]
 WantedBy=default.target

@@ -1,0 +1,44 @@
+# Catches model-pin drift before a customer does.
+#
+# Model downloads fail closed on a sha256 mismatch (2026-08-17 audit), so a pin
+# that stops matching the bytes on the server is a customer-visible outage. The
+# scheduled job is deliberately the *cheap* check: it compares every pin against
+# Hugging Face's LFS oids over the API and transfers no model data at all, so it
+# costs seconds and no bandwidth.
+#
+# It does NOT cover the Models CDN copies (different origin) or the Ultra-gated
+# objects (they need a license bearer, which deliberately does not live in CI).
+# Those stay on the manual release gate:
+#     python3 scripts/verify-model-digests.py --full --source both
+# run on a machine with an Ultra activation. See docs/SIGNOFF-2026-08-16.md.
+
+name: model-pin-drift
+
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays, 07:00 UTC
+  workflow_dispatch:
+  push:
+    paths:
+      - "wayfinder_main.py"
+      - "src/wayfinder/core/setup.py"
+      - "scripts/verify-model-digests.py"
+
+jobs:
+  verify-pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Catalog pins are internally consistent
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest tests/test_catalog_ratchet.py -q
+
+      - name: Pins still match Hugging Face
+        run: python3 scripts/verify-model-digests.py --hf-metadata

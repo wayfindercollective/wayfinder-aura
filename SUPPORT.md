@@ -62,20 +62,20 @@ A good report gets a fast fix. Please include:
 journalctl --user -u wayfinder-aura.service --no-pager -n 200
 
 # The host-side trigger daemon (back button / side-grid keys)
-/tmp/wayfinder-trigger.log
+$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-trigger.log
 
 # The Game Mode / Desktop Mode lifecycle supervisor
-/tmp/wayfinder-mode-supervisor.log
+$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-mode-supervisor.log
 ```
 
-The app service also mirrors stdout/stderr to `/tmp/wfa-stdout.log` and
-`/tmp/wfa-stderr.log`, which are worth attaching if the app crashes on launch.
+The app service also mirrors stdout/stderr to `$XDG_RUNTIME_DIR/wayfinder-aura-logs/wfa-stdout.log` and
+`$XDG_RUNTIME_DIR/wayfinder-aura-logs/wfa-stderr.log`, which are worth attaching if the app crashes on launch.
 
 To grab the trigger/supervisor logs and the recent journal in one shot:
 
 ```sh
 journalctl --user -u wayfinder-aura.service --no-pager -n 200 > ~/wfa-journal.txt
-cp /tmp/wayfinder-trigger.log /tmp/wayfinder-mode-supervisor.log ~/  2>/dev/null
+cp $XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-trigger.log $XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-mode-supervisor.log ~/  2>/dev/null
 ```
 
 ## Troubleshooting checklist
@@ -108,7 +108,7 @@ Try these before filing an issue — they cover the most common problems.
   it works in both Desktop Mode and Game Mode. If the button stops firing:
   - Check the daemon is running:
     `systemctl --user status wayfinder-trigger.service`
-    and read `/tmp/wayfinder-trigger.log`.
+    and read `$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-trigger.log`.
   - **USB hotplug can wedge Steam Input.** Plugging in devices that expose a
     joystick HID interface (e.g. a Keychron Link dongle or Corsair Scimitar)
     can knock the Deck controller from PollState 2 → 1, silencing every Steam

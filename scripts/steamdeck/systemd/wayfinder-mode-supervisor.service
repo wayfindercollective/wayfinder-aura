@@ -8,10 +8,14 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/wayfinder-mode-supervisor.py
+RuntimeDirectory=wayfinder-aura-logs
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
 Restart=on-failure
 RestartSec=3
-StandardOutput=append:/tmp/wayfinder-mode-supervisor.log
-StandardError=append:/tmp/wayfinder-mode-supervisor.log
+StandardOutput=append:%t/wayfinder-aura-logs/wayfinder-mode-supervisor.log
+StandardError=append:%t/wayfinder-aura-logs/wayfinder-mode-supervisor.log
 
 [Install]
 WantedBy=default.target

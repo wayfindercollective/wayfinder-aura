@@ -84,7 +84,7 @@ already available and otherwise its bundled standard-library Linux input
 reader, so a stock immutable SteamOS install needs no Python package. The socket is
 `$XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock`. **No X11/Wayland
 involvement at all**, which is the whole point: it works identically in Desktop
-Mode and Game Mode. Logs to `/tmp/wayfinder-trigger.log`.
+Mode and Game Mode. Logs to `$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-trigger.log`.
 
 It watches two devices:
 
@@ -112,7 +112,7 @@ By default you don't want the dictation app eating RAM while you game: its
 warm whisper/llama servers hold a meaningful chunk of the Deck's 16 GB. But
 some users keybind dictation onto a controller and *do* want it live in Game
 Mode. A host-side `systemd --user` daemon reconciles this every 5s. Logs to
-`/tmp/wayfinder-mode-supervisor.log`.
+`$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-mode-supervisor.log`.
 
 * **Mode detection** is self-contained — it reads
   `systemctl --user is-active gamescope-session.service` (active → Game Mode,

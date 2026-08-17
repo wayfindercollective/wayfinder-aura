@@ -11,10 +11,14 @@ Type=simple
 ExecStart=/usr/bin/flatpak run io.wayfindercollective.WayfinderAura
 ExecStopPost=-/usr/bin/flatpak kill io.wayfindercollective.WayfinderAura
 Environment=DISPLAY=:0
+RuntimeDirectory=wayfinder-aura-logs
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/tmp/wfa-stdout.log
-StandardError=append:/tmp/wfa-stderr.log
+StandardOutput=append:%t/wayfinder-aura-logs/wfa-stdout.log
+StandardError=append:%t/wayfinder-aura-logs/wfa-stderr.log
 
 [Install]
 WantedBy=graphical-session.target
