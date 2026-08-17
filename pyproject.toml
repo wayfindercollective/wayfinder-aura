@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wayfinder-aura"
 # Keep in sync with src/wayfinder/__init__.py __version__
-version = "1.1.8-beta.9"
+version = "1.1.8-beta.10"
 description = "Wayfinder Aura - Local voice dictation for Linux using whisper.cpp"
 readme = "README.md"
 license = {text = "Elastic-2.0"}

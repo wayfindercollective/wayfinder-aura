@@ -115,6 +115,18 @@
   </supports>
 
   <releases>
+    <release version="1.1.8-beta.10" date="2026-08-17" type="development">
+      <description>
+        <p>Prerelease making model downloads verifiable end to end:</p>
+        <ul>
+          <li>Every model Wayfinder Aura downloads is now checked against a known fingerprint before it is installed, so a corrupted or altered file is refused instead of quietly becoming your speech model</li>
+          <li>Downloads are size-bounded and stay on secure connections throughout, including across redirects</li>
+          <li>A dropped connection retries by itself, and free models can fall back to their original source, so ordinary network trouble no longer interrupts a download</li>
+          <li>Model listings now report exact file sizes rather than rounded estimates</li>
+          <li>Steam Deck helper logs moved to a private per-session directory instead of a world-readable temporary file</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.8-beta.9" date="2026-08-16" type="development">
       <description>
         <p>Prerelease making the speed benchmark honest and easier to read:</p>
