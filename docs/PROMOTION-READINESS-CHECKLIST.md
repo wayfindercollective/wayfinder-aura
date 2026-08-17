@@ -303,10 +303,18 @@ Rollback plan:
   rollout.
 - If the beta has a P0 defect, do not promote it or mark it latest; fix forward
   with another prerelease.
-- If a new stable release has a P0 defect, mark `v1.1.7` as the latest GitHub
-  release again so existing `releases/latest` download links roll back, verify
-  the storefront Download button resolves to `v1.1.7`, and publish a fixed
-  version only after repeating the candidate matrix.
+- If a new stable release has a P0 defect, roll `releases/latest` back to
+  `v1.1.7`, verify the storefront Download button resolves to `v1.1.7`, and
+  publish a fixed version only after repeating the candidate matrix.
+
+  **If immutable releases are enabled** (see
+  `docs/SECURITY-AUDIT-APPIMAGE-FLATPAK-2026-08-17.md` §0.1), only a published
+  release's title and notes stay editable — the latest/prerelease designation is
+  fixed at publication and its assets and tag are locked. Rolling back then
+  means **publishing a new release** (e.g. `v1.1.9` carrying the 1.1.7
+  artifacts, or re-publishing the bad version's predecessor under a fresh tag),
+  not editing the bad one. Plan the designation before you click publish:
+  draft → attach every asset → set prerelease/latest → publish.
 
 ## Stable release and promotion gate
 
