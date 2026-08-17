@@ -5,6 +5,7 @@ Toggle-to-record with whisper.cpp transcription.
 """
 
 import atexit
+import copy
 import json
 import os
 import queue
@@ -1976,10 +1977,11 @@ class BenchmarkRunner:
 WHISPER_CPP_MODELS = {
     "tiny.en": {
         "name": "Tiny (English)",
-        "size": "75 MB",
-        "size_bytes": 75_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+        "size": "78 MB",
+        "size_bytes": 77_704_715,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin",
         "filename": "ggml-tiny.en.bin",
+        "sha256": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
         "cdn_object": "whisper/ggml-tiny.en.bin",
         "speed": "Fastest · lightest quality",
         "speed_rating": 5,
@@ -1988,10 +1990,11 @@ WHISPER_CPP_MODELS = {
     },
     "base.en": {
         "name": "Base (English)",
-        "size": "142 MB",
-        "size_bytes": 142_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+        "size": "148 MB",
+        "size_bytes": 147_964_211,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en.bin",
         "filename": "ggml-base.en.bin",
+        "sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
         "cdn_object": "whisper/ggml-base.en.bin",
         "speed": "Very fast · basic quality",
         "speed_rating": 5,
@@ -1999,10 +2002,11 @@ WHISPER_CPP_MODELS = {
     },
     "small.en": {
         "name": "Small (English)",
-        "size": "466 MB",
-        "size_bytes": 466_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+        "size": "488 MB",
+        "size_bytes": 487_614_201,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.en.bin",
         "filename": "ggml-small.en.bin",
+        "sha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
         "cdn_object": "whisper/ggml-small.en.bin",
         "speed": "Fast · solid everyday",
         "speed_rating": 4,
@@ -2012,9 +2016,10 @@ WHISPER_CPP_MODELS = {
     "medium.en": {
         "name": "Medium (English)",
         "size": "1.5 GB",
-        "size_bytes": 1_500_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
+        "size_bytes": 1_533_774_781,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium.en.bin",
         "filename": "ggml-medium.en.bin",
+        "sha256": "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356",
         "cdn_object": "whisper/ggml-medium.en.bin",
         "requires_feature": "large_models",
         "speed": "Moderate · strong quality",
@@ -2024,9 +2029,10 @@ WHISPER_CPP_MODELS = {
     "large-v3-turbo": {
         "name": "Large v3 Turbo",
         "size": "1.6 GB",
-        "size_bytes": 1_600_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+        "size_bytes": 1_624_555_275,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin",
         "filename": "ggml-large-v3-turbo.bin",
+        "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
         "cdn_object": "whisper/ggml-large-v3-turbo.bin",
         "requires_feature": "large_models",
         "speed": "Fast · near top accuracy",
@@ -2035,10 +2041,11 @@ WHISPER_CPP_MODELS = {
     },
     "large-v3-turbo-q5_0": {
         "name": "Large v3 Turbo Q5",
-        "size": "547 MB",
-        "size_bytes": 547_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+        "size": "574 MB",
+        "size_bytes": 574_041_195,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin",
         "filename": "ggml-large-v3-turbo-q5_0.bin",
+        "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
         "speed": "Fastest high-quality · best balance",
         "speed_rating": 4,
         "accuracy_rating": 4,
@@ -2049,10 +2056,11 @@ WHISPER_CPP_MODELS = {
     },
     "tiny": {
         "name": "Tiny (Multi-lang)",
-        "size": "75 MB",
-        "size_bytes": 75_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+        "size": "78 MB",
+        "size_bytes": 77_691_713,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin",
         "filename": "ggml-tiny.bin",
+        "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
         "cdn_object": "whisper/ggml-tiny.bin",
         "speed": "Fastest · lightest quality",
         "speed_rating": 5,
@@ -2061,10 +2069,11 @@ WHISPER_CPP_MODELS = {
     },
     "base": {
         "name": "Base (Multi-lang)",
-        "size": "142 MB",
-        "size_bytes": 142_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        "size": "148 MB",
+        "size_bytes": 147_951_465,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
         "filename": "ggml-base.bin",
+        "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
         "cdn_object": "whisper/ggml-base.bin",
         "speed": "Very fast · basic quality",
         "speed_rating": 5,
@@ -2072,10 +2081,11 @@ WHISPER_CPP_MODELS = {
     },
     "small": {
         "name": "Small (Multi-lang)",
-        "size": "466 MB",
-        "size_bytes": 466_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        "size": "488 MB",
+        "size_bytes": 487_601_967,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
         "filename": "ggml-small.bin",
+        "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
         "cdn_object": "whisper/ggml-small.bin",
         "speed": "Fast · solid everyday",
         "speed_rating": 4,
@@ -2085,9 +2095,10 @@ WHISPER_CPP_MODELS = {
     "medium": {
         "name": "Medium (Multi-lang)",
         "size": "1.5 GB",
-        "size_bytes": 1_500_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+        "size_bytes": 1_533_763_059,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium.bin",
         "filename": "ggml-medium.bin",
+        "sha256": "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
         "cdn_object": "whisper/ggml-medium.bin",
         "requires_feature": "large_models",
         "speed": "Moderate · strong quality",
@@ -2096,10 +2107,11 @@ WHISPER_CPP_MODELS = {
     },
     "large-v3": {
         "name": "Large v3",
-        "size": "3.0 GB",
-        "size_bytes": 3_000_000_000,
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+        "size": "3.1 GB",
+        "size_bytes": 3_095_033_483,
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin",
         "filename": "ggml-large-v3.bin",
+        "sha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
         "cdn_object": "whisper/ggml-large-v3.bin",
         "requires_feature": "large_models",
         "speed": "Slowest · highest accuracy",
@@ -2272,8 +2284,9 @@ LLM_GGUF_MODELS = {
         "name": "Gemma 3 1B ⭐",
         "size": "806 MB",
         "size_bytes": 806_058_496,
-        "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf",
+        "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116f76234503685a98f572982177b11d44ec8ff1/google_gemma-3-1b-it-Q4_K_M.gguf",
         "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
+        "sha256": "12bf0fff8815d5f73a3c9b586bd8fee8e7b248c935de70dec367679873d0f29d",
         "cdn_object": "llm/google_gemma-3-1b-it-Q4_K_M.gguf",
         "description": "Top recommendation. Most consistent gentle-guide cleanup across tones; smaller and faster than Qwen 3.5.",
         "speed": "Very Fast",
@@ -2283,9 +2296,10 @@ LLM_GGUF_MODELS = {
     "qwen3.5-2b": {
         "name": "Qwen 3.5 2B",
         "size": "1.3 GB",
-        "size_bytes": 1_390_000_000,
-        "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+        "size_bytes": 1_280_835_840,
+        "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf",
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
+        "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
         "cdn_object": "llm/Qwen3.5-2B-Q4_K_M.gguf",
         "description": "Capable reasoning model, but less consistent than Gemma 3 1B for light dictation cleanup.",
         "speed": "Very Fast",
@@ -2295,8 +2309,9 @@ LLM_GGUF_MODELS = {
         "name": "Qwen3 4B Instruct 2507",
         "size": "2.5 GB",
         "size_bytes": 2_497_280_736,
-        "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
         "description": "Best local pick for Strong & Caricature. Sharpest instruction-follower in its class, no reasoning latency.",
         "speed": "Fast",
         "accuracy": "Excellent",
@@ -2306,10 +2321,11 @@ LLM_GGUF_MODELS = {
     },
     "lfm2.5-1.2b": {
         "name": "LFM2.5 1.2B",
-        "size": "697 MB",
+        "size": "731 MB",
         "size_bytes": 730_895_168,
-        "url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+        "url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/76022b8bfa64af5862d6bce90a676c3cc9b17b52/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
         "filename": "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+        "sha256": "b1b3de114215d9507409a662a501a631095a479a419584e8a2ded6304b19b4f5",
         "cdn_object": "llm/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
         "description": "Liquid AI on-device model. Very fast, but tended to echo input unchanged in our cleanup eval.",
         "speed": "Very Fast",
@@ -2317,10 +2333,11 @@ LLM_GGUF_MODELS = {
     },
     "phi-3-mini": {
         "name": "Phi-3 Mini (3.8B)",
-        "size": "2.3 GB",
+        "size": "2.4 GB",
         "size_bytes": 2_393_231_072,
-        "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
+        "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/a64113399c2f6b8ad3e11c394733a2ddadaa7f33/Phi-3-mini-4k-instruct-q4.gguf",
         "filename": "Phi-3-mini-4k-instruct-q4.gguf",
+        "sha256": "8a83c7fb9049a9b2e92266fa7ad04933bb53aa1e85136b7b30f1b8000ff2edef",
         "cdn_object": "llm/Phi-3-mini-4k-instruct-q4.gguf",
         "requires_feature": "large_cleanup_models",
         "description": "Microsoft's 2024 compact model. Still works, but Qwen3 4B is the better Strong & Caricature pick.",
@@ -2329,10 +2346,11 @@ LLM_GGUF_MODELS = {
     },
     "qwen2.5-1.5b": {
         "name": "Qwen2.5 1.5B",
-        "size": "1.0 GB",
+        "size": "1.1 GB",
         "size_bytes": 1_117_320_736,
-        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf",
         "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
         "cdn_object": "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf",
         "description": "Previous default, still works well.",
         "speed": "Very Fast",
@@ -2340,10 +2358,11 @@ LLM_GGUF_MODELS = {
     },
     "smollm2-360m": {
         "name": "SmolLM2 360M",
-        "size": "369 MB",
+        "size": "386 MB",
         "size_bytes": 386_404_992,
-        "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q8_0.gguf",
+        "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/593b5a2e04c8f3e4ee880263f93e0bd2901ad47f/smollm2-360m-instruct-q8_0.gguf",
         "filename": "smollm2-360m-instruct-q8_0.gguf",
+        "sha256": "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201",
         "cdn_object": "llm/smollm2-360m-instruct-q8_0.gguf",
         "description": "HuggingFace's tiny model. Blazing fast, best for simple cleanup.",
         "speed": "Instant",
@@ -2351,16 +2370,48 @@ LLM_GGUF_MODELS = {
     },
     "llama3.2-1b": {
         "name": "Llama 3.2 1B",
-        "size": "770 MB",
+        "size": "808 MB",
         "size_bytes": 807_694_464,
-        "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/067b946cf014b7c697f3654f621d577a3e3afd1c/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
         "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "sha256": "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
         "cdn_object": "llm/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
         "description": "Meta's latest efficient model. Good all-rounder for text tasks.",
         "speed": "Very Fast",
         "accuracy": "Good",
     },
 }
+
+# Snapshot of the catalogs exactly as shipped, taken before any remote catalog
+# can be merged into the globals above. This — not the merged catalog — is what
+# authorizes a fallback origin and what a remote entry may not weaken: a digest
+# the remote catalog supplied cannot vouch for the remote catalog's own URL.
+_SHIPPED_WHISPER_MODELS = copy.deepcopy(WHISPER_CPP_MODELS)
+_SHIPPED_LLM_MODELS = copy.deepcopy(LLM_GGUF_MODELS)
+
+
+def shipped_whisper_trust() -> dict:
+    """filename → shipped {sha256, size_bytes, requires_feature, url} for whisper."""
+    from wayfinder.model_catalog import shipped_trust_map
+
+    return shipped_trust_map(_SHIPPED_WHISPER_MODELS)
+
+
+def shipped_llm_trust() -> dict:
+    """filename → shipped {sha256, size_bytes, requires_feature, url} for GGUF."""
+    from wayfinder.model_catalog import shipped_trust_map
+
+    return shipped_trust_map(_SHIPPED_LLM_MODELS)
+
+
+def log_digest_mismatch(filename: str, url: str, err) -> None:
+    """Put the hex where support can find it; the UI gets prose, not digests."""
+    print(
+        f"[ModelDownload] digest mismatch for {filename} from {url}: "
+        f"expected {err.expected}, got {err.actual} ({err.size} bytes)",
+        flush=True,
+    )
+
 
 # Faster-Whisper models (auto-downloaded by library, but we can list them)
 FASTER_WHISPER_MODELS = {
@@ -2411,8 +2462,15 @@ class ModelDownloader:
 
     def writable_copies(self, model_id: str) -> list[Path]:
         """All on-disk copies of this model that we are allowed to delete."""
+        from wayfinder.model_catalog import safe_model_filename
+
         filename = self._filename(model_id)
         if not filename:
+            return []
+        # These paths get unlink()ed. sanitize_entry already refuses a catalog
+        # name that could escape the models dir, but a destructive path should
+        # not depend on an upstream check staying correct (audit F-B).
+        if not safe_model_filename(filename):
             return []
         found: list[Path] = []
         seen: set[str] = set()
@@ -2496,6 +2554,20 @@ class ModelDownloader:
                     download_auth_headers,
                     resolve_download_url,
                 )
+                from wayfinder.model_catalog import (
+                    DigestCheckCancelled,
+                    ModelDigestMismatch,
+                    fallback_url_for,
+                    resolve_model_dest,
+                    verify_model_digest,
+                )
+                from wayfinder.core.download_guard import (
+                    DownloadBounds,
+                    DownloadSizeMismatch,
+                    HttpsOnlyRedirectHandler,
+                    InsecureRedirect,
+                    require_https,
+                )
                 from wayfinder.license import get_feature_gate
                 from wayfinder.config import load_config
 
@@ -2518,8 +2590,16 @@ class ModelDownloader:
                         error_callback("No download URL configured for this model")
                     return
                 filename = model_info["filename"]
-                dest_path = self.models_dir / filename
-                temp_path = self.models_dir / f"{filename}.downloading"
+                # Catalog-supplied name: never join it raw (audit F-B).
+                try:
+                    dest_path = resolve_model_dest(self.models_dir, filename)
+                    temp_path = resolve_model_dest(
+                        self.models_dir, filename, suffix=".downloading"
+                    )
+                except ValueError as e:
+                    if error_callback:
+                        error_callback(f"This model entry is invalid: {e}")
+                    return
                 # Drop any leftover partial from a previous attempt
                 try:
                     if temp_path.exists():
@@ -2527,18 +2607,11 @@ class ModelDownloader:
                 except Exception:
                     pass
                 
-                # Create request with headers (Bearer only for Ultra CDN origin)
-                request = urllib.request.Request(url)
-                for hk, hv in download_auth_headers(
-                    model_info,
-                    bearer_token=gate.get_bearer_token(),
-                    download_url=url,
-                    config=app_cfg,
-                ).items():
-                    request.add_header(hk, hv)
-
-                # Strip Authorization on cross-origin redirects (never leak token to HF).
-                class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+                # Strip Authorization on cross-origin redirects (never leak token
+                # to HF) and refuse to leave https on any hop.
+                class _NoAuthRedirect(
+                    HttpsOnlyRedirectHandler, urllib.request.HTTPRedirectHandler
+                ):
                     def redirect_request(self, req, fp, code, msg, headers, newurl):
                         new_req = super().redirect_request(
                             req, fp, code, msg, headers, newurl
@@ -2554,34 +2627,125 @@ class ModelDownloader:
                             new_req.remove_header("Authorization")
                         return new_req
 
-                opener = urllib.request.build_opener(_NoAuthRedirect)
-                with opener.open(request, timeout=60) as response:
-                    total_size = int(response.headers.get("Content-Length", 0))
-                    downloaded = 0
-                    chunk_size = 1024 * 1024  # 1MB chunks
-                    
-                    with open(temp_path, "wb") as f:
-                        while True:
-                            if self._cancel_requested:
-                                try:
-                                    temp_path.unlink(missing_ok=True)
-                                except Exception:
-                                    pass
-                                if error_callback:
-                                    error_callback("Download cancelled")
-                                return
-                            
-                            chunk = response.read(chunk_size)
-                            if not chunk:
-                                break
-                            
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            
-                            if progress_callback and total_size > 0:
-                                progress = downloaded / total_size
-                                progress_callback(progress, downloaded, total_size)
-                
+                trusted = shipped_whisper_trust().get(filename) or {}
+                # A model we never shipped has no trusted size, but the catalog
+                # had to declare one to be accepted — use it. Self-declared, so
+                # weaker than a shipped pin, but it still bounds the transfer
+                # instead of leaving it open-ended.
+                size_bound = trusted.get("size_bytes") or model_info.get("size_bytes")
+
+                class _Cancelled(Exception):
+                    """Internal: user cancelled mid-transfer."""
+
+                def _fetch(source_url):
+                    """Stream one attempt to temp_path, bounded and https-only."""
+                    require_https(source_url)
+                    bounds = DownloadBounds(size_bound)
+                    request = urllib.request.Request(source_url)
+                    for hk, hv in download_auth_headers(
+                        model_info,
+                        bearer_token=gate.get_bearer_token(),
+                        download_url=source_url,
+                        config=app_cfg,
+                    ).items():
+                        request.add_header(hk, hv)
+
+                    opener = urllib.request.build_opener(_NoAuthRedirect)
+                    with opener.open(request, timeout=60) as response:
+                        header_len = int(response.headers.get("Content-Length", 0))
+                        total_size = bounds.check_header(header_len) or 0
+                        downloaded = 0
+                        chunk_size = 1024 * 1024  # 1MB chunks
+
+                        with open(temp_path, "wb") as f:
+                            while True:
+                                if self._cancel_requested:
+                                    raise _Cancelled()
+
+                                chunk = response.read(chunk_size)
+                                if not chunk:
+                                    break
+
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                bounds.check_progress(downloaded)
+
+                                if progress_callback and total_size > 0:
+                                    progress = downloaded / total_size
+                                    progress_callback(progress, downloaded, total_size)
+
+                        bounds.check_complete(downloaded)
+
+                # One retry for TRANSPORT failures only. A correctly sized body
+                # that fails its digest is not a flaky network — it means a wrong
+                # pin or a changed object, and refetching 3GB only delays the
+                # real error. An ungated model retries against the URL we
+                # shipped; a paid model always stays on the authenticated CDN.
+                attempts = [url]
+                fallback = fallback_url_for(model_info, shipped_whisper_trust())
+                attempts.append(fallback if fallback and fallback != url else url)
+
+                transport_error = None
+                for attempt_url in attempts:
+                    try:
+                        _fetch(attempt_url)
+                        transport_error = None
+                        break
+                    except _Cancelled:
+                        if error_callback:
+                            error_callback("Download cancelled")
+                        return  # finally: removes the temp file
+                    except urllib.error.HTTPError as e:
+                        # 4xx is a settled answer (missing object, expired or
+                        # rejected license) — asking again wastes the user's
+                        # time. 429/5xx are worth the one retry.
+                        if e.code < 500 and e.code != 429:
+                            raise
+                        transport_error = e
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    except (
+                        DownloadSizeMismatch,
+                        InsecureRedirect,
+                        urllib.error.URLError,
+                        OSError,
+                    ) as e:
+                        transport_error = e
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                if transport_error is not None:
+                    raise transport_error
+
+                # Verify content before it can ever be loaded (audit F-C).
+                # Hashing a multi-GB model takes real time, so it honors Cancel
+                # too — otherwise the UI says "Cancelling…" and installs anyway.
+                try:
+                    verify_model_digest(
+                        temp_path,
+                        model_info.get("sha256"),
+                        should_cancel=lambda: self._cancel_requested,
+                    )
+                except DigestCheckCancelled:
+                    if error_callback:
+                        error_callback("Download cancelled")
+                    return  # finally: removes the temp file
+                except ModelDigestMismatch as e:
+                    log_digest_mismatch(filename, url, e)
+                    if error_callback:
+                        error_callback(e.user_message)
+                    return  # finally: removes the temp file
+
+                # Last cancel check: hashing a 3 GB model takes long enough that
+                # a click can land between the final poll and the rename.
+                if self._cancel_requested:
+                    if error_callback:
+                        error_callback("Download cancelled")
+                    return  # finally: removes the temp file
+
                 # Replace destination atomically (needed for clean re-download)
                 if dest_path.exists():
                     dest_path.unlink()
@@ -11991,6 +12155,18 @@ class WayfinderApp(ctk.CTk):
                     download_auth_headers,
                     resolve_download_url,
                 )
+                from wayfinder.model_catalog import (
+                    DigestCheckCancelled,
+                    ModelDigestMismatch,
+                    fallback_url_for,
+                    resolve_model_dest,
+                    verify_model_digest,
+                )
+                from wayfinder.core.download_guard import (
+                    DownloadBounds,
+                    DownloadSizeMismatch,
+                    https_only_get,
+                )
                 from wayfinder.license import get_feature_gate
                 from wayfinder.config import load_config
 
@@ -12004,7 +12180,11 @@ class WayfinderApp(ctk.CTk):
                 if not url:
                     raise Exception("No download URL configured for this model")
                 filename = model_info["filename"]
-                model_file = models_dir / filename
+                # Catalog-supplied name: never join it raw (audit F-B).
+                try:
+                    model_file = resolve_model_dest(models_dir, filename)
+                except ValueError as e:
+                    raise Exception(f"This model entry is invalid (bad filename): {e}")
                 temp_path = model_file.with_suffix('.tmp')
                 
                 # Check for cancel before starting
@@ -12019,82 +12199,137 @@ class WayfinderApp(ctk.CTk):
                     self.update_idletasks()
                 self.after(0, show_connecting)
                 
-                # Bearer only when URL is Models CDN (never attach license token to HF).
+                # Bearer only when the URL is the Models CDN (never attach a
+                # license token to HF or anywhere a redirect leads). Headers are
+                # computed PER HOP rather than stored on the session: session
+                # headers get reattached to every redirect target, and stripping
+                # them from an already-sent request is too late to matter.
                 session = requests.Session()
-                session.headers.update(
-                    download_auth_headers(
+
+                def _headers_for(hop_url):
+                    return download_auth_headers(
                         model_info,
                         bearer_token=gate.get_bearer_token(),
-                        download_url=url,
+                        download_url=hop_url,
                         config=app_cfg,
                     )
-                )
 
-                def _strip_auth_on_cross_origin(r, *args, **kwargs):
-                    # requests hook: drop Authorization if redirect left CDN origin.
-                    try:
-                        from wayfinder.models_cdn import url_is_models_cdn
-
-                        if r.is_redirect and r.request is not None:
-                            loc = r.headers.get("Location") or ""
-                            # Absolute or relative — resolve against response URL.
-                            from urllib.parse import urljoin
-
-                            target = urljoin(r.url, loc)
-                            if not url_is_models_cdn(target, config=app_cfg):
-                                r.request.headers.pop("Authorization", None)
-                    except Exception:
-                        pass
-                    return r
-
-                session.hooks["response"].append(_strip_auth_on_cross_origin)
-
-                # Start download with reasonable timeouts
                 # (connect timeout, read timeout) - read timeout per chunk, not total
-                response = session.get(url, stream=True, timeout=(15, 30), allow_redirects=True)
-                response.raise_for_status()
-                
-                # Check for cancel after connection
-                if self._cancel_download:
-                    raise Exception("Download cancelled by user")
-                
-                total_size = int(response.headers.get('content-length', 0))
+                trusted = shipped_llm_trust().get(filename) or {}
+                # See the whisper path: an unshipped entry falls back to its own
+                # declared size, which the merge required it to carry.
+                size_bound = trusted.get("size_bytes") or model_info.get("size_bytes")
+
+                def _attempt(source_url):
+                    """One bounded, https-only transfer into temp_path.
+
+                    Redirects are followed by hand so a hop to plaintext http is
+                    refused rather than silently taken (requests would keep
+                    Authorization on a same-host downgrade).
+                    """
+                    bounds = DownloadBounds(size_bound)
+                    response = https_only_get(
+                        session, source_url, timeout=(15, 30), headers_for=_headers_for
+                    )
+                    response.raise_for_status()
+
+                    # Check for cancel after connection
+                    if self._cancel_download:
+                        raise Exception("Download cancelled by user")
+
+                    total_size = bounds.check_header(
+                        int(response.headers.get('content-length', 0))
+                    ) or 0
+                    downloaded = 0
+                    start_time = time_module.time()
+                    last_update_time = start_time
+
+                    with open(temp_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=1024 * 256):  # 256KB chunks for smoother progress
+                            # Check for cancel
+                            if self._cancel_download:
+                                raise Exception("Download cancelled by user")
+
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                bounds.check_progress(downloaded)
+
+                                current_time = time_module.time()
+                                if current_time - last_update_time >= 0.3:  # Update every 300ms
+                                    elapsed = current_time - start_time
+                                    speed = downloaded / elapsed if elapsed > 0 else 0
+
+                                    if total_size > 0:
+                                        progress = downloaded / total_size
+                                        percentage = progress * 100
+                                        remaining = total_size - downloaded
+                                        eta = remaining / speed if speed > 0 else 0
+
+                                        status = f"{format_size(downloaded)} / {format_size(total_size)} ({percentage:.0f}%) • {format_speed(speed)}"
+                                        if eta > 0 and eta < 86400:  # Less than a day
+                                            status += f" • ETA {format_eta(eta)}"
+                                    else:
+                                        progress = min(0.9, downloaded / (500 * 1024 * 1024))  # Assume ~500MB if unknown
+                                        status = f"{format_size(downloaded)} • {format_speed(speed)}"
+
+                                    # Schedule UI update
+                                    self.after(10, lambda p=progress, s=status: update_progress(p, s))
+                                    last_update_time = current_time
+
+                    bounds.check_complete(downloaded)
+                    # start_time comes back out so the final stats describe the
+                    # attempt that actually succeeded, not an abandoned one.
+                    return downloaded, start_time
+
+                # One retry for transport failures, matching the whisper panel:
+                # an ungated model retries against the URL we shipped, a paid one
+                # always stays on the authenticated CDN.
+                attempts = [url]
+                llm_fallback = fallback_url_for(model_info, shipped_llm_trust())
+                attempts.append(llm_fallback if llm_fallback and llm_fallback != url else url)
+
                 downloaded = 0
                 start_time = time_module.time()
-                last_update_time = start_time
-                
-                with open(temp_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=1024 * 256):  # 256KB chunks for smoother progress
-                        # Check for cancel
-                        if self._cancel_download:
-                            raise Exception("Download cancelled by user")
-                        
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            
-                            current_time = time_module.time()
-                            if current_time - last_update_time >= 0.3:  # Update every 300ms
-                                elapsed = current_time - start_time
-                                speed = downloaded / elapsed if elapsed > 0 else 0
-                                
-                                if total_size > 0:
-                                    progress = downloaded / total_size
-                                    percentage = progress * 100
-                                    remaining = total_size - downloaded
-                                    eta = remaining / speed if speed > 0 else 0
-                                    
-                                    status = f"{format_size(downloaded)} / {format_size(total_size)} ({percentage:.0f}%) • {format_speed(speed)}"
-                                    if eta > 0 and eta < 86400:  # Less than a day
-                                        status += f" • ETA {format_eta(eta)}"
-                                else:
-                                    progress = min(0.9, downloaded / (500 * 1024 * 1024))  # Assume ~500MB if unknown
-                                    status = f"{format_size(downloaded)} • {format_speed(speed)}"
-                                
-                                # Schedule UI update
-                                self.after(10, lambda p=progress, s=status: update_progress(p, s))
-                                last_update_time = current_time
-                
+                transport_error = None
+                for attempt_url in attempts:
+                    try:
+                        downloaded, start_time = _attempt(attempt_url)
+                        transport_error = None
+                        break
+                    except requests.HTTPError as e:
+                        status = getattr(e.response, "status_code", 0) or 0
+                        if status < 500 and status != 429:
+                            raise  # settled answer — do not ask twice
+                        transport_error = e
+                    except (DownloadSizeMismatch, requests.RequestException, OSError) as e:
+                        transport_error = e
+                    if transport_error is not None:
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                if transport_error is not None:
+                    raise transport_error
+
+                # Verify content before it can ever be loaded (audit F-C).
+                if temp_path.exists():
+                    try:
+                        verify_model_digest(
+                            temp_path,
+                            model_info.get("sha256"),
+                            should_cancel=lambda: self._cancel_download,
+                        )
+                    except DigestCheckCancelled:
+                        raise Exception("Download cancelled by user")
+                    except ModelDigestMismatch as e:
+                        log_digest_mismatch(filename, url, e)
+                        raise Exception(e.user_message)
+
+                # Last cancel check before the rename — see the whisper path.
+                if self._cancel_download:
+                    raise Exception("Download cancelled by user")
+
                 # Move temp to final
                 if temp_path.exists():
                     if model_file.exists():

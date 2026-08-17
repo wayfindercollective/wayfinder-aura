@@ -27,72 +27,93 @@ from ..utils.hostexec import host_env
 WHISPER_MODELS: dict[str, dict] = {
     "tiny.en": {
         "label": "Tiny (English)",
-        "size": "75 MB",
-        "bytes": 78_000_000,
+        "size": "78 MB",
+        "bytes": 77_704_715,
+        "sha256": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
         "note": "Fastest, lowest accuracy",
     },
     "base.en": {
         "label": "Base (English)",
-        "size": "142 MB",
-        "bytes": 148_000_000,
+        "size": "148 MB",
+        "bytes": 147_964_211,
+        "sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
         "note": "Fast, basic accuracy",
     },
     "small.en": {
         "label": "Small (English)",
-        "size": "466 MB",
-        "bytes": 488_000_000,
+        "size": "488 MB",
+        "bytes": 487_614_201,
+        "sha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
         "note": "Good balance for CPU",
     },
     "medium.en": {
         "label": "Medium (English)",
         "size": "1.5 GB",
-        "bytes": 1_530_000_000,
+        "bytes": 1_533_774_781,
+        "sha256": "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356",
         "note": "High accuracy, needs GPU",
     },
     "large-v3-turbo": {
         "label": "Large v3 Turbo",
         "size": "1.6 GB",
-        "bytes": 1_620_000_000,
+        "bytes": 1_624_555_275,
+        "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
         "note": "Best speed/accuracy (recommended for GPU)",
     },
     "large-v3": {
         "label": "Large v3",
         "size": "3.1 GB",
-        "bytes": 3_090_000_000,
+        "bytes": 3_095_033_483,
+        "sha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
         "note": "Maximum accuracy, slower",
     },
 }
 
-MODEL_DOWNLOAD_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+# Pinned revision of ggerganov/whisper.cpp. `main` is mutable: an upstream
+# re-upload or a repo compromise would silently change the weights a
+# first-run Setup downloads (security audit 2026-08-17, F-C). Bump this
+# together with the per-model sha256 values above.
+MODEL_DOWNLOAD_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
+MODEL_DOWNLOAD_BASE = (
+    f"https://huggingface.co/ggerganov/whisper.cpp/resolve/{MODEL_DOWNLOAD_REVISION}"
+)
 
 # LLM models for post-processing (dictation cleanup)
 LLM_MODELS: dict[str, dict] = {
     "google_gemma-3-1b-it-Q4_K_M": {
         "label": "Gemma 3 1B (Recommended)",
-        "size": "~806 MB",
-        "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf",
+        "size": "806 MB",
+        "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116f76234503685a98f572982177b11d44ec8ff1/google_gemma-3-1b-it-Q4_K_M.gguf",
+        "bytes": 806_058_496,
         "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
+        "sha256": "12bf0fff8815d5f73a3c9b586bd8fee8e7b248c935de70dec367679873d0f29d",
         "note": "Most consistent gentle-guide cleanup across tones; smaller and faster than Qwen 3.5",
     },
     "Qwen3.5-2B-Q4_K_M": {
         "label": "Qwen 3.5 2B",
-        "size": "~1.3 GB",
-        "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+        "size": "1.3 GB",
+        "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf",
+        "bytes": 1_280_835_840,
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
+        "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
         "note": "Capable reasoning model; less consistent than Gemma 3 for light cleanup",
     },
     "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M": {
         "label": "Qwen3 4B Instruct 2507 (Strong/Caricature)",
-        "size": "~2.5 GB",
-        "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "size": "2.5 GB",
+        "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "bytes": 2_497_280_736,
         "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
         "note": "Best local model for Strong & Caricature intensity; sharpest instruction follower at 4B",
     },
     "qwen2.5-1.5b-instruct-q4_k_m": {
         "label": "Qwen 2.5 1.5B (Legacy)",
-        "size": "~1.0 GB",
-        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "size": "1.1 GB",
+        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "bytes": 1_117_320_736,
         "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
         "note": "Previous default, still works well",
     },
 }
@@ -859,7 +880,9 @@ def download_whisper_model(
     def _run():
         model_info = WHISPER_MODELS.get(model_name, {})
         size_label = model_info.get("size", "unknown size")
-        _download_model_file(url, target, ".bin.part", size_label, log, done, progress)
+        _download_model_file(url, target, ".bin.part", size_label, log, done, progress,
+                             sha256=model_info.get("sha256"),
+                             expected_bytes=model_info.get("bytes"))
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -873,13 +896,17 @@ def _download_model_file(
     done: Callable[[bool, str], None],
     progress: Optional[Callable[[int, int], None]] = None,
     min_bytes: int = 10_000_000,
+    sha256: Optional[str] = None,
+    expected_bytes: Optional[int] = None,
 ) -> None:
     """Shared model downloader: atomic .part file, integrity checks, clear errors.
 
     Integrity: the byte count must match content-length (a CDN/proxy can serve a
     short 200 body without raising), and the file must clear min_bytes so an HTML
     error page never gets renamed into a "model" that fails hours later with a
-    cryptic load error.
+    cryptic load error. When ``sha256`` is given, the content must also match it
+    before the file is renamed into place — size checks alone cannot tell a
+    swapped model from the real one (security audit 2026-08-17, F-C).
     """
     tmp_target = target.with_suffix(part_suffix)
     try:
@@ -889,25 +916,57 @@ def _download_model_file(
         log(f"From: {url}")
         log("")
 
-        response = requests.get(url, stream=True, timeout=30)
-        if response.status_code == 429:
+        from wayfinder.core.download_guard import (
+            DownloadBounds,
+            DownloadSizeMismatch,
+            https_only_get,
+        )
+
+        def _attempt():
+            """One bounded, https-only transfer into tmp_target."""
+            bounds = DownloadBounds(expected_bytes)
+            # Pass the module, not a Session: this path has no auth headers to
+            # pool and `requests.get` stays the single seam the setup tests patch.
+            response = https_only_get(requests, url, timeout=30)
+            if response.status_code == 429:
+                return None, None  # caller reports the rate-limit message
+            response.raise_for_status()
+
+            total = bounds.check_header(int(response.headers.get("content-length", 0))) or 0
+            downloaded = 0
+
+            with open(tmp_target, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1_048_576):  # 1MB chunks
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    bounds.check_progress(downloaded)
+                    if progress:
+                        progress(downloaded, total)
+                    # Log every ~50MB
+                    if total > 0 and downloaded % (50 * 1_048_576) < 1_048_576:
+                        pct = downloaded * 100 // total
+                        log(f"  {pct}% ({downloaded // 1_000_000} / {total // 1_000_000} MB)")
+
+            bounds.check_complete(downloaded)
+            return total, downloaded
+
+        # One retry, for transport failures only — a dropped connection part-way
+        # through a 3 GB model is the common case and the user should not have to
+        # start over by hand. A digest mismatch is handled below and never
+        # retried: identical bytes would come back.
+        try:
+            total, downloaded = _attempt()
+        except (DownloadSizeMismatch, requests.RequestException, OSError) as first:
+            log(f"Download interrupted ({first}); retrying once...")
+            try:
+                tmp_target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            total, downloaded = _attempt()
+
+        if total is None:
             done(False, "Hugging Face is rate-limiting downloads — try again in a few minutes")
             return
-        response.raise_for_status()
-
-        total = int(response.headers.get("content-length", 0))
-        downloaded = 0
-
-        with open(tmp_target, "wb") as f:
-            for chunk in response.iter_content(chunk_size=1_048_576):  # 1MB chunks
-                f.write(chunk)
-                downloaded += len(chunk)
-                if progress:
-                    progress(downloaded, total)
-                # Log every ~50MB
-                if total > 0 and downloaded % (50 * 1_048_576) < 1_048_576:
-                    pct = downloaded * 100 // total
-                    log(f"  {pct}% ({downloaded // 1_000_000} / {total // 1_000_000} MB)")
 
         if total > 0 and downloaded != total:
             raise IOError(
@@ -919,6 +978,16 @@ def _download_model_file(
                 f"downloaded file is too small ({downloaded} bytes) — "
                 "the server returned an error page instead of the model"
             )
+
+        if sha256:
+            log("Verifying checksum...")
+            from wayfinder.model_catalog import ModelDigestMismatch, verify_model_digest
+
+            try:
+                verify_model_digest(tmp_target, sha256)
+            except ModelDigestMismatch as e:
+                log(f"checksum mismatch: expected {e.expected}, got {e.actual}")
+                raise IOError(e.user_message)
 
         # Rename from .part to final
         tmp_target.rename(target)
@@ -966,7 +1035,8 @@ def download_llm_model(
     def _run():
         size_label = model_info.get("size", "unknown size")
         _download_model_file(url, target, ".gguf.part", size_label, log, done, progress,
-                             min_bytes=100_000_000)
+                             min_bytes=100_000_000, sha256=model_info.get("sha256"),
+                             expected_bytes=model_info.get("bytes"))
 
     threading.Thread(target=_run, daemon=True).start()
 

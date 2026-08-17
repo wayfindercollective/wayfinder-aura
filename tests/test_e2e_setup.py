@@ -811,11 +811,168 @@ class TestBuildWhisperCpp:
 # =============================================================================
 
 
+def _unpin_digest(monkeypatch, model_name="tiny.en"):
+    """Drop a model's pinned sha256 so a stub payload can stand in for weights.
+
+    Setup downloads are digest-verified and size-bounded since the 2026-08-17
+    audit; tests that only exercise transport mechanics would otherwise have to
+    fake the real 77 MB model byte for byte. Both gates have dedicated coverage
+    in TestModelDigestVerification.
+    """
+    from wayfinder.core.setup import WHISPER_MODELS
+
+    entry = {
+        k: v for k, v in WHISPER_MODELS[model_name].items() if k not in ("sha256", "bytes")
+    }
+    monkeypatch.setitem(WHISPER_MODELS, model_name, entry)
+
+
+class TestModelDigestVerification:
+    """A downloaded model must match its pinned digest before it is installed."""
+
+    @patch("requests.get")
+    def test_mismatched_digest_is_not_installed(self, mock_get, temp_dir: Path, monkeypatch):
+        import hashlib
+
+        from wayfinder.core.setup import WHISPER_MODELS
+
+        models = temp_dir / "whisper.cpp" / "models"
+        models.mkdir(parents=True)
+        entry = dict(WHISPER_MODELS["tiny.en"])
+        entry["sha256"] = hashlib.sha256(b"the real weights").hexdigest()
+        entry["bytes"] = 12_000_000  # server returns this many bytes, wrong content
+        monkeypatch.setitem(WHISPER_MODELS, "tiny.en", entry)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-length": "12000000"}
+        mock_response.iter_content.return_value = [b"\x00" * 12_000_000]
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        done_result, done_event = {}, threading.Event()
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+            download_whisper_model(
+                "tiny.en",
+                lambda m: None,
+                lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
+            )
+            _wait_done(done_event)
+
+        assert done_result["success"] is False
+        # The user gets prose and a next step, not two hex digests.
+        assert "doesn't match" in done_result["detail"]
+        assert "sha256" not in done_result["detail"].lower()
+        assert not (models / "ggml-tiny.en.bin").exists()
+        assert not list(models.glob("*.part"))
+
+    @patch("requests.get")
+    def test_matching_digest_installs(self, mock_get, temp_dir: Path, monkeypatch):
+        import hashlib
+
+        from wayfinder.core.setup import WHISPER_MODELS
+
+        models = temp_dir / "whisper.cpp" / "models"
+        models.mkdir(parents=True)
+        payload = b"\x00" * 12_000_000
+        entry = dict(WHISPER_MODELS["tiny.en"])
+        entry["sha256"] = hashlib.sha256(payload).hexdigest()
+        entry["bytes"] = len(payload)
+        monkeypatch.setitem(WHISPER_MODELS, "tiny.en", entry)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-length": str(len(payload))}
+        mock_response.iter_content.return_value = [payload]
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        done_result, done_event = {}, threading.Event()
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+            download_whisper_model(
+                "tiny.en",
+                lambda m: None,
+                lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
+            )
+            _wait_done(done_event)
+
+        assert done_result["success"] is True
+        assert (models / "ggml-tiny.en.bin").exists()
+
+    @patch("requests.get")
+    def test_transport_failure_retries_once(self, mock_get, temp_dir: Path, monkeypatch):
+        """A dropped connection retries automatically; the user sees success."""
+        import requests as _requests
+
+        _unpin_digest(monkeypatch)
+        (temp_dir / "whisper.cpp" / "models").mkdir(parents=True)
+
+        good = MagicMock()
+        good.status_code = 200
+        good.headers = {"content-length": "12000000"}
+        good.iter_content.return_value = [b"\x00" * 12_000_000]
+        good.raise_for_status = MagicMock()
+        mock_get.side_effect = [_requests.ConnectionError("reset by peer"), good]
+
+        done_result, done_event = {}, threading.Event()
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+            download_whisper_model(
+                "tiny.en",
+                lambda m: None,
+                lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
+            )
+            _wait_done(done_event)
+
+        assert done_result["success"] is True
+        assert mock_get.call_count == 2
+
+    @patch("requests.get")
+    def test_digest_mismatch_is_not_retried(self, mock_get, temp_dir: Path, monkeypatch):
+        """Refetching identical bytes cannot fix a wrong pin — do not spend it."""
+        import hashlib
+
+        from wayfinder.core.setup import WHISPER_MODELS
+
+        (temp_dir / "whisper.cpp" / "models").mkdir(parents=True)
+        entry = dict(WHISPER_MODELS["tiny.en"])
+        entry["sha256"] = hashlib.sha256(b"the real weights").hexdigest()
+        entry["bytes"] = 12_000_000
+        monkeypatch.setitem(WHISPER_MODELS, "tiny.en", entry)
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"content-length": "12000000"}
+        resp.iter_content.return_value = [b"\x00" * 12_000_000]
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+
+        done_result, done_event = {}, threading.Event()
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+            download_whisper_model(
+                "tiny.en",
+                lambda m: None,
+                lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
+            )
+            _wait_done(done_event)
+
+        assert done_result["success"] is False
+        assert mock_get.call_count == 1
+
+    def test_setup_urls_are_revision_pinned(self):
+        """`main` is mutable — Setup must fetch a fixed revision."""
+        from wayfinder.core.setup import LLM_MODELS, MODEL_DOWNLOAD_BASE
+
+        assert "/resolve/main" not in MODEL_DOWNLOAD_BASE
+        for key, info in LLM_MODELS.items():
+            assert "/resolve/main/" not in info["url"], key
+
+
 class TestDownloadWhisperModel:
     """Test model download flow (all mocked)."""
 
     @patch("requests.get")
-    def test_successful_download(self, mock_get, temp_dir: Path):
+    def test_successful_download(self, mock_get, temp_dir: Path, monkeypatch):
+        _unpin_digest(monkeypatch)
         (temp_dir / "whisper.cpp" / "models").mkdir(parents=True)
 
         # 12MB payload — must clear the 10MB error-page floor in _download_model_file
@@ -847,7 +1004,8 @@ class TestDownloadWhisperModel:
         assert len(progress_calls) > 0
 
     @patch("requests.get", side_effect=Exception("Network error"))
-    def test_download_failure(self, mock_get, temp_dir: Path):
+    def test_download_failure(self, mock_get, temp_dir: Path, monkeypatch):
+        _unpin_digest(monkeypatch)
         (temp_dir / "whisper.cpp" / "models").mkdir(parents=True)
 
         done_result = {}
@@ -886,7 +1044,8 @@ class TestDownloadWhisperModel:
         assert not part_file.exists()
 
     @patch("requests.get")
-    def test_truncated_download_rejected(self, mock_get, temp_dir: Path):
+    def test_truncated_download_rejected(self, mock_get, temp_dir: Path, monkeypatch):
+        _unpin_digest(monkeypatch)
         """Fewer bytes than content-length (silent CDN truncation) must fail."""
         models_dir = temp_dir / "whisper.cpp" / "models"
         models_dir.mkdir(parents=True)
@@ -914,7 +1073,8 @@ class TestDownloadWhisperModel:
         assert not (models_dir / "ggml-tiny.en.bin.part").exists()
 
     @patch("requests.get")
-    def test_error_page_rejected(self, mock_get, temp_dir: Path):
+    def test_error_page_rejected(self, mock_get, temp_dir: Path, monkeypatch):
+        _unpin_digest(monkeypatch)
         """A tiny 200 body (HTML error page) must never become a model file."""
         models_dir = temp_dir / "whisper.cpp" / "models"
         models_dir.mkdir(parents=True)
@@ -941,7 +1101,8 @@ class TestDownloadWhisperModel:
         assert not (models_dir / "ggml-tiny.en.bin").exists()
 
     @patch("requests.get")
-    def test_rate_limit_message(self, mock_get, temp_dir: Path):
+    def test_rate_limit_message(self, mock_get, temp_dir: Path, monkeypatch):
+        _unpin_digest(monkeypatch)
         """HTTP 429 should surface a clear retry-later message."""
         (temp_dir / "whisper.cpp" / "models").mkdir(parents=True)
 
@@ -1104,7 +1265,15 @@ class TestFullSetupFlow:
         mock_response.raise_for_status = MagicMock()
         mock_requests.return_value = mock_response
 
-        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+        from wayfinder.core.setup import WHISPER_MODELS
+
+        unpinned = {
+            k: v
+            for k, v in WHISPER_MODELS["large-v3-turbo"].items()
+            if k not in ("sha256", "bytes")
+        }
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+             patch.dict(WHISPER_MODELS, {"large-v3-turbo": unpinned}):
             dl_event = threading.Event()
             dl_result = {}
             download_whisper_model(

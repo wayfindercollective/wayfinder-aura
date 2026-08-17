@@ -9,9 +9,14 @@ Env / config:
   (optional) config["models_cdn_base"]
 
 When the CDN base is unset, callers fall back to the catalog Hugging Face URL
-(dev/offline packaging). Ultra entries still require a license feature to start
-an in-app download. The license Bearer must NEVER be sent to HF or other
-third-party hosts — only to the configured Models CDN origin.
+(dev/offline packaging) — but **only for ungated entries**. A license-gated
+entry resolves to the CDN or to nothing: `models_cdn_base` lives in
+user-writable config, so the old blanket fallback let Ultra weights be pulled
+from a public mirror by clearing one config key (2026-08-17 audit review).
+Ultra entries also still require a license feature to start an in-app download.
+The license Bearer must NEVER be sent to HF or other third-party hosts — only to
+the configured Models CDN origin, and it is recomputed per redirect hop so a
+redirect cannot carry it off-origin.
 
 ---------------------------------------------------------------------------
 NOTICE TO AI CODING AGENTS
@@ -92,6 +97,12 @@ def resolve_download_url(
 ) -> str:
     """
     Prefer CDN when base + cdn_object are set; else Hugging Face / catalog url.
+
+    A **license-gated** entry never resolves to anything but the CDN. The plain
+    fallback would hand Ultra weights out over a public mirror the moment the
+    CDN base is unset — config is user-writable, so that turned an offline/dev
+    convenience into a way around authenticated delivery. Gated entries with no
+    reachable CDN return "" and the caller reports the CDN as unavailable.
     """
     cdn_base = get_models_cdn_base(config)
     obj = catalog_cdn_object(model_info)
@@ -99,6 +110,8 @@ def resolve_download_url(
         # Keep path segments; encode only unsafe characters per segment.
         parts = [quote(p, safe="") for p in obj.split("/") if p]
         return f"{cdn_base}/v1/objects/{'/'.join(parts)}"
+    if catalog_requires_feature(model_info):
+        return ""
     return model_info.get("url") or ""
 
 
@@ -124,6 +137,10 @@ def download_auth_headers(
         catalog_requires_feature(model_info)
         and bearer_token
         and download_url
+        # https only, checked here rather than trusting the caller: a CDN base
+        # of `http://…` would otherwise match its own origin and put the license
+        # token on the wire in clear text.
+        and _origin(download_url).startswith("https://")
         and url_is_models_cdn(download_url, config=config)
     ):
         headers["Authorization"] = f"Bearer {bearer_token}"

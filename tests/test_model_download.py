@@ -55,6 +55,35 @@ class FakeUrlResponse:
         return False
 
 
+def _unpin_digest(monkeypatch, model_id="base.en"):
+    """Drop the entry's pinned sha256 and size so a stub payload can stand in.
+
+    Transport-mechanics tests fake a few MB of zeros. Both the live catalog and
+    the shipped snapshot are patched — the snapshot supplies the trusted size
+    bound. The digest and bound checks that guard real installs are covered in
+    test_model_downloader.py.
+    """
+    entry = {
+        k: v
+        for k, v in wayfinder_main.WHISPER_CPP_MODELS[model_id].items()
+        if k not in ("sha256", "size_bytes")
+    }
+    monkeypatch.setitem(wayfinder_main.WHISPER_CPP_MODELS, model_id, entry)
+    monkeypatch.setitem(wayfinder_main._SHIPPED_WHISPER_MODELS, model_id, entry)
+
+
+def _unpin_llm_digest(monkeypatch, model_id):
+    """Same, for the inline GGUF downloader's catalog."""
+    entry = {
+        k: v
+        for k, v in wayfinder_main.LLM_GGUF_MODELS[model_id].items()
+        if k not in ("sha256", "size_bytes")
+    }
+    monkeypatch.setitem(wayfinder_main.LLM_GGUF_MODELS, model_id, entry)
+    monkeypatch.setitem(wayfinder_main._SHIPPED_LLM_MODELS, model_id, entry)
+    return entry
+
+
 def _patch_urllib_opener(monkeypatch, open_fn):
     """Production download uses urllib.request.build_opener(...).open(...)."""
 
@@ -78,6 +107,7 @@ class TestModelDownloader:
         assert errors and "Unknown model" in errors[0]
 
     def test_successful_download_reports_progress_and_completes(self, tmp_path, monkeypatch):
+        _unpin_digest(monkeypatch)
         total = 3 * 1024 * 1024
         chunks = [b"\x00" * (1024 * 1024)] * 3
         _patch_urllib_opener(
@@ -106,6 +136,7 @@ class TestModelDownloader:
         assert [d for _p, d, _t in progress] == sorted(d for _p, d, _t in progress)
 
     def test_cancel_midstream_stops_and_removes_partial(self, tmp_path, monkeypatch):
+        _unpin_digest(monkeypatch)
         total = 10 * 1024 * 1024
         chunks = [b"\x00" * (1024 * 1024)] * 10
         _patch_urllib_opener(
@@ -152,6 +183,7 @@ class TestModelDownloader:
         assert not (tmp_path / wayfinder_main.WHISPER_CPP_MODELS["base.en"]["filename"]).exists()
 
     def test_retry_after_error_succeeds(self, tmp_path, monkeypatch):
+        _unpin_digest(monkeypatch)
         filename = wayfinder_main.WHISPER_CPP_MODELS["base.en"]["filename"]
         dl = wayfinder_main.ModelDownloader(models_dir=tmp_path)
 
@@ -201,9 +233,13 @@ class SyncThread:
 
 
 class FakeRequestResponse:
-    def __init__(self, chunks, total):
+    def __init__(self, chunks, total, status_code=200, url="https://example.invalid/model.gguf"):
         self._chunks = chunks
         self.headers = {"content-length": str(total)}
+        # Downloads now follow redirects by hand to refuse an https->http
+        # downgrade, so a response double needs a status and a URL.
+        self.status_code = status_code
+        self.url = url
 
     def raise_for_status(self):
         pass

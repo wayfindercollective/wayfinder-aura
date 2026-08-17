@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 
-def test_resolve_falls_back_to_hf_without_cdn_base(monkeypatch):
+def test_free_model_falls_back_to_hf_without_cdn_base(monkeypatch):
+    """Offline/dev packaging: an ungated model may use its catalog URL."""
     from wayfinder import models_cdn
 
     monkeypatch.setattr(models_cdn, "DEFAULT_MODELS_CDN_BASE", "")
@@ -11,13 +12,30 @@ def test_resolve_falls_back_to_hf_without_cdn_base(monkeypatch):
     info = {
         "url": "https://example.com/a.bin",
         "cdn_object": "whisper/a.bin",
-        "requires_feature": "large_models",
     }
     # Explicit empty models_cdn_base disables CDN even when pilot default exists.
     assert (
         models_cdn.resolve_download_url(info, config={"models_cdn_base": ""})
         == "https://example.com/a.bin"
     )
+
+
+def test_gated_model_never_falls_back_off_the_cdn(monkeypatch):
+    """Disabling the CDN must not hand Ultra weights out over a public mirror.
+
+    `models_cdn_base` lives in user-writable config, so the old fallback turned
+    an offline convenience into a way around authenticated delivery.
+    """
+    from wayfinder import models_cdn
+
+    monkeypatch.setattr(models_cdn, "DEFAULT_MODELS_CDN_BASE", "")
+    monkeypatch.delenv("WAYFINDER_MODELS_CDN_BASE", raising=False)
+    info = {
+        "url": "https://huggingface.co/org/model/resolve/abc123/a.bin",
+        "cdn_object": "whisper/a.bin",
+        "requires_feature": "large_models",
+    }
+    assert models_cdn.resolve_download_url(info, config={"models_cdn_base": ""}) == ""
 
 
 def test_resolve_prefers_cdn_when_configured():
@@ -93,28 +111,47 @@ def test_auth_headers_include_bearer_when_gated():
     assert "Authorization" not in h2
 
 
-def test_auth_headers_never_attach_bearer_to_hf_fallback(monkeypatch):
-    """Credential leak guard: gated Ultra must not send Bearer to Hugging Face."""
+def test_auth_headers_never_attach_bearer_off_the_cdn(monkeypatch):
+    """Credential leak guard: the Bearer only ever goes to the CDN origin.
+
+    A gated entry no longer resolves off-CDN at all, so this pins the header
+    rule directly against every other origin a redirect could reach.
+    """
     from wayfinder import models_cdn
 
     monkeypatch.delenv("WAYFINDER_MODELS_CDN_BASE", raising=False)
-    monkeypatch.setattr(models_cdn, "DEFAULT_MODELS_CDN_BASE", "")
     info = {
-        "url": "https://huggingface.co/org/model/resolve/main/a.bin",
+        "url": "https://huggingface.co/org/model/resolve/abc123/a.bin",
         "cdn_object": "whisper/a.bin",
         "requires_feature": "large_models",
     }
-    # CDN disabled → HF fallback
-    url = models_cdn.resolve_download_url(info, config={"models_cdn_base": ""})
-    assert "huggingface.co" in url
-    h = models_cdn.download_auth_headers(
+    config = {"models_cdn_base": "https://cdn.example"}
+
+    on_cdn = models_cdn.resolve_download_url(info, config=config)
+    assert on_cdn.startswith("https://cdn.example/")
+    assert "Authorization" in models_cdn.download_auth_headers(
+        info, bearer_token="SECRET.TOKEN", download_url=on_cdn, config=config
+    )
+
+    # A plaintext CDN base matches its own origin, so the origin check alone
+    # would hand the token over in clear text — https is required outright.
+    assert "Authorization" not in models_cdn.download_auth_headers(
         info,
         bearer_token="SECRET.TOKEN",
-        download_url=url,
-        config={"models_cdn_base": ""},
+        download_url="http://cdn.example/v1/objects/whisper/a.bin",
+        config={"models_cdn_base": "http://cdn.example"},
     )
-    assert "Authorization" not in h
-    assert models_cdn.url_is_models_cdn(url, config={"models_cdn_base": ""}) is False
+
+    for elsewhere in (
+        "https://huggingface.co/org/model/resolve/abc123/a.bin",
+        "https://cdn.example.evil/v1/objects/whisper/a.bin",
+        "https://r2.example/blob",
+    ):
+        headers = models_cdn.download_auth_headers(
+            info, bearer_token="SECRET.TOKEN", download_url=elsewhere, config=config
+        )
+        assert "Authorization" not in headers, elsewhere
+        assert models_cdn.url_is_models_cdn(elsewhere, config=config) is False
 
 
 def test_pilot_catalog_entries_are_gated():
