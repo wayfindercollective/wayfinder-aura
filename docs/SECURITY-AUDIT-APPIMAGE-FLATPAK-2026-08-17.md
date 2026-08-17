@@ -247,27 +247,18 @@ leaves the trusted origin. Recorded as a follow-up, not built.
    Workflow becomes draft → attach all assets → set designation → publish, and
    the rollback plan in `docs/PROMOTION-READINESS-CHECKLIST.md` has been updated
    to match.
-2. **Most Ultra objects are still unverified — but the gate can now run here.**
-   State as of this pass:
-   - All **19** pins independently match Hugging Face's LFS oids
-     (`--hf-metadata`, no downloads). `ggml-base.en.bin` also matches the pin
-     already in the Flatpak manifest.
-   - **13 of 19** CDN objects are confirmed byte-identical: the 12 public ones
-     plus `large-v3-turbo-q5_0`, the first Ultra-gated object verified
-     (574 MB, PASS).
-   - **6 gated objects remain unhashed:** `medium.en`, `large-v3-turbo`,
-     `medium`, `large-v3`, `qwen3-4b-2507`, `phi-3-mini` — roughly 12.6 GB.
+2. **RESOLVED 2026-08-17 — every CDN object is byte-verified.**
+   `python3 scripts/verify-model-digests.py --full --source cdn` streamed and
+   hashed all 19 objects: **0 failed, 0 skipped**, exit 0. That includes the
+   seven license-gated ones (`medium.en`, `large-v3-turbo`,
+   `large-v3-turbo-q5_0`, `medium`, `large-v3`, `qwen3-4b-2507`, `phi-3-mini`)
+   which no earlier pass could reach — the verifier finds the activation inside
+   the Flatpak sandbox, so the owner's workstation sufficed. All 19 pins also
+   match Hugging Face's LFS oids independently.
 
-   The verifier now finds the activation **inside the Flatpak sandbox**, so this
-   no longer needs a separate machine — it runs on the owner's workstation:
-
-   ```
-   python3 scripts/verify-model-digests.py --full --source both
-   ```
-
-   **Because downloads fail closed, a drifted Ultra object breaks that model's
-   download for paying customers**, which is exactly the friction this work is
-   meant to avoid. Finish the remaining six before release.
+   The R2 mirror is therefore confirmed byte-identical to what the app expects,
+   and the fail-closed digest check cannot fire on a correct install today.
+   Re-run this whenever an R2 object is touched.
 
 3. **Re-uploading an R2 object is now a coupled change.** Digest pins are
    in-tree, and a remote catalog can neither override a shipped digest nor
