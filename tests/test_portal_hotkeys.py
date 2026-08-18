@@ -153,10 +153,26 @@ class _FakeBus:
 
     def __init__(self, create_code=0, bind_code=0, bound_ids=None,
                  answers=True, bind_answers=True, mismatch=False, activations=(),
-                 close_session=False, portal_owner_change=None):
+                 close_session=False, portal_owner_change=None,
+                 listed=None, list_answers=True, list_raises=False,
+                 triggers=None, listed_after=None):
         self._create_code = create_code
         self._bind_code = bind_code
         self._bound_ids = bound_ids
+        # ListShortcuts: what the compositor says is bound right now, as
+        # {shortcut_id: trigger_description}. `listed` is the state BEFORE this
+        # run binds anything; afterwards the fake reports the real thing a
+        # portal would — the pre-existing set plus whatever the bind added —
+        # unless `listed_after` overrides it (used to model the user CLEARING
+        # a binding in System Settings).
+        self._session_bound = dict(listed or {})
+        self._listed_after = listed_after
+        self._has_bound = False
+        self._list_answers = list_answers
+        self._list_raises = list_raises
+        # trigger_description the BindShortcuts Response reports back, which
+        # need NOT equal what we asked for — the user can edit it in the picker.
+        self._triggers = triggers or {}
         self._answers = answers
         self._bind_answers = bind_answers
         self._mismatch = mismatch
@@ -220,6 +236,27 @@ class _FakeBus:
                 self._pending = (actual, self._create_code, results)
             return _Reply((actual,))
 
+        if method == "ListShortcuts":
+            if self._list_raises:
+                raise RuntimeError("portal has no ListShortcuts")
+            assert fmt == "(oa{sv})"
+            session_handle, options = body
+            assert session_handle == SESSION_HANDLE
+            assert isinstance(options, dict)
+            token = _token_from_options(options)
+            assert isinstance(token, str) and token
+            if self._has_bound and self._listed_after is not None:
+                listed = self._listed_after
+            else:
+                listed = self._session_bound
+            results = {"shortcuts": [
+                (sid, {"trigger_description": trig}) for sid, trig in listed.items()
+            ]}
+            predicted = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+            if self._answers and self._list_answers and self._response_would_match(predicted):
+                self._pending = (predicted, 0, results)
+            return _Reply((predicted,))
+
         assert method == "BindShortcuts"
         assert fmt == "(oa(sa{sv})sa{sv})"
         session_handle, shortcut_list, parent_window, options = body
@@ -231,7 +268,15 @@ class _FakeBus:
         self.bind_shortcut_args = shortcut_list
         requested_ids = [item[0] for item in shortcut_list]
         bound = self._bound_ids if self._bound_ids is not None else requested_ids
-        results = {"shortcuts": [(sid, {}) for sid in bound]}
+        results = {"shortcuts": [
+            (sid, {"trigger_description": self._triggers[sid]}) if sid in self._triggers
+            else (sid, {})
+            for sid in bound
+        ]}
+        # A real portal now reports these from ListShortcuts too.
+        self._has_bound = True
+        for sid in bound:
+            self._session_bound[sid] = self._triggers.get(sid, "")
         predicted = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
         if self._answers and self._bind_answers and self._response_would_match(predicted):
             self._pending = (predicted, self._bind_code, results)
@@ -297,7 +342,8 @@ def _install_fake_gi(monkeypatch, bus, real_glib=None):
     GLib machinery while the connection and main loop stay fake."""
     glib = types.SimpleNamespace(
         MainContext=types.SimpleNamespace(new=_FakeMainContext),
-        MainLoop=types.SimpleNamespace(new=lambda ctx, running: _FakeLoop(bus)),
+        MainLoop=types.SimpleNamespace(new=lambda ctx, running: (
+            bus.events.append(("loop",)), _FakeLoop(bus))[1]),
         Variant=real_glib.Variant if real_glib else (lambda fmt, value: (fmt, value)),
         VariantType=real_glib.VariantType if real_glib else (lambda s: s),
         timeout_source_new=lambda ms: _FakeTimer(),
@@ -325,6 +371,18 @@ def _install_fake_gi(monkeypatch, bus, real_glib=None):
 
 
 def _run(bus, specs=None, logs=None):
+    """Run the listener; returns (result, hotkey_events).
+
+    PORTAL_BINDINGS_CHANGED is filtered out here so activation-routing tests
+    stay about activations — use ``_run_all`` when the binding events ARE the
+    subject.
+    """
+    result, events = _run_all(bus, specs=specs, logs=logs)
+    return result, [e for e in events if e[0] is not EventType.PORTAL_BINDINGS_CHANGED]
+
+
+def _run_all(bus, specs=None, logs=None):
+    """As ``_run``, but keeps every queued event including binding updates."""
     queue = Queue()
     result = portal.wayland_hotkey_listener(
         queue, _specs() if specs is None else specs, Event(),
@@ -334,6 +392,12 @@ def _run(bus, specs=None, logs=None):
     while not queue.empty():
         events.append(queue.get_nowait())
     return result, events
+
+
+def _bindings(events):
+    """Payloads of the PORTAL_BINDINGS_CHANGED events, in order."""
+    return [payload for kind, payload in events
+            if kind is EventType.PORTAL_BINDINGS_CHANGED]
 
 
 # ── availability ─────────────────────────────────────────────────────────────
@@ -372,6 +436,7 @@ def test_every_subscription_pins_its_sender(monkeypatch):
     assert pins == {
         ("Response", "org.freedesktop.portal.Desktop"),
         ("Activated", "org.freedesktop.portal.Desktop"),
+        ("ShortcutsChanged", "org.freedesktop.portal.Desktop"),
         ("Closed", "org.freedesktop.portal.Desktop"),
         ("NameOwnerChanged", "org.freedesktop.DBus"),
     }
@@ -496,6 +561,313 @@ def test_empty_trigger_omits_preferred_trigger(monkeypatch):
     assert "description" in props
 
 
+# ── what is ACTUALLY bound: the compositor is the authority ──────────────────
+
+class TestParseBoundTriggers:
+    """The portal is another process; its reply is untrusted input."""
+
+    def test_reads_trigger_descriptions(self):
+        from wayfinder.hotkeys.dbus import parse_bound_triggers
+
+        assert parse_bound_triggers({"shortcuts": [
+            ("record-toggle", {"trigger_description": "Ctrl+Alt+Space"}),
+            ("style-toggle", {"trigger_description": "Meta+S"}),
+        ]}) == {"record-toggle": "Ctrl+Alt+Space", "style-toggle": "Meta+S"}
+
+    def test_bound_without_a_label_is_still_bound(self):
+        """"" (bound, label unknown) is NOT the same fact as absent."""
+        from wayfinder.hotkeys.dbus import parse_bound_triggers
+
+        assert parse_bound_triggers({"shortcuts": [("record-toggle", {})]}) == {
+            "record-toggle": ""
+        }
+
+    def test_accepts_the_bare_array_shortcutschanged_carries(self):
+        from wayfinder.hotkeys.dbus import parse_bound_triggers
+
+        assert parse_bound_triggers(
+            [("record-toggle", {"trigger_description": "Insert"})]
+        ) == {"record-toggle": "Insert"}
+
+    @pytest.mark.parametrize("payload", [
+        None, "nonsense", 7, {}, {"shortcuts": None}, {"shortcuts": "x"},
+        {"shortcuts": [None, 5, ()]}, {"shortcuts": [("", {})]},
+        {"shortcuts": [("id", {"trigger_description": 9})]},
+    ])
+    def test_malformed_payloads_never_raise(self, payload):
+        from wayfinder.hotkeys.dbus import parse_bound_triggers
+
+        result = parse_bound_triggers(payload)
+        assert isinstance(result, dict)
+        assert all(isinstance(v, str) for v in result.values())
+
+
+def test_unbound_shortcut_is_published_as_none(monkeypatch):
+    """The bug this fixes: a bind that returns code 0 binding NOTHING left the
+    UI advertising the local config chord as though it were live."""
+    bus = _install_fake_gi(monkeypatch, _FakeBus(bound_ids=[]))
+    _result, events = _run_all(bus)
+    assert _bindings(events)[-1] == {"record-toggle": None, "style-toggle": None}
+
+
+def test_partial_bind_publishes_only_what_bound(monkeypatch):
+    bus = _install_fake_gi(monkeypatch, _FakeBus(
+        bound_ids=["record-toggle"], triggers={"record-toggle": "Ctrl+Alt+Space"},
+    ))
+    _result, events = _run_all(bus)
+    assert _bindings(events)[-1] == {
+        "record-toggle": "Ctrl+Alt+Space", "style-toggle": None,
+    }
+
+
+def test_logs_the_compositors_trigger_not_the_one_we_asked_for(monkeypatch):
+    """preferred_trigger is a REQUEST. The user can override it in the picker,
+    and echoing our own request back made an edited chord look accepted."""
+    logs = []
+    bus = _install_fake_gi(monkeypatch, _FakeBus(triggers={
+        "record-toggle": "Meta+Insert",  # user picked something else entirely
+        "style-toggle": "Ctrl+Alt+Return",
+    }))
+    _run(bus, logs=logs)
+    assert any("registered: record-toggle (trigger: Meta+Insert)" in m for m in logs)
+    assert not any("CTRL+ALT+space" in m for m in logs)
+
+
+def test_list_shortcuts_publishes_bindings_made_before_this_run(monkeypatch):
+    """Bindings the user set in System Settings earlier must reach the UI even
+    when the bind that follows adds nothing new."""
+    bus = _install_fake_gi(monkeypatch, _FakeBus(
+        listed={"record-toggle": "Insert"}, bound_ids=[],
+    ))
+    _result, events = _run_all(bus)
+    published = _bindings(events)
+    assert published[0] == {"record-toggle": "Insert", "style-toggle": None}
+
+
+def test_list_shortcuts_brackets_the_bind(monkeypatch):
+    """Once before (what the user already had) and once after (the
+    authoritative snapshot that corrects a subset bind response)."""
+    bus = _install_fake_gi(monkeypatch, _FakeBus())
+    _run(bus)
+    calls = [e[1] for e in bus.events if e[0] == "call"]
+    assert calls == ["CreateSession", "ListShortcuts", "BindShortcuts",
+                     "ListShortcuts"]
+
+
+def test_a_portal_without_list_shortcuts_still_binds(monkeypatch):
+    """ListShortcuts is an enhancement, never a new failure mode."""
+    logs = []
+    bus = _install_fake_gi(monkeypatch, _FakeBus(list_raises=True))
+    result, _events = _run(bus, logs=logs)
+    assert result is True
+    assert any("ListShortcuts unavailable" in m for m in logs)
+    assert any("registered: record-toggle" in m for m in logs)
+
+
+class _ShortcutsChangedBus(_FakeBus):
+    """Delivers one ShortcutsChanged once the listener reaches its listen loop."""
+
+    changed_session = SESSION_HANDLE
+    changed_payload = [("record-toggle", {"trigger_description": "Insert"})]
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._changed_sent = False
+
+    def dispatch(self):
+        # A dispatch that delivers a pending Response is still part of setup;
+        # the first one WITHOUT a pending Response is the steady-state listen
+        # loop, which is when a real user would be editing System Settings.
+        # Sending earlier would be filtered out correctly (the session handle
+        # is still "") and prove nothing.
+        setup_phase = self._pending is not None
+        super().dispatch()
+        if self._changed_sent or setup_phase or self.bind_shortcut_args is None:
+            return
+        self._changed_sent = True
+        # A real compositor that announces a change also reports it from
+        # ListShortcuts; keep the fake self-consistent or the reconcile that
+        # follows would "correct" the change straight back out.
+        for sid, props in self.changed_payload:
+            self._session_bound[sid] = props.get("trigger_description", "")
+        for _s, _i, sig, spath, cb in list(self.subscriptions.values()):
+            if sig == "ShortcutsChanged":
+                cb(None, "org.freedesktop.portal.Desktop", spath,
+                   "org.freedesktop.portal.GlobalShortcuts", "ShortcutsChanged",
+                   _Reply((self.changed_session, self.changed_payload)))
+
+
+def test_shortcuts_changed_republishes(monkeypatch):
+    """The user sets the binding in System Settings AFTER launch — the whole
+    reason the old code could never recover from a declined bind."""
+    bus = _install_fake_gi(monkeypatch, _ShortcutsChangedBus(bound_ids=[]))
+    _result, events = _run_all(bus)
+    published = _bindings(events)
+    assert published[0] == {"record-toggle": None, "style-toggle": None}
+    assert published[-1] == {"record-toggle": "Insert", "style-toggle": None}
+
+
+def test_shortcuts_changed_is_a_delta_not_a_snapshot(monkeypatch):
+    """The spec says the signal carries the shortcuts that CHANGED. Treating it
+    as the whole set marked every omitted id unbound — recreating the false
+    "not set" this change exists to remove (Codex review).
+
+    Both are bound; a signal mentioning only record-toggle must leave
+    style-toggle bound.
+    """
+    class _DeltaBus(_ShortcutsChangedBus):
+        changed_payload = [("record-toggle", {"trigger_description": "Meta+R"})]
+
+    bus = _install_fake_gi(monkeypatch, _DeltaBus(triggers={
+        "record-toggle": "Ctrl+Alt+Space", "style-toggle": "Ctrl+Alt+Return",
+    }))
+    _result, events = _run_all(bus)
+    published = _bindings(events)
+    # published[0] is the pre-bind snapshot (nothing bound yet, correctly all
+    # None). From the bind onward the invariant holds: a delta that never
+    # mentions style-toggle must never cause it to be reported unbound.
+    assert len(published) >= 3, published
+    assert all(p["style-toggle"] == "Ctrl+Alt+Return" for p in published[1:]), published
+    assert published[-1] == {
+        "record-toggle": "Meta+R",           # updated by the delta
+        "style-toggle": "Ctrl+Alt+Return",   # untouched, still bound
+    }
+
+
+def test_a_bind_subset_never_clears_what_was_already_bound(monkeypatch):
+    """The bind response is documented as a SUBSET of what that call asked for,
+    so it must merge. Replacing let it unbind a shortcut the user already had
+    (Codex review)."""
+    bus = _install_fake_gi(monkeypatch, _FakeBus(
+        listed={"record-toggle": "Insert", "style-toggle": "Meta+S"},
+        bound_ids=["record-toggle"], triggers={"record-toggle": "Insert"},
+    ))
+    _result, events = _run_all(bus)
+    published = _bindings(events)
+    assert all(p["style-toggle"] == "Meta+S" for p in published), published
+
+
+def test_list_shortcuts_is_what_can_clear_a_binding(monkeypatch):
+    """Merging must not make unbinding impossible. ListShortcuts is the one
+    authoritative snapshot, so a shortcut the user clears in System Settings
+    does reach the UI as unbound."""
+    bus = _install_fake_gi(monkeypatch, _FakeBus(
+        listed={"record-toggle": "Insert", "style-toggle": "Meta+S"},
+        bound_ids=[],
+        listed_after={"record-toggle": "Insert"},  # user cleared style-toggle
+    ))
+    _result, events = _run_all(bus)
+    published = _bindings(events)
+    assert published[0]["style-toggle"] == "Meta+S"
+    assert published[-1] == {"record-toggle": "Insert", "style-toggle": None}
+
+
+def test_shortcuts_changed_removal_is_observed(monkeypatch):
+    """A merge alone can never see a binding disappear. The reconcile that
+    follows the signal must, or clearing a shortcut in System Settings would
+    leave the UI advertising a chord that no longer does anything."""
+    class _RemovingBus(_ShortcutsChangedBus):
+        changed_payload = [("record-toggle", {"trigger_description": "Insert"})]
+
+        def dispatch(self):
+            super().dispatch()
+            if self._changed_sent:
+                # The user also CLEARED style-toggle; only ListShortcuts says so.
+                self._listed_after = {"record-toggle": "Insert"}
+
+    bus = _install_fake_gi(monkeypatch, _RemovingBus(triggers={
+        "record-toggle": "Ctrl+Alt+Space", "style-toggle": "Ctrl+Alt+Return",
+    }))
+    _result, events = _run_all(bus)
+    published = _bindings(events)
+    assert published[1]["style-toggle"] == "Ctrl+Alt+Return"  # bound at bind
+    assert published[-1] == {"record-toggle": "Insert", "style-toggle": None}
+
+
+def test_a_change_arriving_during_the_reconcile_is_not_lost(monkeypatch):
+    """The refresh flag is checked BEFORE the loop blocks.
+
+    A real GLib main loop blocks until something quits it, so testing the flag
+    only after ``loop.run()`` would sit on a request raised mid-reconcile until
+    some later signal happened to wake the loop — losing a removal for an
+    unbounded time (Codex review). The fake loop returns immediately and so
+    cannot show the stall directly; what it CAN show is the ordering, which is
+    the actual invariant: no new main loop may be entered while a refresh is
+    still outstanding.
+    """
+    class _DoubleChangeBus(_ShortcutsChangedBus):
+        changed_payload = [("record-toggle", {"trigger_description": "F5"})]
+
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._second_sent = False
+            self._in_reconcile = False
+
+        def call_sync(self, *args, **kwargs):
+            # The SECOND ListShortcuts is the post-change reconcile.
+            if args[3] == "ListShortcuts" and self._changed_sent:
+                self._in_reconcile = True
+            return super().call_sync(*args, **kwargs)
+
+        def dispatch(self):
+            super().dispatch()
+            if not (self._in_reconcile and self._changed_sent) or self._second_sent:
+                return
+            self._second_sent = True
+            self.events.append(("second-change",))
+            payload = [("record-toggle", {"trigger_description": "F9"})]
+            for sid, props in payload:
+                self._session_bound[sid] = props["trigger_description"]
+            for _s, _i, sig, spath, cb in list(self.subscriptions.values()):
+                if sig == "ShortcutsChanged":
+                    cb(None, "org.freedesktop.portal.Desktop", spath,
+                       "org.freedesktop.portal.GlobalShortcuts", "ShortcutsChanged",
+                       _Reply((SESSION_HANDLE, payload)))
+
+    bus = _install_fake_gi(monkeypatch, _DoubleChangeBus(
+        triggers={"record-toggle": "Ctrl+Alt+Space"}, bound_ids=["record-toggle"],
+    ))
+    result, events = _run_all(bus)
+    assert result is True
+    assert bus._second_sent, "the second change never fired — the test proves nothing"
+
+    kinds = [e[0] for e in bus.events]
+    marker = kinds.index("second-change")
+    tail = bus.events[marker + 1:]
+    # The reconcile for the second change must be reached without blocking on
+    # another main loop first.
+    next_meaningful = next(
+        (e for e in tail if e[0] == "loop" or (e[0] == "call" and e[1] == "ListShortcuts")),
+        None,
+    )
+    assert next_meaningful is not None and next_meaningful[0] == "call", (
+        f"entered a main loop before reconciling the pending change: {tail[:4]}")
+    assert _bindings(events)[-1]["record-toggle"] == "F9"
+
+
+def test_shortcuts_changed_for_a_foreign_session_is_ignored(monkeypatch):
+    """Another client's binding change must not overwrite our display."""
+    captured = []
+
+    class _ChangedBus(_FakeBus):
+        def dispatch(self):
+            super().dispatch()
+            for _s, _i, sig, spath, cb in list(self.subscriptions.values()):
+                if sig == "ShortcutsChanged" and not captured:
+                    captured.append(True)
+                    cb(None, "org.freedesktop.portal.Desktop", spath,
+                       "org.freedesktop.portal.GlobalShortcuts", "ShortcutsChanged",
+                       _Reply(("/other/session",
+                               [("record-toggle", {"trigger_description": "F1"})])))
+
+    bus = _install_fake_gi(monkeypatch, _ChangedBus())
+    _result, events = _run_all(bus)
+    # Guard against a vacuous pass: this would also hold if ShortcutsChanged
+    # were never subscribed at all (Codex review).
+    assert captured, "listener must subscribe to ShortcutsChanged"
+    assert all("F1" not in str(p) for p in _bindings(events))
+
+
 # ── activation routing ───────────────────────────────────────────────────────
 
 def test_record_activation_emits_hotkey_pressed(monkeypatch):
@@ -603,8 +975,8 @@ def test_unsubscribes_and_closes_on_exit(monkeypatch):
     bus = _install_fake_gi(monkeypatch, _FakeBus())
     _run(bus)
     kinds = [e[0] for e in bus.events]
-    # Response, Activated, Session.Closed, NameOwnerChanged — all released.
-    assert kinds.count("unsubscribe") == 4
+    # Response, Activated, ShortcutsChanged, Session.Closed, NameOwnerChanged.
+    assert kinds.count("unsubscribe") == 5
     assert kinds[-1] == "close"
 
 

@@ -52,6 +52,11 @@ _RESPONSE_CANCELLED = 1
 # CreateSession answers promptly or not at all — no dialog is involved.
 _CREATE_TIMEOUT_SECONDS = 20
 
+# ListShortcuts is a pure enhancement (it only pre-fills the UI), so it gets a
+# much shorter leash than CreateSession: a portal that accepts the method but
+# never answers must not add 20s to every cold start before hotkeys bind.
+_LIST_TIMEOUT_SECONDS = 5
+
 # The gi probe is cached: the import is not free, and its outcome cannot
 # change within a process. gi can raise non-ImportError at import time —
 # PyGObject's override loader asserts against the GLib typelib and a version
@@ -88,6 +93,16 @@ _KEYSYM_BY_CODE = {
     65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
     57: "space", 28: "Return", 15: "Tab", 14: "BackSpace",
     70: "Scroll_Lock", 119: "Pause",
+    # Keys the dropdown never lists but a config can absolutely hold: Detect on
+    # a NON-sandboxed install writes the raw evdev code, and that config then
+    # travels to a Flatpak. Without an entry here encode_trigger() returned ""
+    # and the compositor's picker opened blank — notably for Insert, the key
+    # Steam Input's Deck desktop layout maps to R4.
+    1: "Escape", 99: "Print", 102: "Home", 103: "Up", 104: "Page_Up",
+    105: "Left", 106: "Right", 107: "End", 108: "Down", 109: "Page_Down",
+    110: "Insert", 111: "Delete", 127: "Menu",
+    183: "F13", 184: "F14", 185: "F15", 186: "F16", 187: "F17", 188: "F18",
+    189: "F19", 190: "F20", 191: "F21", 192: "F22", 193: "F23", 194: "F24",
 }
 
 # Config modifier names → shortcuts-spec modifier tokens.
@@ -122,6 +137,41 @@ def encode_trigger(key_code: object, modifiers: object) -> str:
         if token not in tokens:  # "ctrl,ctrl" must not encode CTRL+CTRL
             tokens.append(token)
     return "+".join(tokens + [keysym])
+
+
+def parse_bound_triggers(payload: object) -> dict[str, str]:
+    """``{shortcut_id: trigger_description}`` from a portal shortcuts payload.
+
+    Accepts the ``results`` dict of a BindShortcuts / ListShortcuts Response,
+    or the bare ``a(sa{sv})`` array carried by ShortcutsChanged.
+
+    The portal is another process, so its reply is untrusted input: anything
+    malformed is skipped rather than raised. A shortcut that IS bound but
+    carries no description maps to ``""`` — "bound, label unknown", which is
+    still not the same fact as "absent" (not bound at all).
+    """
+    entries: object = payload
+    if isinstance(payload, dict):
+        entries = payload.get("shortcuts")
+    if not isinstance(entries, (list, tuple)):
+        return {}
+
+    bound: dict[str, str] = {}
+    for entry in entries:
+        try:
+            shortcut_id = str(entry[0])
+            props = entry[1] if len(entry) > 1 else {}
+        except Exception:
+            continue
+        if not shortcut_id:
+            continue
+        trigger = ""
+        if isinstance(props, dict):
+            raw = props.get("trigger_description")
+            if isinstance(raw, str):
+                trigger = raw
+        bound[shortcut_id] = trigger
+    return bound
 
 
 @dataclass(frozen=True)
@@ -197,6 +247,7 @@ def wayland_hotkey_listener(
     bus = None
     response_sub = None
     activated_sub = None
+    shortcuts_changed_sub = None
     session_closed_sub = None
     owner_sub = None
     stop_source = None
@@ -220,9 +271,13 @@ def wayland_hotkey_listener(
 
         responses: dict[str, tuple[int, dict]] = {}
         closed_paths: set = set()
+        # Everything the portal has told us is bound, {shortcut_id: trigger}.
+        # Snapshots replace it; ShortcutsChanged deltas merge into it.
+        known: dict[str, str] = {}
         # Mutable cells shared with handlers across the setup and listen phases.
         target = {"path": create_path}
-        state = {"session_handle": "", "loop": None, "waiting_path": "", "closed": ""}
+        state = {"session_handle": "", "loop": None, "waiting_path": "",
+                 "closed": "", "refresh": False}
 
         def _quit_loop() -> None:
             loop = state["loop"]
@@ -282,6 +337,64 @@ def wayland_hotkey_listener(
             None,
             Gio.DBusSignalFlags.NONE,
             _on_activated,
+        )
+
+        def _publish_bindings(payload: object, *, merge: bool = False) -> None:
+            """Hand the compositor's view of OUR shortcuts to the UI thread.
+
+            Every spec gets an entry: the trigger description when the portal
+            reports it bound, None when it is absent. "Absent" is the fact the
+            UI was previously missing — it kept showing the local config chord
+            as though it were live while nothing was bound at all.
+
+            ``merge=False`` (ListShortcuts / BindShortcuts) — the payload is a
+            full snapshot of the session's shortcuts, so it replaces what we
+            knew.
+
+            ``merge=True`` (ShortcutsChanged) — the spec describes that signal
+            as carrying the shortcuts that CHANGED, not the whole set. Treating
+            a delta as a snapshot would mark every id it omits as unbound, i.e.
+            re-create the false "not set" this whole change exists to remove
+            (Codex review).
+
+            Queued, never touched directly: this runs on the GLib thread and Tk
+            is not thread-safe.
+            """
+            reported = parse_bound_triggers(payload)
+            if merge:
+                known.update(reported)
+            else:
+                known.clear()
+                known.update(reported)
+            event_queue.put((
+                EventType.PORTAL_BINDINGS_CHANGED,
+                {sid: known.get(sid) for sid in specs},
+            ))
+
+        def _on_shortcuts_changed(_conn, _sender, _path, _iface, _signal, params):
+            # Bindings the user edits later in System Settings arrive here.
+            try:
+                session_handle, changed = params.unpack()[:2]
+            except Exception:
+                return
+            if session_handle != state["session_handle"]:
+                return
+            # Merge for instant feedback, then ask the listen loop to reconcile
+            # against a real snapshot — a merge alone can never observe that a
+            # binding was CLEARED in System Settings (Codex review).
+            _publish_bindings(changed, merge=True)
+            state["refresh"] = True
+            _quit_loop()
+
+        # Same pre-CreateSession timing and sender pin as Activated.
+        shortcuts_changed_sub = bus.signal_subscribe(
+            _PORTAL_DEST,
+            _SHORTCUTS_IFACE,
+            "ShortcutsChanged",
+            _PORTAL_PATH,
+            None,
+            Gio.DBusSignalFlags.NONE,
+            _on_shortcuts_changed,
         )
 
         # A dead session must not be listened to forever (Codex review): the
@@ -430,6 +543,62 @@ def wayland_hotkey_listener(
             return False
         log("✓ Portal session established")
 
+        def _reconcile_from_list() -> bool:
+            """Replace ``known`` from ListShortcuts — the authoritative snapshot.
+
+            This is the ONLY call that may clear a binding, which is why the
+            other two sources merge: BindShortcuts' response is documented as a
+            subset of the shortcuts passed to THAT call, and ShortcutsChanged
+            as the ones that changed. Neither can be read as "everything else
+            is unbound" (Codex review).
+
+            Returns True when a snapshot was applied. Never fatal — a portal
+            without ListShortcuts just leaves the merged view in place.
+            """
+            try:
+                list_token = f"wayfinder_{secrets.token_hex(16)}"
+                list_path = f"{_PORTAL_PATH}/request/{sender}/{list_token}"
+                list_reply = bus.call_sync(
+                    _PORTAL_DEST,
+                    _PORTAL_PATH,
+                    _SHORTCUTS_IFACE,
+                    "ListShortcuts",
+                    GLib.Variant(
+                        "(oa{sv})",
+                        (session_handle,
+                         {"handle_token": GLib.Variant("s", list_token)}),
+                    ),
+                    GLib.VariantType("(o)"),
+                    Gio.DBusCallFlags.NONE,
+                    # The SHORT leash on the method call too, not just on the
+                    # Response wait: a hung call_sync would otherwise still add
+                    # the full CreateSession timeout to cold start.
+                    _LIST_TIMEOUT_SECONDS * 1000,
+                    None,
+                )
+                try:
+                    list_actual = list_reply.unpack()[0] or list_path
+                except Exception:
+                    list_actual = list_path
+                # Timed: no dialog is involved, so a silent portal is a fault,
+                # not a user deliberating.
+                listed = _wait_for(list_actual, _LIST_TIMEOUT_SECONDS)
+                if stop_event.is_set() or state["closed"]:
+                    return False
+                if listed is not None and listed[0] == _RESPONSE_OK:
+                    _publish_bindings(listed[1])
+                    return True
+            except Exception as exc:
+                log(f"⚠️ Portal ListShortcuts unavailable ({type(exc).__name__})"
+                    " — continuing")
+            return False
+
+        # Ask what is ALREADY bound before asking to bind, so the UI has the
+        # truth even when the bind that follows adds nothing.
+        _reconcile_from_list()
+        if stop_event.is_set():
+            return True
+
         bind_token = f"wayfinder_{secrets.token_hex(16)}"
         bind_path = f"{_PORTAL_PATH}/request/{sender}/{bind_token}"
         shortcut_list = []
@@ -477,17 +646,21 @@ def wayland_hotkey_listener(
             if bcode == _RESPONSE_OK:
                 # Code 0 alone is not registration: the spec lets the portal
                 # return any subset. Verify OUR ids are in the bound list.
-                returned = set()
-                try:
-                    for item in bresults.get("shortcuts") or []:
-                        returned.add(str(item[0]))
-                except Exception:
-                    pass
+                returned = parse_bound_triggers(bresults)
+                # merge, not replace: the spec allows this response to carry a
+                # SUBSET of what was requested, so it cannot unbind anything
+                # ListShortcuts already reported (Codex review). The reconcile
+                # below is what may clear a binding.
+                _publish_bindings(bresults, merge=True)
                 missing = [s.shortcut_id for s in shortcuts if s.shortcut_id not in returned]
                 for spec in shortcuts:
                     if spec.shortcut_id in returned:
+                        # The COMPOSITOR's trigger, not the one we asked for.
+                        # preferred_trigger is a request; the user can override
+                        # it in the picker, and logging our own request back
+                        # made a declined or edited chord look accepted.
                         log(f"✓ Shortcut registered: {spec.shortcut_id}"
-                            f" (trigger: {spec.trigger or 'choose in System Settings'})")
+                            f" (trigger: {returned[spec.shortcut_id] or 'set in System Settings'})")
                 if missing:
                     log(f"⚠️ Portal did not bind: {', '.join(missing)}"
                         " — set them in System Settings → Shortcuts")
@@ -501,12 +674,40 @@ def wayland_hotkey_listener(
         # bind the session is valid: bindings made later in System Settings
         # deliver Activated here.
         if not state["closed"]:
+            # An authoritative snapshot now that binding is settled — this is
+            # what corrects a bind response that reported only a subset.
+            _reconcile_from_list()
+            # A stale target path must not let a late Response quit the listen
+            # loop; nothing is being awaited from here on.
+            target["path"] = ""
             log("🎧 Listening for global shortcuts (portal)…")
-            loop = GLib.MainLoop.new(context, False)
-            state["loop"] = loop
-            if not stop_event.is_set() and not state["closed"]:
+            while not stop_event.is_set() and not state["closed"]:
+                # Checked BEFORE blocking, not only after: a ShortcutsChanged
+                # that lands DURING the reconcile below sets the flag again,
+                # and testing it only after loop.run() would sit on that
+                # request — losing a removal — until some later signal woke the
+                # loop (Codex review).
+                if state["refresh"]:
+                    # Its payload was already merged for instant feedback; only
+                    # a fresh ListShortcuts can tell us a binding was REMOVED,
+                    # and it must run out here rather than inside the signal
+                    # handler (a nested _wait_for loop would clobber
+                    # state["loop"]). Each pass does a real round trip, so this
+                    # tracks the signal rate rather than spinning.
+                    state["refresh"] = False
+                    _reconcile_from_list()
+                    target["path"] = ""
+                    continue
+                loop = GLib.MainLoop.new(context, False)
+                state["loop"] = loop
                 loop.run()
-            state["loop"] = None
+                state["loop"] = None
+                if not state["refresh"]:
+                    # Any other reason the loop ended (stop, session death, or
+                    # a spurious quit) leaves the listen phase. Re-entering
+                    # unconditionally would busy-spin against a main loop that
+                    # returns immediately.
+                    break
         if state["closed"] and not stop_event.is_set():
             # False → the supervisor rebuilds a fresh session (the dead one
             # can never deliver another Activated).
@@ -522,7 +723,8 @@ def wayland_hotkey_listener(
             if stop_source is not None:
                 stop_source.destroy()
             if bus is not None:
-                for sub in (response_sub, activated_sub, session_closed_sub, owner_sub):
+                for sub in (response_sub, activated_sub, shortcuts_changed_sub,
+                            session_closed_sub, owner_sub):
                     if sub is not None:
                         bus.signal_unsubscribe(sub)
                 bus.close_sync(None)

@@ -284,6 +284,11 @@ class TestHotkeyDetect:
             "_stop_capture_listener",
             "_cancel_detect_timeout",
             "_start_hotkey_detect",
+            # The availability gate and the button-state sync are shared with
+            # the Settings panel so the guard and the enabled state cannot
+            # disagree; the stand-in needs both.
+            "_detect_gate",
+            "_sync_detect_availability",
             "_cancel_hotkey_detect",
         ):
             setattr(app, name, getattr(wayfinder_main.WayfinderApp, name).__get__(app))

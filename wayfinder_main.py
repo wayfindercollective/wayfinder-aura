@@ -141,6 +141,13 @@ MODIFIER_CODES = {
 }
 
 
+# 500ms polls to wait for a portal listener to wind down after a rebind
+# request. The listener's own stop poll is 500ms, but its setup D-Bus calls
+# block up to the CreateSession timeout and cannot be interrupted, so the
+# budget has to cover a listener caught mid-setup (~22s).
+_PORTAL_REBIND_POLLS = 44
+
+
 def _get_llm_models_dir() -> Path:
     """Get the LLM models directory (platform-aware)."""
     if sys.platform == "darwin":
@@ -2891,6 +2898,7 @@ def resolve_audio_device(config: dict) -> int | None:
 # Single source of truth for EventType — shared with hotkey listeners
 from wayfinder.hotkeys.types import EventType
 from wayfinder.hotkeys.detect_gate import detect_availability, evdev_capture_usable
+from wayfinder.hotkeys.display import hotkey_label, is_unbound
 from wayfinder.ui.tab_gates import feature_for_tab, locked_tabs
 from wayfinder.ui.clipboard import attach_secret_paste
 
@@ -7798,6 +7806,28 @@ class WayfinderApp(ctk.CTk):
         )
         self._detect_btn_record.pack(side="left")
 
+        # Under the GlobalShortcuts portal the compositor owns the binding, so
+        # Detect cannot capture anything. Re-running the bind is the action
+        # that DOES work — it makes the compositor show its shortcut picker.
+        self._detect_set_shortcut_btn = ctk.CTkButton(
+            detect_row, text="Set shortcut…",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            text_color=COLORS["bg_base"], height=32, corner_radius=RADIUS["sm"],
+            command=self._request_portal_rebind,
+        )
+        # Packed by _sync_detect_availability only where it applies.
+
+        # Why Detect is unavailable, next to the button rather than buried in
+        # the activity log — the whole defect was a live-looking dead button.
+        self._detect_hint = ctk.CTkLabel(
+            system_content, text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"], wraplength=360, justify="left",
+        )
+        self._detect_hint.pack(fill="x", padx=16, pady=(0, 6), anchor="w")
+        self._sync_detect_availability()
+
         # Steam owns the Deck's rear buttons, so an unassigned R4/L4/etc. never
         # reaches Detect. Explain the one required Steam Input mapping exactly
         # where a Deck user is trying to choose their recording button. Keep the
@@ -12625,6 +12655,11 @@ class WayfinderApp(ctk.CTk):
                 ) if IS_FLATPAK else None
                 if flatpak_backend == "portal":
                     if (not getattr(self, '_portal_listener_started', False)
+                            # A "Set shortcut…" rebind owns the restart while it
+                            # is in flight; the supervisor jumping in would race
+                            # it and make its poll chain report a bogus failure
+                            # against the healthy replacement (Codex review).
+                            and not getattr(self, '_portal_rebind_pending', False)
                             and time.monotonic() >= getattr(self, '_portal_next_retry', 0.0)):
                         self.log("🔄 Portal hotkey listener not running - restarting...")
                         self._start_portal_listener()
@@ -14836,26 +14871,88 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
-    def get_hotkey_display(self) -> str:
-        hotkey_key = self.config.get("hotkey_key", 67)
-        hotkey_modifiers = self.config.get("hotkey_modifiers", [])
-        key_name = _keycode_display(hotkey_key)
-
-        if hotkey_modifiers:
-            mods = "+".join(m.capitalize() for m in hotkey_modifiers)
+    def _config_hotkey_label(self, key_code, modifiers) -> str:
+        """The chord the LOCAL config encodes — a request under the portal."""
+        key_name = _keycode_display(key_code)
+        if modifiers:
+            mods = "+".join(m.capitalize() for m in modifiers)
             return f"{mods}+{key_name}"
         return key_name
+
+    def _portal_display(self, shortcut_id: str, config_label: str) -> str:
+        """Route a config label through the portal's view of what is bound."""
+        bindings = getattr(self, "_portal_bindings", None)
+        return hotkey_label(
+            config_label,
+            # _portal_backend_active, NOT _portal_listener_started: the latter
+            # is thread liveness and goes False during a rebind restart or
+            # while a failed listener is backing off. Keying display on it
+            # would fall back to the config chord in exactly those gaps —
+            # re-telling the original lie (Codex review).
+            portal_active=bool(getattr(self, "_portal_backend_active", False)),
+            portal_known=isinstance(bindings, dict) and shortcut_id in bindings,
+            portal_trigger=(bindings or {}).get(shortcut_id),
+        )
+
+    def get_hotkey_display(self) -> str:
+        return self._portal_display("record-toggle", self._config_hotkey_label(
+            self.config.get("hotkey_key", 67),
+            self.config.get("hotkey_modifiers", []),
+        ))
 
     def get_style_hotkey_display(self) -> str:
         """Get the display string for the style toggle hotkey."""
-        style_key = self.config.get("style_toggle_key", 68)
-        style_modifiers = self.config.get("style_toggle_modifiers", [])
-        key_name = _keycode_display(style_key)
+        return self._portal_display("style-toggle", self._config_hotkey_label(
+            self.config.get("style_toggle_key", 68),
+            self.config.get("style_toggle_modifiers", []),
+        ))
 
-        if style_modifiers:
-            mods = "+".join(m.capitalize() for m in style_modifiers)
-            return f"{mods}+{key_name}"
-        return key_name
+    def _on_portal_bindings_changed(self, bindings) -> None:
+        """The compositor told us what is actually bound (Tk thread).
+
+        Arrives via EventType.PORTAL_BINDINGS_CHANGED — the GLib listener
+        thread must never touch Tk directly.
+        """
+        if not isinstance(bindings, dict):
+            return
+        previous = getattr(self, "_portal_bindings", None)
+        self._portal_bindings = dict(bindings)
+        if previous == self._portal_bindings:
+            return
+        record = self.get_hotkey_display()
+        if is_unbound(record):
+            self.log("⌨ Record hotkey is NOT bound — set it in "
+                     "System Settings → Shortcuts")
+        else:
+            self.log(f"⌨ Record hotkey (bound by the compositor): {record}")
+        self._refresh_hotkey_labels()
+
+    def _refresh_hotkey_labels(self) -> None:
+        """Re-render every surface that shows the record hotkey."""
+        label = self.get_hotkey_display()
+        for attr in ("hotkey_label",):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    widget.configure(text=label)
+                except Exception:
+                    pass
+        try:
+            self._refresh_dictate_setup_chip()
+        except Exception:
+            pass
+        try:
+            self._sync_detect_availability()
+        except Exception:
+            pass
+        # The first-run card can be sitting on its "your hotkey" step right now
+        # — the portal answers asynchronously (Codex review).
+        pane = getattr(self, "_welcome_pane", None)
+        if pane is not None:
+            try:
+                pane.refresh_hotkey_display()
+            except Exception:
+                pass
 
     # === Settings "Detect" hotkey capture ===
 
@@ -14903,16 +15000,17 @@ class WayfinderApp(ctk.CTk):
         # A live pynput listener can capture on its own, so no evdev in the
         # Flatpak is not fatal — gating on evdev alone made Detect dead in
         # every Flatpak install (src/wayfinder/hotkeys/detect_gate.py).
-        can_detect, gate_message = detect_availability(
-            is_flatpak=IS_FLATPAK,
-            # Usable, not merely importable: the Flatpak bundles evdev but has
-            # no /dev/input, so HAS_EVDEV alone would short-circuit this True
-            # and arm Detect against nothing.
-            evdev_usable=evdev_capture_usable(evdev.list_devices if HAS_EVDEV else None),
-            pynput_started=bool(getattr(self, "_pynput_listener_started", False)),
-        )
+        # Usable, not merely importable: the Flatpak bundles evdev but has no
+        # /dev/input, so HAS_EVDEV alone would short-circuit this True and arm
+        # Detect against nothing. Shared with _sync_detect_availability so the
+        # button's enabled state and this guard can never disagree.
+        can_detect, gate_message = self._detect_gate()
         if not can_detect:
             self.log(gate_message)
+            # Belt and braces: the button should already be disabled, but a
+            # backend that changed since the panel was built must not leave a
+            # live-looking control behind.
+            self._sync_detect_availability()
             return
 
         # Debounce: a just-finished Detect must not re-arm from the same physical press
@@ -17767,22 +17865,34 @@ class WayfinderApp(ctk.CTk):
         The portal is the only sandbox-viable global-hotkey mechanism. The user binds/rebinds
         the trigger in System Settings → Shortcuts; wayfinder requests a sensible default.
         """
+        # Sticky: records that the PORTAL owns this app's global hotkeys, which
+        # stays true across restarts and backoff even when no thread is alive.
+        # Display semantics key off this; liveness keys off
+        # _portal_listener_started.
+        self._portal_backend_active = True
         if getattr(self, '_portal_listener_started', False):
             return
+        self._portal_started_at = time.monotonic()
         # Both global shortcuts, triggers encoded from config by the protocol
         # encoder — the UI display label is presentation, not protocol. Built
         # BEFORE the started flag: if this raises, the flag must not be left
         # set with no thread running (Codex review).
         from wayfinder.hotkeys.dbus import shortcut_specs_from_config
+        from wayfinder.hotkeys.types import AnyEvent
         shortcuts = shortcut_specs_from_config(self.config)
         self._portal_listener_started = True
+        # A private stop event alongside the app-wide one, so "Set shortcut…"
+        # can end THIS session (and thus re-run BindShortcuts, which is what
+        # makes the compositor show its picker) without signalling shutdown.
+        self._portal_stop_event = threading.Event()
+        portal_stop = AnyEvent(self.stop_event, self._portal_stop_event)
 
         def _portal_wrapper():
             started_at = time.monotonic()
             clean_stop = False
             try:
                 clean_stop = wayland_hotkey_listener(
-                    self.event_queue, shortcuts, self.stop_event, self.log)
+                    self.event_queue, shortcuts, portal_stop, self.log)
             except Exception as e:
                 print(f"[Hotkey] portal listener crashed: {e}", flush=True)
             finally:
@@ -17805,6 +17915,119 @@ class WayfinderApp(ctk.CTk):
                     self._portal_listener_started = False
 
         threading.Thread(target=_portal_wrapper, daemon=True).start()
+
+    def _request_portal_rebind(self) -> None:
+        """Re-run the portal bind so the compositor shows its shortcut picker.
+
+        The in-app "Detect" capture cannot work under the portal — the sandbox
+        sees no input devices and the compositor, not this app, owns the
+        binding. Ending the current portal session and starting a fresh one
+        re-issues CreateSession + BindShortcuts, which is precisely the call
+        that pops KDE's picker. No new sandbox permission is involved.
+        """
+        if getattr(self, "_portal_rebind_pending", False):
+            self.log("⌨ Already asking — watch for the compositor's picker")
+            return
+        stop = getattr(self, "_portal_stop_event", None)
+        if stop is not None:
+            stop.set()
+        self._portal_next_retry = 0.0
+        # Generation stamp: a second click must not leave the first click's
+        # poll chain running against the healthy replacement listener, where it
+        # would eventually log a bogus "did not stop" (Codex review).
+        self._portal_rebind_gen = int(getattr(self, "_portal_rebind_gen", 0)) + 1
+        self._portal_rebind_pending = True
+        self._portal_rebind_at = time.monotonic()
+        gen = self._portal_rebind_gen
+        self.log("⌨ Asking the compositor for its shortcut picker…")
+        self._sync_detect_availability()
+        self.after(1200, lambda: self._restart_portal_after_stop(gen))
+
+    def _finish_portal_rebind(self, message: str = "") -> None:
+        self._portal_rebind_pending = False
+        if message:
+            self.log(message)
+        try:
+            self._sync_detect_availability()
+        except Exception:
+            pass
+
+    def _restart_portal_after_stop(self, gen: int, attempts: int = 0) -> None:
+        """Start a fresh portal session once the previous one has wound down."""
+        if gen != getattr(self, "_portal_rebind_gen", 0):
+            return  # superseded by a newer rebind request
+        if getattr(self, "_portal_listener_started", False):
+            # A listener that STARTED after the request is the replacement, not
+            # the one we asked to stop — whoever started it, the rebind already
+            # happened and the picker is up (Codex review).
+            if (getattr(self, "_portal_started_at", 0.0)
+                    >= getattr(self, "_portal_rebind_at", 0.0)):
+                self._finish_portal_rebind()
+                return
+            # The setup D-Bus calls are not interruptible mid-flight, so allow
+            # a full CreateSession timeout's worth of winding down rather than
+            # only the 500ms stop-poll cycles (Codex review).
+            if attempts < _PORTAL_REBIND_POLLS:
+                self.after(500, lambda: self._restart_portal_after_stop(gen, attempts + 1))
+            else:
+                self._finish_portal_rebind(
+                    "⚠️ Portal listener is still busy — set the shortcut in "
+                    "System Settings → Shortcuts")
+            return
+        # finally: a raising _start_portal_listener must not leave the button
+        # stuck reading "Asking…" forever (Codex review).
+        try:
+            self._start_portal_listener()
+        finally:
+            self._finish_portal_rebind()
+
+    def _detect_gate(self):
+        """(can_detect, message) for Settings → Detect, in this environment."""
+        return detect_availability(
+            is_flatpak=IS_FLATPAK,
+            evdev_usable=evdev_capture_usable(evdev.list_devices if HAS_EVDEV else None),
+            pynput_started=bool(getattr(self, "_pynput_listener_started", False)),
+        )
+
+    def _sync_detect_availability(self) -> None:
+        """Show Detect as what it IS in this environment.
+
+        The bug: under the portal backend Detect can never capture a key (no
+        /dev/input in the sandbox, and no pynput listener because the portal
+        took the backend slot), yet the button rendered fully enabled and its
+        refusal went only to the activity log. Three clicks, three silent
+        no-ops. Disable it, say why in the panel, and offer the action that
+        does work instead.
+        """
+        can_detect, message = self._detect_gate()
+        for attr in ("_detect_btn_record", "_detect_btn_style"):
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            try:
+                btn.configure(state="normal" if can_detect else "disabled")
+            except Exception:
+                pass
+        hint = getattr(self, "_detect_hint", None)
+        if hint is not None:
+            try:
+                hint.configure(text="" if can_detect else message)
+            except Exception:
+                pass
+        setter = getattr(self, "_detect_set_shortcut_btn", None)
+        if setter is not None:
+            try:
+                if can_detect or not getattr(self, "_portal_backend_active", False):
+                    setter.pack_forget()
+                else:
+                    pending = bool(getattr(self, "_portal_rebind_pending", False))
+                    setter.configure(
+                        state="disabled" if pending else "normal",
+                        text="Asking…" if pending else "Set shortcut…",
+                    )
+                    setter.pack(side="left", padx=(8, 0))
+            except Exception:
+                pass
 
     def _compositor_owns_hotkeys(self) -> bool:
         """True when KDE's global shortcut matches our *current* record hotkey.
@@ -17978,6 +18201,8 @@ class WayfinderApp(ctk.CTk):
             self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
         elif event_type == EventType.HOTKEY_CAPTURED:
             self._apply_captured_hotkey(data)
+        elif event_type == EventType.PORTAL_BINDINGS_CHANGED:
+            self._on_portal_bindings_changed(data)
         elif event_type == EventType.SHOW_WINDOW:
             self.show_from_tray()
         elif event_type == EventType.HIDE_WINDOW:

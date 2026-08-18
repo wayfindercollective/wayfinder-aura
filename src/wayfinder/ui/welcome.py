@@ -20,6 +20,7 @@ demos itself without typing into whatever window happens to be focused.
 from __future__ import annotations
 
 from wayfinder.config import save_config
+from wayfinder.hotkeys.display import UNBOUND_SHORT, is_unbound
 from wayfinder.ui.theme import COLORS, FONT_SIZES, FONTS, RADIUS, SPACING
 
 
@@ -81,6 +82,42 @@ class WelcomeFlow:
 # Max characters of a transcript we echo back inside the card.
 _TRANSCRIPT_MAX = 140
 
+# Design size of the card. These are a CAP, not a fixed size: the card shrinks
+# to whatever the tab-content area actually offers. On a Steam Deck the cavity
+# is 407x430 px (639-wide window - 40 content padding - 180 sidebar - 12 gap),
+# so a hard 520x360 card overflowed by 113 px and lost ~56 px off each side.
+_CARD_MAX_W = 520
+_CARD_MAX_H = 360
+# Breathing room between the card and the edge of the pane it sits in.
+_CARD_MARGIN = 12
+# Horizontal padding inside the card (header/body/footer share one margin, see
+# ``_render_step``), doubled for both sides plus a little slack for the border.
+_CARD_TEXT_INSET = 80
+
+
+def fit_card_size(host_w, host_h, *, max_w=_CARD_MAX_W, max_h=_CARD_MAX_H,
+                  margin=_CARD_MARGIN):
+    """Card size for a host of ``host_w`` x ``host_h``: capped, never overflowing.
+
+    Pure and Tk-free so the sizing rule is testable headlessly (same split as
+    ``WelcomeFlow`` vs ``WelcomePane``).
+
+    There is deliberately NO minimum size. A floor such as
+    ``max(MIN_W, min(MAX_W, available))`` re-introduces the very bug this fixes
+    whenever the host is narrower than the floor — the card would again be wider
+    than the cavity it lives in. Shrinking past comfortable is the correct
+    failure mode; overflowing off-screen is not.
+
+    A non-positive host means "not laid out yet": return the design size and let
+    the ``<Configure>`` refit correct it once real geometry arrives.
+    """
+    def _axis(host, cap):
+        if host <= 0:
+            return cap
+        return max(1, min(cap, host - 2 * margin))
+
+    return _axis(host_w, max_w), _axis(host_h, max_h)
+
 # How long the final "try it now" step waits for a first transcript before it
 # surfaces a troubleshooting line + skip button. Single-shot (see rule #1).
 _HELP_DELAY_MS = 13000
@@ -113,26 +150,84 @@ class WelcomePane:
         # timer swaps the calm "listening…" line for a troubleshooting affordance.
         self._help_after_id = None
         self._help_shown = False
+        # Labels whose wraplength tracks the card width. Rebuilt by every
+        # _render_step; re-measured (without a re-render) by every refit.
+        self._wrapped = []
 
         # Full-size dim underlay. CTk has no real alpha; a plain bg_base frame
         # covering the tab content reads as a focused/modal state.
         self.underlay = ctk.CTkFrame(parent, fg_color=COLORS["bg_base"], corner_radius=0)
         self.underlay.place(relx=0, rely=0, relwidth=1, relheight=1)
 
-        # Single centered card.
+        # Single centered card, sized to the host rather than to a constant —
+        # see fit_card_size. Start at the design cap; the <Configure> refit
+        # below shrinks it as soon as the underlay has real geometry.
+        self._card_size = (_CARD_MAX_W, _CARD_MAX_H)
         self.card = ctk.CTkFrame(
             self.underlay,
             fg_color=COLORS["bg_card"],
             corner_radius=RADIUS["lg"],
             border_width=1,
             border_color=COLORS["border_rim"],
-            width=520,
-            height=360,
+            width=_CARD_MAX_W,
+            height=_CARD_MAX_H,
         )
         self.card.place(relx=0.5, rely=0.5, anchor="center")
         self.card.pack_propagate(False)
 
+        # add="+": CTkFrame binds <Configure> itself for corner/border redraw;
+        # replacing that binding would break the frame's own rendering.
+        self.underlay.bind("<Configure>", self._on_host_resize, add="+")
+
         self._render_step()
+        self._refit_card()
+
+    # --- responsive sizing ---------------------------------------------------
+
+    def _on_host_resize(self, _event=None) -> None:
+        self._refit_card()
+
+    def _refit_card(self) -> None:
+        """Resize the card to the underlay, capped at the design size.
+
+        Idempotent: a no-op when the computed size is unchanged, so the
+        <Configure> storm CTk frames generate costs one comparison. Never
+        re-renders the step — destroying and rebuilding children here would
+        restart the dictate step's single-shot help timer on every resize.
+        """
+        try:
+            w, h = fit_card_size(self.underlay.winfo_width(), self.underlay.winfo_height())
+        except Exception:
+            return
+        if (w, h) == self._card_size:
+            return
+        self._card_size = (w, h)
+        try:
+            self.card.configure(width=w, height=h)
+        except Exception:
+            return
+        self._apply_wraplength()
+
+    def _wrap_width(self) -> int:
+        """Wraplength for text inside the card, derived from its live width."""
+        return max(120, self._card_size[0] - _CARD_TEXT_INSET)
+
+    def _track_wrapped(self, label):
+        """Register a label so refits can re-wrap it without a re-render."""
+        self._wrapped.append(label)
+        return label
+
+    def _apply_wraplength(self) -> None:
+        wrap = self._wrap_width()
+        for label in list(self._wrapped):
+            try:
+                label.configure(wraplength=wrap)
+            except Exception:
+                # Destroyed by a re-render between refits — drop it.
+                try:
+                    self._wrapped.remove(label)
+                except ValueError:
+                    pass
 
     # --- helpers -------------------------------------------------------------
 
@@ -183,11 +278,11 @@ class WelcomePane:
             text=text,
             font=(FONTS["body"][0], FONT_SIZES["small"] if muted else FONT_SIZES["body"]),
             text_color=COLORS["text_muted"] if muted else COLORS["text_secondary"],
-            wraplength=440,
+            wraplength=self._wrap_width(),
             justify="left",
         )
         lbl.pack(anchor="w", pady=pady)
-        return lbl
+        return self._track_wrapped(lbl)
 
     # --- rendering -----------------------------------------------------------
 
@@ -195,6 +290,9 @@ class WelcomePane:
         ctk = self._ctk
         if self.flow.is_complete:
             return
+        # Children are about to be destroyed; the wrap registry must not
+        # outlive them (refits would then configure dead widgets).
+        self._wrapped = []
         for child in self.card.winfo_children():
             child.destroy()
 
@@ -243,17 +341,32 @@ class WelcomePane:
 
     def _render_hotkey(self, body) -> None:
         ctk = self._ctk
+        live = self._hotkey_text()
+        unbound = is_unbound(live)
         token = ctk.CTkLabel(
             body,
-            text=self._hotkey_text(),
+            # The unbound label names a fix ("System Settings → Shortcuts")
+            # that cannot fit a display-size token on a 383 px Deck card, so
+            # the token carries the short form and the body copy explains.
+            text=UNBOUND_SHORT if unbound else live,
             font=(FONTS["mono"][0], FONT_SIZES["display"] + 8, "bold"),
-            text_color=COLORS["accent"],
+            text_color=COLORS["text_muted"] if unbound else COLORS["accent"],
+            wraplength=self._wrap_width(),
+            justify="left",
         )
+        self._track_wrapped(token)
         token.pack(anchor="w", pady=(0, SPACING["md"]))
-        self._body_label(
-            body,
-            "press it once to start a dictation — press it again to stop.",
-        )
+        if unbound:
+            self._body_label(
+                body,
+                "your desktop hasn't bound a shortcut yet — set one in "
+                "System Settings → Shortcuts, under Wayfinder Aura.",
+            )
+        else:
+            self._body_label(
+                body,
+                "press it once to start a dictation — press it again to stop.",
+            )
         self._continue_button(body, "continue")
 
     def _render_dictate(self, body) -> None:
@@ -268,9 +381,10 @@ class WelcomePane:
                 text=f'we heard: "{quote}"',
                 font=(FONTS["body"][0], FONT_SIZES["body"]),
                 text_color=COLORS["text_primary"],
-                wraplength=440,
+                wraplength=self._wrap_width(),
                 justify="left",
             )
+            self._track_wrapped(heard)
             heard.pack(anchor="w", pady=(SPACING["sm"], 0))
             self._continue_button(body, "done", gold=True)
         elif self._help_shown:
@@ -289,16 +403,25 @@ class WelcomePane:
         """The recovery variant of the dictate step, shown once the wait elapses
         without a transcript. Re-shows the hotkey token and offers a clear exit."""
         ctk = self._ctk
+        live = self._hotkey_text()
+        unbound = is_unbound(live)
         self._body_label(body, "try it now — dictate a sentence.")
         token = ctk.CTkLabel(
             body,
-            text=self._hotkey_text(),
+            # Same treatment as _render_hotkey: the long unbound label cannot
+            # fit a title-size token on a 383 px Deck card (Codex review).
+            text=UNBOUND_SHORT if unbound else live,
             font=(FONTS["mono"][0], FONT_SIZES["title"], "bold"),
-            text_color=COLORS["accent"],
+            text_color=COLORS["text_muted"] if unbound else COLORS["accent"],
+            wraplength=self._wrap_width(),
+            justify="left",
         )
+        self._track_wrapped(token)
         token.pack(anchor="w", pady=(SPACING["sm"], 0))
         self._body_label(
             body,
+            "no shortcut is bound yet — set one in System Settings → Shortcuts."
+            if unbound else
             "having trouble? check your mic and press your hotkey — or skip for now.",
             muted=True,
             pady=(SPACING["sm"], 0),
@@ -368,6 +491,32 @@ class WelcomePane:
 
     def _on_skip(self) -> None:
         self.flow.skip()  # fires _complete_flow -> teardown
+
+    def refresh_hotkey_display(self) -> None:
+        """Re-render if the live hotkey label changed under us.
+
+        The portal reports what is actually bound asynchronously, and that can
+        land while the card is already showing the hotkey — which would
+        otherwise keep displaying the stale config chord (Codex review).
+
+        Two steps render the token: "hotkey", and "dictate" once its
+        troubleshooting variant is up. Re-rendering the latter is safe — the
+        help state does not re-arm the single-shot timer, and the
+        transcript variant shows no token at all, so it is skipped. A no-op
+        everywhere else, and cheap enough to call unconditionally.
+        """
+        if self.flow.is_complete:
+            return
+        step = self.flow.current
+        shows_token = step == "hotkey" or (
+            step == "dictate" and self._help_shown and not self._transcript
+        )
+        if not shows_token:
+            return
+        try:
+            self._render_step()
+        except Exception:
+            pass
 
     def receive_transcript(self, text: str) -> None:
         """The app hands a suppressed dictation transcript to the pane.

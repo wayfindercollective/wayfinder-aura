@@ -18,6 +18,11 @@ class EventType(Enum):
     FORCE_RESET = auto()   # Tray "Reset" — unstick overlay / abort in-flight dictation
     QUIT_APP = auto()      # Tray "Quit" — clean full shutdown
     HOTKEY_CAPTURED = auto()  # Settings "Detect" — next pressed key reported to the UI
+    # The GlobalShortcuts portal told us what is ACTUALLY bound. Payload is
+    # {shortcut_id: trigger_description or None}; None means "not bound".
+    # Under the portal the compositor owns the binding, so this — not the local
+    # config — is the truth the UI must display.
+    PORTAL_BINDINGS_CHANGED = auto()
     TRANSCRIPTION_DONE = auto()
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()
@@ -27,3 +32,21 @@ class EventType(Enum):
     LOG_MESSAGE = auto()  # Thread-safe log message (avoids Tk threading crash)
     SWITCH_TAB = auto()  # Dev/verification: switch main-window tab via socket ("tab:<id>")
     URL_CLIPBOARD_OFFER = auto()  # Failed browser open — copy the link to the clipboard on the Tk thread
+
+
+class AnyEvent:
+    """``is_set()`` when ANY of the wrapped events is set.
+
+    Lets one listener be stopped for its own reasons (a user-triggered rebind)
+    without touching the app-wide shutdown event, and without either side
+    knowing about the other. ``is_set`` is the only method the portal listener
+    calls on its stop event, so this stays a drop-in.
+    """
+
+    __slots__ = ("_events",)
+
+    def __init__(self, *events):
+        self._events = tuple(events)
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
