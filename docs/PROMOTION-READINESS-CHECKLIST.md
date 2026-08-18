@@ -318,6 +318,13 @@ Rollback plan:
 
 ## Stable release and promotion gate
 
+- [ ] **Enable immutable releases** (repo Settings) as part of the stable cut,
+      not before. Deferred through the beta cycle by decision on 2026-08-17 —
+      it forbids prerelease→latest promotion and burns a tag name on a botched
+      release, which costs real time at beta cadence and buys little while every
+      install path follows `releases/latest`. Reasoning and trigger:
+      `docs/SECURITY-AUDIT-APPIMAGE-FLATPAK-2026-08-17.md` §0.1. Once enabled,
+      publish via draft → attach every asset → set latest/prerelease → publish.
 - [ ] Every P0 failure found during prerelease testing is fixed and retested on
       the machine that found it.
 - [ ] Create the final stable tag only after prerelease signoff.

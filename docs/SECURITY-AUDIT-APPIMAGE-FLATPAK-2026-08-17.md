@@ -240,13 +240,38 @@ leaves the trusted origin. Recorded as a follow-up, not built.
    is reasonable, but not because attestations replace it.
 
    Costs to accept before enabling: applies to future releases only; a wrong
-   asset needs a new version rather than a re-upload; and post-publish editing
-   is limited to title and notes, so **the latest/prerelease designation is
-   fixed at publication** — the exact `gh release edit --prerelease=false
-   --latest` operation used on `v1.1.8-beta.9` would no longer be available.
-   Workflow becomes draft → attach all assets → set designation → publish, and
-   the rollback plan in `docs/PROMOTION-READINESS-CHECKLIST.md` has been updated
-   to match.
+   asset needs a new version rather than a re-upload; a deleted release frees
+   its tag but the tag **name can never be reused**; and post-publish editing is
+   limited to title and notes — GitHub's docs state *"you can only edit the
+   title and release notes after a release is published"* — so **the
+   latest/prerelease designation is fixed at publication**. The exact
+   `gh release edit --prerelease=false --latest` operation used on
+   `v1.1.8-beta.9` would no longer be available. Workflow becomes draft →
+   attach all assets → set designation → publish, and the rollback plan in
+   `docs/PROMOTION-READINESS-CHECKLIST.md` has been updated to match.
+
+   **DECIDED 2026-08-17: deferred until the 1.1.8 stable line. Do not enable
+   during the beta cycle.** The reasoning, so this is not re-argued:
+
+   - The benefit is **narrower than it first appears**. It stops an attacker
+     with repo write access from swapping bytes under an *existing* tag — but
+     that same attacker can publish a *new* release and repoint `latest`, which
+     immutability does not prevent. Every Aura install path (the Deck
+     installer's default, the README button, AppImageUpdate's zsync) follows
+     `releases/latest`, so the protection only reaches someone who pinned a
+     specific version and re-downloads it.
+   - The attestation is real but **unverified by anything we ship** — the
+     installer checks a digest, not an attestation.
+   - The cost lands hardest exactly now: five prereleases in three days, each
+     published → tested → sometimes promoted. Immutability's constraints
+     multiply by publish frequency, and prerelease→latest promotion is the one
+     operation it forbids.
+
+   **Trigger to revisit:** the 1.1.8 stable cut, when releases become
+   infrequent, customers pin versions, and prereleases are no longer promoted.
+   At that point the workflow cost is near zero and the value is at its peak.
+   Until then the equivalent protection is already shipped: the installer
+   verifies before installing, and `--expect-sha256` gives a pinned install.
 2. **RESOLVED 2026-08-17 — every CDN object is byte-verified.**
    `python3 scripts/verify-model-digests.py --full --source cdn` streamed and
    hashed all 19 objects: **0 failed, 0 skipped**, exit 0. That includes the
