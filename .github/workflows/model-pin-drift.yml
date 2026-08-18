@@ -37,7 +37,8 @@ jobs:
 
       - name: Catalog pins are internally consistent
         run: |
-          python -m pip install --quiet pytest
+          # pytest-timeout is required: pyproject's addopts carries --timeout=60.
+          python -m pip install --quiet pytest pytest-timeout
           python -m pytest tests/test_catalog_ratchet.py -q
 
       - name: Pins still match Hugging Face
