@@ -59,6 +59,26 @@ def attach_secret_paste(entry, tk_module, *, log=None) -> bool:
         # or the right-click never reaches us.
         target = getattr(entry, "_entry", entry)
 
+        # Untie this field's selection from the X11 PRIMARY selection.
+        #
+        # Tk entries default to exportselection=1, which publishes the widget's
+        # selection as PRIMARY -- and Tk *silently clears the widget's own
+        # selection* the moment any other client claims PRIMARY. Selecting the
+        # key in an email or password manager to copy it is exactly such a
+        # claim, so by the time the user pastes over the highlighted old key
+        # the entry no longer has a selection: `sel.first` raises, the paste
+        # falls into the insert-at-cursor branch, and the new key lands
+        # *beside* the old one ("WV-OLD...WV-NEW..."), which then fails
+        # activation with a key the user can see is right.
+        #
+        # Not exporting also keeps a credential out of PRIMARY, where any
+        # client can read it and a stray middle-click can splatter it into
+        # another window.
+        try:
+            target.configure(exportselection=False)
+        except Exception:
+            pass  # ancient/odd Tk build -- paste still works without a selection
+
         def _do_paste(_event=None):
             try:
                 pasted = sanitize_pasted_secret(target.clipboard_get())

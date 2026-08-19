@@ -8,7 +8,11 @@ binding is a thin wrapper over it.
 
 import pytest
 
-from wayfinder.ui.clipboard import sanitize_pasted_secret, text_after_paste
+from wayfinder.ui.clipboard import (
+    attach_secret_paste,
+    sanitize_pasted_secret,
+    text_after_paste,
+)
 
 
 @pytest.mark.parametrize(
@@ -56,3 +60,59 @@ def test_cursor_past_the_end_is_clamped():
 
 def test_pasting_nothing_leaves_the_field_alone():
     assert text_after_paste("ABC", "", None, None, 1) == ("ABC", 1)
+
+
+# ---------------------------------------------------------------------------
+# The Tk binding layer
+# ---------------------------------------------------------------------------
+
+
+class _FakeMenu:
+    def __init__(self, *_a, **_kw):
+        self.commands = []
+
+    def add_command(self, label=None, command=None):
+        self.commands.append((label, command))
+
+
+class _FakeTk:
+    Menu = _FakeMenu
+
+
+class _FakeEntry:
+    """Enough of a tk.Entry to exercise ``attach_secret_paste``."""
+
+    def __init__(self, configure_raises: bool = False):
+        self.options = {"exportselection": 1}
+        self.bindings = {}
+        self._configure_raises = configure_raises
+
+    def configure(self, **kw):
+        if self._configure_raises:
+            raise RuntimeError("this Tk build has no such option")
+        self.options.update(kw)
+
+    def bind(self, sequence, func):
+        self.bindings[sequence] = func
+
+
+def test_secret_field_stops_exporting_its_selection():
+    """The selection must survive another app claiming the X11 PRIMARY selection.
+
+    Tk clears an entry's own selection when it loses PRIMARY, and copying a key
+    out of an email or password manager is exactly what takes PRIMARY away. With
+    the selection silently gone, pasting over a highlighted wrong key appends the
+    new one beside it instead of replacing it, and activation fails on a key the
+    user can see is correct.
+    """
+    entry = _FakeEntry()
+    assert attach_secret_paste(entry, _FakeTk()) is True
+    assert entry.options["exportselection"] is False
+
+
+def test_paste_menu_still_attaches_when_exportselection_is_rejected():
+    """Best-effort: an odd Tk build must not cost the field its paste menu."""
+    entry = _FakeEntry(configure_raises=True)
+    assert attach_secret_paste(entry, _FakeTk()) is True
+    for seq in ("<Button-3>", "<Control-v>", "<Control-a>"):
+        assert seq in entry.bindings
