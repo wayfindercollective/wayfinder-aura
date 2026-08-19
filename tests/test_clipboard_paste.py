@@ -76,6 +76,17 @@ class _TclError(Exception):
     """Stands in for tkinter.TclError, which the handler catches broadly."""
 
 
+class _FakeInterp:
+    """Just enough Tcl to answer the scan-drag guard expression."""
+
+    def __init__(self, entry):
+        self._entry = entry
+
+    def eval(self, script):
+        assert "mouseMoved" in script
+        return "0" if self._entry.mouse_moved else "1"
+
+
 class _FakeInnerEntry:
     """The inner ``tk.Entry``: text, cursor, selection, and the PRIMARY rule."""
 
@@ -89,6 +100,10 @@ class _FakeInnerEntry:
         self.primary = ""
         self.state = "normal"
         self.focused = False
+        self.mouse_moved = False
+        self.tk = _FakeInterp(self)
+
+    CHAR_W = 10  # pixels per glyph, so "@x" and bbox() can disagree
 
     def configure(self, **kw):
         self.options.update(kw)
@@ -112,9 +127,10 @@ class _FakeInnerEntry:
         if what == "end":
             return len(self.text)
         if isinstance(what, str) and what.startswith("@"):
-            # Tk resolves "@<pixel>" to the closest character gap; one
-            # character per pixel is enough to pin which index we asked for.
-            return max(0, min(int(what[1:]), len(self.text)))
+            # Tk's "@<pixel>" names the character *under* the pointer -- not
+            # the nearest gap. Keeping that distinction is what makes the
+            # closest-gap test meaningful.
+            return max(0, min(int(what[1:]) // self.CHAR_W, len(self.text)))
         if what in ("sel.first", "sel.last"):
             if self.selection is None:
                 raise _TclError("selection isn't in widget")
@@ -143,6 +159,9 @@ class _FakeInnerEntry:
 
     def cget(self, option):
         return {"state": self.state}.get(option, "")
+
+    def bbox(self, index):
+        return (index * self.CHAR_W, 0, self.CHAR_W, 16)
 
     def focus_set(self):
         self.focused = True
@@ -217,6 +236,8 @@ def _dispatch(widget, sequence, event=None):
     if result == "break":
         return result
     if sequence == "<<PasteSelection>>":
+        if inner.mouse_moved:
+            return result  # Tk skips the paste after a middle-drag scroll
         # tk::EntryPaste: cursor to the click gap, insert, never delete the
         # selection, then focus.
         inner.icursor(inner.index(f"@{getattr(event, 'x', 0)}"))
@@ -274,8 +295,37 @@ def test_middle_click_without_a_selection_drops_text_at_the_click():
     entry.primary = "xy"
     entry.cursor = 0
 
-    _dispatch(entry, "<<PasteSelection>>", _Event(x=3))
+    # x=30 is the left edge of "D" (10px glyphs) -> gap before it.
+    _dispatch(entry, "<<PasteSelection>>", _Event(x=30))
     assert entry.text == "ABCxyDEF"
+
+
+def test_middle_click_past_a_glyph_midpoint_pastes_after_it():
+    """tk::EntryClosestGap rounds to the nearer gap; a bare "@x" index does
+    not, and would drop the text one position early."""
+    entry = _FakeInnerEntry()
+    entry.text = "ABCDEF"
+    attach_secret_paste(entry, _FakeTk())
+    entry.primary = "xy"
+    entry.cursor = 0
+
+    # x=35 is the right half of "D" -> the gap *after* it.
+    _dispatch(entry, "<<PasteSelection>>", _Event(x=35))
+    assert entry.text == "ABCDxyEF"
+
+
+def test_middle_drag_scroll_does_not_paste():
+    """Middle-drag scrolls a long key horizontally (EntryScanDrag). Tk declines
+    to paste on that release, and so must we -- otherwise ending a scroll
+    dumps PRIMARY into the credential field."""
+    entry = _FakeInnerEntry()
+    entry.text = "WV-2BQG-YYB2-U4QD-WSB5"
+    attach_secret_paste(entry, _FakeTk())
+    entry.primary = "junk-from-somewhere-else"
+    entry.mouse_moved = True
+
+    _dispatch(entry, "<<PasteSelection>>", _Event(x=0))
+    assert entry.text == "WV-2BQG-YYB2-U4QD-WSB5"
 
 
 def test_middle_click_focuses_the_field_like_tk_does():
