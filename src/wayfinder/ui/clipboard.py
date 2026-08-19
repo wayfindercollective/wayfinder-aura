@@ -55,9 +55,11 @@ def attach_secret_paste(entry, tk_module, *, log=None) -> bool:
     exception here would break the settings screen it is attached to.
     """
     try:
-        # CTkEntry wraps a real tk.Entry; bindings must land on the inner one
-        # or the right-click never reaches us.
+        # CTkEntry wraps a real tk.Entry. Bindings, selection indices and the
+        # cursor belong to the inner widget or the right-click never reaches
+        # us; text I/O goes through the outer wrapper (see _read/_write).
         target = getattr(entry, "_entry", entry)
+        outer = entry
 
         # Untie this field's selection from the X11 PRIMARY selection.
         #
@@ -79,24 +81,81 @@ def attach_secret_paste(entry, tk_module, *, log=None) -> bool:
         except Exception:
             pass  # ancient/odd Tk build -- paste still works without a selection
 
-        def _do_paste(_event=None):
+        def _read() -> str:
+            """Current text, as the *app* sees it.
+
+            Read through the CTk wrapper: while the placeholder is showing, the
+            inner tk.Entry literally contains "WV-XXXX-XXXX-XXXX-XXXX" but
+            CTkEntry.get() correctly reports "". Reading the inner widget here
+            would splice the pasted key onto the end of the hint text.
+            """
             try:
-                pasted = sanitize_pasted_secret(target.clipboard_get())
+                return outer.get()
             except Exception:
-                return "break"  # empty or non-text clipboard
+                return target.get()
+
+        def _write(new_text: str, new_cursor: int) -> None:
+            """Replace the field's contents, keeping CTk's placeholder honest.
+
+            CTkEntry.insert() deactivates the placeholder; writing straight to
+            the inner widget leaves _placeholder_text_active set, so get()
+            keeps returning "" and Activate reports "Please enter a license
+            key" while the key is plainly visible on screen.
+            """
+            try:
+                outer.delete(0, "end")
+                outer.insert(0, new_text)
+            except Exception:
+                target.delete(0, "end")
+                target.insert(0, new_text)
+            try:
+                target.icursor(new_cursor)
+            except Exception:
+                pass
+
+        def _paste_from(get_source):
+            try:
+                pasted = sanitize_pasted_secret(get_source())
+            except Exception:
+                return "break"  # empty, non-text, or no such selection
             if not pasted:
                 return "break"
+
+            current = _read()
             try:
                 sel = (target.index("sel.first"), target.index("sel.last"))
             except Exception:
                 sel = (None, None)
+            try:
+                cursor = target.index("insert")
+            except Exception:
+                cursor = len(current)
+            # Placeholder showing: the field is empty as far as the app is
+            # concerned, so any selection/cursor index points into hint text
+            # that is about to be discarded.
+            if not current:
+                sel, cursor = (None, None), 0
+
             new_text, new_cursor = text_after_paste(
-                target.get(), pasted, sel[0], sel[1], target.index("insert")
+                current, pasted, sel[0], sel[1], cursor
             )
-            target.delete(0, "end")
-            target.insert(0, new_text)
-            target.icursor(new_cursor)
+            _write(new_text, new_cursor)
             return "break"
+
+        def _do_paste(_event=None):
+            return _paste_from(target.clipboard_get)
+
+        def _do_paste_primary(_event=None):
+            """Middle-click paste, routed through the same replace logic.
+
+            Tk's stock binding for this is tk::EntryPaste, which does a bare
+            `$w insert` at the click position: it never deletes the selection,
+            so middle-clicking onto a highlighted key appends instead of
+            replacing -- the same defect as above by a different route.
+            """
+            return _paste_from(
+                lambda: target.selection_get(selection="PRIMARY")
+            )
 
         def _do_select_all(_event=None):
             target.select_range(0, "end")
@@ -121,6 +180,9 @@ def attach_secret_paste(entry, tk_module, *, log=None) -> bool:
         target.bind("<Control-V>", _do_paste)
         target.bind("<Control-a>", _do_select_all)
         target.bind("<Control-A>", _do_select_all)
+        # Middle-click paste on X11; ours runs first and breaks the class
+        # binding so tk::EntryPaste's append-at-click never fires.
+        target.bind("<<PasteSelection>>", _do_paste_primary)
         return True
     except Exception as exc:  # pragma: no cover - depends on the Tk build
         if log:

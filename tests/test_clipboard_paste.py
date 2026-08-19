@@ -64,55 +64,208 @@ def test_pasting_nothing_leaves_the_field_alone():
 
 # ---------------------------------------------------------------------------
 # The Tk binding layer
+#
+# These fakes model the two real behaviours that produced the bug: Tk drops an
+# entry's selection when another X11 client claims PRIMARY, and CTkEntry
+# reports "" while its placeholder is showing even though the inner tk.Entry
+# literally contains the hint text.
 # ---------------------------------------------------------------------------
+
+
+class _TclError(Exception):
+    """Stands in for tkinter.TclError, which the handler catches broadly."""
+
+
+class _FakeInnerEntry:
+    """The inner ``tk.Entry``: text, cursor, selection, and the PRIMARY rule."""
+
+    def __init__(self):
+        self.text = ""
+        self.cursor = 0
+        self.selection = None
+        self.options = {"exportselection": 1}
+        self.bindings = {}
+        self.clipboard = ""
+        self.primary = ""
+
+    def configure(self, **kw):
+        self.options.update(kw)
+
+    def bind(self, sequence, func):
+        self.bindings[sequence] = func
+
+    def clipboard_get(self):
+        if not self.clipboard:
+            raise _TclError("CLIPBOARD selection doesn't exist")
+        return self.clipboard
+
+    def selection_get(self, selection="PRIMARY"):
+        if not self.primary:
+            raise _TclError(f"{selection} selection doesn't exist")
+        return self.primary
+
+    def index(self, what):
+        if what == "insert":
+            return self.cursor
+        if what == "end":
+            return len(self.text)
+        if what in ("sel.first", "sel.last"):
+            if self.selection is None:
+                raise _TclError("selection isn't in widget")
+            return self.selection[0 if what == "sel.first" else 1]
+        raise _TclError(what)
+
+    def get(self):
+        return self.text
+
+    def delete(self, first, last=None):
+        end = len(self.text) if last in ("end", None) else last
+        self.text = self.text[:first] + self.text[end:]
+        self.selection = None
+        self.cursor = min(self.cursor, len(self.text))
+
+    def insert(self, index, string):
+        at = len(self.text) if index == "end" else index
+        self.text = self.text[:at] + string + self.text[at:]
+        self.cursor = at + len(string)
+
+    def icursor(self, index):
+        self.cursor = len(self.text) if index == "end" else index
+
+    def select_range(self, start, end):
+        self.selection = (start, len(self.text) if end == "end" else end)
+
+    def foreign_primary_claim(self, text):
+        """Another client takes PRIMARY -- e.g. selecting the key in an email.
+
+        Tk drops this widget's own selection when it loses ownership, unless
+        the widget opted out of exporting it. That drop is the whole bug.
+        """
+        self.primary = text
+        if self.options.get("exportselection"):
+            self.selection = None
+
+
+class _FakeCTkEntry:
+    """CTkEntry's placeholder contract over an inner entry."""
+
+    def __init__(self, placeholder="WV-XXXX-XXXX-XXXX-XXXX"):
+        self._entry = _FakeInnerEntry()
+        self._entry.text = placeholder
+        self._placeholder_active = True
+
+    def get(self):
+        return "" if self._placeholder_active else self._entry.get()
+
+    def insert(self, index, string):
+        if self._placeholder_active:
+            self._placeholder_active = False
+            self._entry.text = ""
+        self._entry.insert(index, string)
+
+    def delete(self, first, last=None):
+        if self._placeholder_active:
+            return
+        self._entry.delete(first, last)
 
 
 class _FakeMenu:
     def __init__(self, *_a, **_kw):
-        self.commands = []
+        self.commands = {}
 
     def add_command(self, label=None, command=None):
-        self.commands.append((label, command))
+        self.commands[label] = command
 
 
 class _FakeTk:
     Menu = _FakeMenu
 
 
-class _FakeEntry:
-    """Enough of a tk.Entry to exercise ``attach_secret_paste``."""
-
-    def __init__(self, configure_raises: bool = False):
-        self.options = {"exportselection": 1}
-        self.bindings = {}
-        self._configure_raises = configure_raises
-
-    def configure(self, **kw):
-        if self._configure_raises:
-            raise RuntimeError("this Tk build has no such option")
-        self.options.update(kw)
-
-    def bind(self, sequence, func):
-        self.bindings[sequence] = func
+def _fire(widget, sequence):
+    """Invoke the handler bound to ``sequence``, as Tk would."""
+    inner = getattr(widget, "_entry", widget)
+    return inner.bindings[sequence]()
 
 
 def test_secret_field_stops_exporting_its_selection():
-    """The selection must survive another app claiming the X11 PRIMARY selection.
-
-    Tk clears an entry's own selection when it loses PRIMARY, and copying a key
-    out of an email or password manager is exactly what takes PRIMARY away. With
-    the selection silently gone, pasting over a highlighted wrong key appends the
-    new one beside it instead of replacing it, and activation fails on a key the
-    user can see is correct.
-    """
-    entry = _FakeEntry()
+    entry = _FakeInnerEntry()
     assert attach_secret_paste(entry, _FakeTk()) is True
     assert entry.options["exportselection"] is False
 
 
+def test_paste_replaces_the_key_after_another_app_claims_primary():
+    """The reported bug, end to end through the real handler.
+
+    Selecting the key in another window to copy it takes PRIMARY away, which
+    used to wipe this entry's selection: the paste then appended, leaving
+    "WV-OLD...WV-NEW..." in the field and failing activation.
+    """
+    entry = _FakeInnerEntry()
+    entry.text = "WV-2BQG-YYB2-U4QD-WSB5"
+    attach_secret_paste(entry, _FakeTk())
+
+    entry.select_range(0, "end")
+    entry.clipboard = "WV-T9XR-HWS4-VQ95-DD8X"
+    entry.foreign_primary_claim("WV-T9XR-HWS4-VQ95-DD8X")
+
+    _fire(entry, "<Control-v>")
+    assert entry.text == "WV-T9XR-HWS4-VQ95-DD8X"
+
+
+def test_middle_click_paste_also_replaces_the_selection():
+    """Tk's own tk::EntryPaste inserts at the click without deleting the
+    selection, so middle-click appended by a different route."""
+    entry = _FakeInnerEntry()
+    entry.text = "WV-2BQG-YYB2-U4QD-WSB5"
+    attach_secret_paste(entry, _FakeTk())
+
+    entry.select_range(0, "end")
+    entry.foreign_primary_claim("WV-T9XR-HWS4-VQ95-DD8X")
+
+    _fire(entry, "<<PasteSelection>>")
+    assert entry.text == "WV-T9XR-HWS4-VQ95-DD8X"
+
+
+def test_paste_into_a_placeholder_field_is_visible_to_the_app():
+    """Right-clicking Paste into the empty field is the documented affordance.
+
+    Writing straight to the inner tk.Entry spliced the key onto the end of the
+    "WV-XXXX-..." hint and left CTk's placeholder flag set, so get() still
+    returned "" and Activate answered "Please enter a license key" while the
+    key sat visible on screen.
+    """
+    entry = _FakeCTkEntry()
+    attach_secret_paste(entry, _FakeTk())
+    entry._entry.clipboard = "WV-T9XR-HWS4-VQ95-DD8X"
+
+    _fire(entry, "<Control-v>")
+
+    assert entry.get() == "WV-T9XR-HWS4-VQ95-DD8X"
+    assert entry._entry.text == "WV-T9XR-HWS4-VQ95-DD8X"
+    assert entry._placeholder_active is False
+
+
+def test_right_click_menu_paste_uses_the_same_path():
+    entry = _FakeCTkEntry()
+    tk_module = _FakeTk()
+    menus = []
+    tk_module.Menu = lambda *a, **k: menus.append(_FakeMenu()) or menus[-1]
+    attach_secret_paste(entry, tk_module)
+    entry._entry.clipboard = "WV-T9XR-HWS4-VQ95-DD8X"
+
+    menus[0].commands["Paste"]()
+
+    assert entry.get() == "WV-T9XR-HWS4-VQ95-DD8X"
+
+
 def test_paste_menu_still_attaches_when_exportselection_is_rejected():
     """Best-effort: an odd Tk build must not cost the field its paste menu."""
-    entry = _FakeEntry(configure_raises=True)
+
+    class _Stubborn(_FakeInnerEntry):
+        def configure(self, **kw):
+            raise RuntimeError("this Tk build has no such option")
+
+    entry = _Stubborn()
     assert attach_secret_paste(entry, _FakeTk()) is True
-    for seq in ("<Button-3>", "<Control-v>", "<Control-a>"):
+    for seq in ("<Button-3>", "<Control-v>", "<Control-a>", "<<PasteSelection>>"):
         assert seq in entry.bindings
