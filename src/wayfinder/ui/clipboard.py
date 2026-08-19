@@ -102,18 +102,17 @@ def attach_secret_paste(entry, tk_module, *, log=None) -> bool:
             keeps returning "" and Activate reports "Please enter a license
             key" while the key is plainly visible on screen.
             """
-            try:
-                outer.delete(0, "end")
-                outer.insert(0, new_text)
-            except Exception:
-                target.delete(0, "end")
-                target.insert(0, new_text)
+            # For a bare tk.Entry `outer` *is* `target`, so this is the same
+            # call; no fallback, because writing the inner widget behind CTk's
+            # back is the very defect this indirection exists to prevent.
+            outer.delete(0, "end")
+            outer.insert(0, new_text)
             try:
                 target.icursor(new_cursor)
             except Exception:
-                pass
+                pass  # cursor placement is cosmetic
 
-        def _paste_from(get_source):
+        def _paste_from(get_source, click_x=None):
             try:
                 pasted = sanitize_pasted_secret(get_source())
             except Exception:
@@ -135,6 +134,13 @@ def attach_secret_paste(entry, tk_module, *, log=None) -> bool:
             # that is about to be discarded.
             if not current:
                 sel, cursor = (None, None), 0
+            # Middle-click with nothing selected drops the text where the user
+            # clicked, as tk::EntryPaste does via EntryClosestGap.
+            elif click_x is not None and sel == (None, None):
+                try:
+                    cursor = target.index(f"@{click_x}")
+                except Exception:
+                    pass
 
             new_text, new_cursor = text_after_paste(
                 current, pasted, sel[0], sel[1], cursor
@@ -145,17 +151,27 @@ def attach_secret_paste(entry, tk_module, *, log=None) -> bool:
         def _do_paste(_event=None):
             return _paste_from(target.clipboard_get)
 
-        def _do_paste_primary(_event=None):
+        def _do_paste_primary(event=None):
             """Middle-click paste, routed through the same replace logic.
 
-            Tk's stock binding for this is tk::EntryPaste, which does a bare
-            `$w insert` at the click position: it never deletes the selection,
-            so middle-clicking onto a highlighted key appends instead of
-            replacing -- the same defect as above by a different route.
+            Tk's stock binding is tk::EntryPaste, which does
+            `icursor` to the click gap, a bare `insert` (never deleting the
+            selection, so middle-clicking onto a highlighted key appends
+            instead of replacing -- the same defect by a different route),
+            then focuses the entry. We break that binding, so the two
+            behaviours worth keeping -- drop-at-click and focus -- are
+            reproduced here.
             """
-            return _paste_from(
-                lambda: target.selection_get(selection="PRIMARY")
+            result = _paste_from(
+                lambda: target.selection_get(selection="PRIMARY"),
+                click_x=getattr(event, "x", None),
             )
+            try:
+                if str(target.cget("state")) != "disabled":
+                    target.focus_set()
+            except Exception:
+                pass
+            return result
 
         def _do_select_all(_event=None):
             target.select_range(0, "end")

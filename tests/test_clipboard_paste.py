@@ -87,6 +87,8 @@ class _FakeInnerEntry:
         self.bindings = {}
         self.clipboard = ""
         self.primary = ""
+        self.state = "normal"
+        self.focused = False
 
     def configure(self, **kw):
         self.options.update(kw)
@@ -109,6 +111,10 @@ class _FakeInnerEntry:
             return self.cursor
         if what == "end":
             return len(self.text)
+        if isinstance(what, str) and what.startswith("@"):
+            # Tk resolves "@<pixel>" to the closest character gap; one
+            # character per pixel is enough to pin which index we asked for.
+            return max(0, min(int(what[1:]), len(self.text)))
         if what in ("sel.first", "sel.last"):
             if self.selection is None:
                 raise _TclError("selection isn't in widget")
@@ -134,6 +140,12 @@ class _FakeInnerEntry:
 
     def select_range(self, start, end):
         self.selection = (start, len(self.text) if end == "end" else end)
+
+    def cget(self, option):
+        return {"state": self.state}.get(option, "")
+
+    def focus_set(self):
+        self.focused = True
 
     def foreign_primary_claim(self, text):
         """Another client takes PRIMARY -- e.g. selecting the key in an email.
@@ -181,10 +193,36 @@ class _FakeTk:
     Menu = _FakeMenu
 
 
-def _fire(widget, sequence):
+class _Event:
+    def __init__(self, x=0):
+        self.x = x
+
+
+def _fire(widget, sequence, event=None):
     """Invoke the handler bound to ``sequence``, as Tk would."""
     inner = getattr(widget, "_entry", widget)
-    return inner.bindings[sequence]()
+    handler = inner.bindings[sequence]
+    return handler() if event is None else handler(event)
+
+
+def _dispatch(widget, sequence, event=None):
+    """Run the widget binding, then Tk's class binding unless it broke.
+
+    Tk walks bind tags widget-first and stops only on "break". Modelling that
+    is what makes the middle-click test meaningful: without the "break", the
+    stock tk::EntryPaste would still run and append a second copy.
+    """
+    inner = getattr(widget, "_entry", widget)
+    result = _fire(widget, sequence, event)
+    if result == "break":
+        return result
+    if sequence == "<<PasteSelection>>":
+        # tk::EntryPaste: cursor to the click gap, insert, never delete the
+        # selection, then focus.
+        inner.icursor(inner.index(f"@{getattr(event, 'x', 0)}"))
+        inner.insert(inner.cursor, inner.primary)
+        inner.focused = True
+    return result
 
 
 def test_secret_field_stops_exporting_its_selection():
@@ -222,8 +260,32 @@ def test_middle_click_paste_also_replaces_the_selection():
     entry.select_range(0, "end")
     entry.foreign_primary_claim("WV-T9XR-HWS4-VQ95-DD8X")
 
-    _fire(entry, "<<PasteSelection>>")
+    # Dispatched through the bind-tag chain: if our handler stopped returning
+    # "break", tk::EntryPaste would run too and append a second copy.
+    assert _dispatch(entry, "<<PasteSelection>>", _Event(x=0)) == "break"
     assert entry.text == "WV-T9XR-HWS4-VQ95-DD8X"
+
+
+def test_middle_click_without_a_selection_drops_text_at_the_click():
+    """tk::EntryPaste pastes where you clicked; breaking it must not lose that."""
+    entry = _FakeInnerEntry()
+    entry.text = "ABCDEF"
+    attach_secret_paste(entry, _FakeTk())
+    entry.primary = "xy"
+    entry.cursor = 0
+
+    _dispatch(entry, "<<PasteSelection>>", _Event(x=3))
+    assert entry.text == "ABCxyDEF"
+
+
+def test_middle_click_focuses_the_field_like_tk_does():
+    entry = _FakeInnerEntry()
+    entry.text = "ABC"
+    attach_secret_paste(entry, _FakeTk())
+    entry.primary = "z"
+
+    _dispatch(entry, "<<PasteSelection>>", _Event(x=0))
+    assert entry.focused is True
 
 
 def test_paste_into_a_placeholder_field_is_visible_to_the_app():
