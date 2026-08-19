@@ -233,4 +233,9 @@ class TestSummarizeMore:
         s = M.summarize(recs)
         assert set(s.keys()) == {"dev", "casual"}
         assert s["dev"]["n"] == 1
-        assert 0.0 <= s["dev"]["mean_guide_score"] <= 1.0
+        # summarize() now reports {"mean", "n"} per metric: N/A metrics are None
+        # (transformative intensities omit the guide-preservation family), so a
+        # bare sum() would raise, and a mean drawn from 2 rows must not read like
+        # one drawn from 18.
+        assert 0.0 <= s["dev"]["guide_score"]["mean"] <= 1.0
+        assert s["dev"]["guide_score"]["n"] == 1

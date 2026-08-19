@@ -1809,6 +1809,137 @@ _RESTATEMENT_RE = re.compile(
 )
 
 
+# =============================================================================
+# Chat templates for local GGUF cleanup models
+# =============================================================================
+# The local cleanup prompt was historically a RAW COMPLETION prompt ending in
+# "Cleaned text:". An instruct model handed that shape never receives its own
+# end-of-turn token, which causes two measured defects:
+#   (a) it answers by ECHOING the input first — the likeliest continuation of
+#       "Text: <X> ... Cleaned text:" is <X> again — and only then produces the
+#       real rewrite, so the extractor returns both glued together;
+#   (b) generation never terminates, running until -n is exhausted.
+# Measured on Qwen3-4B casual/caricature: the input verbatim, then a parody, cut
+# mid-word at the token cap (752 chars against n_predict=230).
+#
+# Wrapping the SAME instruction body in the model's own chat template gives the
+# end-of-turn token back: generation stops on EOG and the echo disappears.
+# Verified on llama-simple, llama-simple-cpu and resident llama-cpp-python
+# (byte-identical output at -n 120 and -n 230 proves EOG, not the cap, stopped it).
+#
+# Enabled per EXACT model, never by family substring: the catalog ships three Qwen
+# models and only Qwen3-4B has been measured across the tone matrix. Qwen 3.5 2B is
+# already recorded as inconsistent (config.py) and is a reasoning model whose
+# <think> prefill interacts with the template, so it stays on raw completion.
+
+# name -> (user_prefix, user_suffix, assistant_prefix, control_atoms)
+_CHAT_TEMPLATES: Dict[str, tuple] = {
+    "chatml": (
+        "<|im_start|>user\n",
+        "<|im_end|>\n",
+        "<|im_start|>assistant\n",
+        ("<|im_start|>", "<|im_end|>"),
+    ),
+}
+
+# Keys are _normalize_model_name(Path(filename).stem). Two traps, both of which
+# would silently make _chat_template_for() always return None and ship this fix
+# INERT while any test reusing the same wrong literal still passed:
+#   - the normalizer strips "-_.:" and whitespace, so the key is NOT the readable
+#     stem ("Qwen_Qwen3-4B-Instruct-2507-Q4_K_M" -> "qwenqwen34binstruct2507q4km");
+#   - ".gguf" must be removed BEFORE normalizing or the extension survives into
+#     the key ("...q4kmgguf").
+# tests/test_chat_template.py derives the expected key from the shipped catalog
+# rather than repeating the literal below, so a rename cannot drift past it.
+_CHAT_TEMPLATE_MODELS: Dict[str, str] = {
+    # Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+    "qwenqwen34binstruct2507q4km": "chatml",
+}
+
+_ECHO_TOKEN_RE = re.compile(r"[a-z0-9']+")
+
+
+def chat_template_key(filename: str) -> str:
+    """The `_CHAT_TEMPLATE_MODELS` key for a model filename or path.
+
+    Single source of truth for the stem-then-normalize order, so the allowlist,
+    the runtime lookup and the tests cannot disagree about it.
+    """
+    return _normalize_model_name(Path(str(filename or "")).stem)
+
+
+def _chat_template_for(model_path: str, setting: str = "auto") -> Optional[tuple]:
+    """Return the chat-template tuple for a model, or None for raw completion.
+
+    ``setting`` is the user-facing ``llama_cpp_chat_template`` config value:
+    ``"auto"`` consults the validated allowlist, ``"off"`` forces the historical
+    raw-completion prompt. There is deliberately no ``"on"`` — a template may only
+    be applied to a model that has been measured across the tone matrix.
+    """
+    if str(setting or "auto").strip().lower() == "off":
+        return None
+    if not model_path:
+        return None
+    name = _CHAT_TEMPLATE_MODELS.get(chat_template_key(model_path))
+    return _CHAT_TEMPLATES.get(name) if name else None
+
+
+def strip_control_atoms(text: str, template: Optional[tuple]) -> str:
+    """Remove a template's control tokens from text that gets interpolated.
+
+    llama.cpp tokenizes the prompt with parse_special=true, so a literal
+    "<|im_start|>system" arriving via dictation or custom vocabulary would open a
+    real control turn. Stripping the ATOMS is what closes that — matching the role
+    literals ("<|im_start|>user\n") as units would miss every other role.
+    No-op on the raw path, which keeps the historical prompt byte-identical.
+    """
+    if not template or not text:
+        return text
+    for atom in template[3]:
+        text = text.replace(atom, "")
+    return text
+
+
+def _word_spans(text: str) -> list:
+    """(word, end_offset) for each alphanumeric token, lowercased."""
+    return [(m.group(0), m.end()) for m in _ECHO_TOKEN_RE.finditer(text.lower())]
+
+
+def strip_echoed_input(gen: str, original_text: str) -> str:
+    """Drop a leading verbatim echo of the input from a rewrite-mode generation.
+
+    Template-independent safety net for defect (a) above, and the layer that fixes
+    the reported bug even on models with no chat template. The existing rewrite
+    loop-guard cannot catch it: that looks for a repeat of the GENERATION's own
+    first 8 words, but here the echo comes FIRST and the text after it is
+    different, so no repeat exists to match.
+
+    Strips only when the generation OPENS with an aligned, near-complete copy of
+    the input AND substantive text follows it — a legitimate answer that merely
+    resembles the input is left untouched.
+
+    NOTE: callers must pass the SANITIZED text that was actually interpolated into
+    the prompt, not the raw dictation. On adversarial input the echoed prompt has
+    its control atoms stripped, so aligning against the unsanitized original would
+    fail and the echo would survive.
+    """
+    if not gen or not original_text:
+        return gen
+    src = [w for w, _ in _word_spans(original_text)]
+    if len(src) < 4:
+        return gen  # too short to align confidently
+    spans = _word_spans(gen)
+    if len(spans) <= len(src):
+        return gen  # nothing follows the would-be echo
+    head = [w for w, _ in spans[:len(src)]]
+    matched = sum(1 for a, b in zip(head, src) if a == b)
+    if matched / len(src) < 0.9:
+        return gen
+    tail = gen[spans[len(src) - 1][1]:].strip()
+    # Require a real continuation, not a stray token or trailing punctuation.
+    return tail if len(tail.split()) >= 3 else gen
+
+
 class LlamaCppCliBackend(PostProcessorBackend):
     """
     Local LLM backend using llama.cpp CLI binary (llama-simple).
@@ -1854,6 +1985,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         caricature_mode: bool = False,
         force_subprocess: bool = False,
         custom_vocabulary: list[str] | None = None,
+        chat_template: str = "auto",
     ):
         # When True, skip the resident llama-cpp-python wheel and always use the
         # llama-simple subprocess (see config: post_processing_force_subprocess).
@@ -1914,6 +2046,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # would spend the token budget reasoning instead of answering. Detected here
         # so build_cli_prompt can pre-fill an empty think block to suppress it.
         self.is_reasoning = _is_reasoning_model(self.model_path)
+        # Chat template for this exact model, or None for the historical raw
+        # completion prompt. Resolved once so process(), warm_up() and the
+        # eval-only probe all agree on the prompt shape.
+        self.chat_template_setting = chat_template
+        self.template = _chat_template_for(self.model_path, chat_template)
 
     def get_name(self) -> str:
         return "llama.cpp CLI (Local)"
@@ -2028,7 +2165,9 @@ class LlamaCppCliBackend(PostProcessorBackend):
         try:
             model = self._resident_model()
             if model is not None:
-                prompt = self.build_cli_prompt("warm up", self.output_tone, self.intensity)
+                prompt = self.build_cli_prompt(
+                    "warm up", self.output_tone, self.intensity, self.template
+                )
                 model(prompt, max_tokens=8, temperature=0.0)
             else:
                 # Subprocess path (Flatpak / force_subprocess / no wheel): run the GPU
@@ -2038,7 +2177,66 @@ class LlamaCppCliBackend(PostProcessorBackend):
         except Exception as e:
             print(f"[Post-processing] Warm-up skipped: {e}")
     
-    def build_cli_prompt(self, text: str, tone: str = "minimal", intensity: str = "standard") -> str:
+    def _token_budget(self, text: str) -> int:
+        """Generation ceiling for one cleanup.
+
+        The old formula multiplied CHARACTERS by 0.8/1.6 and used the result as a
+        TOKEN count — English runs ~4 chars/token, so it over-allocated ~4x (296
+        tokens for an 87-token answer). That is only a ceiling, never the stopping
+        mechanism (the chat template's end-of-turn token is), but an inflated
+        ceiling is what let an untemplated model ramble instead of being cut early.
+
+        Floors are unchanged: 192 for caricature, 64 otherwise.
+        """
+        est_in = max(1, len(text) // 4)
+        if self.intensity == "caricature":
+            # Emojis and CAPS are token-hungry and the parody expands the text.
+            #
+            # Floor stays 192. Raising it to 320 was TESTED and bought nothing:
+            # the same 3 of 18 corpus samples still hit the cap, the output just
+            # got longer (795 vs 539 bytes). Those 3 are degenerate greedy loops
+            # ("a level 10000000000000..."), not length overruns — llama-simple
+            # exposes no sampling flags, so the subprocess path cannot apply the
+            # repetition/temperature pressure that would break them. See the
+            # rewrite-mode loop guard in _extract_cli_output, which cleans up the
+            # visible output when this happens.
+            return min(self.max_tokens, max(192, int(est_in * 3.0)))
+        return min(self.max_tokens, max(64, int(est_in * 1.6)))
+
+    def _probe_raw(self, text: str, n_predict: int) -> tuple:
+        """EVAL-ONLY: run one subprocess cleanup and return the RAW continuation.
+
+        Returns ``(raw_stdout_bytes, effective_n, resolved_cmd)``. Never called on
+        the production path.
+
+        The tone-eval termination gate needs to prove generation stopped on
+        end-of-turn rather than at the token cap. It cannot use process(): that
+        returns only the extracted text, and _extract_cli_output truncates at cut
+        markers, paragraph breaks, restatement headers and terminal punctuation —
+        so an N-token and a 2N-token generation can normalize to identical FINAL
+        text while the raw generations differ. This returns stdout BEFORE any
+        extraction, as bytes (production decodes with errors="replace" because a
+        capped generation can end mid-codepoint, and comparing those decoded
+        strings is lossy).
+
+        Uses process()'s own resolution — same prompt, binary, -ngl, model, env —
+        so the probe measures the configured path, not an approximation.
+        """
+        prompt = self.build_cli_prompt(text, self.output_tone, self.intensity, self.template)
+        binary, ngl = self._subprocess_target()
+        cmd = [binary, "-m", self.model_path, "-ngl", str(ngl),
+               "-n", str(n_predict), prompt]
+        result = subprocess.run(
+            cmd, capture_output=True, timeout=self.timeout, env=bundle_binary_env(),
+        )
+        raw = result.stdout
+        marker = prompt.encode("utf-8", "replace")
+        idx = raw.find(marker)
+        continuation = raw[idx + len(marker):] if idx != -1 else raw
+        return continuation, n_predict, cmd
+
+    def build_cli_prompt(self, text: str, tone: str = "minimal", intensity: str = "standard",
+                         template: Optional[tuple] = None) -> str:
         """
         Build a compact prompt optimized for llama-simple CLI.
 
@@ -2056,6 +2254,12 @@ class LlamaCppCliBackend(PostProcessorBackend):
         (Intensity is already model-tier-capped in __init__, so these templates
         only ever reach 3B+ models.)
         """
+        # Anything interpolated into a templated prompt is tokenized with
+        # parse_special=true, so control atoms in dictated speech or custom
+        # vocabulary must be neutralized before assembly. No-op when template is
+        # None, which keeps the raw prompt byte-identical to the historical one.
+        text = strip_control_atoms(text, template)
+
         if tone == "minimal" and intensity != "caricature":
             # Minimal: just remove um/uh/ah - use clear instruction format
             prompt = f"""Task: Remove only filler sounds (um, uh, ah, er) from the text below. Keep every other word and the original order. Output ONLY the cleaned text, nothing else.
@@ -2066,9 +2270,22 @@ Cleaned text:"""
         elif intensity == "caricature":
             guidance = get_tone_guidance(tone, intensity)
             formatting = get_formatting_rules(tone, intensity)
+            # Length bound: without one the parody rambles until the token cap and
+            # gets sliced mid-word. Measured: a 145-char input yields a 305-char
+            # parody that terminates on EOG at both -n 120 and -n 230.
+            #
+            # Applied ONLY on the templated path. The raw-completion prompt is the
+            # one every non-allowlisted model still gets, and it must stay
+            # byte-identical to the historical text (locked by test_chat_template);
+            # changing it would alter Gemma et al. with no matrix behind it.
+            length_rule = ""
+            if template:
+                word_cap = max(24, len(text.split()) * 2)
+                length_rule = (f"Write ONE short message of at most {word_cap} words. "
+                               "Do not add new topics or repeat yourself.\n")
             prompt = f"""Task: Rewrite the text below as an over-the-top PARODY of the style described. Make it hilarious and exaggerated, but keep the same core message.
 Style: {guidance} {formatting}
-Output ONLY the rewritten text, nothing else.
+{length_rule}Output ONLY the rewritten text, nothing else.
 
 Text: {text}
 
@@ -2097,12 +2314,24 @@ Text: {text}
 Cleaned text:"""
 
         prompt = _with_custom_vocabulary(
-            prompt, {"custom_vocabulary": self.custom_vocabulary}
+            prompt,
+            {"custom_vocabulary": [
+                strip_control_atoms(t, template) for t in self.custom_vocabulary
+            ]},
         )
+
+        # Wrap the SAME instruction body in the model's chat template. This is what
+        # restores the end-of-turn token, so generation stops on EOG instead of
+        # running to -n, and the model answers instead of echoing the input first.
+        if template:
+            user_prefix, user_suffix, assistant_prefix, _atoms = template
+            prompt = user_prefix + prompt + user_suffix + assistant_prefix
 
         # For reasoning models, pre-fill an empty think block so the model skips
         # its <think> reasoning and continues straight to the cleaned text. Without
         # this, Qwen3/3.5 burn the whole token budget reasoning and never answer.
+        # Must land AFTER the assistant prefix — it is the assistant's turn that is
+        # being pre-filled, not the user's.
         if getattr(self, "is_reasoning", False):
             prompt += "<think>\n\n</think>\n"
         return prompt
@@ -2150,19 +2379,13 @@ Cleaned text:"""
                 tone = "minimal" if is_minimal else "professional"
 
             # Build the compact, tone-aware prompt for the CLI (llama-simple)
-            simple_prompt = self.build_cli_prompt(text, tone, self.intensity)
+            simple_prompt = self.build_cli_prompt(text, tone, self.intensity, self.template)
+            # The text as it actually appears in the prompt: on the templated path
+            # control atoms are stripped, and the echo stripper must align against
+            # THIS, not the raw dictation, or an adversarial echo survives.
+            prompt_text = strip_control_atoms(text, self.template)
 
-            # Token budget: the cleaned text is ~the same length as the input.
-            # Give headroom so the answer isn't truncated (we trim any trailing
-            # annotation the model appends). Min 64 covers short inputs.
-            # Caricature EXPANDS the text (emojis, CAPS, sign-offs), so it gets a
-            # bigger multiplier and floor.
-            if self.intensity == "caricature":
-                # Emojis and CAPS are token-hungry and the parody roughly doubles
-                # the text — 1.2x char-count clipped a sign-off mid-word in testing.
-                estimated_output_tokens = min(self.max_tokens, max(192, int(len(text) * 1.6)))
-            else:
-                estimated_output_tokens = min(self.max_tokens, max(64, int(len(text) * 0.8)))
+            estimated_output_tokens = self._token_budget(text)
 
             # Comedy needs sampling heat — greedy/near-greedy caricature output is
             # flat and repetitive. (The llama-simple subprocess has no temperature
@@ -2186,7 +2409,10 @@ Cleaned text:"""
                     temperature=gen_temperature,
                     echo=True,  # echo the prompt so _extract_cli_output works unchanged
                 )
-                cleaned = self._extract_cli_output(out["choices"][0]["text"], simple_prompt)
+                cleaned = self._extract_cli_output(
+                    out["choices"][0]["text"], simple_prompt,
+                    original_text=prompt_text, template=self.template,
+                )
                 mode = "resident"
             else:
                 # Fallback: spawn llama-simple. The prompt is POSITIONAL (llama-simple's
@@ -2211,7 +2437,10 @@ Cleaned text:"""
                     stderr = result.stderr.strip()
                     if "error" in stderr.lower() and "warning" not in stderr.lower():
                         raise PostProcessingError(f"llama error: {stderr}")
-                cleaned = self._extract_cli_output(result.stdout, simple_prompt)
+                cleaned = self._extract_cli_output(
+                    result.stdout, simple_prompt,
+                    original_text=prompt_text, template=self.template,
+                )
                 mode = "CLI-GPU" if ngl != 0 else "CLI-CPU"
 
             elapsed = time.time() - start_time
@@ -2245,7 +2474,8 @@ Cleaned text:"""
         except Exception as e:
             raise PostProcessingError(f"llama processing failed: {e}")
 
-    def _extract_cli_output(self, stdout: str, prompt: str) -> str:
+    def _extract_cli_output(self, stdout: str, prompt: str, original_text: str = "",
+                            template: Optional[tuple] = None) -> str:
         """Extract the model's answer from llama-simple stdout.
 
         llama-simple echoes the full prompt verbatim then the generation, so the
@@ -2253,18 +2483,40 @@ Cleaned text:"""
         then strip any leading <think> block, cut at the first self-annotation the
         model appends ("**Changes made:**", "Note:", bullet lists), and stop at
         prompt repetition / debug markers. Returns the single cleaned paragraph.
+
+        ``original_text`` must be the SANITIZED text that was interpolated into the
+        prompt; it drives the echoed-input stripper. ``template`` selects the
+        fallback strategy when the exact-prompt split misses.
         """
         if not stdout:
             return ""
 
-        # Primary: split on the exact prompt (llama-simple echoes it verbatim).
+        # Primary: split on the exact prompt. Verified verbatim (including literal
+        # special tokens) on llama-simple, llama-simple-cpu and resident echo=True.
         idx = stdout.find(prompt)
         if idx != -1:
             gen = stdout[idx + len(prompt):]
+        elif template:
+            # Templated fallback: find the ASSISTANT boundary. The raw
+            # "Cleaned text:" marker must NOT be used here — under a chat template
+            # it occurs inside the USER turn, so the text after it starts with
+            # "<|im_end|>", the "<|" cut marker below then truncates to "", and a
+            # silent quality regression looks like a clean fallback.
+            assistant_prefix = template[2]
+            m = stdout.rfind(assistant_prefix)
+            if m == -1:
+                return ""  # fail safe: caller falls back to the original text
+            gen = stdout[m + len(assistant_prefix):]
         else:
-            # Fallback: text after the last "Cleaned text:" marker.
+            # Raw-completion fallback: text after the last "Cleaned text:" marker.
             m = stdout.rfind("Cleaned text:")
             gen = stdout[m + len("Cleaned text:"):] if m != -1 else stdout
+
+        # Drop a leading verbatim echo of the input before the cut markers run.
+        # This is the layer that catches the reported defect on ANY model, with or
+        # without a template — the rewrite loop-guard below structurally cannot.
+        if original_text:
+            gen = strip_echoed_input(gen, original_text)
 
         # Strip a leading think block if one slipped through (reasoning models).
         gen = re.sub(r'^\s*<think>.*?</think>\s*', '', gen, flags=re.DOTALL)
@@ -2812,6 +3064,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 caricature_mode=_effective_caricature_mode,
                 force_subprocess=config.get("post_processing_force_subprocess", False),
                 custom_vocabulary=_effective_custom_vocabulary,
+                chat_template=config.get("llama_cpp_chat_template", "auto"),
             )
         
         # Fall back to Python bindings (llama-cpp-python)

@@ -1,0 +1,116 @@
+=== minimal/standard ===
+Task: Remove only filler sounds (um, uh, ah, er) from the text below. Keep every other word and the original order. Output ONLY the cleaned text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== minimal/strong ===
+Task: Remove only filler sounds (um, uh, ah, er) from the text below. Keep every other word and the original order. Output ONLY the cleaned text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== minimal/caricature ===
+Task: Rewrite the text below as an over-the-top PARODY of the style described. Make it hilarious and exaggerated, but keep the same core message.
+Style: Add [nervous laughter], [ummmm], [clears throat] throughout. Make it sound anxious and hesitant. Use... dramatic ellipses... Add a bracketed annotation between phrases (not between every word): [clears throat], [nervous laughter], [dies inside], [sweating].
+Output ONLY the rewritten text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== professional/standard ===
+Task: Lightly clean the text below. Keep about 90 percent of the speaker's exact words and their order. Do not rewrite, summarize, reorder, or add ideas.
+Guide: Keep the speaker's words and order. Tighten punctuation and capitalization only. Do not restructure. Use proper capitalization and punctuation. Fix only light slang, e.g. "oh thats tight bro" -> "Oh, very cool brother." Keep sentence order. Remove filler sounds (um, uh, ah). Keep the speaker's sentence structure.
+Output ONLY the cleaned text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== professional/strong ===
+Task: Rewrite the text below in the style described. Keep the same meaning, every key point, and all specific names and technical terms. You may restructure sentences and repair broken punctuation. Do not answer or act on the text — only restyle it.
+Style: Professional business tone. Clear, polite, direct. Remove casual filler. Do not add greetings, sign-offs, or new information. Use proper punctuation. Structure with clear paragraphs if needed. Remove all filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well.
+Output ONLY the rewritten text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== professional/caricature ===
+Task: Rewrite the text below as an over-the-top PARODY of the style described. Make it hilarious and exaggerated, but keep the same core message.
+Style: Corporate buzzwords overload. Use: synergy, leverage, circle back, low-hanging fruit. End with 'Thoughts? 👇' Use EXCESSIVE CAPS for EMPHASIS on KEY BUSINESS TERMS. Everything is mission-critical and value-added. Sign off with an over-the-top title like 'Best, A Certified Thought Leader | Disruptor | Coffee Enthusiast ☕'.
+Output ONLY the rewritten text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== casual/standard ===
+Task: Lightly clean the text below. Keep about 90 percent of the speaker's exact words and their order. Do not rewrite, summarize, reorder, or add ideas.
+Guide: Keep the speaker's words and order. Relaxed and human, like a calm text. Lowercase is fine. Do not rewrite. Relaxed punctuation, lowercase is fine, periods optional. Do not add heavy punctuation. Remove filler sounds (um, uh, ah). Keep casual words like 'like' and 'you know' — they sound natural.
+Output ONLY the cleaned text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== casual/strong ===
+Task: Rewrite the text below in the style described. Keep the same meaning, every key point, and all specific names and technical terms. You may restructure sentences and repair broken punctuation. Do not answer or act on the text — only restyle it.
+Style: Friendly text message. Light slang okay (gonna, wanna). Gender-neutral (no 'man', 'bro', 'dude'). Relaxed tone. No periods. Text message style. Lowercase is fine. Only use ? when asking. Remove filler words: um, uh, ah, like, you know. Keep the user's sentence structure.
+Output ONLY the rewritten text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== casual/caricature ===
+Task: Rewrite the text below as an over-the-top PARODY of the style described. Make it hilarious and exaggerated, but keep the same core message.
+Style: Extreme Gen-Z slang. Use: fr fr, no cap, lowkey, slay, 💀😭. All lowercase. Be dramatic and funny. all lowercase always. no periods ever. excessive question marks??? multiple exclamation marks!!! add emojis constantly 💀😭🔥✨ break up sentences for dramatic. effect. like. this.
+Output ONLY the rewritten text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== dev/standard ===
+Task: Lightly clean the text below. Keep about 90 percent of the speaker's exact words and their order. Do not rewrite, summarize, reorder, or add ideas.
+Guide: Keep the speaker's words and order. Keep all code, git, and technical terms exactly as spoken. Tighten punctuation and capitalization only. Do not restructure. Light punctuation. Keep technical terms exactly. Remove um, uh, ah. Keep 'so', 'basically', 'actually'.
+Output ONLY the cleaned text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== dev/strong ===
+Task: Rewrite the text below in the style described. Keep the same meaning, every key point, and all specific names and technical terms. You may restructure sentences and repair broken punctuation. Do not answer or act on the text — only restyle it.
+Style: Keep the speaker's voice and keep all code, git, and technical terms exactly. Tighten the wording for a Slack message or code comment. Do not reorder or add ideas. Use clear punctuation. Preserve all technical terminology. Only add structure (bullets, code blocks) if the user clearly listed items. Remove filler sounds: um, uh, ah. Remove 'like' and 'you know' if used as filler, but keep 'so', 'basically', 'actually'.
+Output ONLY the rewritten text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== dev/caricature ===
+Task: Rewrite the text below as an over-the-top PARODY of the style described. Make it hilarious and exaggerated, but keep the same core message.
+Style: Melodramatic developer crisis mode. Everything is a PRODUCTION INCIDENT, even trivial things. Panic about edge cases. End with 'my career depends on this 🙏' Start with [CRITICAL]. Use CAPS for TECHNICAL TERMS. Mention that it works on my machine.
+Output ONLY the rewritten text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== personal/standard ===
+Task: Lightly clean the text below. Keep about 90 percent of the speaker's exact words and their order. Do not rewrite, summarize, reorder, or add ideas.
+Guide:  Match the user's typical punctuation habits. Remove filler words: um, uh, ah, like, you know. Keep the user's sentence structure.
+Output ONLY the cleaned text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== personal/strong ===
+Task: Rewrite the text below in the style described. Keep the same meaning, every key point, and all specific names and technical terms. You may restructure sentences and repair broken punctuation. Do not answer or act on the text — only restyle it.
+Style: Lightly polish while keeping the user's natural voice. Clean punctuation while keeping the user's style. Remove all filler words: um, uh, ah, like, you know, basically, actually, I mean, so, well.
+Output ONLY the rewritten text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:
+=== personal/caricature ===
+Task: Rewrite the text below as an over-the-top PARODY of the style described. Make it hilarious and exaggerated, but keep the same core message.
+Style: Do a loving parody of the speaker: exaggerate their word choices and pet phrases into a theatrical monologue. Make it a funny impression. At most one 'um' or 'like' per sentence. Trail off with dramatic ellipses... Add theatrical asides in parentheses (you know how it is).
+Output ONLY the rewritten text, nothing else.
+
+Text: um so hello there friend
+
+Cleaned text:

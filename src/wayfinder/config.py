@@ -365,6 +365,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # including the Flatpak (which ships no resident wheel and already uses subprocess).
     "post_processing_force_subprocess": False,
     "llama_cpp_use_cli": True,  # Use CLI backend (faster, no Python bindings needed)
+    # Chat-template mode for local GGUF cleanup. "auto" applies the model's own
+    # chat template when that exact model has been measured across the tone matrix
+    # (see _CHAT_TEMPLATE_MODELS); "off" forces the historical raw-completion
+    # prompt. There is deliberately no "on" — a template cannot be forced onto an
+    # unvalidated model, because a wrong template degrades output silently.
+    "llama_cpp_chat_template": "auto",
     
     # Cloud API settings (keys stored in config, loaded into environment on startup)
     "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)

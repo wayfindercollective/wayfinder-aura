@@ -182,7 +182,45 @@ def slang_remaining(inp: str, out: str, slang: list[str] | None) -> list[str]:
 # ----------------------------------------------------------------------------
 # Aggregation
 # ----------------------------------------------------------------------------
-def compute_all(sample: dict, tone: str, inp: str, out: str) -> dict:
+# Absolute gate for filler removal. 0.80 rather than 1.0 because a small model
+# occasionally keeps one sound in a long utterance; a model that keeps MOST of
+# them (the Gemma-under-template failure) lands far below this.
+REQUIRED_FILLER_REMOVAL_MIN = 0.80
+
+# Intensities that intentionally transform the text. Every guide-preservation
+# metric is meaningless for them: an echoed (buggy) output scores word_retention
+# 1.0 because it contains the whole input, while a CORRECT caricature scores
+# 0.286 — so a relative gate would reject the fix rather than the bug.
+_TRANSFORMATIVE = ("strong", "caricature")
+
+# Tones that promise word preservation. "professional" is excluded at every
+# intensity because it legitimately replaces slang ("oh thats tight bro nice" ->
+# "Oh, cool, nice." retains 0.4 and is correct).
+_PRESERVING_TONES = ("minimal", "casual", "dev", "personal")
+
+
+def required_filler_removal(inp: str, out: str, expected: list[str] | None) -> float | None:
+    """Fraction of annotated filler occurrences absent from the output.
+
+    Occurrence/multiset based: a sound present twice in the input must be gone
+    twice. Returns None when the sample has no annotated fillers (not 1.0 — an
+    unannotated sample must not look like a pass).
+    """
+    if not expected:
+        return None
+    out_counts = Counter(_tokens(out))
+    exp_counts = Counter(w.lower() for w in expected)
+    removed = sum(max(0, c - out_counts.get(w, 0)) for w, c in exp_counts.items())
+    return round(removed / sum(exp_counts.values()), 3)
+
+
+def retention_applies(tone: str, intensity: str) -> bool:
+    """Whether word_retention is a meaningful gate for this cell."""
+    return intensity not in _TRANSFORMATIVE and tone in _PRESERVING_TONES
+
+
+def compute_all(sample: dict, tone: str, inp: str, out: str,
+                intensity: str = "standard") -> dict:
     """Return every raw metric + a `passes` dict of booleans + guide_score."""
     retention = word_retention(inp, out)
     order = order_lcs_ratio(inp, out)
@@ -195,13 +233,29 @@ def compute_all(sample: dict, tone: str, inp: str, out: str) -> dict:
     )
 
     lo, hi = PASS_BANDS["len_ratio"]
-    passes: dict[str, bool] = {
-        "retention": retention >= PASS_BANDS["retention_min"],
-        "order_lcs": order >= PASS_BANDS["order_lcs_min"],
-        "len_ratio": lo <= lratio <= hi,
-        "new_words": len(new_words) <= PASS_BANDS["new_words_max"],
-        "sentence_delta": sent_delta <= sent_delta_max,
-    }
+    transformative = intensity in _TRANSFORMATIVE
+    passes: dict[str, bool] = {}
+    if not transformative:
+        # The whole guide-preservation family is omitted for strong/caricature —
+        # not just retention. Keeping order/length/new-word/sentence gates active
+        # would penalize exactly the transformation those modes exist to produce,
+        # and contradicts "caricature has no automated quality metric".
+        passes.update({
+            "order_lcs": order >= PASS_BANDS["order_lcs_min"],
+            "len_ratio": lo <= lratio <= hi,
+            "new_words": len(new_words) <= PASS_BANDS["new_words_max"],
+            "sentence_delta": sent_delta <= sent_delta_max,
+        })
+        if retention_applies(tone, intensity):
+            passes["retention"] = retention >= PASS_BANDS["retention_min"]
+
+    # Absolute filler-removal gate. Caricature is specified to KEEP and ADD
+    # fillers, so it is N/A there.
+    filler_removed = None
+    if intensity != "caricature":
+        filler_removed = required_filler_removal(inp, out, sample.get("expected_removals"))
+        if filler_removed is not None:
+            passes["required_filler_removal"] = filler_removed >= REQUIRED_FILLER_REMOVAL_MIN
 
     # Tone-specific gates (only added when applicable to the sample/tone).
     if tone == "dev":
@@ -212,12 +266,20 @@ def compute_all(sample: dict, tone: str, inp: str, out: str) -> dict:
         passes["prof_caps"] = sentence_start_caps_ratio(out) >= PASS_BANDS["prof_caps_min"]
         passes["prof_slang_removal"] = len(slang_remaining(inp, out, sample.get("slang"))) == 0
 
-    guide_score = sum(1 for v in passes.values() if v) / len(passes) if passes else 1.0
+    # None rather than a number for transformative rows: a guide score computed
+    # from a partial gate set would look comparable to a standard row and is not.
+    guide_score = (
+        None if transformative
+        else (sum(1 for v in passes.values() if v) / len(passes) if passes else 1.0)
+    )
 
     return {
-        "word_retention": round(retention, 3),
-        "order_lcs_ratio": round(order, 3),
-        "length_ratio": round(lratio, 3),
+        # N/A metrics are None AND their key is absent from `passes` — never False,
+        # which would silently penalize every transformative row via guide_score.
+        "word_retention": round(retention, 3) if retention_applies(tone, intensity) else None,
+        "required_filler_removal": filler_removed,
+        "order_lcs_ratio": round(order, 3) if not transformative else None,
+        "length_ratio": round(lratio, 3) if not transformative else None,
         "new_content_words": new_words,
         "sentence_count_in": sent_in,
         "sentence_count_out": sent_out,
@@ -229,7 +291,7 @@ def compute_all(sample: dict, tone: str, inp: str, out: str) -> dict:
         "dev_term_preservation": round(dev_term_preservation(out, sample.get("dev_terms", [])), 3),
         "slang_remaining": slang_remaining(inp, out, sample.get("slang")),
         "passes": passes,
-        "guide_score": round(guide_score, 3),
+        "guide_score": round(guide_score, 3) if guide_score is not None else None,
     }
 
 
@@ -239,22 +301,37 @@ def summarize(results: list[dict]) -> dict:
     for r in results:
         by_tone.setdefault(r["tone"], []).append(r)
 
+    def _mean(ms: list[dict], key: str):
+        """Mean over rows where the metric APPLIES.
+
+        N/A metrics are None (transformative intensities omit the whole
+        guide-preservation family), so a bare sum() would raise. Returns the count
+        it averaged over so a mean drawn from 2 rows is not read as one from 18.
+        """
+        vals = [m[key] for m in ms if m.get(key) is not None]
+        return {"mean": round(sum(vals) / len(vals), 3) if vals else None, "n": len(vals)}
+
     summary = {}
     for tone, recs in by_tone.items():
         n = len(recs)
         ms = [r["metrics"] for r in recs]
+        # A gate absent from a row is N/A there, not a failure — divide by the
+        # rows where it actually applied.
         gate_keys = sorted({k for m in ms for k in m["passes"]})
-        gate_rates = {
-            k: round(
-                sum(1 for m in ms if m["passes"].get(k)) / n, 3
-            ) for k in gate_keys
-        }
+        gate_rates = {}
+        for k in gate_keys:
+            applicable = [m for m in ms if k in m["passes"]]
+            gate_rates[k] = {
+                "rate": round(sum(1 for m in applicable if m["passes"][k]) / len(applicable), 3),
+                "n": len(applicable),
+            }
         summary[tone] = {
             "n": n,
-            "mean_word_retention": round(sum(m["word_retention"] for m in ms) / n, 3),
-            "mean_order_lcs": round(sum(m["order_lcs_ratio"] for m in ms) / n, 3),
-            "mean_length_ratio": round(sum(m["length_ratio"] for m in ms) / n, 3),
-            "mean_guide_score": round(sum(m["guide_score"] for m in ms) / n, 3),
+            "word_retention": _mean(ms, "word_retention"),
+            "required_filler_removal": _mean(ms, "required_filler_removal"),
+            "order_lcs": _mean(ms, "order_lcs_ratio"),
+            "length_ratio": _mean(ms, "length_ratio"),
+            "guide_score": _mean(ms, "guide_score"),
             "mean_latency_s": round(sum(r.get("latency_s", 0) for r in recs) / n, 3),
             "gate_pass_rates": gate_rates,
         }

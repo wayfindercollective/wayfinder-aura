@@ -12,6 +12,8 @@ Each entry:
 - slang:     (professional samples) slang tokens that SHOULD be tidied away
 """
 
+import re
+
 CORPUS = [
     # ----------------------------- DEV -----------------------------
     {
@@ -136,6 +138,32 @@ CORPUS = [
         "dev_terms": ["commit", "boolean"],
     },
 ]
+
+
+# Schema version — part of the eval fingerprint, so a candidate run cannot be
+# compared against a baseline captured under a different corpus.
+CORPUS_VERSION = 2
+
+# Unambiguous filler SOUNDS only. word_retention cannot serve as a
+# filler-removal canary: its _content_tokens() excludes the whole FILLER set
+# (which also contains ordinary words like "i", "you", "know", "so"), so it is
+# structurally blind to "the model returned the input unchanged" — the exact
+# Gemma failure this guards against. These are the tokens every tone except
+# caricature is instructed to remove; discourse words like "like"/"you know" are
+# deliberately NOT here, because minimal only promises um/uh/ah/er.
+_FILLER_SOUND_RE = re.compile(r"\b(um+|uh+|ah+|er+)\b", re.IGNORECASE)
+
+
+def expected_removals(text: str) -> list[str]:
+    """Filler-sound occurrences in `text`, lowercased, WITH duplicates.
+
+    Occurrence-based on purpose: a token appearing twice must be removed twice.
+    """
+    return [m.group(0).lower() for m in _FILLER_SOUND_RE.finditer(text or "")]
+
+
+for _s in CORPUS:
+    _s["expected_removals"] = expected_removals(_s["text"])
 
 
 def as_json_serializable():
