@@ -120,8 +120,9 @@ class TestIdentityAndReuse:
         binary.touch(); model.touch()
         LlamaServerManager._process = _FakeProc()
         LlamaServerManager._port = 8179
-        LlamaServerManager._identity = LlamaServerManager._identity_of(
-            str(binary), str(model), 2048, 4, 99)
+        ident = LlamaServerManager._identity_of(str(binary), str(model), 2048, 4, 99)
+        LlamaServerManager._identity = ident
+        LlamaServerManager._requested = ident
         with patch("subprocess.Popen") as popen:
             port = LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
         assert port == 8179
@@ -131,8 +132,9 @@ class TestIdentityAndReuse:
         binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
         binary.touch(); model.touch()
         LlamaServerManager._process = _FakeProc(rc=1)  # exited
-        LlamaServerManager._identity = LlamaServerManager._identity_of(
-            str(binary), str(model), 2048, 4, 99)
+        ident = LlamaServerManager._identity_of(str(binary), str(model), 2048, 4, 99)
+        LlamaServerManager._identity = ident
+        LlamaServerManager._requested = ident
         with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
              patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
              patch.object(LlamaServerManager, "_serving_model", return_value=True), \
@@ -401,3 +403,183 @@ class TestGpuModeIsRecordedNotAssumed:
             n_gpu_layers=0, port=8179)[0]
         assert "99" in cmd, "precondition: 99 appears as a non-ngl argument"
         assert cmd[cmd.index("-ngl") + 1] == "0"
+
+
+class TestCpuRescueIsReused:
+    """A GPU request that legitimately degraded to CPU must be REUSED by the next
+    identical request. Keying reuse off the spawned layer count instead of the
+    requested one killed the healthy CPU server and retried the broken GPU ladder
+    on every dictation — on a broken-Vulkan machine that reloaded the model each
+    time and made the startup warm-up worthless."""
+
+    def _degrade_to_cpu(self, tmp_path):
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        calls = []
+
+        def ready(proc, port, deadline):
+            return len(calls) > 1  # GPU rung fails, -ngl 0 rung works
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", side_effect=ready), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", side_effect=lambda cmd, **kw: (calls.append(cmd), _FakeProc())[1]):
+            LlamaServerManager.ensure(str(binary), str(model), 2048, 4, n_gpu_layers=99)
+        return binary, model, calls
+
+    def test_the_degraded_server_is_reused_not_respawned(self, tmp_path):
+        binary, model, _ = self._degrade_to_cpu(tmp_path)
+        with patch("subprocess.Popen") as popen:
+            port = LlamaServerManager.ensure(str(binary), str(model), 2048, 4, n_gpu_layers=99)
+        assert port == 8179
+        popen.assert_not_called(), "a working CPU rescue must not be killed and retried"
+
+    def test_it_is_still_labelled_cpu(self, tmp_path):
+        self._degrade_to_cpu(tmp_path)
+        assert LlamaServerManager.spawned_gpu_layers() == 0
+
+    def test_a_genuinely_different_request_still_respawns(self, tmp_path):
+        binary, model, _ = self._degrade_to_cpu(tmp_path)
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=_FakeProc()) as popen:
+            LlamaServerManager.ensure(str(binary), str(model), 4096, 4, n_gpu_layers=99)
+        assert popen.called
+
+
+class TestShutdownDuringStartup:
+    """Quit / GPU toggle / model switch can fire while a startup is still loading.
+    Publishing that child afterwards leaves a multi-GB process behind."""
+
+    def test_a_startup_that_finishes_after_a_shutdown_does_not_publish(self, tmp_path):
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        proc = _FakeProc()
+
+        def ready(p, port, deadline):
+            LlamaServerManager._epoch += 1   # a shutdown lands mid-load
+            return True
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", side_effect=ready), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=proc):
+            with pytest.raises(LlamaServerError, match="shut down while starting"):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert LlamaServerManager._process is None
+        assert proc.terminated or proc.killed, "the orphan must be killed"
+
+    def test_shutdown_without_the_lock_still_bumps_the_epoch(self):
+        """The no-lock branch cannot write shared state, but it MUST invalidate
+        an in-flight startup or the orphan it was racing survives."""
+        before = LlamaServerManager._epoch
+        LlamaServerManager._lock.acquire()
+        try:
+            LlamaServerManager.shutdown()   # cannot take the lock, times out
+        finally:
+            LlamaServerManager._lock.release()
+        assert LlamaServerManager._epoch > before
+
+    def test_our_own_stop_does_not_invalidate_our_own_startup(self, tmp_path):
+        """_stop_locked() bumps the epoch too; capturing it too early made every
+        startup abort itself."""
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            assert LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99) == 8179
+
+
+class TestStartupDeadline:
+    """The ladder must fit inside the app's 120s PROCESSING watchdog, which
+    DISCARDS the cleaned text rather than merely delaying it."""
+
+    def test_lock_acquisition_respects_the_deadline(self, tmp_path):
+        import time as _t
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        LlamaServerManager._lock.acquire()
+        try:
+            with pytest.raises(LlamaServerError, match="deadline"):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99,
+                                          deadline=_t.monotonic() + 0.2)
+        finally:
+            LlamaServerManager._lock.release()
+
+    def test_readiness_wait_is_clamped_to_the_deadline(self, tmp_path):
+        import time as _t
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        seen = []
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready",
+                          side_effect=lambda p, port, dl: (seen.append(dl), False)[1]), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            with pytest.raises(LlamaServerError):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99,
+                                          deadline=_t.monotonic() + 1.0)
+        assert seen, "readiness was never attempted"
+        assert all(d <= _t.monotonic() + 1.1 for d in seen), \
+            "an attempt was allowed to run past the caller's budget"
+
+    def test_no_deadline_means_the_full_startup_timeout(self, tmp_path):
+        import time as _t
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        seen = []
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready",
+                          side_effect=lambda p, port, dl: (seen.append(dl), False)[1]), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            with pytest.raises(LlamaServerError):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert seen[0] > _t.monotonic() + 60, "background warm-up should be unbounded"
+
+
+class TestRepeatedFailurePolicy:
+    def test_a_persistently_failing_server_is_eventually_restarted(self):
+        LlamaServerManager._consecutive_failures = 0
+        with patch.object(LlamaServerManager, "shutdown") as shut:
+            results = [LlamaServerManager.note_failure()
+                       for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES)]
+        assert results[-1] is True and not any(results[:-1])
+        shut.assert_called_once()
+
+    def test_a_one_off_failure_does_not_thrash_the_model_load(self):
+        LlamaServerManager._consecutive_failures = 0
+        with patch.object(LlamaServerManager, "shutdown") as shut:
+            assert LlamaServerManager.note_failure() is False
+        shut.assert_not_called()
+
+    def test_success_resets_the_counter(self):
+        LlamaServerManager._consecutive_failures = 0
+        with patch.object(LlamaServerManager, "shutdown") as shut:
+            LlamaServerManager.note_failure()
+            LlamaServerManager.note_success()
+            for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES - 1):
+                assert LlamaServerManager.note_failure() is False
+        shut.assert_not_called()
+
+
+class TestSaveMemoryReleasesEverything:
+    def test_save_memory_disables_the_resident_wheel_too(self, tmp_path):
+        """Checking only force_subprocess left llama-cpp-python loading and
+        CACHING the model, so the setting freed nothing."""
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        (tmp_path / "llama-simple").touch()
+        model = tmp_path / "m.gguf"; model.touch()
+        b = LlamaCppCliBackend(llama_binary=str(tmp_path / "llama-simple"),
+                               model_path=str(model), residency="save_memory")
+        assert b._resident_model() is None
+        assert b._server_enabled() is False
+
+    def test_auto_still_allows_the_wheel(self, tmp_path):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        (tmp_path / "llama-simple").touch()
+        model = tmp_path / "m.gguf"; model.touch()
+        b = LlamaCppCliBackend(llama_binary=str(tmp_path / "llama-simple"),
+                               model_path=str(model), residency="auto")
+        assert b._server_enabled() is True

@@ -2076,6 +2076,12 @@ class LlamaCppCliBackend(PostProcessorBackend):
         when llama-cpp-python isn't importable (e.g. a from-source install
         without it), so callers fall back to the subprocess path.
         """
+        # "Save memory" means exactly that: nothing held between dictations.
+        # Checking only force_subprocess left the llama-cpp-python wheel loading
+        # and CACHING the model regardless, so the setting freed nothing — and
+        # the startup warm-up loaded it proactively.
+        if getattr(self, "residency", "auto") == "save_memory":
+            return None
         # Honor the explicit opt-out before touching the import: a host may have a
         # slow CPU-only wheel but a fast GPU/AVX2 `llama-simple` subprocess.
         if getattr(self, "force_subprocess", False):
@@ -2260,9 +2266,16 @@ class LlamaCppCliBackend(PostProcessorBackend):
         still catching 88% of unrelated content; 0.15 bought 4 more points of
         catch rate at the cost of a visible false rejection.
 
-        This is a catastrophic-failure floor, NOT a fidelity check: the two
-        populations genuinely overlap (unrelated output reaches 1.0 overlap, p90
-        = 0.143), so no threshold separates them. Caricature stays exempt.
+        What this actually is: a NEAR-ZERO LEXICAL OVERLAP filter. Not a fidelity
+        check, and weaker than "catastrophic-failure floor" would suggest — it is
+        set recall, so a single shared meaningful word carries a short output
+        past any of these thresholds. MEASURED: "deploy the payment service after
+        lunch" -> "The payment was stolen by an attacker." is accepted at 0.12,
+        0.15 AND 0.25, because "payment" appears in both. Raising the threshold
+        does not fix that either: the two populations genuinely overlap (truly
+        unrelated output reaches 1.0 overlap, p90 = 0.143), so no value separates
+        them. It catches near-zero-overlap output and nothing subtler.
+        Caricature stays exempt.
 
         Read by the eval harness for its fingerprint — keep this the only site.
         """
@@ -2286,7 +2299,15 @@ class LlamaCppCliBackend(PostProcessorBackend):
             return 0.15
         return 0.25
 
-    def _server_generate(self, prompt: str, n_predict: int) -> Optional[dict]:
+    # Budget for acquiring a server while a dictation is WAITING. The app's
+    # PROCESSING watchdog fires at 120s and bumps the session generation, which
+    # DISCARDS the cleaned text rather than merely delaying it — so the server
+    # path plus its CLI fallback must finish well inside that. The background
+    # warm-up passes no deadline, because nobody is waiting on it.
+    SERVER_ACQUIRE_BUDGET = 20.0
+
+    def _server_generate(self, prompt: str, n_predict: int,
+                         deadline: Optional[float] = None) -> Optional[dict]:
         """Run one cleanup on the resident server, or None to fall through.
 
         Returns None (never raises) for every failure mode — missing binary,
@@ -2318,6 +2339,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
             port = LlamaServerManager.ensure(
                 binary=binary, model_path=self.model_path, n_ctx=self.n_ctx,
                 n_threads=self.n_threads, n_gpu_layers=requested_ngl,
+                deadline=deadline,
             )
             out = LlamaServerManager.complete(
                 prompt=prompt, n_predict=n_predict, port=port,
@@ -2326,6 +2348,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
             # Label from what the server was ACTUALLY spawned with, so a GPU
             # request that degraded to a CPU rung does not report as GPU.
             out["_spawned_ngl"] = LlamaServerManager.spawned_gpu_layers()
+            LlamaServerManager.note_success()
             return out
         except Exception as e:
             # A server that accepted the connection but never answered is wedged;
@@ -2339,8 +2362,14 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 except Exception:
                     pass
             else:
+                # A live server that keeps failing (HTTP 500, malformed JSON)
+                # passes the poll()+identity reuse check forever, so every later
+                # dictation would pay the failure before falling back. Bounded so
+                # a one-off blip does not thrash a multi-GB model reload either.
+                restarted = LlamaServerManager.note_failure()
                 print(f"[Post-processing] llama-server unavailable "
-                      f"({type(e).__name__}: {e}) - falling back to per-call CLI")
+                      f"({type(e).__name__}: {e}) - falling back to per-call CLI"
+                      + (" (restarting it)" if restarted else ""))
             return None
 
     def _probe_raw(self, text: str, n_predict: int) -> tuple:
@@ -2542,8 +2571,9 @@ Cleaned text:"""
             # the EXACT same compact prompt + extraction as the subprocess path, so
             # the cleaned output is identical — only the execution differs.
             resident = self._resident_model()
-            served = None if resident is not None else \
-                self._server_generate(simple_prompt, estimated_output_tokens)
+            served = None if resident is not None else self._server_generate(
+                simple_prompt, estimated_output_tokens,
+                deadline=time.monotonic() + self.SERVER_ACQUIRE_BUDGET)
             if resident is not None:
                 out = resident(
                     simple_prompt,

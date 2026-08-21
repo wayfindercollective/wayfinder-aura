@@ -36,8 +36,12 @@ PASS_BANDS = {
     "new_words_max": 2,
     "sent_delta_max": {"casual": 2, "_default": 1},
     "prof_caps_min": 0.9,
-    # See nonslang_preservation(): good 0.810-1.000 vs rewrites <=0.800, measured.
-    "nonslang_preservation_min": 0.75,
+    # See nonslang_preservation(): MEASURED, good outputs score 0.810-1.000 and
+    # cross-sample rewrites top out at 0.800. 0.80 is the boundary of that gap —
+    # it rejects every observed rewrite and accepts every observed good output.
+    # (An earlier note here claimed 0.75 "sits inside the gap"; it does not, it
+    # sits below it, and would have admitted a rewrite scoring 0.79.)
+    "nonslang_preservation_min": 0.80,
 }
 
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
@@ -209,6 +213,39 @@ def nonslang_preservation(inp: str, out: str, slang: list[str] | None) -> float 
     return prev[len(dst)] / len(src)
 
 
+_NEGATIONS = frozenset({
+    "not", "no", "never", "none", "cannot", "cant", "dont", "doesnt", "didnt",
+    "wont", "wouldnt", "shouldnt", "couldnt", "isnt", "arent", "wasnt",
+    "werent", "hasnt", "havent", "hadnt", "nor", "neither", "without",
+    # Colloquial forms MUST be here or the metric fires on correct cleanups:
+    # MEASURED, "or nah" -> "or not" and "dunno" -> "don't know" are faithful
+    # expansions that looked like added negations until the input side could
+    # see the originals.
+    "nah", "nope", "dunno", "aint", "nuh",
+})
+
+
+def negation_delta(inp: str, out: str) -> int:
+    """Net negation markers ADDED (+) or DROPPED (-) by the cleanup.
+
+    Cleanup must never flip the meaning of a dictation, and the cheapest way to
+    do exactly that is to add or drop a negation: "send the payment" ->
+    "do not send the payment" is a one-token edit that scores perfectly on every
+    other metric here. It survives nonslang_preservation (input-token recall,
+    where insertions are free) and cannot be caught by an insertion budget —
+    MEASURED, good professional rows insert up to 4 content words beyond what
+    slang replacement accounts for, while that inversion inserts only 2, so the
+    two populations overlap and no budget separates them.
+
+    Deliberately narrow: it catches the inversion class, not paraphrase. n't is
+    normalized because "don't" tokenizes apart from "dont".
+    """
+    def count(text: str) -> int:
+        t = re.sub(r"n[\u2019']t\b", " not", (text or "").lower())
+        return sum(1 for w in _content_tokens(t) if w in _NEGATIONS)
+    return count(out) - count(inp)
+
+
 # ----------------------------------------------------------------------------
 # Aggregation
 # ----------------------------------------------------------------------------
@@ -304,6 +341,19 @@ def compute_all(sample: dict, tone: str, inp: str, out: str,
         if retention_applies(tone, intensity):
             passes["retention"] = retention >= PASS_BANDS["retention_min"]
 
+    # Meaning-inversion gate. Adding or dropping a negation flips what the user
+    # said, which is the worst thing a cleanup can do and the cheapest to do by
+    # accident: "send the payment" -> "do not send the payment" scores perfectly
+    # on every other metric here, including nonslang_preservation (input-token
+    # recall, where insertions are free).
+    #
+    # Standard only — MEASURED across the 198-row matrix: at standard nothing
+    # flags, while strong legitimately drops whole clauses (6 rows) and
+    # caricature adds parody negations (15 rows). Same applicability rule the
+    # preservation family already uses.
+    if intensity == "standard":
+        passes["negation_preserved"] = negation_delta(inp, out) == 0
+
     # Absolute filler-removal gate. Caricature is specified to KEEP and ADD
     # fillers, so it is N/A there.
     filler_removed = None
@@ -325,8 +375,14 @@ def compute_all(sample: dict, tone: str, inp: str, out: str,
         # and still pass on length + capitalization alone.
         # Threshold MEASURED, not chosen: over the 18 professional/standard rows
         # the good outputs score 0.810-1.000 while cross-sample rewrites top out
-        # at 0.800 — a clean gap with no overlap. 0.75 sits inside it (rejects
-        # 0 of 18 good, catches 99.7% of rewrites).
+        # at 0.800 — a clean gap with no overlap, and 0.80 is its boundary.
+        #
+        # This is RECALL of the input's non-slang content, so output INSERTIONS
+        # are free and it cannot see a meaning inversion — "send the payment" ->
+        # "do not send the payment" scores 1.0 here. negation_preserved covers
+        # that specific class; an insertion budget was tried and cannot, because
+        # good rows insert up to 4 content words beyond what slang replacement
+        # explains while that inversion inserts only 2.
         nonslang = nonslang_preservation(inp, out, sample.get("slang"))
         if nonslang is not None:
             passes["nonslang_preservation"] = nonslang >= PASS_BANDS["nonslang_preservation_min"]

@@ -77,13 +77,31 @@ class LlamaServerManager:
     # Identity of the RUNNING server. Every field is fixed at spawn time, so a
     # change in any of them must miss reuse and respawn rather than silently
     # serve requests from a server configured for something else.
+    # What was ASKED for. Reuse is decided against this, never against what was
+    # actually spawned: a GPU request that legitimately degraded to a CPU rung
+    # recorded n_gpu_layers=0, so the next identical request saw a "mismatch",
+    # killed the healthy CPU server and retried the broken GPU ladder — on a
+    # broken-Vulkan machine that reloaded the model on EVERY dictation and made
+    # the startup warm-up worthless.
+    _requested: Optional[tuple] = None
+    # What was actually spawned. Drives the server-GPU/server-CPU label only.
     _identity: Optional[tuple] = None
+    # Bumped by every shutdown. A startup that finishes after a shutdown began
+    # must not publish its child, or Quit leaves a multi-GB process behind.
+    _epoch: int = 0
     _log_tail: Optional[deque] = None
     _log_thread: Optional[threading.Thread] = None
     # Set when every startup ladder rung failed. The caller then goes straight
     # to the per-call CLI instead of paying a failed startup on every dictation.
     _disabled: bool = False
     _atexit_registered: bool = False
+    # Consecutive request failures that were NOT timeouts. A server that stays
+    # alive but always answers HTTP 500 / malformed JSON passes the poll()+
+    # identity reuse check forever, so every dictation would pay the failure
+    # before falling back. Restarting on the FIRST such error would instead
+    # thrash a multi-GB model load on a one-off blip; this bounds both.
+    _consecutive_failures: int = 0
+    MAX_CONSECUTIVE_FAILURES = 3
 
     STARTUP_TIMEOUT = 90.0   # cold load of a 4B GGUF from disk
     # A WARM server answers in ~0.15s (GPU) and ~3.6s (CPU caricature, measured).
@@ -264,10 +282,23 @@ class LlamaServerManager:
 
     @classmethod
     def ensure(cls, binary: str, model_path: str, n_ctx: int = 2048,
-               n_threads: int = 4, n_gpu_layers: int = 99) -> int:
-        """Return a port serving `model_path`, starting the server if needed."""
+               n_threads: int = 4, n_gpu_layers: int = 99,
+               deadline: Optional[float] = None) -> int:
+        """Return a port serving `model_path`, starting the server if needed.
+
+        deadline: absolute time.monotonic() budget covering EVERY blocking step —
+        lock acquisition and all ladder rungs together. Without it the ladder
+        could run 3 attempts x STARTUP_TIMEOUT (~270s) before the CLI fallback
+        even began, and the app's 120s PROCESSING watchdog would have already
+        bumped the session generation and DISCARDED the eventual output. The
+        background warm-up passes None (nobody is waiting); a live dictation
+        passes a real budget. Same shape as WhisperServerBackend's deadline.
+        """
         import atexit
         import time
+
+        def _left() -> float:
+            return float("inf") if deadline is None else deadline - time.monotonic()
 
         if cls._disabled:
             raise LlamaServerError("llama-server disabled after a previous failure")
@@ -278,11 +309,22 @@ class LlamaServerManager:
 
         want = cls._identity_of(binary, model_path, n_ctx, n_threads, n_gpu_layers)
 
-        with cls._lock:
-            if cls._alive() and cls._identity == want:
+        # Bounded lock acquisition: a competing startup can hold this for its
+        # whole readiness wait, so a deadline must clamp the wait for it too.
+        if deadline is None:
+            cls._lock.acquire()
+        else:
+            rem = _left()
+            if rem <= 0 or not cls._lock.acquire(timeout=rem):
+                raise LlamaServerError("deadline hit acquiring the server lock")
+        try:
+            if cls._alive() and cls._requested == want:
                 return cls._port
 
             cls._stop_locked()
+            # Captured AFTER our own stop, which bumps the epoch itself —
+            # otherwise a startup would always invalidate itself.
+            epoch = cls._epoch
 
             if not cls._atexit_registered:
                 atexit.register(cls.shutdown)
@@ -305,7 +347,11 @@ class LlamaServerManager:
                     errors.append(f"{Path(cmd[0]).name}: {type(e).__name__}: {e}")
                     continue
                 cls._start_drain(proc)
-                if cls._wait_ready(proc, port, time.monotonic() + cls.STARTUP_TIMEOUT):
+                # Readiness waits inside the caller's budget, never past it.
+                attempt_deadline = time.monotonic() + cls.STARTUP_TIMEOUT
+                if deadline is not None:
+                    attempt_deadline = min(attempt_deadline, deadline)
+                if cls._wait_ready(proc, port, attempt_deadline):
                     # Confirm the child actually loaded the file we named. A
                     # mismatch means silently cleaning every dictation with the
                     # wrong model, which is invisible in the output.
@@ -317,16 +363,20 @@ class LlamaServerManager:
                         except Exception:
                             pass
                         continue
+                    # A shutdown that began while we were loading wins. Publishing
+                    # here anyway is how Quit-during-warm-up orphaned a multi-GB
+                    # child: shutdown had already returned, having seen no process.
+                    if cls._epoch != epoch:
+                        cls._kill(proc)
+                        raise LlamaServerError("shut down while starting")
                     cls._process = proc
                     cls._port = port
-                    # Identity records the mode ACTUALLY spawned, not the one
-                    # requested: a GPU request that fell to a CPU rung must not
-                    # claim GPU, or the next GPU request reuses a CPU server.
-                    # Record the layer count ACTUALLY spawned, read from the
-                    # -ngl argument (never `"99" in cmd`, which scans the whole
-                    # argv and would let n_threads=99 mark a CPU server as GPU).
-                    # A GPU request that fell to a CPU rung records 0, so the
-                    # next GPU request misses reuse and retries GPU.
+                    # Reuse keys off the REQUEST; the label keys off the spawn.
+                    # Recording only the spawned value made a healthy CPU-rescue
+                    # server look like a mismatch to the next identical request.
+                    cls._requested = want
+                    # Read the -ngl VALUE, never `"99" in cmd`, which scans the
+                    # whole argv and would let n_threads=99 mark a CPU server GPU.
                     spawned_ngl = int(cmd[cmd.index("-ngl") + 1])
                     cls._identity = cls._identity_of(
                         cmd[0], model_path, n_ctx, n_threads, spawned_ngl)
@@ -342,6 +392,8 @@ class LlamaServerManager:
             cls._disabled = True
             raise LlamaServerError("every llama-server start attempt failed: "
                                    + " | ".join(errors))
+        finally:
+            cls._lock.release()
 
     @classmethod
     def complete(cls, prompt: str, n_predict: int, temperature: float = 0.1,
@@ -388,8 +440,24 @@ class LlamaServerManager:
         proc = cls._process
         cls._process = None
         cls._identity = None
+        cls._requested = None
         cls._port = 0
+        cls._epoch += 1
         cls._kill(proc)
+
+    @classmethod
+    def note_success(cls) -> None:
+        cls._consecutive_failures = 0
+
+    @classmethod
+    def note_failure(cls) -> bool:
+        """Record a non-timeout request failure. True when the server was restarted."""
+        cls._consecutive_failures += 1
+        if cls._consecutive_failures >= cls.MAX_CONSECUTIVE_FAILURES:
+            cls._consecutive_failures = 0
+            cls.shutdown()
+            return True
+        return False
 
     @classmethod
     def shutdown(cls) -> None:
@@ -408,6 +476,10 @@ class LlamaServerManager:
             if acquired:
                 cls._stop_locked()
             else:
+                # Could not take the lock: another thread owns the shared state,
+                # so do not write it — but DO bump the epoch, which is what stops
+                # that thread publishing a child after we were asked to stop.
+                cls._epoch += 1
                 proc, cls._process = cls._process, None
                 cls._kill(proc)
         finally:
@@ -433,5 +505,7 @@ class LlamaServerManager:
     def reset_for_tests(cls) -> None:
         cls.shutdown()
         cls._disabled = False
+        cls._requested = None
+        cls._consecutive_failures = 0
         cls._log_tail = None
         cls._log_thread = None

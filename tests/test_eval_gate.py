@@ -406,3 +406,64 @@ class TestNonSlangPreservation:
         p = M.compute_all(self.SAMPLE, "casual", self.IN, "whatever", "standard")["passes"]
         assert "nonslang_preservation" not in p
         assert "order_lcs" in p and "new_words" in p
+
+
+class TestNegationPreserved:
+    """Adding or dropping a negation flips what the user said — the worst thing a
+    cleanup can do, and invisible to every other metric here."""
+
+    SAMPLE = {"id": "x", "stresses": [], "slang": []}
+    IN = "please send the quarterly payment to Alice today before the meeting"
+
+    def test_an_added_negation_is_caught(self):
+        p = M.compute_all(self.SAMPLE, "professional", self.IN,
+                          "Please do not send the quarterly payment to Alice "
+                          "today before the meeting.", "standard")["passes"]
+        assert p["negation_preserved"] is False
+
+    def test_a_dropped_negation_is_caught(self):
+        p = M.compute_all(self.SAMPLE, "minimal",
+                          "do not send the payment until friday",
+                          "Send the payment until Friday.", "standard")["passes"]
+        assert p["negation_preserved"] is False
+
+    def test_nonslang_preservation_alone_would_have_passed_the_inversion(self):
+        """Why this gate exists: recall-only metrics treat insertions as free."""
+        assert M.nonslang_preservation(
+            self.IN,
+            "Please do not send the quarterly payment to Alice today before the "
+            "meeting.", None) == 1.0
+
+    def test_a_faithful_cleanup_is_not_flagged(self):
+        p = M.compute_all(self.SAMPLE, "professional", self.IN,
+                          "Please send the quarterly payment to Alice today "
+                          "before the meeting.", "standard")["passes"]
+        assert p["negation_preserved"] is True
+
+    @pytest.mark.parametrize("inp,out", [
+        # Faithful expansions of colloquial negations, which fired before the
+        # input side learned to see the originals.
+        ("you wanna grab food after or nah", "Do you want to grab food afterward or not?"),
+        ("i dunno about that", "I don't know about that."),
+        ("aint got time", "I do not have time."),
+    ])
+    def test_colloquial_negations_are_recognised_on_the_input_side(self, inp, out):
+        assert M.negation_delta(inp, out) == 0
+
+    def test_contractions_normalise(self):
+        assert M.negation_delta("i do not know", "I don't know.") == 0
+        assert M.negation_delta("i do not know", "I don’t know.") == 0
+
+    @pytest.mark.parametrize("intensity", ["strong", "caricature"])
+    def test_not_gated_for_transformative_intensities(self, intensity):
+        """MEASURED: strong legitimately drops whole clauses (6 matrix rows) and
+        caricature adds parody negations (15 rows)."""
+        p = M.compute_all(self.SAMPLE, "casual", self.IN,
+                          "nah dont even bother with that fr", intensity)["passes"]
+        assert "negation_preserved" not in p
+
+    def test_gated_for_every_tone_at_standard(self):
+        for tone in ("minimal", "casual", "dev", "personal", "professional"):
+            p = M.compute_all(self.SAMPLE, tone, self.IN, "Please send it.",
+                              "standard")["passes"]
+            assert "negation_preserved" in p, tone

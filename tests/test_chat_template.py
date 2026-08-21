@@ -328,3 +328,27 @@ class TestProfessionalHallucinationFloor:
         assert is_hallucination(
             "I need to buy groceries this afternoon",
             "The French Revolution began in 1789 when the Bastille was stormed") is True
+
+
+class TestHallucinationGuardLimits:
+    """What the overlap guard does NOT catch, pinned so the docstring cannot
+    drift back into overstating it. These are not bugs to fix by raising the
+    threshold — the good/bad populations overlap completely, so no value
+    separates them; they are the known ceiling of a lexical check."""
+
+    def test_a_shared_keyword_carries_unrelated_output_past_every_threshold(self):
+        from wayfinder.core.postprocessor import is_hallucination
+        inp = "deploy the payment service after lunch"
+        bad = "The payment was stolen by an attacker."
+        for t in (0.12, 0.15, 0.25):
+            assert is_hallucination(inp, bad, threshold=t, model_name="x") is False, (
+                f"guard unexpectedly caught this at {t} — if this now passes, the "
+                "docstring's stated limits are out of date")
+
+    def test_it_does_catch_near_zero_overlap(self):
+        """The one thing it is actually for."""
+        from wayfinder.core.postprocessor import is_hallucination
+        assert is_hallucination(
+            "deploy the payment service after lunch",
+            "Pineapples flourish in volcanic soil near the equator.",
+            threshold=0.25, model_name="x") is True
