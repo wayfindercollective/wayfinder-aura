@@ -2266,7 +2266,25 @@ class LlamaCppCliBackend(PostProcessorBackend):
 
         Read by the eval harness for its fingerprint — keep this the only site.
         """
-        return 0.12 if self.intensity == "strong" else 0.25
+        if self.intensity == "strong":
+            return 0.12
+        if (self.output_tone or "") == "professional":
+            # Professional is DEFINED to replace slang, so its overlap is
+            # structurally low for exactly the input the tone exists to fix —
+            # the same conflict strong mode has, one tier milder. MEASURED:
+            # gemma-3-1b (the default free-tier model) cleaned "oh thats tight
+            # bro nice" to "Oh, that's quite good." — correct — and scored 0.200,
+            # so at 0.25 the guard discarded it and returned the raw slang.
+            # Across the 18 professional/standard matrix rows on Qwen3-4B the
+            # good outputs score 0.400-1.000, so 0.15 clears every measured-good
+            # result while still rejecting the unrelated-content case (0.000).
+            #
+            # NOT done as a short-input exemption, which was tried and was wrong:
+            # "I need to buy groceries this afternoon" has only 4 meaningful
+            # words, and skipping the verdict there let a genuine hallucination
+            # through (tests/test_postprocessor.py::test_completely_unrelated_response).
+            return 0.15
+        return 0.25
 
     def _server_generate(self, prompt: str, n_predict: int) -> Optional[dict]:
         """Run one cleanup on the resident server, or None to fall through.

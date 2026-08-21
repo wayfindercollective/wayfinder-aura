@@ -284,3 +284,47 @@ class TestFactoryDataflow:
         assert b.template is None
         assert b.build_cli_prompt("hi there", b.output_tone, b.intensity,
                                   b.template).startswith("Task:")
+
+
+class TestProfessionalHallucinationFloor:
+    """Professional is defined to replace slang, so its overlap is structurally
+    low for exactly the input the tone exists to fix.
+
+    MEASURED: gemma-3-1b (the default free-tier model) cleaned "oh thats tight
+    bro nice" to "Oh, that's quite good." — correct — and scored 0.200, so at
+    0.25 the guard discarded it and handed back the raw slang.
+    """
+
+    SHORT = "oh thats tight bro nice"
+
+    def _t(self, tone, intensity="standard"):
+        return _backend(tone=tone, strong=intensity == "strong")._guard_threshold()
+
+    def test_professional_gets_a_lower_floor_than_the_preserving_tones(self):
+        assert self._t("professional") < self._t("casual")
+
+    def test_strong_is_lower_still_and_wins_over_tone(self):
+        assert self._t("professional", "strong") == self._t("casual", "strong") == 0.12
+
+    def test_a_correct_short_slang_cleanup_clears_the_professional_floor(self):
+        from wayfinder.core.postprocessor import is_hallucination
+        assert is_hallucination(self.SHORT, "Oh, that's quite good.",
+                                threshold=self._t("professional"),
+                                model_name="x") is False
+
+    def test_unrelated_content_is_still_rejected_at_that_floor(self):
+        from wayfinder.core.postprocessor import is_hallucination
+        assert is_hallucination(self.SHORT, "Pineapples flourish in volcanic soil.",
+                                threshold=self._t("professional"),
+                                model_name="x") is True
+
+    def test_the_preserving_tones_keep_the_strict_floor(self):
+        assert self._t("casual") == self._t("minimal") == self._t("dev") == 0.25
+
+    def test_a_short_input_still_gets_a_verdict(self):
+        """A length-based exemption was tried instead and was WRONG: with 4
+        meaningful words it let a genuine hallucination through."""
+        from wayfinder.core.postprocessor import is_hallucination
+        assert is_hallucination(
+            "I need to buy groceries this afternoon",
+            "The French Revolution began in 1789 when the Bastille was stormed") is True
