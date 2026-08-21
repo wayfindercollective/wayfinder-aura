@@ -21,6 +21,7 @@ Subset / faster iteration:
 """
 import argparse
 import contextlib
+import re
 import copy
 import hashlib
 import io
@@ -40,7 +41,7 @@ for p in (str(SRC), str(SCRIPTS)):
         sys.path.insert(0, p)
 
 from wayfinder.core.postprocessor import (                            # noqa: E402
-    chat_template_key, process_with_config, strip_echoed_input,
+    chat_template_key, get_backend, process_with_config, strip_echoed_input,
 )
 from tone_eval.corpus import CORPUS, CORPUS_VERSION                   # noqa: E402
 from tone_eval import metrics as M                                    # noqa: E402
@@ -62,6 +63,19 @@ DEFAULT_CELLS = (
 # Failure markers process_with_config() prints instead of raising. It catches
 # PostProcessingError AND bare Exception and returns the INPUT, so a failed
 # cleanup otherwise scores as a perfect pass.
+# Printed by the server path when stop_type == "limit". This is the EXACT
+# termination signal the CLI path can only infer by generating twice.
+CAP_MARKER = "\u26a0 generation hit the token cap"
+
+# Metrics that a no-op output satisfies by construction. Used to suppress
+# meaningless gate-flip comparisons against a baseline that changed nothing.
+# NOT prof_caps/prof_slang_removal/required_filler_removal: a no-op FAILS those
+# (the slang and fillers are still there), so a flip on them is a real signal.
+_PRESERVATION_GATES = frozenset({
+    "retention", "order_lcs", "dev_term_preservation",
+    "len_ratio", "sentence_delta", "new_words",
+})
+
 FAILURE_MARKERS = (
     "[Post-processing] \u2717",
     "\u26a0 No output from llama",
@@ -90,7 +104,7 @@ BASE_CONFIG = {
 
 
 _BINARY_OVERRIDE = {"path": None}
-_PATH = {"use_gpu": True}
+_PATH = {"use_gpu": True, "server": False}
 
 
 def make_config(tone: str, model_path: str, intensity: str = "standard",
@@ -110,7 +124,10 @@ def make_config(tone: str, model_path: str, intensity: str = "standard",
     # (2.4s vs 10.4s per generation on Qwen3-4B, verified byte-identical across
     # three consecutive runs) and is the path users actually run.
     cfg["use_gpu"] = _PATH["use_gpu"]
-    cfg["post_processing_force_subprocess"] = True
+    # server-* paths must NOT force the subprocess: force_subprocess is the flag
+    # that pins the deterministic one-shot path, and it also disables the server.
+    cfg["post_processing_force_subprocess"] = not _PATH["server"]
+    cfg["llama_cpp_residency"] = "instant" if _PATH["server"] else "save_memory"
     return cfg
 
 
@@ -132,7 +149,17 @@ def preflight(model_path: str, chat_template: str) -> dict:
     if not isinstance(backend, LlamaCppCliBackend):
         problems.append(f"backend is {type(backend).__name__}, not LlamaCppCliBackend")
     else:
-        if not backend.force_subprocess:
+        if _PATH["server"]:
+            if backend.force_subprocess:
+                problems.append("force_subprocess set on a server path (server disabled)")
+            if not backend._server_enabled():
+                problems.append(f"server path requested but residency={backend.residency!r} "
+                                "disables it")
+            from wayfinder.core.llama_server import resolve_server_binary
+            sbin = resolve_server_binary(backend.llama_binary, use_gpu=_PATH["use_gpu"])
+            if not sbin:
+                problems.append(f"no llama-server next to {backend.llama_binary}")
+        elif not backend.force_subprocess:
             problems.append("force_subprocess is not set")
         want_gpu = _PATH["use_gpu"]
         if want_gpu and backend.n_gpu_layers == 0:
@@ -158,13 +185,62 @@ def preflight(model_path: str, chat_template: str) -> dict:
     if backend.intensity != "strong":
         problems.append(f"intensity capped to {backend.intensity!r} for this model")
 
+    server_binary = None
+    if _PATH["server"]:
+        from wayfinder.core.llama_server import resolve_server_binary
+        server_binary = resolve_server_binary(
+            getattr(backend, "llama_binary", ""), use_gpu=_PATH["use_gpu"])
     return {"ok": not problems, "problems": problems,
-            "binary": getattr(backend, "llama_binary", None)}
+            "binary": getattr(backend, "llama_binary", None),
+            "server_binary": server_binary}
 
 
 def _chat_template_expectation(setting: str, model_path: str):
     from wayfinder.core.postprocessor import _chat_template_for
     return "chatml" if _chat_template_for(model_path, setting) else None
+
+
+def _prompt_fingerprint(model_path: str, cells: list) -> str:
+    """Hash of the ACTUAL prompt text for every cell in the matrix.
+
+    Without this, a tone-guidance edit is invisible to the gate: none of the
+    other fingerprint fields (model, binary, corpus, cells) change when a prompt
+    string does, so two runs of different prompts would compare as though only
+    the execution path differed.
+    """
+    h = hashlib.sha256()
+    for tone, intensity in sorted(cells):
+        b = get_backend(make_config(tone, model_path, intensity))
+        h.update(b.build_cli_prompt("probe text for hashing", tone,
+                                    b.intensity, b.template).encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def _guard_fingerprint(model_path: str, cells: list) -> dict:
+    """The hallucination-guard floor per intensity, read from the backend."""
+    out = {}
+    for tone, intensity in cells:
+        if intensity not in out:
+            out[intensity] = get_backend(
+                make_config(tone, model_path, intensity))._guard_threshold()
+    return out
+
+
+def _sampling_fingerprint(model_path: str, cells: list) -> dict:
+    """The sampling profile actually used, per intensity present in the matrix.
+
+    Only meaningful on the server path; the CLI path exposes no sampling flags.
+    """
+    if not _PATH["server"]:
+        return {}
+    from wayfinder.core.postprocessor import get_backend
+    out = {}
+    for tone, intensity in cells:
+        if intensity in out:
+            continue
+        b = get_backend(make_config(tone, model_path, intensity))
+        out[intensity] = b._sampling_profile()
+    return out
 
 
 def _sha256(path: str) -> str:
@@ -193,18 +269,24 @@ def run_one(text: str, tone: str, model_path: str, intensity: str = "standard",
         out, err = text, f"{type(e).__name__}: {e}"
     logged = buf.getvalue()
     fell_back = [m for m in FAILURE_MARKERS if m in logged]
+    # Which path ACTUALLY ran. Without this the matrix can silently measure the
+    # CLI while claiming the server: _server_generate() swallows every failure
+    # and falls through by design, so a broken server looks like a clean run.
+    m = re.search(r"llama\.cpp (\S+) completed", logged)
     return {
         "output": out,
         "latency_s": round(time.perf_counter() - t0, 3),
         "error": err,
         "fell_back": bool(fell_back),
         "fallback_markers": fell_back,
+        "mode": m.group(1) if m else None,
+        "hit_cap": CAP_MARKER in logged,
         "stdout": logged.strip()[-500:],
     }
 
 
 def termination_check(text: str, tone: str, model_path: str, intensity: str,
-                      chat_template: str) -> dict:
+                      chat_template: str, row_hit_cap: bool = False) -> dict:
     """Prove generation stopped on end-of-turn rather than at the token cap.
 
     Cannot use process_with_config: it returns only the EXTRACTED text, and the
@@ -217,6 +299,16 @@ def termination_check(text: str, tone: str, model_path: str, intensity: str,
     from wayfinder.core.postprocessor import get_backend
 
     backend = get_backend(make_config(tone, model_path, intensity, chat_template))
+
+    # On the server path the answer is already known exactly: llama-server reports
+    # stop_type ("eos" | "limit" | "word") for the REAL production request, which
+    # run_one() already made. No second generation, no byte comparison, no
+    # heuristic — and half the runtime.
+    if _PATH["server"]:
+        return {"passed": not row_hit_cap, "signal": "stop_type",
+                "reason": None if not row_hit_cap else
+                          "llama-server reported stop_type=limit (hit the cap)"}
+
     n1 = backend._token_budget(text)
     try:
         raw1, eff1, cmd1 = backend._probe_raw(text, n1)
@@ -241,7 +333,8 @@ def termination_check(text: str, tone: str, model_path: str, intensity: str,
 
 
 def compare_to_baseline(baseline: dict, candidate: dict,
-                        advisories: list | None = None) -> list[str]:
+                        advisories: list | None = None,
+                        ignore_fingerprint: set | None = None) -> list[str]:
     """Gate the candidate against a baseline run. Returns a list of violations.
 
     The fingerprint must match on everything except the one variable under test,
@@ -251,8 +344,11 @@ def compare_to_baseline(baseline: dict, candidate: dict,
     violations = []
     advisories = [] if advisories is None else advisories
     bf, cf = baseline.get("fingerprint", {}), candidate.get("fingerprint", {})
+    # Everything not named here must match. The caller must DECLARE the variable
+    # under test, so a run that differs in some other way cannot quietly compare.
+    varying = {"chat_template"} | set(ignore_fingerprint or ())
     for key in sorted(set(bf) | set(cf)):
-        if key == "chat_template":  # the variable under test
+        if key in varying:
             continue
         if bf.get(key) != cf.get(key):
             violations.append(
@@ -278,6 +374,13 @@ def compare_to_baseline(baseline: dict, candidate: dict,
         # clean regardless of the baseline, because the baseline IS the bug.
         if c.get("echoed_input"):
             violations.append(f"ECHO {tag}: output opens with a verbatim copy of the input")
+        # The candidate must have run on the path its fingerprint claims. The
+        # server path degrades to the CLI silently by design, so without this a
+        # server run that never reached the server would compare clean.
+        want_mode = "server" if cf.get("path", "").startswith("server-") else "CLI"
+        got_mode = c.get("mode")
+        if got_mode is not None and not got_mode.startswith(want_mode):
+            violations.append(f"PATH {tag}: claimed {want_mode}, actually ran {got_mode}")
         term = c.get("termination")
         if term and not term.get("passed"):
             violations.append(f"TERMINATION {tag}: {term.get('reason')}")
@@ -304,10 +407,20 @@ def compare_to_baseline(baseline: dict, candidate: dict,
         # every applicability rule for free: retention is absent for
         # transformative/professional rows, dev_term_preservation for non-dev
         # tones, and so on.
+        # A baseline row whose output IS its input passes every preservation
+        # metric trivially — it preserved everything by doing nothing. MEASURED:
+        # on short_01_slang the CLI baseline returned "oh thats tight bro nice"
+        # untouched (retention 1.0) while the server correctly wrote "oh that's
+        # tight bro nice" (retention 0.8), and the gate called the fix a
+        # regression. Comparing against a no-op is not a bar worth clearing.
+        b_noop = b["output"].strip() == b["input"].strip()
         for gate, b_ok in b["metrics"]["passes"].items():
             c_ok = c["metrics"]["passes"].get(gate)
             if c_ok is None:
                 continue  # not applicable to the candidate row
+            if b_noop and gate in _PRESERVATION_GATES:
+                advisories.append(f"skipped {tag} {gate}: baseline was a no-op")
+                continue
             if b_ok and not c_ok:
                 violations.append(f"GATE {tag} {gate}: passed in baseline, fails in candidate")
     # --- Work done, per (tone, intensity). GATED, because it is deterministic.
@@ -352,14 +465,22 @@ def main(argv=None):
                     help="comma list of tone:intensity cells (default: rule-5 matrix)")
     ap.add_argument("--samples", default="",
                     help="comma list of sample ids (default: all)")
-    ap.add_argument("--path", default="cli-gpu", choices=["cli-gpu", "cli-cpu"],
-                    help="execution path to pin and assert (both are greedy/deterministic)")
+    ap.add_argument("--path", default="cli-gpu",
+                    choices=["cli-gpu", "cli-cpu", "server-gpu", "server-cpu"],
+                    help="execution path to pin and assert. cli-* are greedy one-shot "
+                         "(deterministic); server-* use the resident llama-server "
+                         "(sampled, and report stop_type exactly)")
     ap.add_argument("--binary", default=BASE_CONFIG["llama_cpp_binary"],
                     help="llama.cpp binary dir/path (the ctor resolves llama-simple*)")
     ap.add_argument("--chat-template", default="auto", choices=["auto", "off"],
                     help="baseline runs with 'off', candidate with 'auto'")
     ap.add_argument("--baseline", default="",
                     help="baseline results JSON; turns this run into a pass/fail gate")
+    ap.add_argument("--gate-ignore", default="",
+                    help="comma list of fingerprint keys allowed to differ from the "
+                         "baseline (the variable under test). chat_template is always "
+                         "allowed. e.g. cli-gpu -> server-gpu needs "
+                         "path,force_subprocess,sampling,server_binary_sha")
     ap.add_argument("--skip-termination", action="store_true",
                     help="skip the N/2N raw-continuation probe (doubles runtime)")
     ap.add_argument("--out-dir", default=str(ROOT / "scripts" / "tone_eval" / "results"))
@@ -376,7 +497,8 @@ def main(argv=None):
     want_ids = {s.strip() for s in args.samples.split(",") if s.strip()}
     samples = [s for s in CORPUS if (not want_ids or s["id"] in want_ids)]
 
-    _PATH["use_gpu"] = args.path == "cli-gpu"
+    _PATH["use_gpu"] = args.path.endswith("-gpu")
+    _PATH["server"] = args.path.startswith("server-")
     _BINARY_OVERRIDE["path"] = os.path.expanduser(args.binary)
     model_path = os.path.expanduser(args.model)
     if not Path(model_path).exists():
@@ -391,7 +513,7 @@ def main(argv=None):
             print(f"         - {p}", file=sys.stderr)
         return 2
     print(f"[eval] preflight OK — {args.path}, template={args.chat_template}, "
-          f"binary={pre['binary']}")
+          f"binary={pre['server_binary'] or pre['binary']}")
 
     results = []
     total = len(samples) * len(cells)
@@ -408,6 +530,7 @@ def main(argv=None):
                 "input": s["text"], "output": r["output"],
                 "latency_s": r["latency_s"], "error": r["error"],
                 "fell_back": r["fell_back"], "fallback_markers": r["fallback_markers"],
+                "mode": r.get("mode"), "hit_cap": r.get("hit_cap"),
                 "stdout": r["stdout"],
                 # Absolute echo check: did the output open with a verbatim copy of
                 # the input and then continue? That is the reported defect.
@@ -416,7 +539,8 @@ def main(argv=None):
             }
             if not args.skip_termination:
                 rec["termination"] = termination_check(
-                    s["text"], tone, model_path, intensity, args.chat_template)
+                    s["text"], tone, model_path, intensity, args.chat_template,
+                    row_hit_cap=bool(r.get("hit_cap")))
             if args.judge:
                 from tone_eval import judge as J
                 rec["judge"] = J.judge(s["text"], r["output"], tone, backend=args.judge_backend)
@@ -440,8 +564,19 @@ def main(argv=None):
             "model_key": chat_template_key(model_path),
             "model_sha": _sha256(model_path),
             "binary_sha": _sha256(pre["binary"] or ""),
+            "server_binary_sha": _sha256(pre["server_binary"] or "") if _PATH["server"] else None,
             "use_gpu": _PATH["use_gpu"],
-            "force_subprocess": True,
+            "path": args.path,
+            "force_subprocess": not _PATH["server"],
+            # Sampling is part of the output's identity on the server path
+            # (the CLI path has none). Comparing a repeat_penalty=1.1 run to a
+            # 1.15 run as if only the template changed would be meaningless.
+            "sampling": _sampling_fingerprint(model_path, cells),
+            "prompt_profile": _prompt_fingerprint(model_path, cells),
+            # The hallucination-guard floor: it decides whether a rewrite reaches
+            # the user at all, so a change to it must not be invisible to the
+            # gate. Read from the backend, never restated here.
+            "guard_thresholds": _guard_fingerprint(model_path, cells),
             "chat_template": args.chat_template,
             "cells": sorted(f"{t}:{i}" for t, i in cells),
             "sample_ids": sorted(s["id"] for s in samples),
@@ -460,7 +595,9 @@ def main(argv=None):
     if args.baseline:
         baseline = json.loads(Path(args.baseline).read_text())
         advisories: list[str] = []
-        violations = compare_to_baseline(baseline, payload, advisories)
+        violations = compare_to_baseline(
+            baseline, payload, advisories,
+            ignore_fingerprint={k.strip() for k in args.gate_ignore.split(",") if k.strip()})
         print(f"\n[eval] === GATE vs {Path(args.baseline).name} ===")
         # Pre-existing health conditions are surfaced but do not fail the gate.
         carried = []

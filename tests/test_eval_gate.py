@@ -120,6 +120,9 @@ def _payload(fingerprint=None, rows=None):
 def _row(**kw):
     row = {
         "sample_id": "x", "tone": "minimal", "intensity": "standard",
+        # input/output drive the no-op detection; mode drives the PATH gate.
+        "input": "raw dictated words here", "output": "Raw dictated words here.",
+        "mode": "CLI-GPU",
         "latency_s": 1.0, "error": None, "fell_back": False, "fallback_markers": [],
         "echoed_input": False, "termination": {"passed": True},
         "metrics": {"passes": {}, "word_retention": 0.9, "dev_term_preservation": 1.0},
@@ -236,3 +239,119 @@ class TestMatrixShape:
         for tone in E.ALL_TONES:
             assert (tone, "standard") in E.DEFAULT_CELLS
             assert (tone, "strong") in E.DEFAULT_CELLS
+
+
+class TestServerPathGate:
+    """Gates added when the resident llama-server became the default path."""
+
+    def test_path_violation_when_server_run_silently_used_the_cli(self):
+        """_server_generate() swallows every failure and falls through by design,
+        so a server run that never reached the server must NOT compare clean."""
+        fp = {"path": "server-gpu"}
+        base = _payload(fp, [_row(mode="server-GPU")])
+        cand = _payload(fp, [_row(mode="CLI-GPU")])
+        v = E.compare_to_baseline(base, cand, ignore_fingerprint={"path"})
+        assert any(x.startswith("PATH ") and "actually ran CLI-GPU" in x for x in v)
+
+    def test_path_gate_accepts_the_claimed_path(self):
+        fp = {"path": "server-gpu"}
+        rows = [_row(mode="server-GPU")]
+        v = E.compare_to_baseline(_payload(fp, rows), _payload(fp, rows))
+        assert not any(x.startswith("PATH ") for x in v)
+
+    def test_unknown_mode_does_not_trip_the_path_gate(self):
+        """A row that fell back returns the input and prints no mode line."""
+        fp = {"path": "server-gpu"}
+        base = _payload(fp, [_row(mode="server-GPU")])
+        cand = _payload(fp, [_row(mode=None)])
+        assert not any(x.startswith("PATH ") for x in
+                       E.compare_to_baseline(base, cand))
+
+    def test_fingerprint_must_be_declared_to_vary(self):
+        """Undeclared drift still refuses to compare — the caller must say what
+        is under test rather than the gate quietly allowing anything."""
+        v = E.compare_to_baseline(_payload(), _payload({"path": "server-gpu"}))
+        assert any("FINGERPRINT path" in x for x in v)
+        assert any("refusing to compare" in x for x in v)
+
+    def test_declared_fingerprint_key_is_exempt(self):
+        v = E.compare_to_baseline(_payload(), _payload({"path": "server-gpu"}),
+                                  ignore_fingerprint={"path"})
+        assert not any("FINGERPRINT" in x for x in v)
+
+
+class TestNoOpBaselineSuppression:
+    """A baseline that returned its input unchanged preserved everything by doing
+    nothing; measuring a real fix against that is not a meaningful bar."""
+
+    IDENT = "oh thats tight bro nice"
+
+    def test_preservation_flip_against_a_no_op_baseline_is_suppressed(self):
+        base = _payload(rows=[_row(input=self.IDENT, output=self.IDENT,
+                                   metrics={"passes": {"retention": True}})])
+        cand = _payload(rows=[_row(input=self.IDENT, output="oh that's tight bro nice",
+                                   metrics={"passes": {"retention": False}})])
+        adv = []
+        v = E.compare_to_baseline(base, cand, adv)
+        assert not any("retention" in x for x in v)
+        assert any("baseline was a no-op" in a for a in adv)
+
+    def test_slang_removal_flip_is_still_caught_against_a_no_op(self):
+        """A no-op FAILS prof_slang_removal, so a flip there is a real signal and
+        must not be swept up by the suppression."""
+        base = _payload(rows=[_row(input=self.IDENT, output=self.IDENT,
+                                   metrics={"passes": {"prof_slang_removal": True}})])
+        cand = _payload(rows=[_row(input=self.IDENT, output="whatever",
+                                   metrics={"passes": {"prof_slang_removal": False}})])
+        v = E.compare_to_baseline(base, cand)
+        assert any("prof_slang_removal" in x for x in v)
+
+    def test_suppression_does_not_apply_when_the_baseline_did_work(self):
+        base = _payload(rows=[_row(input=self.IDENT, output="Oh, very cool brother.",
+                                   metrics={"passes": {"retention": True}})])
+        cand = _payload(rows=[_row(input=self.IDENT, output="unrelated",
+                                   metrics={"passes": {"retention": False}})])
+        v = E.compare_to_baseline(base, cand)
+        assert any("retention" in x for x in v)
+
+
+class TestSubstitutionMetricApplicability:
+    """"professional" is licensed to replace slang, so metrics that score
+    substitution as damage must be N/A there — the same rule word_retention has
+    always used, extended to the two gates that share its confound."""
+
+    IN = "oh thats tight bro nice"
+    OUT = "Oh, very cool brother. Nice."
+
+    def _passes(self, tone, intensity="standard"):
+        return M.compute_all({"id": "x", "stresses": [], "slang": ["tight", "bro"]},
+                             tone, self.IN, self.OUT, intensity)["passes"]
+
+    def test_professional_omits_the_substitution_gates(self):
+        p = self._passes("professional")
+        assert "order_lcs" not in p
+        assert "new_words" not in p
+        assert "retention" not in p
+
+    def test_professional_keeps_the_gates_that_hold_it_to_its_contract(self):
+        p = self._passes("professional")
+        for gate in ("prof_caps", "prof_slang_removal", "len_ratio", "sentence_delta"):
+            assert gate in p, f"{gate} must stay gated for professional"
+
+    @pytest.mark.parametrize("tone", ["minimal", "casual", "dev", "personal"])
+    def test_preserving_tones_keep_the_substitution_gates(self, tone):
+        """The exemption must not leak: these tones promise the speaker's words."""
+        p = self._passes(tone)
+        assert "order_lcs" in p and "new_words" in p and "retention" in p
+
+    @pytest.mark.parametrize("intensity", ["strong", "caricature"])
+    def test_transformative_intensities_omit_them_everywhere(self, intensity):
+        p = self._passes("minimal", intensity)
+        assert "order_lcs" not in p and "new_words" not in p
+
+    def test_substitution_applies_matches_retention_applies(self):
+        """They encode the same rule; a future edit to one should move both."""
+        for tone in ("minimal", "casual", "dev", "personal", "professional"):
+            for intensity in ("standard", "strong", "caricature"):
+                assert (M.substitution_applies(tone, intensity)
+                        == M.retention_applies(tone, intensity))

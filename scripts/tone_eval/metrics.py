@@ -219,6 +219,16 @@ def retention_applies(tone: str, intensity: str) -> bool:
     return intensity not in _TRANSFORMATIVE and tone in _PRESERVING_TONES
 
 
+def substitution_applies(tone: str, intensity: str) -> bool:
+    """Whether the substitution-sensitive gates (order_lcs, new_words) mean
+    anything for this cell.
+
+    Same rule as retention: a tone licensed to replace words cannot be scored by
+    metrics that treat replacement as damage.
+    """
+    return intensity not in _TRANSFORMATIVE and tone in _PRESERVING_TONES
+
+
 def compute_all(sample: dict, tone: str, inp: str, out: str,
                 intensity: str = "standard") -> dict:
     """Return every raw metric + a `passes` dict of booleans + guide_score."""
@@ -241,11 +251,26 @@ def compute_all(sample: dict, tone: str, inp: str, out: str,
         # would penalize exactly the transformation those modes exist to produce,
         # and contradicts "caricature has no automated quality metric".
         passes.update({
-            "order_lcs": order >= PASS_BANDS["order_lcs_min"],
             "len_ratio": lo <= lratio <= hi,
-            "new_words": len(new_words) <= PASS_BANDS["new_words_max"],
             "sentence_delta": sent_delta <= sent_delta_max,
         })
+        # order_lcs and new_words are omitted for "professional" for the SAME
+        # reason retention already is — the tone is defined to replace slang, and
+        # both metrics score substitution as if it were a failure:
+        #   * new_words counts substitutions directly ("nah" -> "not" is a new
+        #     content word), so it is definitionally in conflict.
+        #   * order_lcs is SequenceMatcher over content TOKENS, so a substituted
+        #     token leaves the match exactly as a reordered one does. It cannot
+        #     distinguish the two. MEASURED: "you wanna grab food after or nah"
+        #     -> "Do you want to grab food afterward or not" preserves every
+        #     clause in order and still scores as reordering.
+        # On the preserving tones there are few substitutions, so both stay
+        # meaningful there. prof_caps, prof_slang_removal, len_ratio,
+        # sentence_delta and required_filler_removal remain gated for
+        # professional and are what actually holds the tone to its contract.
+        if substitution_applies(tone, intensity):
+            passes["order_lcs"] = order >= PASS_BANDS["order_lcs_min"]
+            passes["new_words"] = len(new_words) <= PASS_BANDS["new_words_max"]
         if retention_applies(tone, intensity):
             passes["retention"] = retention >= PASS_BANDS["retention_min"]
 

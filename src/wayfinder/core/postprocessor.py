@@ -91,7 +91,7 @@ FORMATTING_RULES: Dict[str, Dict[str, str]] = {
         "caricature": "Use... dramatic ellipses... Add a bracketed annotation between phrases (not between every word): [clears throat], [nervous laughter], [dies inside], [sweating].",
     },
     "professional": {
-        "standard": "Use proper capitalization and punctuation. Fix only light slang, e.g. \"oh thats tight bro\" -> \"Oh, very cool brother.\" Keep sentence order.",
+        "standard": "Use proper capitalization and punctuation. Replace informal slang and casual praise with neutral professional wording, e.g. \"oh thats tight bro\" -> \"Oh, very cool brother.\" Replacing slang takes priority over keeping the exact words. Keep sentence order.",
         "strong": "Use proper punctuation. Structure with clear paragraphs if needed.",
         # Inline comedy only — injection flattens newlines, so bullet lists and
         # section headers would collapse into run-on mush. No [Name] placeholders
@@ -1986,6 +1986,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         force_subprocess: bool = False,
         custom_vocabulary: list[str] | None = None,
         chat_template: str = "auto",
+        residency: str = "auto",
     ):
         # When True, skip the resident llama-cpp-python wheel and always use the
         # llama-simple subprocess (see config: post_processing_force_subprocess).
@@ -2051,6 +2052,10 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # eval-only probe all agree on the prompt shape.
         self.chat_template_setting = chat_template
         self.template = _chat_template_for(self.model_path, chat_template)
+        # Residency policy for the llama-server fast path (config:
+        # llama_cpp_residency). force_subprocess still wins over all of it — the
+        # eval harness relies on that to pin the deterministic one-shot path.
+        self.residency = str(residency or "auto").strip().lower()
 
     def get_name(self) -> str:
         return "llama.cpp CLI (Local)"
@@ -2202,6 +2207,86 @@ class LlamaCppCliBackend(PostProcessorBackend):
             # visible output when this happens.
             return min(self.max_tokens, max(192, int(est_in * 3.0)))
         return min(self.max_tokens, max(64, int(est_in * 1.6)))
+
+    # ---- resident llama-server fast path -------------------------------
+    #
+    # Sits between the in-process wheel and the per-call subprocess: the wheel is
+    # fastest when llama-cpp-python is importable, but it is absent in the
+    # Flatpak/AppImage, where every dictation previously reloaded the model.
+
+    def _server_enabled(self) -> bool:
+        """Whether this cleanup may use the resident server."""
+        if getattr(self, "force_subprocess", False):
+            return False  # the eval harness pins the deterministic one-shot path
+        return getattr(self, "residency", "auto") in ("auto", "instant")
+
+    def _sampling_profile(self) -> dict:
+        """Sampling for the server path, by intensity.
+
+        Caricature needs heat (greedy parody is flat) AND repetition pressure:
+        MEASURED, the greedy subprocess path fell into degenerate loops on 3 of
+        18 corpus samples and burned the entire token budget. llama-simple has no
+        sampling flags, so this is only expressible here.
+        """
+        if self.intensity == "caricature":
+            return {"temperature": max(self.temperature, 0.8),
+                    "repeat_penalty": 1.15, "repeat_last_n": 128, "top_p": 0.95}
+        return {"temperature": self.temperature,
+                "repeat_penalty": 1.1, "repeat_last_n": 64, "top_p": 0.95}
+
+    def _guard_threshold(self) -> float:
+        """Minimum meaningful-word overlap before a cleanup is called a hallucination.
+
+        0.12 for strong, not 0.15: MEASURED over the 198-row tone matrix, faithful
+        strong rewrites reach 0.143 overlap on slang-heavy input, where the rewrite
+        legitimately replaces nearly every content word ("thats tight bro / stoked
+        / demo" -> "exceeded expectations / highly positive / demonstration"). At
+        0.15 that correct rewrite was discarded and the user got their raw slang
+        back instead. 0.12 rejects 0 of 90 measured-good strong rewrites while
+        still catching 88% of unrelated content; 0.15 bought 4 more points of
+        catch rate at the cost of a visible false rejection.
+
+        This is a catastrophic-failure floor, NOT a fidelity check: the two
+        populations genuinely overlap (unrelated output reaches 1.0 overlap, p90
+        = 0.143), so no threshold separates them. Caricature stays exempt.
+
+        Read by the eval harness for its fingerprint — keep this the only site.
+        """
+        return 0.12 if self.intensity == "strong" else 0.25
+
+    def _server_generate(self, prompt: str, n_predict: int) -> Optional[dict]:
+        """Run one cleanup on the resident server, or None to fall through.
+
+        Returns None (never raises) for every failure mode — missing binary,
+        start failure, HTTP error — so an unavailable server degrades to the
+        subprocess path instead of breaking dictation.
+        """
+        if not self._server_enabled():
+            return None
+        try:
+            from wayfinder.core.llama_server import (
+                LlamaServerManager, resolve_server_binary,
+            )
+        except Exception:
+            return None
+
+        use_gpu = self.n_gpu_layers != 0
+        binary = resolve_server_binary(self.llama_binary, use_gpu=use_gpu)
+        if not binary:
+            return None  # server not bundled in this build
+        try:
+            LlamaServerManager.ensure(
+                binary=binary, model_path=self.model_path, n_ctx=self.n_ctx,
+                n_threads=self.n_threads, use_gpu=use_gpu,
+            )
+            return LlamaServerManager.complete(
+                prompt=prompt, n_predict=n_predict,
+                timeout=self.timeout, **self._sampling_profile(),
+            )
+        except Exception as e:
+            print(f"[Post-processing] llama-server unavailable ({type(e).__name__}: {e}) "
+                  f"- falling back to per-call CLI")
+            return None
 
     def _probe_raw(self, text: str, n_predict: int) -> tuple:
         """EVAL-ONLY: run one subprocess cleanup and return the RAW continuation.
@@ -2402,6 +2487,8 @@ Cleaned text:"""
             # the EXACT same compact prompt + extraction as the subprocess path, so
             # the cleaned output is identical — only the execution differs.
             resident = self._resident_model()
+            served = None if resident is not None else \
+                self._server_generate(simple_prompt, estimated_output_tokens)
             if resident is not None:
                 out = resident(
                     simple_prompt,
@@ -2414,6 +2501,19 @@ Cleaned text:"""
                     original_text=prompt_text, template=self.template,
                 )
                 mode = "resident"
+            elif served is not None:
+                # `content` is the generation with the prompt ALREADY removed, so
+                # feeding back prompt+content makes the extractor's exact-prompt
+                # split hit. Deliberate: both paths then share one cleanup
+                # implementation (cut markers, think-block strip, loop guard)
+                # instead of drifting apart.
+                cleaned = self._extract_cli_output(
+                    simple_prompt + served.get("content", ""), simple_prompt,
+                    original_text=prompt_text, template=self.template,
+                )
+                if served.get("stop_type") == "limit":
+                    print("[Post-processing] \u26a0 generation hit the token cap")
+                mode = "server-GPU" if self.n_gpu_layers != 0 else "server-CPU"
             else:
                 # Fallback: spawn llama-simple. The prompt is POSITIONAL (llama-simple's
                 # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),
@@ -2453,10 +2553,12 @@ Cleaned text:"""
             # to add new words (buzzwords, slang, emojis) and expand the text; the
             # word-overlap/fabrication heuristics would reject exactly the outputs
             # the mode exists to produce (cloud backends already exempt it).
-            # Strong mode keeps the guard but with a looser threshold: a licensed
-            # restructuring paraphrases heavily, so exact-word overlap runs ~25-35%
-            # on faithful rewrites (true hallucinations still land near 0-10%).
-            guard_threshold = 0.15 if self.intensity == "strong" else 0.25
+            # Strong mode keeps the guard but with a looser floor — see
+            # _guard_threshold() for the measured basis. (An earlier note here
+            # claimed faithful rewrites overlap ~25-35% and hallucinations 0-10%;
+            # both halves are wrong. Measured over the 198-row matrix, faithful
+            # strong rewrites reach 14% and unrelated text reaches 100%.)
+            guard_threshold = self._guard_threshold()
             if self.intensity != "caricature" and is_hallucination(
                 text, cleaned, model_name=Path(self.model_path).stem, threshold=guard_threshold
             ):
@@ -3063,6 +3165,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 strong_mode=_effective_strong_mode,
                 caricature_mode=_effective_caricature_mode,
                 force_subprocess=config.get("post_processing_force_subprocess", False),
+                residency=config.get("llama_cpp_residency", "auto"),
                 custom_vocabulary=_effective_custom_vocabulary,
                 chat_template=config.get("llama_cpp_chat_template", "auto"),
             )

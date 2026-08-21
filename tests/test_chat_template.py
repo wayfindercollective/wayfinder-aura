@@ -95,7 +95,14 @@ class TestTemplateSelection:
 class TestRawPromptRegressionLock:
     def test_raw_prompts_are_byte_identical_to_the_pre_change_golden(self):
         """5 tones x 3 intensities, captured before the change. Any drift here
-        changes behaviour for every model with no template."""
+        changes behaviour for every model with no template.
+
+        Re-baselined ONCE, deliberately: the professional/standard slang rule was
+        rewritten (measured — the old "fix only light slang" wording left slang in
+        9 of 18 corpus rows vs 5 for the replacement). That re-baseline changed
+        exactly one line of this file; verify any future regeneration the same way
+        rather than regenerating wholesale.
+        """
         chunks = []
         for tone in TONES:
             for strong, caricature, label in (
@@ -180,10 +187,15 @@ class TestEchoStripper:
     def test_short_inputs_are_not_aligned(self):
         assert strip_echoed_input("hi there friend ok", "hi there") == "hi there friend ok"
 
-    def test_both_call_sites_pass_the_sanitized_original(self):
-        """A default-only parameter would make the whole stripper inert."""
+    def test_every_call_site_passes_the_sanitized_original(self):
+        """A default-only parameter would make the whole stripper inert.
+
+        Three execution paths now reach the extractor — resident wheel, resident
+        llama-server, and the llama-simple subprocess — and a new path that
+        forgets this argument silently loses echo protection.
+        """
         src = Path("src/wayfinder/core/postprocessor.py").read_text()
-        assert src.count("original_text=prompt_text, template=self.template,") == 2
+        assert src.count("original_text=prompt_text, template=self.template,") == 3
 
     def test_stripper_aligns_against_sanitized_not_raw_text(self):
         """Adversarial input: the prompt carries atoms stripped, so aligning on the

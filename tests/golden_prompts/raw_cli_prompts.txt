@@ -20,7 +20,7 @@ Text: um so hello there friend
 Cleaned text:
 === professional/standard ===
 Task: Lightly clean the text below. Keep about 90 percent of the speaker's exact words and their order. Do not rewrite, summarize, reorder, or add ideas.
-Guide: Keep the speaker's words and order. Tighten punctuation and capitalization only. Do not restructure. Use proper capitalization and punctuation. Fix only light slang, e.g. "oh thats tight bro" -> "Oh, very cool brother." Keep sentence order. Remove filler sounds (um, uh, ah). Keep the speaker's sentence structure.
+Guide: Keep the speaker's words and order. Tighten punctuation and capitalization only. Do not restructure. Use proper capitalization and punctuation. Replace informal slang and casual praise with neutral professional wording, e.g. "oh thats tight bro" -> "Oh, very cool brother." Replacing slang takes priority over keeping the exact words. Keep sentence order. Remove filler sounds (um, uh, ah). Keep the speaker's sentence structure.
 Output ONLY the cleaned text, nothing else.
 
 Text: um so hello there friend

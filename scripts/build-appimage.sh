@@ -335,14 +335,18 @@ if [ "$BUILD_MODE" = "--full" ]; then
     LLAMA_BUILD="$LLAMA_DIR/build-vulkan"
     LLAMA_HAS_VULKAN=1
     if ! cmake_native_build "llama.cpp" "$LLAMA_DIR" "$LLAMA_BUILD" ON \
-            llama-cli llama-simple; then
+            llama-cli llama-simple llama-server; then
         echo "   ↳ Falling back to CPU-only llama.cpp"
         LLAMA_HAS_VULKAN=0
         LLAMA_BUILD="$LLAMA_DIR/build-cpu"
         cmake_native_build "llama.cpp" "$LLAMA_DIR" "$LLAMA_BUILD" OFF \
-            llama-cli llama-simple
+            llama-cli llama-simple llama-server
     fi
-    for binary in llama-cli llama-simple; do
+    # llama-server keeps the cleanup model RESIDENT between dictations. MEASURED
+    # on Qwen3-4B/Vulkan: 0.147s warm vs 0.61s for a per-call llama-simple (4.1x),
+    # and it is the only path exposing sampling flags, which is what stops
+    # caricature mode from looping until it burns the whole token budget.
+    for binary in llama-cli llama-simple llama-server; do
         if [ -f "$LLAMA_BUILD/bin/$binary" ]; then
             cp "$LLAMA_BUILD/bin/$binary" "$APPDIR/usr/bin/"
             echo "   ✓ $binary bundled ($(basename "$LLAMA_BUILD"))"
@@ -352,9 +356,10 @@ if [ "$BUILD_MODE" = "--full" ]; then
         LLAMA_CPU_BUILD="$LLAMA_DIR/build-cpu"
         echo "   🔨 Building llama.cpp CPU safety twin..."
         cmake_native_build "llama.cpp CPU" "$LLAMA_DIR" "$LLAMA_CPU_BUILD" OFF \
-            llama-simple
+            llama-simple llama-server
         cp "$LLAMA_CPU_BUILD/bin/llama-simple" "$APPDIR/usr/bin/llama-simple-cpu"
-        echo "   ✓ llama-simple-cpu bundled"
+        cp "$LLAMA_CPU_BUILD/bin/llama-server" "$APPDIR/usr/bin/llama-server-cpu"
+        echo "   ✓ llama-simple-cpu + llama-server-cpu bundled"
     fi
 
     # ── ydotool: deliberately NOT bundled ──

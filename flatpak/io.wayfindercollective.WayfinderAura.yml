@@ -335,8 +335,12 @@ modules:
   #     vs ~300 here) while holding 1.1GB resident. Slower AND hungrier.
   #     (GGML_CPU_ALL_VARIANTS runtime dispatch would fix the speed, but the
   #     wheel build doesn't package the variant backends — load fails.)
-  # Future instant path: bundle llama-server with cache_prompt (KV reuse of the
-  # shared tone-guidance prefix), mirroring the whisper-server architecture.
+  # llama-server IS now bundled and is the default path (config:
+  # llama_cpp_residency). It keeps the model resident with cache_prompt reusing
+  # the shared tone-guidance prefix, mirroring the whisper-server architecture.
+  # MEASURED on Qwen3-4B/Vulkan: 0.147s warm vs 0.61s per-call llama-simple
+  # (4.1x), caricature 0.58s vs 2.46s. llama-simple stays as the save_memory
+  # path and the fallback when the server cannot start.
   # Bound ggml-vulkan's internal shader compiler fan-out to two jobs for the same
   # reason as whisper.cpp above. Keep llama-simple-cpu as an independently built
   # fallback because a Vulkan binary can fail during backend initialization
@@ -348,16 +352,19 @@ modules:
   # Built as a single ninja target (not the full cmake-ninja buildsystem): a full
   # build links ~380 targets including the unified `llama` app, whose link line
   # requires llama-server-impl/llama-cli-impl even with LLAMA_BUILD_SERVER=OFF —
-  # an upstream target-dependency bug at this tag. We only need llama-simple.
+  # an upstream target-dependency bug at this tag. We name only the two targets
+  # we ship (llama-simple, llama-server) so that app is never linked.
   - name: llama-cpp
     buildsystem: simple
     build-commands:
       - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
-      - cmake --build build --target llama-simple --parallel ${FLATPAK_BUILDER_N_JOBS:-2}
+      - cmake --build build --target llama-simple llama-server --parallel ${FLATPAK_BUILDER_N_JOBS:-2}
       # The app's CLI backend prefers llama-simple (stable echo+generation stdout
       # format its extraction is built around); config defaults to /app/bin/llama-simple
-      # inside the sandbox (config.py IS_FLATPAK branch).
+      # inside the sandbox (config.py IS_FLATPAK branch). llama_server.py resolves
+      # llama-server from the SAME directory, so both must land in /app/bin.
       - install -Dm755 build/bin/llama-simple ${FLATPAK_DEST}/bin/llama-simple
+      - install -Dm755 build/bin/llama-server ${FLATPAK_DEST}/bin/llama-server
     sources:
       - type: git
         url: https://github.com/ggml-org/llama.cpp.git
@@ -375,8 +382,9 @@ modules:
     buildsystem: simple
     build-commands:
       - cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_VULKAN=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
-      - cmake --build build --target llama-simple --parallel ${FLATPAK_BUILDER_N_JOBS:-2}
+      - cmake --build build --target llama-simple llama-server --parallel ${FLATPAK_BUILDER_N_JOBS:-2}
       - install -Dm755 build/bin/llama-simple ${FLATPAK_DEST}/bin/llama-simple-cpu
+      - install -Dm755 build/bin/llama-server ${FLATPAK_DEST}/bin/llama-server-cpu
     sources:
       - type: git
         url: https://github.com/ggml-org/llama.cpp.git

@@ -371,6 +371,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # prompt. There is deliberately no "on" — a template cannot be forced onto an
     # unvalidated model, because a wrong template degrades output silently.
     "llama_cpp_chat_template": "auto",
+    # Keep llama-server resident between dictations. MEASURED on Qwen3-4B/Vulkan:
+    # 0.147s warm vs 0.61s per-call subprocess (4.1x), and caricature 0.79s vs
+    # 2.46s. Costs the model's RAM/VRAM while idle.
+    #   auto        - resident (the default; what makes cleanup feel instant)
+    #   instant     - resident, and warmed at startup
+    #   save_memory - never resident; spawn llama-simple per dictation
+    "llama_cpp_residency": "auto",
     
     # Cloud API settings (keys stored in config, loaded into environment on startup)
     "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)

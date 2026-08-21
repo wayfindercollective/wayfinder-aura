@@ -9289,7 +9289,33 @@ class WayfinderApp(ctk.CTk):
             
             # Inline model management section (no popups)
             self._build_inline_model_section(parent, postproc_backend)
-            
+
+            # Residency: keep the cleanup model loaded between dictations, or
+            # reload it per use. MEASURED on Qwen3-4B/Vulkan: 0.15s warm vs 0.61s
+            # per-call (4x), at the cost of the model's RAM/VRAM while idle —
+            # which is the trade that matters on a 16GB Deck running a game.
+            residency = str(self.config.get("llama_cpp_residency", "auto"))
+            self._residency_map = {
+                "Instant (keeps model loaded)": "auto",
+                "Save memory (loads per use)": "save_memory",
+            }
+            self._residency_reverse = {"auto": "Instant (keeps model loaded)",
+                                       "instant": "Instant (keeps model loaded)",
+                                       "save_memory": "Save memory (loads per use)"}
+            self.residency_var = ctk.StringVar(
+                value=self._residency_reverse.get(residency, "Instant (keeps model loaded)"))
+            self.residency_dropdown = self.create_dropdown_row(
+                parent, "Cleanup speed",
+                list(self._residency_map.keys()),
+                self.residency_var, self._on_residency_changed,
+                tooltip=("Instant: the cleanup model stays loaded, so cleanup takes "
+                         "~0.15s instead of ~0.6s. Uses the model's memory while idle.\n"
+                         "Save memory: the model loads for each cleanup and is freed "
+                         "afterwards — slower, but nothing is held while you are not "
+                         "dictating."),
+                width=220,
+            )
+
             # Note: Format template removed - now uses Style tab settings (output_tone + smart_formatting)
     
     def _build_remote_mode_settings(self, parent) -> None:
@@ -11239,9 +11265,32 @@ class WayfinderApp(ctk.CTk):
             WhisperServerBackend.shutdown()
         except Exception:
             pass
+        # Same for the resident llama-server: its -ngl is fixed at spawn, so a
+        # CPU/GPU flip must respawn it rather than keep serving in the old mode.
+        try:
+            from wayfinder.core.llama_server import LlamaServerManager
+            LlamaServerManager.shutdown()
+        except Exception:
+            pass
         self.log(f"⚙ GPU acceleration: {'enabled (GPU)' if want else 'disabled (CPU)'} — applied")
 
     # === Post-Processing Handlers ===
+
+    def _on_residency_changed(self, display_value: str) -> None:
+        """Switch the cleanup model between resident and per-call."""
+        value = self._residency_map.get(display_value, "auto")
+        self.config["llama_cpp_residency"] = value
+        save_config(self.config)
+        # Applies live: dropping the server frees its memory immediately on the
+        # way to save_memory, and the next dictation starts a fresh one on the
+        # way back. Without this the setting would not take effect until restart.
+        try:
+            from wayfinder.core.llama_server import LlamaServerManager
+            LlamaServerManager.shutdown()
+        except Exception:
+            pass
+        self.log(f"⚙ Cleanup speed: {display_value}")
+
     
     def toggle_post_processing(self):
         """Toggle LLM post-processing."""
@@ -11997,6 +12046,15 @@ class WayfinderApp(ctk.CTk):
                 "requires_feature"
             )
             save_config(self.config)
+            # Free the old cleanup model now rather than at the next dictation.
+            # (Correctness is already handled: the server's identity includes the
+            # model path, so a mismatch respawns. This is about not holding a
+            # model the user just switched away from.)
+            try:
+                from wayfinder.core.llama_server import LlamaServerManager
+                LlamaServerManager.shutdown()
+            except Exception:
+                pass
             self._llamacpp_current_display = selection
             self.log(f"⚙ LLM Model: {data['info']['name']}")
         
@@ -12686,6 +12744,15 @@ class WayfinderApp(ctk.CTk):
             self.config["llama_cpp_model_path"] = file_path
             self.config["llama_cpp_model_requires_feature"] = None
             save_config(self.config)
+            # Free the old cleanup model now rather than at the next dictation.
+            # (Correctness is already handled: the server's identity includes the
+            # model path, so a mismatch respawns. This is about not holding a
+            # model the user just switched away from.)
+            try:
+                from wayfinder.core.llama_server import LlamaServerManager
+                LlamaServerManager.shutdown()
+            except Exception:
+                pass
             model_name = Path(file_path).name
             self.log(f"⚙ LLM Model: {model_name}")
             self._rebuild_postproc_section()
@@ -14660,6 +14727,13 @@ class WayfinderApp(ctk.CTk):
             try:
                 from wayfinder.core.transcriber import WhisperServerBackend
                 WhisperServerBackend.shutdown()
+            except Exception:
+                pass
+            try:
+                # enforce_license_config can swap llama_cpp_model_path down to a
+                # Free-tier model; the resident server still holds the old one.
+                from wayfinder.core.llama_server import LlamaServerManager
+                LlamaServerManager.shutdown()
             except Exception:
                 pass
         # Revert the badge/glow/underline/tier live.
@@ -17146,6 +17220,13 @@ class WayfinderApp(ctk.CTk):
         except:
             pass
 
+        # Same for the resident cleanup model server.
+        try:
+            from wayfinder.core.llama_server import LlamaServerManager
+            LlamaServerManager.shutdown()
+        except:
+            pass
+
         # Clean up overlay
         self._cleanup_overlay()
         
@@ -19173,6 +19254,11 @@ def main():
         try:
             from wayfinder.core.transcriber import WhisperServerBackend
             WhisperServerBackend.shutdown()
+        except:
+            pass
+        try:
+            from wayfinder.core.llama_server import LlamaServerManager
+            LlamaServerManager.shutdown()
         except:
             pass
 
