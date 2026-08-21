@@ -503,3 +503,84 @@ class TestLiquidWaveRenderer:
         initial_time = renderer.time
         renderer.advance_time(0.016)
         assert renderer.time > initial_time
+
+
+# =============================================================================
+# Click-through (input transparency)
+# =============================================================================
+
+class TestOverlayIsClickThrough:
+    """The pill is a status indicator with NO mouse handlers, so any click that
+    lands on it is a click the user aimed at the window underneath.
+
+    Input transparency used to live inside the ``self._backend == "x11"`` branch,
+    which never runs on a Wayland session: the module forces
+    QT_QPA_PLATFORM=wayland when XDG_SESSION_TYPE is wayland, so
+    positioning_backend() returns "kwin". The overlay then swallowed clicks —
+    field report: could not press the buttons on a video-call toolbar it sat over.
+
+    MEASURED on KWin/Wayland with a fullscreen probe window: without the flag the
+    surface received Enter+MouseMove; with it, zero pointer events. The compositor
+    honors it, so the flag is the whole fix.
+    """
+
+    def _setup_window_ast(self):
+        import ast as _ast
+        src = Path("src/wayfinder/ui/overlay.py").read_text()
+        for node in _ast.walk(_ast.parse(src)):
+            if isinstance(node, _ast.FunctionDef) and node.name == "_setup_window":
+                return node
+        pytest.fail("_setup_window not found")
+
+    def test_flag_is_not_gated_on_the_x11_backend(self):
+        import ast as _ast
+        fn = self._setup_window_ast()
+        gated = [
+            _ast.unparse(n) for n in _ast.walk(fn)
+            if isinstance(n, _ast.If) and "x11" in _ast.unparse(n.test)
+        ]
+        assert gated, "the x11 branch disappeared — update this test"
+        assert not any("WindowTransparentForInput" in g for g in gated), (
+            "WindowTransparentForInput is inside the x11-only branch again; it "
+            "never applies on a Wayland session and the overlay eats clicks"
+        )
+
+    def test_flag_is_present_in_the_function(self):
+        import ast as _ast
+        assert "WindowTransparentForInput" in _ast.unparse(self._setup_window_ast())
+
+    def test_bypass_hint_stays_x11_only(self):
+        """Override-redirect is an X11 concept; it must NOT leak to the flag set
+        applied on Wayland."""
+        import ast as _ast
+        fn = self._setup_window_ast()
+        gated = " ".join(
+            _ast.unparse(n) for n in _ast.walk(fn)
+            if isinstance(n, _ast.If) and "x11" in _ast.unparse(n.test)
+        )
+        assert "X11BypassWindowManagerHint" in gated
+
+    def test_the_overlay_still_has_no_mouse_handlers(self):
+        """The justification for click-through. If a handler is ever added, the
+        flag makes it dead code and this must be reconsidered."""
+        src = Path("src/wayfinder/ui/overlay.py").read_text()
+        for handler in ("def mousePressEvent", "def mouseReleaseEvent",
+                        "def mouseDoubleClickEvent", "def contextMenuEvent"):
+            assert handler not in src, (
+                f"{handler} was added, but the overlay is input-transparent so it "
+                "can never fire — remove the handler or the flag, not both"
+            )
+
+    def test_flag_is_set_on_a_constructed_overlay(self):
+        """Belt and braces: the flag must survive into the real window flags."""
+        pytest.importorskip("PyQt6")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        overlay_mod = pytest.importorskip("wayfinder.ui.overlay")
+        ov = overlay_mod.GlassmorphicOverlay()
+        try:
+            assert bool(ov.windowFlags() & Qt.WindowType.WindowTransparentForInput)
+        finally:
+            ov.deleteLater()

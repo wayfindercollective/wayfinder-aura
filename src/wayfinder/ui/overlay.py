@@ -1082,20 +1082,31 @@ class GlassmorphicOverlay(QWidget):
             Qt.WindowType.Tool |
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.WindowDoesNotAcceptFocus  # Never steal focus from text fields
+            Qt.WindowType.WindowDoesNotAcceptFocus |  # Never steal focus from text fields
+            # Click-through, on EVERY backend. The pill is a status indicator with
+            # no mouse handlers of any kind, so every click landing on it is a
+            # click the user aimed at whatever is underneath — a call toolbar's
+            # Leave button, a taskbar entry, a text field.
+            #
+            # This used to be inside the x11 branch below, which meant it never
+            # applied on a Wayland session: the module forces
+            # QT_QPA_PLATFORM=wayland when XDG_SESSION_TYPE is wayland, so
+            # positioning_backend() returns "kwin" and the branch is skipped.
+            # The overlay then swallowed clicks (field report: could not press
+            # the buttons on a video-call toolbar the pill was sitting over).
+            #
+            # Must be set BEFORE the window is created: on Wayland the flag is
+            # what makes Qt attach an EMPTY wl_region as the surface's input
+            # region, and that is computed at surface creation. _setup_window()
+            # runs from __init__, well before show().
+            Qt.WindowType.WindowTransparentForInput
         )
         if self._backend == "x11":
             # KWin clamps a managed X11 window's configure requests to the work
             # area, so the position slider could never move the pill over the
             # taskbar (field bug: pinned at the panel strut). Override-redirect
-            # escapes the clamp and renders above the panel — and because an
-            # unmanaged window covering the taskbar would otherwise swallow the
-            # clicks meant for it, input transparency is NOT optional here.
-            # The pill has no mouse handlers, so nothing is lost.
-            flags |= (
-                Qt.WindowType.X11BypassWindowManagerHint |
-                Qt.WindowType.WindowTransparentForInput
-            )
+            # escapes the clamp and renders above the panel.
+            flags |= Qt.WindowType.X11BypassWindowManagerHint
         self.setWindowFlags(flags)
         
         # Critical for ARGB transparency on all platforms
