@@ -1413,3 +1413,132 @@ class TestExtractorIntensity:
         out = b._extract_cli_output(stdout, prompt)
         assert "kindly revert" in out
         assert "rewritten proposal" in out
+
+
+# =============================================================================
+# Cleanup residency release + the shared wall-clock budget
+# =============================================================================
+
+
+class TestResidentModelsAreReleased:
+    """Two independent residencies hold a cleanup model: the external
+    llama-server process and LlamaCppCliBackend's in-process wheel cache.
+    Stopping the server does nothing to the second one."""
+
+    def test_release_empties_the_cache(self):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        LlamaCppCliBackend._resident_cache[("m", 2048, 0)] = object()
+        LlamaCppCliBackend.release_resident_models()
+        assert LlamaCppCliBackend._resident_cache == {}
+
+    def test_release_closes_models_that_support_it(self):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+
+        class _Model:
+            closed = False
+            def close(self):
+                self.closed = True
+
+        m = _Model()
+        LlamaCppCliBackend._resident_cache[("m", 2048, 0)] = m
+        LlamaCppCliBackend.release_resident_models()
+        assert m.closed
+
+    def test_a_model_that_raises_on_close_still_gets_dropped(self):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+
+        class _Angry:
+            def close(self):
+                raise RuntimeError("no")
+
+        LlamaCppCliBackend._resident_cache[("m", 2048, 0)] = _Angry()
+        LlamaCppCliBackend.release_resident_models()
+        assert LlamaCppCliBackend._resident_cache == {}
+
+    def test_the_cache_key_is_why_this_is_needed(self):
+        """Keyed by (path, n_ctx, ngl): a model switch or GPU toggle ADDS an
+        entry rather than replacing one, so the old weights stay resident."""
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        LlamaCppCliBackend.release_resident_models()
+        LlamaCppCliBackend._resident_cache[("a.gguf", 2048, 99)] = object()
+        LlamaCppCliBackend._resident_cache[("b.gguf", 2048, 99)] = object()
+        LlamaCppCliBackend._resident_cache[("b.gguf", 2048, 0)] = object()
+        assert len(LlamaCppCliBackend._resident_cache) == 3
+        LlamaCppCliBackend.release_resident_models()
+        assert LlamaCppCliBackend._resident_cache == {}
+
+
+class TestEveryResidencyReleaseGoesThroughOneFunction:
+    """Half-releases were the bug: sites stopped the server and left the wheel
+    cache loaded, and two sites released nothing at all."""
+
+    def _main_source(self):
+        from pathlib import Path
+        return Path(__file__).resolve().parents[1].joinpath("wayfinder_main.py").read_text()
+
+    def test_no_site_stops_the_server_directly(self):
+        src = self._main_source()
+        body = src.split("def _release_cleanup_residency", 1)[1].split("\ndef ", 1)[0]
+        direct = src.count("LlamaServerManager.shutdown()")
+        assert direct == body.count("LlamaServerManager.shutdown()") == 1, (
+            "a call site stops the server without releasing the wheel cache")
+
+    def test_turning_cleanup_off_releases_residency(self):
+        src = self._main_source()
+        fn = src.split("def toggle_post_processing", 1)[1].split("\n    def ", 1)[0]
+        assert "_release_cleanup_residency()" in fn
+
+    def test_switching_to_a_cloud_backend_releases_residency(self):
+        src = self._main_source()
+        fn = src.split("def on_postproc_backend_changed", 1)[1].split("\n    def ", 1)[0]
+        assert "_release_cleanup_residency()" in fn
+
+
+class TestCleanupHasAWallClockCeiling:
+    """The app arms a 120s PROCESSING watchdog over transcription AND cleanup,
+    and firing it DISCARDS the result — so an unbounded fallback ladder loses a
+    dictation it had already cleaned successfully."""
+
+    def test_the_budget_leaves_room_for_transcription(self):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        assert LlamaCppCliBackend.CLEANUP_TOTAL_BUDGET <= 120.0 / 2
+
+    def test_the_budget_is_smaller_than_the_rungs_it_bounds(self):
+        """20 acquire + 30 request + 10 kill + 8 probe + 60 CLI = 128s > watchdog."""
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        from wayfinder.core.llama_server import LlamaServerManager
+        unbounded = (LlamaCppCliBackend.SERVER_ACQUIRE_BUDGET
+                     + LlamaServerManager.REQUEST_TIMEOUT + 10 + 8 + 60)
+        assert unbounded > 120.0, "the finding's premise no longer holds"
+        assert LlamaCppCliBackend.CLEANUP_TOTAL_BUDGET < unbounded
+
+    def test_the_cli_rung_is_clamped_to_what_is_left(self, tmp_path):
+        """The last rung is the one that would push past the watchdog."""
+        import subprocess as _sp
+        from unittest.mock import patch
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
+        b = LlamaCppCliBackend(llama_binary=str(binary), model_path=str(model),
+                               output_tone="professional", n_gpu_layers=0, timeout=60)
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["timeout"] = kw.get("timeout")
+            raise _sp.TimeoutExpired(cmd, kw.get("timeout"))
+
+        # Squeeze the shared budget well below the rung's own 60s timeout, so a
+        # passing assertion can only mean the clamp ran.
+        with patch.object(LlamaCppCliBackend, "CLEANUP_TOTAL_BUDGET", 5.0), \
+             patch.object(b, "_resident_model", return_value=None), \
+             patch.object(b, "_server_generate", return_value=None), \
+             patch.object(b, "_subprocess_target", return_value=(str(binary), 0)), \
+             patch("subprocess.run", side_effect=fake_run):
+            try:
+                b.process("hello there this is a test", "")
+            except Exception:
+                pass
+        assert seen.get("timeout") is not None, "the CLI rung never ran"
+        assert seen["timeout"] <= 5.0, (
+            f"CLI rung got {seen['timeout']}s against its own timeout of "
+            f"{b.timeout}s — the shared budget was ignored")

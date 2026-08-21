@@ -377,10 +377,23 @@ def compare_to_baseline(baseline: dict, candidate: dict,
         # The candidate must have run on the path its fingerprint claims. The
         # server path degrades to the CLI silently by design, so without this a
         # server run that never reached the server would compare clean.
-        want_mode = "server" if cf.get("path", "").startswith("server-") else "CLI"
+        #
+        # Compare the WHOLE path, accelerator included. Matching only the
+        # "server"/"CLI" half was the bug: "server-CPU".startswith("server") is
+        # True, so a Vulkan regression that silently fell to the CPU rescue rung
+        # satisfied a GPU-pinned run and compared clean.
+        want_mode = cf.get("path", "")
         got_mode = c.get("mode")
-        if got_mode is not None and not got_mode.startswith(want_mode):
-            violations.append(f"PATH {tag}: claimed {want_mode}, actually ran {got_mode}")
+        if want_mode and got_mode is not None:
+            if "-" not in got_mode:
+                # The backend reports a bare mode when it could not read back the
+                # -ngl it spawned with. That is honest, but it is not proof the
+                # pinned accelerator ran, and a pinned path needs proof.
+                violations.append(
+                    f"PATH {tag}: claimed {want_mode}, but the run reported "
+                    f"{got_mode!r} with no accelerator — cannot confirm")
+            elif got_mode.lower() != want_mode.lower():
+                violations.append(f"PATH {tag}: claimed {want_mode}, actually ran {got_mode}")
         term = c.get("termination")
         if term and not term.get("passed"):
             violations.append(f"TERMINATION {tag}: {term.get('reason')}")

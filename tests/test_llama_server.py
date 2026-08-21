@@ -448,6 +448,145 @@ class TestCpuRescueIsReused:
         assert popen.called
 
 
+class TestShutdownReachesAnUnpublishedChild:
+    """The gap sol found: ensure() holds the lock for its WHOLE readiness wait,
+    shutdown() gives up on the lock after 5s, and the app then calls os._exit(0).
+    A child spawned but not yet published was reachable by nobody."""
+
+    def test_the_in_flight_child_is_tracked_where_shutdown_can_see_it(self, tmp_path):
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        proc = _FakeProc()
+        seen = {}
+
+        def ready(p, port, deadline):
+            # Mid-load: this is exactly the window in which a Quit lands.
+            seen["starting"] = LlamaServerManager._starting
+            return True
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", side_effect=ready), \
+             patch.object(LlamaServerManager, "_owns_listener", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=proc):
+            LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert seen["starting"] is proc, "shutdown() could not have reached it"
+
+    def test_shutdown_without_the_lock_kills_the_unpublished_child(self):
+        """The no-lock branch used to kill only _process, which is still None
+        while the child is loading — so the child survived the app."""
+        proc = _FakeProc()
+        LlamaServerManager._starting = proc
+        LlamaServerManager._lock.acquire()
+        try:
+            LlamaServerManager.shutdown()   # cannot take the lock
+        finally:
+            LlamaServerManager._lock.release()
+            LlamaServerManager._starting = None
+        assert proc.terminated or proc.killed, "the unpublished child was orphaned"
+
+    def test_the_handle_is_cleared_once_the_ladder_is_done(self, tmp_path):
+        """A stale handle would let a LATER shutdown kill a healthy server."""
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_owns_listener", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert LlamaServerManager._starting is None
+
+    def test_a_shutdown_stops_the_ladder_from_spawning_more_rungs(self, tmp_path):
+        """Without a per-rung epoch check, a shutdown partway down the ladder
+        still spawned every remaining fallback rung."""
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        spawned = []
+
+        def popen(cmd, **kw):
+            spawned.append(cmd)
+            LlamaServerManager._epoch += 1   # a shutdown lands after rung 1
+            return _FakeProc()
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=False), \
+             patch("subprocess.Popen", side_effect=popen):
+            with pytest.raises(LlamaServerError, match="shut down while starting"):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert len(spawned) == 1, f"kept laddering after a shutdown: {spawned}"
+
+
+class TestListenerOwnership:
+    """_find_port() only proves nobody was listening a MOMENT AGO. Between that
+    probe and llama-server's bind, any local process can take the port, answer
+    /health, and echo our model path back from the unauthenticated /props."""
+
+    def test_a_port_held_by_a_stranger_is_refused(self, tmp_path):
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        served = []
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_owns_listener", return_value=False), \
+             patch.object(LlamaServerManager, "_serving_model",
+                          side_effect=lambda *a: served.append(a) or True), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            with pytest.raises(LlamaServerError):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert LlamaServerManager._process is None, "published a stranger's listener"
+        assert served == [], "asked a stranger to identify itself, and believed it"
+
+    def test_ownership_is_checked_before_identity(self, tmp_path):
+        """/props is unauthenticated, so _serving_model believes whatever the
+        listener claims. It must only ever be asked of a proven-ours listener."""
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        order = []
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_owns_listener",
+                          side_effect=lambda *a: order.append("own") or True), \
+             patch.object(LlamaServerManager, "_serving_model",
+                          side_effect=lambda *a: order.append("props") or True), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert order == ["own", "props"]
+
+    def test_an_undeterminable_kernel_does_not_disable_cleanup(self, tmp_path):
+        """None means /proc could not tell us. Defence in depth, not a promise:
+        failing closed here would kill cleanup on every kernel that hides this."""
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_owns_listener", return_value=None), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            assert LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99) == 8179
+
+    def test_ownership_detection_works_on_this_kernel(self):
+        """The helper is worthless if /proc parsing is wrong here: it would
+        report None forever and silently restore the hole it was added to close."""
+        import socket as _s, subprocess as _sp, sys as _sys, time as _t
+        probe = _s.socket(); probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]; probe.close()
+        child = _sp.Popen([_sys.executable, "-m", "http.server", str(port),
+                           "--bind", "127.0.0.1"],
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        stranger = _sp.Popen([_sys.executable, "-c", "import time;time.sleep(30)"])
+        try:
+            for _ in range(50):
+                _t.sleep(0.1)
+                if LlamaServerManager._listener_inodes(port):
+                    break
+            assert LlamaServerManager._owns_listener(child, port) is True
+            assert LlamaServerManager._owns_listener(stranger, port) is False
+        finally:
+            child.kill(); stranger.kill(); child.wait(); stranger.wait()
+
+
 class TestShutdownDuringStartup:
     """Quit / GPU toggle / model switch can fire while a startup is still loading.
     Publishing that child afterwards leaves a multi-GB process behind."""

@@ -462,6 +462,25 @@ STYLE_LABELS = {
 }
 
 
+# === Cleanup residency ===
+# Cleanup can hold a model resident in TWO independent places: the external
+# llama-server process, and LlamaCppCliBackend's in-process llama-cpp-python
+# cache (source installs only). Every caller that means "stop holding the
+# cleanup model" has to release both, so there is one function that does it and
+# no call site that does half the job.
+def _release_cleanup_residency() -> None:
+    try:
+        from wayfinder.core.llama_server import LlamaServerManager
+        LlamaServerManager.shutdown()
+    except Exception:
+        pass
+    try:
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        LlamaCppCliBackend.release_resident_models()
+    except Exception:
+        pass
+
+
 # === Tooltip Helper ===
 
 # Flipped True for the duration of a mouse-wheel gesture so hover ToolTips
@@ -11268,8 +11287,7 @@ class WayfinderApp(ctk.CTk):
         # Same for the resident llama-server: its -ngl is fixed at spawn, so a
         # CPU/GPU flip must respawn it rather than keep serving in the old mode.
         try:
-            from wayfinder.core.llama_server import LlamaServerManager
-            LlamaServerManager.shutdown()
+            _release_cleanup_residency()
         except Exception:
             pass
         self.log(f"⚙ GPU acceleration: {'enabled (GPU)' if want else 'disabled (CPU)'} — applied")
@@ -11285,8 +11303,7 @@ class WayfinderApp(ctk.CTk):
         # way to save_memory, and the next dictation starts a fresh one on the
         # way back. Without this the setting would not take effect until restart.
         try:
-            from wayfinder.core.llama_server import LlamaServerManager
-            LlamaServerManager.shutdown()
+            _release_cleanup_residency()
         except Exception:
             pass
         self.log(f"⚙ Cleanup speed: {display_value}")
@@ -11298,6 +11315,11 @@ class WayfinderApp(ctk.CTk):
         self.config["post_processing_enabled"] = enabled
         save_config(self.config)
         status = "enabled" if enabled else "disabled"
+        if not enabled:
+            # Turning cleanup off has to give the memory back. Without this the
+            # resident model stayed loaded for the rest of the session even
+            # though nothing would ever ask it for another completion.
+            _release_cleanup_residency()
         self.log(f"⚙ LLM Post-processing: {status}")
         # Rebuild mode settings to show/hide post-processing options
         current_mode = self.config.get("processing_mode", "local")
@@ -11752,6 +11774,10 @@ class WayfinderApp(ctk.CTk):
             "openai": "Cloud (OpenAI GPT)",
         }
         display = display_map.get(value, value)
+        if value != "llama_cpp":
+            # Moving cleanup to a cloud backend leaves the local model resident
+            # with no caller — same leak as switching it off entirely.
+            _release_cleanup_residency()
         self.log(f"⚙ Post-processing backend: {display}")
         # Update config button text
         if hasattr(self, 'postproc_config_btn'):
@@ -12051,8 +12077,7 @@ class WayfinderApp(ctk.CTk):
             # model path, so a mismatch respawns. This is about not holding a
             # model the user just switched away from.)
             try:
-                from wayfinder.core.llama_server import LlamaServerManager
-                LlamaServerManager.shutdown()
+                _release_cleanup_residency()
             except Exception:
                 pass
             self._llamacpp_current_display = selection
@@ -12749,8 +12774,7 @@ class WayfinderApp(ctk.CTk):
             # model path, so a mismatch respawns. This is about not holding a
             # model the user just switched away from.)
             try:
-                from wayfinder.core.llama_server import LlamaServerManager
-                LlamaServerManager.shutdown()
+                _release_cleanup_residency()
             except Exception:
                 pass
             model_name = Path(file_path).name
@@ -14732,8 +14756,7 @@ class WayfinderApp(ctk.CTk):
             try:
                 # enforce_license_config can swap llama_cpp_model_path down to a
                 # Free-tier model; the resident server still holds the old one.
-                from wayfinder.core.llama_server import LlamaServerManager
-                LlamaServerManager.shutdown()
+                _release_cleanup_residency()
             except Exception:
                 pass
         # Revert the badge/glow/underline/tier live.
@@ -17222,8 +17245,7 @@ class WayfinderApp(ctk.CTk):
 
         # Same for the resident cleanup model server.
         try:
-            from wayfinder.core.llama_server import LlamaServerManager
-            LlamaServerManager.shutdown()
+            _release_cleanup_residency()
         except:
             pass
 
@@ -19257,8 +19279,7 @@ def main():
         except:
             pass
         try:
-            from wayfinder.core.llama_server import LlamaServerManager
-            LlamaServerManager.shutdown()
+            _release_cleanup_residency()
         except:
             pass
 

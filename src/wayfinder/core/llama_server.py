@@ -72,6 +72,16 @@ class LlamaServerManager:
     """
 
     _process: Optional[subprocess.Popen] = None
+    # A child that has been spawned but not yet published. It lives here, not
+    # only in ensure()'s frame, so shutdown() can reach it: ensure() holds the
+    # lock for its whole readiness wait (up to STARTUP_TIMEOUT), and shutdown()
+    # gives up on the lock after 5s. Quit inside that gap used to leave a
+    # multi-GB llama-server running with nobody holding a handle to it, because
+    # the app calls os._exit(0) and the startup thread never reached its epoch
+    # guard. (PR_SET_PDEATHSIG is the obvious reflex here and is WRONG: it fires
+    # on the death of the parent THREAD, and we spawn from short-lived worker
+    # threads, so it would kill the server moments after a successful start.)
+    _starting: Optional[subprocess.Popen] = None
     _port: int = 0
     _lock = threading.Lock()
     # Identity of the RUNNING server. Every field is fixed at spawn time, so a
@@ -232,6 +242,62 @@ class LlamaServerManager:
                 sock.close()
         return None
 
+    @staticmethod
+    def _listener_inodes(port: int) -> set:
+        """Socket inodes LISTENing on `port` on loopback, from /proc/net/tcp{,6}."""
+        inodes = set()
+        for name in ("tcp", "tcp6"):
+            try:
+                with open(f"/proc/net/{name}") as fh:
+                    next(fh, None)  # header
+                    for line in fh:
+                        f = line.split()
+                        if len(f) < 10 or f[3] != "0A":  # 0A == TCP_LISTEN
+                            continue
+                        local = f[1]
+                        if ":" not in local:
+                            continue
+                        addr_hex, port_hex = local.rsplit(":", 1)
+                        if int(port_hex, 16) != port:
+                            continue
+                        # Loopback only, v4 or v6-mapped/::1. A listener on
+                        # another interface is not the one we would talk to.
+                        if addr_hex.upper().lstrip("0") not in (
+                                "100007F", "1", "1000000000000000000000000"):
+                            continue
+                        inodes.add(f[9])
+            except (OSError, ValueError, StopIteration):
+                continue
+        return inodes
+
+    @classmethod
+    def _owns_listener(cls, proc: subprocess.Popen, port: int) -> Optional[bool]:
+        """True/False if we could prove ownership; None if /proc could not tell us.
+
+        _find_port() only proves nobody was listening a moment ago. Between that
+        probe and llama-server's bind, any local process can take the port, answer
+        /health, and echo our model path back from /props -- at which point we
+        would hand it every dictation. Since /props is unauthenticated, no reply
+        it makes can be trusted; the only real proof is that the kernel says the
+        listening socket belongs to the child WE spawned.
+        """
+        inodes = cls._listener_inodes(port)
+        if not inodes:
+            return None
+        fd_dir = Path(f"/proc/{proc.pid}/fd")
+        try:
+            entries = list(fd_dir.iterdir())
+        except OSError:
+            return None
+        for fd in entries:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target[8:-1] in inodes:
+                return True
+        return False
+
     # ---------------- lifecycle ----------------
 
     @classmethod
@@ -336,62 +402,95 @@ class LlamaServerManager:
                     f"no free port in {DEFAULT_PORT}-{DEFAULT_PORT + _PORT_SCAN - 1}")
 
             errors = []
-            for cmd in cls._spawn_attempts(binary, model_path, n_ctx,
-                                           n_threads, n_gpu_layers, port):
-                try:
-                    proc = subprocess.Popen(
-                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        env=bundle_binary_env(),
-                    )
-                except Exception as e:
-                    errors.append(f"{Path(cmd[0]).name}: {type(e).__name__}: {e}")
-                    continue
-                cls._start_drain(proc)
-                # Readiness waits inside the caller's budget, never past it.
-                attempt_deadline = time.monotonic() + cls.STARTUP_TIMEOUT
-                if deadline is not None:
-                    attempt_deadline = min(attempt_deadline, deadline)
-                if cls._wait_ready(proc, port, attempt_deadline):
-                    # Confirm the child actually loaded the file we named. A
-                    # mismatch means silently cleaning every dictation with the
-                    # wrong model, which is invisible in the output.
-                    if not cls._serving_model(port, model_path):
-                        errors.append(f"{Path(cmd[0]).name}: serving an unexpected model")
-                        try:
-                            proc.kill()
-                            proc.wait(timeout=5)
-                        except Exception:
-                            pass
-                        continue
-                    # A shutdown that began while we were loading wins. Publishing
-                    # here anyway is how Quit-during-warm-up orphaned a multi-GB
-                    # child: shutdown had already returned, having seen no process.
+            try:
+                for cmd in cls._spawn_attempts(binary, model_path, n_ctx,
+                                               n_threads, n_gpu_layers, port):
+                    # Re-check before EVERY rung, not just before publishing. A
+                    # shutdown partway down the ladder would otherwise keep spawning
+                    # fresh children it has already been told to stop wanting.
                     if cls._epoch != epoch:
-                        cls._kill(proc)
                         raise LlamaServerError("shut down while starting")
-                    cls._process = proc
-                    cls._port = port
-                    # Reuse keys off the REQUEST; the label keys off the spawn.
-                    # Recording only the spawned value made a healthy CPU-rescue
-                    # server look like a mismatch to the next identical request.
-                    cls._requested = want
-                    # Read the -ngl VALUE, never `"99" in cmd`, which scans the
-                    # whole argv and would let n_threads=99 mark a CPU server GPU.
-                    spawned_ngl = int(cmd[cmd.index("-ngl") + 1])
-                    cls._identity = cls._identity_of(
-                        cmd[0], model_path, n_ctx, n_threads, spawned_ngl)
-                    return port
-                errors.append(f"{Path(cmd[0]).name}: not ready "
-                              f"(rc={proc.poll()}) {cls.log_tail()[-300:]}")
-                try:
-                    proc.kill()
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
+                    try:
+                        proc = subprocess.Popen(
+                            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=bundle_binary_env(),
+                        )
+                    except Exception as e:
+                        errors.append(f"{Path(cmd[0]).name}: {type(e).__name__}: {e}")
+                        continue
+                    # Publish the handle FIRST so a concurrent shutdown can kill it.
+                    cls._starting = proc
+                    cls._start_drain(proc)
+                    # Readiness waits inside the caller's budget, never past it.
+                    attempt_deadline = time.monotonic() + cls.STARTUP_TIMEOUT
+                    if deadline is not None:
+                        attempt_deadline = min(attempt_deadline, deadline)
+                    if cls._wait_ready(proc, port, attempt_deadline):
+                        # Confirm the child actually loaded the file we named. A
+                        # mismatch means silently cleaning every dictation with the
+                        # wrong model, which is invisible in the output.
+                        # Ownership BEFORE identity: _serving_model believes what
+                        # the listener says about itself, so it must only ever be
+                        # asked of a listener we already proved is ours.
+                        owned = cls._owns_listener(proc, port)
+                        if owned is False:
+                            errors.append(f"{Path(cmd[0]).name}: port {port} is held "
+                                          "by another process, not our child")
+                            try:
+                                proc.kill()
+                                proc.wait(timeout=5)
+                            except Exception:
+                                pass
+                            continue
+                        if owned is None:
+                            # /proc could not answer. Defence in depth, not a
+                            # guarantee: fall through to the identity check rather
+                            # than disabling cleanup on every kernel that hides it.
+                            print("[llama-server] could not confirm socket "
+                                  f"ownership on port {port} via /proc", flush=True)
+                        if not cls._serving_model(port, model_path):
+                            errors.append(f"{Path(cmd[0]).name}: serving an unexpected model")
+                            try:
+                                proc.kill()
+                                proc.wait(timeout=5)
+                            except Exception:
+                                pass
+                            continue
+                        # A shutdown that began while we were loading wins. Publishing
+                        # here anyway is how Quit-during-warm-up orphaned a multi-GB
+                        # child: shutdown had already returned, having seen no process.
+                        if cls._epoch != epoch:
+                            cls._kill(proc)
+                            raise LlamaServerError("shut down while starting")
+                        cls._process = proc
+                        cls._port = port
+                        # Reuse keys off the REQUEST; the label keys off the spawn.
+                        # Recording only the spawned value made a healthy CPU-rescue
+                        # server look like a mismatch to the next identical request.
+                        cls._requested = want
+                        # Read the -ngl VALUE, never `"99" in cmd`, which scans the
+                        # whole argv and would let n_threads=99 mark a CPU server GPU.
+                        spawned_ngl = int(cmd[cmd.index("-ngl") + 1])
+                        cls._identity = cls._identity_of(
+                            cmd[0], model_path, n_ctx, n_threads, spawned_ngl)
+                        return port
+                    errors.append(f"{Path(cmd[0]).name}: not ready "
+                                  f"(rc={proc.poll()}) {cls.log_tail()[-300:]}")
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    except Exception:
+                        pass
 
-            cls._disabled = True
-            raise LlamaServerError("every llama-server start attempt failed: "
-                                   + " | ".join(errors))
+                cls._disabled = True
+                raise LlamaServerError("every llama-server start attempt failed: "
+                                       + " | ".join(errors))
+            finally:
+                # Whatever happened, this frame no longer owns a child: it was
+                # either published into _process or killed by one of the paths
+                # above. Leaving a stale handle would let a LATER shutdown kill
+                # a healthy, published server.
+                cls._starting = None
         finally:
             cls._lock.release()
 
@@ -444,6 +543,11 @@ class LlamaServerManager:
         cls._port = 0
         cls._epoch += 1
         cls._kill(proc)
+        # An unpublished child from an in-flight ensure() is just as expensive to
+        # leak as a published one. The epoch bump above tells that thread to stop,
+        # but it cannot act on it if the interpreter exits first.
+        starting, cls._starting = cls._starting, None
+        cls._kill(starting)
 
     @classmethod
     def note_success(cls) -> None:
@@ -482,6 +586,11 @@ class LlamaServerManager:
                 cls._epoch += 1
                 proc, cls._process = cls._process, None
                 cls._kill(proc)
+                # The whole reason this branch exists: ensure() holds the lock for
+                # its entire readiness wait, so the child we most need to kill on a
+                # Quit is precisely the one it has not published yet.
+                starting, cls._starting = cls._starting, None
+                cls._kill(starting)
         finally:
             if acquired:
                 cls._lock.release()

@@ -4,8 +4,10 @@ Cleans up transcription output using LLM backends (local or cloud).
 Supports llama-cpp-python for local inference and Anthropic Claude for cloud.
 """
 
+import gc
 import os
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -2114,6 +2116,31 @@ class LlamaCppCliBackend(PostProcessorBackend):
             LlamaCppCliBackend._resident_cache[key] = model
         return model
 
+    @classmethod
+    def release_resident_models(cls) -> None:
+        """Drop every cached llama-cpp-python model and free its memory.
+
+        The cache is keyed by (model_path, n_ctx, n_gpu_layers), so a model
+        change or a GPU toggle does not replace an entry -- it ADDS one, and the
+        old multi-GB model stays resident behind a key nothing will ask for
+        again. Stopping the external llama-server does not touch this at all:
+        they are two different residency mechanisms, and "Save memory" has to
+        release both to mean anything.
+        """
+        cache, cls._resident_cache = cls._resident_cache, {}
+        for model in cache.values():
+            # llama-cpp-python frees the weights in close() on versions that
+            # have it, and in __del__ everywhere else; the clear() below is what
+            # drops the last reference in that case.
+            try:
+                close = getattr(model, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+        cache.clear()
+        gc.collect()
+
     def _cpu_sibling(self) -> Optional[str]:
         """The dedicated CPU llama-simple next to the (Vulkan) binary, if present.
 
@@ -2190,7 +2217,15 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 prompt = self.build_cli_prompt(
                     "warm up", self.output_tone, self.intensity, self.template
                 )
-                if self._server_generate(prompt, 8) is None:
+                # Bounded like any other rung. Warm-up runs on a background
+                # thread, but an unbounded ensure() would block on the lock for
+                # as long as a competing startup wanted to hold it.
+                warm_deadline = time.monotonic() + self.CLEANUP_TOTAL_BUDGET
+                if self._server_generate(
+                        prompt, 8,
+                        deadline=min(time.monotonic() + self.SERVER_ACQUIRE_BUDGET,
+                                     warm_deadline),
+                        overall_deadline=warm_deadline) is None:
                     # Server unavailable — the first dictation will use the CLI, so
                     # resolve its binary now rather than probing live.
                     self._subprocess_target()
@@ -2305,9 +2340,19 @@ class LlamaCppCliBackend(PostProcessorBackend):
     # path plus its CLI fallback must finish well inside that. The background
     # warm-up passes no deadline, because nobody is waiting on it.
     SERVER_ACQUIRE_BUDGET = 20.0
+    # Wall-clock ceiling for EVERYTHING cleanup does, fallbacks included.
+    # The app arms a 120s PROCESSING watchdog covering transcription AND
+    # cleanup, and firing it DISCARDS the result -- so an unbounded fallback
+    # ladder does not merely run long, it loses the user's dictation after
+    # having successfully cleaned it. Worst case used to be ~128s on its own
+    # (20 acquire + 30 request + 10 kill + 8 GPU probe + 60 CLI). Half the
+    # watchdog is reserved here; the other half is transcription's. Running out
+    # returns the raw text, which is the correct degradation.
+    CLEANUP_TOTAL_BUDGET = 60.0
 
     def _server_generate(self, prompt: str, n_predict: int,
-                         deadline: Optional[float] = None) -> Optional[dict]:
+                         deadline: Optional[float] = None,
+                         overall_deadline: Optional[float] = None) -> Optional[dict]:
         """Run one cleanup on the resident server, or None to fall through.
 
         Returns None (never raises) for every failure mode — missing binary,
@@ -2341,8 +2386,16 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 n_threads=self.n_threads, n_gpu_layers=requested_ngl,
                 deadline=deadline,
             )
+            # `deadline` bounds only STARTUP. The generation itself is bounded
+            # by the shared cleanup budget, so a server that accepts the socket
+            # and then stalls cannot spend the fallback ladder's whole allowance.
+            req_timeout = None
+            if overall_deadline is not None:
+                req_timeout = max(1.0, min(LlamaServerManager.REQUEST_TIMEOUT,
+                                           overall_deadline - time.monotonic()))
             out = LlamaServerManager.complete(
                 prompt=prompt, n_predict=n_predict, port=port,
+                timeout=req_timeout,
                 **self._sampling_profile(),
             )
             # Label from what the server was ACTUALLY spawned with, so a GPU
@@ -2566,6 +2619,8 @@ Cleaned text:"""
             )
 
             start_time = time.time()
+            # One deadline for the whole attempt, shared by every rung below.
+            overall_deadline = time.monotonic() + self.CLEANUP_TOTAL_BUDGET
 
             # Fast path: resident in-process model (instant after warm-up). Reuses
             # the EXACT same compact prompt + extraction as the subprocess path, so
@@ -2573,7 +2628,9 @@ Cleaned text:"""
             resident = self._resident_model()
             served = None if resident is not None else self._server_generate(
                 simple_prompt, estimated_output_tokens,
-                deadline=time.monotonic() + self.SERVER_ACQUIRE_BUDGET)
+                deadline=min(time.monotonic() + self.SERVER_ACQUIRE_BUDGET,
+                             overall_deadline),
+                overall_deadline=overall_deadline)
             if resident is not None:
                 out = resident(
                     simple_prompt,
@@ -2615,9 +2672,14 @@ Cleaned text:"""
                 # generation cut mid-emoji (caricature mode loves emojis) leaves
                 # an invalid UTF-8 tail that strict decoding turns into a crash
                 # for the whole cleanup.
+                # Clamped to the shared budget: this is the LAST rung, so it is
+                # the one that would otherwise push past the watchdog and throw
+                # away a result it had already produced.
+                cli_timeout = max(1.0, min(float(self.timeout),
+                                           overall_deadline - time.monotonic()))
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, errors="replace",
-                    timeout=self.timeout,
+                    timeout=cli_timeout,
                     env=bundle_binary_env(),
                 )
                 if result.returncode != 0:

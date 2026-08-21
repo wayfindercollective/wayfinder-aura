@@ -259,6 +259,44 @@ class TestServerPathGate:
         v = E.compare_to_baseline(_payload(fp, rows), _payload(fp, rows))
         assert not any(x.startswith("PATH ") for x in v)
 
+    def test_cpu_rescue_cannot_satisfy_a_gpu_pinned_run(self):
+        """The gate compared only the "server"/"CLI" half, so "server-CPU"
+        startswith("server") was True and a Vulkan regression that silently fell
+        to the CPU rescue rung compared perfectly clean on a GPU-pinned matrix."""
+        fp = {"path": "server-gpu"}
+        rows = [_row(mode="server-CPU")]
+        v = E.compare_to_baseline(_payload(fp, rows), _payload(fp, rows))
+        assert any(x.startswith("PATH ") and "actually ran server-CPU" in x for x in v)
+
+    def test_cpu_rescue_cannot_satisfy_a_gpu_pinned_cli_run(self):
+        """Same hole on the CLI side: "CLI-CPU".startswith("CLI")."""
+        fp = {"path": "cli-gpu"}
+        rows = [_row(mode="CLI-CPU")]
+        v = E.compare_to_baseline(_payload(fp, rows), _payload(fp, rows))
+        assert any(x.startswith("PATH ") and "actually ran CLI-CPU" in x for x in v)
+
+    def test_a_cpu_pinned_run_on_cpu_is_clean(self):
+        """The fix must not make the accelerator-matched case fail."""
+        for path, mode in (("server-cpu", "server-CPU"), ("cli-cpu", "CLI-CPU")):
+            fp = {"path": path}
+            rows = [_row(mode=mode)]
+            v = E.compare_to_baseline(_payload(fp, rows), _payload(fp, rows))
+            assert not any(x.startswith("PATH ") for x in v), (path, mode, v)
+
+    def test_bare_mode_cannot_confirm_a_pinned_accelerator(self):
+        """The backend reports a bare "server" when it could not read back the
+        -ngl it spawned with. Honest, but not proof, and a pinned path needs proof."""
+        fp = {"path": "server-gpu"}
+        rows = [_row(mode="server")]
+        v = E.compare_to_baseline(_payload(fp, rows), _payload(fp, rows))
+        assert any(x.startswith("PATH ") and "cannot confirm" in x for x in v)
+
+    def test_baseline_without_a_declared_path_is_unaffected(self):
+        """Runs recorded before the path fingerprint existed must still compare."""
+        rows = [_row(mode="CLI-CPU")]
+        v = E.compare_to_baseline(_payload({}, rows), _payload({}, rows))
+        assert not any(x.startswith("PATH ") for x in v)
+
     def test_unknown_mode_does_not_trip_the_path_gate(self):
         """A row that fell back returns the input and prints no mode line."""
         fp = {"path": "server-gpu"}
