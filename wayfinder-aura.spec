@@ -129,6 +129,12 @@ a = Analysis(
         'wayfinder.core.transcriber',
         'wayfinder.core.injector',
         'wayfinder.core.postprocessor',
+        # Imported lazily INSIDE _server_generate()/warm_up(), so it reaches the
+        # bundle only via PyInstaller's bytecode scan. Verified present in the
+        # PYZ, but named here so a future refactor of that import site cannot
+        # silently drop the resident-server path and leave every dictation on
+        # the 4x slower per-call CLI.
+        'wayfinder.core.llama_server',
         'wayfinder.core.voice_profile',
         'wayfinder.ui',
         'wayfinder.ui.theme',
