@@ -97,8 +97,15 @@ class LlamaServerManager:
 
     @staticmethod
     def _identity_of(binary: str, model_path: str, n_ctx: int, n_threads: int,
-                     use_gpu: bool) -> tuple:
-        return (binary, model_path, int(n_ctx), int(n_threads), bool(use_gpu))
+                     n_gpu_layers: int) -> tuple:
+        """Identity of a running server.
+
+        n_gpu_layers is the LAYER COUNT, not a bool: collapsing it lost partial
+        offload, so a deliberate 10-layer setting became "all layers" and could
+        reproduce the exact VRAM exhaustion the setting exists to avoid. It also
+        means a 10-layer and a 99-layer server are correctly different servers.
+        """
+        return (binary, model_path, int(n_ctx), int(n_threads), int(n_gpu_layers))
 
     @classmethod
     def _alive(cls) -> bool:
@@ -115,11 +122,12 @@ class LlamaServerManager:
 
     @classmethod
     def _serving_model(cls, port: int, model_path: str, timeout: float = 2.0) -> bool:
-        """True when a llama-server on `port` is serving exactly this model.
+        """True when the llama-server on `port` reports exactly this model.
 
-        /props reports the resolved model_path, so adoption is verified rather
-        than assumed — a stale server on the port holding a DIFFERENT model
-        would otherwise silently answer every cleanup request.
+        Used as a post-spawn self-check on OUR OWN child, never to decide whether
+        to trust a stranger: /props is unauthenticated, so it can only confirm
+        what a process we started says about itself, and cannot establish
+        ownership. See _find_port() for why adoption was removed.
         """
         props = cls._props(port, timeout=timeout)
         if not props:
@@ -166,6 +174,18 @@ class LlamaServerManager:
         thread.start()
 
     @classmethod
+    def spawned_gpu_layers(cls) -> Optional[int]:
+        """-ngl the RUNNING server was actually spawned with, or None if unknown.
+
+        Callers must label a request from this, never from what they requested: a
+        GPU request that fell to a CPU rung is a CPU server, and reporting it as
+        "server-GPU" made the eval matrix unable to establish that a server-gpu
+        row really used the GPU.
+        """
+        ident = cls._identity
+        return None if ident is None else ident[4]
+
+    @classmethod
     def log_tail(cls) -> str:
         thread = cls._log_thread
         if thread is not None:
@@ -175,26 +195,30 @@ class LlamaServerManager:
     # ---------------- ports ----------------
 
     @classmethod
-    def _find_port(cls, model_path: str, probe_timeout: float = 2.0) -> tuple:
-        """Return (port, adopt) — the first free port, or one already serving us."""
-        port = DEFAULT_PORT
-        for _ in range(_PORT_SCAN):
+    def _find_port(cls) -> Optional[int]:
+        """First free loopback port in the scan range, or None if all are taken.
+
+        We deliberately do NOT adopt an existing listener. /props is
+        unauthenticated, so "it says it is serving our model path" is a claim any
+        local process can make — and adopting it would hand that process every
+        subsequent dictation. An occupied port is skipped, never trusted; if the
+        whole range is occupied we fail and the caller falls back to the CLI.
+        """
+        for offset in range(_PORT_SCAN):
+            port = DEFAULT_PORT + offset
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 if sock.connect_ex(("127.0.0.1", port)) != 0:
-                    return port, False  # free
-                if cls._serving_model(port, model_path, timeout=probe_timeout):
-                    return port, True   # our model already resident here
-                port += 1
+                    return port
             finally:
                 sock.close()
-        return DEFAULT_PORT, False
+        return None
 
     # ---------------- lifecycle ----------------
 
     @classmethod
     def _spawn_attempts(cls, binary: str, model_path: str, n_ctx: int,
-                        n_threads: int, use_gpu: bool, port: int) -> list:
+                        n_threads: int, n_gpu_layers: int, port: int) -> list:
         """Ordered spawn ladder: requested mode first, then CPU rescue.
 
         Mirrors whisper-server's ladder. A Vulkan build can fail at library init
@@ -210,8 +234,8 @@ class LlamaServerManager:
             "--parallel", "1",   # one dictation at a time; keeps the KV cache whole
             "--no-webui",        # no reason to serve a UI from a dictation app
         ]
-        attempts = [[binary] + base + ["-ngl", "99" if use_gpu else "0"]]
-        if use_gpu:
+        attempts = [[binary] + base + ["-ngl", str(n_gpu_layers)]]
+        if n_gpu_layers != 0:
             attempts.append([binary] + base + ["-ngl", "0"])
             cpu_twin = binary.replace("llama-server", "llama-server-cpu")
             if cpu_twin != binary and Path(cpu_twin).exists():
@@ -240,7 +264,7 @@ class LlamaServerManager:
 
     @classmethod
     def ensure(cls, binary: str, model_path: str, n_ctx: int = 2048,
-               n_threads: int = 4, use_gpu: bool = True) -> int:
+               n_threads: int = 4, n_gpu_layers: int = 99) -> int:
         """Return a port serving `model_path`, starting the server if needed."""
         import atexit
         import time
@@ -252,7 +276,7 @@ class LlamaServerManager:
         if not model_path or not Path(model_path).exists():
             raise LlamaServerError(f"model not found: {model_path or '<empty>'}")
 
-        want = cls._identity_of(binary, model_path, n_ctx, n_threads, use_gpu)
+        want = cls._identity_of(binary, model_path, n_ctx, n_threads, n_gpu_layers)
 
         with cls._lock:
             if cls._alive() and cls._identity == want:
@@ -264,19 +288,14 @@ class LlamaServerManager:
                 atexit.register(cls.shutdown)
                 cls._atexit_registered = True
 
-            port, adopt = cls._find_port(model_path)
-            if adopt:
-                # An externally-started server is serving our model. Use it, but
-                # record identity as unknown: its real spawn flags (ctx, threads,
-                # GPU) are unknowable, so the next ensure() must re-probe rather
-                # than trust a match it never verified.
-                cls._port = port
-                cls._identity = None
-                return port
+            port = cls._find_port()
+            if port is None:
+                raise LlamaServerError(
+                    f"no free port in {DEFAULT_PORT}-{DEFAULT_PORT + _PORT_SCAN - 1}")
 
             errors = []
             for cmd in cls._spawn_attempts(binary, model_path, n_ctx,
-                                           n_threads, use_gpu, port):
+                                           n_threads, n_gpu_layers, port):
                 try:
                     proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -287,18 +306,30 @@ class LlamaServerManager:
                     continue
                 cls._start_drain(proc)
                 if cls._wait_ready(proc, port, time.monotonic() + cls.STARTUP_TIMEOUT):
+                    # Confirm the child actually loaded the file we named. A
+                    # mismatch means silently cleaning every dictation with the
+                    # wrong model, which is invisible in the output.
+                    if not cls._serving_model(port, model_path):
+                        errors.append(f"{Path(cmd[0]).name}: serving an unexpected model")
+                        try:
+                            proc.kill()
+                            proc.wait(timeout=5)
+                        except Exception:
+                            pass
+                        continue
                     cls._process = proc
                     cls._port = port
                     # Identity records the mode ACTUALLY spawned, not the one
                     # requested: a GPU request that fell to a CPU rung must not
                     # claim GPU, or the next GPU request reuses a CPU server.
-                    # Read the -ngl VALUE, never `"99" in cmd`: that scans the
-                    # whole argv, so n_threads=99 or n_ctx=99 would make a CPU
-                    # server record itself as GPU and be reused for GPU requests.
-                    spawned_gpu = (cmd[cmd.index("-ngl") + 1] != "0"
-                                   and "llama-server-cpu" not in cmd[0])
+                    # Record the layer count ACTUALLY spawned, read from the
+                    # -ngl argument (never `"99" in cmd`, which scans the whole
+                    # argv and would let n_threads=99 mark a CPU server as GPU).
+                    # A GPU request that fell to a CPU rung records 0, so the
+                    # next GPU request misses reuse and retries GPU.
+                    spawned_ngl = int(cmd[cmd.index("-ngl") + 1])
                     cls._identity = cls._identity_of(
-                        cmd[0], model_path, n_ctx, n_threads, spawned_gpu)
+                        cmd[0], model_path, n_ctx, n_threads, spawned_ngl)
                     return port
                 errors.append(f"{Path(cmd[0]).name}: not ready "
                               f"(rc={proc.poll()}) {cls.log_tail()[-300:]}")
@@ -358,6 +389,34 @@ class LlamaServerManager:
         cls._process = None
         cls._identity = None
         cls._port = 0
+        cls._kill(proc)
+
+    @classmethod
+    def shutdown(cls) -> None:
+        """Stop the resident server (atexit, GPU toggle, model switch).
+
+        Bounded lock acquisition, because a startup can hold _lock for its whole
+        readiness wait and atexit must not hang the app on exit. If the lock is
+        NOT acquired we still terminate the child — leaking a process holding
+        several GB is worse than a racing spawn — but we do not clear the shared
+        state, because another thread inside ensure() owns it and would then
+        write its own results over ours. That thread's own _stop_locked/identity
+        write leaves the state consistent.
+        """
+        acquired = cls._lock.acquire(timeout=5)
+        try:
+            if acquired:
+                cls._stop_locked()
+            else:
+                proc, cls._process = cls._process, None
+                cls._kill(proc)
+        finally:
+            if acquired:
+                cls._lock.release()
+
+    @staticmethod
+    def _kill(proc: Optional[subprocess.Popen]) -> None:
+        """Terminate, then kill, a child that ignores SIGTERM."""
         if proc is None or proc.poll() is not None:
             return
         try:
@@ -369,17 +428,6 @@ class LlamaServerManager:
                 proc.wait(timeout=5)
         except Exception:
             pass
-
-    @classmethod
-    def shutdown(cls) -> None:
-        """Stop the resident server (atexit, GPU toggle, model switch)."""
-        # Never block interpreter exit on a lock a wedged request still holds.
-        acquired = cls._lock.acquire(timeout=5)
-        try:
-            cls._stop_locked()
-        finally:
-            if acquired:
-                cls._lock.release()
 
     @classmethod
     def reset_for_tests(cls) -> None:

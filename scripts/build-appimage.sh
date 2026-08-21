@@ -387,7 +387,9 @@ if [ "$BUILD_MODE" = "--full" ]; then
         "$APPDIR/usr/bin/whisper-server-cpu" \
         "$APPDIR/usr/bin/llama-cli" \
         "$APPDIR/usr/bin/llama-simple" \
-        "$APPDIR/usr/bin/llama-simple-cpu"; do
+        "$APPDIR/usr/bin/llama-simple-cpu" \
+        "$APPDIR/usr/bin/llama-server" \
+        "$APPDIR/usr/bin/llama-server-cpu"; do
         if [ -f "$bin" ]; then
             # Copy required shared libraries (excluding glibc/ld-linux)
             ldd "$bin" 2>/dev/null | grep "=> /" | awk '{print $3}' | while read lib; do

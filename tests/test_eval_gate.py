@@ -355,3 +355,54 @@ class TestSubstitutionMetricApplicability:
             for intensity in ("standard", "strong", "caricature"):
                 assert (M.substitution_applies(tone, intensity)
                         == M.retention_applies(tone, intensity))
+
+
+class TestNonSlangPreservation:
+    """The gate that replaces order_lcs/new_words for "professional": it must
+    survive slang substitution but still catch a rewrite of everything else."""
+
+    SAMPLE = {"id": "x", "stresses": [], "slang": ["tight", "bro"]}
+    IN = "oh thats tight bro the quarterly numbers came in way better than we thought"
+
+    def _score(self, out, inp=None):
+        return M.nonslang_preservation(inp or self.IN, out, self.SAMPLE["slang"])
+
+    def test_replacing_only_slang_scores_perfectly(self):
+        assert self._score(
+            "Oh, very cool brother. The quarterly numbers came in way better "
+            "than we thought.") == 1.0
+
+    def test_rewriting_the_non_slang_content_scores_low(self):
+        assert self._score("Oh, very cool brother. Everything went fine today.") < 0.5
+
+    def test_dropping_non_slang_content_is_penalised(self):
+        assert self._score("Oh, very cool brother.") < 0.3
+
+    def test_reordering_non_slang_content_is_penalised(self):
+        """LCS is order-sensitive, unlike a set-overlap measure."""
+        fwd = self._score("The quarterly numbers came in way better than we thought.")
+        rev = self._score("Than we thought better way in came numbers quarterly the.")
+        assert rev < fwd
+
+    def test_returns_none_when_there_is_nothing_to_preserve(self):
+        assert M.nonslang_preservation("tight bro", "Very cool brother.",
+                                       ["tight", "bro"]) is None
+
+    def test_gate_is_applied_to_professional(self):
+        p = M.compute_all(self.SAMPLE, "professional", self.IN,
+                          "Oh, very cool brother. The quarterly numbers came in "
+                          "way better than we thought.", "standard")["passes"]
+        assert "nonslang_preservation" in p and p["nonslang_preservation"] is True
+
+    def test_gate_catches_a_professional_row_that_rewrote_everything(self):
+        """The exact hole leaving order_lcs/new_words out would otherwise open."""
+        p = M.compute_all(self.SAMPLE, "professional", self.IN,
+                          "Oh, very cool brother. Everything went fine today ok.",
+                          "standard")["passes"]
+        assert p["nonslang_preservation"] is False
+
+    def test_not_applied_to_the_preserving_tones(self):
+        """They keep order_lcs/new_words, which already cover this."""
+        p = M.compute_all(self.SAMPLE, "casual", self.IN, "whatever", "standard")["passes"]
+        assert "nonslang_preservation" not in p
+        assert "order_lcs" in p and "new_words" in p

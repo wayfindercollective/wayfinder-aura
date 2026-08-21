@@ -2174,6 +2174,20 @@ class LlamaCppCliBackend(PostProcessorBackend):
                     "warm up", self.output_tone, self.intensity, self.template
                 )
                 model(prompt, max_tokens=8, temperature=0.0)
+            elif self._server_enabled():
+                # Resident-server path: start it AND run one real generation. The
+                # start alone only loads weights; the same graph/prompt-cache cost
+                # described above still lands on the first dictation otherwise.
+                # MEASURED: cold spawn + load + first request is ~0.99s, warm is
+                # ~0.15s — this moves that whole second into the background thread
+                # so the user never pays a cold start.
+                prompt = self.build_cli_prompt(
+                    "warm up", self.output_tone, self.intensity, self.template
+                )
+                if self._server_generate(prompt, 8) is None:
+                    # Server unavailable — the first dictation will use the CLI, so
+                    # resolve its binary now rather than probing live.
+                    self._subprocess_target()
             else:
                 # Subprocess path (Flatpak / force_subprocess / no wheel): run the GPU
                 # probe now so the FIRST dictation already lands on the right binary
@@ -2271,8 +2285,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
         except Exception:
             return None
 
-        use_gpu = self.n_gpu_layers != 0
-        binary = resolve_server_binary(self.llama_binary, use_gpu=use_gpu)
+        # Same -1 -> 99 mapping the subprocess path uses, then the LITERAL layer
+        # count is passed through: collapsing it to a bool turned a deliberate
+        # partial offload (say 10 layers) into "all layers".
+        requested_ngl = 99 if self.n_gpu_layers == -1 else self.n_gpu_layers
+        binary = resolve_server_binary(self.llama_binary, use_gpu=requested_ngl != 0)
         if not binary:
             return None  # server not bundled in this build
         try:
@@ -2282,12 +2299,16 @@ class LlamaCppCliBackend(PostProcessorBackend):
             # a worker) would otherwise zero it between the two calls.
             port = LlamaServerManager.ensure(
                 binary=binary, model_path=self.model_path, n_ctx=self.n_ctx,
-                n_threads=self.n_threads, use_gpu=use_gpu,
+                n_threads=self.n_threads, n_gpu_layers=requested_ngl,
             )
-            return LlamaServerManager.complete(
+            out = LlamaServerManager.complete(
                 prompt=prompt, n_predict=n_predict, port=port,
                 **self._sampling_profile(),
             )
+            # Label from what the server was ACTUALLY spawned with, so a GPU
+            # request that degraded to a CPU rung does not report as GPU.
+            out["_spawned_ngl"] = LlamaServerManager.spawned_gpu_layers()
+            return out
         except Exception as e:
             # A server that accepted the connection but never answered is wedged;
             # leaving it up means every future dictation pays the same timeout.
@@ -2529,7 +2550,9 @@ Cleaned text:"""
                 )
                 if served.get("stop_type") == "limit":
                     print("[Post-processing] \u26a0 generation hit the token cap")
-                mode = "server-GPU" if self.n_gpu_layers != 0 else "server-CPU"
+                spawned = served.get("_spawned_ngl")
+                mode = ("server-GPU" if spawned else "server-CPU") if spawned is not None \
+                    else "server"
             else:
                 # Fallback: spawn llama-simple. The prompt is POSITIONAL (llama-simple's
                 # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),

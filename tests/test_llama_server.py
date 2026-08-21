@@ -103,11 +103,14 @@ class TestIdentityAndReuse:
         ("model_path", "/models/other.gguf"),
         ("n_ctx", 4096),
         ("n_threads", 8),
-        ("use_gpu", False),
+        ("n_gpu_layers", 0),
+        # Partial offload is a DIFFERENT server from full offload: collapsing
+        # this to a bool made a deliberate 10-layer setting mean "all layers".
+        ("n_gpu_layers", 10),
     ])
     def test_every_identity_field_forces_a_respawn(self, field, value):
         base = dict(binary="/b/llama-server", model_path="/models/a.gguf",
-                    n_ctx=2048, n_threads=4, use_gpu=True)
+                    n_ctx=2048, n_threads=4, n_gpu_layers=99)
         first = LlamaServerManager._identity_of(**base)
         second = LlamaServerManager._identity_of(**{**base, field: value})
         assert first != second
@@ -118,9 +121,9 @@ class TestIdentityAndReuse:
         LlamaServerManager._process = _FakeProc()
         LlamaServerManager._port = 8179
         LlamaServerManager._identity = LlamaServerManager._identity_of(
-            str(binary), str(model), 2048, 4, True)
+            str(binary), str(model), 2048, 4, 99)
         with patch("subprocess.Popen") as popen:
-            port = LlamaServerManager.ensure(str(binary), str(model), 2048, 4, True)
+            port = LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
         assert port == 8179
         popen.assert_not_called()
 
@@ -129,11 +132,12 @@ class TestIdentityAndReuse:
         binary.touch(); model.touch()
         LlamaServerManager._process = _FakeProc(rc=1)  # exited
         LlamaServerManager._identity = LlamaServerManager._identity_of(
-            str(binary), str(model), 2048, 4, True)
-        with patch.object(LlamaServerManager, "_find_port", return_value=(8179, False)), \
+            str(binary), str(model), 2048, 4, 99)
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
              patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
              patch("subprocess.Popen", return_value=_FakeProc()) as popen:
-            LlamaServerManager.ensure(str(binary), str(model), 2048, 4, True)
+            LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
         assert popen.called
 
 
@@ -152,22 +156,25 @@ class TestFallbackLadder:
             calls.append(cmd)
             return _FakeProc()
 
-        with patch.object(LlamaServerManager, "_find_port", return_value=(8179, False)), \
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
              patch.object(LlamaServerManager, "_wait_ready", side_effect=fake_ready), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
              patch("subprocess.Popen", side_effect=fake_popen):
-            LlamaServerManager.ensure(str(binary), str(model), 2048, 4, use_gpu=True)
+            LlamaServerManager.ensure(str(binary), str(model), 2048, 4, n_gpu_layers=99)
 
-        assert "99" in calls[0] and "0" in calls[1]
-        assert LlamaServerManager._identity[-1] is False, "must not claim GPU"
+        assert calls[0][calls[0].index("-ngl") + 1] == "99"
+        assert calls[1][calls[1].index("-ngl") + 1] == "0"
+        assert LlamaServerManager._identity[-1] == 0, "must not claim GPU"
+        assert LlamaServerManager.spawned_gpu_layers() == 0
 
     def test_all_rungs_failing_disables_the_server(self, tmp_path):
         binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
         binary.touch(); model.touch()
-        with patch.object(LlamaServerManager, "_find_port", return_value=(8179, False)), \
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
              patch.object(LlamaServerManager, "_wait_ready", return_value=False), \
              patch("subprocess.Popen", return_value=_FakeProc()):
             with pytest.raises(LlamaServerError):
-                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, True)
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
         assert LlamaServerManager._disabled is True
 
     def test_once_disabled_it_stops_paying_startup_cost(self, tmp_path):
@@ -190,18 +197,41 @@ class TestFallbackLadder:
             LlamaServerManager.ensure(str(binary), str(tmp_path / "nope.gguf"))
 
 
-class TestAdoption:
-    def test_adopted_server_records_unknown_identity(self, tmp_path):
-        """An externally started server's real spawn flags are unknowable, so the
-        next ensure() must re-probe instead of trusting an unverified match."""
+class TestNeverAdoptsAStranger:
+    """/props is unauthenticated, so a local process could claim to be serving
+    our model and receive every dictation. We only ever use servers we spawned."""
+
+    def test_an_occupied_port_is_skipped_never_adopted(self):
+        import socket as _s
+        real = _s.socket
+
+        class Occupied(real):
+            def connect_ex(self, addr):
+                return 0 if addr[1] == 8179 else 1  # 8179 busy, 8180 free
+
+        with patch("socket.socket", Occupied):
+            assert LlamaServerManager._find_port() == 8180
+
+    def test_all_ports_occupied_fails_rather_than_adopting(self, tmp_path):
         binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
         binary.touch(); model.touch()
-        with patch.object(LlamaServerManager, "_find_port", return_value=(8179, True)), \
+        with patch.object(LlamaServerManager, "_find_port", return_value=None), \
              patch("subprocess.Popen") as popen:
-            port = LlamaServerManager.ensure(str(binary), str(model), 2048, 4, True)
-        assert port == 8179
+            with pytest.raises(LlamaServerError, match="no free port"):
+                LlamaServerManager.ensure(str(binary), str(model))
         popen.assert_not_called()
-        assert LlamaServerManager._identity is None
+
+    def test_a_spawn_serving_the_wrong_model_is_rejected(self, tmp_path):
+        """Post-spawn self-check: a child that loaded a different file would
+        otherwise clean every dictation with the wrong model, invisibly."""
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=False), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            with pytest.raises(LlamaServerError, match="unexpected model"):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
 
     def test_serving_model_rejects_a_different_model(self):
         with patch.object(LlamaServerManager, "_props",
@@ -282,7 +312,7 @@ class TestSpawnCommand:
     def _cmd(self, **kw):
         return LlamaServerManager._spawn_attempts(
             binary="/b/llama-server", model_path="/m/x.gguf", n_ctx=2048,
-            n_threads=4, use_gpu=True, port=8179, **kw)[0]
+            n_threads=4, n_gpu_layers=99, port=8179, **kw)[0]
 
     def test_binds_loopback_only(self):
         cmd = self._cmd()
@@ -300,13 +330,13 @@ class TestSpawnCommand:
 
     def test_cpu_request_has_no_gpu_layers(self):
         cmd = LlamaServerManager._spawn_attempts(
-            "/b/llama-server", "/m/x.gguf", 2048, 4, use_gpu=False, port=8179)[0]
+            "/b/llama-server", "/m/x.gguf", 2048, 4, n_gpu_layers=0, port=8179)[0]
         assert cmd[cmd.index("-ngl") + 1] == "0"
 
     def test_cpu_request_has_no_rescue_rungs(self):
         """Already on CPU — there is nothing to degrade to."""
         attempts = LlamaServerManager._spawn_attempts(
-            "/b/llama-server", "/m/x.gguf", 2048, 4, use_gpu=False, port=8179)
+            "/b/llama-server", "/m/x.gguf", 2048, 4, n_gpu_layers=0, port=8179)
         assert len(attempts) == 1
 
 
@@ -368,6 +398,6 @@ class TestGpuModeIsRecordedNotAssumed:
         server record itself as GPU and be reused for GPU requests."""
         cmd = LlamaServerManager._spawn_attempts(
             "/b/llama-server", "/m/x.gguf", n_ctx=2048, n_threads=99,
-            use_gpu=False, port=8179)[0]
+            n_gpu_layers=0, port=8179)[0]
         assert "99" in cmd, "precondition: 99 appears as a non-ngl argument"
         assert cmd[cmd.index("-ngl") + 1] == "0"
