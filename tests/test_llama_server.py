@@ -308,3 +308,66 @@ class TestSpawnCommand:
         attempts = LlamaServerManager._spawn_attempts(
             "/b/llama-server", "/m/x.gguf", 2048, 4, use_gpu=False, port=8179)
         assert len(attempts) == 1
+
+
+class TestWedgedServerRecovery:
+    """A server that accepts the connection but never answers must not make every
+    future dictation pay the same timeout."""
+
+    def _backend(self, tmp_path):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        (tmp_path / "llama-simple").touch()
+        (tmp_path / "llama-server").touch()
+        model = tmp_path / "m.gguf"; model.touch()
+        return LlamaCppCliBackend(
+            llama_binary=str(tmp_path / "llama-simple"),
+            model_path=str(model), residency="auto")
+
+    def test_timeout_restarts_the_server_and_falls_back(self, tmp_path):
+        import socket as _socket
+        b = self._backend(tmp_path)
+        with patch.object(LlamaServerManager, "ensure", return_value=8179), \
+             patch.object(LlamaServerManager, "complete", side_effect=_socket.timeout()), \
+             patch.object(LlamaServerManager, "shutdown") as shut:
+            assert b._server_generate("prompt", 64) is None
+        shut.assert_called_once()
+
+    def test_a_non_timeout_error_does_not_restart(self, tmp_path):
+        """Restarting on every transient error would thrash the model load."""
+        b = self._backend(tmp_path)
+        with patch.object(LlamaServerManager, "ensure", return_value=8179), \
+             patch.object(LlamaServerManager, "complete", side_effect=ValueError("bad json")), \
+             patch.object(LlamaServerManager, "shutdown") as shut:
+            assert b._server_generate("prompt", 64) is None
+        shut.assert_not_called()
+
+    def test_start_failure_degrades_to_the_cli(self, tmp_path):
+        b = self._backend(tmp_path)
+        with patch.object(LlamaServerManager, "ensure",
+                          side_effect=LlamaServerError("no server")):
+            assert b._server_generate("prompt", 64) is None
+
+    def test_request_timeout_is_shorter_than_a_frozen_dictation(self):
+        assert LlamaServerManager.REQUEST_TIMEOUT <= 30.0
+
+    def test_the_port_ensure_returned_is_the_one_used(self, tmp_path):
+        """Reading cls._port inside complete() would race a concurrent shutdown."""
+        b = self._backend(tmp_path)
+        seen = {}
+        def cap(**kw):
+            seen.update(kw); return {"content": "x", "stop_type": "eos"}
+        with patch.object(LlamaServerManager, "ensure", return_value=8181), \
+             patch.object(LlamaServerManager, "complete", side_effect=cap):
+            b._server_generate("prompt", 64)
+        assert seen["port"] == 8181
+
+
+class TestGpuModeIsRecordedNotAssumed:
+    def test_a_numeric_argument_of_99_does_not_imply_gpu(self):
+        """`"99" in cmd` scanned the whole argv, so n_threads=99 made a CPU
+        server record itself as GPU and be reused for GPU requests."""
+        cmd = LlamaServerManager._spawn_attempts(
+            "/b/llama-server", "/m/x.gguf", n_ctx=2048, n_threads=99,
+            use_gpu=False, port=8179)[0]
+        assert "99" in cmd, "precondition: 99 appears as a non-ngl argument"
+        assert cmd[cmd.index("-ngl") + 1] == "0"

@@ -86,7 +86,12 @@ class LlamaServerManager:
     _atexit_registered: bool = False
 
     STARTUP_TIMEOUT = 90.0   # cold load of a 4B GGUF from disk
-    REQUEST_TIMEOUT = 60.0
+    # A WARM server answers in ~0.15s (GPU) and ~3.6s (CPU caricature, measured).
+    # 30s is therefore already pathological, and waiting the config's 60s CLI
+    # timeout on a wedged-but-listening server would freeze a dictation for a
+    # minute. On timeout the caller restarts the server and falls back to the
+    # CLI, which is the recovery WhisperServerBackend gets from its deadline.
+    REQUEST_TIMEOUT = 30.0
 
     # ---------------- identity / health ----------------
 
@@ -287,7 +292,11 @@ class LlamaServerManager:
                     # Identity records the mode ACTUALLY spawned, not the one
                     # requested: a GPU request that fell to a CPU rung must not
                     # claim GPU, or the next GPU request reuses a CPU server.
-                    spawned_gpu = "99" in cmd and "llama-server-cpu" not in cmd[0]
+                    # Read the -ngl VALUE, never `"99" in cmd`: that scans the
+                    # whole argv, so n_threads=99 or n_ctx=99 would make a CPU
+                    # server record itself as GPU and be reused for GPU requests.
+                    spawned_gpu = (cmd[cmd.index("-ngl") + 1] != "0"
+                                   and "llama-server-cpu" not in cmd[0])
                     cls._identity = cls._identity_of(
                         cmd[0], model_path, n_ctx, n_threads, spawned_gpu)
                     return port

@@ -2263,6 +2263,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         """
         if not self._server_enabled():
             return None
+        import socket
         try:
             from wayfinder.core.llama_server import (
                 LlamaServerManager, resolve_server_binary,
@@ -2275,17 +2276,32 @@ class LlamaCppCliBackend(PostProcessorBackend):
         if not binary:
             return None  # server not bundled in this build
         try:
-            LlamaServerManager.ensure(
+            # Pass the port ensure() returned rather than letting complete()
+            # re-read the class attribute: a concurrent shutdown (Quit, GPU
+            # toggle, model switch — all on the Tk thread while dictation runs on
+            # a worker) would otherwise zero it between the two calls.
+            port = LlamaServerManager.ensure(
                 binary=binary, model_path=self.model_path, n_ctx=self.n_ctx,
                 n_threads=self.n_threads, use_gpu=use_gpu,
             )
             return LlamaServerManager.complete(
-                prompt=prompt, n_predict=n_predict,
-                timeout=self.timeout, **self._sampling_profile(),
+                prompt=prompt, n_predict=n_predict, port=port,
+                **self._sampling_profile(),
             )
         except Exception as e:
-            print(f"[Post-processing] llama-server unavailable ({type(e).__name__}: {e}) "
-                  f"- falling back to per-call CLI")
+            # A server that accepted the connection but never answered is wedged;
+            # leaving it up means every future dictation pays the same timeout.
+            # Drop it so the next one respawns, and serve THIS one from the CLI.
+            if isinstance(e, (socket.timeout, TimeoutError)) or \
+                    isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
+                print("[Post-processing] llama-server timed out - restarting it")
+                try:
+                    LlamaServerManager.shutdown()
+                except Exception:
+                    pass
+            else:
+                print(f"[Post-processing] llama-server unavailable "
+                      f"({type(e).__name__}: {e}) - falling back to per-call CLI")
             return None
 
     def _probe_raw(self, text: str, n_predict: int) -> tuple:
