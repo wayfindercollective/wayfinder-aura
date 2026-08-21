@@ -467,3 +467,51 @@ class TestNegationPreserved:
             p = M.compute_all(self.SAMPLE, tone, self.IN, "Please send it.",
                               "standard")["passes"]
             assert "negation_preserved" in p, tone
+
+
+class TestNonSlangGateApplicability:
+    """The threshold was measured on professional/STANDARD rows only."""
+
+    SAMPLE = {"id": "x", "stresses": [], "slang": ["tight", "bro"]}
+    IN = "oh thats tight bro the quarterly numbers came in way better than we thought"
+
+    def test_applied_at_standard(self):
+        p = M.compute_all(self.SAMPLE, "professional", self.IN,
+                          "Oh, very cool brother. The quarterly numbers came in "
+                          "way better than we thought.", "standard")["passes"]
+        assert "nonslang_preservation" in p
+
+    @pytest.mark.parametrize("intensity", ["strong", "caricature"])
+    def test_not_applied_to_transformative_intensities(self, intensity):
+        """MEASURED: applying it to strong failed 17 of 18 legitimate rewrites,
+        and the baseline predates the metric so the gate could not see them."""
+        p = M.compute_all(self.SAMPLE, "professional", self.IN,
+                          "Quarterly results exceeded expectations.",
+                          intensity)["passes"]
+        assert "nonslang_preservation" not in p
+
+
+class TestNewGatesAreNotSilentlyRed:
+    """A gate added since the baseline has no prior value to flip FROM, so the
+    flip comparison is blind to it. Without this, a newly added gate could fail
+    on every row and the run would still report clean."""
+
+    def test_a_new_failing_gate_is_reported(self):
+        base = _payload(rows=[_row(metrics={"passes": {"retention": True}})])
+        cand = _payload(rows=[_row(metrics={"passes": {"retention": True,
+                                                       "brand_new_gate": False}})])
+        v = E.compare_to_baseline(base, cand)
+        assert any("NEW GATE" in x and "brand_new_gate" in x for x in v)
+
+    def test_a_new_passing_gate_is_not_reported(self):
+        base = _payload(rows=[_row(metrics={"passes": {"retention": True}})])
+        cand = _payload(rows=[_row(metrics={"passes": {"retention": True,
+                                                       "brand_new_gate": True}})])
+        assert not any("NEW GATE" in x for x in E.compare_to_baseline(base, cand))
+
+    def test_a_gate_dropped_by_the_candidate_is_still_ignored(self):
+        """Applicability rules legitimately omit gates; that is not a failure."""
+        base = _payload(rows=[_row(metrics={"passes": {"retention": True,
+                                                       "order_lcs": True}})])
+        cand = _payload(rows=[_row(metrics={"passes": {"retention": True}})])
+        assert E.compare_to_baseline(base, cand) == []

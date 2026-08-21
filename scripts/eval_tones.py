@@ -414,6 +414,17 @@ def compare_to_baseline(baseline: dict, candidate: dict,
         # tight bro nice" (retention 0.8), and the gate called the fix a
         # regression. Comparing against a no-op is not a bar worth clearing.
         b_noop = b["output"].strip() == b["input"].strip()
+        # Gates the BASELINE never had. The flip comparison below is blind to
+        # these — a metric added since the baseline has no prior value to flip
+        # FROM, so a newly added gate could sit red on every row and the run
+        # would still report clean. MEASURED: that is exactly what happened when
+        # nonslang_preservation was added and wrongly applied to professional
+        # /strong, failing 17 of 18 rows invisibly.
+        for gate, c_ok in c["metrics"]["passes"].items():
+            if gate not in b["metrics"]["passes"] and c_ok is False:
+                violations.append(
+                    f"NEW GATE {tag} {gate}: fails (absent from the baseline, so "
+                    "no flip to compare — check the gate's applicability)")
         for gate, b_ok in b["metrics"]["passes"].items():
             c_ok = c["metrics"]["passes"].get(gate)
             if c_ok is None:

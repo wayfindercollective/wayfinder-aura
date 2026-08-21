@@ -383,9 +383,16 @@ def compute_all(sample: dict, tone: str, inp: str, out: str,
         # that specific class; an insertion budget was tried and cannot, because
         # good rows insert up to 4 content words beyond what slang replacement
         # explains while that inversion inserts only 2.
-        nonslang = nonslang_preservation(inp, out, sample.get("slang"))
-        if nonslang is not None:
-            passes["nonslang_preservation"] = nonslang >= PASS_BANDS["nonslang_preservation_min"]
+        # Standard only. Strong is licensed to restructure, and the threshold was
+        # measured on standard rows alone — MEASURED, applying it to strong failed
+        # 17 of 18 legitimate rewrites. The baseline predates this metric, so the
+        # gate-flip comparison could not see those failures: they were silently
+        # red. Same applicability rule the rest of the preservation family uses.
+        if substitution_applies("casual", intensity):  # i.e. not transformative
+            nonslang = nonslang_preservation(inp, out, sample.get("slang"))
+            if nonslang is not None:
+                passes["nonslang_preservation"] = (
+                    nonslang >= PASS_BANDS["nonslang_preservation_min"])
 
     # None rather than a number for transformative rows: a guide score computed
     # from a partial gate set would look comparable to a standard row and is not.
