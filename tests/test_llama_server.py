@@ -34,6 +34,12 @@ class _FakeProc:
         self.stdout = _FakeStream()
         self.terminated = False
         self.killed = False
+        # A pid that cannot exist, so _owns_listener's /proc lookup fails fast
+        # and returns "cannot determine" instead of consulting the host. Without
+        # this the suite reads the REAL /proc/net/tcp: a live app serving on the
+        # same port made unrelated tests find a stranger's socket and crash on
+        # the missing attribute. Tests must not depend on what the host is running.
+        self.pid = -1
 
     def poll(self):
         return self._rc

@@ -9314,6 +9314,19 @@ class WayfinderApp(ctk.CTk):
             # per-call (4x), at the cost of the model's RAM/VRAM while idle —
             # which is the trade that matters on a 16GB Deck running a game.
             residency = str(self.config.get("llama_cpp_residency", "auto"))
+            # Quote the real figure for the model actually selected rather than a
+            # generic "uses memory": the answer differs by ~3x across the catalog
+            # (846 MB for Gemma-1B vs ~2.6 GB for Qwen3-4B), which is exactly the
+            # range where it decides whether Instant is comfortable on a machine.
+            try:
+                from wayfinder.model_catalog import format_resident_memory
+                _resident_hint = format_resident_memory(
+                    os.path.getsize(os.path.expanduser(
+                        self.config.get("llama_cpp_model_path", "") or ""))
+                ) or "the model's memory"
+            except OSError:
+                _resident_hint = "the model's memory"
+
             self._residency_map = {
                 "Instant (keeps model loaded)": "auto",
                 "Save memory (loads per use)": "save_memory",
@@ -9328,7 +9341,9 @@ class WayfinderApp(ctk.CTk):
                 list(self._residency_map.keys()),
                 self.residency_var, self._on_residency_changed,
                 tooltip=("Instant: the cleanup model stays loaded, so cleanup takes "
-                         "~0.15s instead of ~0.6s. Uses the model's memory while idle.\n"
+                         f"~0.15s instead of ~0.6s. Holds {_resident_hint} while idle "
+                         "(in video memory when GPU acceleration is on, otherwise in "
+                         "RAM).\n"
                          "Save memory: the model loads for each cleanup and is freed "
                          "afterwards — slower, but nothing is held while you are not "
                          "dictating."),
@@ -12141,8 +12156,17 @@ class WayfinderApp(ctk.CTk):
             size = info.get("size", "")
             speed = info.get("speed", "")
             accuracy = info.get("accuracy", "")
-            
-            self._llamacpp_size_label.configure(text=f"📦 {size}" if size else "")
+
+            # Download size is what it costs to GET the model; the resident
+            # figure is what it costs to KEEP it, which is the one that decides
+            # whether Instant/Auto is comfortable on a given machine.
+            from wayfinder.model_catalog import format_resident_memory
+            resident = format_resident_memory(info.get("size_bytes"))
+            size_text = f"📦 {size}" if size else ""
+            if resident:
+                size_text = f"{size_text}  ·  🧠 {resident} loaded" if size_text \
+                    else f"🧠 {resident} loaded"
+            self._llamacpp_size_label.configure(text=size_text)
             self._llamacpp_speed_label.configure(text=f"⚡ {speed}" if speed else "")
             self._llamacpp_accuracy_label.configure(text=f"🎯 {accuracy}" if accuracy else "")
     

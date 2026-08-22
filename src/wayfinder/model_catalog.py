@@ -66,6 +66,41 @@ DEFAULT_CATALOG_PATH = f"/v1/catalog"  # Worker route
 CACHE_MAX_AGE_SECS = 6 * 3600  # re-fetch at most every 6h unless forced
 
 
+# Loaded weights cost more than the file on disk: llama.cpp adds per-tensor
+# metadata, compute buffers, and the KV cache. MEASURED on Qwen3.5-2B-Q4_K_M
+# (1221 MB file) at n_ctx=2048: 1314 MB of VRAM resident, i.e. +7.6%. 1.10 is
+# that measurement rounded up so the figure we show a user is a slight
+# over-estimate rather than an under-promise — nobody is annoyed by a model
+# taking LESS memory than the label said.
+_RESIDENT_MEMORY_FACTOR = 1.10
+
+
+def resident_memory_bytes(size_bytes: Any) -> Optional[int]:
+    """Estimated memory a GGUF holds while loaded, or None if unknowable."""
+    try:
+        n = int(size_bytes)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return int(n * _RESIDENT_MEMORY_FACTOR)
+
+
+def format_resident_memory(size_bytes: Any) -> str:
+    """Human 'about this much memory while loaded', or '' when unknown.
+
+    Deliberately approximate: the true figure moves with n_ctx and with how much
+    the GPU can offload, so a precise-looking number would be false precision.
+    """
+    n = resident_memory_bytes(size_bytes)
+    if n is None:
+        return ""
+    gb = n / 1_073_741_824
+    if gb >= 1.0:
+        return f"~{gb:.1f} GB"
+    return f"~{n / 1_048_576:.0f} MB"
+
+
 def _cache_path() -> Path:
     base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
     d = base / "wayfinder-aura"

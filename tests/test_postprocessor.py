@@ -1542,3 +1542,53 @@ class TestCleanupHasAWallClockCeiling:
         assert seen["timeout"] <= 5.0, (
             f"CLI rung got {seen['timeout']}s against its own timeout of "
             f"{b.timeout}s — the shared budget was ignored")
+
+
+class TestResidentMemoryEstimate:
+    """Users choosing Instant vs Save memory need to know what "keeps model
+    loaded" actually costs. The answer varies ~3x across the catalog."""
+
+    def test_matches_the_measured_footprint(self):
+        """MEASURED: Qwen3.5-2B-Q4_K_M (1,280,835,840 B) held 1314 MB of VRAM at
+        n_ctx=2048. The estimate must land on that, not on the file size."""
+        from wayfinder.model_catalog import resident_memory_bytes
+        est = resident_memory_bytes(1_280_835_840) / 1_048_576
+        assert 1300 <= est <= 1420, f"estimated {est:.0f} MB vs 1314 MB measured"
+
+    def test_never_under_promises(self):
+        """Better to over-state slightly: a model taking LESS memory than the
+        label said annoys nobody, the reverse does."""
+        from wayfinder.model_catalog import resident_memory_bytes
+        for n in (730_895_168, 1_280_835_840, 2_497_280_736):
+            assert resident_memory_bytes(n) > n
+
+    def test_formats_gb_and_mb(self):
+        from wayfinder.model_catalog import format_resident_memory
+        assert format_resident_memory(2_497_280_736) == "~2.6 GB"
+        assert format_resident_memory(806_000_000).endswith("MB")
+
+    def test_unknown_size_yields_no_claim(self):
+        """A blank string lets the caller fall back to generic wording rather
+        than printing '~0 GB' or crashing the settings panel."""
+        from wayfinder.model_catalog import format_resident_memory
+        for bad in (None, "", 0, -5, "abc", object()):
+            assert format_resident_memory(bad) == ""
+
+    def test_every_catalog_llm_can_state_its_footprint(self):
+        """A catalog entry without size_bytes would silently show nothing."""
+        import ast
+        from pathlib import Path
+        from wayfinder.model_catalog import format_resident_memory
+        # AST, not a text split: wayfinder_main imports Tk at module scope, so
+        # importing it here would need a display.
+        src = Path(__file__).resolve().parents[1].joinpath("wayfinder_main.py").read_text()
+        tree = ast.parse(src)
+        catalog = None
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                    getattr(t, "id", None) == "LLM_GGUF_MODELS" for t in node.targets):
+                catalog = ast.literal_eval(node.value)
+        assert catalog, "LLM_GGUF_MODELS not found"
+        missing = [k for k, v in catalog.items()
+                   if not format_resident_memory(v.get("size_bytes"))]
+        assert not missing, f"catalog entries cannot state a footprint: {missing}"
