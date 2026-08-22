@@ -1117,6 +1117,25 @@ _patch_ctk_scrollbar_quiet_draw()
 # neuter-before => no jump.
 ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
 
+# Same trap, different widget, and it must also happen BEFORE instantiation.
+# CTkSlider.__init__ binds <MouseWheel>/<Button-4>/<Button-5> onto its own
+# internal canvas, capturing the bound method at bind time. Widget-level
+# bindings run BEFORE bind_all in Tk's bindtag order, so the app's scroll
+# handler cannot "break" them — and CTk's handler does not return "break"
+# either, so BOTH fired: the page scrolled AND the slider moved.
+#
+# Field report: scrolling Settings in fullscreen made the zoom jump "from 200%
+# to 190%" and the page appear to reload. That is exact, not an impression. The
+# UI Scale slider spans 0.7-2.5 and CTk's default scroll step is 1/20 of the
+# range = 0.09, so one notch takes 2.00 -> 1.91, which the snap-to-5% display
+# renders as 190%; applying the new scale then relays out every widget, which is
+# the "reload". The other three sliders (overlay scale, overlay position,
+# ducking percent) were changing SILENTLY whenever the pointer crossed them.
+#
+# Sliders stay fully usable by drag and keyboard; only the wheel is dropped,
+# which is the conventional behaviour for a slider inside a scrolling page.
+ctk.CTkSlider._mouse_scroll_event = lambda _self, _event: None
+
 
 # Setting tooltip descriptions with latency indicators
 # ═══════════════════════════════════════════════════════════════════════════════
