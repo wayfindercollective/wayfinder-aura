@@ -1552,6 +1552,28 @@ class LlamaCppBackend(PostProcessorBackend):
     
     # Class-level model cache to avoid reloading
     _model_cache: Dict[str, Any] = {}
+
+    @classmethod
+    def release_resident_models(cls) -> None:
+        """Twin of LlamaCppCliBackend.release_resident_models for THIS backend.
+
+        Missed the first time round, and it is not a rare path: this backend is
+        chosen whenever the llama CLI binary is absent or llama_cpp_use_cli is
+        off, so "Save memory", disabling cleanup and switching to a cloud
+        backend all left its weights loaded. Keyed by
+        (model_path, n_ctx, n_gpu_layers), so — exactly like the other cache — a
+        model switch or GPU toggle ADDS an entry instead of replacing one.
+        """
+        cache, cls._model_cache = cls._model_cache, {}
+        for model in cache.values():
+            try:
+                close = getattr(model, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+        cache.clear()
+        gc.collect()
     
     def __init__(
         self,
@@ -2391,8 +2413,10 @@ class LlamaCppCliBackend(PostProcessorBackend):
             # and then stalls cannot spend the fallback ladder's whole allowance.
             req_timeout = None
             if overall_deadline is not None:
-                req_timeout = max(1.0, min(LlamaServerManager.REQUEST_TIMEOUT,
-                                           overall_deadline - time.monotonic()))
+                req_remaining = overall_deadline - time.monotonic()
+                if req_remaining <= 0:
+                    return None      # out of budget: fall through to the CLI rung
+                req_timeout = min(LlamaServerManager.REQUEST_TIMEOUT, req_remaining)
             out = LlamaServerManager.complete(
                 prompt=prompt, n_predict=n_predict, port=port,
                 timeout=req_timeout,
@@ -2675,8 +2699,14 @@ Cleaned text:"""
                 # Clamped to the shared budget: this is the LAST rung, so it is
                 # the one that would otherwise push past the watchdog and throw
                 # away a result it had already produced.
-                cli_timeout = max(1.0, min(float(self.timeout),
-                                           overall_deadline - time.monotonic()))
+                # An exhausted budget SKIPS this rung. max(1.0, ...) quietly
+                # bought another second past a deadline that had already expired,
+                # which is the opposite of what a ceiling is for.
+                cli_remaining = overall_deadline - time.monotonic()
+                if cli_remaining <= 0:
+                    raise PostProcessingError(
+                        "cleanup budget exhausted before the CLI fallback")
+                cli_timeout = min(float(self.timeout), cli_remaining)
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, errors="replace",
                     timeout=cli_timeout,

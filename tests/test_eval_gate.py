@@ -297,13 +297,26 @@ class TestServerPathGate:
         v = E.compare_to_baseline(_payload({}, rows), _payload({}, rows))
         assert not any(x.startswith("PATH ") for x in v)
 
-    def test_unknown_mode_does_not_trip_the_path_gate(self):
-        """A row that fell back returns the input and prints no mode line."""
+    def test_a_missing_mode_cannot_satisfy_a_pinned_path(self):
+        """A row that reports no mode at all used to skip the PATH gate.
+
+        That was backwards on the one gate whose whole job is proving where the
+        work ran: a run that cannot say which path it took has not satisfied a
+        PINNED path, and "no evidence" is not "no problem". The fell_back gate
+        catches the common cause; this catches the rest.
+        """
         fp = {"path": "server-gpu"}
         base = _payload(fp, [_row(mode="server-GPU")])
         cand = _payload(fp, [_row(mode=None)])
-        assert not any(x.startswith("PATH ") for x in
-                       E.compare_to_baseline(base, cand))
+        v = E.compare_to_baseline(base, cand)
+        assert any(x.startswith("PATH ") and "cannot confirm" in x for x in v)
+
+    def test_a_missing_mode_is_ignored_when_no_path_is_pinned(self):
+        """Only a PINNED run needs the proof. A baseline recorded before the
+        path fingerprint existed must still compare cleanly."""
+        rows = [_row(mode=None)]
+        v = E.compare_to_baseline(_payload({}, rows), _payload({}, rows))
+        assert not any(x.startswith("PATH ") for x in v)
 
     def test_fingerprint_must_be_declared_to_vary(self):
         """Undeclared drift still refuses to compare — the caller must say what

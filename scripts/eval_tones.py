@@ -384,8 +384,16 @@ def compare_to_baseline(baseline: dict, candidate: dict,
         # satisfied a GPU-pinned run and compared clean.
         want_mode = cf.get("path", "")
         got_mode = c.get("mode")
-        if want_mode and got_mode is not None:
-            if "-" not in got_mode:
+        if want_mode:
+            if got_mode is None:
+                # No completion marker at all. Previously skipped — but a run
+                # that cannot say which path it took cannot satisfy a PINNED
+                # path, and "no evidence" is not "no problem" on the one gate
+                # whose entire job is proving where the work ran.
+                violations.append(
+                    f"PATH {tag}: claimed {want_mode}, but the run reported no "
+                    "execution path at all — cannot confirm")
+            elif "-" not in got_mode:
                 # The backend reports a bare mode when it could not read back the
                 # -ngl it spawned with. That is honest, but it is not proof the
                 # pinned accelerator ran, and a pinned path needs proof.

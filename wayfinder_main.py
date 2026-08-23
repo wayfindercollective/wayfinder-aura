@@ -474,9 +474,15 @@ def _release_cleanup_residency() -> None:
         LlamaServerManager.shutdown()
     except Exception:
         pass
+    # BOTH backends cache models, and which one is live depends on whether the
+    # CLI binary is present. Releasing only one of them was a half-release that
+    # looked complete from whichever backend happened to be in use.
     try:
-        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        from wayfinder.core.postprocessor import (
+            LlamaCppBackend, LlamaCppCliBackend,
+        )
         LlamaCppCliBackend.release_resident_models()
+        LlamaCppBackend.release_resident_models()
     except Exception:
         pass
 
@@ -1132,8 +1138,17 @@ ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
 # the "reload". The other three sliders (overlay scale, overlay position,
 # ducking percent) were changing SILENTLY whenever the pointer crossed them.
 #
-# Sliders stay fully usable by drag and keyboard; only the wheel is dropped,
-# which is the conventional behaviour for a slider inside a scrolling page.
+# VERSION-DEPENDENT, verified both ways: CustomTkinter 6.0 (what the AppImage
+# ships, and where this bug was reported) binds the wheel on sliders; 5.2.2
+# (what the Flatpak pins and vendors) has no slider wheel handling at all, so
+# there the assignment is an inert no-op. requirements.txt allows >=5.2.0 and
+# therefore 6.x, while flatpak/python-deps.json pins <6 — the two packages run
+# different CustomTkinter majors, which is worth resolving separately.
+#
+# Sliders stay usable by drag; only the wheel is dropped, which is the
+# conventional behaviour for a slider inside a scrolling page. (An earlier
+# version of this comment also claimed keyboard use — CTkSlider ships no
+# keyboard bindings, so that was simply untrue.)
 ctk.CTkSlider._mouse_scroll_event = lambda _self, _event: None
 
 
@@ -1727,15 +1742,15 @@ class BenchmarkRunner:
 
     @staticmethod
     def clear_llm_caches() -> None:
-        """Drop resident LLM weights so multi-model benches don't OOM."""
-        try:
-            from wayfinder.core.postprocessor import LlamaCppCliBackend, LlamaCppBackend
-            if hasattr(LlamaCppCliBackend, "_resident_cache"):
-                LlamaCppCliBackend._resident_cache.clear()
-            if hasattr(LlamaCppBackend, "_model_cache"):
-                LlamaCppBackend._model_cache.clear()
-        except Exception:
-            pass
+        """Drop resident LLM weights so multi-model benches don't OOM.
+
+        Routed through the shared release: clearing the dicts by hand skipped
+        close() and, more to the point, left the EXTERNAL llama-server running —
+        so a benchmark that walked several models freed the Python-side weights
+        and kept a multi-GB server resident the whole time, which is precisely
+        the OOM this exists to prevent.
+        """
+        _release_cleanup_residency()
         try:
             import gc
             gc.collect()
@@ -11915,6 +11930,10 @@ class WayfinderApp(ctk.CTk):
                     "info"
                 ].get("requires_feature")
                 save_config(self.config)
+                # Changing the model must drop the OLD one: both caches are keyed by
+                # model path, so a switch ADDS an entry and leaves the previous
+                # weights resident behind a key nothing will ask for again.
+                _release_cleanup_residency()
                 print(f"[Config] Auto-selected installed model: {installed_data['info']['name']}")
             elif model_options:
                 # Default to first option if nothing installed
@@ -12106,6 +12125,10 @@ class WayfinderApp(ctk.CTk):
                 "requires_feature"
             )
             save_config(self.config)
+            # Changing the model must drop the OLD one: both caches are keyed by
+            # model path, so a switch ADDS an entry and leaves the previous
+            # weights resident behind a key nothing will ask for again.
+            _release_cleanup_residency()
             # Free the old cleanup model now rather than at the next dictation.
             # (Correctness is already handled: the server's identity includes the
             # model path, so a mismatch respawns. This is about not holding a
@@ -12183,8 +12206,12 @@ class WayfinderApp(ctk.CTk):
             resident = format_resident_memory(info.get("size_bytes"))
             size_text = f"📦 {size}" if size else ""
             if resident:
-                size_text = f"{size_text}  ·  🧠 {resident} loaded" if size_text \
-                    else f"🧠 {resident} loaded"
+                # "est. loaded", not "loaded": the factor is calibrated on a
+                # single measurement and the true figure moves with n_ctx and
+                # with how much the GPU can offload. Claiming precision we do
+                # not have would be worse than the vagueness it replaced.
+                size_text = f"{size_text}  ·  🧠 {resident} est. loaded" if size_text \
+                    else f"🧠 {resident} est. loaded"
             self._llamacpp_size_label.configure(text=size_text)
             self._llamacpp_speed_label.configure(text=f"⚡ {speed}" if speed else "")
             self._llamacpp_accuracy_label.configure(text=f"🎯 {accuracy}" if accuracy else "")
@@ -12486,6 +12513,10 @@ class WayfinderApp(ctk.CTk):
                         "requires_feature"
                     )
                     save_config(self.config)
+                    # Changing the model must drop the OLD one: both caches are keyed by
+                    # model path, so a switch ADDS an entry and leaves the previous
+                    # weights resident behind a key nothing will ask for again.
+                    _release_cleanup_residency()
                     
                     # Hide progress after 2 seconds and rebuild
                     self.after(2000, self._rebuild_postproc_section)

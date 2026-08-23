@@ -257,14 +257,21 @@ class LlamaServerManager:
                         local = f[1]
                         if ":" not in local:
                             continue
-                        addr_hex, port_hex = local.rsplit(":", 1)
+                        _addr_hex, port_hex = local.rsplit(":", 1)
                         if int(port_hex, 16) != port:
                             continue
-                        # Loopback only, v4 or v6-mapped/::1. A listener on
-                        # another interface is not the one we would talk to.
-                        if addr_hex.upper().lstrip("0") not in (
-                                "100007F", "1", "1000000000000000000000000"):
-                            continue
+                        # EVERY listener on the port, whatever address it claims.
+                        # Filtering to loopback was the bug: a socket bound to
+                        # 0.0.0.0 (or dual-stack ::) also answers a connection to
+                        # 127.0.0.1, but its hex address is all zeroes, so the
+                        # filter skipped it, the scan came back empty, and
+                        # ownership read as "cannot determine" -- which proceeds.
+                        # A stranger holding the wildcard was therefore invisible
+                        # to exactly the check meant to catch it. (The v6 loopback
+                        # pattern was wrong too: ::1 strips to "1000000", not "1".)
+                        # A listener on some other interface can only add an inode
+                        # we do not own, which costs nothing: we require that one
+                        # of them IS ours, not that all of them are.
                         inodes.add(f[9])
             except (OSError, ValueError, StopIteration):
                 continue
@@ -420,6 +427,17 @@ class LlamaServerManager:
                         continue
                     # Publish the handle FIRST so a concurrent shutdown can kill it.
                     cls._starting = proc
+                    # ...then re-check, because a shutdown could have run in the
+                    # window between the epoch check above and this assignment:
+                    # it would have bumped the epoch, looked at _starting, found
+                    # None, and returned satisfied -- while Popen was still
+                    # returning the child it was supposed to kill. Without this
+                    # the next epoch test is on the far side of the readiness
+                    # wait, and Quit calls os._exit() long before that.
+                    if cls._epoch != epoch:
+                        cls._starting = None
+                        cls._kill(proc)
+                        raise LlamaServerError("shut down while starting")
                     cls._start_drain(proc)
                     # Readiness waits inside the caller's budget, never past it.
                     attempt_deadline = time.monotonic() + cls.STARTUP_TIMEOUT
@@ -432,22 +450,28 @@ class LlamaServerManager:
                         # Ownership BEFORE identity: _serving_model believes what
                         # the listener says about itself, so it must only ever be
                         # asked of a listener we already proved is ours.
+                        # Fail CLOSED on anything short of proof. Proceeding on
+                        # "cannot determine" was the hole: _wait_ready only proves
+                        # SOMETHING answered /health on this port -- our child may
+                        # have failed to bind and exited -- and _serving_model then
+                        # believes whatever that something claims about itself. An
+                        # unverified listener is exactly what must not be handed a
+                        # dictation. Refusing costs the resident server, not
+                        # cleanup: ensure() raises and _server_generate falls
+                        # through to the CLI path.
                         owned = cls._owns_listener(proc, port)
-                        if owned is False:
-                            errors.append(f"{Path(cmd[0]).name}: port {port} is held "
-                                          "by another process, not our child")
+                        if owned is not True:
+                            why = ("is held by another process, not our child"
+                                   if owned is False else
+                                   "could not be confirmed as our child")
+                            errors.append(
+                                f"{Path(cmd[0]).name}: the listener on port {port} {why}")
                             try:
                                 proc.kill()
                                 proc.wait(timeout=5)
                             except Exception:
                                 pass
                             continue
-                        if owned is None:
-                            # /proc could not answer. Defence in depth, not a
-                            # guarantee: fall through to the identity check rather
-                            # than disabling cleanup on every kernel that hides it.
-                            print("[llama-server] could not confirm socket "
-                                  f"ownership on port {port} via /proc", flush=True)
                         if not cls._serving_model(port, model_path):
                             errors.append(f"{Path(cmd[0]).name}: serving an unexpected model")
                             try:

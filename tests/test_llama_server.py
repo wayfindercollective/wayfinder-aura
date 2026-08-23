@@ -454,6 +454,24 @@ class TestCpuRescueIsReused:
         assert popen.called
 
 
+@pytest.fixture(autouse=True)
+def _assume_we_own_the_listener(request):
+    """Tests that are not ABOUT ownership must never consult the real /proc.
+
+    _owns_listener reads /proc/net/tcp for EVERY listener on the port, so its
+    answer depends on what the host happens to be running — and the check now
+    fails closed, so a live server on the test port turned half this file red.
+    Patching the seam (rather than relying on a fake pid making the lookup fail)
+    is what actually decouples them: the ownership tests below opt out and
+    exercise the real thing.
+    """
+    if request.cls is not None and request.cls.__name__ == "TestListenerOwnership":
+        yield
+        return
+    with patch.object(LlamaServerManager, "_owns_listener", return_value=True):
+        yield
+
+
 class TestShutdownReachesAnUnpublishedChild:
     """The gap sol found: ensure() holds the lock for its WHOLE readiness wait,
     shutdown() gives up on the lock after 5s, and the app then calls os._exit(0).
@@ -490,6 +508,47 @@ class TestShutdownReachesAnUnpublishedChild:
             LlamaServerManager._lock.release()
             LlamaServerManager._starting = None
         assert proc.terminated or proc.killed, "the unpublished child was orphaned"
+
+    def test_a_shutdown_landing_inside_popen_does_not_leave_a_live_child(self, tmp_path):
+        """The window a follow-up review found and reproduced.
+
+        shutdown() times out on the lock WHILE Popen is still running: it bumps
+        the epoch, looks at _starting, finds None, and returns satisfied. Popen
+        then returns a live child. Before the post-publish re-check the next
+        epoch test was on the far side of the readiness wait — and Quit calls
+        os._exit() long before that, so the child outlived the app."""
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        proc = _FakeProc()
+
+        def popen(cmd, **kw):
+            LlamaServerManager._epoch += 1   # the shutdown lands *inside* Popen
+            return proc
+
+        waited = []
+
+        def ready(p, port, deadline):
+            waited.append(1)
+            return True
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", side_effect=ready), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", side_effect=popen):
+            with pytest.raises(LlamaServerError, match="shut down while starting"):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+
+        # The load-bearing assertion. A post-READINESS epoch check also kills the
+        # child eventually, so "it died" passes with or without the fix. What the
+        # fix changes is WHEN: readiness can take the whole STARTUP_TIMEOUT while
+        # a model loads, and for all of it shutdown() has already returned
+        # satisfied. Quit calls os._exit() inside that window, and the child
+        # outlives the app. So: we must never have started waiting at all.
+        assert not waited, (
+            "waited for readiness on a child we had already been told to drop")
+        assert proc.terminated or proc.killed, "child survived a shutdown mid-spawn"
+        assert LlamaServerManager._process is None
+        assert LlamaServerManager._starting is None
 
     def test_the_handle_is_cleared_once_the_ladder_is_done(self, tmp_path):
         """A stale handle would let a LATER shutdown kill a healthy server."""
@@ -560,17 +619,43 @@ class TestListenerOwnership:
             LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
         assert order == ["own", "props"]
 
-    def test_an_undeterminable_kernel_does_not_disable_cleanup(self, tmp_path):
-        """None means /proc could not tell us. Defence in depth, not a promise:
-        failing closed here would kill cleanup on every kernel that hides this."""
+    def test_an_unprovable_listener_is_refused_not_trusted(self, tmp_path):
+        """None means /proc could not tell us, and that must FAIL CLOSED.
+
+        _wait_ready only proves something answered /health on the port — our own
+        child may have failed to bind and exited — so an unproven listener is
+        exactly the one that must not receive a dictation. The cost is the
+        resident server, not cleanup: _server_generate falls through to the CLI.
+        """
         binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
         binary.touch(); model.touch()
+        served = []
         with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
              patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
              patch.object(LlamaServerManager, "_owns_listener", return_value=None), \
-             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model",
+                          side_effect=lambda *a: served.append(a) or True), \
              patch("subprocess.Popen", return_value=_FakeProc()):
-            assert LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99) == 8179
+            with pytest.raises(LlamaServerError):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert LlamaServerManager._process is None
+        assert served == [], "asked an unproven listener to identify itself"
+
+    def test_a_wildcard_listener_is_visible_to_the_scan(self):
+        """0.0.0.0 and :: answer connections to 127.0.0.1, but their hex address
+        is all zeroes. Filtering the scan to loopback made a stranger holding the
+        wildcard INVISIBLE to the very check meant to catch it."""
+        import socket as _s
+        srv = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+        srv.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+        srv.bind(("0.0.0.0", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            assert LlamaServerManager._listener_inodes(port), (
+                "a wildcard listener was invisible to the ownership scan")
+        finally:
+            srv.close()
 
     def test_ownership_detection_works_on_this_kernel(self):
         """The helper is worthless if /proc parsing is wrong here: it would
