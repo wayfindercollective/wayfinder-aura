@@ -465,10 +465,12 @@ def _assume_we_own_the_listener(request):
     is what actually decouples them: the ownership tests below opt out and
     exercise the real thing.
     """
-    if request.cls is not None and request.cls.__name__ == "TestListenerOwnership":
+    if request.cls is not None and request.cls.__name__ in (
+            "TestListenerOwnership", "TestOwnershipIsRecheckedPerRequest"):
         yield
         return
-    with patch.object(LlamaServerManager, "_owns_listener", return_value=True):
+    with patch.object(LlamaServerManager, "_owns_listener", return_value=True), \
+         patch.object(LlamaServerManager, "still_ours", return_value=True):
         yield
 
 
@@ -813,3 +815,40 @@ class TestSaveMemoryReleasesEverything:
         b = LlamaCppCliBackend(llama_binary=str(tmp_path / "llama-simple"),
                                model_path=str(model), residency="auto")
         assert b._server_enabled() is True
+
+
+class TestOwnershipIsRecheckedPerRequest:
+    """Startup-time proof cannot speak for a connection opened later.
+
+    The verified child can exit after /props, and the completion request travels
+    over a NEW connection — so a process binding the freed port in between would
+    receive the prompt. Ownership is a property of the moment you use it.
+    """
+
+    def teardown_method(self):
+        LlamaServerManager._process = None
+
+    def test_a_dead_child_is_no_longer_ours(self):
+        LlamaServerManager._process = _FakeProc(rc=0)   # exited
+        with patch.object(LlamaServerManager, "_owns_listener", return_value=True):
+            assert LlamaServerManager.still_ours(8179) is False
+
+    def test_no_child_at_all_is_no_longer_ours(self):
+        LlamaServerManager._process = None
+        assert LlamaServerManager.still_ours(8179) is False
+
+    def test_a_live_child_that_lost_the_port_is_no_longer_ours(self):
+        LlamaServerManager._process = _FakeProc()
+        with patch.object(LlamaServerManager, "_owns_listener", return_value=False):
+            assert LlamaServerManager.still_ours(8179) is False
+
+    def test_unprovable_is_not_ours_either(self):
+        """None means /proc could not answer — same fail-closed rule as startup."""
+        LlamaServerManager._process = _FakeProc()
+        with patch.object(LlamaServerManager, "_owns_listener", return_value=None):
+            assert LlamaServerManager.still_ours(8179) is False
+
+    def test_a_live_child_holding_the_port_is_ours(self):
+        LlamaServerManager._process = _FakeProc()
+        with patch.object(LlamaServerManager, "_owns_listener", return_value=True):
+            assert LlamaServerManager.still_ours(8179) is True

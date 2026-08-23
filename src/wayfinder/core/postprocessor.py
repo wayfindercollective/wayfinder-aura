@@ -7,6 +7,7 @@ Supports llama-cpp-python for local inference and Anthropic Claude for cloud.
 import gc
 import os
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -1512,7 +1513,10 @@ def _cleanup_budget_from(config: dict) -> float:
         watchdog = 120.0
     if watchdog <= 0:          # 0/negative disables the watchdog entirely
         return 60.0
-    return max(10.0, watchdog / 2.0)
+    # No absolute floor: a 10s floor handed a 2s watchdog ten seconds of cleanup,
+    # i.e. a "ceiling" five times the thing it exists to stay under. Below 20s the
+    # split still holds; only guard against a non-positive budget.
+    return max(1.0, watchdog / 2.0)
 
 
 def get_prompt_template(template_name: str, custom_prompt: str = "") -> str:
@@ -1581,15 +1585,18 @@ class LlamaCppBackend(PostProcessorBackend):
         (model_path, n_ctx, n_gpu_layers), so — exactly like the other cache — a
         model switch or GPU toggle ADDS an entry instead of replacing one.
         """
-        cache, cls._model_cache = cls._model_cache, {}
-        for model in cache.values():
-            try:
-                close = getattr(model, "close", None)
-                if callable(close):
-                    close()
-            except Exception:
-                pass
-        cache.clear()
+        with LlamaCppCliBackend._residency_lock:
+        # The lock must span the close() calls, not just the swap:
+        # freeing weights is the part that races an in-flight inference.
+            cache, cls._model_cache = cls._model_cache, {}
+            for model in cache.values():
+                try:
+                    close = getattr(model, "close", None)
+                    if callable(close):
+                        close()
+                except Exception:
+                    pass
+            cache.clear()
         gc.collect()
     
     def __init__(
@@ -2005,6 +2012,10 @@ class LlamaCppCliBackend(PostProcessorBackend):
 
     # Resident model cache shared across instances: {(model_path, n_ctx, ngl): Llama}
     _resident_cache: Dict[Any, Any] = {}
+    # Guards resident weights against being freed while inference is using them.
+    # Reentrant because release paths may be reached from within a call stack
+    # that already holds it.
+    _residency_lock = threading.RLock()
     # One-time GPU-post-proc probe result, shared across instances:
     # {(binary, model): True if a GPU cleanup is fast & working}. A broken/mismatched
     # Vulkan either crashes at init or degrades to ~1 tok/s (a 60s hang per dictation);
@@ -2175,18 +2186,21 @@ class LlamaCppCliBackend(PostProcessorBackend):
         they are two different residency mechanisms, and "Save memory" has to
         release both to mean anything.
         """
-        cache, cls._resident_cache = cls._resident_cache, {}
-        for model in cache.values():
-            # llama-cpp-python frees the weights in close() on versions that
-            # have it, and in __del__ everywhere else; the clear() below is what
-            # drops the last reference in that case.
-            try:
-                close = getattr(model, "close", None)
-                if callable(close):
-                    close()
-            except Exception:
-                pass
-        cache.clear()
+        with LlamaCppCliBackend._residency_lock:
+        # The lock must span the close() calls, not just the swap:
+        # freeing weights is the part that races an in-flight inference.
+            cache, cls._resident_cache = cls._resident_cache, {}
+            for model in cache.values():
+                # llama-cpp-python frees the weights in close() on versions that
+                # have it, and in __del__ everywhere else; the clear() below is what
+                # drops the last reference in that case.
+                try:
+                    close = getattr(model, "close", None)
+                    if callable(close):
+                        close()
+                except Exception:
+                    pass
+            cache.clear()
         gc.collect()
 
     def _cpu_sibling(self) -> Optional[str]:
@@ -2412,7 +2426,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         import socket
         try:
             from wayfinder.core.llama_server import (
-                LlamaServerManager, resolve_server_binary,
+                LlamaServerError, LlamaServerManager, resolve_server_binary,
             )
         except Exception:
             return None
@@ -2443,6 +2457,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 if req_remaining <= 0:
                     return None      # out of budget: fall through to the CLI rung
                 req_timeout = min(LlamaServerManager.REQUEST_TIMEOUT, req_remaining)
+            # Ownership is re-proved per request: the startup check cannot speak
+            # for a connection opened later. Cheap next to the request itself.
+            if not LlamaServerManager.still_ours(port):
+                raise LlamaServerError(
+                    f"port {port} is no longer proven to be our server")
             out = LlamaServerManager.complete(
                 prompt=prompt, n_predict=n_predict, port=port,
                 timeout=req_timeout,
@@ -2685,13 +2704,27 @@ Cleaned text:"""
                 deadline=min(time.monotonic() + self.SERVER_ACQUIRE_BUDGET,
                              overall_deadline),
                 overall_deadline=overall_deadline)
+            if resident is not None and time.monotonic() >= overall_deadline:
+                # Loading a multi-GB model can consume the ENTIRE budget on its
+                # own, so the check before _resident_model() cannot speak for the
+                # moment inference would start. Checked again on the far side.
+                resident = None
+                served = self._server_generate(
+                    simple_prompt, estimated_output_tokens,
+                    overall_deadline=overall_deadline)
             if resident is not None:
-                out = resident(
-                    simple_prompt,
-                    max_tokens=estimated_output_tokens,
-                    temperature=gen_temperature,
-                    echo=True,  # echo the prompt so _extract_cli_output works unchanged
-                )
+                # Held across the call: release_resident_models() closes cached
+                # models, and the UI can fire it (model switch, GPU toggle, Save
+                # memory) from the Tk thread while this worker thread is inside
+                # the wheel. Freeing weights mid-inference is a native-crash risk,
+                # not merely a Python exception.
+                with LlamaCppCliBackend._residency_lock:
+                    out = resident(
+                        simple_prompt,
+                        max_tokens=estimated_output_tokens,
+                        temperature=gen_temperature,
+                        echo=True,  # echo the prompt so _extract_cli_output works unchanged
+                    )
                 cleaned = self._extract_cli_output(
                     out["choices"][0]["text"], simple_prompt,
                     original_text=prompt_text, template=self.template,
@@ -3389,6 +3422,9 @@ def get_backend(config: dict) -> PostProcessorBackend:
             max_tokens=config.get("post_processing_max_tokens", 1024),
             temperature=config.get("post_processing_temperature", 0.1),
             use_gpu=_gpu_enabled,
+            # Same ceiling as the CLI backend. This one kept a hardcoded 60s, so
+            # the "shared budget" was shared by every path except the fallback.
+            timeout=_cleanup_budget_from(config),
         )
 
 

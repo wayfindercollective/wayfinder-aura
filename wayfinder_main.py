@@ -9186,6 +9186,11 @@ class WayfinderApp(ctk.CTk):
             if current_backend not in ["openai", "anthropic"]:
                 self.config["post_processing_backend"] = "openai"
                 save_config(self.config)
+                # This writes the backend key directly instead of going through
+                # on_postproc_backend_changed(), so it skipped that handler's
+                # release: switching Processing Mode to Remote left the local
+                # server and weights resident with nothing left to ask them for.
+                _release_cleanup_residency()
         
         # Show/hide local benchmark tile based on mode
         # Local uses local whisper, Remote doesn't
@@ -12125,10 +12130,6 @@ class WayfinderApp(ctk.CTk):
                 "requires_feature"
             )
             save_config(self.config)
-            # Changing the model must drop the OLD one: both caches are keyed by
-            # model path, so a switch ADDS an entry and leaves the previous
-            # weights resident behind a key nothing will ask for again.
-            _release_cleanup_residency()
             # Free the old cleanup model now rather than at the next dictation.
             # (Correctness is already handled: the server's identity includes the
             # model path, so a mismatch respawns. This is about not holding a

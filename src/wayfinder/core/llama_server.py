@@ -417,6 +417,11 @@ class LlamaServerManager:
                     # fresh children it has already been told to stop wanting.
                     if cls._epoch != epoch:
                         raise LlamaServerError("shut down while starting")
+                    # ...and the caller's deadline binds the LADDER, not just each
+                    # rung: checking only per-attempt let a ladder that had already
+                    # overrun start yet another multi-GB spawn.
+                    if _left() <= 0:
+                        raise LlamaServerError("deadline hit before the next rung")
                     try:
                         proc = subprocess.Popen(
                             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -517,6 +522,22 @@ class LlamaServerManager:
                 cls._starting = None
         finally:
             cls._lock.release()
+
+    @classmethod
+    def still_ours(cls, port: int) -> bool:
+        """Re-prove, right before we hand over a prompt, that the port is ours.
+
+        Startup-time proof is not enough: the verified child can exit after
+        /props, and the completion request travels over a NEW connection, so a
+        process that binds the freed port in between would receive the prompt.
+        Ownership is a property of the moment you use it, not of the moment you
+        checked it — so it is checked again per request. Cost is one read of
+        /proc/net/tcp plus a directory scan, against a request that takes ~1s.
+        """
+        proc = cls._process
+        if proc is None or proc.poll() is not None:
+            return False
+        return cls._owns_listener(proc, port) is True
 
     @classmethod
     def complete(cls, prompt: str, n_predict: int, temperature: float = 0.1,

@@ -11,7 +11,10 @@
 #     pip install -r requirements.txt -r requirements-optional.txt
 
 # UI Framework
-customtkinter>=5.2.0
+# Flatpak vendors 5.2.2 and pins <6; the AppImage ships 6.x. Cap the upper
+# end so a future major cannot land untested in a build — the two packages
+# already differ by a major, which is tracked separately.
+customtkinter>=5.2.0,<7
 
 # HTTP requests for model downloads + online license activation
 requests>=2.28.0

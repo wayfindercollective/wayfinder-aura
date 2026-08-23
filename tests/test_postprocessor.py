@@ -1616,9 +1616,13 @@ class TestBudgetTracksTheWatchdog:
                     {"processing_timeout_secs": "abc"}):
             assert _cleanup_budget_from(bad) == 60.0
 
-    def test_never_returns_a_uselessly_small_budget(self):
+    def test_the_budget_never_exceeds_the_watchdog_it_protects(self):
+        """My first version floored this at 10s, which handed a 2s watchdog ten
+        seconds of cleanup — a "ceiling" five times the thing it stays under."""
         from wayfinder.core.postprocessor import _cleanup_budget_from
-        assert _cleanup_budget_from({"processing_timeout_secs": 2}) >= 10.0
+        for watchdog in (2, 5, 15, 60, 120, 300):
+            assert _cleanup_budget_from(
+                {"processing_timeout_secs": watchdog}) <= watchdog
 
     def test_the_backend_adopts_it(self, tmp_path):
         from wayfinder.core.postprocessor import LlamaCppCliBackend
