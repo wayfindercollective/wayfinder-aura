@@ -1498,6 +1498,23 @@ PROMPT_TEMPLATES: Dict[str, str] = {
 }
 
 
+def _cleanup_budget_from(config: dict) -> float:
+    """Half of the PROCESSING watchdog, which spans transcription AND cleanup.
+
+    Firing that watchdog DISCARDS the result, so cleanup overrunning it does not
+    merely run long — it throws away a dictation it had already cleaned. Half is
+    a split, not a measurement: transcription's share is the other half. A user
+    who raises processing_timeout_secs raises this with it.
+    """
+    try:
+        watchdog = float(config.get("processing_timeout_secs", 120) or 120)
+    except (TypeError, ValueError):
+        watchdog = 120.0
+    if watchdog <= 0:          # 0/negative disables the watchdog entirely
+        return 60.0
+    return max(10.0, watchdog / 2.0)
+
+
 def get_prompt_template(template_name: str, custom_prompt: str = "") -> str:
     """Legacy function - now uses build_prompt internally."""
     return STANDARD_PROMPT
@@ -2011,6 +2028,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         custom_vocabulary: list[str] | None = None,
         chat_template: str = "auto",
         residency: str = "auto",
+        total_budget: Optional[float] = None,
     ):
         # When True, skip the resident llama-cpp-python wheel and always use the
         # llama-simple subprocess (see config: post_processing_force_subprocess).
@@ -2080,6 +2098,14 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # llama_cpp_residency). force_subprocess still wins over all of it — the
         # eval harness relies on that to pin the deterministic one-shot path.
         self.residency = str(residency or "auto").strip().lower()
+        # Derived from the app's PROCESSING watchdog when the caller knows it,
+        # so the ceiling tracks a user who has changed processing_timeout_secs
+        # instead of silently staying at a constant that no longer fits.
+        if total_budget is not None:
+            try:
+                self.CLEANUP_TOTAL_BUDGET = max(10.0, float(total_budget))
+            except (TypeError, ValueError):
+                pass
 
     def get_name(self) -> str:
         return "llama.cpp CLI (Local)"
@@ -2649,7 +2675,11 @@ Cleaned text:"""
             # Fast path: resident in-process model (instant after warm-up). Reuses
             # the EXACT same compact prompt + extraction as the subprocess path, so
             # the cleaned output is identical — only the execution differs.
-            resident = self._resident_model()
+            # The resident wheel call cannot be interrupted once entered — there
+            # is no timeout on llama-cpp-python's __call__ — so the only honest
+            # bound is refusing to start it with the budget already gone.
+            resident = (self._resident_model()
+                        if time.monotonic() < overall_deadline else None)
             served = None if resident is not None else self._server_generate(
                 simple_prompt, estimated_output_tokens,
                 deadline=min(time.monotonic() + self.SERVER_ACQUIRE_BUDGET,
@@ -3345,6 +3375,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 caricature_mode=_effective_caricature_mode,
                 force_subprocess=config.get("post_processing_force_subprocess", False),
                 residency=config.get("llama_cpp_residency", "auto"),
+                total_budget=_cleanup_budget_from(config),
                 custom_vocabulary=_effective_custom_vocabulary,
                 chat_template=config.get("llama_cpp_chat_template", "auto"),
             )

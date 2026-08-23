@@ -1592,3 +1592,59 @@ class TestResidentMemoryEstimate:
         missing = [k for k, v in catalog.items()
                    if not format_resident_memory(v.get("size_bytes"))]
         assert not missing, f"catalog entries cannot state a footprint: {missing}"
+
+
+class TestBudgetTracksTheWatchdog:
+    """A fixed 60s ceiling silently stopped fitting as soon as a user changed
+    processing_timeout_secs, which is a configurable setting."""
+
+    def test_it_is_half_the_configured_watchdog(self):
+        from wayfinder.core.postprocessor import _cleanup_budget_from
+        assert _cleanup_budget_from({"processing_timeout_secs": 120}) == 60.0
+        assert _cleanup_budget_from({"processing_timeout_secs": 300}) == 150.0
+        assert _cleanup_budget_from({"processing_timeout_secs": 60}) == 30.0
+
+    def test_a_disabled_watchdog_still_bounds_cleanup(self):
+        """0 disables the watchdog. Cleanup must NOT become unbounded — an
+        unbounded rung ladder is its own problem, watchdog or no watchdog."""
+        from wayfinder.core.postprocessor import _cleanup_budget_from
+        assert _cleanup_budget_from({"processing_timeout_secs": 0}) == 60.0
+
+    def test_junk_config_falls_back_rather_than_crashing_cleanup(self):
+        from wayfinder.core.postprocessor import _cleanup_budget_from
+        for bad in ({}, {"processing_timeout_secs": None},
+                    {"processing_timeout_secs": "abc"}):
+            assert _cleanup_budget_from(bad) == 60.0
+
+    def test_never_returns_a_uselessly_small_budget(self):
+        from wayfinder.core.postprocessor import _cleanup_budget_from
+        assert _cleanup_budget_from({"processing_timeout_secs": 2}) >= 10.0
+
+    def test_the_backend_adopts_it(self, tmp_path):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
+        b = LlamaCppCliBackend(llama_binary=str(binary), model_path=str(model),
+                               total_budget=25.0)
+        assert b.CLEANUP_TOTAL_BUDGET == 25.0
+
+    def test_an_exhausted_budget_skips_the_uninterruptible_resident_call(self, tmp_path):
+        """llama-cpp-python's __call__ has no timeout, so once entered it cannot
+        be bounded. Refusing to enter it is the only honest ceiling."""
+        from unittest.mock import patch
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
+        b = LlamaCppCliBackend(llama_binary=str(binary), model_path=str(model),
+                               output_tone="professional", n_gpu_layers=0)
+        called = []
+        with patch.object(LlamaCppCliBackend, "CLEANUP_TOTAL_BUDGET", -1.0), \
+             patch.object(b, "_resident_model",
+                          side_effect=lambda: called.append(1) or None), \
+             patch.object(b, "_server_generate", return_value=None), \
+             patch.object(b, "_subprocess_target", return_value=(str(binary), 0)):
+            try:
+                b.process("hello there this is a test", "")
+            except Exception:
+                pass
+        assert not called, "entered an uninterruptible call with no budget left"
