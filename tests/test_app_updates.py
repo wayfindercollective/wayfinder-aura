@@ -72,10 +72,26 @@ class TestVersionComparison:
         ("v1.1.9", ""),
         (None, "1.1.8"),
         ("v1.1.9", None),
+        # The parser is end-anchored and structural: a tag we can only read
+        # PARTIALLY is a tag we cannot read. (The review caught the original
+        # prefix-match accepting "v9.9.9 trailing text" as newer.)
+        ("v9.9.9 trailing text", "1.1.8"),
+        ("vv9.9.9", "1.1.8"),
+        ("v9.9.9-", "1.1.8"),
+        ("v9.9.9-beta..1", "1.1.8"),
+        ("v9.9.9-beta.1!", "1.1.8"),
+        ("9.9.9.9", "1.1.8"),
     ])
     def test_unparseable_never_claims_newer(self, candidate, current):
         # A tag we cannot read must never produce a banner.
         assert is_newer(candidate, current) is False
+
+    def test_build_metadata_is_accepted_and_ignored(self):
+        # Semver: +build carries no precedence. It must parse (GitHub tags may
+        # carry it) and compare as if absent.
+        assert parse_version("1.2.3+build.7") == ((1, 2, 3), None)
+        assert is_newer("v1.2.3+build.7", "1.2.2") is True
+        assert is_newer("v1.2.3+build.7", "1.2.3") is False
 
     def test_parse_strips_v_and_splits_prerelease(self):
         assert parse_version("v1.1.8-beta.10") == ((1, 1, 8), ("beta", "10"))
@@ -150,14 +166,15 @@ class TestCheckForAppUpdate:
         assert info["update_available"] is True
 
 
+@pytest.fixture(scope="module")
+def src():
+    return MAIN_SRC.read_text()
+
+
 class TestBannerWiring:
     """Structural checks against wayfinder_main.py — the UI can't be
     instantiated headless, but the wiring that makes the feature exist at all
     can be pinned down in source."""
-
-    @pytest.fixture(scope="class")
-    def src(self):
-        return MAIN_SRC.read_text()
 
     def test_banner_is_built_in_the_dictate_tab(self, src):
         assert "self.app_update_banner = ctk.CTkFrame(" in src

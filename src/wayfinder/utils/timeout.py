@@ -37,7 +37,11 @@ def run_with_timeout(fn, timeout, *args, **kwargs):
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
-        raise CallTimeout(f"operation exceeded {timeout:.0f}s")
+        exc = CallTimeout(f"operation exceeded {timeout:.0f}s")
+        # The caller may need to know when the leaked call has actually ended
+        # (e.g. to release resources it could not free while the call ran).
+        exc.worker = worker
+        raise exc
     if "error" in result:
         raise result["error"]
     return result.get("value")

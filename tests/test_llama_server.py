@@ -780,10 +780,16 @@ class TestStartupDeadline:
 
 class TestRepeatedFailurePolicy:
     def test_a_persistently_failing_server_is_eventually_restarted(self):
+        import time as _time
         LlamaServerManager._consecutive_failures = 0
         with patch.object(LlamaServerManager, "shutdown") as shut:
             results = [LlamaServerManager.note_failure()
                        for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES)]
+            # The restart runs on its own thread now, so a wedged shutdown
+            # cannot spend the caller's cleanup budget — wait for it.
+            deadline = _time.time() + 5
+            while not shut.called and _time.time() < deadline:
+                _time.sleep(0.01)
         assert results[-1] is True and not any(results[:-1])
         shut.assert_called_once()
 

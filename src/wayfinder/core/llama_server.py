@@ -600,11 +600,19 @@ class LlamaServerManager:
 
     @classmethod
     def note_failure(cls) -> bool:
-        """Record a non-timeout request failure. True when the server was restarted."""
+        """Record a non-timeout request failure. True when a restart was begun.
+
+        The restart runs on its own daemon thread: shutdown() can wait ~5s for
+        the lock plus ~10s terminating a wedged child, and note_failure() is
+        called from inside a dictation's cleanup budget. The epoch machinery
+        makes a concurrent shutdown-vs-respawn race safe by construction."""
         cls._consecutive_failures += 1
         if cls._consecutive_failures >= cls.MAX_CONSECUTIVE_FAILURES:
             cls._consecutive_failures = 0
-            cls.shutdown()
+            threading.Thread(
+                target=cls.shutdown, daemon=True,
+                name="llama-server-failure-restart",
+            ).start()
             return True
         return False
 

@@ -27,10 +27,12 @@ def _clean_caches():
     saved_models = dict(LlamaCppBackend._model_cache)
     saved_resident = dict(LlamaCppCliBackend._resident_cache)
     saved_probe = dict(LlamaCppCliBackend._gpu_probe)
+    saved_clamped = set(LlamaCppCliBackend._gpu_probe_clamped)
     saved_quarantine = list(LlamaCppBackend._quarantined)
     LlamaCppBackend._model_cache.clear()
     LlamaCppCliBackend._resident_cache.clear()
     LlamaCppCliBackend._gpu_probe.clear()
+    LlamaCppCliBackend._gpu_probe_clamped.clear()
     LlamaCppBackend._quarantined.clear()
     yield
     LlamaCppBackend._model_cache.clear()
@@ -39,6 +41,8 @@ def _clean_caches():
     LlamaCppCliBackend._resident_cache.update(saved_resident)
     LlamaCppCliBackend._gpu_probe.clear()
     LlamaCppCliBackend._gpu_probe.update(saved_probe)
+    LlamaCppCliBackend._gpu_probe_clamped.clear()
+    LlamaCppCliBackend._gpu_probe_clamped.update(saved_clamped)
     LlamaCppBackend._quarantined.clear()
     LlamaCppBackend._quarantined.extend(saved_quarantine)
 
@@ -184,9 +188,18 @@ class TestTimedOutModelsAreQuarantined:
                 b.process("hello world", "{text}")
 
         assert key not in LlamaCppBackend._model_cache
-        assert fake in LlamaCppBackend._quarantined
+        assert any(m is fake for m, _w in LlamaCppBackend._quarantined)
+        # The worker is still inside the weights: release must NOT close.
         LlamaCppBackend.release_resident_models()
         assert closed == []
+        # Once the worker provably ends, the next sweep reclaims the memory —
+        # quarantine is bounded by worker liveness, not append-only.
+        for _m, w in LlamaCppBackend._quarantined:
+            if w is not None:
+                w.join(5)
+        LlamaCppBackend.release_resident_models()
+        assert closed == [1]
+        assert not any(m is fake for m, _w in LlamaCppBackend._quarantined)
 
 
 class TestLoadTimeCountsAgainstTheTimeout:
@@ -225,7 +238,7 @@ class TestTheGpuProbeRespectsTheBudget:
                           side_effect=AssertionError("must not probe")):
             _binary, ngl = b._subprocess_target(deadline=time.monotonic() - 1)
         assert ngl == 0
-        assert (b.llama_binary, b.model_path) not in LlamaCppCliBackend._gpu_probe
+        assert (b.llama_binary, b.model_path, 99) not in LlamaCppCliBackend._gpu_probe
 
     def test_a_budget_clamped_probe_failure_is_not_cached(self, tmp_path):
         """A probe cut short by the budget may have failed BECAUSE of the cut;
@@ -235,11 +248,107 @@ class TestTheGpuProbeRespectsTheBudget:
             _binary, ngl = b._subprocess_target(
                 deadline=time.monotonic() + min(1.0, _GPU_PROBE_TIMEOUT / 2))
         assert ngl == 0
-        assert (b.llama_binary, b.model_path) not in LlamaCppCliBackend._gpu_probe
+        assert (b.llama_binary, b.model_path, 99) not in LlamaCppCliBackend._gpu_probe
 
     def test_a_full_time_probe_failure_is_still_cached(self, tmp_path):
         b = _cli_backend(tmp_path, n_gpu_layers=-1)
         with patch.object(b, "_probe_gpu_ok", return_value=False):
             _binary, ngl = b._subprocess_target()
         assert ngl == 0
-        assert LlamaCppCliBackend._gpu_probe[(b.llama_binary, b.model_path)] is False
+        assert LlamaCppCliBackend._gpu_probe[(b.llama_binary, b.model_path, 99)] is False
+
+
+class TestLoadOnlyExpiryIsNotATimeout:
+    def test_a_load_that_eats_the_budget_quarantines_nothing(self, tmp_path):
+        """No worker ever entered the model, so there is nothing to protect:
+        quarantining here pinned one healthy multi-GB model per dictation."""
+        b = _py_backend(tmp_path, timeout=0.05)
+        key = (b.model_path, b.n_ctx, b.n_gpu_layers)
+
+        def slow_load():
+            time.sleep(0.2)
+
+            def model(prompt, **kw):
+                raise AssertionError("inference must not start")
+            LlamaCppBackend._model_cache[key] = model
+            return model
+
+        with patch.object(b, "is_available", return_value=True), \
+             patch.object(b, "_get_model", side_effect=slow_load):
+            with pytest.raises(PostProcessingError):
+                b.process("hello world", "{text}")
+        assert LlamaCppBackend._quarantined == []
+        # The freshly loaded weights are healthy — they stay cached so the
+        # NEXT dictation gets them warm instead of paying the load again.
+        assert key in LlamaCppBackend._model_cache
+
+
+class TestLoadsCannotPublishAfterRelease:
+    def test_a_load_in_flight_when_release_runs_is_closed_not_cached(self, tmp_path):
+        """Sequence: lookup misses -> release sweeps (empty) and returns ->
+        load finishes. Publishing now would resurrect weights 'Save memory'
+        just swept, and the identity re-check cannot catch it — a model that
+        inserts itself IS the cached one. The epoch check must close it."""
+        b = _cli_backend(tmp_path, n_gpu_layers=0)
+        closed = []
+
+        class FakeLlama:
+            def __init__(self, **kw):
+                # The release fires DURING the load, after the epoch was read.
+                LlamaCppCliBackend.release_resident_models()
+
+            def close(self):
+                closed.append(1)
+
+        import wayfinder.core.postprocessor as pp
+        with patch.object(pp, "_wheel_supports_gpu_offload", return_value=True), \
+             patch.dict("sys.modules", {"llama_cpp": type("M", (), {"Llama": FakeLlama})}):
+            result = b._resident_model()
+        assert result is None
+        assert closed == [1]
+        assert LlamaCppCliBackend._resident_cache == {}
+
+
+class TestClampedProbeBurnsAtMostOnce:
+    def test_second_budgeted_call_skips_the_probe(self, tmp_path):
+        b = _cli_backend(tmp_path, n_gpu_layers=-1)
+        deadline = lambda: time.monotonic() + min(1.0, _GPU_PROBE_TIMEOUT / 2)
+        with patch.object(b, "_probe_gpu_ok", return_value=False) as probe:
+            b._subprocess_target(deadline=deadline())
+            b._subprocess_target(deadline=deadline())
+        assert probe.call_count == 1
+
+    def test_a_full_time_probe_settles_a_clamp_burned_key(self, tmp_path):
+        b = _cli_backend(tmp_path, n_gpu_layers=-1)
+        key = (b.llama_binary, b.model_path, 99)
+        with patch.object(b, "_probe_gpu_ok", return_value=False):
+            b._subprocess_target(
+                deadline=time.monotonic() + min(1.0, _GPU_PROBE_TIMEOUT / 2))
+        assert key in LlamaCppCliBackend._gpu_probe_clamped
+        with patch.object(b, "_probe_gpu_ok", return_value=True):
+            _binary, ngl = b._subprocess_target()   # warm-up: no deadline
+        assert ngl == 99
+        assert LlamaCppCliBackend._gpu_probe[key] is True
+        assert key not in LlamaCppCliBackend._gpu_probe_clamped
+
+    def test_the_verdict_is_per_layer_count(self, tmp_path):
+        """A pass at 10 layers says nothing about 99 — each requested count
+        gets its own probe and its own cached verdict."""
+        b10 = _cli_backend(tmp_path, n_gpu_layers=10)
+        with patch.object(b10, "_probe_gpu_ok", return_value=True):
+            b10._subprocess_target()
+        b99 = LlamaCppCliBackend(
+            llama_binary=b10.llama_binary, model_path=b10.model_path,
+            output_tone="professional", n_gpu_layers=-1)
+        with patch.object(b99, "_probe_gpu_ok", return_value=False) as probe:
+            _binary, ngl = b99._subprocess_target()
+        probe.assert_called_once()
+        assert ngl == 0
+        assert LlamaCppCliBackend._gpu_probe[(b10.llama_binary, b10.model_path, 10)] is True
+        assert LlamaCppCliBackend._gpu_probe[(b10.llama_binary, b10.model_path, 99)] is False
+
+
+class TestTheBudgetIsHonoredExactly:
+    def test_a_tiny_budget_is_not_re_floored(self, tmp_path):
+        b = _cli_backend(tmp_path, total_budget=0.05)
+        assert b.CLEANUP_TOTAL_BUDGET == 0.05

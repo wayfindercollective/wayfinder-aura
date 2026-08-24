@@ -29,18 +29,30 @@ CHECK_INTERVAL = 86400
 RELEASES_API = "https://api.github.com/repos/wayfindercollective/wayfinder-aura/releases/latest"
 RELEASES_PAGE = "https://github.com/wayfindercollective/wayfinder-aura/releases/latest"
 
-_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.\-]+))?")
+# End-anchored, and the prerelease is a dot-list of NON-EMPTY identifiers:
+# "v9.9.9 trailing text", "1.2.3-", and "1.2.3-beta..1" must all fail to
+# parse, because a tag we cannot read in full must never produce a banner.
+# Build metadata (+...) is accepted and ignored, per semver precedence rules.
+_VERSION_RE = re.compile(
+    r"^(\d+)\.(\d+)\.(\d+)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 
 def parse_version(text: str) -> Optional[Tuple[Tuple[int, int, int], Optional[Tuple[str, ...]]]]:
     """Parse "v1.1.8-beta.10" into ((1, 1, 8), ("beta", "10")).
 
-    Returns None when the text does not start with a semver-shaped version —
-    callers treat that as "cannot compare", never as "newer".
+    Returns None unless the WHOLE text is a semver-shaped version (one
+    optional leading v) — callers treat that as "cannot compare", never as
+    "newer".
     """
     if not isinstance(text, str):
         return None
-    m = _VERSION_RE.match(text.strip().lstrip("vV"))
+    t = text.strip()
+    if t[:1] in ("v", "V"):
+        t = t[1:]   # exactly one prefix: "vv1.2.3" is not a version
+    m = _VERSION_RE.match(t)
     if not m:
         return None
     nums = (int(m.group(1)), int(m.group(2)), int(m.group(3)))

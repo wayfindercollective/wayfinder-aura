@@ -1574,13 +1574,35 @@ class LlamaCppBackend(PostProcessorBackend):
     
     # Class-level model cache to avoid reloading
     _model_cache: Dict[str, Any] = {}
-    # Models pulled from the cache after a CallTimeout. The timed-out native
-    # call keeps running in its daemon thread (utils/timeout.py bounds recovery,
-    # not the leaked work), so such a model must never be closed OR collected
-    # while that thread may still be inside it — quarantine pins the reference
-    # for the life of the process. Leaking one wedged model beats corrupting
-    # the process.
+    # (model, worker) pairs pulled from the cache after a CallTimeout. The
+    # timed-out native call keeps running in its daemon thread (utils/timeout.py
+    # bounds recovery, not the leaked work), so such a model must never be
+    # closed OR collected while that thread may still be inside it. The pin is
+    # NOT forever: _sweep_quarantine() closes entries whose worker has provably
+    # finished, so repeated timeouts cannot pin one multi-GB model per retry.
+    # Only a worker that never ends pins its model for the process lifetime —
+    # and freeing under a live call would corrupt the process.
     _quarantined: list = []
+
+    @classmethod
+    def _sweep_quarantine(cls) -> None:
+        """Close quarantined models whose timed-out worker has since finished.
+
+        Call with the residency lock held. A dead worker means no native frame
+        can still be inside the weights, so closing is safe again; a live (or
+        unknown) worker keeps its model pinned."""
+        survivors = []
+        for model, worker in cls._quarantined:
+            if worker is not None and not worker.is_alive():
+                try:
+                    close = getattr(model, "close", None)
+                    if callable(close):
+                        close()
+                except Exception:
+                    pass
+            else:
+                survivors.append((model, worker))
+        cls._quarantined[:] = survivors
 
     @classmethod
     def release_resident_models(cls) -> None:
@@ -1605,6 +1627,7 @@ class LlamaCppBackend(PostProcessorBackend):
                 except Exception:
                     pass
             cache.clear()
+            cls._sweep_quarantine()
         gc.collect()
     
     def __init__(
@@ -1732,7 +1755,11 @@ class LlamaCppBackend(PostProcessorBackend):
                 if remaining and remaining > 0:
                     remaining -= time.monotonic() - load_started
                     if remaining <= 0:
-                        raise CallTimeout(
+                        # NOT a CallTimeout: no worker ever entered the model,
+                        # so there is nothing to quarantine — the freshly
+                        # loaded weights are healthy and stay cached for the
+                        # next dictation to use warm.
+                        raise PostProcessingError(
                             f"model load consumed the {self.timeout:.0f}s budget")
                 response = run_with_timeout(
                     model,
@@ -1743,16 +1770,18 @@ class LlamaCppBackend(PostProcessorBackend):
                     stop=["Transcription:", "Spoken text:", "\n\n\n"],  # Stop tokens
                     echo=False,
                 )
-            except CallTimeout:
+            except CallTimeout as ct:
                 # The timed-out native call keeps running in its daemon thread.
                 # Anything that later close()s this model frees weights under a
                 # live call — pull it from the cache WITHOUT closing and pin the
-                # reference so neither release nor GC can ever free it. (The
-                # residency lock is held here, so the cache mutation is safe.)
+                # reference until that worker provably ends. (The residency
+                # lock is held here, so the cache mutation is safe.)
                 key = (self.model_path, self.n_ctx, self.n_gpu_layers)
                 if LlamaCppBackend._model_cache.get(key) is model:
                     del LlamaCppBackend._model_cache[key]
-                LlamaCppBackend._quarantined.append(model)
+                LlamaCppBackend._quarantined.append(
+                    (model, getattr(ct, "worker", None)))
+                LlamaCppBackend._sweep_quarantine()
                 self._model = None
                 raise PostProcessingError(
                     f"llama.cpp post-processing timed out after {self.timeout:.0f}s"
@@ -2053,6 +2082,9 @@ class LlamaCppCliBackend(PostProcessorBackend):
 
     # Resident model cache shared across instances: {(model_path, n_ctx, ngl): Llama}
     _resident_cache: Dict[Any, Any] = {}
+    # Bumped by every release under the lock. A load that started before the
+    # bump must not publish its model afterward (see _resident_model).
+    _residency_epoch = 0
     # Guards resident weights against being freed while inference is using them.
     # Reentrant because release paths may be reached from within a call stack
     # that already holds it.
@@ -2062,6 +2094,9 @@ class LlamaCppCliBackend(PostProcessorBackend):
     # Vulkan either crashes at init or degrades to ~1 tok/s (a 60s hang per dictation);
     # the probe catches both and routes cleanup to the CPU binary instead.
     _gpu_probe: Dict[Any, bool] = {}
+    # Keys whose only probe so far was budget-clamped AND failed: stay on CPU
+    # without re-probing until a full-time probe (warm-up) settles the verdict.
+    _gpu_probe_clamped: set = set()
 
     def __init__(
         self,
@@ -2155,10 +2190,13 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # instead of silently staying at a constant that no longer fits.
         if total_budget is not None:
             try:
-                # Honored as-is: re-flooring at 10s here silently undid the
-                # watchdog/2 rule for every watchdog under 20s — the exact
-                # inversion _cleanup_budget_from() exists to prevent.
-                self.CLEANUP_TOTAL_BUDGET = max(0.1, float(total_budget))
+                # Honored EXACTLY: any re-floor here (10s originally, then
+                # 0.1s) hands some watchdog a ceiling above itself — the exact
+                # inversion _cleanup_budget_from() exists to prevent. Only a
+                # non-positive value is rejected (it would disable every rung).
+                value = float(total_budget)
+                if value > 0:
+                    self.CLEANUP_TOTAL_BUDGET = value
             except (TypeError, ValueError):
                 pass
 
@@ -2212,7 +2250,9 @@ class LlamaCppCliBackend(PostProcessorBackend):
         if ngl > 0 and not _wheel_supports_gpu_offload():
             return None
         key = self._resident_cache_key()
-        model = LlamaCppCliBackend._resident_cache.get(key)
+        with LlamaCppCliBackend._residency_lock:
+            model = LlamaCppCliBackend._resident_cache.get(key)
+            epoch = LlamaCppCliBackend._residency_epoch
         if model is None:
             try:
                 model = Llama(
@@ -2222,7 +2262,21 @@ class LlamaCppCliBackend(PostProcessorBackend):
             except Exception as e:
                 print(f"[Post-processing] Resident model load failed ({e}); using CLI subprocess")
                 return None
-            LlamaCppCliBackend._resident_cache[key] = model
+            with LlamaCppCliBackend._residency_lock:
+                if LlamaCppCliBackend._residency_epoch != epoch:
+                    # Released while we were loading. Publishing now would
+                    # resurrect weights "Save memory" (or a model/GPU switch)
+                    # just swept — and identity re-checks cannot catch it,
+                    # because a model that inserts itself IS the cached one.
+                    # No one else holds this object, so closing here is safe.
+                    try:
+                        close = getattr(model, "close", None)
+                        if callable(close):
+                            close()
+                    except Exception:
+                        pass
+                    return None
+                LlamaCppCliBackend._resident_cache[key] = model
         return model
 
     @classmethod
@@ -2239,6 +2293,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         with LlamaCppCliBackend._residency_lock:
         # The lock must span the close() calls, not just the swap:
         # freeing weights is the part that races an in-flight inference.
+            cls._residency_epoch += 1
             cache, cls._resident_cache = cls._resident_cache, {}
             for model in cache.values():
                 # llama-cpp-python frees the weights in close() on versions that
@@ -2273,8 +2328,10 @@ class LlamaCppCliBackend(PostProcessorBackend):
         if not self.model_path or not Path(self.model_path).exists():
             return False
         import time as _t
+        # No floor: callers refuse to probe at all below 0.5s of budget, so a
+        # clamp here never exceeds what the dictation actually has left.
         limit = _GPU_PROBE_TIMEOUT if budget is None \
-            else max(0.5, min(_GPU_PROBE_TIMEOUT, budget))
+            else min(_GPU_PROBE_TIMEOUT, budget)
         try:
             t0 = _t.time()
             r = subprocess.run(
@@ -2300,24 +2357,36 @@ class LlamaCppCliBackend(PostProcessorBackend):
             # crash) before a GPU-layer flag is honored. This guarantees that a
             # Free or unchecked-GPU run never launches the GPU-capable binary.
             return self._cpu_sibling() or self.llama_binary, 0
-        key = (self.llama_binary, self.model_path)
+        # Keyed by the REQUESTED layer count too: a verdict for 10 layers says
+        # nothing about 99, and reusing it either skips a needed probe or
+        # condemns a viable partial offload.
+        key = (self.llama_binary, self.model_path, requested)
         cache = LlamaCppCliBackend._gpu_probe
         if key not in cache:
             budget = None
             if deadline is not None:
                 budget = deadline - time.monotonic()
-                if budget <= 0:
-                    # No room left to probe. CPU for THIS call, and no cached
-                    # verdict — a probe that never ran cannot condemn the GPU.
+                if budget < 0.5:
+                    # No room to launch a probe subprocess. CPU for THIS call,
+                    # and no cached verdict — a probe that never ran cannot
+                    # condemn the GPU.
+                    return (self._cpu_sibling() or self.llama_binary), 0
+                if key in LlamaCppCliBackend._gpu_probe_clamped:
+                    # One clamped probe per key already failed; re-probing on
+                    # every dictation would tax each one for nothing. Stay on
+                    # CPU until a FULL-time probe (deadline=None — warm-up)
+                    # settles the verdict.
                     return (self._cpu_sibling() or self.llama_binary), 0
             ok = self._probe_gpu_ok(requested, budget=budget)
             if not ok and budget is not None and budget < _GPU_PROBE_TIMEOUT:
                 # A budget-clamped failure may be the clamp, not the GPU.
-                # Don't poison the cache; the next call (or the warm-up, which
-                # passes no deadline) probes with full time.
+                # Don't poison the cache — but remember the burn, so this key
+                # probes at most once per session under a clamp.
+                LlamaCppCliBackend._gpu_probe_clamped.add(key)
                 print("[Post-processing] GPU probe out of budget — CPU for this cleanup")
                 return (self._cpu_sibling() or self.llama_binary), 0
             cache[key] = ok
+            LlamaCppCliBackend._gpu_probe_clamped.discard(key)
             if not cache[key]:
                 print("[Post-processing] GPU llama unavailable/slow — using CPU for cleanup")
         if cache[key]:
