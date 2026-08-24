@@ -7890,6 +7890,15 @@ class WayfinderApp(ctk.CTk):
         )
         self._detect_btn_record.pack(side="left")
 
+        # Populated (and packed) only when the portal reports what the desktop
+        # actually bound — on X11/AppImage installs it simply never appears.
+        self._portal_caption_record = ctk.CTkLabel(
+            system_content, text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"], anchor="w", justify="left",
+        )
+        self._update_portal_binding_captions()
+
         # Steam owns the Deck's rear buttons, so an unassigned R4/L4/etc. never
         # reaches Detect. Explain the one required Steam Input mapping exactly
         # where a Deck user is trying to choose their recording button. Keep the
@@ -10060,6 +10069,14 @@ class WayfinderApp(ctk.CTk):
             command=lambda: self._start_hotkey_detect("style"),
         )
         self._detect_btn_style.pack(side="left")
+
+        # Same portal-truth caption as the record row (see _on_portal_triggers).
+        self._portal_caption_style = ctk.CTkLabel(
+            hotkey_content, text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"], anchor="w", justify="left",
+        )
+        self._update_portal_binding_captions()
 
         # Style hotkey modifier checkboxes (inline row)
         style_mod_row = ctk.CTkFrame(hotkey_content, fg_color="transparent")
@@ -15272,6 +15289,86 @@ class WayfinderApp(ctk.CTk):
             8000, lambda t=target, g=gen: self._cancel_hotkey_detect(t, g)
         )
 
+    def _on_portal_triggers(self, triggers) -> None:
+        """The compositor reported what the portal shortcuts are ACTUALLY
+        bound to — follow it.
+
+        In portal mode config's hotkey is only the preferred trigger of
+        future bind requests; the desktop's stored binding is the live one.
+        Displaying config as if it were the binding is how Settings showed
+        "Space" while F3 did the work. Config is synced to any description
+        that parses (so the dropdown, the overlay tooltips, and future bind
+        requests all tell the truth); one that doesn't parse is still shown
+        verbatim in the desktop-binding caption.
+        """
+        if not isinstance(triggers, dict) or not triggers:
+            return
+        from wayfinder.hotkeys.dbus import parse_trigger_description
+        self._portal_triggers = dict(triggers)
+        changed = []
+        for shortcut_id, key_field, mods_field, target in (
+            ("record-toggle", "hotkey_key", "hotkey_modifiers", "record"),
+            ("style-toggle", "style_toggle_key", "style_toggle_modifiers", "style"),
+        ):
+            desc = triggers.get(shortcut_id)
+            if not desc:
+                continue
+            parsed = parse_trigger_description(desc)
+            if parsed is None:
+                continue  # caption below still shows the verbatim description
+            code, mods = parsed
+            if (self.config.get(key_field), list(self.config.get(mods_field) or [])) == (code, mods):
+                continue
+            self.config[key_field] = code
+            self.config[mods_field] = mods
+            changed.append((target, code, mods, desc))
+        if changed:
+            try:
+                save_config(self.config)
+            except Exception as e:
+                self.log(f"⚠ Could not persist desktop-binding sync: {e}")
+            for target, code, mods, desc in changed:
+                try:
+                    label = self._ensure_hotkey_label(code, target)
+                    if target == "record":
+                        self._hotkey_key_var.set(label)
+                        for mod, var in self._hotkey_mod_vars.items():
+                            var.set(mod in mods)
+                    else:
+                        self._style_hotkey_key_var.set(label)
+                        for mod, var in self._style_hotkey_mod_vars.items():
+                            var.set(mod in mods)
+                except Exception:
+                    pass
+            summary = ", ".join(
+                f"{'Record' if t == 'record' else 'Style'} → {d}"
+                for t, _c, _m, d in changed)
+            self.log(f"🖥 Synced to your desktop's shortcut bindings: {summary}")
+        self._update_portal_binding_captions()
+
+    def _update_portal_binding_captions(self) -> None:
+        """Show the compositor's live binding under each hotkey row."""
+        triggers = getattr(self, "_portal_triggers", None) or {}
+        for shortcut_id, attr in (
+            ("record-toggle", "_portal_caption_record"),
+            ("style-toggle", "_portal_caption_style"),
+        ):
+            label = getattr(self, attr, None)
+            if label is None:
+                continue
+            desc = triggers.get(shortcut_id)
+            try:
+                if desc:
+                    label.configure(
+                        text=f"🖥 Desktop binding: {desc} — change in "
+                             f"System Settings → Shortcuts")
+                    if not label.winfo_manager():
+                        label.pack(anchor="w", padx=16, pady=(0, 6))
+                else:
+                    label.pack_forget()
+            except Exception:
+                pass
+
     def _on_tk_detect_key(self, event):
         """Focus-capture path: the next key pressed in OUR window while a
         Detect session with no global listener is armed becomes the hotkey.
@@ -18300,9 +18397,30 @@ class WayfinderApp(ctk.CTk):
             # While Settings → Detect is armed (or just finished), ignore
             # record/style triggers (including KDE→socket F3) so binding a key
             # doesn't start a dictation from the same physical press.
-            if _HOTKEY_CAPTURE.get("armed") or time.time() < float(
-                _HOTKEY_CAPTURE.get("suppress_until") or 0
-            ):
+            if _HOTKEY_CAPTURE.get("armed"):
+                # This press reached us as a TRIGGER, not a key: the desktop
+                # (or host socket) consumed the key and sent us its meaning,
+                # so Detect can never capture it. Silently ignoring it here
+                # was the worst outcome — the user pressed their hotkey at a
+                # listening button and nothing happened at all. Say why, and
+                # end the session instead of leaving it to the 8s timeout.
+                target = getattr(self, "_hotkey_capture_target", None)
+                if target is not None:
+                    _HOTKEY_CAPTURE["armed"] = False
+                    _HOTKEY_CAPTURE["suppress_until"] = time.time() + 1.0
+                    self._hotkey_capture_target = None
+                    self._tk_capture_active = False
+                    self._cancel_detect_timeout()
+                    self._stop_capture_listener()
+                    self._reset_detect_button(target)
+                    self.log(
+                        "🎯 That key is managed by your desktop — it was "
+                        "consumed before the app could see it, so Detect "
+                        "cannot rebind it. Change it in System Settings → "
+                        "Shortcuts → Wayfinder Aura, or press a different key."
+                    )
+                return
+            if time.time() < float(_HOTKEY_CAPTURE.get("suppress_until") or 0):
                 return
             try:
                 from wayfinder.integrations.gamemode import is_hotkeys_paused
@@ -18330,6 +18448,8 @@ class WayfinderApp(ctk.CTk):
             self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
         elif event_type == EventType.HOTKEY_CAPTURED:
             self._apply_captured_hotkey(data)
+        elif event_type == EventType.PORTAL_TRIGGERS:
+            self._on_portal_triggers(data)
         elif event_type == EventType.SHOW_WINDOW:
             self.show_from_tray()
         elif event_type == EventType.HIDE_WINDOW:

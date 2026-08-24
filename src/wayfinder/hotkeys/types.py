@@ -18,6 +18,7 @@ class EventType(Enum):
     FORCE_RESET = auto()   # Tray "Reset" — unstick overlay / abort in-flight dictation
     QUIT_APP = auto()      # Tray "Quit" — clean full shutdown
     HOTKEY_CAPTURED = auto()  # Settings "Detect" — next pressed key reported to the UI
+    PORTAL_TRIGGERS = auto()  # portal reported the triggers the COMPOSITOR actually bound
     TRANSCRIPTION_DONE = auto()
     TRANSCRIPTION_ERROR = auto()
     INJECTION_DONE = auto()

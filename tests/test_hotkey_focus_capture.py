@@ -56,13 +56,14 @@ class TestCapturedPayload:
             assert encode_trigger(code, []) == keysym
 
 
+@pytest.fixture(scope="module")
+def src():
+    return MAIN_SRC.read_text()
+
+
 class TestDetectWiring:
     """Structural pins on wayfinder_main.py — the UI cannot run headless, but
     the wiring that resurrects the dead button can be pinned in source."""
-
-    @pytest.fixture(scope="class")
-    def src(self):
-        return MAIN_SRC.read_text()
 
     def test_gate_refusal_no_longer_kills_detect(self, src):
         body = src.split("def _start_hotkey_detect", 1)[1]

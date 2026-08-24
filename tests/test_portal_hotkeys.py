@@ -372,6 +372,7 @@ def test_every_subscription_pins_its_sender(monkeypatch):
     assert pins == {
         ("Response", "org.freedesktop.portal.Desktop"),
         ("Activated", "org.freedesktop.portal.Desktop"),
+        ("ShortcutsChanged", "org.freedesktop.portal.Desktop"),
         ("Closed", "org.freedesktop.portal.Desktop"),
         ("NameOwnerChanged", "org.freedesktop.DBus"),
     }
@@ -603,8 +604,9 @@ def test_unsubscribes_and_closes_on_exit(monkeypatch):
     bus = _install_fake_gi(monkeypatch, _FakeBus())
     _run(bus)
     kinds = [e[0] for e in bus.events]
-    # Response, Activated, Session.Closed, NameOwnerChanged — all released.
-    assert kinds.count("unsubscribe") == 4
+    # Response, Activated, ShortcutsChanged, Session.Closed,
+    # NameOwnerChanged — all released.
+    assert kinds.count("unsubscribe") == 5
     assert kinds[-1] == "close"
 
 

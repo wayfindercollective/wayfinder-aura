@@ -124,6 +124,73 @@ def encode_trigger(key_code: object, modifiers: object) -> str:
     return "+".join(tokens + [keysym])
 
 
+# Inverse lookup for parse_trigger_description: lowercase keysym -> keycode.
+_CODE_BY_KEYSYM_LOWER = {v.lower(): k for k, v in _KEYSYM_BY_CODE.items()}
+
+# Compositor trigger-description modifier words -> config modifier names.
+# KDE writes "Meta"; the spec's LOGO and plain "Super" mean the same key.
+_MODIFIER_NAMES = {
+    "ctrl": "ctrl", "control": "ctrl",
+    "alt": "alt",
+    "shift": "shift",
+    "meta": "super", "super": "super", "logo": "super",
+}
+
+
+def parse_trigger_description(desc: object) -> "Optional[tuple[int, list[str]]]":
+    """Parse a compositor trigger description ("F3", "Ctrl+Alt+Return") back
+    into config's (evdev keycode, modifier names), or None.
+
+    The compositor's BindShortcuts response is the ONLY source of truth for
+    what a portal shortcut is actually bound to — config only feeds the
+    preferred trigger of future bind requests. This is how the app follows
+    reality instead of displaying its own wish as if it were the binding.
+    None means "cannot express in config's vocabulary" (unknown key or
+    modifier word) — callers must then show the description verbatim rather
+    than guess a wrong chord.
+    """
+    if not isinstance(desc, str) or not desc.strip():
+        return None
+    parts = [p.strip() for p in desc.split("+")]
+    if any(not p for p in parts):
+        return None
+    code = _CODE_BY_KEYSYM_LOWER.get(parts[-1].lower())
+    if code is None:
+        return None
+    mods = []
+    for word in parts[:-1]:
+        name = _MODIFIER_NAMES.get(word.lower())
+        if name is None:
+            return None
+        if name not in mods:
+            mods.append(name)
+    return code, mods
+
+
+def triggers_from_bound_shortcuts(shortcuts: object) -> dict:
+    """Extract {shortcut_id: trigger_description} from a portal shortcut list.
+
+    Accepts the a(sa{sv}) shape both BindShortcuts' Response and the
+    ShortcutsChanged signal carry. Tolerant: a malformed item is skipped, an
+    entry with no description is omitted (unbound), and any non-list input
+    yields {} — the portal side must never be able to crash the listener.
+    """
+    out = {}
+    try:
+        for item in shortcuts or []:
+            try:
+                sid = str(item[0])
+                props = item[1]
+                desc = props.get("trigger_description")
+                if isinstance(desc, str) and desc.strip():
+                    out[sid] = desc.strip()
+            except Exception:
+                continue
+    except TypeError:
+        return {}
+    return out
+
+
 @dataclass(frozen=True)
 class ShortcutSpec:
     """One portal shortcut: identity, what to tell the compositor, what to emit."""
@@ -197,6 +264,7 @@ def wayland_hotkey_listener(
     bus = None
     response_sub = None
     activated_sub = None
+    shortcuts_changed_sub = None
     session_closed_sub = None
     owner_sub = None
     stop_source = None
@@ -282,6 +350,29 @@ def wayland_hotkey_listener(
             None,
             Gio.DBusSignalFlags.NONE,
             _on_activated,
+        )
+
+        def _on_shortcuts_changed(_conn, _sender, _path, _iface, _signal, params):
+            # The user edited the binding in System Settings while we run —
+            # follow it live, same session filter as Activated.
+            try:
+                session_handle, changed = params.unpack()[:2]
+            except Exception:
+                return
+            if session_handle != state["session_handle"]:
+                return
+            live = triggers_from_bound_shortcuts(changed)
+            if live:
+                event_queue.put((EventType.PORTAL_TRIGGERS, live))
+
+        shortcuts_changed_sub = bus.signal_subscribe(
+            _PORTAL_DEST,
+            _SHORTCUTS_IFACE,
+            "ShortcutsChanged",
+            _PORTAL_PATH,
+            None,
+            Gio.DBusSignalFlags.NONE,
+            _on_shortcuts_changed,
         )
 
         # A dead session must not be listened to forever (Codex review): the
@@ -483,11 +574,21 @@ def wayland_hotkey_listener(
                         returned.add(str(item[0]))
                 except Exception:
                     pass
+                # The response's trigger_description is what the COMPOSITOR
+                # actually bound — which the stored binding can make entirely
+                # different from the trigger we asked for. Report it to the UI
+                # so Settings shows the binding that exists, not the one we
+                # wished for; discarding it here was how the app ended up
+                # displaying "Space" while F3 did the work.
+                live = triggers_from_bound_shortcuts(bresults.get("shortcuts"))
+                if live:
+                    event_queue.put((EventType.PORTAL_TRIGGERS, live))
                 missing = [s.shortcut_id for s in shortcuts if s.shortcut_id not in returned]
                 for spec in shortcuts:
                     if spec.shortcut_id in returned:
+                        actual = live.get(spec.shortcut_id)
                         log(f"✓ Shortcut registered: {spec.shortcut_id}"
-                            f" (trigger: {spec.trigger or 'choose in System Settings'})")
+                            f" (trigger: {actual or spec.trigger or 'choose in System Settings'})")
                 if missing:
                     log(f"⚠️ Portal did not bind: {', '.join(missing)}"
                         " — set them in System Settings → Shortcuts")
@@ -522,7 +623,8 @@ def wayland_hotkey_listener(
             if stop_source is not None:
                 stop_source.destroy()
             if bus is not None:
-                for sub in (response_sub, activated_sub, session_closed_sub, owner_sub):
+                for sub in (response_sub, activated_sub, shortcuts_changed_sub,
+                            session_closed_sub, owner_sub):
                     if sub is not None:
                         bus.signal_unsubscribe(sub)
                 bus.close_sync(None)
