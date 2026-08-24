@@ -5509,6 +5509,8 @@ class WayfinderApp(ctk.CTk):
 
         # Check for model updates in background (non-blocking, once per day)
         self.after(2000, self._check_model_updates_background)
+        # Check for a newer app release (non-blocking, once per day)
+        self.after(2600, self._check_app_update_background)
 
         # Start display wake-up listener for overlay recovery
         if self._use_pyqt_overlay:
@@ -7485,6 +7487,42 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
             text_color=COLORS["bg_base"],
             command=self._open_settings_from_ultra_tips,
+        ).pack(side="right", padx=(SPACING["sm"], 0))
+
+        # (G) App-update banner — a newer release exists on GitHub. Built once,
+        # packed on demand by _show_app_update_banner (called from the daily
+        # background check); text set at show time. Dismissal is per-version:
+        # a NEWER release shows the banner again.
+        self.app_update_banner = ctk.CTkFrame(
+            scroll, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"],
+        )
+        _au_inner = ctk.CTkFrame(self.app_update_banner, fg_color="transparent")
+        _au_inner.pack(fill="x", padx=SPACING["md"], pady=SPACING["sm"])
+        self.app_update_label = ctk.CTkLabel(
+            _au_inner,
+            text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_primary"],
+            wraplength=300,
+            justify="left",
+            anchor="w",
+        )
+        self.app_update_label.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            _au_inner, text="Dismiss",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            height=28, width=80, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=self._dismiss_app_update,
+        ).pack(side="right", padx=(SPACING["sm"], 0))
+        ctk.CTkButton(
+            _au_inner, text="Get Update",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            height=28, width=100, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color=COLORS["bg_base"],
+            command=self._open_app_update_page,
         ).pack(side="right", padx=(SPACING["sm"], 0))
 
         # Card header
@@ -12668,6 +12706,89 @@ class WayfinderApp(ctk.CTk):
                 pass  # Silent failure - don't annoy user
 
         threading.Thread(target=_check, daemon=True).start()
+
+    def _check_app_update_background(self) -> None:
+        """Check GitHub for a newer app release in a background thread.
+
+        Network and parsing live in core/app_updates (cached, once/day); only
+        the banner show is marshalled back to the Tk thread via after(), the
+        same pattern the wake listener uses. Every failure is silent — an
+        update nag must never become a startup error."""
+        if not self.config.get("check_for_app_updates", True):
+            return
+
+        def _check():
+            try:
+                from wayfinder import __version__ as current_version
+                from wayfinder.core.app_updates import check_for_app_update
+
+                info = check_for_app_update(current_version)
+                if not info.get("update_available"):
+                    return
+                if info.get("latest_version") == self.config.get(
+                        "app_update_dismissed_version", ""):
+                    return
+                self.after(0, lambda: self._show_app_update_banner(info))
+            except Exception:
+                pass  # Silent failure - don't annoy user
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _show_app_update_banner(self, info: dict) -> None:
+        """Show the app-update banner on the Dictate tab (Tk thread only).
+
+        Best-effort like the other banners — never raises if the tab isn't
+        built. Idempotent: a fresh check just updates the label."""
+        banner = getattr(self, "app_update_banner", None)
+        label = getattr(self, "app_update_label", None)
+        if banner is None or label is None:
+            return
+        try:
+            from wayfinder import __version__ as current_version
+            latest = info.get("latest_version", "")
+            self._app_update_info = dict(info)
+            text = f"Update available: {latest} (you have {current_version})."
+            if IS_FLATPAK:
+                text += " Update via your software center, or download from GitHub."
+            label.configure(text=text)
+            if not banner.winfo_manager():
+                anchor = getattr(self, "_dictate_banner_anchor", None)
+                if anchor is not None:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+                else:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
+    def _hide_app_update_banner(self) -> None:
+        """Hide the app-update banner without persisting a dismissal."""
+        banner = getattr(self, "app_update_banner", None)
+        if banner is not None:
+            try:
+                banner.pack_forget()
+            except Exception:
+                pass
+
+    def _dismiss_app_update(self) -> None:
+        """Dismiss button: hide the banner and stay quiet about THIS version.
+
+        Persisted per-version rather than forever — the next release should
+        get its own chance to be heard."""
+        self._hide_app_update_banner()
+        try:
+            latest = getattr(self, "_app_update_info", {}).get("latest_version", "")
+            if latest:
+                self.config["app_update_dismissed_version"] = latest
+                save_config(self.config)
+        except Exception as e:
+            self.log(f"⚠ Could not persist update dismissal: {e}")
+
+    def _open_app_update_page(self) -> None:
+        """Get Update button: open the release page. The banner stays up until
+        dismissed or the new version is actually running."""
+        from wayfinder.core.app_updates import RELEASES_PAGE
+        url = getattr(self, "_app_update_info", {}).get("release_url") or RELEASES_PAGE
+        self._open_url(url)
 
     def _start_display_wake_listener(self) -> None:
         """Start D-Bus listener for system wake-up events to refresh the overlay.

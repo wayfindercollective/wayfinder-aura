@@ -391,6 +391,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "check_for_model_updates": True,  # Check HuggingFace for newer models on startup (once/day)
     "dismissed_updates": [],  # List of update keys the user dismissed
 
+    # App update checking
+    "check_for_app_updates": True,  # Check GitHub Releases for a newer app version on startup (once/day)
+    "app_update_dismissed_version": "",  # Release tag the user dismissed; a newer tag shows the banner again
+
     # License / Premium
     # "Buy Now" goes straight to the Ultra checkout; "More Info" goes to the landing page.
     # Both live in config so they're a one-line change without a rebuild.
