@@ -1008,9 +1008,17 @@ class TestResidentLlamaFastPath:
         fake_model = MagicMock(return_value={
             "choices": [{"text": "...Cleaned text: This is the cleaned result."}]
         })
-        with patch.object(b, "_resident_model", return_value=fake_model), \
-             patch("subprocess.run") as sub:
-            out = b.process("this is the cleaned result", "")
+        # Seed the cache the way a real load does: process() re-verifies the
+        # model is STILL the cached one under the lock before entering it, so
+        # an uncached fake now reads as "released in the window" and is skipped.
+        from wayfinder.core.postprocessor import LlamaCppCliBackend as _Cli
+        _Cli._resident_cache[b._resident_cache_key()] = fake_model
+        try:
+            with patch.object(b, "_resident_model", return_value=fake_model), \
+                 patch("subprocess.run") as sub:
+                out = b.process("this is the cleaned result", "")
+        finally:
+            _Cli._resident_cache.pop(b._resident_cache_key(), None)
         # Resident path used — subprocess must NOT be spawned
         sub.assert_not_called()
         fake_model.assert_called_once()
@@ -1075,8 +1083,15 @@ class TestResidentLlamaFastPath:
         from unittest.mock import MagicMock
         b = self._backend(tmp_path)
         fake_model = MagicMock()
-        with patch.object(b, "_resident_model", return_value=fake_model):
-            b.warm_up()
+        # Cached like a real load — warm_up re-verifies identity under the
+        # lock and skips a model that was released between lookup and call.
+        from wayfinder.core.postprocessor import LlamaCppCliBackend as _Cli
+        _Cli._resident_cache[b._resident_cache_key()] = fake_model
+        try:
+            with patch.object(b, "_resident_model", return_value=fake_model):
+                b.warm_up()
+        finally:
+            _Cli._resident_cache.pop(b._resident_cache_key(), None)
         fake_model.assert_called_once()  # one tiny generation to build the graph
 
     def test_warm_up_noop_without_bindings(self, tmp_path):
@@ -1631,6 +1646,25 @@ class TestBudgetTracksTheWatchdog:
         b = LlamaCppCliBackend(llama_binary=str(binary), model_path=str(model),
                                total_budget=25.0)
         assert b.CLEANUP_TOTAL_BUDGET == 25.0
+
+    def test_the_backend_honors_a_small_budget_too(self, tmp_path):
+        """The constructor re-floored the derived budget at 10s, silently
+        undoing the watchdog/2 rule for every watchdog under 20 seconds —
+        checking only the helper let that inversion ship. Assert the whole
+        chain: a 2s watchdog constructs a backend whose ceiling is 1s."""
+        from wayfinder.core.postprocessor import (
+            LlamaCppCliBackend, _cleanup_budget_from)
+        binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
+        derived = _cleanup_budget_from({"processing_timeout_secs": 2})
+        b = LlamaCppCliBackend(llama_binary=str(binary), model_path=str(model),
+                               total_budget=derived)
+        assert b.CLEANUP_TOTAL_BUDGET == derived == 1.0
+
+    def test_a_sub_second_watchdog_is_never_exceeded(self):
+        """Even the 1s sanity guard must stay under the watchdog it protects."""
+        from wayfinder.core.postprocessor import _cleanup_budget_from
+        assert _cleanup_budget_from({"processing_timeout_secs": 0.5}) <= 0.5
 
     def test_an_exhausted_budget_skips_the_uninterruptible_resident_call(self, tmp_path):
         """llama-cpp-python's __call__ has no timeout, so once entered it cannot

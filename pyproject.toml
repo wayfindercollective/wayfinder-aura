@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "customtkinter>=5.2.0",
+    "customtkinter>=5.2.0,<7",  # cap matches requirements.txt; majors land only via a tested build
     "requests>=2.28.0",
     "certifi>=2024.0.0",
     "PyQt6>=6.5.0",

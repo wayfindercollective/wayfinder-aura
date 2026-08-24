@@ -363,11 +363,18 @@ class TestWedgedServerRecovery:
 
     def test_timeout_restarts_the_server_and_falls_back(self, tmp_path):
         import socket as _socket
+        import time as _time
         b = self._backend(tmp_path)
         with patch.object(LlamaServerManager, "ensure", return_value=8179), \
              patch.object(LlamaServerManager, "complete", side_effect=_socket.timeout()), \
              patch.object(LlamaServerManager, "shutdown") as shut:
             assert b._server_generate("prompt", 64) is None
+            # The restart moved off-thread so a wedged shutdown (lock wait +
+            # child termination) cannot eat this dictation's budget — wait for
+            # the spawned thread rather than asserting synchronously.
+            deadline = _time.time() + 5
+            while not shut.called and _time.time() < deadline:
+                _time.sleep(0.01)
         shut.assert_called_once()
 
     def test_a_non_timeout_error_does_not_restart(self, tmp_path):
@@ -852,3 +859,36 @@ class TestOwnershipIsRecheckedPerRequest:
         LlamaServerManager._process = _FakeProc()
         with patch.object(LlamaServerManager, "_owns_listener", return_value=True):
             assert LlamaServerManager.still_ours(8179) is True
+
+    # -- the wiring, not just the method: _server_generate must actually consult
+    # still_ours before handing over the prompt. Every other test class mocks
+    # still_ours through the autouse fixture, so only THIS (exempt) class can
+    # prove the call site exists — the fourth review round found exactly that
+    # gap.
+
+    def _backend(self, tmp_path):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        (tmp_path / "llama-simple").touch()
+        (tmp_path / "llama-server").touch()
+        model = tmp_path / "m.gguf"; model.touch()
+        return LlamaCppCliBackend(
+            llama_binary=str(tmp_path / "llama-simple"),
+            model_path=str(model), residency="auto")
+
+    def test_server_generate_refuses_when_ownership_is_lost(self, tmp_path):
+        b = self._backend(tmp_path)
+        with patch.object(LlamaServerManager, "ensure", return_value=8179), \
+             patch.object(LlamaServerManager, "still_ours", return_value=False), \
+             patch.object(LlamaServerManager, "complete",
+                          side_effect=AssertionError(
+                              "prompt handed to an unverified listener")):
+            assert b._server_generate("prompt", 64) is None
+
+    def test_server_generate_proceeds_when_ownership_holds(self, tmp_path):
+        b = self._backend(tmp_path)
+        with patch.object(LlamaServerManager, "ensure", return_value=8179), \
+             patch.object(LlamaServerManager, "still_ours", return_value=True) as so, \
+             patch.object(LlamaServerManager, "complete",
+                          return_value={"content": "x", "stop_type": "eos"}):
+            assert b._server_generate("prompt", 64) is not None
+        so.assert_called_once_with(8179)
