@@ -64,6 +64,7 @@ except Exception as _dbus_err:
 # Portal hotkeys need only PyGObject (Gio). Probed separately from dbus-python
 # so bundling one never silently switches the other's behavior.
 from wayfinder.hotkeys.dbus import portal_shortcuts_available, portal_unavailable_detail
+from wayfinder.hotkeys.tk_capture import captured_payload as tk_captured_payload
 
 PORTAL_HOTKEYS_AVAILABLE = portal_shortcuts_available()
 if not PORTAL_HOTKEYS_AVAILABLE:
@@ -15196,7 +15197,7 @@ class WayfinderApp(ctk.CTk):
         # A live pynput listener can capture on its own, so no evdev in the
         # Flatpak is not fatal — gating on evdev alone made Detect dead in
         # every Flatpak install (src/wayfinder/hotkeys/detect_gate.py).
-        can_detect, gate_message = detect_availability(
+        can_detect, _gate_message = detect_availability(
             is_flatpak=IS_FLATPAK,
             # Usable, not merely importable: the Flatpak bundles evdev but has
             # no /dev/input, so HAS_EVDEV alone would short-circuit this True
@@ -15204,9 +15205,13 @@ class WayfinderApp(ctk.CTk):
             evdev_usable=evdev_capture_usable(evdev.list_devices if HAS_EVDEV else None),
             pynput_started=bool(getattr(self, "_pynput_listener_started", False)),
         )
-        if not can_detect:
-            self.log(gate_message)
-            return
+        # No global listener (Wayland Flatpak: no /dev/input, pynput needs
+        # X11) is NOT a refusal: Detect never needed a global listener. The
+        # user just clicked the button, so this window has keyboard focus and
+        # the next press arrives to Tk itself. Refusing here — with the
+        # explanation sent only to the activity log — is what made Detect a
+        # silently dead button in every Wayland Flatpak install.
+        use_focus_capture = not can_detect
 
         # Debounce: a just-finished Detect must not re-arm from the same physical press
         # (MMO mice often emit both a keycode and a click on the focused button).
@@ -15234,11 +15239,21 @@ class WayfinderApp(ctk.CTk):
             pass
         self.log("🎯 Press the key/button you want to use…")
 
+        if use_focus_capture:
+            # Install-once persistent binding: Tk's unbind(seq) clears EVERY
+            # binding on the sequence, so a bind/unbind pair per Detect could
+            # nuke unrelated <KeyPress> bindings. The handler no-ops unless a
+            # focus-capture session is armed, so leaving it installed is free.
+            self._tk_capture_active = True
+            if not getattr(self, "_tk_capture_bound", False):
+                self.bind("<KeyPress>", self._on_tk_detect_key, add="+")
+                self._tk_capture_bound = True
+
         production_alive = (
             self._hotkey_thread is not None and self._hotkey_thread.is_alive()
         )
         pynput_alive = getattr(self, "_pynput_listener_started", False)
-        if not production_alive and not pynput_alive and HAS_EVDEV:
+        if not use_focus_capture and not production_alive and not pynput_alive and HAS_EVDEV:
             # KDE-defer case (or listener died): temporary capture-only reader.
             self._capture_stop_event = threading.Event()
             enabled = self.config.get("enabled_input_devices") or None
@@ -15257,6 +15272,27 @@ class WayfinderApp(ctk.CTk):
             8000, lambda t=target, g=gen: self._cancel_hotkey_detect(t, g)
         )
 
+    def _on_tk_detect_key(self, event):
+        """Focus-capture path: the next key pressed in OUR window while a
+        Detect session with no global listener is armed becomes the hotkey.
+
+        Inert unless such a session is armed — this binding is persistent
+        (see _start_hotkey_detect), and eating keys outside Detect would
+        break normal typing in the app."""
+        if not (getattr(self, "_tk_capture_active", False)
+                and _HOTKEY_CAPTURE.get("armed")):
+            return None
+        payload = tk_captured_payload(
+            getattr(event, "keysym", ""), int(getattr(event, "state", 0) or 0))
+        if payload is None:
+            return "break"   # modifier or unmapped key — keep waiting
+        # Snapshot gen before disarm, same rule as the evdev/pynput paths.
+        payload["gen"] = _HOTKEY_CAPTURE.get("gen")
+        _HOTKEY_CAPTURE["armed"] = False
+        self._tk_capture_active = False
+        self.event_queue.put((EventType.HOTKEY_CAPTURED, payload))
+        return "break"
+
     def _cancel_hotkey_detect(self, target: str, gen: int | None = None) -> None:
         if gen is not None and getattr(self, "_hotkey_capture_gen", None) != gen:
             return
@@ -15267,6 +15303,7 @@ class WayfinderApp(ctk.CTk):
             _HOTKEY_CAPTURE["suppress_until"] = time.time() + 0.5
             self._hotkey_capture_target = None
             self._detect_cancel_after_id = None
+            self._tk_capture_active = False
             self._stop_capture_listener()
             self._reset_detect_button(target)
             self.log("🎯 Detect cancelled (no key pressed)")
@@ -15422,6 +15459,22 @@ class WayfinderApp(ctk.CTk):
         self._reset_detect_button(target)
         which = "Record hotkey" if target == "record" else "Style toggle"
         self.log(f"🎯 {which} set to {display} (from {data.get('device', 'input device')})")
+        # In portal mode (Wayland Flatpak) the COMPOSITOR owns the live
+        # trigger: this config feeds the preferred trigger of FUTURE bind
+        # requests, but a binding the desktop has already stored for us does
+        # not follow it. Saying so beats letting the user conclude the new
+        # key silently doesn't work.
+        try:
+            if IS_FLATPAK and resolve_hotkey_backend(
+                    sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
+                    os.environ.get("XDG_SESSION_TYPE", "")) == "portal":
+                self.log(
+                    f"ℹ️ Your desktop manages global shortcuts for sandboxed "
+                    f"apps — if {display} doesn't trigger dictation, set it "
+                    f"under System Settings → Shortcuts → Wayfinder Aura."
+                )
+        except Exception:
+            pass
         # If KDE still owns a *different* key (e.g. F3), tip the user once.
         try:
             path = os.path.join(
