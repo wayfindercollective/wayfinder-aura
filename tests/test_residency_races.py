@@ -487,12 +487,20 @@ class TestTheWedgeGuardSurvivesRelease:
             def close(self):
                 pass
 
+        class WedgingLlama(WedgingModel):
+            def __init__(self, **kw):
+                super().__init__()
+
         try:
-            with patch.object(b, "is_available", return_value=True):
+            # Through the REAL _get_model (loader patched at the llama_cpp
+            # seam): the review's mutation test showed hand-seeding the cache
+            # bypassed the very guard under test, so the old broken release
+            # passed too. This way the old code creates a second model and
+            # the assertion genuinely pins the fix.
+            with patch.object(b, "is_available", return_value=True), \
+                 patch.dict("sys.modules",
+                            {"llama_cpp": type("M", (), {"Llama": WedgingLlama})}):
                 for _ in range(3):
-                    if key not in LlamaCppBackend._model_cache and \
-                            not any(k == key for _c, k, _m, _w in _quarantine_entries):
-                        LlamaCppBackend._model_cache[key] = WedgingModel()
                     with pytest.raises(PostProcessingError):
                         b.process("hello world", "{text}")
                     LlamaCppBackend.release_resident_models()   # between retries
@@ -524,8 +532,20 @@ class TestTheWedgeGuardSurvivesRelease:
         _quarantine_entries.append(
             (LlamaCppCliBackend._resident_cache, b._resident_cache_key(),
              object(), stuck))
+        created = []
+
+        class RecordingLlama:
+            def __init__(self, **kw):
+                created.append(self)
+
         try:
             LlamaCppCliBackend.release_resident_models()
-            assert b._resident_model() is None
+            # A recording loader separates "the guard refused before loading"
+            # from "loading merely failed": under the old cache-replacing
+            # release the guard detached and this WOULD have loaded.
+            with patch.dict("sys.modules",
+                            {"llama_cpp": type("M", (), {"Llama": RecordingLlama})}):
+                assert b._resident_model() is None
+            assert created == []
         finally:
             gate.set()
