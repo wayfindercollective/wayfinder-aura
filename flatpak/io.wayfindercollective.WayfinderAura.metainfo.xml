@@ -7,7 +7,7 @@
   <id>io.wayfindercollective.WayfinderAura</id>
 
   <name>Wayfinder Aura</name>
-  <summary>Local-first voice dictation — speak, text appears at your cursor</summary>
+  <summary>Voice dictation that types for you</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Elastic-2.0</project_license>
@@ -18,9 +18,11 @@
 
   <description>
     <p>
-      Wayfinder Aura is a local-first voice dictation application for Linux. Press a hotkey,
-      speak, and your words are typed wherever your cursor is. By default, transcription runs
-      on your device with whisper.cpp — in local mode your voice never leaves your computer.
+      Wayfinder Aura is a local-first voice dictation and speech recognition application for
+      Linux. Press a hotkey, speak, and your words are typed wherever your cursor is — voice
+      typing for any app, no cloud required. By default, speech-to-text transcription runs
+      offline on your device with whisper.cpp — in local mode your voice never leaves your
+      computer.
       Optional cloud transcription backends are available if you choose to enable them, and the
       app checks online for model updates (toggleable).
     </p>
@@ -94,10 +96,18 @@
   <keywords>
     <keyword>voice</keyword>
     <keyword>dictation</keyword>
+    <keyword>dictate</keyword>
     <keyword>speech</keyword>
     <keyword>whisper</keyword>
     <keyword>transcription</keyword>
     <keyword>speech-to-text</keyword>
+    <keyword>speech recognition</keyword>
+    <keyword>voice recognition</keyword>
+    <keyword>voice typing</keyword>
+    <keyword>voice to text</keyword>
+    <keyword>stt</keyword>
+    <keyword>offline</keyword>
+    <keyword>ai</keyword>
     <keyword>accessibility</keyword>
   </keywords>
 

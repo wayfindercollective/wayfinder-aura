@@ -61,3 +61,4 @@ venv-ubuntu/
 # PyInstaller/appimagetool staging left behind when packaging is interrupted
 AppDir/
 .build-tools/
+old-builds/
