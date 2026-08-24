@@ -463,3 +463,69 @@ class TestResidentInferenceIsBounded:
         # And the lock is free again for the next dictation.
         assert LlamaCppCliBackend._residency_lock.acquire(blocking=False)
         LlamaCppCliBackend._residency_lock.release()
+
+
+class TestTheWedgeGuardSurvivesRelease:
+    def test_release_between_retries_does_not_reopen_the_key(self, tmp_path):
+        """Round 7's reproduction: release REPLACED the cache dict, so the
+        quarantine entry's cache-identity match went stale and the same doomed
+        config loaded one fresh copy per retry again (created=3). The caches
+        are now cleared in place — identity is stable across release."""
+        b = _py_backend(tmp_path, timeout=0.05)
+        key = (b.model_path, b.n_ctx, b.n_gpu_layers)
+        created = []
+        release_worker = threading.Event()
+
+        class WedgingModel:
+            def __init__(self):
+                created.append(self)
+
+            def __call__(self, prompt, **kw):
+                release_worker.wait(30)
+                return {"choices": [{"text": "late"}]}
+
+            def close(self):
+                pass
+
+        try:
+            with patch.object(b, "is_available", return_value=True):
+                for _ in range(3):
+                    if key not in LlamaCppBackend._model_cache and \
+                            not any(k == key for _c, k, _m, _w in _quarantine_entries):
+                        LlamaCppBackend._model_cache[key] = WedgingModel()
+                    with pytest.raises(PostProcessingError):
+                        b.process("hello world", "{text}")
+                    LlamaCppBackend.release_resident_models()   # between retries
+        finally:
+            release_worker.set()
+        assert len(created) == 1
+        assert len(_quarantine_entries) == 1
+
+    def test_get_model_still_refuses_after_a_release(self, tmp_path):
+        b = _py_backend(tmp_path)
+        key = (b.model_path, b.n_ctx, b.n_gpu_layers)
+        gate = threading.Event()
+        stuck = threading.Thread(target=gate.wait, daemon=True)
+        stuck.start()
+        _quarantine_entries.append(
+            (LlamaCppBackend._model_cache, key, object(), stuck))
+        try:
+            LlamaCppBackend.release_resident_models()
+            with pytest.raises(PostProcessingError, match="still running"):
+                b._get_model()
+        finally:
+            gate.set()
+
+    def test_resident_model_still_refuses_after_a_release(self, tmp_path):
+        b = _cli_backend(tmp_path, n_gpu_layers=0)
+        gate = threading.Event()
+        stuck = threading.Thread(target=gate.wait, daemon=True)
+        stuck.start()
+        _quarantine_entries.append(
+            (LlamaCppCliBackend._resident_cache, b._resident_cache_key(),
+             object(), stuck))
+        try:
+            LlamaCppCliBackend.release_resident_models()
+            assert b._resident_model() is None
+        finally:
+            gate.set()

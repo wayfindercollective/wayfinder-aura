@@ -1637,15 +1637,19 @@ class LlamaCppBackend(PostProcessorBackend):
         with LlamaCppCliBackend._residency_lock:
         # The lock must span the close() calls, not just the swap:
         # freeing weights is the part that races an in-flight inference.
-            cache, cls._model_cache = cls._model_cache, {}
-            for model in cache.values():
+            # Cleared IN PLACE, never replaced: quarantine entries identify
+            # their cache by OBJECT IDENTITY, and a replaced dict silently
+            # detached every entry from the wedge guard — the same doomed
+            # config could then load one fresh multi-GB copy per retry again.
+            models = list(cls._model_cache.values())
+            cls._model_cache.clear()
+            for model in models:
                 try:
                     close = getattr(model, "close", None)
                     if callable(close):
                         close()
                 except Exception:
                     pass
-            cache.clear()
             _sweep_quarantine_locked()
         gc.collect()
     
@@ -2324,7 +2328,10 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # freeing weights is the part that races an in-flight inference.
             cls._residency_epoch += 1
             _sweep_quarantine_locked()
-            cache, cls._resident_cache = cls._resident_cache, {}
+            # In place for the same reason as the twin release above: the
+            # wedge guard matches caches by object identity.
+            cache = dict(cls._resident_cache)
+            cls._resident_cache.clear()
             for model in cache.values():
                 # llama-cpp-python frees the weights in close() on versions that
                 # have it, and in __del__ everywhere else; the clear() below is what
