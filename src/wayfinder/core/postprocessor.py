@@ -1566,6 +1566,54 @@ class PostProcessorBackend(ABC):
 # llama-cpp-python Backend (Local)
 # =============================================================================
 
+# (cache, key, model, worker) entries pulled from a residency cache after a
+# CallTimeout. The timed-out native call keeps running in its daemon thread
+# (utils/timeout.py bounds recovery, not the leaked work), so such a model must
+# never be closed OR collected while that thread may still be inside it. The
+# pin is NOT forever: the sweep closes entries whose worker has provably
+# finished. And a key with a live quarantined worker refuses to LOAD AGAIN —
+# without that, a permanently wedged model pinned one multi-GB copy per retry.
+# All three helpers require the residency lock to be held.
+_quarantine_entries: list = []
+
+
+def _sweep_quarantine_locked() -> None:
+    """Close quarantined models whose timed-out worker has since finished.
+
+    A dead worker means no native frame can still be inside the weights, so
+    closing is safe again; a live (or unknown) worker keeps its model pinned."""
+    survivors = []
+    for cache, key, model, worker in _quarantine_entries:
+        if worker is not None and not worker.is_alive():
+            try:
+                close = getattr(model, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+        else:
+            survivors.append((cache, key, model, worker))
+    _quarantine_entries[:] = survivors
+
+
+def _quarantine_model_locked(cache: dict, key, model, worker) -> None:
+    """Pull a timed-out model from its cache without closing it and pin it."""
+    if cache.get(key) is model:
+        del cache[key]
+    _quarantine_entries.append((cache, key, model, worker))
+    _sweep_quarantine_locked()
+
+
+def _key_is_wedged_locked(cache: dict, key) -> bool:
+    """True while an earlier timeout on this exact config is still running.
+
+    Loading a fresh copy of a model whose last call is STILL wedged would
+    almost certainly wedge again — and pin another multi-GB copy. Refuse until
+    the stuck worker ends (the sweep then frees its model too)."""
+    _sweep_quarantine_locked()
+    return any(c is cache and k == key for c, k, _m, _w in _quarantine_entries)
+
+
 class LlamaCppBackend(PostProcessorBackend):
     """
     Local LLM backend using llama-cpp-python.
@@ -1574,35 +1622,6 @@ class LlamaCppBackend(PostProcessorBackend):
     
     # Class-level model cache to avoid reloading
     _model_cache: Dict[str, Any] = {}
-    # (model, worker) pairs pulled from the cache after a CallTimeout. The
-    # timed-out native call keeps running in its daemon thread (utils/timeout.py
-    # bounds recovery, not the leaked work), so such a model must never be
-    # closed OR collected while that thread may still be inside it. The pin is
-    # NOT forever: _sweep_quarantine() closes entries whose worker has provably
-    # finished, so repeated timeouts cannot pin one multi-GB model per retry.
-    # Only a worker that never ends pins its model for the process lifetime —
-    # and freeing under a live call would corrupt the process.
-    _quarantined: list = []
-
-    @classmethod
-    def _sweep_quarantine(cls) -> None:
-        """Close quarantined models whose timed-out worker has since finished.
-
-        Call with the residency lock held. A dead worker means no native frame
-        can still be inside the weights, so closing is safe again; a live (or
-        unknown) worker keeps its model pinned."""
-        survivors = []
-        for model, worker in cls._quarantined:
-            if worker is not None and not worker.is_alive():
-                try:
-                    close = getattr(model, "close", None)
-                    if callable(close):
-                        close()
-                except Exception:
-                    pass
-            else:
-                survivors.append((model, worker))
-        cls._quarantined[:] = survivors
 
     @classmethod
     def release_resident_models(cls) -> None:
@@ -1627,7 +1646,7 @@ class LlamaCppBackend(PostProcessorBackend):
                 except Exception:
                     pass
             cache.clear()
-            cls._sweep_quarantine()
+            _sweep_quarantine_locked()
         gc.collect()
     
     def __init__(
@@ -1678,6 +1697,13 @@ class LlamaCppBackend(PostProcessorBackend):
             return cached
         if self._model is not None:
             self._model = None
+        if _key_is_wedged_locked(LlamaCppBackend._model_cache, cache_key):
+            # An earlier call on this exact config is STILL stuck inside the
+            # weights. A fresh copy would almost certainly wedge too — and pin
+            # another multi-GB model. Raw text until the stuck worker ends.
+            raise PostProcessingError(
+                "previous cleanup on this model is still running after its "
+                "timeout — using raw text until it finishes")
 
         if not self.model_path or not Path(self.model_path).exists():
             raise PostProcessingError(
@@ -1776,12 +1802,10 @@ class LlamaCppBackend(PostProcessorBackend):
                 # live call — pull it from the cache WITHOUT closing and pin the
                 # reference until that worker provably ends. (The residency
                 # lock is held here, so the cache mutation is safe.)
-                key = (self.model_path, self.n_ctx, self.n_gpu_layers)
-                if LlamaCppBackend._model_cache.get(key) is model:
-                    del LlamaCppBackend._model_cache[key]
-                LlamaCppBackend._quarantined.append(
-                    (model, getattr(ct, "worker", None)))
-                LlamaCppBackend._sweep_quarantine()
+                _quarantine_model_locked(
+                    LlamaCppBackend._model_cache,
+                    (self.model_path, self.n_ctx, self.n_gpu_layers),
+                    model, getattr(ct, "worker", None))
                 self._model = None
                 raise PostProcessingError(
                     f"llama.cpp post-processing timed out after {self.timeout:.0f}s"
@@ -2253,6 +2277,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
         with LlamaCppCliBackend._residency_lock:
             model = LlamaCppCliBackend._resident_cache.get(key)
             epoch = LlamaCppCliBackend._residency_epoch
+            if model is None and _key_is_wedged_locked(
+                    LlamaCppCliBackend._resident_cache, key):
+                # An earlier timeout on this config is still inside the
+                # weights; reloading would wedge again and pin another copy.
+                return None
         if model is None:
             try:
                 model = Llama(
@@ -2294,6 +2323,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # The lock must span the close() calls, not just the swap:
         # freeing weights is the part that races an in-flight inference.
             cls._residency_epoch += 1
+            _sweep_quarantine_locked()
             cache, cls._resident_cache = cls._resident_cache, {}
             for model in cache.values():
                 # llama-cpp-python frees the weights in close() on versions that
@@ -2414,7 +2444,19 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 with LlamaCppCliBackend._residency_lock:
                     if LlamaCppCliBackend._resident_cache.get(
                             self._resident_cache_key()) is model:
-                        model(prompt, max_tokens=8, temperature=0.0)
+                        # Bounded: a hung warm-up would otherwise hold the
+                        # residency lock forever and block every dictation.
+                        from wayfinder.utils.timeout import (
+                            run_with_timeout, CallTimeout)
+                        try:
+                            run_with_timeout(
+                                model, self.CLEANUP_TOTAL_BUDGET,
+                                prompt, max_tokens=8, temperature=0.0)
+                        except CallTimeout as ct:
+                            _quarantine_model_locked(
+                                LlamaCppCliBackend._resident_cache,
+                                self._resident_cache_key(), model,
+                                getattr(ct, "worker", None))
             elif self._server_enabled():
                 # Resident-server path: start it AND run one real generation. The
                 # start alone only loads weights; the same graph/prompt-cache cost
@@ -2877,12 +2919,33 @@ Cleaned text:"""
                             self._resident_cache_key()) is not resident:
                         resident = None
                     else:
-                        out = resident(
-                            simple_prompt,
-                            max_tokens=estimated_output_tokens,
-                            temperature=gen_temperature,
-                            echo=True,  # echo the prompt so _extract_cli_output works unchanged
-                        )
+                        # Bounded like every other rung. The native call cannot
+                        # be interrupted, but run_with_timeout bounds RECOVERY:
+                        # on timeout the model is quarantined (never closed
+                        # under the live worker) and this dictation falls
+                        # through — instead of holding the residency lock for
+                        # as long as a hung call feels like, blocking every
+                        # later dictation behind it.
+                        from wayfinder.utils.timeout import (
+                            run_with_timeout, CallTimeout)
+                        wheel_left = overall_deadline - time.monotonic()
+                        try:
+                            if wheel_left <= 0:
+                                raise CallTimeout("budget spent before inference")
+                            out = run_with_timeout(
+                                resident, wheel_left,
+                                simple_prompt,
+                                max_tokens=estimated_output_tokens,
+                                temperature=gen_temperature,
+                                echo=True,  # echo the prompt so _extract_cli_output works unchanged
+                            )
+                        except CallTimeout as ct:
+                            worker = getattr(ct, "worker", None)
+                            if worker is not None:
+                                _quarantine_model_locked(
+                                    LlamaCppCliBackend._resident_cache,
+                                    self._resident_cache_key(), resident, worker)
+                            resident = None
                 if resident is None:
                     # Released in the window — same recovery as the post-load
                     # deadline re-check: hand this dictation to the server rung.

@@ -394,6 +394,13 @@ class LlamaServerManager:
             if cls._alive() and cls._requested == want:
                 return cls._port
 
+            # Stopping a stale server can wait ~10s in _kill() for a child
+            # that ignores SIGTERM. A caller whose deadline is already gone
+            # must not pay that just to fail the first rung check anyway.
+            # (A LIVE deadline still pays the stop if the child stalls — the
+            # alternative, clamping _kill(), would leak a multi-GB process.)
+            if deadline is not None and _left() <= 0:
+                raise LlamaServerError("deadline hit before stopping the old server")
             cls._stop_locked()
             # Captured AFTER our own stop, which bumps the epoch itself —
             # otherwise a startup would always invalidate itself.

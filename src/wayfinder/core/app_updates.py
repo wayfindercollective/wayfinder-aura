@@ -33,8 +33,13 @@ RELEASES_PAGE = "https://github.com/wayfindercollective/wayfinder-aura/releases/
 # "v9.9.9 trailing text", "1.2.3-", and "1.2.3-beta..1" must all fail to
 # parse, because a tag we cannot read in full must never produce a banner.
 # Build metadata (+...) is accepted and ignored, per semver precedence rules.
+# The numeric class is [0-9], NOT \d — \d matches every Unicode digit, so
+# "\u0669.\u0669.\u0669" (Arabic-Indic nines) parsed as an update. Leading
+# zeros are invalid semver and are rejected, and each number is capped at 9
+# digits so int() can never blow up on an adversarial tag.
+_NUM = r"(?:0|[1-9][0-9]{0,8})"
 _VERSION_RE = re.compile(
-    r"^(\d+)\.(\d+)\.(\d+)"
+    r"^(" + _NUM + r")\.(" + _NUM + r")\.(" + _NUM + r")"
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
@@ -57,7 +62,16 @@ def parse_version(text: str) -> Optional[Tuple[Tuple[int, int, int], Optional[Tu
         return None
     nums = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     pre = m.group(4)
-    return nums, (tuple(pre.split(".")) if pre else None)
+    if pre is None:
+        return nums, None
+    ids = tuple(pre.split("."))
+    for ident in ids:
+        if ident.isdigit():
+            # Numeric identifiers: no leading zeros (invalid semver), and
+            # bounded so the int() in is_newer can never blow up.
+            if (len(ident) > 1 and ident[0] == "0") or len(ident) > 9:
+                return None
+    return nums, ids
 
 
 def is_newer(candidate: str, current: str) -> bool:

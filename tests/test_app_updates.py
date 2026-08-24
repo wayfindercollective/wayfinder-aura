@@ -81,10 +81,23 @@ class TestVersionComparison:
         ("v9.9.9-beta..1", "1.1.8"),
         ("v9.9.9-beta.1!", "1.1.8"),
         ("9.9.9.9", "1.1.8"),
+        # Semver structural rules the second review round caught: [0-9] not
+        # \d (Unicode digits!), no leading zeros, bounded numerics.
+        ("٩.٩.٩", "1.1.8"),
+        ("09.9.9", "1.1.8"),
+        ("9.09.9", "1.1.8"),
+        ("9.9.09", "1.1.8"),
+        ("9.9.9-01", "1.1.8"),
+        ("9.9.9-" + "9" * 5000, "1.1.8"),
+        ("9" * 5000 + ".0.0", "1.1.8"),
     ])
     def test_unparseable_never_claims_newer(self, candidate, current):
         # A tag we cannot read must never produce a banner.
         assert is_newer(candidate, current) is False
+
+    def test_a_bare_zero_identifier_is_still_valid(self):
+        # "1.2.3-0" is legal semver; only MULTI-digit leading zeros are not.
+        assert parse_version("1.2.3-0") == ((1, 2, 3), ("0",))
 
     def test_build_metadata_is_accepted_and_ignored(self):
         # Semver: +build carries no precedence. It must parse (GitHub tags may

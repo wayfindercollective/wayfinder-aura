@@ -19,6 +19,7 @@ from wayfinder.core.postprocessor import (
     LlamaCppCliBackend,
     PostProcessingError,
     _GPU_PROBE_TIMEOUT,
+    _quarantine_entries,
 )
 
 
@@ -28,12 +29,12 @@ def _clean_caches():
     saved_resident = dict(LlamaCppCliBackend._resident_cache)
     saved_probe = dict(LlamaCppCliBackend._gpu_probe)
     saved_clamped = set(LlamaCppCliBackend._gpu_probe_clamped)
-    saved_quarantine = list(LlamaCppBackend._quarantined)
+    saved_quarantine = list(_quarantine_entries)
     LlamaCppBackend._model_cache.clear()
     LlamaCppCliBackend._resident_cache.clear()
     LlamaCppCliBackend._gpu_probe.clear()
     LlamaCppCliBackend._gpu_probe_clamped.clear()
-    LlamaCppBackend._quarantined.clear()
+    _quarantine_entries.clear()
     yield
     LlamaCppBackend._model_cache.clear()
     LlamaCppBackend._model_cache.update(saved_models)
@@ -43,8 +44,8 @@ def _clean_caches():
     LlamaCppCliBackend._gpu_probe.update(saved_probe)
     LlamaCppCliBackend._gpu_probe_clamped.clear()
     LlamaCppCliBackend._gpu_probe_clamped.update(saved_clamped)
-    LlamaCppBackend._quarantined.clear()
-    LlamaCppBackend._quarantined.extend(saved_quarantine)
+    _quarantine_entries.clear()
+    _quarantine_entries.extend(saved_quarantine)
 
 
 def _cli_backend(tmp_path, **kw):
@@ -188,18 +189,18 @@ class TestTimedOutModelsAreQuarantined:
                 b.process("hello world", "{text}")
 
         assert key not in LlamaCppBackend._model_cache
-        assert any(m is fake for m, _w in LlamaCppBackend._quarantined)
+        assert any(m is fake for _c, _k, m, _w in _quarantine_entries)
         # The worker is still inside the weights: release must NOT close.
         LlamaCppBackend.release_resident_models()
         assert closed == []
         # Once the worker provably ends, the next sweep reclaims the memory —
         # quarantine is bounded by worker liveness, not append-only.
-        for _m, w in LlamaCppBackend._quarantined:
+        for _c, _k, _m, w in list(_quarantine_entries):
             if w is not None:
                 w.join(5)
         LlamaCppBackend.release_resident_models()
         assert closed == [1]
-        assert not any(m is fake for m, _w in LlamaCppBackend._quarantined)
+        assert not any(m is fake for _c, _k, m, _w in _quarantine_entries)
 
 
 class TestLoadTimeCountsAgainstTheTimeout:
@@ -277,7 +278,7 @@ class TestLoadOnlyExpiryIsNotATimeout:
              patch.object(b, "_get_model", side_effect=slow_load):
             with pytest.raises(PostProcessingError):
                 b.process("hello world", "{text}")
-        assert LlamaCppBackend._quarantined == []
+        assert _quarantine_entries == []
         # The freshly loaded weights are healthy — they stay cached so the
         # NEXT dictation gets them warm instead of paying the load again.
         assert key in LlamaCppBackend._model_cache
@@ -352,3 +353,113 @@ class TestTheBudgetIsHonoredExactly:
     def test_a_tiny_budget_is_not_re_floored(self, tmp_path):
         b = _cli_backend(tmp_path, total_budget=0.05)
         assert b.CLEANUP_TOTAL_BUDGET == 0.05
+
+
+class TestAWedgedKeyIsNotReloaded:
+    def test_repeated_timeouts_pin_one_model_not_one_per_retry(self, tmp_path):
+        """The review reproduced created=3, quarantined=3 after three retries:
+        each timeout evicted the key, so the next dictation loaded ANOTHER
+        multi-GB copy of the same doomed model. A key with a live quarantined
+        worker now refuses to load until that worker ends."""
+        created = []
+        release_worker = threading.Event()
+
+        class WedgingModel:
+            def __init__(self):
+                created.append(self)
+
+            def __call__(self, prompt, **kw):
+                release_worker.wait(30)
+                return {"choices": [{"text": "late"}]}
+
+            def close(self):
+                pass
+
+        b = _py_backend(tmp_path, timeout=0.05)
+        key = (b.model_path, b.n_ctx, b.n_gpu_layers)
+
+        def load():
+            m = LlamaCppBackend._model_cache.get(key)
+            if m is None:
+                if __import__("wayfinder.core.postprocessor", fromlist=["x"]
+                              )._key_is_wedged_locked(LlamaCppBackend._model_cache, key):
+                    raise PostProcessingError("wedged")
+                m = WedgingModel()
+                LlamaCppBackend._model_cache[key] = m
+            return m
+
+        try:
+            with patch.object(b, "is_available", return_value=True), \
+                 patch.object(b, "_get_model", side_effect=load):
+                for _ in range(3):
+                    with pytest.raises(PostProcessingError):
+                        b.process("hello world", "{text}")
+        finally:
+            release_worker.set()
+        assert len(created) == 1
+        assert len(_quarantine_entries) == 1
+
+    def test_the_real_get_model_refuses_a_wedged_key(self, tmp_path):
+        b = _py_backend(tmp_path)
+        key = (b.model_path, b.n_ctx, b.n_gpu_layers)
+        gate = threading.Event()
+        stuck = threading.Thread(target=gate.wait, daemon=True)
+        stuck.start()
+        _quarantine_entries.append(
+            (LlamaCppBackend._model_cache, key, object(), stuck))
+        try:
+            with pytest.raises(PostProcessingError, match="still running"):
+                b._get_model()
+        finally:
+            gate.set()
+
+    def test_resident_model_refuses_a_wedged_key(self, tmp_path):
+        b = _cli_backend(tmp_path, n_gpu_layers=0)
+        gate = threading.Event()
+        stuck = threading.Thread(target=gate.wait, daemon=True)
+        stuck.start()
+        _quarantine_entries.append(
+            (LlamaCppCliBackend._resident_cache, b._resident_cache_key(),
+             object(), stuck))
+        try:
+            assert b._resident_model() is None
+        finally:
+            gate.set()
+
+
+class TestResidentInferenceIsBounded:
+    def test_a_hung_resident_call_quarantines_and_falls_through(self, tmp_path):
+        """A hung native call used to hold the residency lock indefinitely,
+        blocking every later dictation behind it. Now the caller recovers at
+        the budget, quarantines the model, and returns the raw text."""
+        b = _cli_backend(tmp_path, n_gpu_layers=0, total_budget=0.2)
+        gate = threading.Event()
+
+        class HangingModel:
+            def __call__(self, prompt, **kw):
+                gate.wait(30)
+                return {"choices": [{"text": "late"}]}
+
+            def close(self):
+                raise AssertionError("must not close under a live worker")
+
+        fake = HangingModel()
+        LlamaCppCliBackend._resident_cache[b._resident_cache_key()] = fake
+        try:
+            with patch.object(b, "_resident_model", return_value=fake), \
+                 patch.object(b, "_server_generate", return_value=None), \
+                 patch.object(b, "_subprocess_target",
+                              return_value=(b.llama_binary, 0)):
+                # The budget is spent by the hang, so every later rung refuses
+                # and process() raises — process_with_config() one level up is
+                # what converts that into returning the raw text. The point
+                # here: it RETURNS (recovery is bounded), it does not hang.
+                with pytest.raises(PostProcessingError, match="budget"):
+                    b.process("hello world", "{text}")
+        finally:
+            gate.set()
+        assert any(m is fake for _c, _k, m, _w in _quarantine_entries)
+        assert b._resident_cache_key() not in LlamaCppCliBackend._resident_cache
+        # And the lock is free again for the next dictation.
+        assert LlamaCppCliBackend._residency_lock.acquire(blocking=False)
+        LlamaCppCliBackend._residency_lock.release()
