@@ -18487,6 +18487,14 @@ class WayfinderApp(ctk.CTk):
             self._offer_url_clipboard(data)
 
     def on_hotkey(self):
+        # The welcome pane's first step owns the shared production mic while its
+        # capture-only test is running. Do not let an early global-hotkey press
+        # replace WarmMic's sink with a real dictation recorder mid-test.
+        if getattr(self, "_welcome_active", False):
+            pane = getattr(self, "_welcome_pane", None)
+            if pane is not None and getattr(pane, "is_microphone_test_running", False):
+                self.log("ℹ Finish the welcome microphone test before using the dictation hotkey")
+                return
         if self.app_state == AppState.IDLE:
             self.start_recording()
         elif self.app_state == AppState.RECORDING:
@@ -19095,9 +19103,10 @@ class WayfinderApp(ctk.CTk):
         
         # First-run welcome tour: text must NEVER reach inject_text() while it's up,
         # or a tutorial dictation would type into whatever window has focus. Route the
-        # transcript into the welcome card instead (steps 1-2 fast-forward to step 3),
-        # then reset the overlay via the normal injection-done path — min display time +
-        # →READY — so the overlay doesn't wedge. History/log side-effects above still ran.
+        # transcript into the welcome card instead (the mic step treats it as an audio
+        # pass; the hotkey step advances to the demonstration), then reset the overlay
+        # via the normal injection-done path — min display time + →READY — so the overlay
+        # doesn't wedge. History/log side-effects above still ran.
         if getattr(self, "_welcome_active", False) and getattr(self, "_welcome_pane", None) is not None:
             try:
                 self._welcome_pane.receive_transcript(processed_text)
@@ -19355,6 +19364,15 @@ class WayfinderApp(ctk.CTk):
             self._show_error_banner(self._error_guidance(message))
         except Exception:
             pass
+        # The welcome pane covers the Dictate screen, so its first-run errors
+        # must be rendered inside that pane instead of only in the hidden banner.
+        if getattr(self, "_welcome_active", False):
+            pane = getattr(self, "_welcome_pane", None)
+            if pane is not None and hasattr(pane, "receive_error"):
+                try:
+                    pane.receive_error(self._error_guidance(message))
+                except Exception as exc:
+                    self.log(f"⚠ Welcome pane error display failed: {exc}")
         # Flash the overlay's ERROR state (red). Skip in Game Mode (the overlay is
         # off there and an audio error cue already plays below) and when there is
         # no overlay controller.

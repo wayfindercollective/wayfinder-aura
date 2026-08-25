@@ -186,6 +186,7 @@ class FakeApp:
     do_inject = WApp.do_inject
     on_injection_done = WApp.on_injection_done
     _finish_injection = WApp._finish_injection
+    _error_guidance = WApp._error_guidance
     on_error = WApp.on_error
     handle_event = WApp.handle_event
     _split_gen = staticmethod(WApp._split_gen)  # real code: it's a @staticmethod
@@ -351,6 +352,19 @@ class TestRecordButtonDispatch:
         app.app_state = AppState.PROCESSING
         app.on_record_button()
         assert called == {}
+
+    def test_hotkey_is_ignored_while_welcome_microphone_test_owns_input(
+        self, app, monkeypatch
+    ):
+        called = {}
+        monkeypatch.setattr(app, "start_recording", lambda: called.setdefault("start", True))
+        app._welcome_active = True
+        app._welcome_pane = SimpleNamespace(is_microphone_test_running=True)
+
+        app.on_hotkey()
+
+        assert called == {}
+        assert any("welcome microphone test" in message for message in app.logs)
         app.app_state = AppState.PASTING
         app.on_record_button()
         assert called == {}
@@ -698,6 +712,16 @@ class TestHappyPath:
 # ===========================================================================
 
 class TestFailurePaths:
+    def test_welcome_receives_errors_that_its_covering_pane_would_hide(self, app):
+        received = []
+        app._welcome_active = True
+        app._welcome_pane = SimpleNamespace(receive_error=received.append)
+
+        app.on_error("No speech detected", app.session_generation)
+        app.run_after()
+
+        assert received == ["No speech detected — try again, a bit closer to the mic."]
+
     def test_transcription_exception_recovers_without_injecting(self, app, monkeypatch):
         injected = []
         monkeypatch.setattr(wayfinder_main, "inject_text",
