@@ -67,6 +67,7 @@ def test_cli_writes_release_manifest_when_dirty_is_explicitly_allowed(
     assert rc == 0
     rendered = output.read_text(encoding="utf-8")
     copied_deps = output.parent / "python-deps.json"
+    copied_flathub_config = output.parent / "flathub.json"
     assert "      - type: dir\n        path: .." not in rendered
     assert f"url: {helper.REPO_URL}" in rendered
     assert f"tag: {tag}" in rendered
@@ -76,6 +77,10 @@ def test_cli_writes_release_manifest_when_dirty_is_explicitly_allowed(
     assert copied_deps.read_text(encoding="utf-8") == (REPO / "flatpak" / "python-deps.json").read_text(
         encoding="utf-8"
     )
+    assert copied_flathub_config.exists()
+    assert copied_flathub_config.read_text(encoding="utf-8") == (
+        REPO / "flatpak" / "flathub.json"
+    ).read_text(encoding="utf-8")
 
 
 def test_cli_rejects_overwriting_local_manifest(monkeypatch, capsys):

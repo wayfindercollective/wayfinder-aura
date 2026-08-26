@@ -12,9 +12,9 @@ sudo dnf install flatpak-builder appstream desktop-file-utils
 
 # Install the SDK
 flatpak install flathub \
-  org.kde.Platform//6.10 \
-  org.kde.Sdk//6.10 \
-  com.riverbankcomputing.PyQt.BaseApp//6.10
+  org.kde.Platform//6.11 \
+  org.kde.Sdk//6.11 \
+  com.riverbankcomputing.PyQt.BaseApp//6.11
 ```
 
 
@@ -72,6 +72,8 @@ flatpak/
 ├── wayfinder-aura-launcher.sh            # Launch script
 ├── flatpak-requirements.txt               # Python deps for Flatpak
 ├── python-deps.json                       # Generated pip sources
+├── flathub.json                            # x86_64-only Flathub build config
+├── prepare-release-manifest.py             # Generate submission bundle
 ├── generate-pip-sources.sh                # Helper script
 └── BUILDING.md                            # This file
 ```

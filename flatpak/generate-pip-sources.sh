@@ -48,7 +48,7 @@ if python3 -c "import flatpak_pip_generator" &> /dev/null; then
     python3 -m flatpak_pip_generator \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10' \
+        --runtime='org.kde.Sdk//6.11' \
         --prefer-wheels="$PREFER_WHEELS"
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 elif command -v flatpak_pip_generator &> /dev/null; then
@@ -56,7 +56,7 @@ elif command -v flatpak_pip_generator &> /dev/null; then
     flatpak_pip_generator \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10' \
+        --runtime='org.kde.Sdk//6.11' \
         --prefer-wheels="$PREFER_WHEELS"
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 elif command -v flatpak-pip-generator &> /dev/null; then
@@ -64,7 +64,7 @@ elif command -v flatpak-pip-generator &> /dev/null; then
     flatpak-pip-generator \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10' \
+        --runtime='org.kde.Sdk//6.11' \
         --prefer-wheels="$PREFER_WHEELS"
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 elif [ -f "$HOME/flatpak-builder-tools/pip/flatpak-pip-generator.py" ]; then
@@ -72,7 +72,7 @@ elif [ -f "$HOME/flatpak-builder-tools/pip/flatpak-pip-generator.py" ]; then
     python3 "$HOME/flatpak-builder-tools/pip/flatpak-pip-generator.py" \
         --requirements-file="$SCRIPT_DIR/flatpak-requirements.txt" \
         --output="$SCRIPT_DIR/python-deps" \
-        --runtime='org.kde.Sdk//6.10' \
+        --runtime='org.kde.Sdk//6.11' \
         --prefer-wheels="$PREFER_WHEELS"
     echo "Generated: $SCRIPT_DIR/python-deps.json"
 else
@@ -95,7 +95,6 @@ echo "Done! Now update the manifest to include python-deps.json"
 echo "Replace the python-deps module with:"
 echo ""
 echo "  - python-deps.json"
-
 
 
 

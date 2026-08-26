@@ -8,8 +8,8 @@ between the repo and a live listing.
 
 - ✅ Real app ID `io.wayfindercollective.WayfinderAura` everywhere
   (manifest, desktop, metainfo, code `FLATPAK_ID` fallbacks, CI, icon script).
-- ✅ `appstreamcli validate --no-net` passes; `desktop-file-validate` clean.
-  Full network URL validation waits on the public GitHub repo/screenshots.
+- ✅ `appstreamcli validate --no-net` passes; `desktop-file-validate` clean;
+  every public GitHub screenshot URL returns HTTP 200.
 - ✅ `LICENSE` is the **Elastic License 2.0** (source-available; SPDX `Elastic-2.0`).
   Chosen deliberately for the paid premium model ($60, $29.99 launch price): the repo can stay public
   (required for Flathub source review), Flathub may legally build and redistribute, but stripping or
@@ -18,7 +18,7 @@ between the repo and a live listing.
   Flathub pattern (Sublime Text, Bitwig, Master PDF Editor); Flathub has no
   native payments as of mid-2026.
 - ✅ Metainfo: real developer/URLs, ≤35-char summary, OARS rating, branding
-  colors, and a dated `1.1.8-beta.1` candidate entry.
+  colors, and a dated `1.1.8-beta.10` candidate entry.
 - ✅ Screenshot paths referenced by AppStream exist and are refreshed at
   1920×1080:
   `screenshots/main-window.png` and `screenshots/settings.png`.
@@ -27,7 +27,7 @@ between the repo and a live listing.
   and xdotool. The freshly exported local build was installed and smoke-tested
   from `/app`.
 - ✅ Flathub-style Python deps: PyQt6 is provided by
-  `com.riverbankcomputing.PyQt.BaseApp//6.10`; the remaining Python packages
+  `com.riverbankcomputing.PyQt.BaseApp//6.11`; the remaining Python packages
   are generated in `flatpak/python-deps.json` with SHA256-pinned sources.
 - ✅ External git sources in the Flatpak manifest are tag + commit pinned.
 - ✅ Hardware safety nets: name-based mic persistence + pactl-curated picker,
@@ -35,8 +35,8 @@ between the repo and a live listing.
   probing (old/new binaries), download integrity checks, GameMode-aware
   hotkeys, Super+F2/F3 defaults.
 - ✅ Official Flathub manifest linter is clean locally. Builddir/repo lint now
-  reaches the exported artifact; its only current errors are screenshot
-  mirroring errors while the public GitHub screenshot URLs are unreachable.
+  reaches the exported artifact; its only current errors are the expected
+  screenshot-mirroring checks that clear after Flathub imports the screenshots.
 
 ## Remaining for Flathub submission (in order)
 
@@ -51,8 +51,8 @@ reviewer Ultra keys, human PR only).
 - See `docs/GO-LIVE-INPUTS.md`.
 
 ### 2. Public repo + tag
-- Repo is public. Build **`v1.1.8-beta.1`** first; create stable **`v1.1.8`**
-  only after prerelease signoff. Never move an existing tag.
+- Repo is public. **`v1.1.8-beta.10`** is published; create stable **`v1.1.8`**
+  only after hands-on signoff. Never move an existing tag.
 - CI on `main` must be green before tagging.
 
 ### 3. Git source for the app module (tag-time blocker)
@@ -65,7 +65,8 @@ python3 flatpak/prepare-release-manifest.py --tag v1.1.8
 
 ### 4. Clean Flatpak build on the target manifest
 `flatpak-builder` (or `org.flatpak.Builder`) against the **release** YAML.
-Compiled Python deps are now **sdists** (rust-stable SDK extension required).
+Compiled Python deps are still pinned **manylinux wheels**. A first-submission
+exception is required unless they are converted to complete offline source builds.
 
 Current Bazzite audit note: host `flatpak-builder` is absent, but the
 `org.flatpak.Builder` app works when its host-command path is pointed at the
@@ -81,8 +82,8 @@ flatpak run --command=sh \
 ```
 
 ### 5. Submit
-PR against `flathub/flathub` (new-pr branch) containing the manifest +
-generated pip sources. After acceptance, claim the app via the Flathub
+PR against `flathub/flathub` (new-pr branch) containing the manifest,
+generated pip sources, and `flathub.json`. After acceptance, claim the app via the Flathub
 dashboard for the verified checkmark.
 
 ## Known limitations to disclose in the listing

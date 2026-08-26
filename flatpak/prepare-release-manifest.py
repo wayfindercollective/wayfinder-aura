@@ -22,6 +22,7 @@ APP_ID = "io.wayfindercollective.WayfinderAura"
 REPO_URL = "https://github.com/wayfindercollective/wayfinder-aura.git"
 DEV_LICENSE_API_URL = "https://valuable-stoat-578.convex.site/activate"
 PROD_LICENSE_API_URL = "https://shiny-goshawk-432.convex.site/activate"
+SUBMISSION_FILES = ("python-deps.json", "flathub.json")
 
 LOCAL_SOURCE = "    sources:\n      - type: dir\n        path: ..\n"
 
@@ -195,10 +196,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(rendered, encoding="utf-8")
-    deps_source = flatpak_dir / "python-deps.json"
-    deps_dest = args.output.parent / "python-deps.json"
-    if deps_dest.resolve() != deps_source.resolve():
-        shutil.copy2(deps_source, deps_dest)
+    for filename in SUBMISSION_FILES:
+        source = flatpak_dir / filename
+        destination = args.output.parent / filename
+        if destination.resolve() != source.resolve():
+            shutil.copy2(source, destination)
     print(f"wrote {args.output}")
     print(f"source: {REPO_URL} tag={tag} commit={commit}")
     return 0

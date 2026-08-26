@@ -913,10 +913,10 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
     for expected in (
         f"app-id: {APP_ID}",
         "runtime: org.kde.Platform",
-        "runtime-version: '6.10'",
+        "runtime-version: '6.11'",
         "sdk: org.kde.Sdk",
         "base: com.riverbankcomputing.PyQt.BaseApp",
-        "base-version: '6.10'",
+        "base-version: '6.11'",
         "BASEAPP_REMOVE_WEBENGINE: '1'",
         "- --socket=x11",
         "- --env=XDG_SESSION_TYPE=x11",

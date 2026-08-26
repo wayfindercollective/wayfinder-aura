@@ -1,6 +1,6 @@
 # Flathub / Discover — Owner handoff checklist
 
-**Updated:** 2026-07-16 (v1.1.1 launch path; Sol-approved plan)
+**Updated:** 2026-08-25 (v1.1.8 launch path)
 
 > **Full engineering handoff (blockers, CI, fix order):**  
 > **`docs/FLATHUB-LAUNCH-HANDOFF-2026-07-16.md`**
@@ -27,11 +27,10 @@ Request an exception for a mature maintained project:
 
 Reviewers must be able to test paid features. Have a process to issue a **temporary real Ultra license** privately (Convex licensing admin). Never put keys in the PR or git.
 
-### 0c. Runtime note for reviewers
+### 0c. Runtime
 
-- KDE Platform **6.11** exists; **PyQt BaseApp 6.11** is not available yet.
-- Submission stays on matched **`org.kde.Platform//6.10` + `com.riverbankcomputing.PyQt.BaseApp//6.10`**.
-- Ask for a runtime exception until BaseApp 6.11 ships.
+- Submission uses the current matched **`org.kde.Platform//6.11` +
+  `com.riverbankcomputing.PyQt.BaseApp//6.11`** pair.
 
 ---
 
@@ -40,32 +39,32 @@ Reviewers must be able to test paid features. Have a process to issue a **tempor
 | Item | Status |
 |------|--------|
 | Production license URL | `shiny-goshawk-432.convex.site/activate` |
-| Version | **1.1.1** (`pyproject`, `__init__`, metainfo, AppImage script) |
+| Version | **1.1.8-beta.10** candidate; stable **1.1.8** pending hands-on signoff |
 | Freemium disclosure in metainfo | Free tier + Ultra $29.99 / $60 + external checkout |
 | Host model FS grants removed | Sandbox `$HOME` only |
 | Platform wheels for compiled pkgs | Still manylinux wheels (cryptography, cffi, jiter, pydantic-core, numpy, scipy, Pillow). Full sdist offline builds need maturin/OpenBLAS — request temporary Flathub exception or schedule follow-up |
 | CI EGL for PyQt overlay tests | `libegl1` et al. in Tests job |
 | Screenshots on public `main` | HTTP 200 |
 | AppStream / desktop validate | Clean (1 pedantic note) |
-| Local Flatpak | Previously built; release rebuild after `v1.1.1` tag |
+| Local Flatpak | KDE/PyQt 6.11 build, install, renderer/TLS/processing smoke verified 2026-08-25; release rebuild after `v1.1.8` tag |
 
 ---
 
 ## Git release (after CI green on main)
 
 ```bash
-cd /var/home/bazzite/Dev/wayfinder-aura
+cd /var/home/aenect/dev/work/wayfinder-aura
 # ensure origin/main is green
 git push origin main
-git tag -a v1.1.1 -m "Wayfinder Aura 1.1.1"
-git push origin v1.1.1
+git tag -a v1.1.8 -m "Wayfinder Aura 1.1.8"
+git push origin v1.1.8
 # do NOT move or delete v1.1.0
 ```
 
 Generate submission artifacts (gitignored under `flatpak/release/`):
 
 ```bash
-python3 flatpak/prepare-release-manifest.py --tag v1.1.1
+python3 flatpak/prepare-release-manifest.py --tag v1.1.8
 ```
 
 Handoff files for the Flathub fork root:
@@ -78,7 +77,7 @@ Handoff files for the Flathub fork root:
 
 ## Human Flathub PR steps
 
-1. Exception (0a) granted or you accept written risk.
+1. Exception (0a) granted.
 2. `gh repo fork --clone flathub/flathub` → branch from **`new-pr`**.
 3. Copy the three files above into the PR root.
 4. **You** write the PR title/body (do not paste AI plan text).
@@ -109,7 +108,7 @@ Handoff files for the Flathub fork root:
 | Who | Action |
 |-----|--------|
 | **Owner** | AI exception, reviewer Ultra keys, human Flathub PR |
-| **Repo / agent** | CI green, `v1.1.1` tag, sdist deps, release manifest, local proof build |
+| **Repo / agent** | CI green, stable `v1.1.8` tag, release manifest, local proof build; wheel exception or offline source-build conversion |
 | **Result** | App installable via Discover from Flathub after merge + official build |
 
 Until **M0 (exception) + green tag CI + human PR**, Discover will not list the app for other users.

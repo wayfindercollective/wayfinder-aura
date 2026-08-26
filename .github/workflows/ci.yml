@@ -430,9 +430,9 @@ jobs:
       - name: Install SDK
         run: |
           flatpak install --user -y flathub \
-            org.kde.Platform//6.10 \
-            org.kde.Sdk//6.10 \
-            com.riverbankcomputing.PyQt.BaseApp//6.10
+            org.kde.Platform//6.11 \
+            org.kde.Sdk//6.11 \
+            com.riverbankcomputing.PyQt.BaseApp//6.11
 
       - name: Select Flatpak manifest
         id: flatpak-manifest

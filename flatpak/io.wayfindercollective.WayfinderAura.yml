@@ -8,7 +8,8 @@
 #   2. Generate release/io.wayfindercollective.WayfinderAura.yml with
 #      flatpak/prepare-release-manifest.py --tag vX.Y.Z
 #   3. Build the release manifest with --force-clean
-#   4. Submit the release manifest plus generated python-deps.json to Flathub
+#   4. Submit the release manifest plus generated python-deps.json and flathub.json
+#      to Flathub
 #
 # App ID Guidelines:
 #   - For personal projects: io.github.YOURUSERNAME.WayfinderAura
@@ -17,10 +18,10 @@
 
 app-id: io.wayfindercollective.WayfinderAura
 runtime: org.kde.Platform
-runtime-version: '6.10'
+runtime-version: '6.11'
 sdk: org.kde.Sdk
 base: com.riverbankcomputing.PyQt.BaseApp
-base-version: '6.10'
+base-version: '6.11'
 command: wayfinder-aura
 
 cleanup-commands:
@@ -101,7 +102,7 @@ modules:
         commit: 147dd722548358763a8b649b3e4b41dfffbcfbb6
 
   # SPIRV-Headers — required by ggml-vulkan's find_package(SPIRV-Headers).
-  # Pin to vulkan-sdk-1.4.321 to match the KDE 6.10 / Freedesktop 25.08 SDK
+  # Pin to vulkan-sdk-1.4.321 to match the KDE 6.11 / Freedesktop 25.08 SDK
   # Vulkan stack (CI reported Vulkan 1.4.321 + glslc 2025.x). The older
   # 1.3.290 pin left matmul_id_subgroup_* symbols undefined at link.
   - name: spirv-headers

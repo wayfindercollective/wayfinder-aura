@@ -6,6 +6,10 @@
 **Release tag:** `v1.1.2` → commit `cdf948c4f563860164652817332de41452789754`  
 **Goal:** Ship on Flathub so the app appears in KDE Discover / Bazaar.
 
+> **2026-08-25 update:** the matched KDE/PyQt runtime pair has been upgraded
+> to 6.11 and built successfully. The older 6.10 runtime-exception notes below
+> are historical; use `docs/FLATHUB-HANDOFF.md` for the current checklist.
+
 This doc is for the next person fixing blockers and finishing submission. It is not the Flathub PR text (that must be **human-authored**).
 
 ---
