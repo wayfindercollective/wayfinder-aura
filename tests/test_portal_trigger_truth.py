@@ -10,6 +10,7 @@ into config's vocabulary, follow it, and never guess when it doesn't parse.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -125,6 +126,37 @@ class TestUIWiring:
         for needle in ('"record-toggle"', '"style-toggle"',
                        "parse_trigger_description", "save_config(self.config)"):
             assert needle in body
+
+    def test_record_sync_refreshes_the_dictate_surfaces(self, monkeypatch):
+        """A late portal response must not leave the hero showing the old key."""
+        main = pytest.importorskip("wayfinder_main")
+        configured = []
+        chip_refreshes = []
+        app = SimpleNamespace(
+            config={
+                "hotkey_key": 59,
+                "hotkey_modifiers": [],
+                "style_toggle_key": 60,
+                "style_toggle_modifiers": [],
+            },
+            hotkey_label=SimpleNamespace(
+                configure=lambda **kwargs: configured.append(kwargs)),
+            _refresh_dictate_setup_chip=lambda: chip_refreshes.append(True),
+            _ensure_hotkey_label=lambda code, _target: main._keycode_display(code),
+            _update_portal_binding_captions=lambda: None,
+            log=lambda _message: None,
+        )
+        app.get_hotkey_display = main.WayfinderApp.get_hotkey_display.__get__(app)
+        app._refresh_record_hotkey_surfaces = (
+            main.WayfinderApp._refresh_record_hotkey_surfaces.__get__(app))
+        monkeypatch.setattr(main, "save_config", lambda _config: None)
+
+        main.WayfinderApp._on_portal_triggers(
+            app, {"record-toggle": "F3", "style-toggle": "F2"})
+
+        assert app.config["hotkey_key"] == 61
+        assert configured == [{"text": "F3"}]
+        assert chip_refreshes == [True]
 
     def test_unparsed_descriptions_never_touch_config(self, main_src):
         body = main_src.split("def _on_portal_triggers", 1)[1].split("\n    def ", 1)[0]

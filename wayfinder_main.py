@@ -15157,6 +15157,20 @@ class WayfinderApp(ctk.CTk):
             return f"{mods}+{key_name}"
         return key_name
 
+    def _refresh_record_hotkey_surfaces(self) -> None:
+        """Refresh returning-user surfaces after a live/config hotkey change."""
+        new_hotkey = self.get_hotkey_display()
+        label = getattr(self, "hotkey_label", None)
+        if label is not None:
+            try:
+                label.configure(text=new_hotkey)
+            except Exception:
+                pass
+        try:
+            self._refresh_dictate_setup_chip()
+        except Exception:
+            pass
+
     def get_style_hotkey_display(self) -> str:
         """Get the display string for the style toggle hotkey."""
         style_key = self.config.get("style_toggle_key", 68)
@@ -15344,6 +15358,8 @@ class WayfinderApp(ctk.CTk):
                 f"{'Record' if t == 'record' else 'Style'} → {d}"
                 for t, _c, _m, d in changed)
             self.log(f"🖥 Synced to your desktop's shortcut bindings: {summary}")
+            if any(target == "record" for target, _code, _mods, _desc in changed):
+                self._refresh_record_hotkey_surfaces()
         self._update_portal_binding_captions()
 
     def _update_portal_binding_captions(self) -> None:
@@ -15598,12 +15614,7 @@ class WayfinderApp(ctk.CTk):
     def _apply_hotkey_change(self):
         """Apply hotkey config change and update the listener."""
         new_hotkey = self.get_hotkey_display()
-        if hasattr(self, 'hotkey_label'):
-            self.hotkey_label.configure(text=new_hotkey)
-        try:
-            self._refresh_dictate_setup_chip()
-        except Exception:
-            pass
+        self._refresh_record_hotkey_surfaces()
         self.log(f"⚙ Hotkey: {new_hotkey}")
         if sys.platform == "darwin":
             # macOS: pynput reads config live — nothing to restart.
