@@ -9,9 +9,11 @@ the code BEFORE this change and is the byte-level regression lock proving the
 raw-completion path is untouched for every model that has no template.
 """
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from wayfinder import license as license_module
 from wayfinder.config import _LLM_PREFERENCE, DEFAULT_CONFIG
 from wayfinder.core.postprocessor import (
     _CHAT_TEMPLATE_MODELS,
@@ -261,6 +263,12 @@ class TestTokenBudget:
 
 class TestFactoryDataflow:
     """The config key alone is inert unless the factory threads it to the backend."""
+
+    @pytest.fixture(autouse=True)
+    def _licensed_factory(self, monkeypatch):
+        """Keep this dataflow test independent of the machine's saved license."""
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
 
     def _cfg(self, mode):
         cfg = dict(DEFAULT_CONFIG)
