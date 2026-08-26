@@ -397,6 +397,8 @@ def test_flatpak_audio_stack_is_runtime_coherent_and_release_probed():
     assert "AUDIO_INPUT_SELF_TEST_OK" in build_script
     assert "--audio-processing-self-test" in build_script
     assert "AUDIO_PROCESSING_SELF_TEST_OK" in build_script
+    assert "started_pulseaudio=1" in build_script
+    assert "pulseaudio --kill" in build_script
 
 
 def test_appimage_builder_prints_build_mode_after_argument_parsing():

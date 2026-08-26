@@ -67,6 +67,10 @@ Whisper fallback keeps precedence:
 Candidate workflow artifacts expire after three days; tagged release assets
 remain attached to the GitHub release.
 
+Measured on 2026-08-26, mini-inf's first cold SDK/native build took about
+29m35s. An immediate warm run of the complete build, five smokes, bundle, and
+copy-back took 4m52s. The consolidated hosted Quality job completed in 1m47s.
+
 Build a tag after it is pushed with:
 
 ```bash

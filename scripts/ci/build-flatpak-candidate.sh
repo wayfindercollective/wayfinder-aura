@@ -83,15 +83,20 @@ fi
 sink_module=""
 source_module=""
 test_logs=""
+started_pulseaudio=0
 
 cleanup() {
   [[ -z "$source_module" ]] || pactl unload-module "$source_module" >/dev/null 2>&1 || true
   [[ -z "$sink_module" ]] || pactl unload-module "$sink_module" >/dev/null 2>&1 || true
   [[ -z "$test_logs" ]] || rm -rf -- "$test_logs"
+  [[ "$started_pulseaudio" -ne 1 ]] || pulseaudio --kill >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-pulseaudio --check || pulseaudio --daemonize=yes --exit-idle-time=-1
+if ! pulseaudio --check; then
+  pulseaudio --daemonize=yes --exit-idle-time=-1
+  started_pulseaudio=1
+fi
 sink_name="aura_ci_null_$$"
 source_name="aura_ci_mic_$$"
 sink_module=$(pactl load-module module-null-sink sink_name="$sink_name")
