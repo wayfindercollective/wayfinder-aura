@@ -138,6 +138,7 @@ Detailed instructions: https://docs.flathub.org/docs/for-app-authors/submission
 - [ ] Flathub submission PR opened + reviewer signoff on final permissions
 
 Step-by-step owner actions: **`docs/FLATHUB-HANDOFF.md`**.
+CI trigger and mini-inf runner details: **`docs/CI.md`**.
 
 ### 4. Validate Before Submitting
 

@@ -3,69 +3,36 @@ name: CI
 on:
   push:
     branches: [main, develop]
-    tags:
-      - "v*"
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: aura-ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   PYTHON_VERSION: "3.12"
 
 jobs:
-  lint:
-    name: Runtime Syntax Checks
+  quality:
+    name: Quality
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install linting tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff
-
-      - name: Run high-signal Ruff checks
-        run: |
-          # The repo predates a formatting baseline, so CI currently gates the
-          # runtime-breaking classes that must never ship. A full style ratchet
-          # should come in a dedicated formatting-only change.
-          ruff check --output-format=github --select F821,F823,F722,E9 .
-
-  type-check:
-    name: Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install mypy types-requests
-
-      - name: Run mypy
-        run: mypy src/wayfinder --ignore-missing-imports --no-error-summary
-        continue-on-error: true  # Don't fail CI on type errors initially
-
-  test:
-    name: Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
 
       - name: Install system dependencies
         run: |
@@ -77,485 +44,26 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-cov pytest-mock pytest-timeout
-          pip install -e ".[dev]" || pip install -r requirements.txt
+          python -m pip install -e . \
+            pytest pytest-cov pytest-mock pytest-timeout ruff
+
+      - name: Run high-signal Ruff checks
+        run: |
+          # The repo predates a formatting baseline, so CI currently gates the
+          # runtime-breaking classes that must never ship. A full style ratchet
+          # should come in a dedicated formatting-only change.
+          ruff check --output-format=github --select F821,F823,F722,E9 .
+
+      - name: Verify project structure
+        run: python scripts/verify_structure.py
 
       - name: Run tests
         run: |
-          pytest tests/ -v --tb=short --cov=src/wayfinder --cov-report=xml -m "not ui and not slow and not network and not perf"
+          pytest tests/ -q --tb=short --cov=src/wayfinder --cov-report=xml -m "not ui and not slow and not network and not perf"
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.xml
           fail_ci_if_error: false
         continue-on-error: true
-
-  structure-check:
-    name: Structure Verification
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install project dependencies
-        run: python -m pip install -e .
-
-      - name: Verify project structure
-        run: |
-          python scripts/verify_structure.py
-
-  release-readiness:
-    name: Release Readiness
-    runs-on: ubuntu-latest
-    needs: [lint, test]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Skip non-tag release check
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
-        run: echo "Release readiness check only runs for version tags and manual artifact builds."
-
-      - name: Verify production license defaults
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        run: python scripts/ci/check-release-license-defaults.py
-
-      - name: Install storefront browser checker
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install playwright
-          python -m playwright install --with-deps chromium
-
-      - name: Verify storefront readiness
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        run: python scripts/ci/check-storefront-readiness.py --browser --timeout 30
-
-      - name: Verify release manifest can be generated
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          python flatpak/prepare-release-manifest.py \
-            --tag "${GITHUB_REF_NAME}" \
-            --output /tmp/wayfinder-flathub/io.wayfindercollective.WayfinderAura.yml
-
-  build-pyinstaller:
-    name: Build (PyInstaller)
-    runs-on: ubuntu-latest
-    needs: [lint, release-readiness]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk portaudio19-dev
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-          pip install -r requirements.txt
-
-      - name: Build executable
-        run: |
-          pyinstaller wayfinder-aura.spec --clean
-          ls -la dist/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wayfinder-aura-linux
-          path: dist/wayfinder-aura
-          retention-days: 7
-
-  build-appimage:
-    name: Build (AppImage)
-    # Pin the AppImage build to an older glibc baseline for wider distro
-    # compatibility. Keep the other CI jobs on ubuntu-latest.
-    runs-on: ubuntu-22.04
-    needs: [lint, release-readiness]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install system dependencies
-        # spirv-headers/spirv-tools: whisper.cpp/llama.cpp GGML_VULKAN cmake
-        # configure hard-requires SPIRV-Headers — without it the build script
-        # SILENTLY falls back to CPU-only inference binaries (smoke test below
-        # now asserts Vulkan). libgirepository/libdbus/libcairo dev: build deps
-        # for the pip PyGObject/dbus-python below.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk portaudio19-dev \
-            cmake make gcc g++ git pkg-config \
-            libvulkan-dev vulkan-tools glslang-tools \
-            spirv-headers spirv-tools \
-            libgirepository1.0-dev libdbus-1-dev libcairo2-dev \
-            wtype \
-            xvfb libxft2 pulseaudio libasound2-plugins \
-            libfuse2 desktop-file-utils appstream
-
-      - name: Install glslc for Vulkan builds
-        # glslc from shaderc; glslangValidator from apt glslang-tools (required by
-        # whisper.cpp / llama.cpp find_package(Vulkan COMPONENTS glslc glslangValidator)).
-        run: scripts/ci/install-glslc-if-needed.sh
-
-      - name: Install modern Vulkan headers
-        # jammy's libvulkan-dev ships 1.3.204 (2022) Vulkan-Hpp, which no longer
-        # compiles ggml-vulkan.cpp ("conversion from vk::PhysicalDeviceProperties2
-        # to VkPhysicalDeviceProperties2" — v1.1.3 tag run). Header-only install
-        # pinned to the same SDK family as the Flatpak's SPIRV pin; the runtime
-        # loader stays the host's (ABI-stable).
-        run: |
-          git clone --depth 1 --branch vulkan-sdk-1.4.321.0 \
-            https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vulkan-headers
-          cmake -S /tmp/vulkan-headers -B /tmp/vulkan-headers/build \
-            -DCMAKE_INSTALL_PREFIX=/usr/local
-          sudo cmake --install /tmp/vulkan-headers/build
-
-      - name: Expand memory headroom for Vulkan shader generation
-        # Same prophylaxis as the Flatpak job: vulkan-shaders-gen forks glslc
-        # from a large parent; default heuristic overcommit can ENOMEM those
-        # forks on runners.
-        run: |
-          sudo sysctl vm.overcommit_memory=1
-          sudo fallocate -l 8G /mnt/wf-swap || sudo dd if=/dev/zero of=/mnt/wf-swap bs=1M count=8192
-          sudo chmod 600 /mnt/wf-swap
-          sudo mkswap /mnt/wf-swap
-          sudo swapon /mnt/wf-swap
-          free -h
-
-      - name: Install Python dependencies
-        # PyGObject/dbus-python: setup-python is hermetic — without these pip
-        # packages the spec's HAS_GLIB_DBUS gate is False and the AppImage
-        # ships with NO gi/dbus (no Wayland GlobalShortcuts portal) and no
-        # bundled GI typelibs. PyGObject pinned <3.51: newer needs
-        # girepository-2.0, which jammy doesn't ship.
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-          pip install "PyGObject==3.50.2" "dbus-python==1.4.0"
-          pip install -r requirements.txt
-
-      - name: Preflight gi/dbus imports
-        # If these fail, the spec's HAS_GLIB_DBUS gate silently strips the
-        # Wayland GlobalShortcuts integration from the bundle — fail HERE with
-        # a clear cause instead of shipping a degraded artifact.
-        run: |
-          python -c "import dbus, gi; from dbus.mainloop.glib import DBusGMainLoop; from gi.repository import GLib"
-
-      - name: Build full AppImage
-        run: |
-          chmod +x scripts/build-appimage.sh
-          ./scripts/build-appimage.sh --full
-
-      # Upload before smoke so a failed candidate remains available for local
-      # Bazzite debugging. Tag releases still require this whole job to pass.
-      - name: Upload AppImage candidate
-        uses: actions/upload-artifact@v4
-        with:
-          name: wayfinder-aura-appimage
-          path: |
-            Wayfinder_Aura-*.AppImage
-            Wayfinder_Aura-*.AppImage.zsync
-          retention-days: 14
-
-      - name: Smoke-test AppImage contents
-        run: |
-          ./Wayfinder_Aura-*.AppImage --appimage-extract >/tmp/wayfinder-appimage-extract.log
-          test -x squashfs-root/AppRun
-          test -x squashfs-root/usr/bin/wayfinder-aura
-          test -x squashfs-root/usr/bin/whisper-cli
-          test -x squashfs-root/usr/bin/whisper-server
-          test -x squashfs-root/usr/bin/whisper-cli-cpu
-          test -x squashfs-root/usr/bin/whisper-server-cpu
-          test -x squashfs-root/usr/bin/llama-cli
-          test -x squashfs-root/usr/bin/llama-simple
-          test -x squashfs-root/usr/bin/llama-simple-cpu
-          test -x squashfs-root/usr/bin/wtype
-          # ydotool is deliberately NOT bundled: the client must protocol-match
-          # the HOST daemon (jammy's 0.1.8 doesn't even speak the app's CLI).
-          test ! -e squashfs-root/usr/bin/ydotool \
-            || { echo "ydotool must NOT be bundled (host-client-only policy)" >&2; exit 1; }
-          # Vulkan MUST be in the inference binaries: the build script silently
-          # falls back to CPU-only when the GGML_VULKAN configure fails, which
-          # would ship a release without GPU acceleration.
-          grep -aFq "ggml_vulkan" squashfs-root/usr/bin/whisper-cli \
-            || { echo "whisper-cli was built WITHOUT Vulkan (silent CPU fallback)" >&2; exit 1; }
-          grep -aFq "ggml_vulkan" squashfs-root/usr/bin/llama-cli \
-            || { echo "llama-cli was built WITHOUT Vulkan (silent CPU fallback)" >&2; exit 1; }
-          if grep -aFq "ggml_vulkan" squashfs-root/usr/bin/whisper-cli-cpu \
-             || grep -aFq "ggml_vulkan" squashfs-root/usr/bin/llama-simple-cpu; then
-            echo "CPU safety twin unexpectedly links the Vulkan backend" >&2
-            exit 1
-          fi
-          # GI typelibs + the gi/dbus C extensions MUST be bundled: without them
-          # frozen builds lose Wayland portal shortcuts or crash against a
-          # mismatched host GLib (Fedora 44 launch bug). File-then-grep so a
-          # future pipefail change can't mask pyi-archive_viewer failures.
-          pyi-archive_viewer -l squashfs-root/usr/bin/wayfinder-aura > /tmp/pyi-contents.txt
-          grep -Fq "gi_typelibs/GLib-2.0.typelib" /tmp/pyi-contents.txt \
-            || { echo "bundle is missing gi typelibs (PyGObject absent at build time)" >&2; exit 1; }
-          grep -Eq "_dbus_bindings.*\.so" /tmp/pyi-contents.txt \
-            || { echo "bundle is missing dbus-python bindings" >&2; exit 1; }
-          grep -Eq "gi[/\\]_gi.*\.so" /tmp/pyi-contents.txt \
-            || { echo "bundle is missing the PyGObject _gi extension" >&2; exit 1; }
-          grep -Fq "certifi/cacert.pem" /tmp/pyi-contents.txt \
-            || { echo "bundle is missing the TLS CA trust store" >&2; exit 1; }
-          # Tk's scripts and native library must both be present. Portable
-          # Python distributions can use a combined libtcl*tk*.so that
-          # PyInstaller's normal Linux dependency lookup does not discover.
-          grep -Fq "_tk_data/tk.tcl" /tmp/pyi-contents.txt \
-            || { echo "bundle is missing Tk runtime data" >&2; exit 1; }
-          grep -Eq "lib(tcl[^/ ]*tk|tk)[^/ ]*\.so" /tmp/pyi-contents.txt \
-            || { echo "bundle is missing the Tk native library" >&2; exit 1; }
-          HOME=$(mktemp -d) xvfb-run -a squashfs-root/AppRun \
-            --ui-renderer-self-test | tee /tmp/ui-renderer-self-test.log
-          grep -Fq "UI_RENDERER_SELF_TEST_OK" /tmp/ui-renderer-self-test.log
-          # Design fonts MUST ship: without them fontconfig substitutes a random
-          # sans per distro and HiDPI text sizing regressed (1.1.4 field bug).
-          # DejaVu Sans is the product typeface by owner decision (2026-07-30).
-          test -f squashfs-root/usr/share/fonts/wayfinder-aura/dejavu/DejaVuSans.ttf \
-            || { echo "bundle is missing the DejaVu Sans product font" >&2; exit 1; }
-          grep -Fq "FONTCONFIG_FILE" squashfs-root/AppRun \
-            || { echo "AppRun does not expose bundled fonts to fontconfig" >&2; exit 1; }
-          # QtDBus MUST ship: overlay placement talks to KWin in-process (host
-          # qdbus dies against the bundle's older libstdc++).
-          grep -Eq "PyQt6[/\\]QtDBus" /tmp/pyi-contents.txt \
-            || { echo "bundle is missing PyQt6.QtDBus (KWin overlay placement)" >&2; exit 1; }
-          # Runners have no real desktop audio graph. Provide Pulse endpoints
-          # for the packaged playback probe; actual AppImage launch is tested
-          # on Bazzite before tagging because Xvfb cannot emulate evdev, ALSA,
-          # D-Bus, a compositor, GameMode, or a tray coherently.
-          pulseaudio --daemonize=yes --exit-idle-time=-1 || true
-          pactl load-module module-null-sink sink_name=ci_null || true
-          pactl load-module module-null-source source_name=ci_mic || true
-          pactl set-default-sink ci_null || true
-          pactl set-default-source ci_mic || true
-          # Exercise the SAME helper as Settings -> Mic Test, beginning at the
-          # real 16 kHz recording rate. A GUI boot does not catch a broken ALSA
-          # plugin, default sink, or native-rate fallback.
-          AUDIO_HOME=$(mktemp -d)
-          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
-            squashfs-root/AppRun --audio-output-self-test | tee /tmp/audio-self-test.log
-          grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/audio-self-test.log
-          grep -Fq "host PulseAudio/PipeWire" /tmp/audio-self-test.log
-          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
-            squashfs-root/AppRun --audio-input-self-test | tee /tmp/audio-input-self-test.log
-          grep -Fq "AUDIO_INPUT_SELF_TEST_OK" /tmp/audio-input-self-test.log
-          # Medium depends on a dynamically imported scipy.signal module, and
-          # preprocessing's stationary-noise guard is a release-critical defense
-          # against confident Whisper hallucinations. Exercise the packaged path.
-          HOME=$(mktemp -d) squashfs-root/AppRun \
-            --audio-processing-self-test | tee /tmp/audio-processing-self-test.log
-          grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/audio-processing-self-test.log
-          # Import the complete frozen application module. This catches missing
-          # PyInstaller hidden imports/native extensions without constructing
-          # fake desktop hardware inside Xvfb.
-          HOME=$(mktemp -d) squashfs-root/AppRun \
-            --app-import-self-test | tee /tmp/app-import-self-test.log
-          grep -Fq "APP_IMPORT_SELF_TEST_OK" /tmp/app-import-self-test.log
-          # Exercise a real verified handshake from the finished AppImage.
-          # The CDN may reject an anonymous request; an HTTP response still
-          # proves the packaged OpenSSL trusted its certificate chain.
-          HOME=$(mktemp -d) squashfs-root/AppRun \
-            --tls-self-test | tee /tmp/tls-self-test.log
-          grep -Fq "TLS_SELF_TEST_OK" /tmp/tls-self-test.log
-          desktop-file-validate squashfs-root/io.wayfindercollective.WayfinderAura.desktop
-          # AppStream metainfo uses modern tags (developer/, vcs-browser) that
-          # Flathub accepts. Ubuntu 22.04 appstreamcli treats them as
-          # warning/info and exits non-zero. Fail only on real Error lines.
-          METAINFO=squashfs-root/usr/share/metainfo/io.wayfindercollective.WayfinderAura.metainfo.xml
-          set +e
-          VALIDATE_OUT=$(appstreamcli validate --no-net "$METAINFO" 2>&1)
-          VALIDATE_RC=$?
-          set -e
-          echo "$VALIDATE_OUT"
-          if echo "$VALIDATE_OUT" | grep -qE '^E:'; then
-            echo "appstreamcli reported hard errors" >&2
-            exit 1
-          fi
-          if [ "$VALIDATE_RC" -ne 0 ]; then
-            echo "appstreamcli non-zero exit ($VALIDATE_RC) with only warnings/info/pedantic — accepting for jammy CI"
-          fi
-
-  # Flatpak build (optional, requires flatpak-builder)
-  build-flatpak:
-    name: Build (Flatpak)
-    runs-on: ubuntu-latest
-    needs: [lint, release-readiness]
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install Flatpak tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder pulseaudio xvfb
-
-      - name: Add Flathub remote
-        run: |
-          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-
-      - name: Install SDK
-        run: |
-          flatpak install --user -y flathub \
-            org.kde.Platform//6.11 \
-            org.kde.Sdk//6.11 \
-            com.riverbankcomputing.PyQt.BaseApp//6.11
-
-      - name: Select Flatpak manifest
-        id: flatpak-manifest
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            python3 flatpak/prepare-release-manifest.py \
-              --tag "$GITHUB_REF_NAME" \
-              --output flatpak/release/io.wayfindercollective.WayfinderAura.yml
-            echo "manifest=release/io.wayfindercollective.WayfinderAura.yml" >> "$GITHUB_OUTPUT"
-          else
-            echo "manifest=io.wayfindercollective.WayfinderAura.yml" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Expand memory headroom for Vulkan shader generation
-        # vulkan-shaders-gen accumulates the mul_mm shader family in-process and
-        # forks glslc per variant; under the runner's default HEURISTIC
-        # overcommit, forking that multi-GB parent dies with ENOMEM ("Cannot
-        # allocate memory ... Failed to fork") even at --jobs=2 — which then
-        # surfaces as undefined matmul_id_subgroup_* at link. fork+exec never
-        # actually copies the pages, so always-overcommit makes the forks safe;
-        # the swapfile covers the true peak. A resource-rich machine builds the
-        # identical manifest clean (verified 2026-07-30), proving this is a
-        # runner-resource issue, not a toolchain bug.
-        # /mnt is the runner's large ephemeral disk, and some runner images
-        # already have an active /swapfile (fallocate on it: "Text file busy")
-        # — use our own path there and keep any existing swap.
-        run: |
-          sudo sysctl vm.overcommit_memory=1
-          sudo fallocate -l 8G /mnt/wf-swap || sudo dd if=/dev/zero of=/mnt/wf-swap bs=1M count=8192
-          sudo chmod 600 /mnt/wf-swap
-          sudo mkswap /mnt/wf-swap
-          sudo swapon /mnt/wf-swap
-          free -h
-
-      - name: Build Flatpak
-        run: |
-          cd flatpak
-          flatpak-builder --user --force-clean --jobs=2 \
-            --repo=repo build-dir "${{ steps.flatpak-manifest.outputs.manifest }}"
-
-      - name: Smoke-test Flatpak audio boundary
-        run: |
-          pulseaudio --daemonize=yes --exit-idle-time=-1 || true
-          pactl load-module module-null-sink sink_name=ci_null || true
-          pactl load-module module-null-source source_name=ci_mic || true
-          pactl set-default-source ci_mic || true
-          flatpak remote-add --user --if-not-exists --no-gpg-verify \
-            wayfinder-ci "$(pwd)/flatpak/repo"
-          flatpak install --user -y wayfinder-ci \
-            io.wayfindercollective.WayfinderAura
-          # Let Flatpak inject its sandbox-side PULSE_SERVER path for the
-          # --socket=pulseaudio bind mount; leaking the host path here would
-          # bypass the exact boundary this test is meant to validate.
-          flatpak run io.wayfindercollective.WayfinderAura \
-            --audio-output-self-test | tee /tmp/flatpak-audio-self-test.log
-          grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/flatpak-audio-self-test.log
-          flatpak run io.wayfindercollective.WayfinderAura \
-            --audio-input-self-test | tee /tmp/flatpak-audio-input-self-test.log
-          grep -Fq "AUDIO_INPUT_SELF_TEST_OK" /tmp/flatpak-audio-input-self-test.log
-          flatpak run io.wayfindercollective.WayfinderAura \
-            --audio-processing-self-test | tee /tmp/flatpak-audio-processing-self-test.log
-          grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/flatpak-audio-processing-self-test.log
-          flatpak run io.wayfindercollective.WayfinderAura \
-            --tls-self-test | tee /tmp/flatpak-tls-self-test.log
-          grep -Fq "TLS_SELF_TEST_OK" /tmp/flatpak-tls-self-test.log
-          # Keep HOME unchanged: this is a per-user Flatpak installation under
-          # ~/.local/share/flatpak. Replacing HOME here makes `flatpak run`
-          # report the app as uninstalled before the renderer probe can start.
-          xvfb-run -a flatpak run io.wayfindercollective.WayfinderAura \
-            --ui-renderer-self-test | tee /tmp/flatpak-ui-renderer-self-test.log
-          grep -Fq "UI_RENDERER_SELF_TEST_OK" /tmp/flatpak-ui-renderer-self-test.log
-
-      - name: Build single-file bundle
-        run: |
-          cd flatpak
-          flatpak build-bundle repo io.wayfindercollective.WayfinderAura.flatpak \
-            io.wayfindercollective.WayfinderAura master \
-            --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
-
-      - name: Upload Flatpak artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wayfinder-aura-flatpak
-          path: flatpak/io.wayfindercollective.WayfinderAura.flatpak
-          retention-days: 14
-
-  # Release job (only on tags)
-  release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    needs: [lint, test, release-readiness, build-pyinstaller, build-appimage, build-flatpak]
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download PyInstaller artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: wayfinder-aura-linux
-          path: dist/
-
-      - name: Download AppImage artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: wayfinder-aura-appimage
-          path: dist/
-
-      - name: Download Flatpak artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: wayfinder-aura-flatpak
-          path: dist/
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            dist/wayfinder-aura
-            dist/Wayfinder_Aura-*.AppImage
-            dist/Wayfinder_Aura-*.AppImage.zsync
-            dist/io.wayfindercollective.WayfinderAura.flatpak
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}

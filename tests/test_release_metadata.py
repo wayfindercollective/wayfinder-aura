@@ -28,6 +28,8 @@ RELEASE_SHELL_SCRIPTS = [
     REPO / "build-appimage.sh",
     REPO / "build.sh",
     REPO / "scripts" / "ci" / "install-glslc-if-needed.sh",
+    REPO / "scripts" / "ci" / "build-flatpak-candidate.sh",
+    REPO / "scripts" / "ci" / "build-flatpak-on-mini-inf.sh",
     REPO / "flatpak" / "generate-pip-sources.sh",
     REPO / "flatpak" / "wayfinder-aura-launcher.sh",
     REPO / "scripts" / "build-appimage.sh",
@@ -42,20 +44,50 @@ RELEASE_PYTHON_SCRIPTS = [
     REPO / "flatpak" / "prepare-release-manifest.py",
     REPO / "scripts" / "steamdeck" / "wayfinder-aura-show-or-start.py",
 ]
+CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = REPO / ".github" / "workflows" / "release.yml"
+FLATPAK_BUILD_WORKFLOW = REPO / ".github" / "workflows" / "flatpak-build.yml"
+FLATPAK_BUILD_SCRIPT = REPO / "scripts" / "ci" / "build-flatpak-candidate.sh"
+MINI_INF_BUILD_SCRIPT = REPO / "scripts" / "ci" / "build-flatpak-on-mini-inf.sh"
 
 
 def _manifest_text() -> str:
     return FLATPAK_MANIFEST.read_text(encoding="utf-8")
 
 
+def _ci_workflow_text() -> str:
+    return CI_WORKFLOW.read_text(encoding="utf-8")
+
+
+def _release_workflow_text() -> str:
+    return RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+
+def _flatpak_build_workflow_text() -> str:
+    return FLATPAK_BUILD_WORKFLOW.read_text(encoding="utf-8")
+
+
+def _flatpak_build_script_text() -> str:
+    return FLATPAK_BUILD_SCRIPT.read_text(encoding="utf-8")
+
+
 def _workflow_text() -> str:
-    return (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    return (
+        f"{_ci_workflow_text()}\n"
+        f"{_release_workflow_text()}\n"
+        f"{_flatpak_build_workflow_text()}"
+    )
 
 
 def _workflow_job_body(name: str) -> str:
-    workflow = _workflow_text()
+    workflow = (
+        _flatpak_build_workflow_text()
+        if name == "build-flatpak"
+        else _workflow_text()
+    )
+    workflow_name = "build" if name == "build-flatpak" else name
     match = re.search(
-        rf"(?ms)^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
+        rf"(?ms)^  {re.escape(workflow_name)}:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
         workflow,
     )
     assert match, f"workflow must define the {name} job"
@@ -101,7 +133,7 @@ def test_root_appimage_builder_delegates_to_maintained_script():
 
 def test_release_artifacts_bundle_and_probe_portable_tls_trust():
     spec = (REPO / "wayfinder-aura.spec").read_text(encoding="utf-8")
-    workflow = _workflow_text()
+    release_builds = f"{_workflow_text()}\n{_flatpak_build_script_text()}"
     requirements = (REPO / "requirements.txt").read_text(encoding="utf-8")
     flatpak_sources = PYTHON_DEPS.read_text(encoding="utf-8")
 
@@ -109,8 +141,8 @@ def test_release_artifacts_bundle_and_probe_portable_tls_trust():
     assert "(str(CERTIFI_CA_BUNDLE), 'certifi')" in spec
     assert "certifi>=2024.0.0" in requirements
     assert "certifi-" in flatpak_sources
-    assert workflow.count("--tls-self-test") >= 2
-    assert workflow.count("TLS_SELF_TEST_OK") >= 2
+    assert release_builds.count("--tls-self-test") >= 2
+    assert release_builds.count("TLS_SELF_TEST_OK") >= 2
     appimage_builder = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
     assert 'export TMPDIR="$WF_RUNTIME_TMP"' in appimage_builder
 
@@ -353,18 +385,18 @@ def test_appimage_import_probe_and_desktop_audio_graph_are_release_gated():
 
 def test_flatpak_audio_stack_is_runtime_coherent_and_release_probed():
     manifest = _manifest_text()
-    job = _workflow_job_body("build-flatpak")
+    build_script = _flatpak_build_script_text()
 
     assert "--socket=pulseaudio" in manifest
     assert "-DPA_USE_ALSA=ON" in manifest
     assert "-DPA_USE_JACK=OFF" in manifest
-    assert "flatpak run io.wayfindercollective.WayfinderAura" in job
-    assert "--audio-output-self-test" in job
-    assert "AUDIO_OUTPUT_SELF_TEST_OK" in job
-    assert "--audio-input-self-test" in job
-    assert "AUDIO_INPUT_SELF_TEST_OK" in job
-    assert "--audio-processing-self-test" in job
-    assert "AUDIO_PROCESSING_SELF_TEST_OK" in job
+    assert 'flatpak run "$APP_ID"' in build_script
+    assert "--audio-output-self-test" in build_script
+    assert "AUDIO_OUTPUT_SELF_TEST_OK" in build_script
+    assert "--audio-input-self-test" in build_script
+    assert "AUDIO_INPUT_SELF_TEST_OK" in build_script
+    assert "--audio-processing-self-test" in build_script
+    assert "AUDIO_PROCESSING_SELF_TEST_OK" in build_script
 
 
 def test_appimage_builder_prints_build_mode_after_argument_parsing():
@@ -409,7 +441,7 @@ def test_pyinstaller_spec_collects_portable_python_tk_libraries():
 def test_release_artifacts_probe_real_xft_renderer():
     workflow = _workflow_text()
     appimage = _workflow_job_body("build-appimage")
-    flatpak = _workflow_job_body("build-flatpak")
+    flatpak = _flatpak_build_script_text()
 
     assert "--ui-renderer-self-test" in appimage
     assert "--ui-renderer-self-test" in flatpak
@@ -519,12 +551,11 @@ def test_pyinstaller_spec_keeps_linux_tray_dbus_integrations_optional():
 
 
 def test_tagged_github_release_is_gated_by_release_readiness_check():
-    workflow = _workflow_text()
+    workflow = _release_workflow_text()
 
     assert re.search(r"(?m)^    tags:\n      - \"v\*\"$", workflow)
     assert "release-readiness:" in workflow
     assert "if: startsWith(github.ref, 'refs/tags/v')" in workflow
-    assert "Release readiness check only runs for version tags and manual artifact builds." in workflow
     assert "python scripts/ci/check-release-license-defaults.py" in workflow
     assert "python -m pip install playwright" in workflow
     assert "python -m playwright install --with-deps chromium" in workflow
@@ -535,20 +566,95 @@ def test_tagged_github_release_is_gated_by_release_readiness_check():
     assert "--allow-dev-license" not in workflow
 
     release_job = _workflow_job_body("release")
-    for job_name in ("release", "build-pyinstaller", "build-appimage", "build-flatpak"):
+    for job_name in ("release", "build-appimage"):
         assert "release-readiness" in _workflow_job_body(job_name)
+    assert "release-readiness" in workflow.split("  build-flatpak:", 1)[1]
 
     assert release_job, "workflow must define the tag release job"
     assert "softprops/action-gh-release@v3" in release_job
 
 
-def test_release_artifact_jobs_do_not_build_dev_license_artifacts_on_normal_pushes():
-    pyinstaller_job = _workflow_job_body("build-pyinstaller")
+def test_release_artifact_jobs_are_manual_or_tag_only_and_raw_binary_is_removed():
+    workflow = _release_workflow_text()
+    flatpak_workflow = _flatpak_build_workflow_text()
     appimage_job = _workflow_job_body("build-appimage")
+    release_job = _workflow_job_body("release")
 
-    artifact_condition = "startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'"
-    assert f"if: {artifact_condition}" in pyinstaller_job
-    assert f"if: {artifact_condition}" in appimage_job
+    assert "build-pyinstaller:" not in workflow
+    assert "wayfinder-aura-linux" not in workflow
+    assert "dist/wayfinder-aura" not in release_job
+    assert "inputs.artifacts == 'appimage' || inputs.artifacts == 'all'" in appimage_job
+    assert "inputs.artifacts == 'hosted-flatpak' || inputs.artifacts == 'all'" in workflow
+    assert "uses: ./.github/workflows/flatpak-build.yml" in workflow
+    assert "pull_request:" not in workflow.split("jobs:", 1)[0]
+    assert "pull_request:" not in flatpak_workflow.split("jobs:", 1)[0]
+    assert "if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'" in flatpak_workflow
+    assert "runs-on: ubuntu-latest" in flatpak_workflow
+    assert "self-hosted" not in workflow
+    assert "self-hosted" not in flatpak_workflow
+    assert "uses: ./.github/workflows/ci.yml" in workflow
+
+
+def test_normal_ci_is_one_cached_quality_job_and_cancels_stale_pushes():
+    workflow = _ci_workflow_text()
+    quality_job = _workflow_job_body("quality")
+
+    for removed_job in ("lint:", "type-check:", "test:", "structure-check:"):
+        assert f"  {removed_job}" not in workflow
+    assert "cache: pip" in quality_job
+    assert "Run high-signal Ruff checks" in quality_job
+    assert "python scripts/verify_structure.py" in quality_job
+    assert "pytest tests/" in quality_job
+    assert "group: aura-ci-${{ github.event_name }}-${{ github.ref }}" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "aura-flatpak" not in workflow
+    assert "workflow_call:" in workflow
+
+
+def test_model_pin_drift_is_scheduled_and_only_pushes_for_pin_surfaces():
+    workflow = (REPO / ".github" / "workflows" / "model-pin-drift.yml").read_text(
+        encoding="utf-8"
+    )
+
+    trigger_block = workflow.split("jobs:", 1)[0]
+    assert "schedule:" in trigger_block
+    assert "workflow_dispatch:" in trigger_block
+    assert "push:" in trigger_block
+    for path in (
+        "wayfinder_main.py",
+        "src/wayfinder/core/setup.py",
+        "scripts/verify-model-digests.py",
+        "tests/test_catalog_ratchet.py",
+        ".github/workflows/model-pin-drift.yml",
+    ):
+        assert f'- "{path}"' in trigger_block
+
+
+def test_mini_inf_flatpak_build_is_resource_capped_below_live_inference():
+    limits = MINI_INF_BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    for setting in (
+        "CPUQuota=200%",
+        "MemoryHigh=16G",
+        "MemoryMax=24G",
+        "nice -n 10 ionice -c 3",
+        'XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+    ):
+        assert setting in limits
+
+
+def test_mini_inf_build_accepts_only_pushed_main_history_and_uses_no_runner():
+    script = MINI_INF_BUILD_SCRIPT.read_text(encoding="utf-8")
+    docs = (REPO / "docs" / "CI.md").read_text(encoding="utf-8")
+
+    assert 'SOURCE_REF="origin/main"' in script
+    assert 'merge-base --is-ancestor "$source_sha" origin/main' in script
+    assert 'merge-base --is-ancestor "$source_sha" refs/heads/main' in script
+    assert "https://github.com/wayfindercollective/wayfinder-aura.git" in script
+    assert "systemd-run --user --scope" in script
+    assert "scp --" in script
+    assert "permanently registered repository runner" in docs
+    assert "**not** registered" in docs
 
 
 def test_release_license_defaults_checker_rejects_dev_and_accepts_non_dev(tmp_path):
@@ -797,18 +903,20 @@ def test_appimage_ci_glslc_helper_is_pinned_and_builds_shaderc_when_needed():
 
 def test_flatpak_ci_builds_tag_sourced_release_manifest_on_tags():
     job = _workflow_job_body("build-flatpak")
+    build_script = _flatpak_build_script_text()
 
     assert "fetch-depth: 0" in job
-    assert "actions/setup-python@v5" in job
-    assert "id: flatpak-manifest" in job
+    assert "actions/setup-python@v7" in job
     assert 'if [[ "$GITHUB_REF" == refs/tags/v* ]]; then' in job
-    assert "python3 flatpak/prepare-release-manifest.py" in job
     assert '--tag "$GITHUB_REF_NAME"' in job
-    assert "--output flatpak/release/io.wayfindercollective.WayfinderAura.yml" in job
-    assert "manifest=release/io.wayfindercollective.WayfinderAura.yml" in job
-    assert "manifest=io.wayfindercollective.WayfinderAura.yml" in job
-    assert 'flatpak-builder --user --force-clean --jobs=2' in job
-    assert 'build-dir "${{ steps.flatpak-manifest.outputs.manifest }}"' in job
+    assert "scripts/ci/build-flatpak-candidate.sh" in job
+    assert 'python3 "$REPO_ROOT/flatpak/prepare-release-manifest.py"' in build_script
+    assert '--tag "$TAG"' in build_script
+    assert '--output "$REPO_ROOT/flatpak/release/io.wayfindercollective.WayfinderAura.yml"' in build_script
+    assert 'manifest="release/io.wayfindercollective.WayfinderAura.yml"' in build_script
+    assert 'manifest="io.wayfindercollective.WayfinderAura.yml"' in build_script
+    assert 'flatpak-builder --user --force-clean --ccache --jobs=2' in build_script
+    assert 'build-dir "$manifest"' in build_script
 
 
 def test_appimage_version_matches_pyproject():

@@ -24,18 +24,23 @@ on:
       - "src/wayfinder/core/setup.py"
       - "scripts/verify-model-digests.py"
       - "tests/test_catalog_ratchet.py"
-      # Include this file: a change to the checker must re-run the checker,
-      # otherwise a broken edit sits green until the next weekly tick.
       - ".github/workflows/model-pin-drift.yml"
+
+concurrency:
+  group: model-pin-drift
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   verify-pins:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

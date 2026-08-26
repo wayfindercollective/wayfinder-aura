@@ -1,0 +1,68 @@
+name: Flatpak Build
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: "Exact Aura commit to build"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  build:
+    name: Build (Flatpak)
+    # Release.yml is the only caller. This second guard makes it impossible for
+    # a future pull-request caller to start the heavyweight build accidentally.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Flatpak tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder pulseaudio xvfb
+
+      - name: Expand runner memory headroom
+        run: |
+          sudo sysctl vm.overcommit_memory=1
+          sudo fallocate -l 8G /mnt/wf-swap || sudo dd if=/dev/zero of=/mnt/wf-swap bs=1M count=8192
+          sudo chmod 600 /mnt/wf-swap
+          sudo mkswap /mnt/wf-swap
+          sudo swapon /mnt/wf-swap
+          free -h
+
+      - name: Build and smoke-test Flatpak
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            scripts/ci/build-flatpak-candidate.sh \
+              --tag "$GITHUB_REF_NAME" \
+              --output flatpak/io.wayfindercollective.WayfinderAura.flatpak
+          else
+            scripts/ci/build-flatpak-candidate.sh \
+              --output flatpak/io.wayfindercollective.WayfinderAura.flatpak
+          fi
+
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wayfinder-aura-flatpak
+          path: flatpak/io.wayfindercollective.WayfinderAura.flatpak
+          retention-days: 3

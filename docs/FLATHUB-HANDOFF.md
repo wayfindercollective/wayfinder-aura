@@ -43,19 +43,22 @@ Reviewers must be able to test paid features. Have a process to issue a **tempor
 | Freemium disclosure in metainfo | Free tier + Ultra $29.99 / $60 + external checkout |
 | Host model FS grants removed | Sandbox `$HOME` only |
 | Platform wheels for compiled pkgs | Still manylinux wheels (cryptography, cffi, jiter, pydantic-core, numpy, scipy, Pillow). Full sdist offline builds need maturin/OpenBLAS — request temporary Flathub exception or schedule follow-up |
-| CI EGL for PyQt overlay tests | `libegl1` et al. in Tests job |
+| CI EGL for PyQt overlay tests | `libegl1` et al. in the consolidated Quality job |
 | Screenshots on public `main` | HTTP 200 |
 | AppStream / desktop validate | Clean (1 pedantic note) |
 | Local Flatpak | KDE/PyQt 6.11 build, install, renderer/TLS/processing smoke verified 2026-08-25; release rebuild after `v1.1.8` tag |
 
 ---
 
-## Git release (after CI green on main)
+## Git release (after Quality + manual Flatpak CI are green)
 
 ```bash
 cd /var/home/aenect/dev/work/wayfinder-aura
-# ensure origin/main is green
+# Routine pushes run the fast Quality job only. Exercise the shared
+# release-grade Flatpak path on mini-inf before tagging.
 git push origin main
+scripts/ci/build-flatpak-on-mini-inf.sh
+# wait for Quality and the mini-inf build/smokes to pass
 git tag -a v1.1.8 -m "Wayfinder Aura 1.1.8"
 git push origin v1.1.8
 # do NOT move or delete v1.1.0

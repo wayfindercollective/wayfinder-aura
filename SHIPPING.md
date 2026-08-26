@@ -53,7 +53,10 @@ reviewer Ultra keys, human PR only).
 ### 2. Public repo + tag
 - Repo is public. **`v1.1.8-beta.10`** is published; create stable **`v1.1.8`**
   only after hands-on signoff. Never move an existing tag.
-- CI on `main` must be green before tagging.
+- The fast Quality job on `main` and
+  `scripts/ci/build-flatpak-on-mini-inf.sh` must both be green before tagging.
+  Heavy artifacts no longer rebuild on every push, and mini-inf is not exposed
+  as a self-hosted runner on this public repository.
 
 ### 3. Git source for the app module (tag-time blocker)
 The `wayfinder-aura` module uses `type: dir, path: ..` (local builds only).
