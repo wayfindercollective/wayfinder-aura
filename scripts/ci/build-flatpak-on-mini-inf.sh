@@ -97,12 +97,16 @@ if [[ -e "$OUTPUT" && "$FORCE" -ne 1 ]]; then
 fi
 
 remote_name="wayfinder-aura-$source_sha.flatpak"
-ssh -o BatchMode=yes "$REMOTE_HOST" bash -s -- "$source_sha" "$TAG" "$remote_name" <<'REMOTE'
+remote_tag=${TAG:--}
+ssh -o BatchMode=yes "$REMOTE_HOST" bash -s -- "$source_sha" "$remote_tag" "$remote_name" <<'REMOTE'
 set -Eeuo pipefail
 
 source_sha=$1
 tag=$2
 remote_name=$3
+if [[ "$tag" == "-" ]]; then
+  tag=""
+fi
 cache_root="$HOME/.cache/wayfinder-aura-flatpak"
 mirror="$cache_root/repository.git"
 worktree="$cache_root/worktrees/$source_sha"

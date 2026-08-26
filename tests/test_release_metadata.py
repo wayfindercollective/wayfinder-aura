@@ -652,6 +652,7 @@ def test_mini_inf_build_accepts_only_pushed_main_history_and_uses_no_runner():
     assert 'merge-base --is-ancestor "$source_sha" refs/heads/main' in script
     assert "https://github.com/wayfindercollective/wayfinder-aura.git" in script
     assert "systemd-run --user --scope" in script
+    assert 'remote_tag=${TAG:--}' in script
     assert "scp --" in script
     assert "permanently registered repository runner" in docs
     assert "**not** registered" in docs
