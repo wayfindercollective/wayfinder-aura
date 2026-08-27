@@ -42,7 +42,7 @@ Reviewers must be able to test paid features. Have a process to issue a **tempor
 | Version | **1.1.8-beta.10** candidate; stable **1.1.8** pending hands-on signoff |
 | Freemium disclosure in metainfo | Free tier + Ultra $29.99 / $60 + external checkout |
 | Host model FS grants removed | Sandbox `$HOME` only |
-| Platform wheels for compiled pkgs | Still manylinux wheels (cryptography, cffi, jiter, pydantic-core, numpy, scipy, Pillow). Full sdist offline builds need maturin/OpenBLAS — request temporary Flathub exception or schedule follow-up |
+| Platform wheels for compiled pkgs | **Submission blocker:** still manylinux wheels (cryptography, cffi, jiter, pydantic-core, numpy, scipy, Pillow). Current policy requires source builds; provide the offline Rust/Maturin + BLAS/Meson build chain before opening the PR rather than assuming an exception. |
 | CI EGL for PyQt overlay tests | `libegl1` et al. in the consolidated Quality job |
 | Screenshots on public `main` | HTTP 200 |
 | AppStream / desktop validate | Clean (1 pedantic note) |
@@ -63,6 +63,11 @@ git tag -a v1.1.8 -m "Wayfinder Aura 1.1.8"
 git push origin v1.1.8
 # do NOT move or delete v1.1.0
 ```
+
+The tag—not a raw `main` push—is the customer release boundary. Direct bundle
+users receive the in-app GitHub Release notice. After Flathub acceptance, the
+generated manifest's stable-only `x-checker-data` creates update PRs; merging a
+green Flathub update PR publishes it to Discover/GNOME Software users.
 
 Generate submission artifacts (gitignored under `flatpak/release/`):
 

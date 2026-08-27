@@ -39,6 +39,10 @@ def test_render_release_manifest_replaces_local_app_source():
     assert f"url: {helper.REPO_URL}" in rendered
     assert f"tag: {tag}" in rendered
     assert f"commit: {commit}" in rendered
+    assert "x-checker-data:" in rendered
+    assert "tag-pattern: ^v([0-9]+\\.[0-9]+\\.[0-9]+)$" in rendered
+    assert "version-scheme: semantic" in rendered
+    assert "is-main-source: true" in rendered
     assert "- python-deps.json" in rendered
 
 

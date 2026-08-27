@@ -129,6 +129,13 @@ def render_release_manifest(text: str, tag: str, commit: str) -> str:
         f"        url: {REPO_URL}\n"
         f"        tag: {tag}\n"
         f"        commit: {commit}\n"
+        "        x-checker-data:\n"
+        "          type: git\n"
+        "          tag-pattern: ^v([0-9]+\\.[0-9]+\\.[0-9]+)$\n"
+        "          version-scheme: semantic\n"
+        "          is-main-source: true\n"
+        "          release-url-template: "
+        "https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v$version\n"
     )
     return text[:idx] + release_source + text[idx + len(LOCAL_SOURCE) :]
 

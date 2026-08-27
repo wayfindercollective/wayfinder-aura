@@ -37,6 +37,29 @@ being online. The standalone raw PyInstaller artifact is intentionally absent:
 the AppImage performs the same PyInstaller build and adds the portable runtime,
 native inference binaries, and release-grade package smokes.
 
+## User update contract
+
+A push to `main` validates source but is not itself a public release. Shipping
+every merged commit would make an accidental merge an immediate customer
+rollout and would provide no stable version for Flatpak/AppStream metadata.
+
+The release boundary is a version tag:
+
+1. Push the release commit to `main` and wait for `Quality`.
+2. Build and test the exact commit with
+   `scripts/ci/build-flatpak-on-mini-inf.sh`.
+3. After hands-on signoff, push the matching `vX.Y.Z` tag.
+4. The tag workflow builds both packages and publishes a GitHub Release.
+5. Direct-install users are notified in-app. Stable installs follow stable
+   releases; prerelease installs also follow newer prereleases.
+6. Once accepted on Flathub, its external-data checker notices new stable tags
+   and opens an update PR. Merging that green PR publishes the Flatpak update;
+   Discover/GNOME Software can then install it automatically.
+
+Single-file `.flatpak` bundles are candidates/downloads, not update channels.
+Until Flathub is live, users must install a newer GitHub Release bundle after
+the in-app notification.
+
 ## Mini-inf Flatpak builder
 
 Wayfinder Aura is public and owned by a personal GitHub account, which cannot

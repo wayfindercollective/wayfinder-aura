@@ -30,6 +30,8 @@ between the repo and a live listing.
   `com.riverbankcomputing.PyQt.BaseApp//6.11`; the remaining Python packages
   are generated in `flatpak/python-deps.json` with SHA256-pinned sources.
 - ✅ External git sources in the Flatpak manifest are tag + commit pinned.
+- ✅ Generated release manifests mark the stable upstream git tag as the main
+  `x-checker-data` source, so Flathub can open update PRs after acceptance.
 - ✅ Hardware safety nets: name-based mic persistence + pactl-curated picker,
   silent-capture guard, sample-rate fallback w/ resampling, whisper-cli flag
   probing (old/new binaries), download integrity checks, GameMode-aware
@@ -68,8 +70,11 @@ python3 flatpak/prepare-release-manifest.py --tag v1.1.8
 
 ### 4. Clean Flatpak build on the target manifest
 `flatpak-builder` (or `org.flatpak.Builder`) against the **release** YAML.
-Compiled Python deps are still pinned **manylinux wheels**. A first-submission
-exception is required unless they are converted to complete offline source builds.
+Compiled Python deps are still pinned **manylinux wheels**. Current Flathub
+policy requires source-available dependencies to build from source; convert
+the cffi/cryptography, NumPy/SciPy/Pillow, jiter, and pydantic-core inputs to
+complete offline source builds before submission rather than assuming an
+exception will be granted.
 
 Current Bazzite audit note: host `flatpak-builder` is absent, but the
 `org.flatpak.Builder` app works when its host-command path is pointed at the

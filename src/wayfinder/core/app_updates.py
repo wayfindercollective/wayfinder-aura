@@ -4,7 +4,11 @@ App update detection for Wayfinder Aura.
 Checks the GitHub Releases API once a day for a version newer than the one
 running, so users on both packages hear about releases at all: the AppImage's
 embedded zsync info only helps people who run an updater tool themselves, and
-the Flatpak has no update channel until it is on Flathub.
+the Flatpak has no automatic update channel until it is on Flathub.
+
+Stable installs follow stable releases. Prerelease installs follow both newer
+prereleases and stable releases, so beta testers are not stranded by GitHub's
+``/releases/latest`` endpoint (which deliberately excludes prereleases).
 
 Results are cached for 24 hours. Every failure mode (no network, API change,
 unparseable tag) resolves to "no update" — a wrong nag is worse than a late one.
@@ -23,10 +27,9 @@ APP_UPDATE_CACHE_FILE = CONFIG_DIR / "app_update_cache.json"
 # Check interval: once per day (seconds)
 CHECK_INTERVAL = 86400
 
-# /releases/latest returns the newest release not marked draft or pre-release.
-# Betas here are published as ordinary releases (v1.1.8-beta.9 is "latest"),
-# so they flow through this endpoint too.
-RELEASES_API = "https://api.github.com/repos/wayfindercollective/wayfinder-aura/releases/latest"
+# Query the release list rather than /releases/latest. GitHub excludes releases
+# marked as prereleases from /latest, which made beta.10 invisible to beta.9.
+RELEASES_API = "https://api.github.com/repos/wayfindercollective/wayfinder-aura/releases?per_page=30"
 RELEASES_PAGE = "https://github.com/wayfindercollective/wayfinder-aura/releases/latest"
 
 # End-anchored, and the prerelease is a dot-list of NON-EMPTY identifiers:
@@ -107,6 +110,44 @@ def is_newer(candidate: str, current: str) -> bool:
     return len(apre) > len(bpre)
 
 
+def _release_channel(version: str) -> Optional[str]:
+    parsed = parse_version(version)
+    if parsed is None:
+        return None
+    return "stable" if parsed[1] is None else "prerelease"
+
+
+def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
+    """Select the newest release allowed by the running version's channel."""
+    channel = _release_channel(current_version)
+    if channel is None:
+        return {}
+    if not isinstance(payload, list):
+        raise ValueError("GitHub releases response is not a list")
+
+    selected: Dict[str, str] = {}
+    for release in payload:
+        if not isinstance(release, dict) or release.get("draft") is True:
+            continue
+        tag = release.get("tag_name")
+        parsed = parse_version(tag)
+        if parsed is None:
+            continue
+
+        # Stable users never receive beta/rc notices, even if a prerelease was
+        # accidentally published with GitHub's prerelease flag turned off.
+        tag_is_prerelease = parsed[1] is not None
+        if channel == "stable" and (release.get("prerelease") is True or tag_is_prerelease):
+            continue
+
+        if not selected or is_newer(tag, selected["tag_name"]):
+            selected = {
+                "tag_name": tag,
+                "html_url": str(release.get("html_url", "") or RELEASES_PAGE),
+            }
+    return selected
+
+
 def check_for_app_update(current_version: str, force: bool = False) -> Dict[str, Any]:
     """
     Check GitHub for a release newer than current_version.
@@ -122,9 +163,10 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
         - last_checked: ISO timestamp
         - error: optional error message
     """
+    channel = _release_channel(current_version)
     if not force:
         cached = _load_cache()
-        if cached and _is_cache_fresh(cached):
+        if cached and cached.get("channel") == channel and _is_cache_fresh(cached):
             return _with_comparison(cached, current_version)
 
     results: Dict[str, Any] = {
@@ -132,6 +174,7 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
         "latest_version": "",
         "release_url": RELEASES_PAGE,
         "last_checked": datetime.now().isoformat(),
+        "channel": channel,
         "error": None,
     }
 
@@ -142,9 +185,9 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
             headers={"Accept": "application/vnd.github+json"},
         )
         response.raise_for_status()
-        data = response.json()
-        results["latest_version"] = str(data.get("tag_name", "") or "")
-        results["release_url"] = str(data.get("html_url", "") or RELEASES_PAGE)
+        release = _select_release(response.json(), current_version)
+        results["latest_version"] = release.get("tag_name", "")
+        results["release_url"] = release.get("html_url", RELEASES_PAGE)
     except Exception as e:
         results["error"] = str(e)
 

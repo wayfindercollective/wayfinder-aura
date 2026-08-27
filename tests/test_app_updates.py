@@ -31,10 +31,20 @@ def _isolated_cache(tmp_path, monkeypatch):
         app_updates, "APP_UPDATE_CACHE_FILE", tmp_path / "app_update_cache.json")
 
 
-def _github_response(tag, url="https://github.com/wayfindercollective/wayfinder-aura/releases/tag/x"):
+def _release(tag, url="https://github.com/wayfindercollective/wayfinder-aura/releases/tag/x", **flags):
+    return {
+        "tag_name": tag,
+        "html_url": url,
+        "draft": False,
+        "prerelease": False,
+        **flags,
+    }
+
+
+def _github_response(*releases):
     resp = MagicMock()
     resp.raise_for_status.return_value = None
-    resp.json.return_value = {"tag_name": tag, "html_url": url}
+    resp.json.return_value = list(releases)
     return resp
 
 
@@ -114,7 +124,7 @@ class TestVersionComparison:
 
 class TestCheckForAppUpdate:
     def test_newer_release_reports_update(self):
-        with patch("requests.get", return_value=_github_response("v9.9.9")):
+        with patch("requests.get", return_value=_github_response(_release("v9.9.9"))):
             info = check_for_app_update("1.1.8")
         assert info["update_available"] is True
         assert info["latest_version"] == "v9.9.9"
@@ -122,9 +132,47 @@ class TestCheckForAppUpdate:
 
     def test_current_or_older_release_is_quiet(self):
         # Today's real state: dev build ahead of the newest published release.
-        with patch("requests.get", return_value=_github_response("v1.1.8-beta.9")):
+        with patch(
+            "requests.get",
+            return_value=_github_response(_release("v1.1.8-beta.9")),
+        ):
             info = check_for_app_update("1.1.8-beta.10")
         assert info["update_available"] is False
+
+    def test_prerelease_install_sees_newer_github_prerelease(self):
+        with patch(
+            "requests.get",
+            return_value=_github_response(
+                _release("v1.1.8-beta.9"),
+                _release("v1.1.8-beta.10", prerelease=True),
+            ),
+        ):
+            info = check_for_app_update("1.1.8-beta.9")
+        assert info["update_available"] is True
+        assert info["latest_version"] == "v1.1.8-beta.10"
+
+    def test_stable_install_ignores_prerelease_tags_regardless_of_github_flag(self):
+        with patch(
+            "requests.get",
+            return_value=_github_response(
+                _release("v1.2.0-beta.1"),  # beta.9 was published this way
+                _release("v1.1.9", prerelease=False),
+            ),
+        ):
+            info = check_for_app_update("1.1.8")
+        assert info["latest_version"] == "v1.1.9"
+
+    def test_drafts_and_malformed_releases_are_ignored(self):
+        with patch(
+            "requests.get",
+            return_value=_github_response(
+                _release("v9.9.9", draft=True),
+                _release("not-a-version"),
+                _release("v1.1.9"),
+            ),
+        ):
+            info = check_for_app_update("1.1.8")
+        assert info["latest_version"] == "v1.1.9"
 
     def test_network_failure_is_quiet_and_recorded(self):
         with patch("requests.get", side_effect=OSError("no network")):
@@ -133,19 +181,19 @@ class TestCheckForAppUpdate:
         assert "no network" in info["error"]
 
     def test_fresh_cache_skips_the_network(self):
-        with patch("requests.get", return_value=_github_response("v9.9.9")) as get:
+        with patch("requests.get", return_value=_github_response(_release("v9.9.9"))) as get:
             check_for_app_update("1.1.8")
             check_for_app_update("1.1.8")
         assert get.call_count == 1
 
     def test_force_bypasses_cache(self):
-        with patch("requests.get", return_value=_github_response("v9.9.9")) as get:
+        with patch("requests.get", return_value=_github_response(_release("v9.9.9"))) as get:
             check_for_app_update("1.1.8")
             check_for_app_update("1.1.8", force=True)
         assert get.call_count == 2
 
     def test_stale_cache_rechecks(self):
-        with patch("requests.get", return_value=_github_response("v9.9.9")) as get:
+        with patch("requests.get", return_value=_github_response(_release("v9.9.9"))) as get:
             check_for_app_update("1.1.8")
         cache = json.loads(app_updates.APP_UPDATE_CACHE_FILE.read_text())
         cache["last_checked"] = (
@@ -160,21 +208,32 @@ class TestCheckForAppUpdate:
         # The cache stores the tag, not the verdict for one particular version:
         # upgrading the app must silence a cached "update available" without
         # waiting out the interval.
-        with patch("requests.get", return_value=_github_response("v1.1.9")):
+        with patch("requests.get", return_value=_github_response(_release("v1.1.9"))):
             before = check_for_app_update("1.1.8")
         assert before["update_available"] is True
         with patch("requests.get", side_effect=AssertionError("should use cache")):
             after = check_for_app_update("1.1.9")
         assert after["update_available"] is False
 
+    def test_switching_from_stable_to_prerelease_channel_refetches(self):
+        with patch("requests.get", return_value=_github_response(_release("v1.1.9"))):
+            check_for_app_update("1.1.8")
+        with patch(
+            "requests.get",
+            return_value=_github_response(_release("v1.2.0-beta.2", prerelease=True)),
+        ) as get:
+            info = check_for_app_update("1.2.0-beta.1")
+        assert get.call_count == 1
+        assert info["latest_version"] == "v1.2.0-beta.2"
+
     def test_missing_tag_in_response_is_quiet(self):
-        with patch("requests.get", return_value=_github_response(None)):
+        with patch("requests.get", return_value=_github_response(_release(None))):
             info = check_for_app_update("1.1.8")
         assert info["update_available"] is False
 
     def test_corrupt_cache_is_ignored(self):
         app_updates.APP_UPDATE_CACHE_FILE.write_text("{not json")
-        with patch("requests.get", return_value=_github_response("v9.9.9")):
+        with patch("requests.get", return_value=_github_response(_release("v9.9.9"))):
             info = check_for_app_update("1.1.8")
         assert info["update_available"] is True
 
