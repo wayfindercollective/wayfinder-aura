@@ -79,9 +79,11 @@ def test_appimage_prefers_host_audio_client(monkeypatch):
     monkeypatch.setitem(sys.modules, "sounddevice", fake)
     monkeypatch.setattr(audio_output, "_is_appimage_runtime", lambda: True)
     expected = audio_output.PlaybackResult(
-        16000, 16000, "System default (host PulseAudio/PipeWire)", False
+        16000, 16000, "System default (PulseAudio/PipeWire)", False
     )
-    monkeypatch.setattr(audio_output, "_play_via_host", lambda _audio, _rate: expected)
+    monkeypatch.setattr(
+        audio_output, "_play_via_desktop_client", lambda _audio, _rate: expected
+    )
 
     result = audio_output.play_blocking(np.zeros(160, dtype=np.float32), 16000)
 
@@ -95,7 +97,7 @@ def test_appimage_falls_back_to_portaudio_when_host_client_is_missing(monkeypatc
     monkeypatch.setattr(audio_output, "_is_appimage_runtime", lambda: True)
     monkeypatch.setattr(
         audio_output,
-        "_play_via_host",
+        "_play_via_desktop_client",
         lambda _audio, _rate: (_ for _ in ()).throw(FileNotFoundError("paplay")),
     )
 
@@ -103,6 +105,39 @@ def test_appimage_falls_back_to_portaudio_when_host_client_is_missing(monkeypatc
 
     assert result.output_name == "PipeWire Default"
     assert [rate for _audio, rate in fake.calls] == [16000]
+
+
+def test_flatpak_requires_runtime_audio_client_without_portaudio_fallback(monkeypatch):
+    fake = _fake_sounddevice()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    monkeypatch.setattr(audio_output, "_is_flatpak_runtime", lambda: True)
+    monkeypatch.setattr(audio_output, "_is_appimage_runtime", lambda: False)
+    monkeypatch.setattr(
+        audio_output,
+        "_play_via_desktop_client",
+        lambda _audio, _rate: (_ for _ in ()).throw(FileNotFoundError("paplay")),
+    )
+
+    with pytest.raises(FileNotFoundError, match="paplay"):
+        audio_output.play_blocking(np.zeros(160, dtype=np.float32), 16000)
+
+    assert fake.calls == []
+
+
+def test_flatpak_stop_does_not_enter_portaudio(monkeypatch):
+    fake = _fake_sounddevice()
+    fake.stop_calls = 0
+
+    def stop():
+        fake.stop_calls += 1
+
+    fake.stop = stop
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    monkeypatch.setattr(audio_output, "_is_flatpak_runtime", lambda: True)
+
+    audio_output.stop_playback()
+
+    assert fake.stop_calls == 0
 
 
 def test_packaged_self_test_uses_real_mic_test_starting_rate(monkeypatch):

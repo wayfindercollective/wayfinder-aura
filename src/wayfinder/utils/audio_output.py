@@ -1,4 +1,4 @@
-"""Shared audio-output helpers for mic playback and package release probes.
+"""Shared audio-output helpers for mic playback, cues, and release probes.
 
 The recorded mic-test WAV is 16 kHz, while many ALSA hardware devices only
 accept 44.1 or 48 kHz.  Desktop audio servers normally resample it, but a raw
@@ -8,10 +8,10 @@ UI and packaged-artifact smoke test exercise the exact same path.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import shutil
 import subprocess
 import threading
+from dataclasses import dataclass
 
 
 class PlaybackCancelled(Exception):
@@ -51,8 +51,19 @@ def _is_appimage_runtime() -> bool:
     return get_wayfinder_appimage_dir() is not None
 
 
-def _play_via_host(audio, sample_rate: int) -> PlaybackResult:
-    """Play through the host Pulse/PipeWire client, outside AppImage libraries."""
+def _is_flatpak_runtime() -> bool:
+    from wayfinder.utils.platform import is_wayfinder_flatpak_env
+
+    return is_wayfinder_flatpak_env()
+
+
+def _play_via_desktop_client(audio, sample_rate: int) -> PlaybackResult:
+    """Play through paplay on the desktop PulseAudio/PipeWire graph.
+
+    For AppImages this resolves to the host client with a bundle-clean
+    environment.  In Flatpak it resolves to the pinned runtime's client, which
+    reaches the host graph through ``--socket=pulseaudio``.
+    """
     import numpy as np
 
     from wayfinder.utils.hostexec import host_env
@@ -60,7 +71,7 @@ def _play_via_host(audio, sample_rate: int) -> PlaybackResult:
     env = host_env()
     paplay = shutil.which("paplay", path=env.get("PATH"))
     if not paplay:
-        raise FileNotFoundError("host paplay is unavailable")
+        raise FileNotFoundError("paplay is unavailable")
 
     samples = np.asarray(audio, dtype="<f4").reshape(-1)
     timeout = max(5.0, samples.size / max(1, sample_rate) + 5.0)
@@ -104,7 +115,7 @@ def _play_via_host(audio, sample_rate: int) -> PlaybackResult:
     return PlaybackResult(
         int(sample_rate),
         int(sample_rate),
-        "System default (host PulseAudio/PipeWire)",
+        "System default (PulseAudio/PipeWire)",
         False,
     )
 
@@ -112,23 +123,30 @@ def _play_via_host(audio, sample_rate: int) -> PlaybackResult:
 def play_blocking(audio, sample_rate: int) -> PlaybackResult:
     """Play mono float audio and wait, retrying at the default sink's native rate.
 
-    Flatpak/source builds use ``sounddevice``. An AppImage instead prefers the
-    host's ``paplay`` client with every bundle path removed from its environment.
-    This avoids loading Fedora/Bazzite's PipeWire ALSA plugin into the AppImage's
-    older, self-contained recording stack. If the host client is absent or
-    refuses playback, the normal PortAudio path remains a compatibility fallback.
+    Flatpak always uses its runtime's ``paplay`` client. Keeping playback out of
+    process is important: PortAudio/ALSA stream closes are process-global and can
+    segfault when two Python playback threads finish together. An AppImage also
+    prefers the host's ``paplay`` client with every bundle path removed from its
+    environment, retaining its PortAudio compatibility fallback. Source runs use
+    PortAudio directly.
     """
     import numpy as np
-    import sounddevice as sd
 
     requested_rate = int(sample_rate)
+    if _is_flatpak_runtime():
+        # The Flatpak manifest always supplies paplay. Never cross back into
+        # PortAudio if the desktop audio graph is unavailable: a clear playback
+        # error is safer than reintroducing concurrent native stream teardown.
+        return _play_via_desktop_client(audio, requested_rate)
     if _is_appimage_runtime():
         try:
-            return _play_via_host(audio, requested_rate)
+            return _play_via_desktop_client(audio, requested_rate)
         except PlaybackCancelled:
             raise
         except Exception:
             pass
+    import sounddevice as sd
+
     try:
         output_info, output_name = _default_output(sd)
     except Exception:
@@ -158,6 +176,11 @@ def stop_playback() -> None:
             process.terminate()
         except OSError:
             pass
+    if _is_flatpak_runtime():
+        # Flatpak playback never owns a sounddevice stream. Calling sd.stop()
+        # here can race an unrelated PortAudio user and is exactly the native
+        # teardown class this subprocess path is meant to avoid.
+        return
     try:
         import sounddevice as sd
 

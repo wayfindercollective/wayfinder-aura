@@ -11,17 +11,15 @@ is sound. These cues mark the dictation lifecycle:
 
 Design constraints (see docs/superpowers/specs and CLAUDE.md):
 
-* Must work INSIDE the Flatpak sandbox. The sandbox grants PulseAudio/PipeWire
-  access and the app already ships ``sounddevice`` (PortAudio) for recording,
-  so playback goes through the same stack — no dependency on host binaries
-  (``canberra-gtk-play`` etc.) that may be absent from the runtime.
+* Must work INSIDE the Flatpak sandbox. The pinned runtime supplies ``paplay``,
+  which reaches the host PipeWire graph through ``--socket=pulseaudio``.
 * Fire-and-forget and NON-blocking: cues run on a daemon thread so the Tk UI
   thread is never held up.
 * SILENT no-op on any failure (no output device, device busy, missing file,
   PortAudio error). A missing chime must never break dictation.
-* Uses a dedicated short-lived ``OutputStream`` rather than the module-global
-  ``sd.play``/``sd.stop`` (which the mic-test UI uses), so a cue can never cut
-  off other playback and is independent of the recorder's input stream.
+* Uses the shared packaged-playback policy. In Flatpak and AppImage this keeps
+  short-lived cues out of process so concurrent cue teardown cannot race inside
+  PortAudio/ALSA; source installs retain the normal PortAudio path.
 
 WAVs live in ``sounds/`` next to this module and ship via the Flatpak
 manifest's existing ``cp -r src/wayfinder`` (no manifest change).
@@ -71,17 +69,9 @@ def _play_blocking(name: str) -> None:
         return
     audio, sr = data
     try:
-        import sounddevice as sd
+        from wayfinder.utils.audio_output import play_blocking
 
-        # Dedicated stream (not sd.play's shared global): isolated from the
-        # mic-test playback and from the recorder's input stream.
-        stream = sd.OutputStream(samplerate=sr, channels=1, dtype="float32")
-        stream.start()
-        try:
-            stream.write(audio.reshape(-1, 1))
-        finally:
-            stream.stop()
-            stream.close()
+        play_blocking(audio, sr)
     except Exception:
         pass  # no device / busy / PortAudio error — stay silent
 

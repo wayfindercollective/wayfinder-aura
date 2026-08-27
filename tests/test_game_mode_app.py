@@ -12,7 +12,6 @@ import pytest
 
 from wayfinder.utils import platform as p
 
-
 # =============================================================================
 # Mode marker + is_game_mode
 # =============================================================================
@@ -149,11 +148,9 @@ def test_play_cue_returns_immediately_and_silently(monkeypatch):
     from wayfinder.feedback import audio
 
     # Force the playback backend to be unavailable; the cue must stay silent.
-    fake_sd = type(sys)("sounddevice")
-    def _boom(*a, **k):
+    def _boom(*_args, **_kwargs):
         raise RuntimeError("no audio device")
-    fake_sd.OutputStream = _boom
-    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    monkeypatch.setattr("wayfinder.utils.audio_output.play_blocking", _boom)
 
     audio.play_cue("start")  # spawns a daemon thread that will hit _boom and swallow it
     # Give the worker a moment; the test passes as long as nothing propagates.
