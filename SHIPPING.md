@@ -28,7 +28,8 @@ between the repo and a live listing.
   from `/app`.
 - ✅ Flathub-style Python deps: PyQt6 is provided by
   `com.riverbankcomputing.PyQt.BaseApp//6.11`; the remaining Python packages
-  are generated in `flatpak/python-deps.json` with SHA256-pinned sources.
+  are SHA256-pinned. OpenBLAS, CFFI, Cryptography, NumPy, SciPy, Pillow, Jiter,
+  and Pydantic Core build offline from source; all Rust crates are vendored.
 - ✅ External git sources in the Flatpak manifest are tag + commit pinned.
 - ✅ Generated release manifests mark the stable upstream git tag as the main
   `x-checker-data` source, so Flathub can open update PRs after acceptance.
@@ -70,11 +71,9 @@ python3 flatpak/prepare-release-manifest.py --tag v1.1.8
 
 ### 4. Clean Flatpak build on the target manifest
 `flatpak-builder` (or `org.flatpak.Builder`) against the **release** YAML.
-Compiled Python deps are still pinned **manylinux wheels**. Current Flathub
-policy requires source-available dependencies to build from source; convert
-the cffi/cryptography, NumPy/SciPy/Pillow, jiter, and pydantic-core inputs to
-complete offline source builds before submission rather than assuming an
-exception will be granted.
+The compiled Python dependencies have been converted from platform wheels to
+complete offline source builds. Repeat the clean build and all five runtime
+smokes against the exact stable-tag release manifest before submission.
 
 Current Bazzite audit note: host `flatpak-builder` is absent, but the
 `org.flatpak.Builder` app works when its host-command path is pointed at the
@@ -91,8 +90,9 @@ flatpak run --command=sh \
 
 ### 5. Submit
 PR against `flathub/flathub` (new-pr branch) containing the manifest,
-generated pip sources, and `flathub.json`. After acceptance, claim the app via the Flathub
-dashboard for the verified checkmark.
+the three generated Python source manifests, four Cargo source manifests, and
+`flathub.json`. After acceptance, claim the app via the Flathub dashboard for
+the verified checkmark.
 
 ## Known limitations to disclose in the listing
 - GNOME Wayland / sway: the overlay can't self-position (no KWin scripting,

@@ -15,14 +15,24 @@ import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 APP_ID = "io.wayfindercollective.WayfinderAura"
 REPO_URL = "https://github.com/wayfindercollective/wayfinder-aura.git"
 DEV_LICENSE_API_URL = "https://valuable-stoat-578.convex.site/activate"
 PROD_LICENSE_API_URL = "https://shiny-goshawk-432.convex.site/activate"
-SUBMISSION_FILES = ("python-deps.json", "flathub.json")
+SUBMISSION_FILES = (
+    "python-deps.json",
+    "python-numpy-build-tools.json",
+    "python-scipy-build-tools.json",
+    "cargo-sources-maturin.json",
+    "cargo-sources-cryptography.json",
+    "cargo-sources-jiter.json",
+    "cargo-sources-pydantic-core.json",
+    "flathub.json",
+)
 
 LOCAL_SOURCE = "    sources:\n      - type: dir\n        path: ..\n"
 

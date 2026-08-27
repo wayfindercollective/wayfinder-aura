@@ -1,0 +1,3 @@
+# SciPy's source build requirements not already supplied by org.kde.Sdk.
+pybind11==3.0.4
+pythran==0.18.1

@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import re
-import json
 import importlib.util
+import json
+import re
 import shutil
-import pytest
 import subprocess
 import sys
-import tomllib
 import xml.etree.ElementTree as ET
 from datetime import date
 from pathlib import Path
 
+import pytest
+import tomllib
 from PIL import Image
 
 REPO = Path(__file__).resolve().parent.parent
@@ -1026,6 +1026,7 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
         "runtime: org.kde.Platform",
         "runtime-version: '6.11'",
         "sdk: org.kde.Sdk",
+        "- org.freedesktop.Sdk.Extension.rust-stable",
         "base: com.riverbankcomputing.PyQt.BaseApp",
         "base-version: '6.11'",
         "BASEAPP_REMOVE_WEBENGINE: '1'",
@@ -1099,6 +1100,63 @@ def test_flatpak_python_deps_are_offline_hashed_and_exclude_pyqt():
             assert source.get("type") == "file"
             assert source.get("url", "").startswith("https://")
             assert re.fullmatch(r"[0-9a-f]{64}", source.get("sha256", ""))
+
+
+def test_flatpak_compiled_python_dependencies_build_from_source():
+    manifest = _manifest_text()
+    for module in (
+        "openblas",
+        "python-maturin",
+        "python-pycparser",
+        "python-cffi",
+        "python-cryptography",
+        "python-numpy",
+        "python-scipy",
+        "python-pillow",
+        "python-jiter",
+        "python-pydantic-core",
+    ):
+        assert re.search(rf"(?m)^  - name: {re.escape(module)}$", manifest)
+
+    dependency_manifests = [
+        PYTHON_DEPS,
+        REPO / "flatpak" / "python-numpy-build-tools.json",
+        REPO / "flatpak" / "python-scipy-build-tools.json",
+    ]
+    for path in dependency_manifests:
+        text = path.read_text(encoding="utf-8")
+        assert "manylinux" not in text, path
+        assert "musllinux" not in text, path
+
+    # A build-only wildcard cleanup can claim native dependencies that the
+    # later build-tool module imports. Runtime artifact smokes caught this when
+    # NumPy's extensions disappeared only during the final cleanup stage.
+    for path in dependency_manifests[1:]:
+        assert '"cleanup"' not in path.read_text(encoding="utf-8"), path
+    assert "/lib/python*/site-packages/pythran*" in manifest
+
+    assert "-DBUILD_SHARED_LIBS:BOOL=ON" in manifest
+    assert "-DBUILD_WITHOUT_LAPACKE:BOOL=ON" in manifest
+    assert "-DDYNAMIC_OLDER" not in manifest
+    assert manifest.count("maturin build --release --locked --offline") == 3
+    assert manifest.count("CARGO_NET_OFFLINE: 'true'") == 4
+
+    for filename in (
+        "cargo-sources-maturin.json",
+        "cargo-sources-cryptography.json",
+        "cargo-sources-jiter.json",
+        "cargo-sources-pydantic-core.json",
+    ):
+        assert filename in manifest
+        cargo_sources = json.loads((REPO / "flatpak" / filename).read_text(encoding="utf-8"))
+        assert cargo_sources
+        for source in cargo_sources:
+            assert source.get("type") in {"archive", "inline"}
+            if source["type"] == "archive":
+                assert source.get("url", "").startswith("https://static.crates.io/")
+                assert re.fullmatch(r"[0-9a-f]{64}", source.get("sha256", ""))
+            else:
+                assert source.get("contents")
 
 
 # ── 1.1.5 rendering + host-spawn invariants ──────────────────────────────────

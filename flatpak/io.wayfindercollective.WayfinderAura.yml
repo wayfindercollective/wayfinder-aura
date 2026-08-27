@@ -20,6 +20,8 @@ app-id: io.wayfindercollective.WayfinderAura
 runtime: org.kde.Platform
 runtime-version: '6.11'
 sdk: org.kde.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
 base: com.riverbankcomputing.PyQt.BaseApp
 base-version: '6.11'
 command: wayfinder-aura
@@ -28,6 +30,7 @@ cleanup-commands:
   - /app/cleanup-BaseApp.sh
 
 build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
   env:
     BASEAPP_REMOVE_WEBENGINE: '1'
 
@@ -80,6 +83,20 @@ cleanup:
   - /lib/python*/site-packages/pip*
   - /lib/python*/site-packages/setuptools*
   - /lib/python*/site-packages/wheel*
+  # Source-build frontends are needed while constructing NumPy/SciPy, not at
+  # runtime. Keep these paths explicit: generated build-only cleanup='*' can
+  # claim native libraries imported by a later build-tool module.
+  - /bin/pybind11-config
+  - /bin/pyproject-build
+  - /bin/pythran*
+  - /lib/python*/site-packages/beniget*
+  - /lib/python*/site-packages/gast*
+  - /lib/python*/site-packages/mesonpy*
+  - /lib/python*/site-packages/meson_python*
+  - /lib/python*/site-packages/ply*
+  - /lib/python*/site-packages/pybind11*
+  - /lib/python*/site-packages/pyproject_metadata*
+  - /lib/python*/site-packages/pythran*
 
 modules:
   # PortAudio for sounddevice. In the sandbox, route through the KDE runtime's
@@ -248,8 +265,163 @@ modules:
         tag: v3.20211022.1
         commit: eb489de1b4fb3fd0cd935d68ae16ecd4c653ac7d
 
-  # Python dependencies, installed from generated SHA256-pinned sources. PyQt6 itself comes
-  # from com.riverbankcomputing.PyQt.BaseApp above; regenerate with generate-pip-sources.sh.
+  # Flathub requires source-available runtime dependencies to be built from
+  # source. OpenBLAS backs the explicit NumPy/SciPy source modules below.
+  - name: openblas
+    buildsystem: cmake-ninja
+    builddir: true
+    build-options:
+      no-debuginfo: true
+    config-opts:
+      - -DBUILD_TESTING:BOOL=OFF
+      - -DBUILD_SHARED_LIBS:BOOL=ON
+      - -DBUILD_WITHOUT_LAPACKE:BOOL=ON
+      - -DDYNAMIC_ARCH=1
+      - -DTARGET=GENERIC
+    sources:
+      - type: archive
+        url: https://github.com/OpenMathLib/OpenBLAS/archive/v0.3.34.tar.gz
+        sha256: cd7e129868320cc2d033afa920e31202dfe0b8066a5b66661900ccc0f197dfed
+
+  # NumPy and SciPy use Meson's PEP 517 backend. These are pure-Python build
+  # tools and are removed from the final app by the explicit top-level cleanup.
+  - python-numpy-build-tools.json
+
+  # Build Maturin itself from source once, then use it as the offline PEP 517
+  # backend for cryptography, jiter, and pydantic-core. Cargo source manifests
+  # vendor every locked crate before the network-isolated build starts.
+  - name: python-maturin
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/python-maturin/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo build --release --locked --offline
+      - install -Dm755 target/release/maturin ${FLATPAK_DEST}/bin/maturin
+    cleanup:
+      - '*'
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/a7/d0/b7c8b7778cc44df3efbc96eb23acaa995e06ea1a60eb9b02f29858fcbd08/maturin-1.14.0.tar.gz
+        sha256: f7f82a6aca4a6c402bf00b99200be199d4874d04b9b9e74e825726a3478bba7f
+      - cargo-sources-maturin.json
+
+  # CFFI needs pycparser at runtime, and Cryptography imports it while
+  # generating its OpenSSL bindings. Install the pinned pure-Python wheel
+  # before both native source modules; python-deps.json sees it as satisfied.
+  - name: python-pycparser
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} --no-deps pycparser==3.0
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl
+        sha256: b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+
+  - name: python-cffi
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+    build-commands:
+      - pip3 install --verbose --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} . --no-build-isolation --no-deps
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/57/5f/ff100cae70ebe9d8df1c01a00e510e45d9adb5c1fdda84791b199141de97/cffi-2.1.0.tar.gz
+        sha256: efc1cdd798b1aaf39b4610bba7aad28c9bea9b910f25c784ccf9ec1fa719d1f9
+
+  - name: python-cryptography
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+      env:
+        CARGO_HOME: /run/build/python-cryptography/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - maturin build --release --locked --offline --interpreter python3 --compatibility linux --auditwheel skip --out dist
+      - pip3 install --verbose --no-index --prefix=${FLATPAK_DEST} --no-deps dist/*.whl
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/1f/99/d1c90d6041656cc6ee229dc99cd67fd0cd5aec3c5f7d72fffc27cc750054/cryptography-49.0.0.tar.gz
+        sha256: f89660a348f4f78a92366240a61404e337586ef7f5909a2fef59ca88ef505493
+      - cargo-sources-cryptography.json
+
+  - name: python-numpy
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+      ldflags: -lgfortran
+    build-commands:
+      - pip3 install --verbose --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} . --no-build-isolation --no-deps
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/22/fd/89965aa4ac08c74998539fcbf24fa3540f3e15237fbeb6bcf9c908f4aade/numpy-2.5.1.tar.gz
+        sha256: a48a113e6afea91f5608793bafa7ef2ad481fefbda87ec5069f483de61cb9fa3
+
+  # SciPy's remaining build frontends need the just-built NumPy import, so
+  # install them after NumPy rather than in the earlier build-tool module.
+  - python-scipy-build-tools.json
+
+  - name: python-scipy
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+      ldflags: -lgfortran
+    build-commands:
+      - pip3 install --verbose --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} . --no-build-isolation --no-deps
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/a7/25/c2700dfaf6442b4effaa91af24ebce5dc9d31bb4a69706313aae70d72cd0/scipy-1.18.0.tar.gz
+        sha256: 67b2ad2ad54c72ca6d04975a9b2df8c3638c34ddd5b28738e94fc2b57929d378
+
+  - name: python-pillow
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+    build-commands:
+      - pip3 install --verbose --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} . --no-build-isolation --no-deps
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/1c/3d/bb7fca845737cf9d7dbde16ed1843984665ff2e0a518f5db43e77ec540b9/pillow-12.3.0.tar.gz
+        sha256: 3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce
+
+  - name: python-jiter
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+      env:
+        CARGO_HOME: /run/build/python-jiter/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - maturin build --release --locked --offline --interpreter python3 --compatibility linux --auditwheel skip --out dist
+      - pip3 install --verbose --no-index --prefix=${FLATPAK_DEST} --no-deps dist/*.whl
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/1d/1f/10936e16d8860c70698a1aa939a46aa0224813b782bce4e000e637da0b2d/jiter-0.16.0.tar.gz
+        sha256: 7b24c3492c5f4f84a37946ad9cf504910cf6a782d6a4e0689b6673c5894b4a1c
+      - cargo-sources-jiter.json
+
+  - name: python-pydantic-core
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+      env:
+        CARGO_HOME: /run/build/python-pydantic-core/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - maturin build --release --locked --offline --interpreter python3 --compatibility linux --auditwheel skip --out dist
+      - pip3 install --verbose --no-index --prefix=${FLATPAK_DEST} --no-deps dist/*.whl
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/9d/56/921726b776ace8d8f5db44c4ef961006580d91dc52b803c489fafd1aa249/pydantic_core-2.46.4.tar.gz
+        sha256: 62f875393d7f270851f20523dd2e29f082bcc82292d66db2b64ea71f64b6e1c1
+      - cargo-sources-pydantic-core.json
+
+  # Remaining Python dependencies are installed from generated, SHA256-pinned
+  # pure wheels or source archives. The native packages above also appear as
+  # source archives here for dependency resolution, but pip finds the exact
+  # source-built versions already installed and does not rebuild them. PyQt6
+  # itself comes from com.riverbankcomputing.PyQt.BaseApp.
   - python-deps.json
 
   # Tcl/Tk 8.6.14 built WITH Xft. The runtime does not ship Python's tkinter

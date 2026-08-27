@@ -14,6 +14,7 @@ sudo dnf install flatpak-builder appstream desktop-file-utils
 flatpak install flathub \
   org.kde.Platform//6.11 \
   org.kde.Sdk//6.11 \
+  org.freedesktop.Sdk.Extension.rust-stable//25.08 \
   com.riverbankcomputing.PyQt.BaseApp//6.11
 ```
 
@@ -57,10 +58,18 @@ python -m pip install flatpak-pip-generator
 ./generate-pip-sources.sh
 ```
 
-This creates `python-deps.json` which contains all the pip packages with their SHA256 hashes.
-PyQt6 itself is provided by `com.riverbankcomputing.PyQt.BaseApp`; the generated
-file covers the remaining Python runtime packages. The generated file is checked
-in so Flatpak builds do not need network access for Python packages.
+This creates the SHA256-pinned `python-deps.json`,
+`python-numpy-build-tools.json`, and `python-scipy-build-tools.json` manifests.
+The compiled runtime dependencies are built offline from source by the main
+manifest: OpenBLAS, CFFI, Cryptography, NumPy, SciPy, Pillow, Jiter, and
+Pydantic Core. The Cargo source manifests vendor every locked Rust crate for
+Maturin and the Rust-backed packages. PyQt6 itself is provided by
+`com.riverbankcomputing.PyQt.BaseApp`.
+
+When a pinned Rust package or Maturin changes, regenerate its Cargo source
+manifest with `flatpak-cargo-generator.py` from Flathub's
+`flatpak-builder-tools` using that source archive's `Cargo.lock`. Review all
+generated diffs and complete a clean offline Flatpak build before committing.
 
 ## File Structure
 
@@ -70,10 +79,14 @@ flatpak/
 ├── io.wayfindercollective.WayfinderAura.desktop  # Desktop entry
 ├── io.wayfindercollective.WayfinderAura.metainfo.xml  # AppStream metadata
 ├── wayfinder-aura-launcher.sh            # Launch script
-├── flatpak-requirements.txt               # Python deps for Flatpak
-├── python-deps.json                       # Generated pip sources
-├── flathub.json                            # x86_64-only Flathub build config
-├── prepare-release-manifest.py             # Generate submission bundle
+├── flatpak-requirements.txt              # Exact Python runtime lock
+├── flatpak-constraints.txt               # Exact transitive lock
+├── *-build-requirements.txt              # NumPy/SciPy build inputs
+├── python-deps.json                      # Generated runtime sources
+├── python-*-build-tools.json             # Generated PEP 517 tools
+├── cargo-sources-*.json                  # Vendored locked Rust crates
+├── flathub.json                          # x86_64-only Flathub config
+├── prepare-release-manifest.py           # Generate submission bundle
 ├── generate-pip-sources.sh                # Helper script
 └── BUILDING.md                            # This file
 ```
@@ -107,7 +120,8 @@ python flatpak/prepare-release-manifest.py --tag v1.1.8
 ```
 
 The helper writes `release/io.wayfindercollective.WayfinderAura.yml` and copies
-`python-deps.json` beside it, replacing the local `type: dir` source with the
+the three generated Python source manifests, four Cargo source manifests, and
+`flathub.json` beside it. It replaces the local `type: dir` source with the
 pinned public git tag and commit that Flathub expects. It refuses to run while
 the checked-in license defaults point at a known dev backend.
 `--allow-dev-license` is for deliberate local dry-runs only, not submission builds.
@@ -198,10 +212,14 @@ Bundled models live under `/app/share/whisper-models`; user-downloaded models
 live under `~/.local/share/wayfinder-aura/whisper-models/`.
 
 ### Build fails on Python packages
-Regenerate `python-deps.json` with the latest versions:
+Regenerate the Python source manifests from the checked-in exact requirements:
 ```bash
 ./generate-pip-sources.sh
 ```
+
+Do not solve a native-package build failure by adding a manylinux or musllinux
+wheel. Flathub expects source-available native dependencies to build from
+source, offline, using the pinned archives and Cargo crates in this directory.
 
 ## Testing Changes
 

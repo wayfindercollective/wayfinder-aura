@@ -1,6 +1,6 @@
 # Flathub / Discover — Owner handoff checklist
 
-**Updated:** 2026-08-25 (v1.1.8 launch path)
+**Updated:** 2026-08-26 (v1.1.8 launch path)
 
 > **Full engineering handoff (blockers, CI, fix order):**  
 > **`docs/FLATHUB-LAUNCH-HANDOFF-2026-07-16.md`**
@@ -42,11 +42,11 @@ Reviewers must be able to test paid features. Have a process to issue a **tempor
 | Version | **1.1.8-beta.10** candidate; stable **1.1.8** pending hands-on signoff |
 | Freemium disclosure in metainfo | Free tier + Ultra $29.99 / $60 + external checkout |
 | Host model FS grants removed | Sandbox `$HOME` only |
-| Platform wheels for compiled pkgs | **Submission blocker:** still manylinux wheels (cryptography, cffi, jiter, pydantic-core, numpy, scipy, Pillow). Current policy requires source builds; provide the offline Rust/Maturin + BLAS/Meson build chain before opening the PR rather than assuming an exception. |
+| Compiled Python dependencies | Converted to offline source builds: shared OpenBLAS, CFFI, Cryptography, NumPy, SciPy, Pillow, Jiter, and Pydantic Core. Maturin and all locked Rust crates are source-vendored. |
 | CI EGL for PyQt overlay tests | `libegl1` et al. in the consolidated Quality job |
 | Screenshots on public `main` | HTTP 200 |
 | AppStream / desktop validate | Clean (1 pedantic note) |
-| Local Flatpak | KDE/PyQt 6.11 build, install, renderer/TLS/processing smoke verified 2026-08-25; release rebuild after `v1.1.8` tag |
+| Local Flatpak | KDE/PyQt 6.11 full source build/export plus native import/processing smoke verified 2026-08-26; exact-commit mini-inf rebuild still required before `v1.1.8` |
 
 ---
 
@@ -79,6 +79,12 @@ Handoff files for the Flathub fork root:
 
 - `io.wayfindercollective.WayfinderAura.yml`
 - `python-deps.json`
+- `python-numpy-build-tools.json`
+- `python-scipy-build-tools.json`
+- `cargo-sources-maturin.json`
+- `cargo-sources-cryptography.json`
+- `cargo-sources-jiter.json`
+- `cargo-sources-pydantic-core.json`
 - `flathub.json` → `{ "only-arches": ["x86_64"] }`
 
 ---
@@ -87,7 +93,7 @@ Handoff files for the Flathub fork root:
 
 1. Exception (0a) granted.
 2. `gh repo fork --clone flathub/flathub` → branch from **`new-pr`**.
-3. Copy the three files above into the PR root.
+3. Copy the nine files above into the PR root.
 4. **You** write the PR title/body (do not paste AI plan text).
 5. Base branch: **`new-pr`** (never `master`). Title: `Add io.wayfindercollective.WayfinderAura`.
 6. Answer reviewers yourself; provide temp Ultra key if asked; `bot, build`.
@@ -116,7 +122,7 @@ Handoff files for the Flathub fork root:
 | Who | Action |
 |-----|--------|
 | **Owner** | AI exception, reviewer Ultra keys, human Flathub PR |
-| **Repo / agent** | CI green, stable `v1.1.8` tag, release manifest, local proof build; wheel exception or offline source-build conversion |
+| **Repo / agent** | CI green, stable `v1.1.8` tag, release manifest, and exact-commit mini-inf proof build |
 | **Result** | App installable via Discover from Flathub after merge + official build |
 
 Until **M0 (exception) + green tag CI + human PR**, Discover will not list the app for other users.

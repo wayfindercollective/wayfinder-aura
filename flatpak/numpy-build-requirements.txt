@@ -1,0 +1,2 @@
+# Pure-Python build frontend used by the NumPy and SciPy source modules.
+meson-python==0.19.0

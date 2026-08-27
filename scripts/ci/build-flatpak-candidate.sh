@@ -64,6 +64,7 @@ flatpak remote-add --user --if-not-exists \
 flatpak install --user --noninteractive -y flathub \
   org.kde.Platform//6.11 \
   org.kde.Sdk//6.11 \
+  org.freedesktop.Sdk.Extension.rust-stable//25.08 \
   com.riverbankcomputing.PyQt.BaseApp//6.11
 
 manifest="io.wayfindercollective.WayfinderAura.yml"

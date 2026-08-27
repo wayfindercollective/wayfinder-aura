@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "flatpak" / "prepare-release-manifest.py"
@@ -70,21 +71,17 @@ def test_cli_writes_release_manifest_when_dirty_is_explicitly_allowed(
 
     assert rc == 0
     rendered = output.read_text(encoding="utf-8")
-    copied_deps = output.parent / "python-deps.json"
-    copied_flathub_config = output.parent / "flathub.json"
     assert "      - type: dir\n        path: .." not in rendered
     assert f"url: {helper.REPO_URL}" in rendered
     assert f"tag: {tag}" in rendered
     assert f"commit: {commit}" in rendered
     assert f"tag={tag} commit={commit}" in capsys.readouterr().out
-    assert copied_deps.exists()
-    assert copied_deps.read_text(encoding="utf-8") == (REPO / "flatpak" / "python-deps.json").read_text(
-        encoding="utf-8"
-    )
-    assert copied_flathub_config.exists()
-    assert copied_flathub_config.read_text(encoding="utf-8") == (
-        REPO / "flatpak" / "flathub.json"
-    ).read_text(encoding="utf-8")
+    for filename in helper.SUBMISSION_FILES:
+        copied = output.parent / filename
+        assert copied.exists(), filename
+        assert copied.read_text(encoding="utf-8") == (
+            REPO / "flatpak" / filename
+        ).read_text(encoding="utf-8")
 
 
 def test_cli_rejects_overwriting_local_manifest(monkeypatch, capsys):
