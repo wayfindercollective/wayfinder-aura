@@ -882,7 +882,13 @@ class TestPortalModuleSurface:
         from wayfinder.hotkeys.dbus import wayland_hotkey_listener
 
         params = list(inspect.signature(wayland_hotkey_listener).parameters)
-        assert params == ["event_queue", "shortcuts", "stop_event", "log_callback"]
+        assert params == [
+            "event_queue",
+            "shortcuts",
+            "stop_event",
+            "log_callback",
+            "control_queue",
+        ]
 
 
 # =============================================================================

@@ -10,17 +10,18 @@ into config's vocabulary, follow it, and never guess when it doesn't parse.
 """
 
 from pathlib import Path
+from queue import Queue
 from types import SimpleNamespace
 
 import pytest
 
 from wayfinder.hotkeys.dbus import (
     _KEYSYM_BY_CODE,
+    _call_configure_shortcuts,
     encode_trigger,
     parse_trigger_description,
     triggers_from_bound_shortcuts,
 )
-from wayfinder.hotkeys.types import EventType
 
 MAIN_SRC = Path(__file__).resolve().parent.parent / "wayfinder_main.py"
 DBUS_SRC = Path(__file__).resolve().parent.parent / "src/wayfinder/hotkeys/dbus.py"
@@ -167,6 +168,97 @@ class TestUIWiring:
         assert "self._portal_caption_record = ctk.CTkLabel(" in main_src
         assert "self._portal_caption_style = ctk.CTkLabel(" in main_src
 
+    def test_portal_detect_opens_desktop_configuration_instead_of_drifting(self):
+        main = pytest.importorskip("wayfinder_main")
+        opened = []
+        app = SimpleNamespace(
+            _portal_listener_started=True,
+            _request_portal_shortcut_configuration=lambda: opened.append(True),
+        )
+
+        main.WayfinderApp._start_hotkey_detect(app, "record")
+
+        assert opened == [True]
+
+    def test_portal_configuration_request_crosses_the_worker_queue(self):
+        main = pytest.importorskip("wayfinder_main")
+        control = Queue()
+        app = SimpleNamespace(_portal_control_queue=control, log=lambda _message: None)
+
+        main.WayfinderApp._request_portal_shortcut_configuration(app)
+
+        assert control.get_nowait() == "configure"
+
+    def test_portal_controls_are_read_only_and_offer_desktop_editor(self):
+        main = pytest.importorskip("wayfinder_main")
+
+        class Widget:
+            def __init__(self):
+                self.config = {}
+
+            def configure(self, **kwargs):
+                self.config.update(kwargs)
+
+            def winfo_manager(self):
+                return "pack"
+
+            def pack(self, **_kwargs):
+                pass
+
+            def pack_forget(self):
+                pass
+
+        record_caption = Widget()
+        record_dropdown = Widget()
+        record_check = Widget()
+        record_button = Widget()
+        app = SimpleNamespace(
+            _portal_listener_started=True,
+            _portal_triggers={"record-toggle": "F3"},
+            _portal_caption_record=record_caption,
+            _portal_caption_style=None,
+            hotkey_dropdown=record_dropdown,
+            _hotkey_mod_checks={"ctrl": record_check},
+            _detect_btn_record=record_button,
+        )
+
+        main.WayfinderApp._update_portal_binding_captions(app)
+
+        assert record_caption.config["text"] == "🖥 Desktop binding: F3"
+        assert record_dropdown.config["state"] == "disabled"
+        assert record_check.config["state"] == "disabled"
+        assert record_button.config == {
+            "text": "Change in Desktop Shortcuts",
+            "state": "normal",
+        }
+
+    def test_portal_worker_uses_standard_configure_shortcuts_method(self, dbus_src):
+        assert '"ConfigureShortcuts"' in dbus_src
+        assert 'GLib.Variant("(osa{sv})"' in dbus_src
+
+    def test_configure_shortcuts_uses_the_v2_wire_contract(self):
+        calls = []
+        bus = SimpleNamespace(call_sync=lambda *args: calls.append(args))
+        gio = SimpleNamespace(DBusCallFlags=SimpleNamespace(NONE=0))
+        glib = SimpleNamespace(
+            Variant=lambda signature, value: (signature, value),
+            VariantType=lambda signature: signature,
+        )
+
+        _call_configure_shortcuts(bus, "/session/wayfinder", gio, glib)
+
+        assert calls == [(
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.GlobalShortcuts",
+            "ConfigureShortcuts",
+            ("(osa{sv})", ("/session/wayfinder", "", {})),
+            "()",
+            0,
+            5000,
+            None,
+        )]
+
     def test_a_desktop_owned_press_during_detect_explains_itself(self, main_src):
         # The silent `return` while armed left the user pressing their hotkey
         # at a listening button with no reaction at all.
@@ -174,3 +266,11 @@ class TestUIWiring:
         body = body.split("if time.time() < float", 1)[0]
         assert "System Settings" in body
         assert "self._reset_detect_button(target)" in body
+
+
+def test_completed_benchmark_replaces_stale_cleanup_snapshot(main_src):
+    body = main_src.split("# Save post-processing results + pipeline headline", 1)[1]
+    body = body.split("save_config(self.config)", 1)[0]
+    assignment = 'self.config["postprocessing_benchmark_results"] = pp_results'
+    assert assignment in body
+    assert "if pp_results:" not in body.split(assignment, 1)[0]

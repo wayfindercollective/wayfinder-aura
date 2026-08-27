@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass
-from queue import Queue
+from queue import Empty, Queue
 from threading import Event
 from typing import Callable, Optional
 
@@ -224,6 +224,21 @@ def shortcut_specs_from_config(config: dict) -> list[ShortcutSpec]:
     ]
 
 
+def _call_configure_shortcuts(bus, session_handle: str, Gio, GLib) -> None:
+    """Ask a GlobalShortcuts v2 portal to open its desktop-owned editor."""
+    bus.call_sync(
+        _PORTAL_DEST,
+        _PORTAL_PATH,
+        _SHORTCUTS_IFACE,
+        "ConfigureShortcuts",
+        GLib.Variant("(osa{sv})", (session_handle, "", {})),
+        GLib.VariantType("()"),
+        Gio.DBusCallFlags.NONE,
+        5000,
+        None,
+    )
+
+
 # --- the listener -----------------------------------------------------------
 
 def wayland_hotkey_listener(
@@ -231,6 +246,7 @@ def wayland_hotkey_listener(
     shortcuts: list[ShortcutSpec],
     stop_event: Event,
     log_callback: Optional[Callable[[str], None]] = None,
+    control_queue: Optional[Queue] = None,
 ) -> bool:
     """Register global shortcuts via the portal and emit events until stopped.
 
@@ -439,7 +455,35 @@ def wayland_hotkey_listener(
         # loop.run() with nothing to quit it.
         stop_source = GLib.timeout_source_new(500)
 
+        def _configure_shortcuts() -> None:
+            """Ask the desktop to show its shortcut editor for this session.
+
+            GlobalShortcuts version 2 added this specifically so sandboxed
+            apps do not need a desktop-specific executable or host-spawn
+            permission. Older portals reject the method cleanly and the UI's
+            explanatory caption remains the fallback.
+            """
+            session_handle = state["session_handle"]
+            if not session_handle:
+                return
+            try:
+                _call_configure_shortcuts(bus, session_handle, Gio, GLib)
+                log("🖥 Opened your desktop's shortcut settings")
+            except Exception as exc:
+                log(
+                    "⚠️ Your desktop could not open shortcut settings "
+                    f"({type(exc).__name__}) — open System Settings → Shortcuts"
+                )
+
         def _poll(*_args) -> bool:
+            if control_queue is not None and state["session_handle"]:
+                while True:
+                    try:
+                        command = control_queue.get_nowait()
+                    except Empty:
+                        break
+                    if command == "configure":
+                        _configure_shortcuts()
             if (
                 stop_event.is_set()
                 or state["closed"]

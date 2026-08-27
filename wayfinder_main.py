@@ -3697,7 +3697,9 @@ def socket_listener(event_queue, stop_event, log_callback=None):
     return _package_socket_listener(event_queue, stop_event, log_callback)
 
 
-def wayland_hotkey_listener(event_queue, shortcuts, stop_event, log_callback=None):
+def wayland_hotkey_listener(
+    event_queue, shortcuts, stop_event, log_callback=None, control_queue=None
+):
     """Delegate to the package GlobalShortcuts portal listener (single implementation).
 
     Legacy body lived here; the hardened Gio implementation lives in
@@ -3705,7 +3707,9 @@ def wayland_hotkey_listener(event_queue, shortcuts, stop_event, log_callback=Non
     ``shortcuts`` is a list of ``wayfinder.hotkeys.dbus.ShortcutSpec``.
     """
     from wayfinder.hotkeys.dbus import wayland_hotkey_listener as _package_portal_listener
-    return _package_portal_listener(event_queue, shortcuts, stop_event, log_callback)
+    return _package_portal_listener(
+        event_queue, shortcuts, stop_event, log_callback, control_queue
+    )
 
 
 # === Floating Status Indicator ===
@@ -5240,6 +5244,11 @@ class WayfinderApp(ctk.CTk):
         
         self.app_state = AppState.IDLE
         self.event_queue = queue.Queue()
+        # UI → GlobalShortcuts worker commands. The portal connection and its
+        # session live on a private GLib thread, so the Settings button asks
+        # that owner thread to invoke ConfigureShortcuts instead of attempting
+        # desktop-specific host execution from the Flatpak sandbox.
+        self._portal_control_queue = queue.Queue()
         # History is built lazily for returning users. Preserve log lines received before the
         # tab exists, then flush them into its textbox the first time it is opened.
         self._pending_ui_logs: list[str] = []
@@ -7917,17 +7926,20 @@ class WayfinderApp(ctk.CTk):
         ).pack(side="left")
         current_mods = self.config.get("hotkey_modifiers", [])
         self._hotkey_mod_vars = {}
+        self._hotkey_mod_checks = {}
         for mod in ["ctrl", "alt", "shift"]:
             var = ctk.BooleanVar(value=mod in current_mods)
             self._hotkey_mod_vars[mod] = var
-            ctk.CTkCheckBox(
+            checkbox = ctk.CTkCheckBox(
                 mod_row, text=mod.capitalize(), variable=var,
                 font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_primary"],
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
                 checkmark_color="#000000", width=24,
                 command=self._on_hotkey_mod_changed,
-            ).pack(side="right", padx=(8, 0))
+            )
+            checkbox.pack(side="right", padx=(8, 0))
+            self._hotkey_mod_checks[mod] = checkbox
         
         # UI Scale slider
         self._create_scale_slider_row(system_content)
@@ -8880,8 +8892,11 @@ class WayfinderApp(ctk.CTk):
                 )
 
             # Save post-processing results + pipeline headline
-            if pp_results:
-                self.config["postprocessing_benchmark_results"] = pp_results
+            # A completed run owns this snapshot even when it found no cleanup
+            # models. Keeping the old non-empty dict mixed an Aug 16 Gemma time
+            # into an Aug 26 speech-only run and labeled the whole card with the
+            # newer timestamp, making stale data look current.
+            self.config["postprocessing_benchmark_results"] = pp_results
             if pipeline:
                 self.config["pipeline_benchmark"] = pipeline
                 if pipeline.get("fastest_postprocessor"):
@@ -10088,17 +10103,20 @@ class WayfinderApp(ctk.CTk):
         ).pack(side="left")
         current_style_mods = self.config.get("style_toggle_modifiers", [])
         self._style_hotkey_mod_vars = {}
+        self._style_hotkey_mod_checks = {}
         for mod in ["ctrl", "alt", "shift"]:
             var = ctk.BooleanVar(value=mod in current_style_mods)
             self._style_hotkey_mod_vars[mod] = var
-            ctk.CTkCheckBox(
+            checkbox = ctk.CTkCheckBox(
                 style_mod_row, text=mod.capitalize(), variable=var,
                 font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_primary"],
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
                 checkmark_color="#000000", width=24,
                 command=self._on_style_hotkey_mod_changed,
-            ).pack(side="right", padx=(8, 0))
+            )
+            checkbox.pack(side="right", padx=(8, 0))
+            self._style_hotkey_mod_checks[mod] = checkbox
         
         # === 🎭 SECRET: Caricature Mode Keyboard Detection ===
         # Track keystrokes to detect "lol" or "haha" (easter egg still works!)
@@ -15225,6 +15243,14 @@ class WayfinderApp(ctk.CTk):
           - Else (typical when KDE owns F3 and defers evdev) → start a
             capture-only temporary listener so Detect still sees keys.
         """
+        # Once a live GlobalShortcuts session exists, the desktop is the only
+        # authority that can change it. Ask the standard portal to open its
+        # configuration UI instead of letting Detect change a second, inert
+        # local value (the F4-dropdown/F3-live mismatch found in release test).
+        if getattr(self, "_portal_listener_started", False):
+            self._request_portal_shortcut_configuration()
+            return
+
         # A live pynput listener can capture on its own, so no evdev in the
         # Flatpak is not fatal — gating on evdev alone made Detect dead in
         # every Flatpak install (src/wayfinder/hotkeys/detect_gate.py).
@@ -15363,27 +15389,63 @@ class WayfinderApp(ctk.CTk):
         self._update_portal_binding_captions()
 
     def _update_portal_binding_captions(self) -> None:
-        """Show the compositor's live binding under each hotkey row."""
+        """Show the compositor's live binding and lock inert local controls."""
         triggers = getattr(self, "_portal_triggers", None) or {}
-        for shortcut_id, attr in (
-            ("record-toggle", "_portal_caption_record"),
-            ("style-toggle", "_portal_caption_style"),
+        portal_active = bool(
+            triggers or getattr(self, "_portal_listener_started", False)
+        )
+        for shortcut_id, caption_attr, dropdown_attr, checks_attr, button_attr in (
+            (
+                "record-toggle", "_portal_caption_record", "hotkey_dropdown",
+                "_hotkey_mod_checks", "_detect_btn_record",
+            ),
+            (
+                "style-toggle", "_portal_caption_style", "style_hotkey_dropdown",
+                "_style_hotkey_mod_checks", "_detect_btn_style",
+            ),
         ):
-            label = getattr(self, attr, None)
+            label = getattr(self, caption_attr, None)
             if label is None:
                 continue
             desc = triggers.get(shortcut_id)
             try:
-                if desc:
+                if portal_active:
                     label.configure(
-                        text=f"🖥 Desktop binding: {desc} — change in "
-                             f"System Settings → Shortcuts")
+                        text=(f"🖥 Desktop binding: {desc}" if desc else
+                              "🖥 Your desktop manages this global shortcut"))
                     if not label.winfo_manager():
                         label.pack(anchor="w", padx=16, pady=(0, 6))
+                    dropdown = getattr(self, dropdown_attr, None)
+                    if dropdown is not None:
+                        dropdown.configure(state="disabled")
+                    for checkbox in getattr(self, checks_attr, {}).values():
+                        checkbox.configure(state="disabled")
+                    button = getattr(self, button_attr, None)
+                    if button is not None:
+                        button.configure(
+                            text="Change in Desktop Shortcuts", state="normal"
+                        )
                 else:
                     label.pack_forget()
+                    dropdown = getattr(self, dropdown_attr, None)
+                    if dropdown is not None:
+                        dropdown.configure(state="normal")
+                    for checkbox in getattr(self, checks_attr, {}).values():
+                        checkbox.configure(state="normal")
+                    button = getattr(self, button_attr, None)
+                    if button is not None:
+                        button.configure(text=self._DETECT_IDLE_TEXT, state="normal")
             except Exception:
                 pass
+
+    def _request_portal_shortcut_configuration(self) -> None:
+        """Open the desktop-owned editor through GlobalShortcuts portal v2."""
+        control = getattr(self, "_portal_control_queue", None)
+        if control is None:
+            self.log("🖥 Open System Settings → Shortcuts to change this binding")
+            return
+        control.put("configure")
+        self.log("🖥 Asking your desktop to open its shortcut settings…")
 
     def _on_tk_detect_key(self, event):
         """Focus-capture path: the next key pressed in OUR window while a
@@ -15424,7 +15486,12 @@ class WayfinderApp(ctk.CTk):
     def _reset_detect_button(self, target: str) -> None:
         btn = self._detect_btn_record if target == "record" else self._detect_btn_style
         try:
-            btn.configure(text=self._DETECT_IDLE_TEXT, state="normal")
+            text = (
+                "Change in Desktop Shortcuts"
+                if getattr(self, "_portal_listener_started", False)
+                else self._DETECT_IDLE_TEXT
+            )
+            btn.configure(text=text, state="normal")
         except Exception:
             pass  # settings panel may have been rebuilt/destroyed
 
@@ -18242,7 +18309,9 @@ class WayfinderApp(ctk.CTk):
             clean_stop = False
             try:
                 clean_stop = wayland_hotkey_listener(
-                    self.event_queue, shortcuts, self.stop_event, self.log)
+                    self.event_queue, shortcuts, self.stop_event, self.log,
+                    self._portal_control_queue,
+                )
             except Exception as e:
                 print(f"[Hotkey] portal listener crashed: {e}", flush=True)
             finally:
