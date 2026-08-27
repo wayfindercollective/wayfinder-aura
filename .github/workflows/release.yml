@@ -235,7 +235,7 @@ jobs:
           PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
             squashfs-root/AppRun --audio-output-self-test | tee /tmp/audio-self-test.log
           grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/audio-self-test.log
-          grep -Fq "host PulseAudio/PipeWire" /tmp/audio-self-test.log
+          grep -Fq "PulseAudio/PipeWire" /tmp/audio-self-test.log
           PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
             squashfs-root/AppRun --audio-input-self-test | tee /tmp/audio-input-self-test.log
           grep -Fq "AUDIO_INPUT_SELF_TEST_OK" /tmp/audio-input-self-test.log

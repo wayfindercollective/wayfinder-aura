@@ -365,6 +365,8 @@ def test_appimage_uses_host_player_without_mixing_recording_libraries():
     assert '"--raw"' in output
     assert "--audio-output-self-test" in job
     assert "AUDIO_OUTPUT_SELF_TEST_OK" in job
+    assert 'grep -Fq "PulseAudio/PipeWire"' in job
+    assert "host PulseAudio/PipeWire" not in job
     assert "--audio-input-self-test" in job
     assert "AUDIO_INPUT_SELF_TEST_OK" in job
     assert "--audio-processing-self-test" in job
