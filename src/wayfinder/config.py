@@ -167,7 +167,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
     
-    # Hotkey settings — Ctrl+Alt+Space / Ctrl+Alt+S by default.
+    # Hotkey settings — Ctrl+Alt+Space / Ctrl+Alt+Enter by default.
     # Chosen 2026-07 over Super+F2: first-run users didn't know what the
     # "Super" key was (launch feedback), and every keyboard labels Ctrl/Alt/
     # Space. Still game-safe: bare F-keys collide with countless game keybinds

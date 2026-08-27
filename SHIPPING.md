@@ -18,7 +18,7 @@ between the repo and a live listing.
   Flathub pattern (Sublime Text, Bitwig, Master PDF Editor); Flathub has no
   native payments as of mid-2026.
 - ✅ Metainfo: real developer/URLs, ≤35-char summary, OARS rating, branding
-  colors, and a dated `1.1.8-beta.10` candidate entry.
+  colors, and a dated stable `1.1.8` release entry.
 - ✅ Screenshot paths referenced by AppStream exist and are refreshed at
   1920×1080:
   `screenshots/main-window.png` and `screenshots/settings.png`.
@@ -36,7 +36,7 @@ between the repo and a live listing.
 - ✅ Hardware safety nets: name-based mic persistence + pactl-curated picker,
   silent-capture guard, sample-rate fallback w/ resampling, whisper-cli flag
   probing (old/new binaries), download integrity checks, GameMode-aware
-  hotkeys, Super+F2/F3 defaults.
+  hotkeys, and conflict-resistant Ctrl+Alt+Space/Enter defaults.
 - ✅ Official Flathub manifest linter is clean locally. Builddir/repo lint now
   reaches the exported artifact; its only current errors are the expected
   screenshot-mirroring checks that clear after Flathub imports the screenshots.
@@ -54,8 +54,8 @@ reviewer Ultra keys, human PR only).
 - See `docs/GO-LIVE-INPUTS.md`.
 
 ### 2. Public repo + tag
-- Repo is public. **`v1.1.8-beta.10`** is published; create stable **`v1.1.8`**
-  only after hands-on signoff. Never move an existing tag.
+- Repo is public. **`v1.1.8-beta.10`** is published; stable **`v1.1.8`** is
+  prepared after hands-on signoff and must not be moved once tagged.
 - The fast Quality job on `main` and
   `scripts/ci/build-flatpak-on-mini-inf.sh` must both be green before tagging.
   Heavy artifacts no longer rebuild on every push, and mini-inf is not exposed

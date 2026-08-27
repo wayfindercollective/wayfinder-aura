@@ -125,73 +125,16 @@
   </supports>
 
   <releases>
-    <release version="1.1.8-beta.10" date="2026-08-17" type="development">
+    <release version="1.1.8" date="2026-08-26">
       <description>
-        <p>Prerelease making model downloads verifiable end to end:</p>
+        <p>Faster local dictation, dependable sandbox integration, and clearer update behavior:</p>
         <ul>
-          <li>Every model Wayfinder Aura downloads is now checked against a known fingerprint before it is installed, so a corrupted or altered file is refused instead of quietly becoming your speech model</li>
-          <li>Downloads are size-bounded and stay on secure connections throughout, including across redirects</li>
-          <li>A dropped connection retries by itself, and free models can fall back to their original source, so ordinary network trouble no longer interrupts a download</li>
-          <li>Model listings now report exact file sizes rather than rounded estimates</li>
-          <li>Steam Deck helper logs moved to a private per-session directory instead of a world-readable temporary file</li>
-        </ul>
-      </description>
-    </release>
-    <release version="1.1.8-beta.9" date="2026-08-16" type="development">
-      <description>
-        <p>Prerelease making the speed benchmark honest and easier to read:</p>
-        <ul>
-          <li>CPU-vs-GPU comparisons now warm caches first and report model loading separately from speech-to-text time, making results closer to warmed-up dictation and preventing one-time startup costs from skewing the comparison</li>
-          <li>Fast results display with enough precision instead of rounding to a misleading zero</li>
-          <li>The benchmark panel speaks plainly: speech-to-text instead of ASR, realtime instead of RT, and it says exactly how it measures</li>
-          <li>Older benchmark numbers measured the old cold way are retired rather than shown next to incomparable warm results</li>
-        </ul>
-      </description>
-    </release>
-    <release version="1.1.8-beta.8" date="2026-08-15" type="development">
-      <description>
-        <p>Prerelease hardening the new portal hotkeys:</p>
-        <ul>
-          <li>Hotkeys recover automatically if the desktop portal restarts or the compositor closes the shortcut session, instead of staying silently dead until relaunch</li>
-          <li>Repeated portal failures retry with increasing delays instead of every ten seconds</li>
-          <li>Hand-edited configuration files with malformed hotkey modifiers can no longer prevent startup</li>
-        </ul>
-      </description>
-    </release>
-    <release version="1.1.8-beta.7" date="2026-08-15" type="development">
-      <description>
-        <p>Prerelease bringing working global hotkeys to sandboxed Wayland sessions:</p>
-        <ul>
-          <li>The Flatpak now registers its shortcuts through the desktop's GlobalShortcuts portal — approve the prompt once, or bind them in System Settings, and the record and style-cycle hotkeys work on Wayland</li>
-          <li>A cancelled or unanswered shortcut prompt no longer retriggers the dialog; bind later in System Settings whenever you like</li>
-          <li>Only shortcuts belonging to this app's portal session can trigger recording</li>
-          <li>Documentation now describes each install method's hotkey mechanism accurately</li>
-        </ul>
-      </description>
-    </release>
-    <release version="1.1.8-beta.6" date="2026-08-15" type="development">
-      <description>
-        <p>Prerelease focused on dictation reliability and a smoother Ultra experience:</p>
-        <ul>
-          <li>Dictated text is no longer corrupted when the hotkey's modifier keys are still held as typing starts</li>
-          <li>Activating Ultra now updates the footer tier label and retires upgrade prompts immediately; deactivating restores the Free footer label</li>
-          <li>A dismissible launch tip points Ultra users to upgrades they haven't switched on yet, like GPU acceleration and premium models</li>
-          <li>Switching GPU acceleration on or off always restarts the speech engine so the new mode takes effect</li>
-          <li>An inline feedback form in Settings sends your thoughts straight to the Wayfinder team</li>
-          <li>The status overlay can cross the Plasma taskbar on X11, and links reliably open through the desktop portal</li>
-        </ul>
-      </description>
-    </release>
-    <release version="1.1.8-beta.5" date="2026-08-12" type="development">
-      <description>
-        <p>Prerelease candidate for faster packaged inference and more reliable dictation:</p>
-        <ul>
-          <li>Automatic long-recording chunk processing preserves the complete transcript before cleanup and Auto-Enter</li>
-          <li>AppImage inference follows the current mount and no longer inherits PyInstaller's private library directory</li>
-          <li>Whisper server recovery preserves a bounded CLI salvage path instead of returning an avoidable empty result</li>
-          <li>The status overlay stays above the Plasma panel and its position control can place visible content at the physical screen edge</li>
-          <li>Custom vocabulary is protected through every writing style and both packaged local-cleanup paths</li>
-          <li>Inline Settings spacing remains stable across repeated opens on HiDPI displays</li>
+          <li>Local cleanup models can stay loaded between dictations, substantially reducing repeated cleanup latency while retaining a save-memory option</li>
+          <li>Flatpak hotkeys use the desktop's GlobalShortcuts portal, show the compositor's live bindings, and open the desktop shortcut editor instead of presenting settings that cannot take effect</li>
+          <li>Downloaded speech and cleanup models are verified against pinned fingerprints, size-bounded, and kept on secure connections across redirects</li>
+          <li>CPU-versus-GPU benchmarks warm models first, separate one-time loading from processing, and retire stale results when a model is unavailable</li>
+          <li>Installed users are notified when a newer applicable GitHub release is available, while Flathub installs follow Flathub's managed update channel</li>
+          <li>Flatpak audio feedback is isolated from microphone capture teardown for more reliable repeated dictation</li>
         </ul>
       </description>
     </release>

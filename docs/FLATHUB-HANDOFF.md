@@ -39,7 +39,7 @@ Reviewers must be able to test paid features. Have a process to issue a **tempor
 | Item | Status |
 |------|--------|
 | Production license URL | `shiny-goshawk-432.convex.site/activate` |
-| Version | **1.1.8-beta.10** candidate; stable **1.1.8** pending hands-on signoff |
+| Version | Stable **1.1.8** release candidate; exact-commit mini-inf build pending |
 | Freemium disclosure in metainfo | Free tier + Ultra $29.99 / $60 + external checkout |
 | Host model FS grants removed | Sandbox `$HOME` only |
 | Compiled Python dependencies | Converted to offline source builds: shared OpenBLAS, CFFI, Cryptography, NumPy, SciPy, Pillow, Jiter, and Pydantic Core. Maturin and all locked Rust crates are source-vendored. |
