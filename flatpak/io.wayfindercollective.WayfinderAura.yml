@@ -45,7 +45,9 @@ finish-args:
   - --env=QT_QPA_PLATFORM=xcb
   - --share=ipc
   
-  # Audio recording (PipeWire/PulseAudio) - essential for voice dictation
+  # Audio recording plus playback ducking through PipeWire/PulseAudio. Aura gives
+  # only its short-lived pactl mutation client media.category=Manager (the same
+  # narrow control role used by pavucontrol); no raw PipeWire or host escape.
   - --socket=pulseaudio
   
   # D-Bus for system integration

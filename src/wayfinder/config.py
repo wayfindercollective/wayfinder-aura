@@ -43,6 +43,15 @@ def normalize_chunked_mode(value: object, default: str = "off") -> str:
         return normalized
     return default if default in CHUNKED_PROCESSING_MODES else "off"
 
+
+def normalize_duck_percent(value: object, default: int = 30) -> int:
+    """Return a safe whole-number duck amount in the public 0-100 range."""
+    try:
+        normalized = round(float(value))
+    except (TypeError, ValueError, OverflowError):
+        normalized = int(default)
+    return max(0, min(100, normalized))
+
 def _default_config_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "wayfinder-aura"
@@ -333,7 +342,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
     # Audio ducking settings (reduce other audio while recording)
     "audio_ducking_enabled": True,  # Enable automatic volume reduction during recording
-    "audio_ducking_percent": 30,  # How much to lower other audio (0-50, higher = quieter)
+    "audio_ducking_percent": 30,  # Reduction while recording (0=no change, 100=silence)
     
     # Style settings (5 presets that cycle via hotkey)
     # Minimal cleanup remains Free; the Style workspace/presets are Ultra.
@@ -764,6 +773,14 @@ def load_config() -> dict:
             # Merge with defaults (user config overrides defaults)
             config = DEFAULT_CONFIG.copy()
             config.update(user_config)
+
+            # Duck Amount was historically limited to 50 in the UI. Keep every
+            # valid saved choice while accepting the expanded 0-100 public range;
+            # malformed or out-of-range values cannot amplify audio or break CTk.
+            config["audio_ducking_percent"] = normalize_duck_percent(
+                config.get("audio_ducking_percent"),
+                default=DEFAULT_CONFIG["audio_ducking_percent"],
+            )
 
             # Migrate the old boolean Chunked Mode toggle into the new
             # Off/Auto/On selector. An existing config that somehow predates the

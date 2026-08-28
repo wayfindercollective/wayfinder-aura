@@ -188,7 +188,7 @@ The manifest requests these permissions:
 | Permission | Reason |
 |------------|--------|
 | `--socket=x11` | CustomTkinter UI and PyQt overlay through XWayland |
-| `--socket=pulseaudio` | Record audio |
+| `--socket=pulseaudio` | Record audio and manager-scoped playback ducking; only Aura's short-lived `pactl` mutation process is marked `media.category=Manager` |
 | `--talk-name=org.freedesktop.Notifications` | Desktop notifications |
 | `--talk-name=org.kde.StatusNotifierWatcher` | KDE/StatusNotifier tray icon |
 | `--filesystem=xdg-run/wayfinder-aura:create` | Host-trigger socket for shortcuts and Steam Deck R4 |

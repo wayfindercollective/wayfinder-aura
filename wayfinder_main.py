@@ -91,6 +91,7 @@ from wayfinder.config import (
     IS_FLATPAK,
     load_config,
     normalize_chunked_mode,
+    normalize_duck_percent,
     save_config,
 )
 from wayfinder.utils.platform import get_portal_app_id
@@ -5340,8 +5341,9 @@ class WayfinderApp(ctk.CTk):
         self.chunk_transcription_lock = threading.Lock()
         
         # Audio ducker for reducing other audio during recording
-        duck_percent = self.config.get("audio_ducking_percent", 30)
+        duck_percent = normalize_duck_percent(self.config.get("audio_ducking_percent", 30))
         self.audio_ducker = AudioDucker(duck_percent=duck_percent)
+        self._duck_failure_message = None
         
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.logs = []
@@ -16021,7 +16023,7 @@ class WayfinderApp(ctk.CTk):
 
         ctk.CTkLabel(
             parent,
-            text="Automatically lower other audio while recording",
+            text="Lower audio already playing when recording starts",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=SPACING["lg"], pady=(0, 8))  # align with row labels
@@ -16032,7 +16034,7 @@ class WayfinderApp(ctk.CTk):
         self.create_toggle_row(
             parent, "Enable Audio Ducking",
             self.audio_ducking_var, self._on_audio_ducking_toggled,
-            tooltip="Automatically lower music and other audio while recording",
+            tooltip="Lower music and other audio already playing when recording starts",
         )
         
         # Duck percentage slider
@@ -16055,11 +16057,14 @@ class WayfinderApp(ctk.CTk):
         )
         label_widget.grid(row=0, column=0, sticky="w")
         
-        tooltip_text = "How much to lower other audio. Higher = quieter music while recording."
+        tooltip_text = (
+            "How much to lower other audio: 0% leaves it unchanged; "
+            "100% makes it silent while recording."
+        )
         ToolTip(label_widget, tooltip_text)
         
         # Get current duck percentage
-        duck_percent = self.config.get("audio_ducking_percent", 30)
+        duck_percent = normalize_duck_percent(self.config.get("audio_ducking_percent", 30))
         
         # Value display (right side, shows percentage)
         self.duck_percent_value_label = ctk.CTkLabel(
@@ -16097,7 +16102,7 @@ class WayfinderApp(ctk.CTk):
         self.duck_percent_slider = ctk.CTkSlider(
             row,
             from_=0,
-            to=50,
+            to=100,
             variable=self.duck_percent_slider_var,
             command=on_duck_slider_change,
             height=18,
@@ -16118,6 +16123,14 @@ class WayfinderApp(ctk.CTk):
         enabled = self.audio_ducking_var.get()
         self.config["audio_ducking_enabled"] = enabled
         save_config(self.config)
+
+        # Turning the feature off during a recording must restore immediately;
+        # turning it on may apply to the streams that are playing right now.
+        if hasattr(self, "audio_ducker"):
+            if not enabled:
+                self._enqueue_duck_action("restore")
+            elif getattr(self, "app_state", None) == AppState.RECORDING:
+                self._enqueue_duck_action("duck")
         
         # Update slider enabled state
         self._update_ducking_slider_state()
@@ -16138,6 +16151,7 @@ class WayfinderApp(ctk.CTk):
     
     def _apply_duck_percent(self, new_percent):
         """Apply duck percentage change."""
+        new_percent = normalize_duck_percent(new_percent)
         current = self.config.get("audio_ducking_percent", 30)
         if new_percent == current:
             return  # No change
@@ -17640,6 +17654,9 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, '_evdev_stop_event'):
             self._evdev_stop_event.set()
 
+        # Restore ducked streams before os._exit bypasses normal destructors.
+        self._close_audio_ducking()
+
         # Shutdown thread pool executors gracefully
         try:
             if hasattr(self, 'executor'):
@@ -17843,15 +17860,43 @@ class WayfinderApp(ctk.CTk):
             ).start()
         q.put(action)
 
+    def _close_audio_ducking(self) -> None:
+        """Restore owned stream volumes and make queued duck work inert."""
+        ducker = getattr(self, "audio_ducker", None)
+        if ducker is not None:
+            try:
+                ducker.close()
+            except Exception as exc:
+                print(f"[AudioDucker] shutdown restore failed: {exc}", flush=True)
+        q = getattr(self, "_duck_action_queue", None)
+        if q is not None:
+            try:
+                q.put(None)
+            except Exception:
+                pass
+
     def _duck_audio_safe(self, action: str) -> None:
         try:
             ducker = getattr(self, "audio_ducker", None)
             if ducker is None:
                 return
             if action == "duck":
-                ducker.duck()
+                result = ducker.duck()
             else:
-                ducker.restore()
+                result = ducker.restore()
+
+            # Do not claim success when the server rejected every write. Keep
+            # repeated recordings quiet in the Activity log by reporting each
+            # distinct failure once, and clear the latch after a clean result.
+            if result.should_notify and result.message:
+                if result.message != getattr(self, "_duck_failure_message", None):
+                    self._duck_failure_message = result.message
+                    try:
+                        self.after(0, lambda msg=result.message: self.log(f"⚠ {msg}"))
+                    except Exception:
+                        print(f"[AudioDucker] {result.message}", flush=True)
+            elif result.ok:
+                self._duck_failure_message = None
         except Exception as e:
             print(f"[AudioDucker] {action} failed: {e}", flush=True)
 
@@ -19714,6 +19759,10 @@ def main():
             if app:
                 # Signal all threads to stop
                 app.stop_event.set()
+
+                # Restore any stream volumes Aura still owns. The recovery
+                # journal remains if the audio server rejects a final retry.
+                app._close_audio_ducking()
                 
                 # Shutdown thread pool executors gracefully
                 if hasattr(app, 'executor'):

@@ -1050,6 +1050,7 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
     assert "--filesystem=xdg-config/wayfinder-aura" not in manifest
     assert "--filesystem=xdg-cache/wayfinder-aura:create" not in manifest
     assert "--talk-name=org.freedesktop.Flatpak" not in manifest
+    assert "pipewire-0" not in manifest
     assert "--talk-name=org.freedesktop.portal." not in manifest
     assert re.search(r"(?m)^  - name: ydotool$", manifest) is None
     assert re.search(r"(?m)^  - name: wtype$", manifest)
@@ -1065,6 +1066,22 @@ def test_flatpak_runtime_baseapp_and_permissions_are_release_safe():
     # the same manifest cleanly. CPU fallback modules stay OFF by design.
     assert manifest.count("-DGGML_VULKAN=ON") == 2
     assert manifest.count("-DGGML_VULKAN=OFF") >= 2
+
+
+def test_audio_ducking_uses_narrow_manager_client_and_full_public_range():
+    ducker = (REPO / "src" / "wayfinder" / "utils" / "audio_ducker.py").read_text(
+        encoding="utf-8"
+    )
+    main = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
+
+    assert '"PULSE_PROP_media.category": "Manager"' in ducker
+    assert "manager=True" in ducker
+    assert "--talk-name=org.freedesktop.Flatpak" not in _manifest_text()
+    assert "pipewire-0" not in _manifest_text()
+    slider = main[main.index("def _create_audio_ducking_slider_row"):]
+    slider = slider[:slider.index("def _on_audio_ducking_toggled")]
+    assert "from_=0" in slider
+    assert "to=100" in slider
 
 
 def test_flatpak_git_sources_are_all_tag_and_commit_pinned():

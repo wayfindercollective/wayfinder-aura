@@ -86,6 +86,8 @@ from .logging import (
 
 from .audio_ducker import (
     AudioDucker,
+    DuckingResult,
+    DuckingStatus,
     is_pactl_available,
     get_sink_inputs,
     set_sink_input_volume,
@@ -163,6 +165,8 @@ __all__ = [
     "get_log_file_path",
     # Audio Ducking
     "AudioDucker",
+    "DuckingResult",
+    "DuckingStatus",
     "is_pactl_available",
     "get_sink_inputs",
     "set_sink_input_volume",

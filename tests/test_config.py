@@ -32,6 +32,23 @@ class TestConfigLoading:
         for key in required_keys:
             assert key in DEFAULT_CONFIG, f"Missing required key: {key}"
 
+    @pytest.mark.parametrize(
+        ("saved", "expected"),
+        [(-1, 0), (0, 0), (50, 50), (100, 100), (175, 100), ("72", 72), (None, 30)],
+    )
+    def test_duck_amount_is_normalized_to_public_range(self, saved, expected):
+        from wayfinder.config import normalize_duck_percent
+
+        assert normalize_duck_percent(saved) == expected
+
+    def test_load_clamps_invalid_saved_duck_amount(self, temp_config_dir: Path):
+        from wayfinder.config import CONFIG_FILE, load_config
+
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps({"audio_ducking_percent": 250}))
+
+        assert load_config()["audio_ducking_percent"] == 100
+
     def test_free_product_defaults_are_base_cpu_minimal(self):
         from wayfinder.config import DEFAULT_CONFIG
 

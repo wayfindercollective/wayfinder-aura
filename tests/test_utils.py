@@ -6,7 +6,9 @@ Tests for utility modules:
 """
 
 import importlib
+import json
 import logging
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -235,101 +237,201 @@ class TestParseSinkInputs:
         assert _parse_sink_inputs("") == []
         assert _parse_sink_inputs("\n\n") == []
 
+    def test_json_parser_preserves_channels_mute_and_serial(self):
+        from wayfinder.utils.audio_ducker import _parse_sink_inputs_json
+
+        result = _parse_sink_inputs_json(json.dumps([{
+            "index": 42,
+            "client": 7,
+            "mute": True,
+            "volume": {
+                "front-left": {"value": 65536, "value_percent": "100%"},
+                "front-right": {"value": 32768, "value_percent": "50%"},
+            },
+            "properties": {
+                "application.name": "Player",
+                "object.serial": "9001",
+            },
+        }]))
+
+        assert result[0]["channel_volumes"] == [65536, 32768]
+        assert result[0]["muted"] is True
+        assert result[0]["identity"] == "serial:9001"
+
 
 class TestAudioDucker:
     """Tests for AudioDucker class with mocked pactl."""
+
+    @staticmethod
+    def stream(
+        sink_id=100,
+        volumes=(65536, 65536),
+        app_name="Firefox",
+        serial="serial-100",
+    ):
+        from wayfinder.utils.audio_ducker import _finish_stream
+
+        return _finish_stream(
+            {
+                "id": sink_id,
+                "client": "client-1",
+                "channel_volumes": list(volumes),
+                "muted": False,
+                "app_name": app_name,
+                "serial": serial,
+                "properties": {
+                    "application.name": app_name,
+                    "application.process.id": "1234",
+                    "object.serial": serial,
+                },
+            }
+        )
+
+    @staticmethod
+    def query_ok():
+        from wayfinder.utils.audio_ducker import _PactlResult
+
+        return _PactlResult(True)
+
+    @staticmethod
+    def set_ok():
+        from wayfinder.utils.audio_ducker import _PactlResult
+
+        return _PactlResult(True)
 
     @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
     def test_ducker_init_available(self, mock_avail):
         """AudioDucker marks itself available when pactl is present."""
         from wayfinder.utils.audio_ducker import AudioDucker
 
-        ducker = AudioDucker(duck_percent=20.0)
+        ducker = AudioDucker(duck_percent=20.0, recovery_path=None)
         assert ducker.is_available is True
         assert ducker.is_ducked is False
 
     @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=False)
     def test_ducker_init_unavailable(self, mock_avail):
         """AudioDucker gracefully handles missing pactl."""
-        from wayfinder.utils.audio_ducker import AudioDucker
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
 
-        ducker = AudioDucker()
+        ducker = AudioDucker(recovery_path=None)
         assert ducker.is_available is False
-        assert ducker.duck() is False
-        assert ducker.restore() is False
+        assert ducker.duck().status is DuckingStatus.UNAVAILABLE
+        assert ducker.restore().status is DuckingStatus.UNAVAILABLE
 
-    @patch("wayfinder.utils.audio_ducker.set_sink_input_volume", return_value=True)
-    @patch("wayfinder.utils.audio_ducker.get_sink_inputs")
+    @patch("wayfinder.utils.audio_ducker._set_sink_input_channel_volumes")
+    @patch("wayfinder.utils.audio_ducker._query_sink_inputs")
     @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
-    def test_duck_reduces_volume(self, mock_avail, mock_get_sinks, mock_set_vol):
-        """duck() should reduce each sink input volume by the duck percentage."""
-        from wayfinder.utils.audio_ducker import AudioDucker
+    def test_duck_reduces_each_channel(self, mock_avail, mock_query, mock_set):
+        """duck() should reduce every channel by the configured percentage."""
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
 
-        mock_get_sinks.return_value = [
-            {"id": 100, "volume_percent": 100, "app_name": "Firefox"},
-        ]
-        ducker = AudioDucker(duck_percent=25.0)
+        stream = self.stream(volumes=(65536, 32768))
+        mock_query.side_effect = [([stream], self.query_ok()), ([
+            self.stream(volumes=(49152, 24576))
+        ], self.query_ok())]
+        mock_set.return_value = self.set_ok()
+        ducker = AudioDucker(duck_percent=25.0, recovery_path=None)
         result = ducker.duck()
 
-        assert result is True
+        assert result.status is DuckingStatus.APPLIED
         assert ducker.is_ducked is True
-        # 100% * (1 - 0.25) = 75%
-        mock_set_vol.assert_called_once_with(100, 75)
+        mock_set.assert_called_once_with(100, [49152, 24576])
+        assert ducker.restore().status is DuckingStatus.RESTORED
+        assert mock_set.call_args_list[-1] == call(100, [65536, 32768])
 
-    @patch("wayfinder.utils.audio_ducker.set_sink_input_volume", return_value=True)
-    @patch("wayfinder.utils.audio_ducker.get_sink_inputs")
+    @patch("wayfinder.utils.audio_ducker._set_sink_input_channel_volumes")
+    @patch("wayfinder.utils.audio_ducker._query_sink_inputs")
     @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
-    def test_duck_excludes_apps(self, mock_avail, mock_get_sinks, mock_set_vol):
-        """duck() should skip excluded applications."""
+    def test_duck_100_percent_means_silence(self, mock_avail, mock_query, mock_set):
         from wayfinder.utils.audio_ducker import AudioDucker
 
-        mock_get_sinks.return_value = [
-            {"id": 100, "volume_percent": 80, "app_name": "Firefox"},
-            {"id": 200, "volume_percent": 90, "app_name": "Wayfinder"},
-        ]
-        ducker = AudioDucker(duck_percent=50.0, exclude_apps=["Wayfinder"])
+        mock_query.return_value = ([self.stream()], self.query_ok())
+        mock_set.return_value = self.set_ok()
+        ducker = AudioDucker(duck_percent=100, recovery_path=None)
         ducker.duck()
 
-        # Only Firefox should be ducked, not Wayfinder
-        mock_set_vol.assert_called_once_with(100, 40)
+        mock_set.assert_called_once_with(100, [0, 0])
+        ducker._is_ducked = False
 
-    @patch("wayfinder.utils.audio_ducker.set_sink_input_volume", return_value=True)
-    @patch("wayfinder.utils.audio_ducker.get_sink_inputs")
+    @patch("wayfinder.utils.audio_ducker._set_sink_input_channel_volumes")
+    @patch("wayfinder.utils.audio_ducker._query_sink_inputs")
     @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
-    def test_restore_returns_original_volume(self, mock_avail, mock_get_sinks, mock_set_vol):
-        """restore() should set volumes back to their original values."""
+    def test_duck_excludes_aura_and_configured_apps(self, mock_avail, mock_query, mock_set):
         from wayfinder.utils.audio_ducker import AudioDucker
 
-        mock_get_sinks.return_value = [
-            {"id": 100, "volume_percent": 80, "app_name": "Firefox"},
-        ]
-        ducker = AudioDucker(duck_percent=50.0)
+        mock_query.return_value = ([
+            self.stream(100, app_name="Firefox", serial="a"),
+            self.stream(200, app_name="Wayfinder Aura", serial="b"),
+            self.stream(300, app_name="Music Test", serial="c"),
+        ], self.query_ok())
+        mock_set.return_value = self.set_ok()
+        ducker = AudioDucker(
+            duck_percent=50.0,
+            exclude_apps=["Music Test"],
+            recovery_path=None,
+        )
         ducker.duck()
-        mock_set_vol.reset_mock()
 
-        ducker.restore()
+        mock_set.assert_called_once_with(100, [32768, 32768])
+        ducker._is_ducked = False
+
+    @patch("wayfinder.utils.audio_ducker._set_sink_input_channel_volumes")
+    @patch("wayfinder.utils.audio_ducker._query_sink_inputs")
+    @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
+    def test_all_denied_is_truthful(self, mock_avail, mock_query, mock_set):
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus, _PactlResult
+
+        mock_query.return_value = ([self.stream()], self.query_ok())
+        mock_set.return_value = _PactlResult(False, "permission_denied", "Access denied")
+        ducker = AudioDucker(duck_percent=50, recovery_path=None)
+        result = ducker.duck()
+
+        assert result.status is DuckingStatus.PERMISSION_DENIED
         assert ducker.is_ducked is False
-        mock_set_vol.assert_called_once_with(100, 80)
+        assert ducker._records == {}
+
+    @patch("wayfinder.utils.audio_ducker._set_sink_input_channel_volumes")
+    @patch("wayfinder.utils.audio_ducker._query_sink_inputs")
+    @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
+    def test_partial_success_tracks_only_successful_writes(self, mock_avail, mock_query, mock_set):
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus, _PactlResult
+
+        mock_query.return_value = ([
+            self.stream(100, serial="a"),
+            self.stream(200, serial="b"),
+        ], self.query_ok())
+        mock_set.side_effect = [self.set_ok(), _PactlResult(False, "permission_denied")]
+        ducker = AudioDucker(duck_percent=50, recovery_path=None)
+        result = ducker.duck()
+
+        assert result.status is DuckingStatus.PARTIAL
+        assert result.changed_count == 1
+        assert result.failed_count == 1
+        assert set(ducker._records) == {100}
+        ducker._is_ducked = False
 
     @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
     def test_double_duck_prevented(self, mock_avail):
         """Calling duck() twice should not double-duck."""
-        from wayfinder.utils.audio_ducker import AudioDucker
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
 
-        with patch("wayfinder.utils.audio_ducker.get_sink_inputs", return_value=[
-            {"id": 1, "volume_percent": 100, "app_name": "App"},
-        ]), patch("wayfinder.utils.audio_ducker.set_sink_input_volume", return_value=True):
-            ducker = AudioDucker(duck_percent=20.0)
+        with patch("wayfinder.utils.audio_ducker._query_sink_inputs", return_value=(
+            [self.stream(1)], self.query_ok()
+        )), patch(
+            "wayfinder.utils.audio_ducker._set_sink_input_channel_volumes",
+            return_value=self.set_ok(),
+        ):
+            ducker = AudioDucker(duck_percent=20.0, recovery_path=None)
             ducker.duck()
-            # Second duck should return False
-            assert ducker.duck() is False
+            assert ducker.duck().status is DuckingStatus.ALREADY_DUCKED
+            ducker._is_ducked = False
 
     @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
     def test_set_duck_percent_clamps(self, mock_avail):
         """set_duck_percent should clamp to 0-100 range."""
         from wayfinder.utils.audio_ducker import AudioDucker
 
-        ducker = AudioDucker(duck_percent=50.0)
+        ducker = AudioDucker(duck_percent=50.0, recovery_path=None)
 
         ducker.set_duck_percent(150)
         assert ducker._duck_percent == 100
@@ -338,15 +440,100 @@ class TestAudioDucker:
         assert ducker._duck_percent == 0
 
     @patch("wayfinder.utils.audio_ducker.subprocess.run")
-    def test_set_sink_input_volume_clamps_to_150(self, mock_run):
-        """set_sink_input_volume should cap at 150%."""
+    def test_set_sink_input_volume_uses_manager_env_and_clamps(self, mock_run):
+        """Only pactl mutations receive the narrow manager identity."""
         from wayfinder.utils.audio_ducker import set_sink_input_volume
 
         mock_run.return_value = MagicMock(returncode=0)
         set_sink_input_volume(1, 200)
-        # Should be clamped to 150%
         args = mock_run.call_args[0][0]
         assert "150%" in args
+        env = mock_run.call_args.kwargs["env"]
+        assert env["PULSE_PROP_media.category"] == "Manager"
+        assert env["LC_ALL"] == "C"
+
+    @patch.dict(os.environ, {"PULSE_PROP_media.category": "Manager"})
+    def test_read_only_query_environment_drops_manager_identity(self):
+        from wayfinder.utils.audio_ducker import _pactl_env
+
+        assert "PULSE_PROP_media.category" not in _pactl_env(manager=False)
+
+    @patch("wayfinder.utils.audio_ducker._set_sink_input_channel_volumes")
+    @patch("wayfinder.utils.audio_ducker._query_sink_inputs")
+    @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
+    def test_restore_skips_reused_stream_id(self, mock_avail, mock_query, mock_set):
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
+
+        original = self.stream(100, serial="old")
+        reused = self.stream(100, volumes=(32768, 32768), serial="new")
+        mock_query.side_effect = [([original], self.query_ok()), ([reused], self.query_ok())]
+        mock_set.return_value = self.set_ok()
+        ducker = AudioDucker(duck_percent=50, recovery_path=None)
+        ducker.duck()
+        mock_set.reset_mock()
+
+        result = ducker.restore()
+
+        assert result.status is DuckingStatus.NO_CHANGE
+        assert result.skipped_count == 1
+        mock_set.assert_not_called()
+        assert ducker.is_ducked is False
+
+    @patch("wayfinder.utils.audio_ducker._set_sink_input_channel_volumes")
+    @patch("wayfinder.utils.audio_ducker._query_sink_inputs")
+    @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
+    def test_restore_does_not_overwrite_user_change(self, mock_avail, mock_query, mock_set):
+        from wayfinder.utils.audio_ducker import AudioDucker
+
+        original = self.stream(100, volumes=(65536, 32768))
+        user_changed = self.stream(100, volumes=(40000, 20000))
+        mock_query.side_effect = [([original], self.query_ok()), ([user_changed], self.query_ok())]
+        mock_set.return_value = self.set_ok()
+        ducker = AudioDucker(duck_percent=50, recovery_path=None)
+        ducker.duck()
+        mock_set.reset_mock()
+
+        result = ducker.restore()
+
+        assert result.skipped_count == 1
+        mock_set.assert_not_called()
+        assert ducker.is_ducked is False
+
+    @patch("wayfinder.utils.audio_ducker._set_sink_input_channel_volumes")
+    @patch("wayfinder.utils.audio_ducker._query_sink_inputs")
+    @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
+    def test_stale_journal_restores_after_crash(self, mock_avail, mock_query, mock_set, tmp_path):
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
+
+        journal = tmp_path / "audio-duck-recovery.json"
+        original = self.stream(100)
+        ducked = self.stream(100, volumes=(32768, 32768))
+        record = AudioDucker._record_for(original, [32768, 32768])
+        journal.write_text(json.dumps({"version": 1, "pid": 0, "streams": [record]}))
+        mock_query.return_value = ([ducked], self.query_ok())
+        mock_set.return_value = self.set_ok()
+
+        ducker = AudioDucker(duck_percent=50, recovery_path=journal)
+
+        assert ducker.recovery_result.status is DuckingStatus.RESTORED
+        mock_set.assert_called_once_with(100, [65536, 65536])
+        assert not journal.exists()
+
+    @patch("wayfinder.utils.audio_ducker._pid_is_alive", return_value=True)
+    @patch("wayfinder.utils.audio_ducker._query_sink_inputs")
+    @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=True)
+    def test_live_process_journal_is_not_touched(self, mock_avail, mock_query, mock_alive, tmp_path):
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
+
+        journal = tmp_path / "audio-duck-recovery.json"
+        record = AudioDucker._record_for(self.stream(), [32768, 32768])
+        journal.write_text(json.dumps({"version": 1, "pid": os.getpid() + 10_000, "streams": [record]}))
+
+        ducker = AudioDucker(duck_percent=50, recovery_path=journal)
+
+        assert ducker.recovery_result.status is DuckingStatus.NO_CHANGE
+        mock_query.assert_not_called()
+        assert journal.exists()
 
 
 # =============================================================================
