@@ -47,7 +47,27 @@ cd infra/models-cdn && npx wrangler deploy
 4. `python3 scripts/publish_model_catalog.py --skip-export`
 5. Users get it on next app launch / cache expiry.
 
-To **remove** a model remotely: set `"disabled": true` on that id and re-publish.
+## Retire a model (never delete the key)
+
+To **retire** a model remotely, set `"disabled": true` on that id and re-publish:
+
+```json
+"llm": { "phi-3-mini": { "disabled": true } }
+```
+
+`merge_section()` pops a `disabled` id out of the merged catalog, so the model stops
+being offered **on already-installed clients too**. Deleting the id from
+`catalog/v1.json` does the opposite of what you want: with nothing to overlay, an old
+client keeps offering its own built-in entry forever. A retired row therefore stays in
+the published catalog as `{"disabled": true}` indefinitely.
+
+Retiring is catalog-only. Do **not** delete the R2 object and do **not** trim
+`FREE_CLEANUP_MODEL_FILENAMES` or the `config._LLM_PREFERENCE` legacy tail — users who
+already downloaded the file must keep being able to load it from disk.
+
+The 2026-09 refresh retired `lfm2.5-1.2b`, `llama3.2-1b`, `phi-3-mini`,
+`qwen2.5-1.5b` and `smollm2-360m` this way. The shipped lineup is Gemma 3 1B (Free,
+recommended) / Qwen 3.5 2B (Free) / Qwen3 4B Instruct 2507 (Ultra).
 
 ## Scout (don’t monitor HF yourself)
 
@@ -112,16 +132,44 @@ Scout **never** auto-publishes. You approve → upload → catalog publish.
     }
   },
   "llm": {
+    "gemma3-1b": {
+      "name": "Gemma 3 1B ⭐",
+      "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
+      "cdn_object": "llm/google_gemma-3-1b-it-Q4_K_M.gguf",
+      "sha256": "12bf0fff…",
+      "size_bytes": 806058496,
+      "recommended": true,
+      "url": "https://huggingface.co/…/resolve/<commit-sha>/…"
+    },
+    "qwen3.5-2b": {
+      "name": "Qwen 3.5 2B",
+      "filename": "Qwen3.5-2B-Q4_K_M.gguf",
+      "cdn_object": "llm/Qwen3.5-2B-Q4_K_M.gguf",
+      "sha256": "aaf42c8b…",
+      "size_bytes": 1280835840,
+      "url": "https://huggingface.co/…/resolve/<commit-sha>/…"
+    },
     "qwen3-4b-2507": {
       "name": "Qwen3 4B Instruct 2507",
       "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
       "cdn_object": "llm/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
       "requires_feature": "large_cleanup_models",
-      "url": "https://huggingface.co/…"
-    }
+      "sha256": "2fde00ce…",
+      "size_bytes": 2497280736,
+      "url": "https://huggingface.co/…/resolve/<commit-sha>/…"
+    },
+    "phi-3-mini": { "disabled": true }
   }
 }
 ```
+
+`sha256` and an exact `size_bytes` are **not optional** for an LLM row. `size_bytes`
+is the pre-hash download bound, and `merge_section()` rejects any row that reuses a
+shipped filename while weakening its digest, size, or `requires_feature` — a rejected
+row is silently ignored by clients, so a wrong number is a *silent* publish failure.
+Always regenerate the live rows with `scripts/export_model_catalog.py` rather than
+hand-editing them, and never write a `/resolve/main/` URL: `main` moves, the pinned
+digest does not.
 
 Allowed entry keys are allowlisted in `src/wayfinder/model_catalog.py`.
 

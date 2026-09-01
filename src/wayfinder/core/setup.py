@@ -107,15 +107,6 @@ LLM_MODELS: dict[str, dict] = {
         "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
         "note": "Best local model for Strong & Caricature intensity; sharpest instruction follower at 4B",
     },
-    "qwen2.5-1.5b-instruct-q4_k_m": {
-        "label": "Qwen 2.5 1.5B (Legacy)",
-        "size": "1.1 GB",
-        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        "bytes": 1_117_320_736,
-        "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
-        "note": "Previous default, still works well",
-    },
 }
 
 

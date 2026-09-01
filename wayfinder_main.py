@@ -2360,6 +2360,25 @@ LLM_GGUF_MODELS = {
         "speed": "Very Fast",
         "accuracy": "Excellent",
     },
+    # 2026-09 lineup refresh — three tiers:
+    #   light  = Gemma 3 1B (Free, recommended default)
+    #   medium = Qwen 3.5 2B (Free)
+    #   heavy  = Qwen3 4B Instruct 2507 (Ultra, requires large_cleanup_models)
+    # Retired as superseded: Phi-3 Mini, Qwen2.5 1.5B, SmolLM2 360M, Llama 3.2 1B.
+    # LFM2.5 1.2B retired for its license: the LFM Open License's $10M revenue
+    # cap follows every downstream user, which is incompatible with
+    # redistributing the weights from our CDN.
+    # Qwen3.5 4B was verified but NOT evaluated, and deliberately not adopted.
+    # Verified means its pin (revision + sha256 + byte count) was confirmed
+    # against the HuggingFace API and its Apache-2.0 licence cleared for CDN
+    # redistribution. It was NOT benchmarked: it is a *thinking* vision-language
+    # model (enable_thinking defaults on), not a non-thinking Instruct-2507
+    # successor, and its dictation-cleanup fitness is unmeasured. Its pin is
+    # recorded in docs/MODEL-REFRESH-PLAYBOOK.md as candidate #1 for the next
+    # scout cycle, to be evaluated against 2507 on the 11-cell matrix.
+    # Retired models stay usable: already-downloaded files still load from disk
+    # via Browse…, the config._LLM_PREFERENCE legacy tail and
+    # FREE_CLEANUP_MODEL_FILENAMES; their R2 objects remain for old clients.
     "qwen3-4b-2507": {
         "name": "Qwen3 4B Instruct 2507",
         "size": "2.5 GB",
@@ -2373,67 +2392,6 @@ LLM_GGUF_MODELS = {
         # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
         "cdn_object": "llm/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "requires_feature": "large_cleanup_models",
-    },
-    "lfm2.5-1.2b": {
-        "name": "LFM2.5 1.2B",
-        "size": "731 MB",
-        "size_bytes": 730_895_168,
-        "url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/76022b8bfa64af5862d6bce90a676c3cc9b17b52/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
-        "filename": "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
-        "sha256": "b1b3de114215d9507409a662a501a631095a479a419584e8a2ded6304b19b4f5",
-        "cdn_object": "llm/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
-        "description": "Liquid AI on-device model. Very fast, but tended to echo input unchanged in our cleanup eval.",
-        "speed": "Very Fast",
-        "accuracy": "Fair",
-    },
-    "phi-3-mini": {
-        "name": "Phi-3 Mini (3.8B)",
-        "size": "2.4 GB",
-        "size_bytes": 2_393_231_072,
-        "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/a64113399c2f6b8ad3e11c394733a2ddadaa7f33/Phi-3-mini-4k-instruct-q4.gguf",
-        "filename": "Phi-3-mini-4k-instruct-q4.gguf",
-        "sha256": "8a83c7fb9049a9b2e92266fa7ad04933bb53aa1e85136b7b30f1b8000ff2edef",
-        "cdn_object": "llm/Phi-3-mini-4k-instruct-q4.gguf",
-        "requires_feature": "large_cleanup_models",
-        "description": "Microsoft's 2024 compact model. Still works, but Qwen3 4B is the better Strong & Caricature pick.",
-        "speed": "Fast",
-        "accuracy": "High",
-    },
-    "qwen2.5-1.5b": {
-        "name": "Qwen2.5 1.5B",
-        "size": "1.1 GB",
-        "size_bytes": 1_117_320_736,
-        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
-        "cdn_object": "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        "description": "Previous default, still works well.",
-        "speed": "Very Fast",
-        "accuracy": "Good",
-    },
-    "smollm2-360m": {
-        "name": "SmolLM2 360M",
-        "size": "386 MB",
-        "size_bytes": 386_404_992,
-        "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/593b5a2e04c8f3e4ee880263f93e0bd2901ad47f/smollm2-360m-instruct-q8_0.gguf",
-        "filename": "smollm2-360m-instruct-q8_0.gguf",
-        "sha256": "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201",
-        "cdn_object": "llm/smollm2-360m-instruct-q8_0.gguf",
-        "description": "HuggingFace's tiny model. Blazing fast, best for simple cleanup.",
-        "speed": "Instant",
-        "accuracy": "Basic",
-    },
-    "llama3.2-1b": {
-        "name": "Llama 3.2 1B",
-        "size": "808 MB",
-        "size_bytes": 807_694_464,
-        "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/067b946cf014b7c697f3654f621d577a3e3afd1c/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-        "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-        "sha256": "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
-        "cdn_object": "llm/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-        "description": "Meta's latest efficient model. Good all-rounder for text tasks.",
-        "speed": "Very Fast",
-        "accuracy": "Good",
     },
 }
 

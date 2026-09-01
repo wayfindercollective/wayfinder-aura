@@ -1,0 +1,141 @@
+# Biweekly post-processing model scout — REPORTS ONLY.
+#
+# This workflow never changes production. It cannot: it runs
+# `scripts/model_scout.py`, which reads catalogs and lists HuggingFace trees,
+# and then it writes a GitHub issue comment. It does not edit the catalog,
+# re-pin a model, upload weights to R2, publish `catalog/v1.json`, or open a
+# PR — an automated PR that moves a model pin is a supply-chain hazard, and an
+# automated publish is worse. Promotion is a reviewed manual step documented in
+# `docs/MODEL-REFRESH-PLAYBOOK.md`.
+#
+# The only credential it uses is the default GITHUB_TOKEN, scoped to
+# `issues: write` on this repository. It has no R2, Cloudflare, HuggingFace or
+# license credentials, so it could not publish even if it were changed to try.
+#
+# Sibling workflow `model-pin-drift.yml` asks "is our pin still intact?" — it
+# fetches our *pinned revision* and re-verifies the bytes we ship.
+#
+# This one asks two different questions, in one run:
+#   1. Discovery  — are there models we do not ship yet that we should evaluate?
+#   2. Pin watch  — has upstream `main` moved PAST the bytes we pin? A same-
+#                   filename re-release is invisible to `model-pin-drift.yml`,
+#                   because our pinned revision still holds our bytes and still
+#                   correctly passes. This is a freshness signal, not an outage.
+# It also reports how many shipped pins it actually managed to compare, so a run
+# whose sources were unreachable is not mistaken for "everything still matches".
+
+name: model-scout
+
+on:
+  schedule:
+    # 1st and 15th at 08:00 UTC — "maybe every two weeks".
+    - cron: "0 8 1,15 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: model-scout
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Run scout
+        # A HuggingFace hiccup must not fail the workflow: a red cron badge
+        # every fortnight trains you to ignore it. The next step handles a
+        # missing or unparseable report explicitly instead.
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          # --json puts JSON *only* on stdout; the markdown digest goes to
+          # stderr, which is why they can be split cleanly here.
+          python3 scripts/model_scout.py \
+            --json \
+            -o scout-digest.md \
+            > scout.json 2> scout-stderr.txt
+          echo "--- digest (stderr) ---"
+          cat scout-stderr.txt
+
+      - name: Summarise
+        id: summary
+        run: |
+          if [ ! -s scout.json ] || ! python3 -c "import json;json.load(open('scout.json'))"; then
+            printf 'candidates=-1\n' >> "$GITHUB_OUTPUT"
+            {
+              echo "## Model scout"
+              echo
+              echo ":warning: Scout did not produce a parseable report."
+              echo "Nothing was changed. Re-run via workflow_dispatch."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          print("candidates=%d" % json.load(open("scout.json"))["candidates"])
+          PY
+          cat scout-digest.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-scout-report
+          path: |
+            scout.json
+            scout-digest.md
+            scout-stderr.txt
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Comment on (or open) the model-refresh issue
+        if: steps.summary.outputs.candidates != '-1' && steps.summary.outputs.candidates != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BODY_FILE=scout-comment.md
+          {
+            echo "### Model scout — $(date -u '+%Y-%m-%d')"
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "_Report only — nothing has been changed. Promotion is manual:_"
+            echo "_see \`docs/MODEL-REFRESH-PLAYBOOK.md\`._"
+            echo
+            cat scout-digest.md
+          } > "$BODY_FILE"
+
+          # Reuse one long-lived tracking issue. Opening a fresh issue every
+          # fortnight would bury the discussion and the review history, so look
+          # one up first and only create when there genuinely is none.
+          EXISTING=$(gh issue list \
+            --label model-refresh \
+            --state open \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "Commenting on the existing model-refresh issue"
+            gh issue comment "$EXISTING" --body-file "$BODY_FILE"
+          else
+            echo "No open model-refresh issue; opening one"
+            gh label create model-refresh \
+              --description "Post-processing model refresh candidates" \
+              --color 0E8A16 || true
+            gh issue create \
+              --title "Model refresh candidates" \
+              --label model-refresh \
+              --body-file "$BODY_FILE"
+          fi

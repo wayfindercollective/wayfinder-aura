@@ -356,28 +356,30 @@ python scripts/benchmark_llama_cpp.py --list
 
 #### Model Descriptions
 
-**Qwen2.5-1.5B-Instruct** ⭐ Recommended
-- Size: ~1GB (Q4_K_M)
-- Params: 1.5B
-- Best for: All modes - follows instructions well
-- Speed: ~300 tokens/sec (Vulkan GPU)
-- Download: `huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct-GGUF`
+The shipped lineup is three tiers. The app downloads these for you (Settings →
+post-processing model); the commands below are only for setting one up by hand.
 
-**Llama-3.2-1B-Instruct**
-- Size: ~770MB (Q4_K_M)  
-- Params: 1B
-- Best for: Fast cleanup
-- Speed: ~750 tokens/sec (Vulkan GPU)
-- Note: May hallucinate on longer inputs
-- Download: `huggingface-cli download meta-llama/Llama-3.2-1B-Instruct-GGUF`
+**Gemma 3 1B** ⭐ Recommended (Free)
+- Size: 806 MB (Q4_K_M) · Params: 1B
+- Best for: the default. Most consistent gentle-guide cleanup across all tones
+- Download: `huggingface-cli download bartowski/google_gemma-3-1b-it-GGUF google_gemma-3-1b-it-Q4_K_M.gguf`
 
-**Phi-3-mini-4k-Instruct**
-- Size: ~2.2GB (Q4)
-- Params: 3.8B
-- Best for: Strong mode, creative transformations
-- Speed: ~270 tokens/sec (Vulkan GPU)
-- Note: Rewrites sentences even in standard mode
-- Download: `huggingface-cli download microsoft/Phi-3-mini-4k-instruct-gguf`
+**Qwen 3.5 2B** (Free)
+- Size: 1.3 GB (Q4_K_M) · Params: 2B
+- Best for: standard mode when you want more headroom than Gemma
+- Note: capable, but less consistent than Gemma 3 1B for light dictation cleanup
+- Download: `huggingface-cli download unsloth/Qwen3.5-2B-GGUF Qwen3.5-2B-Q4_K_M.gguf`
+
+**Qwen3 4B Instruct 2507** (Wayfinder Ultra — `large_cleanup_models`)
+- Size: 2.5 GB (Q4_K_M) · Params: 4B
+- Best for: Strong and Caricature. Sharpest instruction follower in its class
+- Note: an *Instruct* SKU — no reasoning latency, unlike thinking 4B models
+- Download: `huggingface-cli download bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf`
+
+Phi-3 Mini, Qwen 2.5 1.5B, SmolLM2 360M, Llama 3.2 1B and LFM2.5 1.2B were
+retired from the catalog in 2026-09 (LFM2.5 for its license). Files already on
+disk keep working. Swapping a model is documented in
+[`docs/MODEL-REFRESH-PLAYBOOK.md`](docs/MODEL-REFRESH-PLAYBOOK.md).
 
 ### llama.cpp Benchmark
 
@@ -404,10 +406,13 @@ Example output:
 ══════════════════════════════════════════════════════════════════════
 
   ┌─ Tier ─────────┬─ Model ────────────────────────────────────┐
-  │ 🔸 SMALL         │ qwen2.5-1.5b-instruct-q4_k_m               │
-  │ (~1.5B)         │   Size: 986MB                              │
-  │                 │ Llama-3.2-1B-Instruct-Q4_K_M               │
-  │                 │ Phi-3-mini-4k-instruct-q4                  │
+  │ 🔸 SMALL         │ google_gemma-3-1b-it-Q4_K_M                │
+  │ (500M-2B)       │   Size: 806MB                              │
+  │                 │ Qwen3.5-2B-Q4_K_M                          │
+  │                 │   Size: 1.3GB                              │
+  ├─────────────────┼────────────────────────────────────────────┤
+  │ 🟢 STANDARD      │ Qwen_Qwen3-4B-Instruct-2507-Q4_K_M         │
+  │ (2B-7B)         │   Size: 2.5GB  (Ultra)                     │
   └─────────────────┴────────────────────────────────────────────┘
 ```
 
@@ -436,8 +441,9 @@ cmake --build build --config Release -j$(nproc)
 mkdir -p ~/.local/share/wayfinder-aura/llm-models
 cd ~/.local/share/wayfinder-aura/llm-models
 
-# Download recommended model (Qwen2.5-1.5B)
-wget https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+# Download the recommended model (Gemma 3 1B). The URL pins a revision on
+# purpose: `main` moves, and the app verifies a sha256 that does not.
+wget https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116f76234503685a98f572982177b11d44ec8ff1/google_gemma-3-1b-it-Q4_K_M.gguf
 ```
 
 ### Configuration
@@ -447,7 +453,7 @@ Set in Wayfinder Aura settings or `~/.config/wayfinder-aura/config.json`:
 ```json
 {
   "post_processing_backend": "llama_cpp",
-  "llama_cpp_model_path": "~/.local/share/wayfinder-aura/llm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+  "llama_cpp_model_path": "~/.local/share/wayfinder-aura/llm-models/google_gemma-3-1b-it-Q4_K_M.gguf",
   "llama_cpp_binary": "~/llama.cpp/build/bin/llama-cli",
   "llama_cpp_n_gpu_layers": -1,
   "llama_cpp_use_cli": true

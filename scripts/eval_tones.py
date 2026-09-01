@@ -13,7 +13,7 @@ Run on the FLATPAK HOST (the GPU + llama-simple only exist there):
 A/B a different model:
 
   ... python3 scripts/eval_tones.py \
-      --model ~/.local/share/wayfinder-aura/llm-models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf
+      --model ~/.local/share/wayfinder-aura/llm-models/Qwen3.5-2B-Q4_K_M.gguf
 
 Subset / faster iteration:
 

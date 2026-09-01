@@ -501,8 +501,8 @@ def print_summary(results: list[BenchmarkResult]):
     if fastest_gpu:
         best = min(fastest_gpu, key=lambda r: r.inference_time)
         print(f"     • Use '{best.model_name}' for best GPU performance")
-    print("     • qwen2.5-1.5b-instruct is recommended for quality/speed balance")
-    print("     • Phi-3-mini is best for 'Strong' mode transformations")
+    print("     • google_gemma-3-1b-it is recommended for quality/speed balance")
+    print("     • Qwen3-4B-Instruct-2507 is best for 'Strong' mode transformations")
 
 
 # =============================================================================

@@ -615,33 +615,28 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
         return {
             "min_params": "3B+",
             "recommended_models": [
-                {"name": "Phi-3-mini-4k-instruct-Q4_K_M.gguf", "type": "gguf", "description": "3.8B - great for caricature"},
-                {"name": "Qwen2.5-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - good creativity"},
-                {"name": "Llama-3.2-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - reliable option"},
+                {"name": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf", "type": "gguf", "description": "4B - best local pick for caricature (Ultra)"},
             ],
             "message": "Caricature mode requires 3B+ parameter models for creative text generation. "
-                       "Download a 3B+ GGUF model from huggingface.co — or use a Cloud AI backend "
-                       "(Ultra) for the best results.",
+                       "Qwen3 4B Instruct 2507 is the best local pick (Wayfinder Ultra) — or use a "
+                       "Cloud AI backend (Ultra) for the best results.",
         }
     elif intensity == "strong":
         return {
             "min_params": "3B+",
             "recommended_models": [
-                {"name": "Phi-3-mini-4k-instruct-Q4_K_M.gguf", "type": "gguf", "description": "3.8B - fast and capable"},
-                {"name": "Qwen2.5-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - best for strong intensity"},
-                {"name": "Llama-3.2-3B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "3B - good alternative"},
+                {"name": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf", "type": "gguf", "description": "4B - best for strong intensity (Ultra)"},
             ],
             "message": "Strong intensity works best with 3B+ parameter models. "
-                       "Download a 3B+ GGUF model from huggingface.co — or use a Cloud AI backend "
-                       "(Ultra) for the best results.",
+                       "Qwen3 4B Instruct 2507 is the best local pick (Wayfinder Ultra) — or use a "
+                       "Cloud AI backend (Ultra) for the best results.",
         }
     elif intensity == "standard":
         return {
             "min_params": "1B+",
             "recommended_models": [
-                {"name": "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "Great balance"},
-                {"name": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "Fast option"},
-                {"name": "Phi-3-mini-4k-instruct-Q4_K_M.gguf", "type": "gguf", "description": "3.8B - reliable"},
+                {"name": "Qwen3.5-2B-Q4_K_M.gguf", "type": "gguf", "description": "Great balance"},
+                {"name": "google_gemma-3-1b-it-Q4_K_M.gguf", "type": "gguf", "description": "Fast option, most consistent across tones"},
             ],
             "message": "Standard intensity works with 1B+ parameter models.",
         }
@@ -649,8 +644,8 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
         return {
             "min_params": "500M+",
             "recommended_models": [
-                {"name": "SmolLM2-360M-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "Ultra fast"},
-                {"name": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf", "type": "gguf", "description": "Compact"},
+                {"name": "google_gemma-3-1b-it-Q4_K_M.gguf", "type": "gguf", "description": "Fast and compact"},
+                {"name": "Qwen3.5-2B-Q4_K_M.gguf", "type": "gguf", "description": "Roomier, still very fast"},
             ],
             "message": "Light intensity works with most models.",
         }
@@ -3976,11 +3971,13 @@ def get_recommended_models() -> list:
     return [
         {
             "tier": "recommended",
+            # Order and ⭐ must agree with the shipped lineup: the catalog row
+            # flagged `recommended` is gemma3-1b, and components.MODEL_RECOMMENDATIONS
+            # already tells the user "gemma3:1b — ⭐ Best overall". Ratcheted by
+            # tests/test_catalog_ratchet.py::TestRecommendationsMatchTheLineup.
             "models": [
-                {"name": "qwen3.5:2b", "description": "⭐ Best overall - fast, excellent instruction following"},
-                {"name": "qwen2.5:1.5b", "description": "Previous best, still great"},
-                {"name": "llama3.2:1b", "description": "Fast, good for standard mode"},
-                {"name": "llama3.2:3b", "description": "Higher quality, good for all modes"},
+                {"name": "gemma3:1b", "description": "⭐ Best overall - fast + most consistent cleanup across tones"},
+                {"name": "qwen3.5:2b", "description": "Roomier alternative - excellent instruction following"},
             ],
         },
         {
@@ -3989,13 +3986,12 @@ def get_recommended_models() -> list:
             "models": [
                 {"name": "qwen3:4b", "description": "⭐ Best for Strong & Caricature — sharpest instruction following at 4B"},
                 {"name": "qwen3.5:4b", "description": "Newest generation, but thinks before answering (slower)"},
-                {"name": "phi3:mini", "description": "Dated 2024 model — works, but Qwen3 4B outclasses it"},
             ],
         },
         {
             "tier": "budget",
             "models": [
-                {"name": "smollm2:360m", "description": "Ultra fast but may hallucinate"},
+                {"name": "smollm2:360m", "description": "Ultra fast but may hallucinate — retired from the shipped lineup, Ollama-only"},
             ],
         },
         {
@@ -4021,10 +4017,10 @@ def get_model_recommendation_for_style(style: str, strong_mode: bool = False) ->
     """
     if strong_mode:
         return {
-            "recommended": ["qwen3:4b", "qwen3.5:4b", "phi3:mini"],
+            "recommended": ["qwen3:4b"],
             # Sub-3B models are NOT listed: the model-tier cap downgrades strong
             # to standard on them, so advertising them here would be misleading.
-            "also_works": ["qwen2.5:3b", "llama3.2:3b"],
+            "also_works": ["qwen3.5:4b", "qwen2.5:3b", "llama3.2:3b"],
             "avoid": [],
             "message": "Strong mode allows restructuring and requires a 3B+ model — smaller models fall back to standard. Qwen3 4B is the best local pick.",
         }
@@ -4032,39 +4028,39 @@ def get_model_recommendation_for_style(style: str, strong_mode: bool = False) ->
     # Standard mode - need models that follow "keep exact words" instructions
     if style == "minimal":
         return {
-            "recommended": ["qwen3.5:2b", "qwen2.5:1.5b", "llama3.2:1b"],
-            "also_works": ["smollm2:360m", "llama3.2:3b"],
+            "recommended": ["qwen3.5:2b"],
+            "also_works": ["llama3.2:3b"],
             "avoid": [],
             "message": "Minimal mode just removes filler. Most models work well.",
         }
     elif style == "dev":
         return {
-            "recommended": ["qwen3.5:2b", "qwen2.5:1.5b"],
-            "also_works": ["llama3.2:1b", "llama3.2:3b"],
+            "recommended": ["qwen3.5:2b"],
+            "also_works": ["llama3.2:3b"],
             "avoid": ["phi3:mini"],
             "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
             "message": "Dev mode adds git/code context. qwen3.5:2b recommended.",
         }
     elif style == "professional":
         return {
-            "recommended": ["qwen3.5:2b", "qwen2.5:1.5b"],
-            "also_works": ["llama3.2:1b", "llama3.2:3b"],
+            "recommended": ["qwen3.5:2b"],
+            "also_works": ["llama3.2:3b"],
             "avoid": ["phi3:mini"],
             "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
             "message": "Professional mode fixes punctuation. qwen3.5:2b keeps your words intact.",
         }
     elif style == "casual":
         return {
-            "recommended": ["qwen3.5:2b", "qwen2.5:1.5b"],
-            "also_works": ["llama3.2:1b", "llama3.2:3b", "smollm2:360m"],
+            "recommended": ["qwen3.5:2b"],
+            "also_works": ["llama3.2:3b"],
             "avoid": ["phi3:mini"],
             "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
             "message": "Casual mode uses relaxed punctuation. Most small models work well.",
         }
     else:  # personal or unknown
         return {
-            "recommended": ["qwen3.5:2b", "qwen2.5:1.5b"],
-            "also_works": ["llama3.2:1b", "llama3.2:3b"],
+            "recommended": ["qwen3.5:2b"],
+            "also_works": ["llama3.2:3b"],
             "avoid": ["phi3:mini"],
             "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
             "message": "Personal mode preserves your speaking style. qwen3.5:2b recommended.",

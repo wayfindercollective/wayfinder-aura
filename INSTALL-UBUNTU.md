@@ -132,9 +132,10 @@ Wayfinder can clean up transcriptions using a local LLM (fixes filler words, pun
 # llama-cpp-python is bundled with the app, but for GPU acceleration:
 pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
 
-# Download a small, fast model (Qwen2.5-1.5B recommended for cleanup tasks)
-# Visit: https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF
-# Download the Q4_K_M variant (~1 GB)
+# Download a small, fast model (Gemma 3 1B is the recommended default)
+# Visit: https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF
+# Download the Q4_K_M variant (~806 MB)
+# Roomier alternative: https://huggingface.co/unsloth/Qwen3.5-2B-GGUF (1.3 GB)
 mkdir -p ~/.local/share/wayfinder-aura/models
 # Place the .gguf file in the directory above
 ```

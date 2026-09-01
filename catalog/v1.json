@@ -7,55 +7,23 @@
       "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
       "name": "Gemma 3 1B \u2b50",
       "recommended": true,
+      "sha256": "12bf0fff8815d5f73a3c9b586bd8fee8e7b248c935de70dec367679873d0f29d",
       "size": "806 MB",
       "size_bytes": 806058496,
       "speed": "Very Fast",
-      "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf"
+      "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116f76234503685a98f572982177b11d44ec8ff1/google_gemma-3-1b-it-Q4_K_M.gguf"
     },
     "lfm2.5-1.2b": {
-      "accuracy": "Fair",
-      "cdn_object": "llm/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
-      "description": "Liquid AI on-device model. Very fast, but tended to echo input unchanged in our cleanup eval.",
-      "filename": "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
-      "name": "LFM2.5 1.2B",
-      "size": "697 MB",
-      "size_bytes": 730895168,
-      "speed": "Very Fast",
-      "url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
+      "disabled": true
     },
     "llama3.2-1b": {
-      "accuracy": "Good",
-      "cdn_object": "llm/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-      "description": "Meta's latest efficient model. Good all-rounder for text tasks.",
-      "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-      "name": "Llama 3.2 1B",
-      "size": "770 MB",
-      "size_bytes": 807694464,
-      "speed": "Very Fast",
-      "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+      "disabled": true
     },
     "phi-3-mini": {
-      "accuracy": "High",
-      "cdn_object": "llm/Phi-3-mini-4k-instruct-q4.gguf",
-      "description": "Microsoft's 2024 compact model. Still works, but Qwen3 4B is the better Strong & Caricature pick.",
-      "filename": "Phi-3-mini-4k-instruct-q4.gguf",
-      "name": "Phi-3 Mini (3.8B)",
-      "requires_feature": "large_cleanup_models",
-      "size": "2.3 GB",
-      "size_bytes": 2393231072,
-      "speed": "Fast",
-      "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf"
+      "disabled": true
     },
     "qwen2.5-1.5b": {
-      "accuracy": "Good",
-      "cdn_object": "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-      "description": "Previous default, still works well.",
-      "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-      "name": "Qwen2.5 1.5B",
-      "size": "1.0 GB",
-      "size_bytes": 1117320736,
-      "speed": "Very Fast",
-      "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+      "disabled": true
     },
     "qwen3-4b-2507": {
       "accuracy": "Excellent",
@@ -64,10 +32,11 @@
       "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
       "name": "Qwen3 4B Instruct 2507",
       "requires_feature": "large_cleanup_models",
+      "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
       "size": "2.5 GB",
       "size_bytes": 2497280736,
       "speed": "Fast",
-      "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+      "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
     },
     "qwen3.5-2b": {
       "accuracy": "Excellent",
@@ -75,24 +44,17 @@
       "description": "Capable reasoning model, but less consistent than Gemma 3 1B for light dictation cleanup.",
       "filename": "Qwen3.5-2B-Q4_K_M.gguf",
       "name": "Qwen 3.5 2B",
+      "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
       "size": "1.3 GB",
-      "size_bytes": 1390000000,
+      "size_bytes": 1280835840,
       "speed": "Very Fast",
-      "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"
+      "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf"
     },
     "smollm2-360m": {
-      "accuracy": "Basic",
-      "cdn_object": "llm/smollm2-360m-instruct-q8_0.gguf",
-      "description": "HuggingFace's tiny model. Blazing fast, best for simple cleanup.",
-      "filename": "smollm2-360m-instruct-q8_0.gguf",
-      "name": "SmolLM2 360M",
-      "size": "369 MB",
-      "size_bytes": 386404992,
-      "speed": "Instant",
-      "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q8_0.gguf"
+      "disabled": true
     }
   },
-  "updated_at": "2026-07-11T03:01:24Z",
+  "updated_at": "2026-09-01T05:26:13Z",
   "version": 1,
   "whisper": {
     "base": {
@@ -100,22 +62,24 @@
       "cdn_object": "whisper/ggml-base.bin",
       "filename": "ggml-base.bin",
       "name": "Base (Multi-lang)",
-      "size": "142 MB",
-      "size_bytes": 142000000,
+      "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+      "size": "148 MB",
+      "size_bytes": 147951465,
       "speed": "Very fast \u00b7 basic quality",
       "speed_rating": 5,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin"
     },
     "base.en": {
       "accuracy_rating": 2,
       "cdn_object": "whisper/ggml-base.en.bin",
       "filename": "ggml-base.en.bin",
       "name": "Base (English)",
-      "size": "142 MB",
-      "size_bytes": 142000000,
+      "sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+      "size": "148 MB",
+      "size_bytes": 147964211,
       "speed": "Very fast \u00b7 basic quality",
       "speed_rating": 5,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en.bin"
     },
     "large-v3": {
       "accuracy_rating": 5,
@@ -123,11 +87,12 @@
       "filename": "ggml-large-v3.bin",
       "name": "Large v3",
       "requires_feature": "large_models",
-      "size": "3.0 GB",
-      "size_bytes": 3000000000,
+      "sha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+      "size": "3.1 GB",
+      "size_bytes": 3095033483,
       "speed": "Slowest \u00b7 highest accuracy",
       "speed_rating": 1,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin"
     },
     "large-v3-turbo": {
       "accuracy_rating": 5,
@@ -135,11 +100,12 @@
       "filename": "ggml-large-v3-turbo.bin",
       "name": "Large v3 Turbo",
       "requires_feature": "large_models",
+      "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
       "size": "1.6 GB",
-      "size_bytes": 1600000000,
+      "size_bytes": 1624555275,
       "speed": "Fast \u00b7 near top accuracy",
       "speed_rating": 3,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin"
     },
     "large-v3-turbo-q5_0": {
       "accuracy_rating": 4,
@@ -148,11 +114,12 @@
       "name": "Large v3 Turbo Q5",
       "recommended": true,
       "requires_feature": "large_models",
-      "size": "547 MB",
-      "size_bytes": 547000000,
+      "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+      "size": "574 MB",
+      "size_bytes": 574041195,
       "speed": "Fastest high-quality \u00b7 best balance",
       "speed_rating": 4,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin"
     },
     "medium": {
       "accuracy_rating": 4,
@@ -160,11 +127,12 @@
       "filename": "ggml-medium.bin",
       "name": "Medium (Multi-lang)",
       "requires_feature": "large_models",
+      "sha256": "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
       "size": "1.5 GB",
-      "size_bytes": 1500000000,
+      "size_bytes": 1533763059,
       "speed": "Moderate \u00b7 strong quality",
       "speed_rating": 2,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium.bin"
     },
     "medium.en": {
       "accuracy_rating": 4,
@@ -172,55 +140,64 @@
       "filename": "ggml-medium.en.bin",
       "name": "Medium (English)",
       "requires_feature": "large_models",
+      "sha256": "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356",
       "size": "1.5 GB",
-      "size_bytes": 1500000000,
+      "size_bytes": 1533774781,
       "speed": "Moderate \u00b7 strong quality",
       "speed_rating": 2,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium.en.bin"
     },
     "small": {
       "accuracy_rating": 3,
       "cdn_object": "whisper/ggml-small.bin",
       "filename": "ggml-small.bin",
       "name": "Small (Multi-lang)",
-      "size": "466 MB",
-      "size_bytes": 466000000,
+      "requires_feature": "large_models",
+      "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+      "size": "488 MB",
+      "size_bytes": 487601967,
       "speed": "Fast \u00b7 solid everyday",
       "speed_rating": 4,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin"
     },
     "small.en": {
       "accuracy_rating": 3,
       "cdn_object": "whisper/ggml-small.en.bin",
       "filename": "ggml-small.en.bin",
       "name": "Small (English)",
-      "size": "466 MB",
-      "size_bytes": 466000000,
+      "requires_feature": "large_models",
+      "sha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+      "size": "488 MB",
+      "size_bytes": 487614201,
       "speed": "Fast \u00b7 solid everyday",
       "speed_rating": 4,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.en.bin"
     },
     "tiny": {
       "accuracy_rating": 1,
       "cdn_object": "whisper/ggml-tiny.bin",
       "filename": "ggml-tiny.bin",
       "name": "Tiny (Multi-lang)",
-      "size": "75 MB",
-      "size_bytes": 75000000,
+      "requires_feature": "large_models",
+      "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+      "size": "78 MB",
+      "size_bytes": 77691713,
       "speed": "Fastest \u00b7 lightest quality",
       "speed_rating": 5,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin"
     },
     "tiny.en": {
       "accuracy_rating": 1,
       "cdn_object": "whisper/ggml-tiny.en.bin",
       "filename": "ggml-tiny.en.bin",
       "name": "Tiny (English)",
-      "size": "75 MB",
-      "size_bytes": 75000000,
+      "requires_feature": "large_models",
+      "sha256": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+      "size": "78 MB",
+      "size_bytes": 77704715,
       "speed": "Fastest \u00b7 lightest quality",
       "speed_rating": 5,
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin"
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin"
     }
   }
 }

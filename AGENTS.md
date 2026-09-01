@@ -493,6 +493,41 @@ python main.py 2>&1 | tee wayfinder.log
 3. Add to `get_backend()` factory function
 4. Add backend option to config
 
+### Replacing a Post-Processing Model
+
+Follow **[`docs/MODEL-REFRESH-PLAYBOOK.md`](docs/MODEL-REFRESH-PLAYBOOK.md)**.
+A model swap touches five data sites plus two watchers — enumerated with their
+ratchet in the playbook's "update every sync point" table. Every row cites a
+class that exists in `tests/test_catalog_ratchet.py` and genuinely covers that
+row: **removing a shipped model from any of the seven fails CI** — with one
+deliberate exception, per-style coverage, named below — verified by deleting
+each row and watching the suite go red. Sites 2, 4, 6 and 7 are exact
+set equalities in both directions, so inventing an entry the app does not ship
+fails too; site 6 additionally checks each `repo_id` against the repository
+encoded in that model's pinned download URL. Site 5 needs both directions and
+now has them: three coverage guards assert every shipped model is listed by
+`get_recommended_models()`, named in `MODEL_RECOMMENDATIONS`, and suggested by
+at least one intensity. Five things are deliberately *not* enforced, and the
+playbook names each in place: the `avoid` list (naming a retired model there is
+a warning, not a recommendation), free-text prose (`message` strings and
+`MONITORED_MODELS` descriptions), the *ordering and extra contents* of the
+`_LLM_PREFERENCE` legacy tail (its lead entry, every shipped filename and the
+legacy Qwen 2.5 sentinel are all ratcheted), per-style **union coverage** in
+`get_model_recommendation_for_style()` (its two fields are enforced
+differently: `recommended` may not be empty and every tag must map to a live
+shipped model, so emptying a branch or naming an unshipped tag fails CI, while
+`also_works` is checked against retired tags only, so an unshipped Ollama-only
+tag such as `qwen3.5:4b` passes deliberately — what nothing enforces is that
+every shipped model is recommended by *some* style, so replacing a live tag
+with another live tag passes, and `gemma3-1b` is intentionally recommended by
+no style), and Whisper `setup.py` <-> app
+equality (Setup offers a subset on purpose). The playbook covers the 11-cell
+tone-eval matrix, the redistribution-license check, `disabled: true` retirement,
+and the object-before-catalog publish order. The biweekly
+`.github/workflows/model-scout.yml` only *reports* candidates — it never
+promotes one, and it distinguishes "every shipped pin verified" from "we could
+not check", so a run that reached nothing never reads as a clean bill of health.
+
 ---
 
 ## Related Documentation

@@ -21,6 +21,16 @@ Convex /activate signs token (private key only on Convex)
 | `llm/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf` | [HF bartowski/…](https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf) | `large_cleanup_models` |
 
 App catalog entries already set `cdn_object` + `requires_feature` for these two.
+No retired model needs an entry here: the 2026-09 refresh retired `phi-3-mini`,
+`qwen2.5-1.5b`, `smollm2-360m`, `llama3.2-1b` and `lfm2.5-1.2b` from the catalog
+only — **their existing R2 objects stay in place** so already-installed clients
+can still re-download what they were offered.
+
+> **Ordering rule — object first, catalog second.** Never publish a
+> `catalog/v1.json` row before its R2 object exists. `merge_section()` adds an
+> unknown id as *CDN-only* (it strips the HuggingFace `url`, because a model we
+> never shipped cannot vouch for an arbitrary origin), so a row published ahead
+> of its object gives every client a download that can only 404.
 
 ## 1. Create the R2 bucket
 
