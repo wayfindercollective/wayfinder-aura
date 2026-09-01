@@ -599,7 +599,7 @@ def test_release_artifact_jobs_are_manual_or_tag_only_and_raw_binary_is_removed(
     assert "uses: ./.github/workflows/ci.yml" in workflow
 
 
-def test_normal_ci_is_one_cached_quality_job_and_cancels_stale_pushes():
+def test_normal_ci_keeps_cached_quality_platform_smoke_and_cancels_stale_pushes():
     workflow = _ci_workflow_text()
     quality_job = _workflow_job_body("quality")
 
@@ -613,6 +613,10 @@ def test_normal_ci_is_one_cached_quality_job_and_cancels_stale_pushes():
     assert "cancel-in-progress: true" in workflow
     assert "aura-flatpak" not in workflow
     assert "workflow_call:" in workflow
+    platform_job = _workflow_job_body("platform-smoke")
+    assert "macos-latest" in platform_job
+    assert "windows-latest" in platform_job
+    assert "python scripts/platform_smoke.py --expected ${{ matrix.expected }}" in platform_job
 
 
 def test_model_pin_drift_is_scheduled_and_only_pushes_for_pin_surfaces():

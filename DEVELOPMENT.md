@@ -4,7 +4,13 @@
 
 ## Project Overview
 
-Wayfinder Aura is a local voice dictation app for Linux. It uses whisper.cpp for speech-to-text and injects the transcribed text at the cursor position.
+Wayfinder Aura is a local voice dictation app. Linux is the production
+baseline, macOS is an active port, and Windows is planned. It uses whisper.cpp
+for speech-to-text and injects the transcribed text at the cursor position.
+
+Platform contributors must read [docs/PLATFORM-DEVELOPMENT.md](docs/PLATFORM-DEVELOPMENT.md).
+Aura stays in one repository; operating-system work is isolated behind the
+documented adapters and protected by Linux plus native platform CI.
 
 ## Development Setup
 
@@ -46,7 +52,7 @@ wayfinder-aura/
 │   │   ├── overlay.py      # Glassmorphic status overlay (PyQt6)
 │   │   └── dialogs/        # Dialog windows
 │   ├── hotkeys/            # Hotkey detection
-│   │   ├── evdev.py        # Direct input monitoring (X11)
+│   │   ├── evdev.py        # Direct input monitoring (Linux only)
 │   │   ├── socket.py       # Unix socket for KDE shortcuts
 │   │   └── dbus.py         # XDG GlobalShortcuts portal
 │   └── utils/              # Utilities
@@ -158,11 +164,12 @@ Events flow through `event_queue` and are processed by `poll_events()`.
 
 ## Hotkey Detection
 
-Three methods (used based on environment):
+Platform-specific methods (used based on environment):
 
-1. **evdev** (X11): Monitors /dev/input devices
-2. **Socket** (Wayland): Listens on `/tmp/wayfinder-aura.sock`
-3. **D-Bus** (Wayland): XDG GlobalShortcuts portal (experimental)
+1. **evdev** (Linux): Monitors `/dev/input` devices
+2. **Socket** (Linux/macOS): Accepts external Unix-socket triggers
+3. **D-Bus** (Linux/Wayland): Uses the XDG GlobalShortcuts portal
+4. **pynput** (macOS/fallback): Provides a platform-compatible global listener
 
 ## Testing Changes
 
@@ -462,8 +469,9 @@ Set in Wayfinder Aura settings or `~/.config/wayfinder-aura/config.json`:
 
 ## Future Improvements
 
-- [ ] Mac/Windows platform support
-- [ ] AppImage packaging for easier Linux distribution
+- [ ] Complete macOS packaging, signing, notarization, and clean-machine QA
+- [ ] Implement Windows input/audio adapters and signed installer
+- [ ] Continue AppImage and Flatpak release hardening for Linux
 - [ ] Voice activity detection (auto-stop recording)
 - [ ] Multiple language support
 - [ ] Custom wake word detection

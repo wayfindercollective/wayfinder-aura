@@ -87,6 +87,8 @@ def test_structure():
         "wayfinder_main.py",
         "pyproject.toml",
         "requirements.txt",
+        "docs/PLATFORM-DEVELOPMENT.md",
+        "scripts/platform_smoke.py",
     ]
     
     missing = []
@@ -135,6 +137,5 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
 
 

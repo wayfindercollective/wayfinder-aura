@@ -77,7 +77,7 @@ class FakeOverlay:
         self.commands.append(("show", state))
         return True
 
-    def update(self, state):
+    def update(self, state, **_kwargs):
         self.commands.append(("update", state))
         return True
 
@@ -597,6 +597,62 @@ class TestHappyPath:
         app.do_inject("line one\nline two   \r\n  end", app.session_generation)
         app.pump_events()
         assert injected == ["line one line two end"]
+
+    def test_tray_only_controller_receives_recording_and_processing_states(
+        self, app
+    ):
+        app._use_pyqt_overlay = False
+        app.indicator = None
+        app.overlay_controller.tray_only = True
+
+        assert app._set_status_indicator("listening") is True
+        assert app._set_status_indicator("processing") is True
+
+        assert app.overlay_controller.commands == [
+            ("show", "listening"),
+            ("update", "processing"),
+        ]
+
+    def test_focus_change_respects_the_text_box_selected_while_processing(
+        self, app, monkeypatch
+    ):
+        calls = []
+        app._inject_target_window = "record-start-window"
+        monkeypatch.setattr(
+            wayfinder_main,
+            "inject_text",
+            lambda text, **kwargs: calls.append((text, kwargs)),
+        )
+        import wayfinder.core.injector as injector
+        monkeypatch.setattr(injector, "get_active_window", lambda: "current-window")
+        monkeypatch.setattr(
+            "wayfinder.utils.platform.get_text_injector", lambda: "xdotool"
+        )
+
+        app.do_inject("type into the selected box", app.session_generation)
+
+        assert calls[0][1]["target_window"] is None
+        assert any("respecting current window" in message for message in app.logs)
+
+    def test_record_start_window_is_only_fallback_when_focus_query_fails(
+        self, app, monkeypatch
+    ):
+        calls = []
+        app._inject_target_window = "record-start-window"
+        monkeypatch.setattr(
+            wayfinder_main,
+            "inject_text",
+            lambda text, **kwargs: calls.append((text, kwargs)),
+        )
+        import wayfinder.core.injector as injector
+        monkeypatch.setattr(injector, "get_active_window", lambda: None)
+        monkeypatch.setattr(
+            "wayfinder.utils.platform.get_text_injector", lambda: "xdotool"
+        )
+
+        app.do_inject("use the safe fallback", app.session_generation)
+
+        assert calls[0][1]["target_window"] == "record-start-window"
 
     def test_auto_enter_waits_for_final_text_then_target_settle(
         self, app, monkeypatch

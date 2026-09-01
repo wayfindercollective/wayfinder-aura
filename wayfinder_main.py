@@ -7,6 +7,7 @@ Toggle-to-record with whisper.cpp transcription.
 import atexit
 import copy
 import json
+import math
 import os
 import queue
 import signal
@@ -2996,6 +2997,83 @@ def get_all_input_devices() -> list[dict]:
     return result
 
 
+def parse_proc_input_device_names(text: str) -> list[str]:
+    """Return human hardware names from ``/proc/bus/input/devices``.
+
+    Flatpak can see input metadata even though it intentionally cannot open the
+    corresponding ``/dev/input/event*`` nodes. This gives Settings an honest
+    connected-device list while the Global Shortcuts portal continues to own
+    the actual all-device hotkey binding.
+    """
+    names: list[str] = []
+    ignored = (
+        "ydotool",
+        "dotoold",
+        "virtual",
+        "power button",
+        "sleep button",
+        "video bus",
+        "pc speaker",
+        "wmi hotkeys",
+        "hda ",
+        "hd-audio",
+    )
+    for block in (text or "").split("\n\n"):
+        name = ""
+        handlers = ""
+        key_words = ""
+        for line in block.splitlines():
+            if line.startswith('N: Name="') and line.endswith('"'):
+                name = " ".join(line[len('N: Name="'):-1].split())
+            elif line.startswith("H: Handlers="):
+                handlers = line.partition("=")[2].lower()
+            elif line.startswith("B: KEY="):
+                key_words = line.partition("=")[2]
+        handler_tokens = handlers.split()
+        if not name or not (
+            "kbd" in handler_tokens
+            or any(token.startswith("mouse") for token in handler_tokens)
+        ):
+            continue
+        # Match the real evdev eligibility rule: a full keyboard exposes F1 and
+        # F12, while a mouse exposes at least one standard/side button. This
+        # excludes microphones and headsets whose media buttons also receive a
+        # misleading `kbd` handler.
+        try:
+            key_bits = 0
+            for word in key_words.split():
+                key_bits = (key_bits << 64) | int(word, 16)
+        except ValueError:
+            key_bits = 0
+        has_fkeys = bool(key_bits & (1 << 59)) and bool(key_bits & (1 << 88))
+        has_mouse_buttons = any(key_bits & (1 << code) for code in _MOUSE_BUTTON_CODES)
+        if not (has_fkeys or has_mouse_buttons):
+            continue
+        if any(token in name.lower() for token in ignored):
+            continue
+        # Composite USB devices expose separate consumer-control and keyboard
+        # interfaces. Show the physical product once instead of three nearly
+        # identical menu entries.
+        for suffix in (" Consumer Control", " Keyboard"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)].rstrip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def get_input_device_names_metadata() -> list[str]:
+    """Best-effort connected keyboard/mouse names without opening event nodes."""
+    try:
+        return parse_proc_input_device_names(
+            Path("/proc/bus/input/devices").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        )
+    except OSError:
+        return []
+
+
 def find_keyboard_devices(
     enabled_devices: list[str] = None,
     device_snapshot_callback=None,
@@ -3058,6 +3136,17 @@ def resolve_status_indicator_target(
     if has_indicator:
         return "ctk"
     return "none"
+
+
+def normalize_indicator_audio_level(value) -> float:
+    """Convert recorder scalar types (including NumPy float32) to finite 0..1."""
+    try:
+        level = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(level):
+        return 0.0
+    return max(0.0, min(1.0, level))
 
 # Free-tier GPU upsell: after a dictation this long (seconds) on the CPU/free path,
 # gently surface that GPU acceleration is much faster. Long enough that it never
@@ -3816,19 +3905,11 @@ class FloatingIndicator:
         self._stuck_count = 0
         self._is_centered = False
             
-        # Get cursor position (works via XWayland on Wayland)
-        try:
-            x = self.parent.winfo_pointerx()
-            y = self.parent.winfo_pointery()
-            self._last_cursor_x = x
-            self._last_cursor_y = y
-        except:
-            # Fallback: center of screen
-            x = self.parent.winfo_screenwidth() // 2
-            y = 100
-        
-        # Create the floating window
+        # Create the floating window hidden. CTk otherwise maps a default-sized
+        # Toplevel at +0+0 before geometry is known, producing the visible
+        # top-left flash reported for the Disappearing indicator.
         self.window = ctk.CTkToplevel(self.parent)
+        self.window.withdraw()
         self.window.title("Wayfinder Status")
         self.window.overrideredirect(True)  # Borderless
         self.window.attributes("-topmost", True)  # Always on top
@@ -3844,13 +3925,6 @@ class FloatingIndicator:
             # Set window type hint for better stacking on KDE
             self.window.attributes("-type", "notification")
         except:
-            pass
-        
-        try:
-            # Lift only — do NOT focus_force (steals focus from the dictation target
-            # on Wayland and can break injection into the focused app).
-            self.window.lift()
-        except Exception:
             pass
         
         # GitHub Dark palette - reduces halation/eye strain
@@ -3931,13 +4005,20 @@ class FloatingIndicator:
         
         self.current_color = color
         
-        # Position near cursor (offset slightly so it doesn't cover click target)
+        # Fully lay out and place the window before its first map. The indicator
+        # deliberately starts at its stable taskbar position; the old cursor
+        # position was immediately replaced by _follow_step(), causing a jump.
         self.window.update_idletasks()
         self._window_width = self.window.winfo_width()
         self._window_height = self.window.winfo_height()
-        
-        # Initial position
-        self._update_position(x, y)
+        self._center_above_taskbar()
+        self.window.deiconify()
+        try:
+            # Lift only — do NOT focus_force (steals focus from the dictation target
+            # on Wayland and can break injection into the focused app).
+            self.window.lift()
+        except Exception:
+            pass
         
         self._visible = True
         self._start_pulse()
@@ -4198,10 +4279,7 @@ class FloatingIndicator:
             bg_r, bg_g, bg_b = 14, 14, 16  # Match new deep charcoal
             
             # HYPER voice-reactive amplitude - FREAK OUT when speaking!
-            audio_level = self._current_audio_level
-            # Validate audio_level to avoid NaN
-            if not isinstance(audio_level, (int, float)) or audio_level != audio_level:
-                audio_level = 0.0
+            audio_level = normalize_indicator_audio_level(self._current_audio_level)
             # Small base motion when quiet
             base_breath = 0.15 + 0.1 * (0.5 + 0.5 * math.sin(self._wave_breath))
             # MASSIVE exponential voice boost - fills space FAST when speaking
@@ -4254,7 +4332,9 @@ class FloatingIndicator:
         # Get audio level from callback - INSTANT attack, moderate decay
         if self._audio_level_callback:
             try:
-                raw_level = self._audio_level_callback()
+                raw_level = normalize_indicator_audio_level(
+                    self._audio_level_callback()
+                )
                 # Instant attack - respond IMMEDIATELY to voice!
                 if raw_level > self._current_audio_level:
                     self._current_audio_level = raw_level
@@ -7922,9 +8002,16 @@ class WayfinderApp(ctk.CTk):
                 device_names = [d["name"] for d in all_devices]
             else:
                 device_names = list(cached_names)
-            device_options = ["All Devices"] + device_names
+            if IS_FLATPAK and not device_names:
+                device_names = get_input_device_names_metadata()
+            all_devices_label = "All Devices (Portal)" if IS_FLATPAK else "All Devices"
+            device_options = [all_devices_label] + device_names
         enabled = self.config.get("enabled_input_devices", [])
-        if not enabled or len(enabled) == len(device_names):
+        if IS_FLATPAK:
+            # The desktop portal exposes one global binding and cannot filter
+            # by physical device. Hardware entries are informational here.
+            current_device_selection = "All Devices (Portal)"
+        elif not enabled or len(enabled) == len(device_names):
             current_device_selection = "All Devices"
         elif len(enabled) == 1:
             current_device_selection = enabled[0] if enabled[0] in device_names else "All Devices"
@@ -10632,37 +10719,43 @@ class WayfinderApp(ctk.CTk):
         ) == "pyqt"
 
     def _set_status_indicator(self, state: str):
-        """Drive the on-screen status pill (not the tray icon).
+        """Drive the visual status pill and the Qt system-tray state.
 
         state: ``listening`` | ``processing`` | ``ready`` | ``hide``
 
         Returns the controller show/update result when using PyQt Always On
         (so callers can retry critical ready transitions); otherwise None.
         """
-        if self._has_visual_pyqt_overlay():
-            ctrl = self.overlay_controller
+        ctrl = getattr(self, "overlay_controller", None)
+        ctrl_result = None
+        if ctrl is not None:
             if state == "listening":
-                return ctrl.show("listening")
-            if state == "processing":
+                ctrl_result = ctrl.show("listening")
+            elif state == "processing":
                 # Never hard-restart mid-dictation: remapping the overlay/tray
                 # steals Wayland focus so ydotool injects into the wrong surface.
-                return ctrl.update("processing", allow_restart=False)
-            if state == "ready":
-                return ctrl.show("ready")
-            if state == "hide":
+                ctrl_result = ctrl.update("processing", allow_restart=False)
+            elif state == "ready":
+                ctrl_result = ctrl.show("ready")
+            elif state == "hide":
                 ctrl.hide()
-                return True
-            return None
+                ctrl_result = True
+            # A full PyQt controller owns both visual pill and tray. A
+            # tray-only controller must continue below so Disappearing CTk is
+            # updated too; previously it received no states at all, leaving the
+            # tray blue while recording/processing with Show Overlay off.
+            if self._has_visual_pyqt_overlay():
+                return ctrl_result
         ind = getattr(self, "indicator", None)
         if ind is None:
-            return None
+            return ctrl_result
         if state == "listening":
             ind.show("Listening...", COLORS["state_recording"])
         elif state == "processing":
             ind.update("Processing...", COLORS["accent_yellow"])
         elif state in ("ready", "hide"):
             ind.hide()
-        return None
+        return ctrl_result
 
     def _stop_overlay_process(self) -> bool:
         """Stop CTk indicator + PyQt overlay/tray process. Returns prior want_tray."""
@@ -15689,6 +15782,16 @@ class WayfinderApp(ctk.CTk):
 
     def _on_device_selected(self, value):
         """Handle inline device dropdown change."""
+        if IS_FLATPAK:
+            # Connected devices are listed for visibility, but the Global
+            # Shortcuts portal intentionally has no per-device filtering API.
+            self._device_var.set("All Devices (Portal)")
+            self.config["enabled_input_devices"] = []
+            save_config(self.config)
+            self.log(
+                f"ℹ {value} is connected; Flatpak portal hotkeys listen on all devices"
+            )
+            return
         if value == "All Devices":
             self.config["enabled_input_devices"] = []
         else:
@@ -18641,10 +18744,10 @@ class WayfinderApp(ctk.CTk):
                     )
                     return
 
-            # Capture the window focused RIGHT NOW (record-start) so we can target it at inject
-            # time. With a global-hotkey trigger the user's terminal/chat is focused here; a long
-            # dictation's processing can later drift focus, which made injection land nowhere
-            # ("works, but intermittent on long dictations"). Best-effort; X11 only.
+            # Remember the record-start window only as a fallback. The window focused at
+            # injection time is authoritative: users commonly click a different text box while
+            # transcription finishes, and reactivating this older window would steal focus and
+            # type into the wrong tab. Best-effort; X11 only.
             try:
                 from wayfinder.core.injector import get_active_window
                 self._inject_target_window = get_active_window()
@@ -19231,9 +19334,11 @@ class WayfinderApp(ctk.CTk):
             if gen is not None and gen != self.session_generation:
                 return
 
-            # Target the window captured at record-start, and log a focus-drift diagnostic to the
-            # persisted activity.log so an intermittent miss is traceable after the fact.
-            target = getattr(self, "_inject_target_window", None)
+            # Respect the window the user has focused NOW. The record-start window is only a
+            # fallback when X11 cannot report any active window at injection time. Previously
+            # every focus change triggered windowactivate(record_start), which stole focus from
+            # a text box the user had deliberately selected while transcription was finishing.
+            record_start_window = getattr(self, "_inject_target_window", None)
             try:
                 from wayfinder.core.injector import get_active_window
                 now_focused = get_active_window()
@@ -19244,20 +19349,23 @@ class WayfinderApp(ctk.CTk):
                 backend = get_text_injector()
             except Exception:
                 backend = "?"
-            # ydotool/wtype cannot retarget a record-start window (xdotool only).
+            # xdotool can use the record-start fallback when the active-window query failed.
             can_retarget = backend == "xdotool"
             focus_drifted = bool(
-                target and now_focused and target != now_focused
+                record_start_window
+                and now_focused
+                and record_start_window != now_focused
             )
-            drift = ""
-            if focus_drifted:
-                drift = (
-                    " [focus drifted; retargeting]"
-                    if can_retarget
-                    else " [focus drifted; backend cannot retarget — soft-overlay path must preserve focus]"
-                )
+            injection_window = now_focused or record_start_window
+            fallback_target = (
+                record_start_window
+                if can_retarget and now_focused is None
+                else None
+            )
+            drift = " [focus changed; respecting current window]" if focus_drifted else ""
             self.log(
-                f"⌨ Inject {len(text)} chars via {backend} → win {target or now_focused or '?'}{drift}"
+                f"⌨ Inject {len(text)} chars via {backend} → "
+                f"win {injection_window or '?'}{drift}"
             )
 
             # Final generation gate immediately before keystrokes leave the process.
@@ -19288,7 +19396,7 @@ class WayfinderApp(ctk.CTk):
                 inject_text(
                     text,
                     typing_speed="instant",
-                    target_window=target if can_retarget else None,
+                    target_window=fallback_target,
                     game_mode=in_game_mode,
                     paste_fallback=bool(
                         self.config.get("game_mode_paste_fallback", True)
@@ -19301,9 +19409,7 @@ class WayfinderApp(ctk.CTk):
             # received the text before sending Return.
             if text.strip() and self.config.get("press_enter_after_dictation", False):
                 try:
-                    injected_window = (
-                        target if can_retarget and target else (now_focused or target)
-                    )
+                    injected_window = injection_window
                     _time.sleep(_AUTO_ENTER_SETTLE_S)
 
                     # A new dictation/reset during the settle window supersedes

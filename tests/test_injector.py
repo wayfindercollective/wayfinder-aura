@@ -82,11 +82,12 @@ class TestTypingSpeeds:
     """Tests for the TYPING_SPEEDS dictionary."""
 
     def test_instant_speed(self):
-        # "instant" uses 1ms (not 0) delays to prevent ydotool Shift bleed (commit 8bcedd4).
-        assert TYPING_SPEEDS["instant"] == (1, 1)
+        # 2ms is the proven floor: 1ms can lose the first XWayland key press
+        # and can race ydotool's synthetic Shift around punctuation.
+        assert TYPING_SPEEDS["instant"] == (2, 2)
 
     def test_fast_speed(self):
-        assert TYPING_SPEEDS["fast"] == (1, 1)
+        assert TYPING_SPEEDS["fast"] == (2, 2)
 
     def test_normal_speed(self):
         assert TYPING_SPEEDS["normal"] == (12, 12)
@@ -116,6 +117,14 @@ class TestInjectTextEarlyReturn:
     def test_none_returns_early(self, mock_ydotool_success):
         inject_text(None, "instant")
         mock_ydotool_success.assert_not_called()
+
+    def test_unimplemented_platform_fails_closed_before_linux_tool_selection(self):
+        with patch("wayfinder.core.injector.sys.platform", "win32"), \
+             patch("wayfinder.utils.platform.get_text_injector") as mock_selector:
+            with pytest.raises(InjectionError, match="not implemented"):
+                inject_text("hello", "instant")
+
+        mock_selector.assert_not_called()
 
     def test_whitespace_only_returns_early(self, mock_ydotool_success):
         inject_text("   \t\n  ", "instant")
@@ -154,8 +163,8 @@ class TestInjectTextSubprocess:
     @pytest.mark.parametrize(
         "speed,expected_delay,expected_hold",
         [
-            ("instant", "1", "1"),
-            ("fast", "1", "1"),
+            ("instant", "2", "2"),
+            ("fast", "2", "2"),
             ("normal", "12", "12"),
             ("slow", "50", "20"),
             ("very_slow", "100", "50"),
@@ -444,8 +453,8 @@ class TestInjectTextXdotool:
         activate_idx = calls.index(activate)
         type_idx = next(i for i, cmd in enumerate(calls) if cmd[1] == "type")
         assert activate_idx < type_idx
-        # Settle so the focus-in completes before synthetic keys.
-        mock_sleep.assert_called_once_with(0.06)
+        # Settle so the target toolkit completes FocusIn before the first key.
+        mock_sleep.assert_called_once_with(0.10)
 
     def test_no_target_window_skips_focus_check(self):
         # Without a target_window there's no getactivewindow/windowactivate — just type.
@@ -777,6 +786,25 @@ class TestModifierReleaseGate:
              patch("wayfinder.core.injector.time.monotonic", side_effect=clock):
             assert _wait_for_modifier_release(timeout=2.0) is False
         assert probe.closed  # released even on the timeout path
+
+    def test_xdotool_aborts_instead_of_typing_shift_corrupted_text(self):
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.core.injector._wait_for_modifier_release",
+                   return_value=False), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   return_value=ok) as run:
+            with pytest.raises(InjectionError, match="still held"):
+                _inject_text_xdotool("I'm ready.")
+        run.assert_not_called()
+
+    def test_wtype_aborts_instead_of_typing_shift_corrupted_text(self):
+        with patch("wayfinder.core.injector._wait_for_modifier_release",
+                   return_value=False), \
+             patch("wayfinder.core.injector.subprocess.run") as run:
+            from wayfinder.core.injector import _inject_text_wtype
+            with pytest.raises(InjectionError, match="still held"):
+                _inject_text_wtype("I'm ready.")
+        run.assert_not_called()
 
     def test_poll_interval_honors_no_sub_100ms_rule(self):
         probe = _FakeProbe([0x01, 0])

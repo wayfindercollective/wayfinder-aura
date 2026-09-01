@@ -83,6 +83,10 @@ class TestPlatformDetection:
         with patch.object(sys, "platform", "win32"):
             assert get_platform() == "windows"
 
+    def test_windows_injector_fails_closed_until_adapter_exists(self):
+        with patch.object(sys, "platform", "win32"):
+            assert get_text_injector() == "none"
+
 
 # =============================================================================
 # Linux-Specific Detection

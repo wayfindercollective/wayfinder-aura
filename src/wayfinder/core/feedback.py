@@ -9,6 +9,8 @@ longer than the HTTP timeout.
 """
 
 import os
+import re
+import uuid
 
 # Production Wayfinder-OS Convex deployment (fine-shrimp-886) — httpActions are
 # served from the .convex.site domain. Override for local/dev testing.
@@ -18,6 +20,7 @@ AURA_FEEDBACK_API_URL = os.environ.get(
 )
 FEEDBACK_HTTP_TIMEOUT = 10  # seconds
 FEEDBACK_MAX_CHARS = 4000  # keep in sync with the endpoint's server-side cap
+_EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 def submit_feedback(
@@ -38,9 +41,15 @@ def submit_feedback(
     if len(message) > FEEDBACK_MAX_CHARS:
         message = message[:FEEDBACK_MAX_CHARS]
 
-    payload = {"message": message}
-    if email and email.strip():
-        payload["email"] = email.strip()[:254]
+    normalized_email = (email or "").strip()[:254]
+    if normalized_email and not _EMAIL_PATTERN.fullmatch(normalized_email):
+        return False, "Enter a valid email address, or leave the email field blank."
+
+    # A stable ID for this one button press lets the mail provider deduplicate
+    # an ambiguous/replayed HTTP delivery without retaining user content.
+    payload = {"message": message, "submissionId": uuid.uuid4().hex}
+    if normalized_email:
+        payload["email"] = normalized_email
     if app_version:
         payload["appVersion"] = str(app_version)[:100]
     if plan:

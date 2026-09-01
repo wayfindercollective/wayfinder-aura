@@ -72,6 +72,8 @@ class TestSubmitFeedbackWire:
         assert post.call_args.args[0] == AURA_FEEDBACK_API_URL
         assert "fine-shrimp-886.convex.site" in AURA_FEEDBACK_API_URL
         payload = post.call_args.kwargs["json"]
+        submission_id = payload.pop("submissionId")
+        assert len(submission_id) == 32
         assert payload == {
             "message": "The overlay is lovely now",
             "email": "peter@example.com",  # stripped
@@ -85,12 +87,25 @@ class TestSubmitFeedbackWire:
         with patch("requests.post", return_value=_response(200, {"ok": True})) as post:
             ok, _ = submit_feedback("just the message, thanks")
         assert ok is True
-        assert post.call_args.kwargs["json"] == {"message": "just the message, thanks"}
+        payload = post.call_args.kwargs["json"]
+        assert payload["message"] == "just the message, thanks"
+        assert len(payload["submissionId"]) == 32
+        assert set(payload) == {"message", "submissionId"}
 
-    def test_email_capped_at_254_chars(self):
+    def test_email_at_254_chars_is_preserved(self):
+        long_valid = f"{'a' * 64}@{'b' * 185}.com"
+        assert len(long_valid) == 254
         with patch("requests.post", return_value=_response(200, {"ok": True})) as post:
-            submit_feedback("hello there", email="a" * 300)
-        assert len(post.call_args.kwargs["json"]["email"]) == 254
+            ok, _ = submit_feedback("hello there", email=long_valid)
+        assert ok is True
+        assert post.call_args.kwargs["json"]["email"] == long_valid
+
+    def test_invalid_email_fails_before_network(self):
+        with patch("requests.post") as post:
+            ok, detail = submit_feedback("hello there", email="test")
+        assert ok is False
+        assert "valid email" in detail
+        post.assert_not_called()
 
 
 class TestSubmitFeedbackFailures:

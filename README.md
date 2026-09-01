@@ -10,6 +10,11 @@ Troubleshooting).
 In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
+Linux is the current production release. macOS is an active port and Windows
+is planned; contributors should follow the
+[platform development contract](docs/PLATFORM-DEVELOPMENT.md) so platform work
+does not regress the Linux app.
+
 ![Wayfinder Aura UI](assets/icon.png)
 
 ## Why Wayfinder Aura

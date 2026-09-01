@@ -196,12 +196,12 @@ class TestTypingSpeedPresets:
             assert hold >= 0, f"{name}: hold is negative"
 
     def test_instant_has_minimal_delays(self):
-        """The 'instant' preset uses 1ms (near-zero) delays — 0ms caused ydotool Shift bleed."""
+        """Instant keeps the proven 2ms floor for first-key and Shift reliability."""
         from wayfinder.core.injector import TYPING_SPEEDS
 
         delay, hold = TYPING_SPEEDS["instant"]
-        assert delay == 1
-        assert hold == 1
+        assert delay == 2
+        assert hold == 2
 
 
 # =============================================================================

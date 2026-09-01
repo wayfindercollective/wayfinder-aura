@@ -31,12 +31,16 @@ See also `CLAUDE.md` (same rule) and notices in `src/wayfinder/license.py` / `sr
 
 ## Project Overview
 
-**Wayfinder Aura** is a local voice dictation application for Linux. It:
+**Wayfinder Aura** is a local voice dictation application. Linux is the
+production baseline, macOS is an active port, and Windows is planned. Read
+`docs/PLATFORM-DEVELOPMENT.md` before changing platform-sensitive code.
 
-1. **Records audio** when user presses a hotkey (F9 default)
+It:
+
+1. **Records audio** when the user presses the record hotkey (Ctrl+Alt+Space default)
 2. **Transcribes speech** using whisper.cpp or Faster-Whisper
 3. **Post-processes text** with an LLM (llama.cpp or cloud APIs)
-4. **Injects text** at the cursor position using ydotool
+4. **Injects text** at the cursor position using a platform adapter
 
 ### Core Technologies
 
@@ -47,9 +51,17 @@ See also `CLAUDE.md` (same rule) and notices in `src/wayfinder/license.py` / `sr
 | Audio Recording | sounddevice + scipy | 16kHz resampling for Whisper |
 | Transcription | whisper.cpp / Faster-Whisper | GPU acceleration via Vulkan/ROCm |
 | Post-Processing | llama.cpp | Local LLM cleanup |
-| Text Injection | ydotool | Works on Wayland and X11 |
+| Text Injection | xdotool / wtype / ydotool / macOS paste | Selected by runtime platform/session |
 | System Tray | pystray | Background operation |
-| Hotkey Detection | evdev / D-Bus | X11 and Wayland support |
+| Hotkey Detection | evdev / D-Bus / pynput | Platform-specific backends behind one interface |
+
+### Platform changes are contract-bound
+
+This is intentionally one repository. Shared recording, transcription,
+post-processing, state, licensing, and config behavior must not be forked by
+operating system. OS behavior belongs at the seams documented in
+`docs/PLATFORM-DEVELOPMENT.md`. Every macOS or Windows change still has to pass
+the Linux suite, plus the native platform-smoke CI jobs.
 
 ---
 
@@ -59,9 +71,10 @@ See also `CLAUDE.md` (same rule) and notices in `src/wayfinder/license.py` / `sr
 flowchart TB
     subgraph input [Input Detection]
         Hotkey[Hotkey Press]
-        evdev[evdev - X11]
-        socket[Socket - Wayland]
-        dbus[D-Bus Portal]
+        evdev[evdev - Linux]
+        socket[Socket - Linux/macOS]
+        dbus[D-Bus Portal - Linux]
+        pynput[pynput - macOS/fallback]
     end
 
     subgraph state [State Machine]
@@ -84,8 +97,8 @@ flowchart TB
         Tray[SystemTray - pystray]
     end
 
-    Hotkey --> evdev & socket & dbus
-    evdev & socket & dbus --> IDLE
+    Hotkey --> evdev & socket & dbus & pynput
+    evdev & socket & dbus & pynput --> IDLE
 
     IDLE -->|hotkey| RECORDING
     RECORDING -->|hotkey/stop| PROCESSING
@@ -136,7 +149,7 @@ src/wayfinder/
 │   ├── __init__.py     # Re-exports all core modules
 │   ├── recorder.py     # Audio recording (AudioRecorder, ChunkedRecorder)
 │   ├── transcriber.py  # Speech-to-text (whisper.cpp, Faster-Whisper, Groq, OpenAI)
-│   ├── injector.py     # Text injection via ydotool
+│   ├── injector.py     # Platform-dispatched text injection
 │   ├── postprocessor.py # LLM text cleanup (llama.cpp, Anthropic, OpenAI)
 │   └── voice_profile.py # Personal voice pattern learning
 │
@@ -151,7 +164,7 @@ src/wayfinder/
 │
 ├── hotkeys/            # Hotkey detection
 │   ├── __init__.py
-│   ├── evdev.py        # Direct /dev/input monitoring (X11)
+│   ├── evdev.py        # Direct /dev/input monitoring (Linux only)
 │   ├── socket.py       # Unix socket for external triggers
 │   └── dbus.py         # XDG GlobalShortcuts portal (Wayland)
 │
@@ -193,7 +206,9 @@ The project is being migrated from a monolithic structure to the modular `src/wa
 
 ## Configuration Reference
 
-Config is stored at `~/.config/wayfinder-aura/config.json`
+Config is stored at the platform config directory (`~/.config/wayfinder-aura`
+on Linux, `~/Library/Application Support/wayfinder-aura` on macOS, and
+`%APPDATA%\wayfinder-aura` on Windows).
 
 ### Whisper Settings
 
@@ -206,10 +221,10 @@ Config is stored at `~/.config/wayfinder-aura/config.json`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `hotkey_key` | int | `67` (F9) | evdev key code for recording toggle |
-| `hotkey_modifiers` | list | `[]` | Modifier keys (ctrl, alt, shift, super) |
-| `style_toggle_key` | int | `68` (F10) | Key to cycle output styles |
-| `style_toggle_modifiers` | list | `[]` | Modifiers for style toggle |
+| `hotkey_key` | int | `57` (Space) | evdev-compatible key code for recording toggle |
+| `hotkey_modifiers` | list | `["ctrl", "alt"]` | Modifier keys (ctrl, alt, shift, super) |
+| `style_toggle_key` | int | `28` (Enter) | Key to cycle output styles |
+| `style_toggle_modifiers` | list | `["ctrl", "alt"]` | Modifiers for style toggle |
 
 ### Audio Settings
 
@@ -314,21 +329,22 @@ Config is stored at `~/.config/wayfinder-aura/config.json`
 
 ### `wayfinder.core.injector`
 
-**Purpose**: Type text at cursor position.
+**Purpose**: Type text at the cursor through the active platform adapter.
 
 **Key Function**:
-- `inject_text(text, typing_speed)` - Inject via ydotool
+- `inject_text(text, typing_speed)` - Dispatch to Linux or macOS injection
 
-**Typing Speeds**: `instant` (0ms), `fast` (1ms), `normal` (12ms), `slow` (50ms), `very_slow` (100ms)
+**Typing Speeds**: `instant`/`fast` (2ms safe floor), `normal` (12ms), `slow` (50ms), `very_slow` (100ms)
 
 ### `wayfinder.hotkeys`
 
-**Purpose**: Detect global hotkeys across X11 and Wayland.
+**Purpose**: Detect global hotkeys through platform-specific backends.
 
 **Methods**:
-1. `evdev` - Direct `/dev/input` monitoring (X11, needs input group)
-2. `socket` - Unix socket at `/tmp/wayfinder-aura.sock` (Wayland)
-3. `dbus` - XDG GlobalShortcuts portal (Wayland, experimental)
+1. `evdev` - Direct `/dev/input` monitoring (Linux, needs device access)
+2. `socket` - Unix socket triggers (Linux/macOS)
+3. `dbus` - XDG GlobalShortcuts portal (Linux/Wayland)
+4. `pynput` - macOS global listener and supported fallbacks
 
 ### `wayfinder.ui.theme`
 
@@ -389,9 +405,11 @@ change. X11: Qt geometry, no KWin loadScript spam. Details: `DEVELOPMENT.md`
 
 ydotool needs its daemon running. Check socket at `/run/ydotool/ydotool.sock`.
 
-### 7. Config Duplication
+### 7. Config Ownership
 
-`DEFAULT_CONFIG` appears in both `wayfinder_main.py` and `src/wayfinder/config.py`. The authoritative version is `src/wayfinder/config.py`.
+`DEFAULT_CONFIG` exists only in `src/wayfinder/config.py`. Do not create a
+platform-specific or `wayfinder_main.py` copy; platform defaults must be
+computed by the shared config/platform helpers.
 
 ---
 

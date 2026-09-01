@@ -1,7 +1,8 @@
 """
-Wayfinder Aura - Local voice dictation for Linux.
+Wayfinder Aura - Local voice dictation.
 
 A privacy-focused voice dictation app using whisper.cpp for transcription.
+Linux is the production platform; macOS is an active port and Windows is planned.
 
 Package Structure:
     wayfinder/

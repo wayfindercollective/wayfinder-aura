@@ -124,11 +124,14 @@ def _get_ydotool_env() -> dict:
 
 
 # Typing speed presets: (key_delay_ms, key_hold_ms)
-# Minimum 1ms delays to prevent ydotool Shift key race conditions
-# (0ms causes Shift to bleed into adjacent keys: a→A, comma→<, period→>)
+# Keep a 2ms floor for synthetic typing.  The earlier 1ms optimisation was
+# fast enough to expose two compositor/input-client races in the field: Shift
+# events could bleed into adjacent punctuation, and XWayland occasionally
+# discarded the first character's very short press.  Two milliseconds remains
+# effectively instant while preserving the first character reliably.
 TYPING_SPEEDS = {
-    "instant": (1, 1),       # 1ms delays — prevents Shift bleed, effectively instant
-    "fast": (1, 1),          # Same as instant (safe minimum)
+    "instant": (2, 2),       # Safe minimum for ydotool and XWayland/xdotool
+    "fast": (2, 2),          # Same as instant (safe minimum)
     "normal": (12, 12),      # Comfortable speed
     "slow": (50, 20),        # Slower, more natural
     "very_slow": (100, 50),  # Very slow, like watching someone type
@@ -625,8 +628,10 @@ def _wait_for_modifier_release(timeout: float = 2.0, poll: float = 0.1) -> bool:
     bounded wait, not a repeating idle timer, and the 100ms poll honors the
     project's no-sub-100ms-polling rule. The common case returns on the first
     query (mask clear, or probe unavailable — which must never block).
-    False means the user still held a modifier at *timeout*; callers proceed
-    anyway with --clearmodifiers as the best-effort backstop.
+    False means the user still held a modifier at *timeout*. Synthetic-key
+    callers must abort in that case: typing through a live Shift changes every
+    letter's case and punctuation (for example ``.`` becomes ``>``), while a
+    live Ctrl can fire application shortcuts instead of inserting text.
     """
     probe = _open_modifier_probe()
     if probe is None:
@@ -641,6 +646,21 @@ def _wait_for_modifier_release(timeout: float = 2.0, poll: float = 0.1) -> bool:
             time.sleep(poll)
     finally:
         probe.close()
+
+
+def _require_modifier_release() -> None:
+    """Fail closed when a physical modifier is still held after the wait.
+
+    xdotool's ``--clearmodifiers`` only clears the X server's synthetic state.
+    Under XWayland the compositor immediately reasserts a physically-held key,
+    so continuing after the bounded wait corrupts the transcript. The complete
+    transcript remains available in Aura's Last Transcription UI on this error.
+    """
+    if not _wait_for_modifier_release():
+        raise InjectionError(
+            "A Shift, Ctrl, Alt, or Super key is still held. "
+            "Release it, then dictate again; the transcript was not typed."
+        )
 
 
 def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window: "str | None" = None) -> None:
@@ -680,7 +700,12 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
                     capture_output=True, text=True, timeout=5, env=_env,
                 )
                 import time as _t
-                _t.sleep(0.06)  # let the WM/app finish the focus-in before synthetic keys
+                # ``windowactivate --sync`` confirms the WM's active-window
+                # property, but the target toolkit can still be finishing its
+                # FocusIn handling.  At 60ms, XWayland occasionally accepted
+                # every key except the first one.  Give that rare fallback a
+                # full event-loop turn before the transcript begins.
+                _t.sleep(0.10)
             except Exception:
                 pass
 
@@ -688,7 +713,7 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     # no later pre-work re-opens the race): the user's hand is often still on
     # the keyboard ~1s after hotkey release, and under XWayland
     # --clearmodifiers cannot neutralize a physically-held modifier.
-    _wait_for_modifier_release()
+    _require_modifier_release()
 
     cmd = [
         "xdotool", "type",
@@ -734,7 +759,7 @@ def _inject_text_wtype(text: str) -> None:
     # Gate immediately before the synthetic keys (after the first-injection
     # settle): a physically-held modifier corrupts virtual-keyboard typing the
     # same way it corrupts XTEST typing.
-    _wait_for_modifier_release()
+    _require_modifier_release()
     try:
         result = subprocess.run(
             ["wtype", text],
@@ -841,7 +866,7 @@ def _send_ctrl_v_linux(tool: str) -> None:
     """Synthesize Ctrl+V with the active injection tool."""
     # A physically-held Shift would turn this into Ctrl+Shift+V (app-dependent
     # behavior) — same XWayland --clearmodifiers gap as the type path.
-    _wait_for_modifier_release()
+    _require_modifier_release()
     if tool == "xdotool":
         result = subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
@@ -893,11 +918,15 @@ def press_enter() -> None:
         import pyautogui
         pyautogui.press("enter")
         return
+    if not sys.platform.startswith("linux"):
+        raise InjectionError(
+            "Text injection is not implemented for this platform yet."
+        )
 
     from wayfinder.utils.platform import get_text_injector
     # Held Shift would send Shift+Return — newline instead of submit in most
     # chat inputs, silently breaking the auto-Enter promise.
-    _wait_for_modifier_release()
+    _require_modifier_release()
     tool = get_text_injector()
     if tool == "xdotool":
         result = subprocess.run(
@@ -950,6 +979,10 @@ def inject_text_clipboard_paste(text: str) -> None:
     if sys.platform == "darwin":
         _inject_text_pyautogui(text, "instant")
         return
+    if not sys.platform.startswith("linux"):
+        raise InjectionError(
+            "Text injection is not implemented for this platform yet."
+        )
 
     from ..utils.platform import get_text_injector
 
@@ -1042,7 +1075,7 @@ def _inject_text_type_linux(
         # Gate immediately before the synthetic keys (after readiness checks):
         # uinput-level typing merges with physically-held modifiers in the
         # compositor exactly like the other backends.
-        _wait_for_modifier_release()
+        _require_modifier_release()
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -1102,6 +1135,10 @@ def inject_text(
     if sys.platform == "darwin":
         _inject_text_pyautogui(text, typing_speed)
         return
+    if not sys.platform.startswith("linux"):
+        raise InjectionError(
+            "Text injection is not implemented for this platform yet."
+        )
 
     # Linux type path first.
     try:
