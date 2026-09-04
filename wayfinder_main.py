@@ -4712,12 +4712,18 @@ class OverlayController:
 
                 try:
                     line = json.dumps(cmd) + "\n"
-                    import select
-                    _, ready, _ = select.select([], [self._process.stdin], [], 0.05)
-                    if not ready:
-                        if critical:
-                            continue  # Retry critical commands
-                        return False
+                    # select() on the stdin *pipe* is POSIX-only; on Windows it
+                    # raises WinError 10038 (select accepts only sockets there),
+                    # which was being caught as "overlay died" and crash-looped
+                    # the overlay. The overlay's always-on stdin reader keeps the
+                    # pipe drained, so on Windows we write directly.
+                    if sys.platform != "win32":
+                        import select
+                        _, ready, _ = select.select([], [self._process.stdin], [], 0.05)
+                        if not ready:
+                            if critical:
+                                continue  # Retry critical commands
+                            return False
                     self._process.stdin.write(line)
                     self._process.stdin.flush()
                     wrote = True
@@ -12975,12 +12981,14 @@ class WayfinderApp(ctk.CTk):
                 # The socket listener can die on a transient bind failure, or wedge after
                 # binding/listening so the thread remains alive but the KDE/tray command
                 # socket refuses clients. Verify a real ping response, not just thread liveness.
-                if self._socket_thread is None or not self._socket_thread.is_alive():
-                    self.log("🔄 Socket listener not running - restarting...")
-                    self._ensure_socket_listener()
-                elif not self._socket_listener_healthy():
-                    self.log("🔄 Socket listener unreachable - restarting...")
-                    self._ensure_socket_listener(force_restart=True)
+                # (Windows has no AF_UNIX command socket — skip, don't log-spam a restart.)
+                if sys.platform != "win32":
+                    if self._socket_thread is None or not self._socket_thread.is_alive():
+                        self.log("🔄 Socket listener not running - restarting...")
+                        self._ensure_socket_listener()
+                    elif not self._socket_listener_healthy():
+                        self.log("🔄 Socket listener unreachable - restarting...")
+                        self._ensure_socket_listener(force_restart=True)
                 # In a Flatpak the in-app global-hotkey path is the GlobalShortcuts portal when
                 # PyGObject is bundled, else the pynput X11 fallback (see start_hotkey_listener).
                 # Supervise whichever the app ACTUALLY chose by mirroring resolve_hotkey_backend
@@ -18306,6 +18314,8 @@ class WayfinderApp(ctk.CTk):
 
     def _socket_listener_healthy(self, timeout: float = 0.35) -> bool:
         """Return True only when the command socket accepts and answers a ping."""
+        if sys.platform == "win32":
+            return False  # No AF_UNIX command socket on Windows.
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(timeout)
@@ -18324,6 +18334,12 @@ class WayfinderApp(ctk.CTk):
 
         Always uses the package listener (import here so a local legacy name cannot shadow it).
         """
+        if sys.platform == "win32":
+            # The command socket is AF_UNIX (Linux/macOS external triggers such
+            # as trigger_record.py). Windows has no Unix domain socket here and
+            # the pynput hotkey listener already covers dictation, so skip it
+            # rather than crash-looping on socket.AF_UNIX.
+            return
         existing = self._socket_thread
         if not force_restart and existing is not None and existing.is_alive():
             return
