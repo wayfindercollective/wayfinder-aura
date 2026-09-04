@@ -1,0 +1,20 @@
+# Wayfinder Aura - Windows install manifest.
+#
+# Installs everything a Windows box needs, including the local LLM cleanup
+# engine. Windows has no default C toolchain, so llama-cpp-python is pulled as a
+# prebuilt CPU wheel from the project's own index (no compiler required) rather
+# than built from source. That resident wheel is the app's preferred cleanup
+# path; the llama-cli subprocess fallback expects the retired `llama-simple`
+# binary and does not work with modern llama.cpp builds.
+#
+# Install:
+#     python -m pip install -r requirements-windows.txt
+#
+# Then run `python main.py` and complete the in-app setup, which downloads the
+# prebuilt whisper.cpp binary and the speech model automatically on Windows.
+
+-r requirements.txt
+
+# Local LLM post-processing (dictation cleanup) - prebuilt Windows CPU wheel.
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python>=0.3.0
