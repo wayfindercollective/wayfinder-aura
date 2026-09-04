@@ -110,6 +110,7 @@ class TestConfigLoading:
         save_config(reloaded)
         assert load_config()["overlay_enabled"] is True
 
+    @pytest.mark.linux_only
     def test_save_config_is_owner_only(self, temp_config_dir: Path, sample_config: dict):
         """config.json is written 0600 (may hold API keys)."""
         from wayfinder.config import save_config, CONFIG_FILE
@@ -118,6 +119,7 @@ class TestConfigLoading:
         assert CONFIG_FILE.exists()
         assert (CONFIG_FILE.stat().st_mode & 0o777) == 0o600
 
+    @pytest.mark.linux_only
     def test_load_repairs_config_backup_modes(self, temp_config_dir: Path):
         """Existing config.json* backups are tightened to 0600 on load."""
         import json
@@ -280,6 +282,7 @@ class TestStalePathRepair:
         config = cfg.load_config()
         assert config["llama_cpp_binary"] == str(user_binary)
 
+    @pytest.mark.linux_only
     def test_blank_whisper_binary_repaired_to_existing_host_candidate(
         self, temp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -340,6 +343,7 @@ class TestStalePathRepair:
 
         assert cfg._repair_config_path("llama_cpp_binary", str(stale_cli)) == str(current_cli)
 
+    @pytest.mark.linux_only
     def test_source_mode_ignores_existing_flatpak_app_path(
         self, temp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ):

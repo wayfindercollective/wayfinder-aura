@@ -1158,6 +1158,7 @@ class TestSetupConfigIntegration:
             cfg_mod.CONFIG_DIR = original_dir
             cfg_mod.CONFIG_FILE = original_file
 
+    @pytest.mark.linux_only
     def test_config_paths_updated_after_setup(self, temp_config_dir: Path):
         """Setup should update whisper_binary and model_path in config."""
         import wayfinder.config as cfg_mod
@@ -1339,6 +1340,7 @@ class TestYdotooldSelfProvision:
         monkeypatch.setattr(s.shutil, "which", lambda n: "/usr/bin/systemctl")
         assert s.can_self_provision_ydotoold() is False
 
+    @pytest.mark.linux_only
     def test_find_host_ydotoold_skips_appdir(self, monkeypatch, temp_dir):
         from wayfinder.core import setup as s
         appdir = temp_dir / "AppDir"
@@ -1356,6 +1358,7 @@ class TestYdotooldSelfProvision:
         assert s._find_host_ydotoold() == str(host)
 
 
+@pytest.mark.linux_only
 class TestStaleYdotoolSocket:
     """A socket file with no listener must not report ready (probe by connect)."""
 

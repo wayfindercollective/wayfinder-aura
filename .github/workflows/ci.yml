@@ -96,3 +96,38 @@ jobs:
 
       - name: Verify native platform boundaries
         run: python scripts/platform_smoke.py --expected ${{ matrix.expected }}
+
+  windows-tests:
+    name: Windows tests
+    runs-on: windows-latest
+    # UTF-8 mode: the console defaults to cp1252 on Windows runners, which can't
+    # encode the ✓ glyphs the structure check and some tests print.
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+
+      - name: Install Aura + test tools
+        run: python -m pip install -e . pytest pytest-mock pytest-timeout ruff
+
+      - name: Run high-signal Ruff checks
+        run: ruff check --output-format=github --select F821,F823,F722,E9 .
+
+      - name: Verify project structure
+        run: python scripts/verify_structure.py
+
+      - name: Verify native platform boundaries
+        run: python scripts/platform_smoke.py --expected windows
+
+      - name: Run tests (Linux-only tests auto-skip via the linux_only marker)
+        run: pytest tests/ -q --tb=short -m "not ui and not slow and not network and not perf"

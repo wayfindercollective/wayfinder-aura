@@ -69,6 +69,7 @@ class TestLicenseStorage:
         assert loaded.is_valid
         assert loaded.license_key == key
 
+    @pytest.mark.linux_only
     def test_existing_license_permissions_are_repaired(self, temp_config_dir: Path, mock_online_license):
         """Existing token files are tightened to owner-only permissions on load."""
         import json

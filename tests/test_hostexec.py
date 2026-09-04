@@ -100,6 +100,7 @@ def test_bundle_binary_env_restores_pre_pyinstaller_library_path(bundle, monkeyp
     assert env["LD_LIBRARY_PATH_ORIG"] == original
 
 
+@pytest.mark.linux_only
 def test_bundle_binary_env_without_orig_drops_only_meipass(bundle, monkeypatch):
     monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
     monkeypatch.setenv(

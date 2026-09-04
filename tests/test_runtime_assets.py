@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from wayfinder.utils import runtime_assets
 
 
@@ -45,6 +47,7 @@ def test_cpu_lookup_falls_back_to_primary_when_twin_is_absent(tmp_path, monkeypa
     assert runtime_assets.find_whisper_binary({"whisper_binary": str(primary)}, cpu=True) == str(primary)
 
 
+@pytest.mark.linux_only
 def test_non_executable_candidate_is_rejected(tmp_path, monkeypatch):
     candidate = tmp_path / "whisper-cli"
     candidate.write_text("not executable")

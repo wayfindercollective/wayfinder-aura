@@ -27,6 +27,31 @@ def pytest_configure(config):
         "markers",
         "live: requires a running Wayfinder app (skipped unless WAYFINDER_LIVE=1)",
     )
+    config.addinivalue_line(
+        "markers",
+        "linux_only: exercises a Linux-only mechanism (evdev/ydotool input, "
+        "AF_UNIX sockets, POSIX file-mode bits, SteamOS/gamemode, GPU/Vulkan "
+        "fallback, AppImage/Flatpak packaging); auto-skipped on macOS/Windows.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip ``@pytest.mark.linux_only`` tests when not on Linux.
+
+    Those tests cover mechanisms with no macOS/Windows equivalent, so they can
+    only run on Linux. They STILL run on Linux — the production regression gate
+    (docs/PLATFORM-DEVELOPMENT.md) — so this narrows the suite on the ports
+    without ever weakening Linux coverage. It is not a substitute for a proper
+    adapter: shared behavior must stay unmarked and pass on every platform.
+    """
+    if sys.platform == "linux":
+        return
+    skip_marker = pytest.mark.skip(
+        reason="Linux-only mechanism; not applicable on this platform"
+    )
+    for item in items:
+        if "linux_only" in item.keywords:
+            item.add_marker(skip_marker)
 
 
 # Add src to path for imports

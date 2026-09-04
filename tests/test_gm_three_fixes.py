@@ -255,6 +255,7 @@ class TestEffectiveAsrConfig:
         assert out["accuracy_mode"] == "fast"
         assert out["transcription_backend"] == "groq_whisper"
 
+    @pytest.mark.linux_only
     def test_no_light_file_keeps_heavy_path_with_fast_overrides(self, tmp_path, monkeypatch):
         heavy = tmp_path / "ggml-large-v3-turbo.bin"
         heavy.write_bytes(b"heavy")
