@@ -357,6 +357,10 @@ _INSTANCE_LOCK_FD = None  # keep open for process lifetime
 
 
 def _instance_lock_path() -> Path:
+    if sys.platform == "win32":
+        # Windows has no XDG_RUNTIME_DIR; keep the lock in the per-user cache dir.
+        from wayfinder.utils.platform import get_cache_dir
+        return get_cache_dir() / "instance.lock"
     runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
     return Path(runtime) / "wayfinder-aura" / "instance.lock"
 
@@ -372,6 +376,11 @@ def _control_socket_path() -> str:
 
 def _try_control_command(verb: bytes, *, expect_reply: bool = False) -> bool:
     """Send a control-socket verb to a live instance. Returns True if connected."""
+    if sys.platform == "win32":
+        # AF_UNIX control IPC is Linux/macOS-only. A Windows control channel
+        # (named pipe or localhost socket) is a planned adapter; until then a
+        # second launch simply exits instead of raising the first window.
+        return False
     import socket
 
     path = _control_socket_path()
@@ -420,8 +429,47 @@ def _dispatch_cli_control_verb() -> int | None:
     return 1
 
 
+def _acquire_instance_lock_windows() -> bool:
+    """Windows single-instance lock via msvcrt byte-range lock (the fcntl.flock analog).
+
+    Uses a non-blocking exclusive lock on byte 0 of a lock file in the cache dir.
+    The lock is held for the process lifetime (fd kept open) and released by the
+    OS on exit. Opened append-mode so a second instance never truncates the byte
+    the primary holds locked (which would surface as a sharing violation).
+    """
+    import msvcrt
+
+    global _INSTANCE_LOCK_FD
+    path = _instance_lock_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = open(path, "a+", encoding="utf-8")
+    except OSError as e:
+        print(f"[Instance] Warning: could not open lock file ({e}); continuing")
+        return True  # fail open — better a second instance than no launch
+    try:
+        fd.seek(0)
+        msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        try:
+            fd.close()
+        except Exception:
+            pass
+        return False  # another live instance holds the lock
+    try:
+        fd.write(str(os.getpid()))  # append-mode write; informational only
+        fd.flush()
+    except OSError:
+        pass  # PID annotation is best-effort; the lock is what matters
+    _INSTANCE_LOCK_FD = fd  # keep open so the lock is held
+    return True
+
+
 def _acquire_instance_lock() -> bool:
     """Exclusive flock. True = we are the primary instance. False = another holds it."""
+    if sys.platform == "win32":
+        return _acquire_instance_lock_windows()
+
     import fcntl
 
     global _INSTANCE_LOCK_FD

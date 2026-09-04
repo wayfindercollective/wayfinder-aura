@@ -3291,7 +3291,7 @@ def resolve_hotkey_backend(platform: str, is_flatpak: bool, portal_available: bo
     Pure mirror of start_hotkey_listener's top-level dispatch, so the
     cross-desktop behavior is provable without every environment on hand:
 
-      "pynput"      — macOS, OR Flatpak-on-X11 without PyGObject (XRecord grab)
+      "pynput"      — macOS or Windows, OR Flatpak-on-X11 without PyGObject
       "portal"      — Flatpak with PyGObject: the XDG GlobalShortcuts portal,
                       the cross-desktop standard (works on KDE *and* GNOME)
       "evdev"       — native (non-Flatpak) Linux, reading /dev/input directly.
@@ -3307,7 +3307,9 @@ def resolve_hotkey_backend(platform: str, is_flatpak: bool, portal_available: bo
     `session_type` is $XDG_SESSION_TYPE (case-insensitive; anything other than
     "wayland" — "x11", "tty", "" — is treated as not-Wayland). Pure/headless.
     """
-    if platform == "darwin":
+    if platform == "darwin" or platform == "win32":
+        # macOS and Windows have neither evdev nor the XDG portal; the
+        # cross-platform pynput global listener is their native hotkey backend.
         return "pynput"
     is_wayland = session_type.lower() == "wayland"
     if is_flatpak:
@@ -18373,7 +18375,12 @@ class WayfinderApp(ctk.CTk):
         hotkey_modifiers = self.config.get("hotkey_modifiers", [])
         style_toggle_key = self.config.get("style_toggle_key", 68)
         style_toggle_modifiers = self.config.get("style_toggle_modifiers", [])
-        platform_label = "macOS" if sys.platform == "darwin" else "X11 Flatpak fallback"
+        if sys.platform == "darwin":
+            platform_label = "macOS"
+        elif sys.platform == "win32":
+            platform_label = "Windows"
+        else:
+            platform_label = "X11 Flatpak fallback"
         self.log(f"🖥️ {platform_label} — using pynput (global keyboard listener)")
         self._pynput_listener_started = True
 

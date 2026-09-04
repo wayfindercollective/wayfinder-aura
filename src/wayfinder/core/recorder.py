@@ -1372,6 +1372,13 @@ class AudioRecorder:
             suffix=".wav", delete=False, dir=str(get_app_temp_dir())
         )
         temp_path = self._temp_file.name
+        # We only needed NamedTemporaryFile to reserve a unique path in the
+        # private temp dir; the audio is written via wave.open below. Close the
+        # reservation handle now: on Windows a lingering open handle keeps the
+        # file locked, so the whisper-cli subprocess can't read it ("failed to
+        # read audio file") and cleanup's unlink() also fails. POSIX tolerates
+        # the concurrent handle, so closing here is safe on every platform.
+        self._temp_file.close()
 
         # Write WAV file at target sample rate (16kHz for Whisper)
         with wave.open(temp_path, "wb") as wav_file:
@@ -1644,6 +1651,10 @@ class ChunkedRecorder:
                 dir=str(get_app_temp_dir()),
             )
             temp_path = temp_file.name
+            # Close the reservation handle before writing via wave.open: on
+            # Windows a lingering open handle locks the file so the whisper-cli
+            # subprocess can't read the chunk. Harmless on POSIX.
+            temp_file.close()
             self._temp_files.append(temp_path)
             
             # Write WAV at target sample rate (16kHz for Whisper)

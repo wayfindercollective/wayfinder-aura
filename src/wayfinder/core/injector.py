@@ -918,6 +918,10 @@ def press_enter() -> None:
         import pyautogui
         pyautogui.press("enter")
         return
+    if sys.platform == "win32":
+        from .injector_windows import press_enter_windows
+        press_enter_windows()
+        return
     if not sys.platform.startswith("linux"):
         raise InjectionError(
             "Text injection is not implemented for this platform yet."
@@ -978,6 +982,10 @@ def inject_text_clipboard_paste(text: str) -> None:
 
     if sys.platform == "darwin":
         _inject_text_pyautogui(text, "instant")
+        return
+    if sys.platform == "win32":
+        from .injector_windows import inject_text_paste_windows
+        inject_text_paste_windows(text)
         return
     if not sys.platform.startswith("linux"):
         raise InjectionError(
@@ -1135,6 +1143,20 @@ def inject_text(
     if sys.platform == "darwin":
         _inject_text_pyautogui(text, typing_speed)
         return
+    if sys.platform == "win32":
+        # Clipboard paste (Ctrl+V) is the reliable cross-app primary on Windows:
+        # modern rich-text / WinUI / Electron controls mishandle a rapid burst of
+        # synthetic per-character SendInput events, dropping or garbling
+        # characters (observed as runs of stray glyphs). Paste inserts the exact
+        # Unicode text in one shot and restores the clipboard. SendInput typing
+        # stays as the fallback for the rare control that ignores synthetic paste.
+        from .injector_windows import inject_text_paste_windows, inject_text_windows
+        try:
+            inject_text_paste_windows(text)
+            return
+        except InjectionError:
+            inject_text_windows(text, typing_speed)
+            return
     if not sys.platform.startswith("linux"):
         raise InjectionError(
             "Text injection is not implemented for this platform yet."

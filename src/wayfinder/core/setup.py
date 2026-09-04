@@ -183,6 +183,10 @@ def check_text_injection() -> DependencyStatus:
         except ImportError:
             return DependencyStatus(False, error="pyautogui not installed. Run: pip install pyautogui")
 
+    if sys.platform == "win32":
+        # Native Win32 SendInput injection needs no external tool or daemon.
+        return DependencyStatus(True, detail="Windows native (SendInput)")
+
     # NOTE: a bundled ydotool CLIENT is deliberately NOT treated as sufficient —
     # it must protocol-match a running host daemon, and without one it silently
     # types into a throwaway uinput device nothing receives (2026-07 field bug).

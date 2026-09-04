@@ -83,9 +83,11 @@ class TestPlatformDetection:
         with patch.object(sys, "platform", "win32"):
             assert get_platform() == "windows"
 
-    def test_windows_injector_fails_closed_until_adapter_exists(self):
+    def test_windows_injector_reports_native_sendinput_adapter(self):
+        # The native Win32 SendInput adapter now exists
+        # (wayfinder.core.injector_windows), so Windows advertises it.
         with patch.object(sys, "platform", "win32"):
-            assert get_text_injector() == "none"
+            assert get_text_injector() == "windows"
 
 
 # =============================================================================
