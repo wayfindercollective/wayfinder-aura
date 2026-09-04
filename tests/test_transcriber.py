@@ -1493,6 +1493,7 @@ class TestTranscribeWithConfig:
         assert transcribe_with_config(str(sample_audio_file), sample_config) == ""
 
 
+@pytest.mark.linux_only
 class TestGpuCpuFallback:
     """Vulkan whisper crash -> automatic retry with the bundled CPU sibling binary."""
 
@@ -1642,6 +1643,7 @@ class TestPackagedServerCpuRouting:
         assert "-ng" not in attempts[0]
 
 
+@pytest.mark.linux_only
 class TestGpuRecoveryProbe:
     """Background probe re-tests a crashed GPU binary and restores it when healthy."""
 
@@ -1942,6 +1944,7 @@ class TestServerModeDefaultAndFallback:
         assert backend.whisper_binary
         assert backend.whisper_binary != ""
 
+    @pytest.mark.linux_only
     def test_blank_whisper_binary_resolves_existing_home_cli(
         self, tmp_path, monkeypatch
     ):
@@ -1965,6 +1968,7 @@ class TestServerModeDefaultAndFallback:
         assert isinstance(backend, WhisperCppBackend)
         assert backend.whisper_binary == str(home_cli)
 
+    @pytest.mark.linux_only
     def test_source_mode_ignores_flatpak_path_candidates(
         self, tmp_path, monkeypatch
     ):

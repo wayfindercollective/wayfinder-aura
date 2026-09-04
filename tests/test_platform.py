@@ -83,9 +83,11 @@ class TestPlatformDetection:
         with patch.object(sys, "platform", "win32"):
             assert get_platform() == "windows"
 
-    def test_windows_injector_fails_closed_until_adapter_exists(self):
+    def test_windows_injector_reports_native_sendinput_adapter(self):
+        # The native Win32 SendInput adapter now exists
+        # (wayfinder.core.injector_windows), so Windows advertises it.
         with patch.object(sys, "platform", "win32"):
-            assert get_text_injector() == "none"
+            assert get_text_injector() == "windows"
 
 
 # =============================================================================
@@ -282,6 +284,7 @@ class TestBinaryDetection:
         result = get_default_whisper_binary()
         assert result == str(bundled)
 
+    @pytest.mark.linux_only
     def test_get_default_whisper_binary_normal(self):
         """Returns home-based path when not in AppImage."""
         result = get_default_whisper_binary()
@@ -501,6 +504,7 @@ class TestSteamPlatform:
 
         monkeypatch.setattr(platform_mod.Path, "read_text", fake)
 
+    @pytest.mark.linux_only
     @pytest.mark.parametrize("content", [
         'ID=steamos\n',
         'ID="steamos"\n',
@@ -529,7 +533,7 @@ class TestSteamPlatform:
         assert is_steamos() is False
 
     @pytest.mark.parametrize("host_release,expected", [
-        ('ID=steamos\nID_LIKE=arch\n', True),
+        pytest.param('ID=steamos\nID_LIKE=arch\n', True, marks=pytest.mark.linux_only),
         ('ID=bazzite\nID_LIKE=fedora\n', False),
     ])
     def test_flatpak_uses_authoritative_host_os_release(
@@ -598,6 +602,7 @@ class TestSteamPlatform:
         monkeypatch.setattr(platform_mod, "read_mode_marker", lambda: "desktop")
         assert supports_steam_game_mode() is True
 
+    @pytest.mark.linux_only
     def test_game_mode_controls_show_when_full_session_is_installed(self, monkeypatch):
         monkeypatch.setattr(platform_mod, "get_steam_platform", lambda: None)
         monkeypatch.setattr(platform_mod, "read_mode_marker", lambda: None)

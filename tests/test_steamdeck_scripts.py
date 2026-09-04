@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO = Path(__file__).resolve().parent.parent
 STEAMDECK = REPO / "scripts" / "steamdeck"
@@ -38,6 +40,7 @@ def test_trigger_daemon_sends_socket_commands_not_xdotool_f3():
     assert "/usr/bin/xdotool" not in daemon
 
 
+@pytest.mark.linux_only
 def test_trigger_daemon_has_a_no_package_stdlib_evdev_backend(tmp_path):
     """Stock SteamOS cannot compile python-evdev against its stripped headers."""
     daemon = _read("wayfinder-trigger-daemon.py")

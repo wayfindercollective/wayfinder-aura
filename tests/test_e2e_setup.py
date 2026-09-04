@@ -312,6 +312,10 @@ class TestCheckBuildTools:
         status = check_build_tools()
         assert status.installed is True
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows needs no build toolchain (prebuilt binary download)",
+    )
     @patch("wayfinder.core.setup.shutil.which")
     def test_missing_cmake(self, mock_which):
         def which_side_effect(name):
@@ -324,6 +328,10 @@ class TestCheckBuildTools:
         assert status.installed is False
         assert "cmake" in status.error.lower()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows needs no build toolchain (prebuilt binary download)",
+    )
     @patch("wayfinder.core.setup.shutil.which")
     def test_missing_compiler(self, mock_which):
         def which_side_effect(name):
@@ -737,6 +745,10 @@ class TestInstallSystemPackages:
 # =============================================================================
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows provisions whisper via a prebuilt-binary download, not a from-source build",
+)
 class TestBuildWhisperCpp:
     """Test the whisper.cpp build flow (all mocked)."""
 
@@ -1158,6 +1170,7 @@ class TestSetupConfigIntegration:
             cfg_mod.CONFIG_DIR = original_dir
             cfg_mod.CONFIG_FILE = original_file
 
+    @pytest.mark.linux_only
     def test_config_paths_updated_after_setup(self, temp_config_dir: Path):
         """Setup should update whisper_binary and model_path in config."""
         import wayfinder.config as cfg_mod
@@ -1339,6 +1352,7 @@ class TestYdotooldSelfProvision:
         monkeypatch.setattr(s.shutil, "which", lambda n: "/usr/bin/systemctl")
         assert s.can_self_provision_ydotoold() is False
 
+    @pytest.mark.linux_only
     def test_find_host_ydotoold_skips_appdir(self, monkeypatch, temp_dir):
         from wayfinder.core import setup as s
         appdir = temp_dir / "AppDir"
@@ -1356,6 +1370,7 @@ class TestYdotooldSelfProvision:
         assert s._find_host_ydotoold() == str(host)
 
 
+@pytest.mark.linux_only
 class TestStaleYdotoolSocket:
     """A socket file with no listener must not report ready (probe by connect)."""
 
@@ -1437,3 +1452,34 @@ class TestStaleYdotoolSocket:
             time.sleep(0.1)
         assert result.get("ok") is True, result
         assert seen_env.get("YDOTOOL_SOCKET") == str(own_sock)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows prebuilt-binary download path")
+@patch("requests.get")
+def test_windows_whisper_provision_downloads_prebuilt(mock_get, tmp_path, monkeypatch):
+    """On Windows, build_whisper_cpp downloads the prebuilt binary (no toolchain):
+    it extracts whisper-cli.exe + DLLs (and skips the other bundled tools) to
+    ~/whisper.cpp/build/bin/ and reports success."""
+    import io as _io
+    import threading as _threading
+    import zipfile as _zipfile
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Release/whisper-cli.exe", b"MZ fake")
+        zf.writestr("Release/ggml.dll", b"dll")
+        zf.writestr("Release/bench.exe", b"skip me")  # non-whisper exe must be skipped
+    mock_get.return_value = MagicMock(content=buf.getvalue(), raise_for_status=lambda: None)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    result, done_evt = {}, _threading.Event()
+    build_whisper_cpp(
+        lambda m: None,
+        lambda ok, detail: (result.update(ok=ok, detail=detail), done_evt.set()),
+    )
+    assert done_evt.wait(10)
+    assert result.get("ok") is True, result
+    binp = tmp_path / "whisper.cpp" / "build" / "bin"
+    assert (binp / "whisper-cli.exe").exists()
+    assert (binp / "ggml.dll").exists()          # DLLs are kept (whisper-cli needs them)
+    assert not (binp / "bench.exe").exists()     # other tools are not

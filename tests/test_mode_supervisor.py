@@ -13,6 +13,13 @@ Coverage:
   poll, the never-stop-unless-game+off guard, and the min-interval guard.
 """
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip("Steam Deck mode supervisor is Linux-only", allow_module_level=True)
+
 import importlib.util
 import threading
 from pathlib import Path

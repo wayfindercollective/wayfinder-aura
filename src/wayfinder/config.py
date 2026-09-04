@@ -159,16 +159,20 @@ elif IS_APPIMAGE and APPDIR:
         else "~/llama.cpp/build/bin/llama-cli"
     )
 else:
-    _default_whisper_binary = "~/whisper.cpp/build/bin/whisper-cli"
+    # Windows executables need the .exe suffix to launch; Linux/macOS do not.
+    _exe = ".exe" if sys.platform == "win32" else ""
+    _default_whisper_binary = f"~/whisper.cpp/build/bin/whisper-cli{_exe}"
     _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
     # LLM model for post-processing - prefer Qwen 3.5 if available, fall back to Qwen 2.5
     # Use platform-appropriate data dir (macOS: ~/Library/Application Support/, Linux: ~/.local/share/)
     if sys.platform == "darwin":
         _user_llm_dir = str(Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models")
+    elif sys.platform == "win32":
+        _user_llm_dir = str(Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models")
     else:
         _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
     _default_llm_model_path = _pick_llm(_user_llm_dir)
-    _default_llama_binary = "~/llama.cpp/build/bin/llama-cli"
+    _default_llama_binary = f"~/llama.cpp/build/bin/llama-cli{_exe}"
 
 # Default configuration values
 DEFAULT_CONFIG: dict[str, Any] = {

@@ -75,6 +75,7 @@ class TestVoiceProfileInit:
         assert new_dir.exists()
         assert (new_dir / "voice_profile.json").exists()
 
+    @pytest.mark.linux_only
     def test_save_creates_owner_only_file(self, voice_profile_dir: Path):
         """voice_profile.json is written 0600 (transcript history is sensitive)."""
         import os
@@ -84,6 +85,7 @@ class TestVoiceProfileInit:
         assert path.exists()
         assert (path.stat().st_mode & 0o777) == 0o600
 
+    @pytest.mark.linux_only
     def test_load_repairs_world_readable_mode(self, voice_profile_dir: Path):
         """Existing 0644 profile files are tightened to 0600 on load."""
         import json

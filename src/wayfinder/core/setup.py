@@ -183,6 +183,10 @@ def check_text_injection() -> DependencyStatus:
         except ImportError:
             return DependencyStatus(False, error="pyautogui not installed. Run: pip install pyautogui")
 
+    if sys.platform == "win32":
+        # Native Win32 SendInput injection needs no external tool or daemon.
+        return DependencyStatus(True, detail="Windows native (SendInput)")
+
     # NOTE: a bundled ydotool CLIENT is deliberately NOT treated as sufficient —
     # it must protocol-match a running host daemon, and without one it silently
     # types into a throwaway uinput device nothing receives (2026-07 field bug).
@@ -479,6 +483,10 @@ def check_cuda_toolkit() -> DependencyStatus:
 
 def check_build_tools() -> DependencyStatus:
     """Check for git, cmake, and a C++ compiler."""
+    if sys.platform == "win32":
+        # Windows provisions whisper.cpp from a prebuilt binary download
+        # (build_whisper_cpp), so no local C toolchain is required.
+        return DependencyStatus(True, detail="Prebuilt binary (no toolchain needed)")
     missing = []
     found = []
 
@@ -781,6 +789,58 @@ def install_system_packages(
     threading.Thread(target=_run, daemon=True).start()
 
 
+# Pinned prebuilt whisper.cpp Windows CPU build (no toolchain needed on Windows).
+# Bump together with any whisper-cli flag/model-format change the app relies on.
+WHISPER_WINDOWS_BUILD = "b4938"
+WHISPER_WINDOWS_URL = (
+    "https://github.com/ggml-org/whisper.cpp/releases/download/"
+    f"{WHISPER_WINDOWS_BUILD}/whisper-bin-x64.zip"
+)
+
+
+def _download_whisper_binary_windows(log: LogCallback, done: DoneCallback) -> None:
+    """Windows whisper provisioning: fetch the prebuilt CPU binary, no compiler.
+
+    Extracts whisper-cli.exe and its DLLs to ~/whisper.cpp/build/bin/ — the same
+    path the config resolves to — so the setup wizard's whisper step works on a
+    Windows box without git/cmake/a C++ toolchain. Runs in a background thread.
+    """
+    import io
+    import threading
+    import zipfile
+
+    dest = Path.home() / "whisper.cpp" / "build" / "bin"
+    binary_path = dest / "whisper-cli.exe"
+
+    def _run():
+        if binary_path.exists():
+            log(f"whisper-cli already present at {binary_path}")
+            done(True, str(binary_path))
+            return
+        try:
+            import requests
+            dest.mkdir(parents=True, exist_ok=True)
+            log(f"Downloading prebuilt whisper.cpp ({WHISPER_WINDOWS_BUILD}) for Windows…")
+            resp = requests.get(WHISPER_WINDOWS_URL, timeout=180)
+            resp.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                for member in zf.namelist():
+                    name = os.path.basename(member)
+                    # whisper-cli.exe plus every DLL it loads; skip the other tools.
+                    if name == "whisper-cli.exe" or name.endswith(".dll"):
+                        with zf.open(member) as src, open(dest / name, "wb") as out:
+                            shutil.copyfileobj(src, out)
+            if binary_path.exists():
+                log(f"whisper-cli installed at: {binary_path}")
+                done(True, str(binary_path))
+            else:
+                done(False, "whisper-cli.exe not found in the downloaded archive")
+        except Exception as e:
+            done(False, f"Windows whisper download failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def build_whisper_cpp(
     log: LogCallback,
     done: DoneCallback,
@@ -791,6 +851,12 @@ def build_whisper_cpp(
     Clone and build whisper.cpp from source. No sudo needed.
     Runs in a background thread.
     """
+    if sys.platform == "win32":
+        # No default C toolchain on Windows — fetch the prebuilt binary instead
+        # of building. Same result path (~/whisper.cpp/build/bin/whisper-cli.exe).
+        _download_whisper_binary_windows(log, done)
+        return
+
     whisper_dir = Path.home() / "whisper.cpp"
     binary_path = whisper_dir / "build" / "bin" / "whisper-cli"
 

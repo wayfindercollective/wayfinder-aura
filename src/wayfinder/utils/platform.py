@@ -523,7 +523,7 @@ def get_text_injector() -> str:
         - Linux/Wayland: "wtype" (preferred) or "ydotool"
         - Linux/X11: "xdotool" or "ydotool"
         - macOS: "pyautogui"
-        - Windows: "none" until the planned native adapter is implemented
+        - Windows: "windows" (native Win32 SendInput Unicode injection)
         - If unavailable: "none"
     """
     if is_linux():
@@ -556,10 +556,9 @@ def get_text_injector() -> str:
             return "pyautogui"
         return "none"
     elif is_windows():
-        # Windows path/config imports are supported, but text injection is not.
-        # Fail closed instead of accidentally routing into the Linux backend or
-        # presenting an untested pyautogui path as a working implementation.
-        return "none"
+        # Native Win32 SendInput Unicode injection, implemented in
+        # wayfinder.core.injector_windows (no external tool required).
+        return "windows"
     return "none"
 
 

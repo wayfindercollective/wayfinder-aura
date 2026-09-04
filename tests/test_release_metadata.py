@@ -118,6 +118,7 @@ def test_appimage_metadata_copies_authoritative_desktop_and_metainfo():
     assert "<project_license>MIT</project_license>" not in script
 
 
+@pytest.mark.linux_only
 def test_root_appimage_builder_delegates_to_maintained_script():
     root_path = REPO / "build-appimage.sh"
     root_script = root_path.read_text(encoding="utf-8")
@@ -666,6 +667,7 @@ def test_mini_inf_build_accepts_only_pushed_main_history_and_uses_no_runner():
     assert "**not** registered" in docs
 
 
+@pytest.mark.linux_only
 def test_release_license_defaults_checker_rejects_dev_and_accepts_non_dev(tmp_path):
     checker = REPO / "scripts" / "ci" / "check-release-license-defaults.py"
     assert checker.stat().st_mode & 0o111, "license defaults checker must be executable"
@@ -797,6 +799,7 @@ def test_storefront_readiness_checker_rejects_free_gpu_claim():
     assert any("GPU support on the lighter models" in error for error in errors)
 
 
+@pytest.mark.linux_only
 def test_storefront_readiness_checker_accepts_release_markers(tmp_path):
     checker = REPO / "scripts" / "ci" / "check-storefront-readiness.py"
     assert checker.stat().st_mode & 0o111, "storefront readiness checker must be executable"
@@ -893,6 +896,7 @@ def test_appimage_ci_build_uses_older_glibc_runner_and_smoke_test():
     assert "glslang-tools" in job
 
 
+@pytest.mark.linux_only
 def test_appimage_ci_glslc_helper_is_pinned_and_builds_shaderc_when_needed():
     script_path = REPO / "scripts" / "ci" / "install-glslc-if-needed.sh"
     script = script_path.read_text(encoding="utf-8")
