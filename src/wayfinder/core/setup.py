@@ -798,12 +798,21 @@ WHISPER_WINDOWS_URL = (
 )
 
 
-def _download_whisper_binary_windows(log: LogCallback, done: DoneCallback) -> None:
-    """Windows whisper provisioning: fetch the prebuilt CPU binary, no compiler.
+# Binaries pulled from the Windows prebuilt zip: whisper-cli (per-call) plus
+# whisper-server (the resident HTTP service that keeps the model loaded for
+# instant transcription — whisper_server_mode is on by default). Both share the
+# same DLLs. Other bundled tools (bench, command, parakeet, …) are skipped.
+WHISPER_WINDOWS_BINARIES = ("whisper-cli.exe", "whisper-server.exe")
 
-    Extracts whisper-cli.exe and its DLLs to ~/whisper.cpp/build/bin/ — the same
-    path the config resolves to — so the setup wizard's whisper step works on a
-    Windows box without git/cmake/a C++ toolchain. Runs in a background thread.
+
+def _download_whisper_binary_windows(log: LogCallback, done: DoneCallback) -> None:
+    """Windows whisper provisioning: fetch the prebuilt CPU binaries, no compiler.
+
+    Extracts whisper-cli.exe, whisper-server.exe and their DLLs to
+    ~/whisper.cpp/build/bin/ — the same path the config resolves to — so the
+    setup wizard's whisper step works on a Windows box without git/cmake/a C++
+    toolchain, AND the default resident-server (instant) mode has its binary.
+    Runs in a background thread.
     """
     import io
     import threading
@@ -811,10 +820,13 @@ def _download_whisper_binary_windows(log: LogCallback, done: DoneCallback) -> No
 
     dest = Path.home() / "whisper.cpp" / "build" / "bin"
     binary_path = dest / "whisper-cli.exe"
+    server_path = dest / "whisper-server.exe"
 
     def _run():
-        if binary_path.exists():
-            log(f"whisper-cli already present at {binary_path}")
+        # Re-download if either binary is missing (e.g. an older install that
+        # only had whisper-cli, before whisper-server was provisioned).
+        if binary_path.exists() and server_path.exists():
+            log(f"whisper-cli + whisper-server already present at {dest}")
             done(True, str(binary_path))
             return
         try:
@@ -826,12 +838,13 @@ def _download_whisper_binary_windows(log: LogCallback, done: DoneCallback) -> No
             with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
                 for member in zf.namelist():
                     name = os.path.basename(member)
-                    # whisper-cli.exe plus every DLL it loads; skip the other tools.
-                    if name == "whisper-cli.exe" or name.endswith(".dll"):
+                    # whisper-cli/whisper-server plus every DLL they load.
+                    if name in WHISPER_WINDOWS_BINARIES or name.endswith(".dll"):
                         with zf.open(member) as src, open(dest / name, "wb") as out:
                             shutil.copyfileobj(src, out)
             if binary_path.exists():
-                log(f"whisper-cli installed at: {binary_path}")
+                extras = " + whisper-server" if server_path.exists() else ""
+                log(f"whisper-cli{extras} installed at: {dest}")
                 done(True, str(binary_path))
             else:
                 done(False, "whisper-cli.exe not found in the downloaded archive")

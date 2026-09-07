@@ -1457,9 +1457,9 @@ class TestStaleYdotoolSocket:
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows prebuilt-binary download path")
 @patch("requests.get")
 def test_windows_whisper_provision_downloads_prebuilt(mock_get, tmp_path, monkeypatch):
-    """On Windows, build_whisper_cpp downloads the prebuilt binary (no toolchain):
-    it extracts whisper-cli.exe + DLLs (and skips the other bundled tools) to
-    ~/whisper.cpp/build/bin/ and reports success."""
+    """On Windows, build_whisper_cpp downloads the prebuilt binaries (no toolchain):
+    it extracts whisper-cli.exe, whisper-server.exe + DLLs (and skips the other
+    bundled tools) to ~/whisper.cpp/build/bin/ and reports success."""
     import io as _io
     import threading as _threading
     import zipfile as _zipfile
@@ -1467,6 +1467,7 @@ def test_windows_whisper_provision_downloads_prebuilt(mock_get, tmp_path, monkey
     buf = _io.BytesIO()
     with _zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("Release/whisper-cli.exe", b"MZ fake")
+        zf.writestr("Release/whisper-server.exe", b"MZ fake server")  # instant mode
         zf.writestr("Release/ggml.dll", b"dll")
         zf.writestr("Release/bench.exe", b"skip me")  # non-whisper exe must be skipped
     mock_get.return_value = MagicMock(content=buf.getvalue(), raise_for_status=lambda: None)
@@ -1481,5 +1482,6 @@ def test_windows_whisper_provision_downloads_prebuilt(mock_get, tmp_path, monkey
     assert result.get("ok") is True, result
     binp = tmp_path / "whisper.cpp" / "build" / "bin"
     assert (binp / "whisper-cli.exe").exists()
-    assert (binp / "ggml.dll").exists()          # DLLs are kept (whisper-cli needs them)
-    assert not (binp / "bench.exe").exists()     # other tools are not
+    assert (binp / "whisper-server.exe").exists()  # resident-server (instant) mode binary
+    assert (binp / "ggml.dll").exists()            # DLLs are kept (both binaries need them)
+    assert not (binp / "bench.exe").exists()       # other tools are not
