@@ -4661,6 +4661,9 @@ class OverlayController:
                     text=True,
                     bufsize=1,  # Line buffered
                     preexec_fn=_overlay_preexec if sys.platform.startswith("linux") else None,
+                    # Hide a console window on Windows source runs (the frozen
+                    # overlay exe is already windowed). No-op (0) elsewhere.
+                    creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
                 )
                 try:
                     from wayfinder.utils.overlay_process import write_overlay_pidfile

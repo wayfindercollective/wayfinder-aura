@@ -566,6 +566,19 @@ def get_text_injector() -> str:
 # Cross-Platform Binary Detection
 # =============================================================================
 
+def subprocess_no_window_kwargs() -> dict:
+    """subprocess kwargs that hide a child's console window on Windows.
+
+    whisper-cli, whisper-server and llama are console programs; spawned without
+    this, Windows pops a visible terminal window for each (a persistent one for
+    the resident whisper-server, brief flashes for the rest). Returns an empty
+    dict on Linux/macOS, so callers can splat it unconditionally: ``**kwargs``.
+    """
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def find_executable(name: str) -> str | None:
     """
     Find an executable by name in the system PATH.

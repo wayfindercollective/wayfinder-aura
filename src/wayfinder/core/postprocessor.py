@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from wayfinder.utils.hostexec import bundle_binary_env
+from wayfinder.utils.platform import subprocess_no_window_kwargs
+
+# Hide the child console window on Windows (empty on POSIX); splatted into each
+# llama subprocess spawn so no stray terminal appears.
+_NO_WINDOW = subprocess_no_window_kwargs()
 
 
 class PostProcessingError(Exception):
@@ -2370,6 +2375,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 [self.llama_binary, "-m", self.model_path, "-ngl", str(ngl), "-n", "16", "warm up"],
                 capture_output=True, text=True, timeout=limit,
                 env=bundle_binary_env(),
+                **_NO_WINDOW,
             )
         except Exception:
             return False
@@ -2713,6 +2719,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
                "-n", str(n_predict), prompt]
         result = subprocess.run(
             cmd, capture_output=True, timeout=self.timeout, env=bundle_binary_env(),
+            **_NO_WINDOW,
         )
         raw = result.stdout
         marker = prompt.encode("utf-8", "replace")
@@ -3006,6 +3013,7 @@ Cleaned text:"""
                     cmd, capture_output=True, text=True, errors="replace",
                     timeout=cli_timeout,
                     env=bundle_binary_env(),
+                    **_NO_WINDOW,
                 )
                 if result.returncode != 0:
                     stderr = result.stderr.strip()
