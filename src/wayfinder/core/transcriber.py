@@ -20,6 +20,12 @@ from typing import Optional
 
 from wayfinder.config import IS_FLATPAK
 from wayfinder.utils.hostexec import bundle_binary_env
+from wayfinder.utils.platform import subprocess_no_window_kwargs
+
+# subprocess kwargs that hide the child console window on Windows (empty on
+# POSIX). Every whisper-cli / whisper-server spawn below splats it so no stray
+# terminal appears.
+_NO_WINDOW = subprocess_no_window_kwargs()
 
 
 # Developer vocabulary - common terms that Whisper often mishears
@@ -340,6 +346,7 @@ class WhisperCppBackend(TranscriptionBackend):
                 text=True,
                 timeout=5,
                 env=bundle_binary_env(),
+                **_NO_WINDOW,
             )
             # Check for GPU-related flags in help output
             # Vulkan builds have --no-gpu (GPU on by default)
@@ -377,6 +384,7 @@ class WhisperCppBackend(TranscriptionBackend):
                 [binary or self.whisper_binary, "--help"],
                 capture_output=True, text=True, timeout=probe_timeout,
                 env=bundle_binary_env(),
+                **_NO_WINDOW,
             )
             flags = set(re.findall(r"--[a-z][a-z0-9-]+", (h.stdout or "") + (h.stderr or "")))
         except subprocess.TimeoutExpired:
@@ -553,6 +561,7 @@ class WhisperCppBackend(TranscriptionBackend):
                     # Preserve Vulkan selection while dropping PyInstaller's
                     # private library directory from native GPU children.
                     env=bundle_binary_env(),
+                    **_NO_WINDOW,
                 )
             except subprocess.TimeoutExpired:
                 # A deadline-CLAMPED timeout means the caller's salvage budget ran
@@ -666,6 +675,7 @@ class WhisperCppBackend(TranscriptionBackend):
                 capture_output=True,
                 timeout=60,
                 env=bundle_binary_env(),
+                **_NO_WINDOW,
             )
             return result.returncode == 0
         except Exception:
@@ -1033,6 +1043,7 @@ class WhisperServerBackend(TranscriptionBackend):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     env=bundle_binary_env(),
+                    **_NO_WINDOW,
                 )
                 WhisperServerBackend._server_process = proc
                 WhisperServerBackend._server_port = port
