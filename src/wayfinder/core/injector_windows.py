@@ -31,8 +31,15 @@ from .injector import InjectionError
 # Win32 SendInput plumbing
 # ---------------------------------------------------------------------------
 
-_user32 = ctypes.WinDLL("user32", use_last_error=True)
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+# hasattr(ctypes, "WinDLL") is True only on real Windows, regardless of any
+# patched sys.platform — so this module stays importable on Linux/macOS (e.g.
+# tests that fake win32). The functions below are only ever called on Windows.
+if hasattr(ctypes, "WinDLL"):
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+else:  # pragma: no cover - import-safety shim for non-Windows
+    _user32 = None
+    _kernel32 = None
 
 ULONG_PTR = wintypes.WPARAM  # pointer-sized unsigned (matches dwExtraInfo)
 
@@ -93,11 +100,12 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
 
 
-_user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int)
-_user32.SendInput.restype = wintypes.UINT
-_user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
-_user32.GetAsyncKeyState.restype = ctypes.c_short
-_user32.GetForegroundWindow.restype = wintypes.HWND
+if _user32 is not None:
+    _user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int)
+    _user32.SendInput.restype = wintypes.UINT
+    _user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+    _user32.GetAsyncKeyState.restype = ctypes.c_short
+    _user32.GetForegroundWindow.restype = wintypes.HWND
 
 
 def _keyboard_input(*, wVk: int = 0, wScan: int = 0, flags: int = 0) -> _INPUT:
@@ -275,18 +283,19 @@ def press_enter_windows() -> None:
 _CF_UNICODETEXT = 13
 _GMEM_MOVEABLE = 0x0002
 
-_user32.OpenClipboard.argtypes = (wintypes.HWND,)
-_user32.OpenClipboard.restype = wintypes.BOOL
-_user32.GetClipboardData.argtypes = (wintypes.UINT,)
-_user32.GetClipboardData.restype = wintypes.HANDLE
-_user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
-_user32.SetClipboardData.restype = wintypes.HANDLE
-_kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
-_kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
-_kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
-_kernel32.GlobalLock.restype = ctypes.c_void_p
-_kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
-_kernel32.GlobalUnlock.restype = wintypes.BOOL
+if _user32 is not None:
+    _user32.OpenClipboard.argtypes = (wintypes.HWND,)
+    _user32.OpenClipboard.restype = wintypes.BOOL
+    _user32.GetClipboardData.argtypes = (wintypes.UINT,)
+    _user32.GetClipboardData.restype = wintypes.HANDLE
+    _user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    _user32.SetClipboardData.restype = wintypes.HANDLE
+    _kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+    _kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    _kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
+    _kernel32.GlobalLock.restype = ctypes.c_void_p
+    _kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+    _kernel32.GlobalUnlock.restype = wintypes.BOOL
 
 
 def _open_clipboard(retries: int = 5) -> bool:

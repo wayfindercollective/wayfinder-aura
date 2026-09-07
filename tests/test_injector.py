@@ -118,9 +118,11 @@ class TestInjectTextEarlyReturn:
         inject_text(None, "instant")
         mock_ydotool_success.assert_not_called()
 
-    @pytest.mark.linux_only
     def test_unimplemented_platform_fails_closed_before_linux_tool_selection(self):
-        with patch("wayfinder.core.injector.sys.platform", "win32"), \
+        # A platform with no injector (not linux/darwin/win32) must fail closed
+        # before the Linux tool selector runs. win32 is now implemented, so this
+        # uses a genuinely unimplemented platform.
+        with patch("wayfinder.core.injector.sys.platform", "freebsd"), \
              patch("wayfinder.utils.platform.get_text_injector") as mock_selector:
             with pytest.raises(InjectionError, match="not implemented"):
                 inject_text("hello", "instant")
@@ -253,6 +255,7 @@ class TestInjectTextErrors:
 # =============================================================================
 
 
+@pytest.mark.linux_only
 class TestGetYdotoolBinary:
     """Tests for finding the ydotool binary.
 

@@ -148,6 +148,7 @@ def test_release_artifacts_bundle_and_probe_portable_tls_trust():
     assert 'export TMPDIR="$WF_RUNTIME_TMP"' in appimage_builder
 
 
+@pytest.mark.linux_only
 def test_release_shell_scripts_parse_with_bash():
     for script in RELEASE_SHELL_SCRIPTS:
         result = subprocess.run(
