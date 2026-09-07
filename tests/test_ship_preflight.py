@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -17,6 +19,7 @@ def _load_preflight():
     return module
 
 
+@pytest.mark.linux_only
 def test_preflight_script_is_executable():
     script = REPO / "scripts" / "ship_preflight.py"
 
@@ -81,6 +84,7 @@ def test_wayfinder_flatpak_does_not_require_host_spawn(monkeypatch):
     assert preflight.should_use_flatpak_spawn() is False
 
 
+@pytest.mark.linux_only
 def test_collect_preflight_pings_socket_on_host_when_in_foreign_flatpak(monkeypatch):
     preflight = _load_preflight()
     monkeypatch.setenv("FLATPAK_ID", "com.visualstudio.code")

@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.mark.linux_only
 class TestAtomicWrite:
     def test_atomic_write_json_mode_0600(self, tmp_path: Path):
         from wayfinder.utils.fs_security import atomic_write_json
@@ -35,6 +36,7 @@ class TestAtomicWrite:
         assert (p.stat().st_mode & 0o777) == 0o600
 
 
+@pytest.mark.linux_only
 class TestAppTempDir:
     def test_get_app_temp_dir_is_0700(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -49,6 +51,7 @@ class TestAppTempDir:
         assert not f.exists()
 
 
+@pytest.mark.linux_only
 class TestOwnerOnlyLogging:
     def test_configure_logging_file_is_0600(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -87,6 +90,7 @@ class TestOwnerOnlyLogging:
 
 
 class TestOverlayProcessHelpers:
+    @pytest.mark.linux_only
     def test_is_our_overlay_pid_rejects_wrong_uid_or_cmd(self):
         from wayfinder.utils.overlay_process import is_our_overlay_pid
 
@@ -115,6 +119,7 @@ class TestOverlayProcessHelpers:
         assert "-f', 'overlay" not in main
 
 
+@pytest.mark.linux_only
 class TestSocketModeReal:
     def test_socket_bind_mode_0600(self, tmp_path: Path, monkeypatch):
         sock_dir = tmp_path / "wayfinder-aura"

@@ -650,6 +650,7 @@ class TestListenerOwnership:
         assert LlamaServerManager._process is None
         assert served == [], "asked an unproven listener to identify itself"
 
+    @pytest.mark.linux_only
     def test_a_wildcard_listener_is_visible_to_the_scan(self):
         """0.0.0.0 and :: answer connections to 127.0.0.1, but their hex address
         is all zeroes. Filtering the scan to loopback made a stranger holding the
@@ -666,6 +667,7 @@ class TestListenerOwnership:
         finally:
             srv.close()
 
+    @pytest.mark.linux_only
     def test_ownership_detection_works_on_this_kernel(self):
         """The helper is worthless if /proc parsing is wrong here: it would
         report None forever and silently restore the hole it was added to close."""

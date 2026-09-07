@@ -98,8 +98,11 @@ def run(expected: str) -> None:
     if actual == "windows":
         from wayfinder.utils.platform import get_text_injector
 
-        if get_text_injector() != "none":
-            raise RuntimeError("Windows injection must fail closed until its adapter exists")
+        if get_text_injector() != "windows":
+            raise RuntimeError(
+                "Windows injection must report 'windows' (native SendInput adapter "
+                "in wayfinder.core.injector_windows)"
+            )
 
     print(f"PLATFORM_SMOKE_OK {actual}")
 

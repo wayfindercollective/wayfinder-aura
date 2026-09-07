@@ -80,6 +80,7 @@ class TestFullDictationPipeline:
         state = get_next_state(state, "pasted")
         assert state == AppState.IDLE
 
+    @pytest.mark.linux_only
     @patch("wayfinder.core.injector.sys")
     @patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "mocked"))
     @patch("wayfinder.core.injector._get_ydotool_binary", return_value="/usr/bin/ydotool")

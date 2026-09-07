@@ -13,6 +13,7 @@ import pytest
 wayfinder_main = pytest.importorskip("wayfinder_main")
 
 
+@pytest.mark.linux_only
 class TestSingleInstanceGuard:
     def _serve_once(self, sock_path: str, received: list) -> threading.Thread:
         """One-shot AF_UNIX server standing in for a live app instance."""
@@ -68,6 +69,7 @@ class TestSingleInstanceGuard:
         assert received and received[0].strip() == b"show"
 
 
+@pytest.mark.linux_only
 class TestInputDeviceFilter:
     """Remapper virtual keyboards must be monitored; only our injector is excluded.
 
@@ -376,6 +378,7 @@ class TestHotkeyDetect:
         assert saved
         assert app._detect_rearm_after >= before + app._DETECT_REARM_COOLDOWN_S - 0.05
 
+    @pytest.mark.linux_only
     def test_capture_listener_stamps_immutable_session_gen(self, monkeypatch):
         """Sol R2: a join-timed-out capture reader must not emit the *newer*
         session gen from the shared global — stamp the gen it was started with.
@@ -428,6 +431,7 @@ class TestHotkeyDetect:
             os.close(r)
             os.close(w)
 
+    @pytest.mark.linux_only
     def test_armed_capture_reports_key_instead_of_firing_hotkey(self, monkeypatch):
         import os
         import queue

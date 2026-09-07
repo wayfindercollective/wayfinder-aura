@@ -19,6 +19,17 @@
 # `python-evdev` via --system-site-packages (covers the evdev import surface);
 # leave llama-cpp-python uninstalled and use a cloud backend (groq/openai) or
 # whisper.cpp directly.
+#
+# On WINDOWS: local cleanup runs through the resident llama-cpp-python path
+# (the app's preferred fast path). There is no C toolchain by default, but the
+# project publishes prebuilt CPU wheels — no compiler needed:
+#     pip install llama-cpp-python \
+#       --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+#       --only-binary=:all:
+# This matters because the subprocess FALLBACK spawns `llama-simple` with a
+# POSITIONAL prompt (postprocessor.py), and modern llama.cpp builds ship
+# `llama-cli` (which needs `-p`) and no longer include `llama-simple` — so on
+# Windows the resident wheel, not the CLI fallback, is the working cleanup path.
 
 # Input Device Monitoring (Linux only — skipped on macOS/Windows)
 evdev>=1.6.0; sys_platform == 'linux'

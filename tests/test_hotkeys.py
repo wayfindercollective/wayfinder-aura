@@ -161,6 +161,7 @@ class TestSocketListener:
         assert "stop_event" in params
         assert "log_callback" in params
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.socket.os.unlink")
     @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_socket_listener_creates_server(self, mock_socket_cls, mock_unlink):
@@ -186,6 +187,7 @@ class TestSocketListener:
         mock_server.bind.assert_called_once_with(SOCKET_PATH)
         mock_server.listen.assert_called_once_with(1)
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.socket.os.unlink")
     @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_socket_handles_toggle_command(self, mock_socket_cls, mock_unlink):
@@ -222,6 +224,7 @@ class TestSocketListener:
         assert event_type == EventType.HOTKEY_PRESSED
         assert event_data is None
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.socket.os.unlink")
     @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_socket_handles_style_command(self, mock_socket_cls, mock_unlink):
@@ -256,6 +259,7 @@ class TestSocketListener:
         assert event_type == EventType.STYLE_TOGGLE
         assert event_data is None
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.socket.os.unlink")
     @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_socket_handles_style_with_name(self, mock_socket_cls, mock_unlink):
@@ -290,6 +294,7 @@ class TestSocketListener:
         assert event_type == EventType.STYLE_TOGGLE
         assert event_data == "dev"
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.socket.os.unlink")
     @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_socket_handles_ping_without_event(self, mock_socket_cls, mock_unlink):
@@ -321,6 +326,7 @@ class TestSocketListener:
         mock_conn.sendall.assert_called_once_with(b"pong")
         assert event_queue.empty()
 
+    @pytest.mark.linux_only
     def test_socket_handles_tray_commands(self):
         """Tray verbs map to the same app-loop events as the live Qt tray."""
         from wayfinder.hotkeys.socket import socket_listener
@@ -363,6 +369,7 @@ class TestSocketListener:
             if payload == b"show":
                 mock_conn.sendall.assert_called_once_with(b"ok")
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.socket.os.unlink")
     @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_socket_timeout_continues_loop(self, mock_socket_cls, mock_unlink):
@@ -398,6 +405,7 @@ class TestSocketListener:
 class TestSendToggle:
     """Test the send_toggle convenience function."""
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_send_toggle_success(self, mock_socket_cls):
         """send_toggle returns True on successful send."""
@@ -430,6 +438,7 @@ class TestSendToggle:
 class TestSendStyle:
     """Test the send_style convenience function."""
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_send_style_cycle(self, mock_socket_cls):
         """send_style() without args sends 'style' to cycle."""
@@ -443,6 +452,7 @@ class TestSendStyle:
         assert result is True
         mock_sock.send.assert_called_once_with(b"style")
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.socket.socket.socket")
     def test_send_style_specific(self, mock_socket_cls):
         """send_style('casual') sends 'style:casual'."""
@@ -542,6 +552,7 @@ class TestEvdevFunctionSignatures:
         assert "style_toggle_modifiers" in params
 
 
+@pytest.mark.linux_only
 @pytest.mark.skipif(not HAS_EVDEV_MODULE, reason="evdev module not importable")
 class TestEvdevDeviceDiscovery:
     """Test device discovery with mocked evdev."""
@@ -719,6 +730,7 @@ class TestEvdevHotkeyListener:
         assert any("No input devices" in msg for msg in log_messages)
         assert event_queue.empty()
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.evdev.select.select")
     @patch("wayfinder.hotkeys.evdev.find_keyboard_devices")
     def test_listener_detects_hotkey_press(self, mock_find, mock_select):
@@ -769,6 +781,7 @@ class TestEvdevHotkeyListener:
         event_type, _ = event_queue.get_nowait()
         assert event_type == EventType.HOTKEY_PRESSED
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.evdev.select.select")
     @patch("wayfinder.hotkeys.evdev.find_keyboard_devices")
     def test_listener_ignores_key_up(self, mock_find, mock_select):
@@ -813,6 +826,7 @@ class TestEvdevHotkeyListener:
 
         assert event_queue.empty()
 
+    @pytest.mark.linux_only
     @patch("wayfinder.hotkeys.evdev.select.select")
     @patch("wayfinder.hotkeys.evdev.find_keyboard_devices")
     def test_listener_detects_style_toggle(self, mock_find, mock_select):

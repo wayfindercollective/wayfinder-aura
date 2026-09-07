@@ -552,6 +552,7 @@ class TestPactlCuration:
         only_pulse = [{"name": "pulse", "max_input_channels": 32, "hostapi": 0}]
         assert _match_source_to_device(src, only_pulse, [{"name": "ALSA"}]) is None
 
+    @pytest.mark.linux_only
     @patch("wayfinder.core.recorder._is_steam_deck", return_value=False)
     @patch("wayfinder.core.recorder.sd")
     def test_curated_list_replaces_portaudio_clutter(self, mock_sd, _deck):

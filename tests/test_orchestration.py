@@ -1024,6 +1024,7 @@ class TestStopChunkedPath:
         types = {et for et, _ in seen}
         assert wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE in types
 
+    @pytest.mark.linux_only
     def test_chunk_transcription_repairs_blank_whisper_binary(self, app, tmp_path, monkeypatch):
         """Handoff regression: a live chunk logged
         ``Chunk 1 error: [Errno 13] Permission denied: ''`` when the saved

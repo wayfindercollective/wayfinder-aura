@@ -111,11 +111,13 @@ def config_dir(temp_dir, monkeypatch):
     return temp_dir / ".config" / "wayfinder-aura"
 
 
+@pytest.mark.linux_only
 def test_write_game_mode_marker_true(config_dir):
     p.write_game_mode_marker(True)
     assert (config_dir / "game-mode-dictation").read_text() == "1"
 
 
+@pytest.mark.linux_only
 def test_write_game_mode_marker_false(config_dir):
     p.write_game_mode_marker(False)
     assert (config_dir / "game-mode-dictation").read_text() == "0"
