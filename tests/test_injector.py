@@ -35,6 +35,8 @@ from wayfinder.core.injector import (
     split_shift_segments,
     SHIFT_ISOLATION_GAP_S,
     XWAYLAND_MIN_KEY_DELAY_MS,
+    XWAYLAND_WARMUP_KEY,
+    XWAYLAND_WARMUP_GAP_S,
 )
 
 
@@ -995,7 +997,7 @@ class TestXdotoolShiftIsolation:
                    side_effect=_xdotool_dispatcher()) as mock_run, \
              patch("time.sleep"):
             _inject_text_xdotool("hi", "instant")
-        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if "type" in c.args[0])
         assert type_cmd[type_cmd.index("--delay") + 1] == str(XWAYLAND_MIN_KEY_DELAY_MS)
 
     def test_xwayland_keeps_a_slower_configured_speed(self, monkeypatch):
@@ -1004,7 +1006,7 @@ class TestXdotoolShiftIsolation:
                    side_effect=_xdotool_dispatcher()) as mock_run, \
              patch("time.sleep"):
             _inject_text_xdotool("hi", "normal")
-        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if "type" in c.args[0])
         assert type_cmd[type_cmd.index("--delay") + 1] == "12"
 
     def test_native_x11_keeps_instant_delay(self):
@@ -1068,3 +1070,52 @@ class TestRunningUnderXwayland:
         assert (name_len, name) == (8, b"XWAYLAND")
         lib.xcb_disconnect.assert_called_once()
         libc.free.assert_called_once()
+
+
+class TestXdotoolFirstKeyWarmup:
+    """Field bug 2026-09-18: XWayland's EI bridge swallows the FIRST synthetic
+    key of an injection, so "Yeah, ..." lands as "eah, ...". A no-op Shift_L
+    tap with a settle gap is prepended under XWayland so the throwaway press is
+    dropped instead of the user's first character."""
+
+    def test_warmup_prepends_noop_key_and_gap(self):
+        argv = build_xdotool_type_command("hi", 4, warmup=True)
+        assert argv[:6] == [
+            "xdotool", "key", "--clearmodifiers", XWAYLAND_WARMUP_KEY,
+            "sleep", f"{XWAYLAND_WARMUP_GAP_S:.3f}",
+        ]
+        # The real text still follows as a normal type run.
+        assert argv[6] == "type"
+        assert "".join(_type_runs(argv)) == "hi"
+
+    def test_no_warmup_by_default(self):
+        argv = build_xdotool_type_command("hi", 2)
+        assert argv[1] == "type"
+        assert "key" not in argv
+
+    def test_warmup_key_produces_no_character(self):
+        # A lone modifier keysym: pressing/releasing it types nothing.
+        assert XWAYLAND_WARMUP_KEY in ("Shift_L", "Shift_R", "Control_L", "Control_R")
+
+    def test_inject_under_xwayland_warms_up(self, monkeypatch):
+        monkeypatch.setattr("wayfinder.core.injector._running_under_xwayland", lambda: True)
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("Yeah", "instant")
+        argv = next(c.args[0] for c in mock_run.call_args_list if "type" in c.args[0])
+        # Warm-up key + settle precede the text so the swallowed press is the throwaway.
+        assert argv[:4] == ["xdotool", "key", "--clearmodifiers", XWAYLAND_WARMUP_KEY]
+        assert argv[argv.index(XWAYLAND_WARMUP_KEY) + 1] == "sleep"
+        # And the user's leading capital is preserved in the runs.
+        assert "".join(_type_runs(argv)) == "Yeah"
+
+    def test_inject_native_x11_has_no_warmup(self):
+        # autouse fixture pins XWayland False; native X11 keeps the proven path.
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("Yeah", "instant")
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        assert "key" not in type_cmd
+        assert "".join(_type_runs(type_cmd)) == "Yeah"

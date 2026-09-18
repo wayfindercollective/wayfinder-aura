@@ -162,6 +162,20 @@ SHIFT_ISOLATION_GAP_S = 0.012
 # configured speed.
 XWAYLAND_MIN_KEY_DELAY_MS = 4
 
+# --- XWayland first-key drop ------------------------------------------------
+# Separate field bug (2026-09-18): the FIRST synthetic key of an injection is
+# swallowed by XWayland's EI bridge before the focused window is ready, so a
+# sentence the pipeline produced as "Yeah, ..." lands as "eah, ...". It is not
+# the caps bleed and the 2 ms floor never masked it. Fix: emit one warm-up key
+# that produces NO character (a lone Shift tap) with a settle gap before the
+# real text, so the swallowed press is the throwaway, not the user's first
+# letter. Shift_L is inert on its own and prime_wayland_injection() already
+# uses a Shift no-op for the same "wake the input path" purpose. If the bridge
+# does NOT drop it, the tap is harmless and --clearmodifiers on the first real
+# run clears any lingering state.
+XWAYLAND_WARMUP_KEY = "Shift_L"
+XWAYLAND_WARMUP_GAP_S = 0.020
+
 _TYPOGRAPHY_FOLD = str.maketrans({
     "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'",
     "“": '"', "”": '"', "„": '"', "‟": '"', "″": '"',
@@ -216,14 +230,24 @@ def split_shift_segments(text: str) -> list:
 
 def build_xdotool_type_command(
     text: str, key_delay_ms: int, gap_s: float = SHIFT_ISOLATION_GAP_S,
+    warmup: bool = False,
 ) -> list:
     """xdotool argv that types *text* with shifted/remapped runs isolated.
 
     One xdotool process, chained commands: ``type --args 1 -- <run>`` per
     run with ``sleep <gap>`` between runs. ``--clearmodifiers`` is kept on
     every run so each behaves exactly like the former single-command call.
+
+    When *warmup* is set, a no-op ``key Shift_L`` and a settle gap are
+    prepended so XWayland's EI bridge drops the throwaway press instead of
+    the first real character (see XWAYLAND_WARMUP_KEY).
     """
     argv = ["xdotool"]
+    if warmup:
+        argv += [
+            "key", "--clearmodifiers", XWAYLAND_WARMUP_KEY,
+            "sleep", f"{XWAYLAND_WARMUP_GAP_S:.3f}",
+        ]
     for i, seg in enumerate(split_shift_segments(text)):
         if i:
             argv += ["sleep", f"{gap_s:.3f}"]
@@ -892,7 +916,7 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     _require_modifier_release()
 
     text = fold_typography_for_typing(text)
-    cmd = build_xdotool_type_command(text, key_delay)
+    cmd = build_xdotool_type_command(text, key_delay, warmup=xwayland)
     try:
         result = subprocess.run(
             cmd,
