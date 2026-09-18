@@ -3668,6 +3668,140 @@ def get_backend(config: dict) -> PostProcessorBackend:
         )
 
 
+# =============================================================================
+# Post-LLM hygiene (deterministic repairs after the cleanup model)
+# =============================================================================
+# Small local cleanup models (Gemma 3 1B in the field, 2026-09-17) hand back
+# text that still carries filler sounds the prompt told them to drop, split
+# contractions ("I 'm", "it 's") and occasionally a word or clause shouted in
+# caps that the transcript never had. Each repair below is narrow, idempotent
+# and skipped for caricature, whose output is meant to be loud.
+
+_FILLER = r"(?:um+|uhm+|uh+|erm+|hmm+)"
+_NB = r"(?<![\w'’-])"   # not glued to a word ("uh-huh", "album")
+_NA = r"(?![\w'’-])"
+_FILLER_BARE = re.compile(_NB + _FILLER + _NA, re.IGNORECASE)
+# Ordered: a filler bracketed by commas takes both commas with it, a filler
+# that opens a clause takes its trailing comma, one that closes a clause takes
+# its leading comma, and only then is a bare filler blanked.
+_FILLER_STEPS = (
+    (re.compile(r"\s*,\s*" + _NB + _FILLER + _NA + r"\s*,\s*", re.IGNORECASE), " "),
+    (re.compile(_NB + _FILLER + _NA + r"\s*,\s*", re.IGNORECASE), ""),
+    (re.compile(r"\s*,\s*" + _NB + _FILLER + _NA + r"(?=\s*[.!?;:]|\s*$)", re.IGNORECASE), ""),
+    (_FILLER_BARE, " "),
+)
+_SPLIT_CONTRACTION_REGEX = re.compile(r"\b(\w+) (['’])(m|re|ve|ll|d|s|t)\b", re.IGNORECASE)
+
+
+def _prompt_is_caricature(prompt: str) -> bool:
+    """Same fingerprint the backends use to exempt caricature output."""
+    return "SILLY" in prompt and "EXAGGERATED" in prompt
+
+
+def _alpha(word: str) -> str:
+    return re.sub(r"[^A-Za-z]", "", word)
+
+
+def _recase(word: str, target: str) -> str:
+    """Rewrite *word*'s letters with *target*'s casing, keeping punctuation."""
+    out = []
+    k = 0
+    for ch in word:
+        if ch.isalpha() and k < len(target):
+            out.append(target[k])
+            k += 1
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _unshout(text: str, original: str) -> str:
+    """Undo words the model shouted that the transcript did not.
+
+    A run of three or more consecutive all-caps words, or any lone all-caps
+    word of four letters or more, is un-shouted unless the transcript already
+    had that word in caps or it is a known acronym. Short lone tokens (UI,
+    DB, PR) are left alone: they are far more often acronyms than shouting.
+    "I" never counts as shouting and never breaks a run. Un-shouted words
+    take the casing the transcript used (Arawn, TypeScript), else lowercase
+    with a capital at sentence starts.
+    """
+    from .transcriber import _PRESERVE_CAPS  # lazy: transcriber imports us lazily too
+
+    already_upper = set()
+    original_case = {}
+    for w in original.split():
+        a = _alpha(w)
+        if not a:
+            continue
+        if len(a) > 1 and a.isupper():
+            already_upper.add(a)
+        if a != a.lower() or a.lower() not in original_case:
+            original_case[a.lower()] = a
+
+    parts = re.split(r"(\s+)", text)
+    word_idx = [i for i in range(0, len(parts), 2) if parts[i]]
+
+    def _is_shout(word: str) -> bool:
+        a = _alpha(word)
+        return (
+            bool(a) and a != "I" and a.isupper()
+            and a not in already_upper and a not in _PRESERVE_CAPS
+        )
+
+    to_fix = set()
+    run = []
+    for i in word_idx + [None]:
+        if i is not None:
+            a = _alpha(parts[i])
+            if a == "I" and run:
+                continue          # neutral: keeps a run alive, never changed
+            if _is_shout(parts[i]):
+                run.append(i)
+                continue
+        if len(run) >= 3:
+            to_fix.update(run)
+        else:
+            to_fix.update(j for j in run if len(_alpha(parts[j])) >= 4)
+        run = []
+    if not to_fix:
+        return text
+
+    for n, i in enumerate(word_idx):
+        if i not in to_fix:
+            continue
+        a = _alpha(parts[i])
+        target = original_case.get(a.lower(), a.lower())
+        word = _recase(parts[i], target)
+        sentence_start = n == 0 or parts[word_idx[n - 1]].rstrip().endswith((".", "!", "?"))
+        if sentence_start and target == a.lower():
+            for k, ch in enumerate(word):
+                if ch.isalpha():
+                    word = word[:k] + ch.upper() + word[k + 1:]
+                    break
+        parts[i] = word
+    return "".join(parts)
+
+
+def post_llm_hygiene(result: str, original: str) -> str:
+    """Deterministic clean-up of a non-caricature cleanup-model result."""
+    if not result or not result.strip():
+        return result
+    out = _SPLIT_CONTRACTION_REGEX.sub(r"\1\2\3", result)
+
+    if _FILLER_BARE.search(out):
+        for pattern, repl in _FILLER_STEPS:
+            out = pattern.sub(repl, out)
+        out = re.sub(r"[ \t]+([,.!?;:])", r"\1", out)   # space before punctuation
+        out = re.sub(r"[ \t]{2,}", " ", out)
+        out = re.sub(r"(?m)^[ \t]+|[ \t]+$", "", out)
+        # A removed opener ("Um, the") leaves a lowercase sentence start.
+        out = re.sub(r"(^|[.!?]\s+)([a-z])", lambda m: m.group(1) + m.group(2).upper(), out)
+
+    out = _unshout(out, original)
+    return out
+
+
 def process_with_config(text: str, config: dict) -> str:
     """
     Post-process transcription using settings from config dictionary.
@@ -3840,6 +3974,14 @@ def process_with_config(text: str, config: dict) -> str:
         # Small models add commentary like "(no filler words, correct grammar)"
         import re
         result = re.sub(r'\s*\([^)]*(?:filler|grammar|clean|correct|change|edit|modif|remov|format|punctuat|capitaliz|no changes)[^)]*\)\s*$', '', result, flags=re.IGNORECASE)
+
+        # Deterministic repairs a small model tends to leave behind (fillers,
+        # split contractions, shouted words). Caricature is meant to be loud.
+        if not _prompt_is_caricature(prompt):
+            repaired = post_llm_hygiene(result, text)
+            if repaired != result:
+                print("[Post-processing] 🧹 Post-LLM hygiene applied")
+                result = repaired
 
         output_words = len(result.split())
         words_per_sec = input_words / elapsed if elapsed > 0 else 0

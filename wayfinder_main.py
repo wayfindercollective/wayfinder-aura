@@ -19427,7 +19427,9 @@ class WayfinderApp(ctk.CTk):
             else:
                 inject_text(
                     text,
-                    typing_speed="instant",
+                    # Honor the Settings preset; this was hard-coded "instant",
+                    # which silently ignored the user's choice.
+                    typing_speed=str(self.config.get("typing_speed", "instant")),
                     target_window=fallback_target,
                     game_mode=in_game_mode,
                     paste_fallback=bool(

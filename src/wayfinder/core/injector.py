@@ -13,6 +13,7 @@ Platform dispatch:
 
 import ctypes
 import os
+import string
 import subprocess
 import shutil
 import sys
@@ -136,6 +137,101 @@ TYPING_SPEEDS = {
     "slow": (50, 20),        # Slower, more natural
     "very_slow": (100, 50),  # Very slow, like watching someone type
 }
+
+# --- xdotool under XWayland -------------------------------------------------
+# On a Wayland desktop xdotool's XTest keys are bridged to the compositor
+# through XWayland's EI client, and the compositor re-derives every key's case
+# from its own modifier state. Field bug (2026-09-17, Bazzite/KWin, Konsole):
+# a cleanly-cased transcript arrived as "CaN YOU TELL ME ABOUT HOW HUMANS
+# WORK" — Shift state bled across the characters that followed a shifted key.
+# Two defences, both cheap:
+#   1. Shifted characters are typed in their own `type` command with a settle
+#      gap before and after, so the Shift press/release never sits in the same
+#      event batch as the neighbouring unshifted keys. Lowercase runs keep the
+#      fast per-key delay.
+#   2. Typographic punctuation is folded to ASCII first. Each character
+#      outside the keymap (’ “ ” — …) makes xdotool remap a scratch keycode,
+#      which under XWayland re-announces the keyboard to the compositor
+#      mid-transcript — another place for modifier state to get lost.
+# Characters xdotool types with Shift on the US layout. Other layouts differ;
+# a missed character only loses the extra gap, never correctness.
+_SHIFTED_ASCII = frozenset(string.ascii_uppercase + '~!@#$%^&*()_+{}|:"<>?')
+SHIFT_ISOLATION_GAP_S = 0.012
+# Per-key floor under XWayland: 2 ms was measured "safe" on Xorg/ydotool,
+# but the EI bridge showed the bleed in the field. Native Xorg keeps the
+# configured speed.
+XWAYLAND_MIN_KEY_DELAY_MS = 4
+
+_TYPOGRAPHY_FOLD = str.maketrans({
+    "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'",
+    "“": '"', "”": '"', "„": '"', "‟": '"', "″": '"',
+    "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-",
+    "―": "-", "−": "-",
+    "…": "...",
+    " ": " ", " ": " ", " ": " ", "​": "",
+})
+
+
+def fold_typography_for_typing(text: str) -> str:
+    """ASCII-fold the typographic punctuation Whisper/LLM cleanup emits.
+
+    Curly quotes, dashes, ellipsis and thin/no-break spaces become their
+    plain equivalents. Everything else (accented letters, emoji, other
+    scripts) is left alone and still typed via xdotool's keymap remap.
+    """
+    if not text:
+        return text
+    return text.translate(_TYPOGRAPHY_FOLD)
+
+
+def _char_class(ch: str) -> str:
+    if ch in _SHIFTED_ASCII:
+        return "shift"
+    if ord(ch) > 0x7E or ord(ch) < 0x20:
+        return "remap"   # outside the plain keymap: xdotool binds a scratch keycode
+    return "plain"
+
+
+def split_shift_segments(text: str) -> list:
+    """Split *text* into runs that share a typing class (plain / shift / remap).
+
+    Consecutive shifted characters ("JSON", "PR") stay in one run: the risky
+    transitions are between classes, and that is where the caller inserts a
+    settle gap.
+    """
+    segments = []
+    current = []
+    current_class = None
+    for ch in text:
+        cls = _char_class(ch)
+        if cls != current_class and current:
+            segments.append("".join(current))
+            current = []
+        current_class = cls
+        current.append(ch)
+    if current:
+        segments.append("".join(current))
+    return segments
+
+
+def build_xdotool_type_command(
+    text: str, key_delay_ms: int, gap_s: float = SHIFT_ISOLATION_GAP_S,
+) -> list:
+    """xdotool argv that types *text* with shifted/remapped runs isolated.
+
+    One xdotool process, chained commands: ``type --args 1 -- <run>`` per
+    run with ``sleep <gap>`` between runs. ``--clearmodifiers`` is kept on
+    every run so each behaves exactly like the former single-command call.
+    """
+    argv = ["xdotool"]
+    for i, seg in enumerate(split_shift_segments(text)):
+        if i:
+            argv += ["sleep", f"{gap_s:.3f}"]
+        argv += [
+            "type", "--clearmodifiers", "--delay", str(key_delay_ms),
+            "--args", "1", "--", seg,
+        ]
+    return argv
 
 
 def _check_ydotool_result(result, action: str) -> None:
@@ -489,6 +585,23 @@ class _XcbQueryPointerReply(ctypes.Structure):
     ]
 
 
+class _XcbQueryExtensionCookie(ctypes.Structure):
+    _fields_ = [("sequence", ctypes.c_uint)]
+
+
+class _XcbQueryExtensionReply(ctypes.Structure):
+    _fields_ = [
+        ("response_type", ctypes.c_uint8),
+        ("pad0", ctypes.c_uint8),
+        ("sequence", ctypes.c_uint16),
+        ("length", ctypes.c_uint32),
+        ("present", ctypes.c_uint8),
+        ("major_opcode", ctypes.c_uint8),
+        ("first_event", ctypes.c_uint8),
+        ("first_error", ctypes.c_uint8),
+    ]
+
+
 # Lazy singleton: (libxcb, libc) or None. Loaded at most once per process —
 # repeated CDLL() would leak dlopen refs and find_library() shells out to
 # ldconfig (~2ms) on every call (Codex review).
@@ -528,6 +641,14 @@ def _load_xcb():
         lib.xcb_query_pointer_reply.restype = ctypes.POINTER(_XcbQueryPointerReply)
         lib.xcb_query_pointer_reply.argtypes = [
             ctypes.c_void_p, _XcbQueryPointerCookie, ctypes.c_void_p,
+        ]
+        lib.xcb_query_extension.restype = _XcbQueryExtensionCookie
+        lib.xcb_query_extension.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint16, ctypes.c_char_p,
+        ]
+        lib.xcb_query_extension_reply.restype = ctypes.POINTER(_XcbQueryExtensionReply)
+        lib.xcb_query_extension_reply.argtypes = [
+            ctypes.c_void_p, _XcbQueryExtensionCookie, ctypes.c_void_p,
         ]
         libc.free.restype = None
         libc.free.argtypes = [ctypes.c_void_p]
@@ -614,6 +735,55 @@ def _x11_held_modifiers() -> "int | None":
         probe.close()
 
 
+# Cached per process: the X server does not change under a running app.
+_XWAYLAND_RESULT = None
+
+
+def _running_under_xwayland() -> bool:
+    """True when DISPLAY is served by Xwayland.
+
+    Asks the X server for the XWAYLAND extension (advertised since Xwayland
+    23.1). The Flatpak forces XDG_SESSION_TYPE=x11 and gets no Wayland
+    socket, so on a Wayland desktop this query is the only signal that
+    xdotool's keys are really crossing XWayland's EI bridge. Falls back to
+    the environment (WAYLAND_DISPLAY without an explicit x11 session) when
+    the query cannot run.
+    """
+    global _XWAYLAND_RESULT
+    if _XWAYLAND_RESULT is not None:
+        return _XWAYLAND_RESULT
+    result = False
+    if os.environ.get("DISPLAY"):
+        loaded = _load_xcb()
+        if loaded is not None:
+            lib, libc = loaded
+            conn = None
+            try:
+                conn = lib.xcb_connect(None, None)
+                if conn and not lib.xcb_connection_has_error(conn):
+                    name = b"XWAYLAND"
+                    cookie = lib.xcb_query_extension(conn, len(name), name)
+                    reply = lib.xcb_query_extension_reply(conn, cookie, None)
+                    if reply:
+                        try:
+                            result = bool(reply.contents.present)
+                        finally:
+                            libc.free(reply)
+            except Exception:
+                result = False
+            finally:
+                if conn:
+                    try:
+                        lib.xcb_disconnect(conn)
+                    except Exception:
+                        pass
+        if (not result and os.environ.get("XDG_SESSION_TYPE") != "x11"
+                and os.environ.get("WAYLAND_DISPLAY")):
+            result = True
+    _XWAYLAND_RESULT = result
+    return result
+
+
 def _wait_for_modifier_release(timeout: float = 2.0, poll: float = 0.1) -> bool:
     """Bounded wait until no modifier key is physically held. True when clear.
 
@@ -674,6 +844,12 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     else:
         key_delay = 2
 
+    # See the XWayland note above TYPING_SPEEDS: a per-key floor on the EI
+    # bridge, the configured speed on native Xorg.
+    xwayland = _running_under_xwayland()
+    if xwayland and key_delay < XWAYLAND_MIN_KEY_DELAY_MS:
+        key_delay = XWAYLAND_MIN_KEY_DELAY_MS
+
     # xdotool is a host binary — never feed it the bundle's library path.
     from wayfinder.utils.hostexec import host_env
     _env = host_env()
@@ -715,12 +891,8 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     # --clearmodifiers cannot neutralize a physically-held modifier.
     _require_modifier_release()
 
-    cmd = [
-        "xdotool", "type",
-        "--clearmodifiers",
-        "--delay", str(key_delay),
-        "--", text,
-    ]
+    text = fold_typography_for_typing(text)
+    cmd = build_xdotool_type_command(text, key_delay)
     try:
         result = subprocess.run(
             cmd,

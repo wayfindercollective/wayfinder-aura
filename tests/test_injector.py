@@ -27,7 +27,23 @@ from wayfinder.core.injector import (
     _wait_for_modifier_release,
     _x11_held_modifiers,
     _X_HELD_MODIFIER_BITS,
+    _XcbQueryExtensionReply,
+    # Captured at import time, before the autouse stub below replaces the name.
+    _running_under_xwayland as _REAL_XWAYLAND_PROBE,
+    build_xdotool_type_command,
+    fold_typography_for_typing,
+    split_shift_segments,
+    SHIFT_ISOLATION_GAP_S,
+    XWAYLAND_MIN_KEY_DELAY_MS,
 )
+
+
+@pytest.fixture(autouse=True)
+def _assume_native_x11(monkeypatch):
+    """xdotool tests are about argv shape. Pin the XWayland probe to False so
+    the suite is deterministic on a Wayland desktop (where a delay floor
+    applies); tests that cover the floor flip it explicitly."""
+    monkeypatch.setattr("wayfinder.core.injector._running_under_xwayland", lambda: False)
 
 
 # =============================================================================
@@ -408,6 +424,11 @@ class TestInjectionError:
 # =============================================================================
 
 
+def _type_runs(argv):
+    """The text runs a chained xdotool argv types, in order."""
+    return [argv[k + 1] for k, tok in enumerate(argv) if tok == "--"]
+
+
 def _xdotool_dispatcher(active_window="win-1", type_result=None):
     """Build a subprocess.run side_effect that routes by xdotool subcommand.
 
@@ -477,7 +498,9 @@ class TestInjectTextXdotool:
         mock_sleep.assert_not_called()
 
     def test_type_command_passes_text_as_trailing_arg(self):
-        # Text is a trailing argv element after `--` — no shell, no injection surface.
+        # Text is passed as argv elements after `--` — no shell, no injection surface.
+        # Since the shift-isolation change the text is split into runs, each its
+        # own chained `type ... --args 1 -- <run>`; the runs must re-join exactly.
         with patch("wayfinder.core.injector.subprocess.run",
                    side_effect=_xdotool_dispatcher()) as mock_run, \
              patch("time.sleep"):
@@ -485,10 +508,14 @@ class TestInjectTextXdotool:
 
         type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
         assert type_cmd[0] == "xdotool"
-        assert "--" in type_cmd
-        assert type_cmd[-1] == "rm -rf ~; echo pwned"
-        # The text sits after the `--` guard so it can never be read as a flag.
-        assert type_cmd.index("--") == len(type_cmd) - 2
+        runs = _type_runs(type_cmd)
+        assert "".join(runs) == "rm -rf ~; echo pwned"
+        # Every run sits right after a `--` guard so it can never be read as a flag,
+        # and `--args 1` tells xdotool exactly one argument follows.
+        for k, tok in enumerate(type_cmd):
+            if tok == "--":
+                assert type_cmd[k - 2:k] == ["--args", "1"]
+                assert type_cmd[k + 1] in runs
 
     def test_typing_speed_maps_to_delay(self):
         with patch("wayfinder.core.injector.subprocess.run",
@@ -903,3 +930,141 @@ class TestModifierReleaseGate:
                    side_effect=lambda *a, **k: order.append("key") or ok):
             press_enter()
         assert order == ["wait", "key"]
+
+
+# =============================================================================
+# xdotool under XWayland — shift isolation, typography folding, delay floor
+# =============================================================================
+
+
+class TestXdotoolShiftIsolation:
+    """Field bug 2026-09-17 (Bazzite/KWin, Konsole): a normal-case transcript
+    was typed as "CaN YOU TELL ME ABOUT HOW HUMANS WORK". xdotool's XTest keys
+    cross XWayland's EI bridge and Shift state bled across neighbouring keys.
+    Shifted runs are now typed in their own chained command with a settle gap
+    on both sides, and typographic punctuation is folded so xdotool never has
+    to remap a scratch keycode mid-transcript."""
+
+    def test_segments_split_on_shift_class_transitions(self):
+        assert split_shift_segments("Can you") == ["C", "an you"]
+        # Consecutive shifted characters stay together; shifted punctuation counts.
+        assert split_shift_segments("the JSON, PR?") == ["the ", "JSON", ", ", "PR?"]
+        assert split_shift_segments("all lowercase, no shifts.") == ["all lowercase, no shifts."]
+        assert split_shift_segments("") == []
+
+    def test_segments_isolate_characters_outside_the_keymap(self):
+        # Non-ASCII needs a keymap remap: its own run, gapped from neighbours.
+        assert split_shift_segments("café au lait") == ["caf", "é", " au lait"]
+
+    def test_segments_rejoin_to_the_original_text(self):
+        text = "Is that a reasonable conclusion? I think so: JSON/PR @ 100% (done)."
+        assert "".join(split_shift_segments(text)) == text
+
+    def test_fold_typography(self):
+        assert fold_typography_for_typing("it’s “quoted” — fine…") == "it's \"quoted\" - fine..."
+        assert fold_typography_for_typing("plain ascii") == "plain ascii"
+        assert fold_typography_for_typing("") == ""
+        # Untouched: accented letters and emoji still go through xdotool's remap.
+        assert fold_typography_for_typing("café 🚀") == "café 🚀"
+
+    def test_build_command_chains_runs_with_gaps(self):
+        argv = build_xdotool_type_command("Can you", 2)
+        assert argv == [
+            "xdotool",
+            "type", "--clearmodifiers", "--delay", "2", "--args", "1", "--", "C",
+            "sleep", f"{SHIFT_ISOLATION_GAP_S:.3f}",
+            "type", "--clearmodifiers", "--delay", "2", "--args", "1", "--", "an you",
+        ]
+
+    def test_build_command_single_run_has_no_sleep(self):
+        argv = build_xdotool_type_command("no shifts here", 12)
+        assert argv == ["xdotool", "type", "--clearmodifiers", "--delay", "12",
+                        "--args", "1", "--", "no shifts here"]
+
+    def test_inject_folds_typography_before_typing(self):
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("it’s done — really…", "instant")
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        assert "".join(_type_runs(type_cmd)) == "it's done - really..."
+
+    def test_xwayland_raises_instant_delay_to_floor(self, monkeypatch):
+        monkeypatch.setattr("wayfinder.core.injector._running_under_xwayland", lambda: True)
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("hi", "instant")
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        assert type_cmd[type_cmd.index("--delay") + 1] == str(XWAYLAND_MIN_KEY_DELAY_MS)
+
+    def test_xwayland_keeps_a_slower_configured_speed(self, monkeypatch):
+        monkeypatch.setattr("wayfinder.core.injector._running_under_xwayland", lambda: True)
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("hi", "normal")
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        assert type_cmd[type_cmd.index("--delay") + 1] == "12"
+
+    def test_native_x11_keeps_instant_delay(self):
+        with patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher()) as mock_run, \
+             patch("time.sleep"):
+            _inject_text_xdotool("hi", "instant")
+        type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
+        assert type_cmd[type_cmd.index("--delay") + 1] == "2"
+
+
+class TestRunningUnderXwayland:
+    """The probe asks the X server for the XWAYLAND extension; the Flatpak
+    forces XDG_SESSION_TYPE=x11, so the environment alone cannot tell."""
+
+    @pytest.fixture(autouse=True)
+    def _uncached(self, monkeypatch):
+        import wayfinder.core.injector as inj
+        monkeypatch.setattr(inj, "_XWAYLAND_RESULT", None)
+
+    def test_no_display_means_not_xwayland(self, monkeypatch):
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        assert _REAL_XWAYLAND_PROBE() is False
+
+    def test_env_fallback_when_xcb_unavailable(self, monkeypatch):
+        import wayfinder.core.injector as inj
+        monkeypatch.setattr(inj, "_load_xcb", lambda: None)
+        monkeypatch.setenv("DISPLAY", ":0")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+        assert _REAL_XWAYLAND_PROBE() is True
+        # Cached per process.
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        assert _REAL_XWAYLAND_PROBE() is True
+
+    def test_forced_x11_session_disables_env_fallback(self, monkeypatch):
+        import wayfinder.core.injector as inj
+        monkeypatch.setattr(inj, "_load_xcb", lambda: None)
+        monkeypatch.setenv("DISPLAY", ":0")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")   # what the Flatpak manifest forces
+        assert _REAL_XWAYLAND_PROBE() is False
+
+    @pytest.mark.parametrize("present", [1, 0])
+    def test_extension_query_decides_even_in_a_forced_x11_sandbox(self, monkeypatch, present):
+        import ctypes
+        import wayfinder.core.injector as inj
+        reply = _XcbQueryExtensionReply(present=present)
+        lib = MagicMock()
+        lib.xcb_connect.return_value = 1
+        lib.xcb_connection_has_error.return_value = 0
+        lib.xcb_query_extension_reply.return_value = ctypes.pointer(reply)
+        libc = MagicMock()
+        monkeypatch.setattr(inj, "_load_xcb", lambda: (lib, libc))
+        monkeypatch.setenv("DISPLAY", ":0")
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        assert _REAL_XWAYLAND_PROBE() is bool(present)
+        name_len, name = lib.xcb_query_extension.call_args[0][1:]
+        assert (name_len, name) == (8, b"XWAYLAND")
+        lib.xcb_disconnect.assert_called_once()
+        libc.free.assert_called_once()

@@ -35,6 +35,10 @@ from wayfinder.core.postprocessor import (
     check_settings_compatibility,
     get_backend,
     process_with_config,
+    post_llm_hygiene,
+    _prompt_is_caricature,
+    CARICATURE_PROMPT,
+    STANDARD_PROMPT,
     get_tone_options,
     # Backend classes
     LlamaCppBackend,
@@ -1686,3 +1690,106 @@ class TestBudgetTracksTheWatchdog:
             except Exception:
                 pass
         assert not called, "entered an uninterruptible call with no budget left"
+
+
+# =============================================================================
+# post_llm_hygiene — deterministic repairs after a small cleanup model
+# =============================================================================
+
+
+class TestPostLlmHygiene:
+    """Gemma 3 1B in the field (2026-09-17) left fillers, split contractions
+    and the odd shouted word in its output. These repairs are narrow and
+    never touch caricature output."""
+
+    def test_joins_split_contractions(self):
+        assert post_llm_hygiene("I 'm sure it 's fine, don 't worry.", "") == \
+            "I'm sure it's fine, don't worry."
+
+    def test_filler_between_commas_takes_both_commas(self):
+        assert post_llm_hygiene("Tell me, um, about it.", "tell me um about it") == \
+            "Tell me about it."
+
+    def test_opening_filler_takes_its_comma_and_recapitalizes(self):
+        assert post_llm_hygiene("Um, the deploy is done. Uh, then we ship.", "") == \
+            "The deploy is done. Then we ship."
+
+    def test_closing_filler_keeps_the_sentence_punctuation(self):
+        assert post_llm_hygiene("That's fine, um.", "") == "That's fine."
+
+    def test_words_containing_fillers_are_untouched(self):
+        text = "Uh-huh, the album and the umbrella are fine."
+        assert post_llm_hygiene(text, "") == text
+
+    def test_shouted_run_is_unshouted_with_transcript_casing(self):
+        out = post_llm_hygiene(
+            "Fix the bug in ARAWN and the TYPESCRIPT BUILD.",
+            "fix the bug in Arawn and the TypeScript build",
+        )
+        assert out == "Fix the bug in Arawn and the TypeScript build."
+
+    def test_shouted_clause_at_sentence_start_gets_one_capital(self):
+        out = post_llm_hygiene(
+            "IS THAT A REASONABLE CONCLUSION? Yes.",
+            "is that a reasonable conclusion yes",
+        )
+        assert out == "Is that a reasonable conclusion? Yes."
+
+    def test_i_never_lowercased_and_never_breaks_a_run(self):
+        assert post_llm_hygiene("WHAT I MEANT WAS this.", "what I meant was this") == \
+            "What I meant was this."
+
+    def test_acronyms_and_short_tokens_survive(self):
+        text = "The UI uses JSON and the PR hits the API. NASA said OK."
+        assert post_llm_hygiene(text, "the ui uses json and the pr hits the api nasa said ok") == text
+
+    def test_caps_present_in_transcript_are_kept(self):
+        text = "Ship it ASAP, the WAYFINDER build."
+        assert post_llm_hygiene(text, "ship it ASAP the WAYFINDER build") == text
+
+    def test_lone_long_shout_is_lowercased(self):
+        assert post_llm_hygiene("This is a PRODUCTION incident.", "this is a production incident") == \
+            "This is a production incident."
+
+    def test_lone_short_shout_is_left_alone(self):
+        # Three letters or fewer could be an acronym the list does not know.
+        text = "Check the DNS and the CDN."
+        assert post_llm_hygiene(text, "check the dns and the cdn") == text
+
+    def test_empty_and_whitespace_pass_through(self):
+        assert post_llm_hygiene("", "x") == ""
+        assert post_llm_hygiene("   ", "x") == "   "
+
+    def test_caricature_fingerprint(self):
+        assert _prompt_is_caricature(CARICATURE_PROMPT.format(
+            style_name="dev", tone_guidance="", formatting_rules="", text="hi"))
+        assert not _prompt_is_caricature(STANDARD_PROMPT.format(
+            tone_guidance="", formatting_rules="", filler_rules="", text="hi"))
+
+    def _run(self, model_output, config_extra=None):
+        backend = SimpleNamespace(
+            is_available=lambda: True,
+            process=MagicMock(return_value=model_output),
+        )
+        config = {
+            "output_tone": "dev",
+            "post_processing_enabled": True,
+            "post_processing_backend": "llama_cpp",
+            "llama_cpp_model_path": "/tmp/google_gemma-3-1b-it-Q4_K_M.gguf",
+        }
+        config.update(config_extra or {})
+        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
+            return process_with_config("um can you tell me about how humans work I'm not sure", config)
+
+    def test_process_with_config_applies_hygiene_for_standard_cleanup(self):
+        out = self._run("Um, can you tell me about HOW HUMANS WORK? I 'm not sure.")
+        assert out == "Can you tell me about how humans work? I'm not sure."
+
+    def test_process_with_config_skips_hygiene_for_caricature(self):
+        loud = "Um, CAN YOU TELL ME how HUMANS WORK?! I 'm PANICKING 🙏"
+        # Qwen3-4B is caricature-capable, so the caricature prompt is really built.
+        out = self._run(loud, {
+            "caricature_mode": True,
+            "llama_cpp_model_path": "/tmp/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        })
+        assert out == loud
