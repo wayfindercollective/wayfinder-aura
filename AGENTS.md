@@ -37,7 +37,7 @@ production baseline, macOS is an active port, and Windows is planned. Read
 
 It:
 
-1. **Records audio** when the user presses the record hotkey (Ctrl+Alt+Space default)
+1. **Records audio** when the user presses the record hotkey (Fn+Space on macOS, Ctrl+Alt+Space elsewhere)
 2. **Transcribes speech** using whisper.cpp or Faster-Whisper
 3. **Post-processes text** with an LLM (llama.cpp or cloud APIs)
 4. **Injects text** at the cursor position using a platform adapter

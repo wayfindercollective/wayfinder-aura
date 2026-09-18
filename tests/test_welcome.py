@@ -17,6 +17,20 @@ class TestWelcomeFlow:
         assert flow.index == 0
         assert flow.is_complete is False
 
+    def test_packaged_flow_detects_mic_before_downloading_free_model(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow(include_model=True)
+        assert flow.steps == ["mic", "model", "hotkey", "dictate"]
+        flow.pass_mic_test()
+        assert flow.advance() is True
+        assert flow.current == "model"
+        assert flow.advance() is False
+        assert flow.begin_model_download() is True
+        assert flow.complete_model_download() is True
+        assert flow.advance() is True
+        assert flow.current == "hotkey"
+
     def test_advance_through_all_steps_completes(self):
         from wayfinder.ui.welcome import WelcomeFlow
 

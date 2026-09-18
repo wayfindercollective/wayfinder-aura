@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Union
@@ -86,11 +88,9 @@ def get_app_temp_dir() -> Path:
     Prefer XDG cache so Flatpak sandboxes get a writable private path without
     new finish-args. Falls back to system temp + wayfinder-aura-<uid>.
     """
-    cache_home = os.environ.get("XDG_CACHE_HOME")
-    if cache_home:
-        base = Path(cache_home) / "wayfinder-aura" / "tmp"
-    else:
-        base = Path.home() / ".cache" / "wayfinder-aura" / "tmp"
+    from wayfinder.utils.platform import get_cache_dir
+
+    base = get_cache_dir() / "tmp"
     return ensure_private_dir(base)
 
 
@@ -122,3 +122,56 @@ def cleanup_app_temp_dir(max_age_seconds: float | None = None) -> int:
         except OSError:
             pass
     return removed
+
+
+def migrate_legacy_macos_cache() -> int:
+    """Move pre-port cache files and purge abandoned private WAVs on macOS."""
+    if sys.platform != "darwin":
+        return 0
+    legacy = Path.home() / ".cache" / "wayfinder-aura"
+    if not legacy.is_dir():
+        return 0
+    from wayfinder.utils.platform import get_cache_dir
+
+    target = ensure_private_dir(get_cache_dir())
+    moved = 0
+    for name in (
+        "activity.log",
+        "overlay-debug.log",
+        "model_catalog_v1.json",
+        "model_catalog_v1.meta.json",
+    ):
+        source = legacy / name
+        destination = target / name
+        if source.is_file() and not destination.exists():
+            try:
+                shutil.move(str(source), str(destination))
+                moved += 1
+            except OSError:
+                pass
+    old_logs = legacy / "logs"
+    new_logs = target / "logs"
+    if old_logs.is_dir() and not new_logs.exists():
+        try:
+            shutil.move(str(old_logs), str(new_logs))
+            moved += 1
+        except OSError:
+            pass
+    old_tmp = legacy / "tmp"
+    if old_tmp.is_dir():
+        for path in old_tmp.iterdir():
+            if path.is_file() or path.is_symlink():
+                try:
+                    path.unlink()
+                    moved += 1
+                except OSError:
+                    pass
+        try:
+            old_tmp.rmdir()
+        except OSError:
+            pass
+    try:
+        legacy.rmdir()
+    except OSError:
+        pass
+    return moved

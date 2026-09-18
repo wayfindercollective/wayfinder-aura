@@ -3,13 +3,14 @@ First-run welcome tour for Wayfinder Aura.
 
 Two layers:
 
-- ``WelcomeFlow`` — a tiny, pure state machine (steps: mic -> hotkey -> dictate).
+- ``WelcomeFlow`` — a tiny, pure state machine (optional free model download,
+  then mic -> hotkey -> dictate).
   It has NO Tk/customtkinter dependency and is headless-testable.
 - ``WelcomePane`` — the in-window card that renders the flow over the tab content
   area. It imports customtkinter lazily (inside the builder), so importing this
   module and using ``WelcomeFlow`` works without a display.
 
-Design brief: the first five minutes feel guided and calm. One card, three steps,
+Design brief: the first five minutes feel guided and calm. One card, a short flow,
 dot progress, always skippable, max restraint — matched to the app's design
 language (theme tokens, caps + divider aesthetic, blue brand accent).
 
@@ -20,6 +21,7 @@ demos itself without typing into whatever window happens to be focused.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 from wayfinder.config import save_config
@@ -27,7 +29,7 @@ from wayfinder.ui.theme import COLORS, FONT_SIZES, FONTS, RADIUS, SPACING
 
 
 class WelcomeFlow:
-    """Pure state machine for the 3-step welcome tour.
+    """Pure state machine for the first-run welcome tour.
 
     No Tk imports — importable and testable headlessly. ``on_complete`` fires
     exactly once, whether the flow is completed (advance past the last step) or
@@ -36,12 +38,16 @@ class WelcomeFlow:
 
     STEPS = ("mic", "hotkey", "dictate")
 
-    def __init__(self, on_complete=None):
+    def __init__(self, on_complete=None, *, include_model: bool = False):
         self.steps = list(self.STEPS)
+        if include_model:
+            self.steps.insert(1, "model")
         self._index = 0
         self.is_complete = False
         self.on_complete = on_complete
         self._fired = False
+        self.model_download_state = "idle"
+        self.model_download_error = ""
         self.mic_test_state = "idle"
         self.mic_test_error = ""
         self._mic_test_generation = 0
@@ -65,7 +71,30 @@ class WelcomeFlow:
         users walk past an untested microphone and discover the failure only
         after learning the dictation hotkey.
         """
+        if self.current == "model":
+            return self.model_download_state == "ready"
         return self.current != "mic" or self.mic_test_state == "passed"
+
+    def begin_model_download(self) -> bool:
+        if self.is_complete or self.current != "model":
+            return False
+        self.model_download_state = "downloading"
+        self.model_download_error = ""
+        return True
+
+    def complete_model_download(self) -> bool:
+        if self.is_complete or self.current != "model":
+            return False
+        self.model_download_state = "ready"
+        self.model_download_error = ""
+        return True
+
+    def fail_model_download(self, message: str) -> bool:
+        if self.is_complete or self.current != "model":
+            return False
+        self.model_download_state = "failed"
+        self.model_download_error = str(message)
+        return True
 
     @property
     def mic_test_generation(self) -> int:
@@ -229,6 +258,7 @@ class WelcomePane:
 
     # Per-step card titles (rendered in the fixed header, above the divider).
     _STEP_TITLES = {
+        "model": "set up local dictation",
         "mic": "welcome to wayfinder aura",
         "hotkey": "your hotkey",
         "dictate": "try it now",
@@ -240,7 +270,14 @@ class WelcomePane:
         self._ctk = ctk
         self.parent = parent
         self.app = app
-        self.flow = WelcomeFlow(on_complete=self._complete_flow)
+        try:
+            needs_model = not bool(app._has_usable_whisper_model())
+        except Exception:
+            needs_model = False
+        self.flow = WelcomeFlow(
+            on_complete=self._complete_flow,
+            include_model=needs_model,
+        )
         self._transcript = None
         self._dictation_error = ""
         self._destroyed = False
@@ -249,6 +286,10 @@ class WelcomePane:
         self._mic_test_started_at = None
         self._mic_level_bar = None
         self._mic_level_label = None
+        self._model_progress_bar = None
+        self._model_progress_label = None
+        self._model_downloader = None
+        self._model_choice = "base.en"
         # Final-step recovery: if the first dictation never lands, a single-shot
         # timer swaps the calm "listening…" line for a troubleshooting affordance.
         self._help_after_id = None
@@ -374,12 +415,101 @@ class WelcomePane:
         body.pack(expand=True, fill="x")
 
         step = self.flow.current
-        if step == "mic":
+        if step == "model":
+            self._render_model(body)
+        elif step == "mic":
             self._render_mic(body)
         elif step == "hotkey":
             self._render_hotkey(body)
         elif step == "dictate":
             self._render_dictate(body)
+
+    def _render_model(self, body) -> None:
+        ctk = self._ctk
+        state = self.flow.model_download_state
+        model_label = (
+            "Base (English)"
+            if self._model_choice == "base.en"
+            else "Base (Multilingual)"
+        )
+        if state == "downloading":
+            self._body_label(body, f"downloading {model_label}…")
+            self._body_label(
+                body,
+                "the free model runs entirely on this Mac after download.",
+                muted=True,
+                pady=(SPACING["sm"], SPACING["md"]),
+            )
+            self._model_progress_bar = ctk.CTkProgressBar(
+                body,
+                height=10,
+                corner_radius=RADIUS["xs"],
+                progress_color=COLORS["accent"],
+                fg_color=COLORS["bg_input"],
+            )
+            self._model_progress_bar.pack(fill="x")
+            self._model_progress_bar.set(0)
+            self._model_progress_label = self._status_label(
+                body,
+                "starting…",
+                COLORS["text_muted"],
+                pady=(SPACING["sm"], 0),
+            )
+            return
+
+        if state == "ready":
+            self._status_label(
+                body,
+                "✓ Base model ready",
+                COLORS["accent_green"],
+                pady=(0, SPACING["sm"]),
+            )
+            self._body_label(body, "Local dictation is installed and ready to test.")
+            self._continue_button(body, "continue")
+            return
+
+        self._body_label(body, "Choose a free speech model for private local dictation.")
+        self._body_label(
+            body,
+            "Both run entirely on this Mac after download.",
+            muted=True,
+            pady=(SPACING["sm"], 0),
+        )
+        choices = ctk.CTkFrame(body, fg_color="transparent")
+        choices.pack(fill="x", pady=(SPACING["md"], 0))
+        for model_id, label in (
+            ("base.en", "English"),
+            ("base", "Multilingual"),
+        ):
+            selected = model_id == self._model_choice
+            ctk.CTkButton(
+                choices,
+                text=label,
+                height=34,
+                corner_radius=RADIUS["sm"],
+                fg_color=COLORS["accent"] if selected else COLORS["bg_input"],
+                hover_color=COLORS["accent_dim"] if selected else COLORS["bg_hover"],
+                text_color=COLORS["bg_base"] if selected else COLORS["text_secondary"],
+                font=(FONTS["body"][0], FONT_SIZES["small"], "bold" if selected else "normal"),
+                command=lambda value=model_id: self._select_model_choice(value),
+            ).pack(side="left", fill="x", expand=True, padx=(0, SPACING["sm"]))
+        if state == "failed":
+            self._status_label(
+                body,
+                self.flow.model_download_error or "The download did not finish.",
+                COLORS["accent_red"],
+                pady=(SPACING["md"], 0),
+            )
+            label = "retry download"
+        else:
+            label = f"download {model_label}"
+        self._continue_button(body, label, command=self._start_model_download)
+
+    def _select_model_choice(self, model_id: str) -> None:
+        if model_id not in ("base.en", "base"):
+            return
+        self._model_choice = model_id
+        self._render_step()
 
     def _render_mic(self, body) -> None:
         ctk = self._ctk
@@ -480,6 +610,56 @@ class WelcomePane:
             body,
             "press it once to start a dictation — press it again to stop.",
         )
+        if sys.platform == "darwin":
+            try:
+                from wayfinder.utils.macos_permissions import macos_install_location_ready
+
+                install_ready = macos_install_location_ready()
+            except Exception:
+                install_ready = True
+            try:
+                accessibility, input_monitoring = self.app._macos_permission_state()
+            except Exception:
+                accessibility = input_monitoring = None
+            missing = (
+                "install_location" if not install_ready
+                else "accessibility" if accessibility is not True
+                else "input_monitoring" if input_monitoring is not True
+                else None
+            )
+            if missing is not None:
+                self.app._missing_macos_permission = missing
+                pane = (
+                    "Applications"
+                    if missing == "install_location"
+                    else "Accessibility"
+                    if missing == "accessibility"
+                    else "Input Monitoring"
+                )
+                self._status_label(
+                    body,
+                    (
+                        "Before granting permissions, move Wayfinder Aura into Applications "
+                        "and relaunch that stable copy."
+                        if missing == "install_location"
+                        else f"Before trying the hotkey, enable Wayfinder Aura in {pane}. "
+                        "Input Monitoring may require using + to add the Applications copy."
+                    ),
+                    COLORS["accent_yellow"],
+                    pady=(SPACING["md"], 0),
+                )
+                self._body_label(
+                    body,
+                    "After enabling it, quit and reopen Aura; this tour will resume here.",
+                    muted=True,
+                    pady=(SPACING["sm"], 0),
+                )
+                self._continue_button(
+                    body,
+                    f"open {pane.lower()}",
+                    command=self.app._open_missing_macos_permission,
+                )
+                return
         self._continue_button(body, "continue")
 
     def _render_dictate(self, body) -> None:
@@ -589,6 +769,66 @@ class WelcomePane:
     @property
     def is_microphone_test_running(self) -> bool:
         return self.flow.current == "mic" and self.flow.mic_test_state in {"starting", "recording", "checking"}
+
+    def _start_model_download(self) -> None:
+        if self._destroyed or not self.flow.begin_model_download():
+            return
+        self._render_step()
+
+        def progress(pct, done, total):
+            self._post_to_ui(
+                lambda: self._update_model_progress(pct, done, total)
+            )
+
+        def complete(path):
+            self._post_to_ui(lambda: self._finish_model_download(path))
+
+        def error(message):
+            self._post_to_ui(lambda: self._fail_model_download(message))
+
+        try:
+            self._model_downloader = self.app._start_welcome_model_download(
+                self._model_choice,
+                progress,
+                complete,
+                error,
+            )
+        except Exception as exc:
+            self._fail_model_download(str(exc))
+
+    def _update_model_progress(self, pct, done, total) -> None:
+        if self._destroyed or self.flow.model_download_state != "downloading":
+            return
+        try:
+            pct = max(0.0, min(1.0, float(pct)))
+            if self._model_progress_bar is not None:
+                self._model_progress_bar.set(pct)
+            if self._model_progress_label is not None:
+                done_mb = float(done) / (1024 * 1024)
+                total_mb = float(total) / (1024 * 1024) if total else 0.0
+                text = (
+                    f"{done_mb:.0f} / {total_mb:.0f} MB  ·  {pct * 100:.0f}%"
+                    if total_mb
+                    else f"{done_mb:.0f} MB"
+                )
+                self._model_progress_label.configure(text=text)
+        except Exception:
+            pass
+
+    def _finish_model_download(self, path) -> None:
+        if self._destroyed or not self.flow.complete_model_download():
+            return
+        try:
+            self.app._on_whisper_model_ready(path)
+        except Exception as exc:
+            self.flow.fail_model_download(str(exc))
+        self._render_step()
+
+    def _fail_model_download(self, message) -> None:
+        if self._destroyed:
+            return
+        self.flow.fail_model_download(str(message))
+        self._render_step()
 
     def _start_mic_test(self) -> None:
         if self._destroyed or self.is_microphone_test_running:
@@ -854,6 +1094,13 @@ class WelcomePane:
 
     def _teardown(self) -> None:
         self._destroyed = True
+        downloader = self._model_downloader
+        self._model_downloader = None
+        if downloader is not None:
+            try:
+                downloader.cancel_download()
+            except Exception:
+                pass
         self._cancel_mic_test()
         self._cancel_help()
         # Clear the app-side flag so normal injection resumes.

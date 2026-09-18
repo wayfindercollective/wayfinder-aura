@@ -60,7 +60,8 @@ try:
     DBUS_AVAILABLE = True
 except Exception as _dbus_err:
     DBUS_AVAILABLE = False
-    print(f"[Hotkeys] dbus-python/GLib unavailable ({_dbus_err.__class__.__name__}: {_dbus_err}); sleep/wake overlay recovery disabled", flush=True)
+    if sys.platform.startswith("linux"):
+        print(f"[Hotkeys] dbus-python/GLib unavailable ({_dbus_err.__class__.__name__}: {_dbus_err}); sleep/wake overlay recovery disabled", flush=True)
 
 # Portal hotkeys need only PyGObject (Gio). Probed separately from dbus-python
 # so bundling one never silently switches the other's behavior.
@@ -68,7 +69,7 @@ from wayfinder.hotkeys.dbus import portal_shortcuts_available, portal_unavailabl
 from wayfinder.hotkeys.tk_capture import captured_payload as tk_captured_payload
 
 PORTAL_HOTKEYS_AVAILABLE = portal_shortcuts_available()
-if not PORTAL_HOTKEYS_AVAILABLE:
+if sys.platform.startswith("linux") and not PORTAL_HOTKEYS_AVAILABLE:
     print(f"[Hotkeys] PyGObject unavailable ({portal_unavailable_detail()}); portal shortcuts disabled", flush=True)
 
 # pynput for cross-platform hotkeys (macOS/Windows)
@@ -156,10 +157,14 @@ def _get_whisper_models_dir() -> Path:
 
     In a Flatpak, `$HOME` is the sandboxed app home (~/.var/app/<app-id>/), so
     downloads under ~/.local/share/wayfinder-aura/... persist without host
-    filesystem grants (Flathub prefers minimized permissions). Outside a
-    Flatpak the long-standing ~/whisper.cpp/models location is kept (existing
-    installs, docs and from-source builds all use it).
+    filesystem grants (Flathub prefers minimized permissions). macOS uses the
+    application data directory; Linux source installs keep the long-standing
+    ~/whisper.cpp/models location for compatibility.
     """
+    if sys.platform == "darwin":
+        from wayfinder.utils.platform import get_data_dir
+
+        return get_data_dir() / "whisper-models"
     if IS_FLATPAK:
         return Path.home() / ".local" / "share" / "wayfinder-aura" / "whisper-models"
     return Path.home() / "whisper.cpp" / "models"
@@ -394,6 +399,18 @@ COLORS = {
     "warning_bg": "#2A1A1A",        # Red-tinted banner background (cloud warning)
 }
 
+
+def _tab_surface_kwargs(platform_name: str | None = None) -> dict:
+    """CTk page colors, with an opaque Aqua backing to prevent white flashes."""
+    active_platform = platform_name or sys.platform
+    if active_platform == "darwin":
+        return {
+            "fg_color": COLORS["bg_base"],
+            "bg_color": COLORS["bg_base"],
+            "corner_radius": 0,
+        }
+    return {"fg_color": "transparent"}
+
 # Corner radius design tokens for consistent rounded corners.
 # Mirrored in src/wayfinder/ui/theme.py (RADIUS) — keep both in sync.
 RADIUS = {
@@ -509,7 +526,7 @@ class ToolTip:
         self.delay = delay
         self.tooltip_window = None
         self.scheduled_id = None
-        
+
         widget.bind("<Enter>", self.on_enter)
         widget.bind("<Leave>", self.on_leave)
         widget.bind("<ButtonPress>", self.on_leave)
@@ -1079,6 +1096,87 @@ def _wheel_top_frac_after(top_frac: float, applied_px: float, content_h: float) 
     return max(0.0, (top_frac * content_h + applied_px) / content_h)
 
 
+def _wheel_event_notches(delta: object, platform_name: str | None = None) -> float:
+    """Normalize one Tk ``MouseWheel`` delta into wheel-notch units.
+
+    Windows and Tk 9/X11 report 120 per notch. Aqua reports small,
+    high-resolution deltas for Mac trackpads; dividing those by 120 makes
+    scrolling appear dead. Four Aqua delta units approximate one wheel notch
+    while retaining smooth fractional accumulation.
+    """
+    try:
+        numeric = float(delta)
+    except (TypeError, ValueError):
+        return 0.0
+    active_platform = platform_name or sys.platform
+    divisor = 4.0 if active_platform == "darwin" and abs(numeric) < 120 else 120.0
+    return -numeric / divisor
+
+
+def _hero_idle_interval_ms(platform_name: str | None = None) -> int | None:
+    """Idle waveform cadence (the approved 30 fps on every desktop)."""
+    del platform_name
+    return 33
+
+
+def _hero_active_interval_ms(platform_name: str | None = None) -> int:
+    """Recording cadence: 30 fps on Aqua, established 15 fps elsewhere."""
+    active_platform = platform_name or sys.platform
+    return 33 if active_platform == "darwin" else 66
+
+
+def _hero_visual_scale(
+    ui_scale: float, platform_name: str | None = None
+) -> float:
+    """Scale the raw Tk hero canvas on Aqua alongside CTk widgets."""
+    active_platform = platform_name or sys.platform
+    if active_platform != "darwin":
+        return 1.0
+    return max(0.7, min(2.5, float(ui_scale)))
+
+
+def _hero_canvas_pady(platform_name: str | None = None):
+    """Lower the Aqua ribbon without moving the controls or changing Linux."""
+    active_platform = platform_name or sys.platform
+    return (10, 0) if active_platform == "darwin" else (0, 8)
+
+
+def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
+    """Recording-state animation cadence for tray and menu-bar glyphs."""
+    del platform_name
+    return 50
+
+
+def _settings_preload_interval_ms(platform_name: str | None = None) -> int:
+    """Yield time between hidden Settings construction slices.
+
+    Aqua's widget realization and CoreGraphics commits are relatively costly;
+    leave a full input turn between tiles so startup work cannot monopolize the
+    same event queue that delivers mouse presses and releases.
+    """
+    active_platform = platform_name or sys.platform
+    return 150 if active_platform == "darwin" else 25
+
+
+def _ctk_scaling_callback_jobs(tracker, widget_scale: float) -> list[tuple]:
+    """Snapshot CTk scaling callbacks with the arguments each should receive."""
+    tracker.widget_scaling = max(float(widget_scale), 0.4)
+    jobs = []
+    for window, callbacks in list(tracker.window_widgets_dict.items()):
+        dpi = float(tracker.window_dpi_scaling_dict.get(window, 1.0))
+        if tracker.deactivate_automatic_dpi_awareness:
+            applied_widget = tracker.widget_scaling
+            applied_window = tracker.window_scaling
+        else:
+            applied_widget = dpi * tracker.widget_scaling
+            applied_window = dpi * tracker.window_scaling
+        jobs.extend(
+            (callback, applied_widget, applied_window)
+            for callback in list(callbacks)
+        )
+    return jobs
+
+
 def _patch_ctk_scrollbar_quiet_draw() -> None:
     """Stop CTkScrollbar._draw from calling update_idletasks() every tick.
 
@@ -1107,7 +1205,43 @@ def _patch_ctk_scrollbar_quiet_draw() -> None:
     ctk.CTkScrollbar._wf_quiet_draw = True  # type: ignore[attr-defined]
 
 
+def _pointer_event_inside_widget(widget, event) -> bool:
+    """Return whether a root-coordinate pointer event is inside ``widget``."""
+    try:
+        left = int(widget.winfo_rootx())
+        top = int(widget.winfo_rooty())
+        right = left + int(widget.winfo_width())
+        bottom = top + int(widget.winfo_height())
+        return left <= int(event.x_root) < right and top <= int(event.y_root) < bottom
+    except Exception:
+        return bool(getattr(widget, "_mouse_inside", False))
+
+
+def _patch_ctk_button_aqua_release() -> None:
+    """Make Aqua button releases depend on geometry, not a stale Enter flag.
+
+    CustomTkinter 6 invokes a CTkButton only when ``_mouse_inside`` was set by
+    an earlier ``<Enter>``. Aqua does not consistently emit Enter when a new
+    panel is mapped under a stationary pointer, so the first real click on a
+    freshly shown button is discarded. Recompute containment from the release
+    event; drag-out cancellation still works because an outside release stays
+    outside the widget bounds.
+    """
+    if sys.platform != "darwin" or getattr(ctk.CTkButton, "_wf_aqua_release", False):
+        return
+    original = ctk.CTkButton._on_release
+
+    def _aqua_on_release(self, event=None):  # noqa: ANN001
+        if event is not None:
+            self._mouse_inside = _pointer_event_inside_widget(self, event)
+        return original(self, event)
+
+    ctk.CTkButton._on_release = _aqua_on_release  # type: ignore[method-assign]
+    ctk.CTkButton._wf_aqua_release = True  # type: ignore[attr-defined]
+
+
 _patch_ctk_scrollbar_quiet_draw()
+_patch_ctk_button_aqua_release()
 
 
 # Neuter CustomTkinter's own <MouseWheel> handler at import time — BEFORE any
@@ -1166,6 +1300,10 @@ SETTING_TOOLTIPS = {
     "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\n⚡ Latency: None",
     "benchmark": "Measure end-to-end dictation speed on your hardware.\nTimes speech-to-text + cleanup, with a per-model breakdown.\n⏱️ Run once to get accurate timing predictions.",
     "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
+    "enable_tray_icon": (
+        "Show a stateful Wayfinder item in the macOS menu bar. Turn it off if "
+        "menu-bar space is limited.\n⚡ Latency: None"
+    ),
     "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
     "overlay_type": "Choose the status indicator style:\n• Always On: Stays visible, never steals focus (PyQt6)\n• Disappearing: Shows only during recording (CTk)\n⚠️ Requires restart to take effect.",
     "overlay_enabled": "Show the floating status pill (Listening / Processing / Ready).\nOff = no on-screen pill; system tray + dictation still work.\n⚡ Latency: None",
@@ -3184,6 +3322,55 @@ def _keycode_display(code: int) -> str:
     return f"Key {code}"
 
 
+def _modifier_display(name: str, platform_name: str | None = None) -> str:
+    """Use the names printed on the active platform's keyboard."""
+    active_platform = platform_name or sys.platform
+    if active_platform == "darwin":
+        return {
+            "fn": "Fn",
+            "ctrl": "Control",
+            "alt": "Option",
+            "super": "Command",
+            "shift": "Shift",
+        }.get(name.lower(), name.capitalize())
+    return name.capitalize()
+
+
+def hotkey_key_options(
+    platform_name: str | None = None,
+    available_pynput_codes: set[int] | None = None,
+) -> dict[str, int]:
+    """Return only hotkey presets the active platform can actually observe.
+
+    Linux keeps the full evdev/mouse list. macOS and Windows use the pynput
+    keyboard listener, so offering Linux mouse codes or keys absent from that
+    platform's ``pynput.Key`` enum would create a silently dead hotkey.
+    """
+    _hotkey_key_codes = {
+        "Space": 57, "Enter": 28,
+        "F9": 67, "F10": 68, "F8": 66, "F7": 65, "F6": 64, "F5": 63,
+        "F4": 62, "F3": 61, "F2": 60, "F1": 59, "F11": 87, "F12": 88,
+        "ScrollLock": 70, "Pause": 119,
+        "Mouse Middle": 274, "Mouse Side": 275, "Mouse Extra": 276,
+        "Mouse Forward": 277, "Mouse Back": 278,
+    }
+    active_platform = platform_name or sys.platform
+    if active_platform.startswith("linux"):
+        return _hotkey_key_codes
+    if available_pynput_codes is None:
+        try:
+            from wayfinder.hotkeys.pynput_listener import EVDEV_TO_PYNPUT
+
+            available_pynput_codes = set(EVDEV_TO_PYNPUT)
+        except Exception:
+            available_pynput_codes = set()
+    return {
+        name: code
+        for name, code in _hotkey_key_codes.items()
+        if code in available_pynput_codes
+    }
+
+
 def kde_record_shortcut_key(kglobalshortcutsrc_text: str,
                             desktop_group: str = "wayfinder-aura.desktop",
                             action: str = "toggle-recording") -> str | None:
@@ -4899,6 +5086,10 @@ class OverlayController:
         """Set the overlay corner/edge anchor (e.g. 'bottom-center', 'top-right')."""
         self._send_command({"cmd": "anchor", "value": anchor})
 
+    def reposition(self):
+        """Re-evaluate the active display and Dock/work-area geometry."""
+        self._send_command({"cmd": "reposition"})
+
     def set_quality(self, quality: str):
         """Set the overlay render quality live ('high' | 'performance')."""
         self._send_command({"cmd": "quality", "value": quality})
@@ -5228,10 +5419,11 @@ class WayfinderApp(ctk.CTk):
         # multiplies with our explicit ui_scale and the UI double-scales — notably in the
         # Flatpak sandbox on the Steam Deck's 1280x800 panel. _get_recommended_scale() +
         # set_widget_scaling(ui_scale) then governs scaling alone. (CustomTkinter >=5.2 API.)
-        try:
-            ctk.deactivate_automatic_dpi_awareness()
-        except Exception:
-            pass  # older CustomTkinter without the API — harmless
+        if sys.platform.startswith("linux"):
+            try:
+                ctk.deactivate_automatic_dpi_awareness()
+            except Exception:
+                pass  # older CustomTkinter without the API — harmless
         # className sets the WM_CLASS *class* part. Plasma matches StartupWMClass
         # against it to merge the window into the pinned launcher. Source and
         # Flatpak MUST use different classes (see get_wm_class) — both desktops
@@ -5271,9 +5463,9 @@ class WayfinderApp(ctk.CTk):
         # Merge remote model catalog (CDN) over built-in lists when available so
         # newly published models appear without an app rebuild.
         try:
-            from wayfinder.model_catalog import apply_remote_to_globals
+            from wayfinder.model_catalog import apply_cached_to_globals
 
-            _cat_status = apply_remote_to_globals(
+            _cat_status = apply_cached_to_globals(
                 WHISPER_CPP_MODELS, LLM_GGUF_MODELS, self.config
             )
             if _cat_status.get("remote_applied"):
@@ -5283,7 +5475,7 @@ class WayfinderApp(ctk.CTk):
                     f"updated_at={_cat_status.get('updated_at')}"
                 )
             else:
-                print("[catalog] using built-in model lists (no remote catalog)")
+                print("[catalog] using built-in model lists (no cached remote catalog)")
         except Exception as _cat_err:
             print(f"[catalog] remote merge skipped: {_cat_err}")
         
@@ -5294,6 +5486,10 @@ class WayfinderApp(ctk.CTk):
         
         self.app_state = AppState.IDLE
         self.event_queue = queue.Queue()
+        # Menu delegates (especially PyObjC's NSMenu callback) must never call
+        # Tk/AppKit window code inline. poll_events drains this only after the
+        # native menu tracking callback has returned to Tk's main loop.
+        self._tray_action_queue = queue.Queue()
         # UI → GlobalShortcuts worker commands. The portal connection and its
         # session live on a private GLib thread, so the Settings button asks
         # that owner thread to invoke ConfigureShortcuts instead of attempting
@@ -5530,10 +5726,40 @@ class WayfinderApp(ctk.CTk):
         self.setup_tray()
         self.setup_ui()
         self.setup_scaling_shortcuts()
+        self._macos_lifecycle_observer = None
+        if IS_MACOS:
+            try:
+                from wayfinder.utils.macos_lifecycle import MacOSLifecycleObserver
+
+                self._macos_lifecycle_observer = MacOSLifecycleObserver.start(
+                    # PyObjC delivers these inside AppKit notification callbacks.
+                    # Entering Tcl from there is re-entrant and can abort in
+                    # PyEval_RestoreThread (most visibly on Hide -> Show). Queue
+                    # every notification and let poll_events enter Tk on its next
+                    # normal timer turn.
+                    on_sleep=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._on_macos_will_sleep)
+                    ),
+                    on_wake=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._on_macos_did_wake)
+                    ),
+                    on_screens_changed=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._on_macos_screens_changed)
+                    ),
+                    on_visibility_changed=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._refresh_tray_menu)
+                    ),
+                )
+            except Exception as exc:
+                self.log(f"⚠ macOS lifecycle integration unavailable: {exc}")
+        if IS_MACOS:
+            self.after(1200, self._refresh_macos_permission_banner)
         self._schedule_settings_preload()
         # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
         self._start_hotkey_supervisor()
         self.poll_events()
+        self.after(350, self._refresh_model_catalog_background)
+        self.after(500, self._refresh_license_background)
 
         # SciPy's signal stack is deliberately absent from the first-frame import path. Warm it
         # once immediately after the UI maps so first-dictation processing stays just as snappy.
@@ -5556,10 +5782,17 @@ class WayfinderApp(ctk.CTk):
             self.log("🎯 Overlay: off")
         self.log(f"🎬 Animation refresh: {self._target_fps} Hz (monitor sync)")
         
-        # Taskbar Close / window manager delete = full quit (overlay + tray too).
-        # Hide-to-tray is only via start_minimized or an explicit minimize control —
-        # treating Close as hide left orphan tray/overlay and looked like a leak.
-        self.protocol("WM_DELETE_WINDOW", self.quit_app)
+        # A Mac utility remains available from its Dock/menu-bar item when its
+        # last window closes. Command-Q is the explicit full-quit path.
+        self.protocol(
+            "WM_DELETE_WINDOW",
+            self.hide_to_tray if IS_MACOS else self.quit_app,
+        )
+        if IS_MACOS:
+            try:
+                self.createcommand("::tk::mac::Quit", self.quit_app)
+            except Exception:
+                pass
         
         # Only start minimized to tray if the user has enabled this option
         if self.config.get("start_minimized", False):
@@ -5574,10 +5807,134 @@ class WayfinderApp(ctk.CTk):
         self.after(2600, self._check_app_update_background)
 
         # Start display wake-up listener for overlay recovery
-        if self._use_pyqt_overlay:
+        if self._use_pyqt_overlay and not IS_MACOS:
             self._start_display_wake_listener()
             # Also start periodic health check for the overlay
             self._start_overlay_health_check()
+
+    def _refresh_model_catalog_background(self) -> None:
+        """Refresh the remote catalog without delaying first paint or input."""
+        def _worker():
+            try:
+                from wayfinder.model_catalog import (
+                    apply_document_to_globals,
+                    catalog_url_from_config,
+                    fetch_remote_catalog,
+                )
+
+                remote = fetch_remote_catalog(self.config)
+                if not remote:
+                    return
+
+                def _apply():
+                    status = apply_document_to_globals(
+                        WHISPER_CPP_MODELS,
+                        LLM_GGUF_MODELS,
+                        remote,
+                        catalog_url=catalog_url_from_config(self.config),
+                    )
+                    if status.get("remote_applied"):
+                        self.log(
+                            "✓ Model catalog refreshed "
+                            f"({status['whisper_count']} speech, {status['llm_count']} cleanup)"
+                        )
+
+                self.event_queue.put((EventType.UI_CALLBACK, _apply))
+            except Exception as exc:
+                print(f"[catalog] background refresh skipped: {exc}", flush=True)
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="model-catalog-refresh",
+        ).start()
+
+    def _refresh_license_background(self) -> None:
+        """Refresh revocation/grace state after first paint, never before it."""
+        def _worker():
+            try:
+                from wayfinder.license import get_feature_gate
+
+                gate = get_feature_gate(force_refresh=True)
+
+                def _apply():
+                    self.feature_gate = gate
+                    from wayfinder.config import enforce_license_config
+
+                    repaired = enforce_license_config(self.config, gate)
+                    if repaired:
+                        save_config(self.config)
+                        try:
+                            from wayfinder.core.transcriber import WhisperServerBackend
+
+                            WhisperServerBackend.shutdown()
+                        except Exception:
+                            pass
+                    self._refresh_entitlement_ui()
+
+                self.event_queue.put((EventType.UI_CALLBACK, _apply))
+            except Exception as exc:
+                print(f"[license] background refresh skipped: {exc}", flush=True)
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="license-refresh",
+        ).start()
+
+    def _on_macos_will_sleep(self) -> None:
+        """Leave no live capture, pending paste, or attenuated audio at sleep."""
+        try:
+            if self.app_state == AppState.RECORDING:
+                self.cancel_recording()
+            elif self.app_state in (AppState.PROCESSING, AppState.PASTING):
+                self._do_force_reset()
+        except Exception as exc:
+            self.log(f"⚠ Sleep reset failed: {exc}")
+        self._close_audio_ducking()
+        try:
+            self.warm_mic.close()
+        except Exception:
+            pass
+        native = getattr(self, "_macos_hero_layer", None)
+        if native is not None:
+            native.set_hidden(True)
+
+    def _on_macos_did_wake(self) -> None:
+        self.after(1500, self._recover_macos_after_wake)
+
+    def _recover_macos_after_wake(self) -> None:
+        try:
+            duck_percent = normalize_duck_percent(
+                self.config.get("audio_ducking_percent", 30)
+            )
+            self.audio_ducker = AudioDucker(duck_percent=duck_percent)
+            self._duck_failure_message = None
+            self._duck_action_queue = None
+        except Exception as exc:
+            self.log(f"⚠ Audio restore after wake failed: {exc}")
+        try:
+            self.warm_mic.rescan()
+            self._resolved_audio_device = resolve_audio_device(self.config)
+            self.warm_mic.set_device(
+                self._resolved_audio_device,
+                preferred_name=self.config.get("audio_device_name"),
+            )
+        except Exception as exc:
+            self.log(f"⚠ Microphone refresh after wake failed: {exc}")
+        self._on_macos_screens_changed()
+        self.log("🌅 macOS wake recovery complete")
+
+    def _on_macos_screens_changed(self) -> None:
+        controller = getattr(self, "overlay_controller", None)
+        if controller is not None:
+            try:
+                controller.reposition()
+            except Exception:
+                pass
+        native = getattr(self, "_macos_hero_layer", None)
+        if native is not None:
+            self.after(100, native.update_geometry)
 
     # Consistent base dimensions for the window
     BASE_WINDOW_WIDTH = 480
@@ -5662,6 +6019,17 @@ class WayfinderApp(ctk.CTk):
         # Apply widget scaling only - this controls content size
         # NOT window scaling - that would fight with manual window resizing
         ctk.set_widget_scaling(self.ui_scale)
+
+        # CTkCanvas subclasses raw tkinter.Canvas and is not tracked by CTk's
+        # widget scaler. Keep the waveform's height/strokes proportional to the
+        # surrounding card on Retina instead of leaving a thin 64px island.
+        if hasattr(self, "hero_canvas"):
+            try:
+                self.hero_canvas.configure(
+                    height=round(64 * _hero_visual_scale(self.ui_scale))
+                )
+            except Exception:
+                pass
         
         # Save geometry when window is moved or resized (debounced).
         # add="+": CTk's own <Configure> binding feeds its window-size tracker
@@ -5671,7 +6039,18 @@ class WayfinderApp(ctk.CTk):
         self._geometry_save_pending = False
         self.bind("<Configure>", self._on_window_configure, add="+")
         
-        if ICON_PATH.exists():
+        if IS_MACOS:
+            # The bundle's .icns is the macOS app icon. Replacing it at runtime
+            # with Tk iconphoto() feeds Dock the transparent foreground PNG and
+            # strips the system's masked/backed app-icon treatment (a naked,
+            # low-contrast arrow). Keep/reset the bundle-provided icon instead.
+            try:
+                from AppKit import NSApplication
+
+                NSApplication.sharedApplication().setApplicationIconImage_(None)
+            except Exception:
+                pass
+        elif ICON_PATH.exists():
             try:
                 from PIL import ImageTk
                 icon_img = Image.open(ICON_PATH)
@@ -5727,7 +6106,18 @@ class WayfinderApp(ctk.CTk):
         self.bind("<Control-minus>", lambda e: self.scale_ui(0.9))
         self.bind("<Control-0>", lambda e: self.reset_scale())
         self.bind("<Control-r>", lambda e: self.rescue_window())  # Emergency rescue
+        self.bind("<Escape>", self._on_escape, add="+")
         self._enable_linux_mousewheel()
+
+    def _on_escape(self, _event=None):
+        """Cancel a live recording when no foreground inline panel owns Escape."""
+        if getattr(self, "_premium_banner", None) is not None:
+            return None
+        if getattr(self, "_active_dropdown_panel", None) is not None:
+            return None
+        if self.cancel_recording():
+            return "break"
+        return None
 
     def _enable_linux_mousewheel(self):
         """One sane, pixel-based wheel pipeline for every CTkScrollableFrame.
@@ -5829,7 +6219,11 @@ class WayfinderApp(ctk.CTk):
                         canvas = widget._parent_canvas
                         view = canvas.yview()
                         if view == (0.0, 1.0):
-                            return "break"  # content fits; nothing to do
+                            # Nested model/download lists often fit until their
+                            # contents finish laying out. Let the parent Settings
+                            # scroller take the gesture instead of swallowing it.
+                            widget = getattr(widget, "master", None)
+                            continue
                         metrics = _canvas_metrics(canvas)
                         if metrics is None:
                             return "break"
@@ -5872,10 +6266,12 @@ class WayfinderApp(ctk.CTk):
                             float(delta_px), top_frac, content_h, viewport_h
                         )
                         if applied == 0.0:
-                            # At edge in this direction — drop residual so a
-                            # reverse roll starts clean; no canvas write.
+                            # At this nested scroller's edge in the requested
+                            # direction. Drop its residual and hand the SAME
+                            # gesture to the nearest scrollable parent.
                             st["acc"] = 0.0
-                            return "break"
+                            widget = getattr(widget, "master", None)
+                            continue
 
                         new_frac = _wheel_top_frac_after(top_frac, applied, content_h)
                         canvas.yview_moveto(new_frac)
@@ -5885,12 +6281,11 @@ class WayfinderApp(ctk.CTk):
                 widget = getattr(widget, "master", None)
             return None
 
-        # Tk 9 (and Windows/mac): one <MouseWheel> per notch, delta=±120;
-        # high-resolution wheels report proportional multiples — dividing by
-        # 120 makes those scroll smoothly instead of jumping.
+        # Windows and Tk 9/X11 use ±120 wheel deltas; macOS trackpads emit
+        # small high-resolution deltas. Normalize without crushing Aqua input.
         self.bind_all(
             "<MouseWheel>",
-            lambda e: _scroll_under_pointer(e, -e.delta / 120),
+            lambda e: _scroll_under_pointer(e, _wheel_event_notches(e.delta)),
             add="+",
         )
         # Legacy X11 (pre-Tk9): one Button-4/5 press per notch.
@@ -6262,19 +6657,71 @@ class WayfinderApp(ctk.CTk):
         # Only update widget scaling - this makes content bigger
         # DON'T change window size - let user control that manually
         # DON'T use set_window_scaling - that fights with manual window sizing
-        ctk.set_widget_scaling(self.ui_scale)
-        
-        # Force layout recalculation so scrollable frames update
-        self.update_idletasks()
+        if IS_MACOS:
+            self._apply_scale_staged_macos()
+            return
 
-        # Form-row measure max is design units × scale → re-pad after scale change.
-        self._sync_all_form_measures(force=True)
-        
-        # Update all scale indicators
+        ctk.set_widget_scaling(self.ui_scale)
+        self._finish_scale_layout(force_idle_flush=True)
+
+    def _apply_scale_staged_macos(self) -> None:
+        """Rescale Aqua widgets in bounded batches so input keeps dispatching."""
+        from customtkinter.windows.widgets.scaling.scaling_tracker import (
+            ScalingTracker,
+        )
+
+        self._scale_batch_generation = getattr(
+            self, "_scale_batch_generation", 0
+        ) + 1
+        generation = self._scale_batch_generation
+        jobs = _ctk_scaling_callback_jobs(ScalingTracker, self.ui_scale)
+        index = 0
+        batch_size = 24
+
+        # Reflect the selected value immediately; widget geometry catches up in
+        # short turns below instead of blocking this click/drag callback.
+        self._update_scale_labels()
+
+        def apply_batch():
+            nonlocal index
+            if generation != getattr(self, "_scale_batch_generation", None):
+                return
+            stop = min(len(jobs), index + batch_size)
+            for callback, widget_scale, window_scale in jobs[index:stop]:
+                try:
+                    callback(widget_scale, window_scale)
+                except Exception:
+                    pass
+            index = stop
+            if index < len(jobs):
+                self.after(1, apply_batch)
+            else:
+                self._finish_scale_layout(force_idle_flush=False)
+
+        self.after_idle(apply_batch)
+
+    def _update_scale_labels(self) -> None:
         if hasattr(self, 'header_scale_label'):
             self.header_scale_label.configure(text=f"{int(self.ui_scale * 100)}%")
         if hasattr(self, 'scale_value_label'):
             self.scale_value_label.configure(text=f"{int(self.ui_scale * 100)}%")
+
+    def _finish_scale_layout(self, *, force_idle_flush: bool) -> None:
+        try:
+            self.hero_canvas.configure(
+                height=round(64 * _hero_visual_scale(self.ui_scale))
+            )
+        except Exception:
+            pass
+
+        if force_idle_flush:
+            # Preserve Linux's established synchronous behavior. Aqua's staged
+            # path deliberately lets Tk settle during normal event-loop turns.
+            self.update_idletasks()
+
+        # Form-row measure max is design units × scale → re-pad after scale change.
+        self._sync_all_form_measures(force=True)
+        self._update_scale_labels()
     
     def setup_ui(self) -> None:
         # === Typography ===
@@ -6348,7 +6795,13 @@ class WayfinderApp(ctk.CTk):
         self._create_sidebar(body_container)
         
         # === Tab Content Container ===
-        self.tab_content_container = ctk.CTkFrame(body_container, fg_color="transparent")
+        # Keep an opaque native backing under the page stack. On Aqua,
+        # transparent CTk frames can expose Tk's default white surface for one
+        # compositor frame while a Canvas-heavy page is being mapped.
+        self.tab_content_container = ctk.CTkFrame(
+            body_container,
+            **_tab_surface_kwargs(),
+        )
         self.tab_content_container.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
         
         # Create tab frames
@@ -6606,34 +7059,36 @@ class WayfinderApp(ctk.CTk):
         right_controls = ctk.CTkFrame(header, fg_color="transparent")
         right_controls.pack(side="right")
         
-        # Close = full quit (taskbar Close / tray Quit). Hide-to-tray is the
-        # minimize control and tray / desktop "Hide to tray" action.
-        ctk.CTkButton(
-            right_controls,
-            text="×",
-            width=28,
-            height=28,
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_muted"],
-            font=(self.font_body[0], 18),  # optical glyph size
-            corner_radius=RADIUS["sm"],
-            command=self.quit_app,
-        ).pack(side="right")
-        hide_btn = ctk.CTkButton(
-            right_controls,
-            text="–",
-            width=28,
-            height=28,
-            fg_color="transparent",
-            hover_color=COLORS["bg_hover"],
-            text_color=COLORS["text_muted"],
-            font=(self.font_body[0], 18),  # optical glyph size
-            corner_radius=RADIUS["sm"],
-            command=self.hide_to_tray,
-        )
-        hide_btn.pack(side="right", padx=(0, 2))
-        ToolTip(hide_btn, "Hide to tray\nDictation and overlay keep running.")
+        # Aqua already provides Close and Minimize in the native traffic-light
+        # frame. Duplicating them inside the header looked non-native and gave
+        # Hide two conflicting meanings. Other desktops keep the custom pair.
+        if not IS_MACOS:
+            ctk.CTkButton(
+                right_controls,
+                text="×",
+                width=28,
+                height=28,
+                fg_color="transparent",
+                hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_muted"],
+                font=(self.font_body[0], 18),  # optical glyph size
+                corner_radius=RADIUS["sm"],
+                command=self.quit_app,
+            ).pack(side="right")
+            hide_btn = ctk.CTkButton(
+                right_controls,
+                text="–",
+                width=28,
+                height=28,
+                fg_color="transparent",
+                hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_muted"],
+                font=(self.font_body[0], 18),  # optical glyph size
+                corner_radius=RADIUS["sm"],
+                command=self.hide_to_tray,
+            )
+            hide_btn.pack(side="right", padx=(0, 2))
+            ToolTip(hide_btn, "Hide to tray\nDictation and overlay keep running.")
         
         # === Quick Scale Controls (always visible for accessibility) ===
         scale_frame = ctk.CTkFrame(right_controls, fg_color="transparent")
@@ -6766,11 +7221,11 @@ class WayfinderApp(ctk.CTk):
         # === Waveform Visualizer Canvas - elegant silk ribbon ===
         self.hero_canvas = ctk.CTkCanvas(
             hero_inner,
-            height=64,  # Compact, elegant height
+            height=round(64 * _hero_visual_scale(self.ui_scale)),
             bg=COLORS["bg_card"],
             highlightthickness=0,
         )
-        self.hero_canvas.pack(fill="x", pady=(0, 8))
+        self.hero_canvas.pack(fill="x", pady=_hero_canvas_pady())
         
         # Initialize animation state
         self._hero_wave_time = 0.0
@@ -6787,11 +7242,16 @@ class WayfinderApp(ctk.CTk):
         self._hero_wave_items_created = False
         self._hero_wave_bar_ids = []  # Legacy compat (unused with PIL path)
         self._hero_canvas_width = 0
+        self._hero_canvas_height = 0
         self._hero_wave_image_id = None  # Canvas image item ID
         self._hero_wave_photo = None    # Keep reference to prevent GC
+        self._macos_hero_layer = None
+        self._macos_hero_layer_retry_at = 0.0
 
         # Bind resize to reinitialize
         self.hero_canvas.bind("<Configure>", self._on_hero_canvas_resize)
+        self.hero_canvas.bind("<Map>", self._on_hero_canvas_map, add="+")
+        self.hero_canvas.bind("<Unmap>", self._on_hero_canvas_unmap, add="+")
         
         # STABILITY FIX: Fixed 15fps for animations to prevent memory issues
         self._target_fps = 15
@@ -7004,12 +7464,21 @@ class WayfinderApp(ctk.CTk):
             pass  # rule 10: canvas ops must never crash the app
     
     def _on_hero_canvas_resize(self, event=None):
-        """Handle canvas resize - reset image item to fill new width."""
+        """Handle canvas resize - reset image item to fill its new size."""
         if not self.hero_canvas:
             return
         new_width = self.hero_canvas.winfo_width()
-        if new_width > 100 and abs(new_width - self._hero_canvas_width) > 20:
+        new_height = self.hero_canvas.winfo_height()
+        size_changed = (
+            abs(new_width - self._hero_canvas_width) > 20
+            or new_height != self._hero_canvas_height
+        )
+        if new_width > 100 and new_height > 1 and size_changed:
             self._hero_canvas_width = new_width
+            self._hero_canvas_height = new_height
+            native_layer = getattr(self, "_macos_hero_layer", None)
+            if native_layer is not None:
+                native_layer.update_geometry()
             # Delete old image item if any
             if self._hero_wave_image_id is not None:
                 try:
@@ -7019,6 +7488,38 @@ class WayfinderApp(ctk.CTk):
                 self._hero_wave_image_id = None
             self._hero_wave_items_created = False
             self._init_hero_wave_items()
+
+    def _on_hero_canvas_map(self, event=None) -> None:
+        """Restore the native hero after deminiaturize or returning to Dictate."""
+        def restore():
+            native_layer = getattr(self, "_macos_hero_layer", None)
+            if native_layer is None:
+                return
+            native_layer.update_geometry()
+            self._sync_macos_hero_visibility()
+
+        self.after(50, restore)
+
+    def _on_hero_canvas_unmap(self, event=None) -> None:
+        """Hide the independent native layer whenever Tk unmaps its canvas."""
+        native_layer = getattr(self, "_macos_hero_layer", None)
+        if native_layer is not None:
+            native_layer.set_hidden(True)
+
+    def _macos_hero_is_occluded(self) -> bool:
+        """Whether Tk currently owns a surface above the native hero layer."""
+        return (
+            getattr(self, "active_tab", "dictate") != "dictate"
+            or getattr(self, "_premium_banner", None) is not None
+        )
+
+    def _sync_macos_hero_visibility(self) -> None:
+        """Keep the independent CALayer behind tabs and full-window scrims."""
+        native_layer = getattr(self, "_macos_hero_layer", None)
+        if native_layer is not None:
+            native_layer.set_hidden(
+                WayfinderApp._macos_hero_is_occluded(self)
+            )
 
     def _init_hero_wave_items(self) -> None:
         """Create a single canvas image item for PIL-rendered waveform."""
@@ -7076,15 +7577,73 @@ class WayfinderApp(ctk.CTk):
             if not isinstance(audio_level, (int, float)) or audio_level != audio_level:
                 audio_level = 0.0
 
+            stroke_scale = _hero_visual_scale(self.ui_scale)
+            native_layer = None
+            if IS_MACOS:
+                native_layer = getattr(self, "_macos_hero_layer", None)
+                now = time.monotonic()
+                if native_layer is None and now >= getattr(
+                    self, "_macos_hero_layer_retry_at", 0.0
+                ):
+                    try:
+                        from wayfinder.ui.macos_hero import MacOSHeroLayer
+
+                        native_layer = MacOSHeroLayer.try_create(self, canvas)
+                        self._macos_hero_layer = native_layer
+                    except Exception:
+                        native_layer = None
+                    if native_layer is None:
+                        self._macos_hero_layer_retry_at = now + 0.5
+                if native_layer is not None and self._macos_hero_is_occluded():
+                    native_layer.set_hidden(True)
+                    return
+                if native_layer is not None and native_layer.render_wave(
+                    width=w,
+                    height=h,
+                    time_value=self._hero_wave_time,
+                    audio_level=audio_level,
+                    morph=self._hero_morph,
+                    active=self.app_state != AppState.IDLE,
+                    stroke_scale=stroke_scale,
+                    color_rgb=color_rgb,
+                    bg_rgb=bg_rgb,
+                ):
+                    try:
+                        canvas.itemconfigure(self._hero_wave_image_id, state="hidden")
+                    except Exception:
+                        pass
+                    return
+
+            # Shared exact-pixel reference and non-Metal fallback.
             caches = get_hero_caches(w, h, color_rgb, bg_rgb)
             img = render_hero_wave(
                 w, h, self._hero_wave_time, audio_level, self._hero_morph,
                 color_rgb, bg_rgb, caches=caches,
+                stroke_scale=stroke_scale,
             )
+            if native_layer is not None and native_layer.set_image(img):
+                try:
+                    canvas.itemconfigure(self._hero_wave_image_id, state="hidden")
+                except Exception:
+                    pass
+                return
 
-            # Single Tk call: update the canvas image
-            self._hero_wave_photo = ImageTk.PhotoImage(img)
-            canvas.itemconfig(self._hero_wave_image_id, image=self._hero_wave_photo)
+            # Reuse one Tcl image handle. Creating a new PhotoImage and swapping
+            # the canvas item every frame made Aqua rebuild backing layers for
+            # much more than this 64px ribbon. ``paste`` updates the existing
+            # pixel store in place and keeps Linux's exact animation cadence.
+            photo = self._hero_wave_photo
+            try:
+                canvas.itemconfigure(self._hero_wave_image_id, state="normal")
+            except Exception:
+                pass
+            if photo is not None and photo.width() == w and photo.height() == h:
+                photo.paste(img)
+            else:
+                self._hero_wave_photo = ImageTk.PhotoImage(img)
+                canvas.itemconfig(
+                    self._hero_wave_image_id, image=self._hero_wave_photo
+                )
         except Exception:
             pass
     
@@ -7197,7 +7756,8 @@ class WayfinderApp(ctk.CTk):
         try:
             if self.winfo_viewable():
                 loading_frame = ctk.CTkFrame(
-                    self.tab_content_container, fg_color="transparent"
+                    self.tab_content_container,
+                    **_tab_surface_kwargs(),
                 )
                 ctk.CTkLabel(
                     loading_frame,
@@ -7205,9 +7765,11 @@ class WayfinderApp(ctk.CTk):
                     font=(self.font_body[0], self.font_sizes["body"]),
                     text_color=COLORS["text_secondary"],
                 ).pack(expand=True)
-                for frame in self.tab_frames.values():
-                    frame.pack_forget()
-                loading_frame.pack(fill="both", expand=True)
+                # Cover the current page before doing the one-time build. Do
+                # not unmap it: Aqua can present the window between those two
+                # operations, which was the white tab-switch flash.
+                loading_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+                loading_frame.lift()
                 self.update_idletasks()
         except Exception:
             loading_frame = None
@@ -7293,7 +7855,7 @@ class WayfinderApp(ctk.CTk):
 
         # Let the 15 Hz overlay/header animation and input queue run between
         # tiles. This is a finite one-shot chain, not an idle polling loop.
-        self._schedule_settings_preload(delay_ms=25)
+        self._schedule_settings_preload(delay_ms=_settings_preload_interval_ms())
 
     def _finish_settings_build(self) -> None:
         """Drain any staged build now (first-run or an unusually early click)."""
@@ -7344,14 +7906,22 @@ class WayfinderApp(ctk.CTk):
         # Set this before the one-time builder runs so tab-specific setup observes the intended
         # destination, and so the selected sidebar button + loading surface paint immediately.
         self.active_tab = tab_id
+        WayfinderApp._sync_macos_hero_visibility(self)
         self._ensure_tab_created(tab_id)
         
-        # Hide all tabs, show selected
-        for tid, frame in self.tab_frames.items():
-            if tid == tab_id:
-                frame.pack(fill="both", expand=True)
-            else:
-                frame.pack_forget()
+        # Keep every built page mapped in one stack and only raise the selected
+        # page. Unmapping/remapping Canvas-heavy CTkScrollableFrames makes Aqua
+        # expose their native white backing for one compositor frame.
+        for frame in self.tab_frames.values():
+            manager = frame.winfo_manager()
+            if manager != "place":
+                if manager == "pack":
+                    frame.pack_forget()
+                elif manager == "grid":
+                    frame.grid_forget()
+                frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.tab_frames[tab_id].lift()
+        WayfinderApp._sync_macos_hero_visibility(self)
         
         self._write_status_breadcrumb()
 
@@ -7403,13 +7973,16 @@ class WayfinderApp(ctk.CTk):
 
     def _create_dictate_tab(self) -> None:
         """Create the Dictate tab content."""
-        frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        frame = ctk.CTkFrame(
+            self.tab_content_container,
+            **_tab_surface_kwargs(),
+        )
         self.tab_frames["dictate"] = frame
         
         # Scrollable content
         scroll = SmoothScrollableFrame(
             frame,
-            fg_color="transparent",
+            **_tab_surface_kwargs(),
             scrollbar_button_color=COLORS["bg_hover"],
             scrollbar_button_hover_color=COLORS["accent_dim"],
         )
@@ -7455,6 +8028,39 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
             command=self._hide_error_banner,
         ).pack(side="right", padx=(SPACING["sm"], 0))
+
+        # (B) macOS Accessibility + Input Monitoring guidance.
+        self.macos_permission_banner = ctk.CTkFrame(
+            scroll, fg_color=COLORS["warning_bg"], corner_radius=RADIUS["sm"],
+        )
+        _mp_inner = ctk.CTkFrame(
+            self.macos_permission_banner, fg_color="transparent"
+        )
+        _mp_inner.pack(fill="x", padx=SPACING["md"], pady=SPACING["sm"])
+        self.macos_permission_label = ctk.CTkLabel(
+            _mp_inner, text="",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["accent_yellow"], wraplength=330,
+            justify="left", anchor="w",
+        )
+        self.macos_permission_label.pack(side="left", fill="x", expand=True)
+        self.macos_permission_open_btn = ctk.CTkButton(
+            _mp_inner, text="Open Settings",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            height=28, width=110, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color=COLORS["bg_base"],
+            command=self._open_missing_macos_permission,
+        )
+        self.macos_permission_open_btn.pack(side="right", padx=(SPACING["sm"], 0))
+        ctk.CTkButton(
+            _mp_inner, text="Recheck",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            height=28, width=76, corner_radius=RADIUS["xs"],
+            fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["text_secondary"],
+            command=self._refresh_macos_permission_banner,
+        ).pack(side="right")
 
         # (D) Persistent "finish setup — download a model" cue.
         self.setup_cue_banner = ctk.CTkFrame(
@@ -7776,13 +8382,16 @@ class WayfinderApp(ctk.CTk):
 
     def _create_settings_tab_steps(self):
         """Yield after each hidden Settings tile to keep the UI responsive."""
-        frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        frame = ctk.CTkFrame(
+            self.tab_content_container,
+            **_tab_surface_kwargs(),
+        )
         self.tab_frames["settings"] = frame
         
         # Scrollable content
         scroll = SmoothScrollableFrame(
             frame,
-            fg_color="transparent",
+            **_tab_surface_kwargs(),
             scrollbar_button_color=COLORS["bg_hover"],
             scrollbar_button_hover_color=COLORS["accent_dim"],
         )
@@ -7911,22 +8520,20 @@ class WayfinderApp(ctk.CTk):
         system_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
         
         # Hotkey key dropdown (inline, no popup)
-        self._hotkey_key_codes = {
-            "Space": 57, "Enter": 28,
-            "F9": 67, "F10": 68, "F8": 66, "F7": 65, "F6": 64, "F5": 63,
-            "F4": 62, "F3": 61, "F2": 60, "F1": 59, "F11": 87, "F12": 88,
-            "ScrollLock": 70, "Pause": 119,
-            "Mouse Middle": 274, "Mouse Side": 275, "Mouse Extra": 276,
-            "Mouse Forward": 277, "Mouse Back": 278,
-        }
+        self._hotkey_key_codes = hotkey_key_options()
         self._hotkey_code_to_name = {v: k for k, v in self._hotkey_key_codes.items()}
         current_key_code = self.config.get("hotkey_key", 67)
         current_key_name = self._hotkey_code_to_name.get(current_key_code)
         if current_key_name is None:
-            # Custom key from a prior Detect (e.g. Insert, F13, keypad)
-            current_key_name = _keycode_display(current_key_code)
-            self._hotkey_key_codes[current_key_name] = current_key_code
-            self._hotkey_code_to_name[current_key_code] = current_key_name
+            if sys.platform.startswith("linux"):
+                # Custom key from a prior Detect (e.g. Insert, F13, keypad)
+                current_key_name = _keycode_display(current_key_code)
+                self._hotkey_key_codes[current_key_name] = current_key_code
+                self._hotkey_code_to_name[current_key_code] = current_key_name
+            else:
+                # A shared config can carry a Linux-only mouse key. Keep the
+                # saved preference intact while showing the session fallback.
+                current_key_name = self._hotkey_code_to_name[57]
         self._hotkey_key_var = ctk.StringVar(value=current_key_name)
         self.hotkey_dropdown = self.create_dropdown_row(
             system_content, "Hotkey",
@@ -7978,11 +8585,16 @@ class WayfinderApp(ctk.CTk):
         current_mods = self.config.get("hotkey_modifiers", [])
         self._hotkey_mod_vars = {}
         self._hotkey_mod_checks = {}
-        for mod in ["ctrl", "alt", "shift"]:
+        modifier_options = (
+            ["fn", "super", "ctrl", "alt", "shift"]
+            if sys.platform == "darwin"
+            else ["ctrl", "alt", "shift"]
+        )
+        for mod in modifier_options:
             var = ctk.BooleanVar(value=mod in current_mods)
             self._hotkey_mod_vars[mod] = var
             checkbox = ctk.CTkCheckBox(
-                mod_row, text=mod.capitalize(), variable=var,
+                mod_row, text=_modifier_display(mod), variable=var,
                 font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_primary"],
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
@@ -8088,6 +8700,11 @@ class WayfinderApp(ctk.CTk):
 
         # Master on/off for the floating status pill (applies live).
         self._create_overlay_enabled_toggle_row(overlay_content)
+
+        # The menu-bar item is a separate status surface. Keep it optional on
+        # macOS because menu-bar space is scarce.
+        if IS_MACOS:
+            self._create_menu_bar_toggle_row(overlay_content)
         
         # Overlay Type dropdown
         overlay_type = self.config.get("overlay_type", "always_on")
@@ -8218,8 +8835,9 @@ class WayfinderApp(ctk.CTk):
         benchmark_content = ctk.CTkFrame(benchmark_tile, fg_color="transparent")
         benchmark_content.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
         
-        # Hardware info (inline)
-        sys_info = BenchmarkRunner.get_system_info()
+        # Hardware info (inline). system_profiler can take several seconds on
+        # macOS, so never run it inside this staged Tk construction slice.
+        sys_info = {"cpu": "Detecting…", "gpu": "Detecting…", "ram": "Detecting…"}
         hw_frame = ctk.CTkFrame(benchmark_content, fg_color=COLORS["bg_hover"], corner_radius=RADIUS["sm"])
         hw_frame.pack(fill="x", pady=(0, 10))
         
@@ -8227,12 +8845,36 @@ class WayfinderApp(ctk.CTk):
         hw_text += f"GPU: {sys_info['gpu'][:45]}{'...' if len(sys_info['gpu']) > 45 else ''}\n"
         hw_text += f"RAM: {sys_info['ram']}"
         
-        ctk.CTkLabel(
+        hardware_info_label = ctk.CTkLabel(
             hw_frame, text=hw_text,
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"],
             justify="left",
-        ).pack(anchor="w", padx=12, pady=10)
+        )
+        hardware_info_label.pack(anchor="w", padx=12, pady=10)
+
+        def _probe_hardware_info():
+            detected = BenchmarkRunner.get_system_info()
+
+            def _apply_detected_info():
+                try:
+                    cpu = detected["cpu"]
+                    gpu = detected["gpu"]
+                    ram = detected["ram"]
+                    text = f"CPU: {cpu[:45]}{'...' if len(cpu) > 45 else ''}\n"
+                    text += f"GPU: {gpu[:45]}{'...' if len(gpu) > 45 else ''}\n"
+                    text += f"RAM: {ram}"
+                    hardware_info_label.configure(text=text)
+                except Exception:
+                    pass
+
+            self.event_queue.put((EventType.UI_CALLBACK, _apply_detected_info))
+
+        threading.Thread(
+            target=_probe_hardware_info,
+            daemon=True,
+            name="macos-hardware-info",
+        ).start()
         
         # Results display (inline)
         self.benchmark_results_frame = ctk.CTkFrame(benchmark_content, fg_color="transparent")
@@ -8558,8 +9200,10 @@ class WayfinderApp(ctk.CTk):
         # Result queue for thread-safe communication (dict payload)
         result_queue = queue.Queue()
         
-        # Debug logging to file
-        log_file = Path.home() / ".cache" / "wayfinder-benchmark.log"
+        # Debug logging to the platform-native cache directory.
+        from wayfinder.utils.platform import get_cache_dir
+
+        log_file = get_cache_dir() / "benchmark.log"
         def debug_log(msg):
             try:
                 with open(log_file, "a") as f:
@@ -9865,13 +10509,16 @@ class WayfinderApp(ctk.CTk):
     
     def _create_style_tab(self) -> None:
         """Create the Style tab with 5 preset options and Strong mode toggle."""
-        frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        frame = ctk.CTkFrame(
+            self.tab_content_container,
+            **_tab_surface_kwargs(),
+        )
         self.tab_frames["style"] = frame
         
         # Scrollable content
         scroll = SmoothScrollableFrame(
             frame,
-            fg_color="transparent",
+            **_tab_surface_kwargs(),
             scrollbar_button_color=COLORS["bg_hover"],
             scrollbar_button_hover_color=COLORS["accent_dim"],
         )
@@ -10120,9 +10767,12 @@ class WayfinderApp(ctk.CTk):
         current_style_key_code = self.config.get("style_toggle_key", 68)
         current_style_key_name = self._hotkey_code_to_name.get(current_style_key_code)
         if current_style_key_name is None:
-            current_style_key_name = _keycode_display(current_style_key_code)
-            self._hotkey_key_codes[current_style_key_name] = current_style_key_code
-            self._hotkey_code_to_name[current_style_key_code] = current_style_key_name
+            if sys.platform.startswith("linux"):
+                current_style_key_name = _keycode_display(current_style_key_code)
+                self._hotkey_key_codes[current_style_key_name] = current_style_key_code
+                self._hotkey_code_to_name[current_style_key_code] = current_style_key_name
+            else:
+                current_style_key_name = self._hotkey_code_to_name[28]
         self._style_hotkey_key_var = ctk.StringVar(value=current_style_key_name)
         self.style_hotkey_dropdown = self.create_dropdown_row(
             hotkey_content, "Toggle Style",
@@ -10162,11 +10812,16 @@ class WayfinderApp(ctk.CTk):
         current_style_mods = self.config.get("style_toggle_modifiers", [])
         self._style_hotkey_mod_vars = {}
         self._style_hotkey_mod_checks = {}
-        for mod in ["ctrl", "alt", "shift"]:
+        modifier_options = (
+            ["fn", "super", "ctrl", "alt", "shift"]
+            if sys.platform == "darwin"
+            else ["ctrl", "alt", "shift"]
+        )
+        for mod in modifier_options:
             var = ctk.BooleanVar(value=mod in current_style_mods)
             self._style_hotkey_mod_vars[mod] = var
             checkbox = ctk.CTkCheckBox(
-                style_mod_row, text=mod.capitalize(), variable=var,
+                style_mod_row, text=_modifier_display(mod), variable=var,
                 font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_primary"],
                 fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
@@ -10630,7 +11285,10 @@ class WayfinderApp(ctk.CTk):
         
         # Re-show if it's the active tab
         if self.active_tab == "style":
-            self.tab_frames["style"].pack(fill="both", expand=True)
+            self.tab_frames["style"].place(
+                relx=0, rely=0, relwidth=1, relheight=1
+            )
+            self.tab_frames["style"].lift()
     
     def _on_smart_formatting_toggled(self) -> None:
         """Handle smart formatting toggle (legacy - kept for compatibility)."""
@@ -10703,6 +11361,60 @@ class WayfinderApp(ctk.CTk):
                 "Show the floating status pill. Off = no on-screen overlay.",
             ),
         )
+
+    def _create_menu_bar_toggle_row(self, parent) -> None:
+        """Live macOS toggle for the optional stateful menu-bar item."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=(2, 6))
+        ctk.CTkLabel(
+            row, text="Show Menu Bar Item",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        self.menu_bar_item_var = ctk.BooleanVar(
+            value=bool(self.config.get("enable_tray_icon", True))
+        )
+        toggle = ctk.CTkSwitch(
+            row, text="",
+            variable=self.menu_bar_item_var,
+            command=self._on_menu_bar_item_toggled,
+            width=40, height=22, switch_width=36, switch_height=18,
+            corner_radius=RADIUS["sm"] + 1,
+            fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+            button_hover_color=COLORS["text_bright"],
+        )
+        toggle.pack(side="right")
+        ToolTip(row, SETTING_TOOLTIPS["enable_tray_icon"])
+
+    def _on_menu_bar_item_toggled(self) -> None:
+        """Show/hide the macOS status item without restarting the app."""
+        enabled = bool(self.menu_bar_item_var.get())
+        self.config["enable_tray_icon"] = enabled
+        save_config(self.config)
+
+        if enabled:
+            if getattr(self, "tray_icon", None) is None:
+                self.setup_tray()
+            elif not getattr(self.tray_icon, "visible", False):
+                try:
+                    self.tray_icon.visible = True
+                except Exception as exc:
+                    self.log(f"⚠ Could not show menu-bar item: {exc}")
+            self.update_tray(getattr(self, "app_state", AppState.IDLE))
+            self.log("📌 Menu-bar item on")
+            return
+
+        self._stop_tray_pulse()
+        icon = getattr(self, "tray_icon", None)
+        if icon is not None:
+            try:
+                # pystray's detached backend shares Tk's NSApplication. Calling
+                # stop() here would also stop Tk's event loop, so only hide it.
+                icon.visible = False
+            except Exception as exc:
+                self.log(f"⚠ Could not hide menu-bar item: {exc}")
+        self.log("📌 Menu-bar item off")
 
     def _audio_level_for_overlay(self):
         """Shared audio-level callback for the Always On overlay (live or startup)."""
@@ -11077,7 +11789,10 @@ class WayfinderApp(ctk.CTk):
     
     def _create_history_tab(self) -> None:
         """Create the History tab content."""
-        frame = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        frame = ctk.CTkFrame(
+            self.tab_content_container,
+            **_tab_surface_kwargs(),
+        )
         self.tab_frames["history"] = frame
         
         # Header with clear button
@@ -12721,25 +13436,25 @@ class WayfinderApp(ctk.CTk):
     def _check_startup_dependencies(self) -> None:
         """Check critical dependencies on startup and warn/adjust as needed."""
         import shutil
-        from pathlib import Path
-        
+
         # Check 1: Verify transcription backend is available
         backend = self.config.get("transcription_backend", "whisper_cpp")
         
         if backend == "whisper_cpp":
-            whisper_binary = self.config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
-            whisper_binary = os.path.expanduser(whisper_binary)
-            
-            if not Path(whisper_binary).exists():
-                # Try to find it elsewhere
-                found = shutil.which("whisper-cli")
-                if found:
+            from wayfinder.utils.runtime_assets import find_whisper_binary
+
+            found = find_whisper_binary(self.config)
+            if found:
+                # Bundle paths depend on where the user installs the .app; never
+                # persist one. The runtime resolver finds the current path on
+                # every launch.
+                if not getattr(sys, "frozen", False):
                     self.config["whisper_binary"] = found
                     save_config(self.config)
-                    self.log(f"✓ Found whisper-cli at {found}")
-                else:
-                    self.log("⚠️ whisper-cli not found - transcription won't work")
-                    self.log("💡 Install: git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp && make")
+                self.log(f"✓ Found whisper-cli at {found}")
+            else:
+                self.log("⚠️ whisper-cli not found - transcription won't work")
+                self.log("💡 Install whisper.cpp or use the complete packaged build")
         
         # Check 2: Adjust thread count on first run
         if "threads_auto_adjusted" not in self.config:
@@ -13011,6 +13726,12 @@ class WayfinderApp(ctk.CTk):
                         self._start_portal_listener()
                 elif flatpak_backend == "pynput" and not getattr(self, '_pynput_listener_started', False):
                     self.log("🔄 pynput hotkey listener not running - restarting...")
+                    self._start_pynput_listener()
+                elif (
+                    sys.platform in ("darwin", "win32")
+                    and not getattr(self, '_pynput_listener_started', False)
+                ):
+                    self.log("🔄 Global hotkey listener stopped - restarting...")
                     self._start_pynput_listener()
             except Exception as e:
                 self.log(f"⚠️ Hotkey supervisor error: {e}")
@@ -13492,7 +14213,13 @@ class WayfinderApp(ctk.CTk):
         header.pack(fill="x", padx=16, pady=(8, 4))
 
         def close():
+            if getattr(self, "_active_inline_panel", None) is panel:
+                self._active_inline_panel = None
+                self._active_inline_panel_close = None
             self._close_inline_panel(container, panel)
+
+        self._active_inline_panel = panel
+        self._active_inline_panel_close = close
 
         back_btn = ctk.CTkButton(
             header, text="←", width=32, height=32,
@@ -14185,6 +14912,94 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
 
+    def _macos_permission_state(self) -> tuple[bool | None, bool | None]:
+        if not IS_MACOS:
+            return True, True
+        try:
+            from wayfinder.utils.macos_permissions import (
+                request_accessibility_permission,
+                request_input_monitoring_permission,
+            )
+
+            return (
+                request_accessibility_permission(prompt=False),
+                request_input_monitoring_permission(prompt=False),
+            )
+        except Exception:
+            return None, None
+
+    def _refresh_macos_permission_banner(self) -> None:
+        """Show actionable guidance while either global-input grant is absent."""
+        banner = getattr(self, "macos_permission_banner", None)
+        label = getattr(self, "macos_permission_label", None)
+        button = getattr(self, "macos_permission_open_btn", None)
+        anchor = getattr(self, "_dictate_banner_anchor", None)
+        if not IS_MACOS or banner is None or label is None or button is None:
+            return
+        try:
+            from wayfinder.utils.macos_permissions import macos_install_location_ready
+
+            install_ready = macos_install_location_ready()
+        except Exception:
+            install_ready = True
+        accessibility, input_monitoring = self._macos_permission_state()
+        self._missing_macos_permission = (
+            "install_location" if not install_ready
+            else "accessibility" if accessibility is not True
+            else "input_monitoring" if input_monitoring is not True
+            else None
+        )
+        if self._missing_macos_permission is None:
+            try:
+                banner.pack_forget()
+            except Exception:
+                pass
+            return
+        if self._missing_macos_permission == "install_location":
+            text = (
+                "Move Wayfinder Aura from the disk image into Applications before "
+                "granting permissions, then launch that copy."
+            )
+            button_text = "Open Applications"
+        elif self._missing_macos_permission == "accessibility":
+            text = (
+                "Fn+Space needs Accessibility. Enable the /Applications copy of "
+                "Wayfinder Aura, then quit and reopen Aura."
+            )
+            button_text = "Open Accessibility"
+        else:
+            text = (
+                "Fn+Space also needs Input Monitoring on this Mac. Open the pane, "
+                "click +, add /Applications/Wayfinder Aura.app, enable it, then "
+                "quit and reopen Aura."
+            )
+            button_text = "Open Input Monitoring"
+        try:
+            label.configure(text=text)
+            button.configure(text=button_text)
+            if not banner.winfo_manager():
+                if anchor is not None:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+                else:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
+    def _open_missing_macos_permission(self) -> None:
+        permission = getattr(self, "_missing_macos_permission", None)
+        if permission is None:
+            self._refresh_macos_permission_banner()
+            permission = getattr(self, "_missing_macos_permission", None)
+        if permission is None:
+            return
+        try:
+            from wayfinder.utils.macos_permissions import open_macos_privacy_settings
+
+            if not open_macos_privacy_settings(permission):
+                self.log("⚠ Could not open macOS Privacy & Security settings")
+        except Exception as exc:
+            self.log(f"⚠ Could not open macOS permission settings: {exc}")
+
     # === Dictate-tab "finish setup — download a model" cue (D) ===
     def _has_usable_whisper_model(self) -> bool:
         """True if dictation can run without a local-model download.
@@ -14233,6 +15048,57 @@ class WayfinderApp(ctk.CTk):
                 banner.pack_forget()
             except Exception:
                 pass
+
+    def show_first_run_model_setup(self) -> None:
+        """Put a clean packaged install directly into the model downloader."""
+        try:
+            self._switch_tab("settings")
+            self._finish_settings_build()
+            self.open_model_settings()
+            self.log("↓ Download the Base model to finish Mac setup")
+        except Exception as exc:
+            self.log(f"⚠ Could not open first-run model setup: {exc}")
+
+    def _start_welcome_model_download(
+        self,
+        model_id,
+        progress_callback,
+        complete_callback,
+        error_callback,
+    ):
+        """Start a free Base-model download owned by the welcome card."""
+        if model_id not in ("base.en", "base"):
+            raise ValueError("Onboarding supports only the free Base models")
+        downloader = ModelDownloader()
+        downloader.download_model(
+            model_id,
+            progress_callback=progress_callback,
+            complete_callback=complete_callback,
+            error_callback=error_callback,
+        )
+        return downloader
+
+    def _on_whisper_model_ready(self, path: str | Path | None = None) -> bool:
+        """Select a downloaded model and resume pending first-run Welcome."""
+        if path:
+            value = str(path)
+            home = str(Path.home())
+            if value.startswith(home):
+                value = "~" + value[len(home):]
+            self.config["model_path"] = value
+        self.config["setup_completed"] = True
+        save_config(self.config)
+        self._hide_setup_cue()
+        self._refresh_dictate_setup_chip()
+        if not getattr(self, "_pending_welcome_after_model", False):
+            return False
+        self._pending_welcome_after_model = False
+        close_panel = getattr(self, "_active_inline_panel_close", None)
+        if callable(close_panel):
+            close_panel()
+        self._switch_tab("dictate")
+        self.after(350, self.show_welcome_pane)
+        return True
 
     def _open_setup_from_cue(self) -> None:
         """Jump from the setup cue into the whisper-model download settings."""
@@ -14373,9 +15239,16 @@ class WayfinderApp(ctk.CTk):
     def _restart_for_overlay_change(self):
         """Kill the overlay and re-exec the app to apply a status-indicator change."""
         import sys
+        # Exec keeps the same PID, so neither the native child supervisor nor
+        # macOS will infer that old resources should be released. Clean them
+        # explicitly before replacing the interpreter.
         try:
-            if getattr(self, "overlay_controller", None):
-                self.overlay_controller.stop()
+            self._close_audio_ducking()
+            if getattr(self, "warm_mic", None):
+                self.warm_mic.close()
+            from wayfinder.core.transcriber import WhisperServerBackend
+            WhisperServerBackend.shutdown()
+            self._cleanup_overlay()
             from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
             kill_stale_overlay_from_pidfile()
         except Exception:
@@ -14442,13 +15315,14 @@ class WayfinderApp(ctk.CTk):
     def _append_activity_log(self, log_line: str) -> None:
         """Append one line to the persistent activity log. Best-effort; never raises.
 
-        Lives in the XDG cache dir (sandbox-private in the Flatpak). Truncates once per
+        Lives in the platform cache dir (sandbox-private in the Flatpak). Truncates once per
         session if it has grown past ~5 MB so it can't grow without bound.
         """
         path = getattr(self, "_activity_log_path", None)
         if path is None:
-            cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-            path = cache_home / "wayfinder-aura" / "activity.log"
+            from wayfinder.utils.platform import get_cache_dir
+
+            path = get_cache_dir() / "activity.log"
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
@@ -14838,6 +15712,34 @@ class WayfinderApp(ctk.CTk):
         if confirmation is not None:
             confirmation.pack_forget()
 
+    def _dismiss_premium_prompt(self, _event=None):
+        """Tear down the inline Ultra panel and its temporary Escape binding."""
+        bind_id = getattr(self, "_premium_escape_bind_id", None)
+        if bind_id is not None:
+            try:
+                self.unbind("<Escape>", bind_id)
+            except Exception:
+                pass
+            self._premium_escape_bind_id = None
+        banner = getattr(self, "_premium_banner", None)
+        if banner is not None:
+            try:
+                banner.place_forget()
+            except Exception:
+                pass
+            try:
+                banner.destroy()
+            except Exception:
+                pass
+        self._premium_banner = None
+        self._premium_dismiss_button = None
+        WayfinderApp._sync_macos_hero_visibility(self)
+        try:
+            self._write_status_breadcrumb()
+        except Exception:
+            pass
+        return "break"
+
     def _show_premium_prompt(self, feature_id: str) -> None:
         """Ultra upgrade panel: the locked feature + benefits + pricing + Buy Now / More Info.
 
@@ -14852,12 +15754,7 @@ class WayfinderApp(ctk.CTk):
                 return
         except Exception:
             pass
-        if getattr(self, '_premium_banner', None) is not None:
-            try:
-                self._premium_banner.destroy()
-            except Exception:
-                pass
-            self._premium_banner = None
+        self._dismiss_premium_prompt()
 
         price = self.config.get("premium_price", "$29.99")
         price_reg = self.config.get("premium_price_regular", "$60")
@@ -14871,6 +15768,10 @@ class WayfinderApp(ctk.CTk):
         scrim = ctk.CTkFrame(self, fg_color=COLORS["bg_base"])
         scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._premium_banner = scrim
+        # The native Metal hero is a sibling CALayer above all Tk pixels; Tk's
+        # scrim cannot occlude it by z-order alone. Suspend it for the lifetime
+        # of the covering Ultra card, then restore on dismissal.
+        WayfinderApp._sync_macos_hero_visibility(self)
 
         # Content-hugging card (~470px) — the old relwidth=0.82 card stretched absurdly
         # wide on large windows. place() with no explicit size lets pack propagation size
@@ -14880,6 +15781,24 @@ class WayfinderApp(ctk.CTk):
             border_width=2, border_color=COLORS["accent"],
         )
         card.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Redundant exits are intentional: mouse users can use the close glyph,
+        # the existing Maybe later button, or the surrounding scrim; Escape is
+        # also bound for keyboard users. A purchase panel must never trap input.
+        ctk.CTkButton(
+            card, text="×", width=30, height=30,
+            font=(self.font_body[0], self.font_sizes["title"]),
+            fg_color="transparent", hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_muted"], corner_radius=RADIUS["sm"],
+            command=self._dismiss_premium_prompt,
+        ).place(relx=1.0, x=-12, y=12, anchor="ne")
+        scrim.bind("<Button-1>", self._dismiss_premium_prompt, add="+")
+        try:
+            self._premium_escape_bind_id = self.bind(
+                "<Escape>", self._dismiss_premium_prompt, add="+"
+            )
+        except Exception:
+            self._premium_escape_bind_id = None
 
         inner = ctk.CTkFrame(card, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=SPACING["2xl"], pady=SPACING["xl"])
@@ -14923,20 +15842,12 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         ).pack(side="left", padx=(SPACING["sm"], 0))
 
-        def _dismiss():
-            try:
-                scrim.place_forget()
-                scrim.destroy()
-            except Exception:
-                pass
-            self._premium_banner = None
-
         ctk.CTkButton(
             inner, text=f"Buy Now — {price}",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             text_color="#000000", height=42, corner_radius=RADIUS["md"],
-            command=lambda: [self._open_url(checkout), _dismiss()],
+            command=lambda: [self._open_url(checkout), self._dismiss_premium_prompt()],
         ).pack(fill="x")
 
         btn_row = ctk.CTkFrame(inner, fg_color="transparent")
@@ -14950,13 +15861,18 @@ class WayfinderApp(ctk.CTk):
             command=lambda: self._open_url(info_url),
         ).pack(side="left", padx=(0, SPACING["sm"]))
 
-        ctk.CTkButton(
+        self._premium_dismiss_button = ctk.CTkButton(
             btn_row, text="Maybe later",
             font=(self.font_body[0], self.font_sizes["small"]),
             fg_color="transparent", hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_muted"], height=32, width=120, corner_radius=RADIUS["sm"],
-            command=_dismiss,
-        ).pack(side="left")
+            command=self._dismiss_premium_prompt,
+        )
+        self._premium_dismiss_button.pack(side="left")
+        # Publish readiness only after every exit binding/button exists. This
+        # is also what the packaged interaction smoke test waits on.
+        self.update_idletasks()
+        self._write_status_breadcrumb()
 
     def _activate_license(self) -> None:
         """Activate a license key from the Settings UI."""
@@ -15218,8 +16134,7 @@ class WayfinderApp(ctk.CTk):
         try:
             banner = getattr(self, "_premium_banner", None)
             if banner is not None and self.feature_gate.is_premium:
-                banner.destroy()
-                self._premium_banner = None
+                WayfinderApp._dismiss_premium_prompt(self)
         except Exception:
             pass
         # Freshly flipped tier: recompute the Ultra utilization cue right away
@@ -15237,7 +16152,7 @@ class WayfinderApp(ctk.CTk):
         key_name = _keycode_display(hotkey_key)
 
         if hotkey_modifiers:
-            mods = "+".join(m.capitalize() for m in hotkey_modifiers)
+            mods = "+".join(_modifier_display(m) for m in hotkey_modifiers)
             return f"{mods}+{key_name}"
         return key_name
 
@@ -15262,7 +16177,7 @@ class WayfinderApp(ctk.CTk):
         key_name = _keycode_display(style_key)
 
         if style_modifiers:
-            mods = "+".join(m.capitalize() for m in style_modifiers)
+            mods = "+".join(_modifier_display(m) for m in style_modifiers)
             return f"{mods}+{key_name}"
         return key_name
 
@@ -15955,6 +16870,9 @@ class WayfinderApp(ctk.CTk):
 
     def _on_microphone_selected(self, selection: str):
         """Handle microphone dropdown selection."""
+        if getattr(self, "app_state", AppState.IDLE) == AppState.RECORDING:
+            self.log("⚠ Finish or cancel the current dictation before changing microphones")
+            return
         if "Auto-detect" in selection:
             # Auto-detect mode
             self.config["audio_device"] = None
@@ -15978,6 +16896,13 @@ class WayfinderApp(ctk.CTk):
         
         # Update recorder with new device
         self.update_audio_device()
+
+        mic_var = getattr(self, "mic_var", None)
+        if mic_var is not None:
+            try:
+                mic_var.set(selection)
+            except Exception:
+                pass
         
         # Log the change
         self.log(f"🎤 Microphone: {device_display}")
@@ -16739,7 +17664,7 @@ class WayfinderApp(ctk.CTk):
                 if store.startswith(home):
                     store = "~" + store[len(home):]
                 self.config["model_path"] = store
-                save_config(self.config)
+                resumed_welcome = self._on_whisper_model_ready(selected)
                 if hasattr(self, "model_btn"):
                     self.model_btn.configure(text=self.get_model_display())
                 self.log(f"⚙ Model: {self.get_model_display()}")
@@ -16747,7 +17672,7 @@ class WayfinderApp(ctk.CTk):
                     self.log("⚙ Free transcription uses Base on CPU; GPU requires Ultra.")
                     if hasattr(self, "gpu_var"):
                         self.gpu_var.set(False)
-                if close:
+                if close and not resumed_welcome:
                     close_panel()
 
             def show_installed():
@@ -17254,7 +18179,8 @@ class WayfinderApp(ctk.CTk):
                 def on_complete(_path):
                     def update():
                         self.log(f"Downloaded: {info['name']}")
-                        show_download()
+                        if not self._on_whisper_model_ready(_path):
+                            show_download()
                     self.after(0, update)
 
                 def on_error(error):
@@ -17330,7 +18256,9 @@ class WayfinderApp(ctk.CTk):
     def create_audio_processing_setter(self, level: str):
         """Create a callback function for setting audio processing level from tray menu."""
         def setter(icon=None, item=None):
-            self.after(0, lambda: self._apply_audio_processing_from_tray(level))
+            self._dispatch_tray_action(
+                lambda: self._apply_audio_processing_from_tray(level)
+            )
         return setter
     
     def _apply_audio_processing_from_tray(self, level: str):
@@ -17351,13 +18279,44 @@ class WayfinderApp(ctk.CTk):
                 pass
     
     def _create_microphone_tray_menu(self):
-        """Dynamically create microphone submenu with audio processing options."""
-        return pystray.Menu(
-            pystray.MenuItem(
-                "Audio Processing",
-                self._create_audio_processing_tray_menu,
-            ),
+        """Dynamically create microphone + audio-processing submenus."""
+        try:
+            options, current = self._get_microphone_dropdown_options()
+        except Exception:
+            options, current = ["🎤 Auto-detect (Recommended)"], "🎤 Auto-detect (Recommended)"
+
+        items = []
+        for selection in options:
+            items.append(
+                pystray.MenuItem(
+                    selection,
+                    self.create_microphone_setter(selection),
+                    checked=lambda item, value=selection: value == current,
+                    enabled=lambda item: getattr(self, "app_state", AppState.IDLE)
+                    != AppState.RECORDING,
+                )
+            )
+        items.extend(
+            (
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(
+                    "Audio Processing",
+                    pystray.Menu(
+                        lambda: tuple(self._create_audio_processing_tray_menu().items)
+                    ),
+                ),
+            )
         )
+        return pystray.Menu(*items)
+
+    def create_microphone_setter(self, selection: str):
+        """Create a menu-safe callback for a saved microphone display name."""
+        def setter(icon=None, item=None):
+            self._dispatch_tray_action(
+                lambda: self._on_microphone_selected(selection)
+            )
+
+        return setter
     
     def _create_model_tray_menu(self):
         """Dynamically create model submenu showing only installed models."""
@@ -17404,9 +18363,9 @@ class WayfinderApp(ctk.CTk):
     def create_model_setter(self, model_name: str):
         """Create a callback function for setting a specific model from tray menu."""
         def setter(icon=None, item=None):
-            # Schedule on main thread - pystray callbacks run on a different thread
-            # and Tk is NOT thread-safe
-            self.after(0, lambda: self._apply_model_from_tray(model_name))
+            self._dispatch_tray_action(
+                lambda: self._apply_model_from_tray(model_name)
+            )
         return setter
     
     def _apply_model_from_tray(self, model_name: str):
@@ -17473,22 +18432,33 @@ class WayfinderApp(ctk.CTk):
         
         # Create menu with dynamic model submenu (only installed models)
         # UI is only accessible via "Open Settings" - app always starts minimized to tray
+        window_items = (
+            [pystray.MenuItem(self._tray_window_action_text, self.toggle_window_from_tray)]
+            if sys.platform == "darwin"
+            else [
+                pystray.MenuItem("Open Settings", self.show_from_tray),
+                pystray.MenuItem("Hide to tray", self.hide_from_tray),
+            ]
+        )
         menu = pystray.Menu(
             pystray.MenuItem("Toggle Recording", self.tray_record, default=True),
             pystray.MenuItem("Reset (unstick overlay)", self.tray_reset),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Open Settings", self.show_from_tray),
-            pystray.MenuItem("Hide to tray", self.hide_to_tray),
+            *window_items,
             pystray.MenuItem(
                 "Model",
-                self._create_model_tray_menu,
+                pystray.Menu(
+                    lambda: tuple(self._create_model_tray_menu().items)
+                ),
             ),
             pystray.MenuItem(
                 "Microphone",
-                self._create_microphone_tray_menu,
+                pystray.Menu(
+                    lambda: tuple(self._create_microphone_tray_menu().items)
+                ),
             ),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", self.quit_app),
+            pystray.MenuItem("Quit", self.quit_from_tray),
         )
         
         # Idle tray = the drawn brand-blue arrow (NOT the logo PNG). It morphs to red
@@ -17502,14 +18472,19 @@ class WayfinderApp(ctk.CTk):
 
         if sys.platform == "darwin":
             # On macOS, pystray's run() calls NSApplication.run() from a background
-            # thread, which crashes with NSUpdateCycleInitialize. Use run_detached()
-            # instead — tray icon events are handled by Tkinter's own NSApp run loop.
-            self.tray_icon.run_detached()
+            # thread, which crashes with NSUpdateCycleInitialize. Use Tkinter's own
+            # NSApp loop. pystray's default detached setup changes the NSStatusItem
+            # from a worker thread, so suppress it and make the item visible here on
+            # the main thread.
+            self.tray_icon.run_detached(setup=lambda _icon: None)
+            self.tray_icon.visible = True
+            self._set_macos_tray_template(True)
+            self._prepare_macos_tray_animation()
         else:
             def _tray_thread_wrapper():
                 try:
                     self.tray_icon.run()
-                except Exception as e:
+                except Exception:
                     raise
             threading.Thread(target=_tray_thread_wrapper, daemon=True).start()
 
@@ -17604,6 +18579,48 @@ class WayfinderApp(ctk.CTk):
 
         return icon
 
+    def _prepare_macos_tray_animation(self) -> None:
+        """Pre-render native status-item frames so recording animation is cheap."""
+        self._macos_tray_recording_frames = []
+        if sys.platform != "darwin" or not getattr(self, "tray_icon", None):
+            return
+        try:
+            import io
+
+            from AppKit import NSImage
+            from Foundation import NSData
+
+            thickness = max(16, int(self.tray_icon._status_bar.thickness()))
+            native_size = (thickness, thickness)
+            # Start partially drawn rather than disappearing completely. Hold the
+            # filled arrow for four frames before the trace loops.
+            progress_values = [0.08 + (0.92 * i / 19.0) for i in range(20)]
+            progress_values.extend((1.0, 1.0, 1.0, 1.0))
+            for progress in progress_values:
+                frame = self.get_tray_icon(AppState.RECORDING, progress)
+                frame = frame.resize(native_size, Image.LANCZOS)
+                encoded = io.BytesIO()
+                frame.save(encoded, "png")
+                data = NSData(encoded.getvalue())
+                native = NSImage.alloc().initWithData_(data)
+                if native is not None:
+                    native.setTemplate_(False)
+                    self._macos_tray_recording_frames.append(native)
+        except Exception as exc:
+            self._macos_tray_recording_frames = []
+            self.log(f"⚠ Menu-bar animation unavailable: {exc}")
+
+    def _set_macos_tray_template(self, enabled: bool) -> None:
+        """Let macOS render the idle glyph white/black for the active menu theme."""
+        if sys.platform != "darwin":
+            return
+        try:
+            native = self.tray_icon._icon_image
+            if native is not None:
+                native.setTemplate_(bool(enabled))
+        except Exception:
+            pass
+
     def update_tray(self, state: AppState):
         if self.tray_icon:
             # Create icon image first (this is thread-safe)
@@ -17613,6 +18630,7 @@ class WayfinderApp(ctk.CTk):
             try:
                 self.tray_icon.icon = new_icon
                 self.tray_icon.title = new_title
+                self._set_macos_tray_template(state == AppState.IDLE)
             except Exception as e:
                 pass
         
@@ -17631,6 +18649,11 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
             self._tray_pulse_job = None
+        if not getattr(self, "tray_icon", None) or not getattr(
+            self.tray_icon, "visible", False
+        ):
+            return
+        self._macos_tray_frame_index = 0
         if not hasattr(self, '_tray_pulse_frame'):
             self._tray_pulse_frame = 0
         self._tray_pulse_step()
@@ -17652,12 +18675,29 @@ class WayfinderApp(ctk.CTk):
         
         pulse_scale = self._tray_pulse_progress
         
-        # Update tray icon with current progress
+        # Aqua swaps retained NSImage handles directly. No PIL draw, PNG encode,
+        # allocation, or resize happens during the 20 fps animation, so it does
+        # not compete with Tk pointer dispatch.
         if self.tray_icon:
-            self.tray_icon.icon = self.get_tray_icon(AppState.RECORDING, pulse_scale)
+            native_frames = getattr(self, "_macos_tray_recording_frames", ())
+            if sys.platform == "darwin" and native_frames:
+                index = getattr(self, "_macos_tray_frame_index", 0)
+                try:
+                    self.tray_icon._status_item.button().setImage_(
+                        native_frames[index % len(native_frames)]
+                    )
+                    self._macos_tray_frame_index = (index + 1) % len(native_frames)
+                except Exception:
+                    pass
+            elif sys.platform != "darwin":
+                self.tray_icon.icon = self.get_tray_icon(
+                    AppState.RECORDING, pulse_scale
+                )
         
         # Schedule next frame at 50ms (~20 fps for smooth animation)
-        self._tray_pulse_job = self.after(50, self._tray_pulse_step)
+        interval = _tray_pulse_interval_ms()
+        if interval is not None:
+            self._tray_pulse_job = self.after(interval, self._tray_pulse_step)
     
     def _stop_tray_pulse(self):
         """Stop the tray icon pulsing animation."""
@@ -17669,8 +18709,51 @@ class WayfinderApp(ctk.CTk):
             self._tray_pulse_job = None
         self._tray_pulse_phase = 0.0
 
-    def show_from_tray(self):
-        self.after(0, self._show_window)
+    def _dispatch_tray_action(self, callback) -> None:
+        """Run a status-menu action only after the native menu has unwound."""
+        # Do not call self.after() here: on Aqua that enters Tcl from PyObjC's
+        # NSMenu delegate and can abort in PyEval_RestoreThread. queue.Queue.put
+        # is native-thread-safe and poll_events owns all later UI work.
+        self._tray_action_queue.put(callback)
+
+    def _refresh_tray_menu(self) -> None:
+        try:
+            tray_icon = getattr(self, "tray_icon", None)
+            if tray_icon is not None:
+                tray_icon.update_menu()
+        except Exception:
+            pass
+
+    def show_from_tray(self, icon=None, item=None):
+        self._dispatch_tray_action(self._show_window)
+
+    def hide_from_tray(self, icon=None, item=None):
+        self._dispatch_tray_action(self.hide_to_tray)
+
+    def _tray_window_action_text(self, item=None) -> str:
+        """Contextual macOS window action shown in the status menu."""
+        try:
+            from AppKit import NSApplication
+
+            hidden = bool(NSApplication.sharedApplication().isHidden())
+        except Exception:
+            hidden = False
+        return "Show Wayfinder Aura" if hidden else "Hide Wayfinder Aura"
+
+    def toggle_window_from_tray(self, icon=None, item=None):
+        """Choose show/hide while in the menu, execute after it has closed."""
+        try:
+            from AppKit import NSApplication
+
+            hidden = bool(NSApplication.sharedApplication().isHidden())
+        except Exception:
+            hidden = False
+        self._dispatch_tray_action(
+            self._show_window if hidden else self.hide_to_tray
+        )
+
+    def quit_from_tray(self, icon=None, item=None):
+        self._dispatch_tray_action(self.quit_app)
 
     def _show_window(self):
         """Raise the main window (tray Open / second-launch SHOW).
@@ -17678,10 +18761,20 @@ class WayfinderApp(ctk.CTk):
         Wayland often ignores a bare lift(); flash topmost + focus_force so the
         user actually sees the window when they re-launch from the app menu.
         """
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSApplication
+
+                app = NSApplication.sharedApplication()
+                app.unhide_(None)
+                app.activateIgnoringOtherApps_(True)
+            except Exception:
+                pass
         try:
             self.deiconify()
         except Exception:
             pass
+        self._sync_macos_hero_visibility()
         try:
             self.lift()
             self.focus_force()
@@ -17699,13 +18792,34 @@ class WayfinderApp(ctk.CTk):
             pass
 
     def hide_to_tray(self):
+        if sys.platform == "darwin":
+            # Tk.withdraw() on Aqua can make Tk's native main loop tear down while
+            # timer callbacks are still registered (PyEval_RestoreThread abort).
+            # Native Hide keeps the Tk window and shared NSApplication alive; the
+            # menu-bar item remains available and _show_window() unhides the app.
+            try:
+                from AppKit import NSApplication
+
+                native_hero = getattr(self, "_macos_hero_layer", None)
+                if native_hero is not None:
+                    native_hero.set_hidden(True)
+                NSApplication.sharedApplication().hide_(None)
+                return
+            except Exception:
+                # Source environments without PyObjC still need a recoverable path.
+                self.iconify()
+                return
+
         # Only withdraw (fully hide) if there's a tray surface to restore the window from —
         # otherwise the window vanishes with no way back (the Flatpak had no tray). Check
         # ACTUAL availability, not HAS_PYSTRAY: self.tray_icon is None when the tray is
         # disabled in settings even though pystray imported, and the overlay's
         # QSystemTrayIcon availability is reported live on the controller (so it stays correct
         # across an overlay restart). With no tray, minimize to the taskbar — always restorable.
-        tray_present = (getattr(self, 'tray_icon', None) is not None) or (
+        tray_icon = getattr(self, 'tray_icon', None)
+        tray_present = (
+            tray_icon is not None and getattr(tray_icon, "visible", False)
+        ) or (
             getattr(self, 'overlay_controller', None) is not None
             and getattr(self.overlay_controller, 'tray_available', False)
         )
@@ -17715,11 +18829,11 @@ class WayfinderApp(ctk.CTk):
             self.iconify()
 
     def tray_record(self):
-        self.after(0, self.on_record_button)
+        self._dispatch_tray_action(self.on_record_button)
 
     def tray_reset(self, icon=None, item=None):
         """Tray 'Reset' action — abandon any stuck/in-flight dictation and return to idle."""
-        self.force_reset()
+        self._dispatch_tray_action(self.force_reset)
 
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
@@ -17766,6 +18880,22 @@ class WayfinderApp(ctk.CTk):
 
         # Clean up overlay
         self._cleanup_overlay()
+
+        observer = getattr(self, "_macos_lifecycle_observer", None)
+        if observer is not None:
+            try:
+                observer.close()
+            except Exception:
+                pass
+            self._macos_lifecycle_observer = None
+
+        native_hero = getattr(self, "_macos_hero_layer", None)
+        if native_hero is not None:
+            try:
+                native_hero.close()
+            except Exception:
+                pass
+            self._macos_hero_layer = None
         
         # Give a moment for cleanup to complete
         time.sleep(0.2)
@@ -17815,12 +18945,29 @@ class WayfinderApp(ctk.CTk):
                 "state": state.name if hasattr(state, "name") else str(state),
                 "tab": getattr(self, "active_tab", None),
                 "generation": getattr(self, "session_generation", 0),
+                "modal": (
+                    "premium"
+                    if getattr(self, "_premium_banner", None) is not None
+                    else None
+                ),
+                "premium_dismiss_bounds": None,
                 # So a harness can tell "the licence gate refused" from "tab
                 # switching is broken" — the two look identical from outside.
                 "locked_tabs": locked_tabs(
                     gate.has_feature if gate is not None else lambda _f: False
                 ),
             }
+            dismiss = getattr(self, "_premium_dismiss_button", None)
+            if dismiss is not None:
+                try:
+                    payload["premium_dismiss_bounds"] = {
+                        "x": dismiss.winfo_rootx(),
+                        "y": dismiss.winfo_rooty(),
+                        "width": dismiss.winfo_width(),
+                        "height": dismiss.winfo_height(),
+                    }
+                except Exception:
+                    pass
             d = _os.path.dirname(STATUS_PATH)
             if d:
                 _os.makedirs(d, exist_ok=True)
@@ -17948,6 +19095,7 @@ class WayfinderApp(ctk.CTk):
                 q.put(None)
             except Exception:
                 pass
+            self._duck_action_queue = None
 
     def _duck_audio_safe(self, action: str) -> None:
         try:
@@ -18083,7 +19231,7 @@ class WayfinderApp(ctk.CTk):
             self._idle_breath_job = None
     
     def _animate_idle_breath(self):
-        """Animation frame for idle breathing waveform - runs at 2fps to save CPU."""
+        """Animation frame for the low-cost idle breathing waveform."""
         # Guard: Stop if not in IDLE state
         if self.app_state != AppState.IDLE:
             self._idle_breath_job = None
@@ -18091,10 +19239,23 @@ class WayfinderApp(ctk.CTk):
         
         # Skip animation when window is not visible (minimized, hidden to tray, withdrawn)
         try:
+            if IS_MACOS:
+                from AppKit import NSApplication
+
+                if NSApplication.sharedApplication().isHidden():
+                    native_layer = getattr(self, "_macos_hero_layer", None)
+                    if native_layer is not None:
+                        native_layer.set_hidden(True)
+                    self._idle_breath_job = self.after(500, self._animate_idle_breath)
+                    return
             win_state = self.state()
             if win_state in ("iconic", "withdrawn"):
                 # Check again in 2 seconds (no point animating an invisible window)
-                self._idle_breath_job = self.after(2000, self._animate_idle_breath)
+                native_layer = getattr(self, "_macos_hero_layer", None)
+                if native_layer is not None:
+                    native_layer.set_hidden(True)
+                delay = 250 if native_layer is not None else 2000
+                self._idle_breath_job = self.after(delay, self._animate_idle_breath)
                 return
         except Exception:
             pass
@@ -18102,7 +19263,11 @@ class WayfinderApp(ctk.CTk):
         # Also skip if the hero canvas is not visible (e.g. on a different tab)
         try:
             if not self.hero_canvas.winfo_viewable():
-                self._idle_breath_job = self.after(2000, self._animate_idle_breath)
+                native_layer = getattr(self, "_macos_hero_layer", None)
+                if native_layer is not None:
+                    native_layer.set_hidden(True)
+                delay = 250 if native_layer is not None else 2000
+                self._idle_breath_job = self.after(delay, self._animate_idle_breath)
                 return
         except Exception:
             pass
@@ -18122,8 +19287,18 @@ class WayfinderApp(ctk.CTk):
         # Redraw waveform (PIL render + single canvas image update)
         self._draw_hero_waveform()
 
-        # Schedule next frame at 33ms (30fps) — smooth silk ribbon animation
-        self._idle_breath_job = self.after(33, self._animate_idle_breath)
+        native_layer = getattr(self, "_macos_hero_layer", None)
+        if native_layer is not None and native_layer.native_renderer is not None:
+            # The native Objective-C timer owns all 30 fps idle frames. Python
+            # wakes again only on a state/tab/window event.
+            self._idle_breath_job = None
+            return
+
+        interval = _hero_idle_interval_ms()
+        self._idle_breath_job = (
+            self.after(interval, self._animate_idle_breath)
+            if interval is not None else None
+        )
     
     def _animate_hero(self):
         """Animation frame for hero waveform - STABLE at 15fps."""
@@ -18131,6 +19306,27 @@ class WayfinderApp(ctk.CTk):
         if self.app_state == AppState.IDLE:
             self._hero_animation_job = None
             return
+
+        # The floating overlay remains the feedback surface when the main
+        # window/Dictate tab is hidden. Do not render an invisible Tk image.
+        try:
+            if IS_MACOS:
+                from AppKit import NSApplication
+
+                if NSApplication.sharedApplication().isHidden():
+                    native_layer = getattr(self, "_macos_hero_layer", None)
+                    if native_layer is not None:
+                        native_layer.set_hidden(True)
+                    self._hero_animation_job = self.after(250, self._animate_hero)
+                    return
+            if self.state() in ("iconic", "withdrawn") or not self.hero_canvas.winfo_viewable():
+                native_layer = getattr(self, "_macos_hero_layer", None)
+                if native_layer is not None:
+                    native_layer.set_hidden(True)
+                self._hero_animation_job = self.after(250, self._animate_hero)
+                return
+        except Exception:
+            pass
         
         import math
         hero_fps_scale = 4.0  # 60/15
@@ -18167,8 +19363,11 @@ class WayfinderApp(ctk.CTk):
             pulse = 0.9 + 0.1 * math.sin(self._hero_wave_time * 2)
             self._draw_mic_button_with_pulse(STATE_COLORS[self.app_state], pulse)
         
-        # Schedule next frame at fixed 66ms (15fps)
-        self._hero_animation_job = self.after(66, self._animate_hero)
+        # Aqua needs 30 fps so fast audio peaks do not alias into visible jumps.
+        # Linux keeps its established 15 fps active cadence.
+        self._hero_animation_job = self.after(
+            _hero_active_interval_ms(), self._animate_hero
+        )
     
     def _init_mic_pulse_items(self, color: str):
         """Create the single pulse-mode image item ONCE (replaces 5 aliased ovals)."""
@@ -18416,9 +19615,16 @@ class WayfinderApp(ctk.CTk):
                 print(f"[Hotkey] pynput listener crashed: {e}", flush=True)
                 import traceback
                 traceback.print_exc()
-                self._pynput_listener_started = False
+            finally:
+                if not self.stop_event.is_set():
+                    self._pynput_listener_started = False
 
-        threading.Thread(target=_pynput_wrapper, daemon=True).start()
+        self._pynput_thread = threading.Thread(
+            target=_pynput_wrapper,
+            daemon=True,
+            name="global-hotkey-pynput",
+        )
+        self._pynput_thread.start()
 
     def _start_portal_listener(self):
         """Start the XDG GlobalShortcuts portal listener (Wayland/Flatpak) in a daemon thread.
@@ -18580,6 +19786,18 @@ class WayfinderApp(ctk.CTk):
                 self.handle_event(event_type, data)
         except queue.Empty:
             pass
+        try:
+            while True:
+                callback = self._tray_action_queue.get_nowait()
+                try:
+                    callback()
+                except Exception as exc:
+                    self.log(f"⚠ Menu action failed: {exc}")
+                # NSApplication.hide_ applies after the current Tcl turn. Rebuild
+                # the menu once that state is observable so Hide becomes Show.
+                self.after(100, self._refresh_tray_menu)
+        except queue.Empty:
+            pass
         # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
         # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
         # While Settings → Detect is armed, use the CLAUDE.md floor (100ms) so the
@@ -18668,6 +19886,8 @@ class WayfinderApp(ctk.CTk):
             self.hide_to_tray()
         elif event_type == EventType.FORCE_RESET:
             self.force_reset()
+        elif event_type == EventType.CANCEL_RECORDING:
+            self.cancel_recording()
         elif event_type == EventType.QUIT_APP:
             self.quit_app()
         elif event_type == EventType.SWITCH_TAB:
@@ -18697,6 +19917,9 @@ class WayfinderApp(ctk.CTk):
             self._do_log(data)
         elif event_type == EventType.URL_CLIPBOARD_OFFER:
             self._offer_url_clipboard(data)
+        elif event_type == EventType.UI_CALLBACK:
+            if callable(data):
+                data()
 
     def on_hotkey(self):
         # The welcome pane's first step owns the shared production mic while its
@@ -19628,6 +20851,51 @@ class WayfinderApp(ctk.CTk):
         """
         self.after(0, self._do_force_reset)
 
+    def cancel_recording(self) -> bool:
+        """Discard the active recording and return to idle without transcription."""
+        if getattr(self, "app_state", None) != AppState.RECORDING:
+            return False
+
+        # Invalidate chunk callbacks/results before detaching the recorder.
+        self.session_generation += 1
+        if self._duration_update_job is not None:
+            try:
+                self.after_cancel(self._duration_update_job)
+            except Exception:
+                pass
+            self._duration_update_job = None
+        self._recording_start_time = None
+
+        try:
+            recorder = getattr(self, "chunked_recorder", None)
+            if recorder is not None and recorder.is_recording():
+                cancel = getattr(recorder, "cancel", None)
+                if callable(cancel):
+                    cancel()
+                else:
+                    recorder.stop()
+                    recorder.cleanup()
+                self.chunked_recorder = None
+            else:
+                recorder = getattr(self, "recorder", None)
+                if recorder is not None:
+                    cancel = getattr(recorder, "cancel", None)
+                    if callable(cancel):
+                        cancel()
+                    else:
+                        recorder.stop()
+                        recorder.cleanup()
+        except Exception as exc:
+            self.log(f"⚠ Cancel cleanup: {exc}")
+
+        self.update_state(AppState.IDLE)
+        try:
+            self._set_status_indicator("ready")
+        except Exception:
+            pass
+        self.log("✕ Recording cancelled — audio discarded")
+        return True
+
     def _do_force_reset(self):
         # Bump the generation so every in-flight worker + scheduled callback becomes stale.
         self.session_generation += 1
@@ -19649,7 +20917,8 @@ class WayfinderApp(ctk.CTk):
         try:
             if getattr(self, "chunked_recorder", None) is not None:
                 try:
-                    self.chunked_recorder.stop()
+                    cancel = getattr(self.chunked_recorder, "cancel", None)
+                    cancel() if callable(cancel) else self.chunked_recorder.stop()
                 except Exception:
                     pass
                 try:
@@ -19659,7 +20928,8 @@ class WayfinderApp(ctk.CTk):
                 self.chunked_recorder = None
             elif getattr(self, "recorder", None) is not None:
                 try:
-                    self.recorder.stop()
+                    cancel = getattr(self.recorder, "cancel", None)
+                    cancel() if callable(cancel) else self.recorder.stop()
                 except Exception:
                     pass
                 try:

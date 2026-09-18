@@ -12,11 +12,12 @@ The visual language is ported from the PyQt6 overlay's ``LiquidWaveRenderer``
 breath ``0.26 + 0.09*sin``, the amplitude/brightness morph curves) are
 USER-APPROVED and reproduced here verbatim.
 
-Cost model (see plan): per frame = 10 opaque ``draw.line`` polylines (sampled
-every 6px, NO ``joint="curve"`` — Codex benchmarked that at ~8.3ms/frame) + one
-``Image.composite`` through a baked edge-fade L mask + one 1px top-highlight
-line. Alpha is pre-blended over the opaque bg into solid RGBs (no per-segment
-RGBA compositing, no per-frame blur/supersample). All per-(w,h,color,bg)
+Cost model (see plan): per frame = 10 source-over ``draw.line`` polylines
+(sampled every 6px, NO ``joint="curve"`` — that costs ~8.3ms/frame) + one
+``Image.composite`` through a baked edge-fade L mask.
+Pillow blends the RGBA strokes directly onto the opaque RGB card surface. That
+preserves real overlap opacity without handing Aqua a translucent Tk image or
+painting a pre-blended dark outline under each strand. All per-(w,h,color,bg)
 invariants are memoized in a bounded module-level cache. Target <=1.5ms/frame.
 """
 from __future__ import annotations
@@ -24,7 +25,7 @@ from __future__ import annotations
 import math
 import random
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 # --- palette defaults (mirror of wayfinder_main.COLORS, only what we need) ----
 BG_CARD = (0x1E, 0x1E, 0x1F)      # #1E1E1F bento tile (hero canvas bg)
@@ -76,10 +77,8 @@ def get_hero_caches(w, h, color_rgb, bg_rgb=BG_CARD):
     """Memoized per-(w,h,color,bg) invariants.
 
     Returns a dict with:
-      - ``layer_deltas``: per-layer (color-bg)*alpha *deltas* for glow+core, so a
-        frame does ``rgb = bg + delta*brightness`` (linear in brightness — lets
-        morph scale layer brightness without re-blending).
-      - ``highlight_deltas``: same for the bright center highlight wave.
+      - ``layer_alphas``: per-layer glow/core opacity.
+      - ``highlight_alphas``: same for the bright center highlight wave.
       - ``mask``: baked edge-fade L mask (255 center -> 0 at edges).
       - ``bg_flat``: an opaque flat bg image reused as the composite backdrop.
     """
@@ -88,19 +87,13 @@ def get_hero_caches(w, h, color_rgb, bg_rgb=BG_CARD):
     if cache is not None:
         return cache
 
-    br, bg_, bb = bg_rgb
-    cr, cg, cb = color_rgb
-
-    def delta(alpha):
-        return ((cr - br) * alpha, (cg - bg_) * alpha, (cb - bb) * alpha)
-
-    layer_deltas = []
+    layer_alphas = []
     for _freq, _phase, base_alpha, _thick in WAVE_CONFIGS:
-        layer_deltas.append({
-            "glow": delta(base_alpha * 0.3),
-            "core": delta(base_alpha),
+        layer_alphas.append({
+            "glow": base_alpha * 0.3,
+            "core": base_alpha,
         })
-    highlight_deltas = {"glow": delta(0.4), "core": delta(1.0)}
+    highlight_alphas = {"glow": 0.4, "core": 1.0}
 
     # Edge-fade L mask: 255 in the middle, ramp to 0 across a generous zone.
     fade_zone = max(24, w * 0.06)
@@ -112,12 +105,14 @@ def get_hero_caches(w, h, color_rgb, bg_rgb=BG_CARD):
         mdraw.line([(x, 0), (x, h - 1)], fill=val)
 
     bg_flat = Image.new("RGB", (w, h), bg_rgb)
+    bg_rgba = Image.new("RGBA", (w, h), (*bg_rgb, 255))
 
     cache = {
-        "layer_deltas": layer_deltas,
-        "highlight_deltas": highlight_deltas,
+        "layer_alphas": layer_alphas,
+        "highlight_alphas": highlight_alphas,
         "mask": mask,
         "bg_flat": bg_flat,
+        "bg_rgba": bg_rgba,
     }
     if len(_HERO_CACHE) >= _HERO_CACHE_MAX:
         _HERO_CACHE.clear()
@@ -126,7 +121,7 @@ def get_hero_caches(w, h, color_rgb, bg_rgb=BG_CARD):
 
 
 def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
-                     caches=None, stardust=False):
+                     caches=None, stardust=False, stroke_scale=1.0):
     """Liquid-ribbon waveform onto a w x h RGB strip.
 
     Args:
@@ -137,10 +132,12 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
             1 = energetic bright (active). Scales amplitude reactivity + layer
             brightness + voice-boost gain.
         state_color_rgb: (r,g,b) ribbon colour for the current app state.
-        bg_rgb: opaque canvas background the alpha is pre-blended over.
+        bg_rgb: opaque canvas background the RGBA strokes composite over.
         caches: optional ``get_hero_caches`` result (else computed/looked up).
         stardust: draw a few drifting sparkle points (placement B; unused by the
             approved header-only design, kept for completeness).
+        stroke_scale: line/halo scale for raw Tk canvases that do not inherit
+            CustomTkinter's widget scale (Aqua main window).
 
     Returns a ``PIL.Image`` in mode ``RGB``, size ``(w, h)``.
     """
@@ -153,6 +150,7 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
         morph = 0.0
     level = _clampf(level, 0.0, 1.0)
     morph = _clampf(morph, 0.0, 1.0)
+    stroke_scale = _clampf(float(stroke_scale), 0.7, 2.5)
 
     if caches is None:
         caches = get_hero_caches(w, h, state_color_rgb, bg_rgb)
@@ -179,7 +177,9 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     # a knee through tanh so peaks asymptotically approach (never touch) the
     # bounds. Below the knee it's identity — the approved idle look (max
     # displacement ~15px at h=64) is untouched.
-    max_stroke_rad = (max(cfg[3] for cfg in WAVE_CONFIGS) + 4) / 2.0
+    max_stroke = max(1, round(max(cfg[3] for cfg in WAVE_CONFIGS) * stroke_scale))
+    glow_extra = max(1, round(2 * stroke_scale))
+    max_stroke_rad = (max_stroke + glow_extra * 2) / 2.0
     a_max = max(4.0, h / 2.0 - max_stroke_rad - 3.0)
     knee = a_max * 0.7
     soft_range = a_max - knee
@@ -195,11 +195,9 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     brightness = 0.55 + 0.45 * morph
     hi_brightness = 0.40 + 0.60 * morph
 
-    br, bg_, bb = bg_rgb
-    layer_deltas = caches["layer_deltas"]
+    layer_alphas = caches["layer_alphas"]
 
-    img = caches["bg_flat"].copy()
-    draw = ImageDraw.Draw(img)
+    img = caches["bg_rgba"].copy()
 
     # Fixed point count in mock-reference space: x is the on-image pixel, u is
     # the wave-space coordinate the sines are evaluated at.
@@ -209,16 +207,22 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     n = _N_POINTS_MIN if morph < 0.3 else _n_points(w)
     xus = [(w * i / (n - 1), _REF_W * i / (n - 1)) for i in range(n)]
 
-    def blend(delta, k):
-        dr, dg, db = delta
-        return (
-            int(_clampf(br + dr * k, 0, 255)),
-            int(_clampf(bg_ + dg * k, 0, 255)),
-            int(_clampf(bb + db * k, 0, 255)),
-        )
+    def rgba(alpha, k):
+        return (*state_color_rgb, int(255 * _clampf(alpha * k, 0.0, 1.0)))
+
+    def stroke(points, fill, width):
+        # Draw each complete polyline into its own transparent layer, then
+        # source-over composite once. ImageDraw's RGBA-on-RGB shortcut blends
+        # every polyline segment separately at joins, producing bright/dark
+        # vertical seams on Retina. An RGBA layer writes each covered pixel
+        # once; alpha_composite then applies the intended opacity uniformly.
+        layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).line(points, fill=fill, width=width)
+        img.alpha_composite(layer)
 
     # --- 4 stacked layers: glow (wide, dim) UNDER core (narrow) --------------
-    for (freq, phase, _a, thick), deltas in zip(WAVE_CONFIGS, layer_deltas):
+    wave_paths = []
+    for (freq, phase, _a, thick), alphas in zip(WAVE_CONFIGS, layer_alphas):
         f = freq * fs
         pts = []
         for x, u in xus:
@@ -226,32 +230,58 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
             dy += (amp * 0.4) * math.sin(f * 2.3 * u + t * 1.6 + phase)
             dy += (amp * 0.2) * math.sin(f * 3.7 * u + t * 2.1 + phase * 0.5)
             pts.append((x, _clampf(center_y + soft_limit(dy), top, bottom)))
-        draw.line(pts, fill=blend(deltas["glow"], brightness), width=thick + 4)
-        draw.line(pts, fill=blend(deltas["core"], brightness), width=thick)
+        wave_paths.append((pts, max(1, round(thick * stroke_scale)), alphas))
 
     # --- bright center highlight wave ---------------------------------------
-    hdelt = caches["highlight_deltas"]
+    halphas = caches["highlight_alphas"]
     hpts = []
     for x, u in xus:
         dy = amp * math.sin(0.13 * fs * u + t * 1.4)
         dy += (amp * 0.5) * math.sin(0.26 * fs * u + t * 2.0 + 0.8)
         hpts.append((x, _clampf(center_y + soft_limit(dy), top, bottom)))
-    draw.line(hpts, fill=blend(hdelt["glow"], hi_brightness), width=6)
-    draw.line(hpts, fill=blend(hdelt["core"], hi_brightness * 0.95), width=2)
+    # One shared blurred alpha mask gives every strand a real soft fade without
+    # five full-frame blurs. Drawing dim→bright makes crossings take the maximum
+    # useful glow instead of accumulating into muddy halos.
+    glow_mask = Image.new("L", (w, h), 0)
+    glow_draw = ImageDraw.Draw(glow_mask)
+    for pts, thick, alphas in wave_paths:
+        glow_draw.line(
+            pts,
+            fill=int(255 * _clampf(alphas["glow"] * brightness, 0.0, 1.0)),
+            width=thick + glow_extra,
+        )
+    glow_draw.line(
+        hpts,
+        fill=int(255 * _clampf(halphas["glow"] * hi_brightness, 0.0, 1.0)),
+        width=max(2, round(4 * stroke_scale)),
+    )
+    glow_mask = glow_mask.filter(
+        ImageFilter.GaussianBlur(radius=max(1.0, 2.0 * stroke_scale))
+    )
+    # The centerlines are soft-limited away from the strip bounds; keep the
+    # blurred halo inside the same guard band so it fades before, rather than
+    # appearing clipped by, the canvas edge.
+    glow_mask.paste(0, (0, 0, w, 3))
+    glow_mask.paste(0, (0, h - 2, w, h))
+    glow_layer = Image.new("RGBA", (w, h), (*state_color_rgb, 0))
+    glow_layer.putalpha(glow_mask)
+    img.alpha_composite(glow_layer)
+
+    for pts, thick, alphas in wave_paths:
+        stroke(pts, rgba(alphas["core"], brightness), thick)
+    stroke(
+        hpts,
+        rgba(halphas["core"], hi_brightness * 0.95),
+        max(1, round(2 * stroke_scale)),
+    )
 
     # --- optional drifting stardust (placement B) ---------------------------
     if stardust:
+        draw = ImageDraw.Draw(img)
         _draw_wave_stardust(draw, w, h, t, state_color_rgb, bg_rgb)
 
     # --- edge fade: composite wave over flat bg through baked mask -----------
-    final = Image.composite(img, caches["bg_flat"], caches["mask"])
-
-    # --- 1px inner top-edge highlight (bg +6% toward white), post-composite --
-    # Intentionally NOT background (kept from hero-depth commit ae3da97) — the
-    # edge-fade test asserts every column EXCEPT row 0.
-    fdraw = ImageDraw.Draw(final)
-    hi = tuple(int(c + (255 - c) * 0.06) for c in bg_rgb)
-    fdraw.line([(0, 0), (w - 1, 0)], fill=hi)
+    final = Image.composite(img, caches["bg_rgba"], caches["mask"]).convert("RGB")
 
     return final
 

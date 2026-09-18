@@ -67,13 +67,26 @@ def test_inactive_tab_is_created_once_on_first_switch():
 
     class Frame:
         def __init__(self):
-            self.packed = False
+            self.manager = ""
+            self.raised = False
 
         def pack(self, **_kwargs):
-            self.packed = True
+            self.manager = "pack"
 
         def pack_forget(self):
-            self.packed = False
+            self.manager = ""
+
+        def grid_forget(self):
+            self.manager = ""
+
+        def place(self, **_kwargs):
+            self.manager = "place"
+
+        def lift(self):
+            self.raised = True
+
+        def winfo_manager(self):
+            return self.manager
 
     class Button:
         def configure(self, **_kwargs):
@@ -102,12 +115,13 @@ def test_inactive_tab_is_created_once_on_first_switch():
     WayfinderApp._switch_tab(app, "settings")
 
     assert calls == ["settings"]
-    assert app.tab_frames["settings"].packed is True
-    assert app.tab_frames["dictate"].packed is False
+    assert app.tab_frames["settings"].manager == "place"
+    assert app.tab_frames["settings"].raised is True
+    assert app.tab_frames["dictate"].manager == "place"
 
 
 def test_settings_preload_advances_one_slice_and_reschedules():
-    from wayfinder_main import AppState, WayfinderApp
+    from wayfinder_main import AppState, WayfinderApp, _settings_preload_interval_ms
 
     built: list[str] = []
     scheduled: list[tuple[int, object]] = []
@@ -138,7 +152,7 @@ def test_settings_preload_advances_one_slice_and_reschedules():
 
     assert built == ["audio"]
     assert len(scheduled) == 1
-    assert scheduled[0][0] == 25
+    assert scheduled[0][0] == _settings_preload_interval_ms()
     assert scheduled[0][1].__func__ is WayfinderApp._preload_settings_slice
     assert app._settings_preload_job == "next"
 

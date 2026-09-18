@@ -73,7 +73,7 @@ class _FakeRoot:
 def test_normalize_sets_scaling_from_xft_dpi(monkeypatch):
     monkeypatch.setattr(tk_dpi, "read_xft_dpi", lambda: 192.0)
     root = _FakeRoot()
-    assert tk_dpi.normalize_tk_font_dpi(root) == 192.0
+    assert tk_dpi.normalize_tk_font_dpi(root, platform_name="linux") == 192.0
     assert root.calls == [("tk", "scaling", 192.0 / 72.0)]
 
 
@@ -81,11 +81,19 @@ def test_normalize_defaults_to_96(monkeypatch):
     """96 is applied, not skipped: pixel-exactness is the calibration baseline."""
     monkeypatch.setattr(tk_dpi, "read_xft_dpi", lambda: None)
     root = _FakeRoot()
-    assert tk_dpi.normalize_tk_font_dpi(root) == 96.0
+    assert tk_dpi.normalize_tk_font_dpi(root, platform_name="linux") == 96.0
     assert root.calls == [("tk", "scaling", 96.0 / 72.0)]
 
 
 def test_normalize_survives_tk_failure(monkeypatch):
     monkeypatch.setattr(tk_dpi, "read_xft_dpi", lambda: 144.0)
     root = _FakeRoot(fail=True)
-    assert tk_dpi.normalize_tk_font_dpi(root) == 96.0
+    assert tk_dpi.normalize_tk_font_dpi(root, platform_name="linux") == 96.0
+
+
+def test_macos_preserves_native_tk_scaling(monkeypatch):
+    monkeypatch.setattr(tk_dpi, "read_xft_dpi", lambda: 192.0)
+    root = _FakeRoot()
+    root.call = lambda *args: 2.0 if args == ("tk", "scaling") else None
+
+    assert tk_dpi.normalize_tk_font_dpi(root, platform_name="darwin") == 144.0

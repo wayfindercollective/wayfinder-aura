@@ -84,10 +84,14 @@ def test_reconciled_keys_present_in_defaults():
 
 
 def test_overlay_keys_in_defaults():
+    import sys
+
     from wayfinder.config import DEFAULT_CONFIG
 
     assert DEFAULT_CONFIG["overlay_scale"] == 1.0  # live wayfinder_main value kept
-    assert DEFAULT_CONFIG["overlay_anchor"] == "bottom-center"
+    assert DEFAULT_CONFIG["overlay_anchor"] == (
+        "bottom-right" if sys.platform == "darwin" else "bottom-center"
+    )
     assert DEFAULT_CONFIG["overlay_vertical_offset"] == 0
 
 

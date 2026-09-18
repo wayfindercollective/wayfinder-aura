@@ -13,6 +13,7 @@ from typing import Any
 
 from wayfinder.utils.platform import (
     WAYFINDER_FLATPAK_ID,
+    get_cache_dir,
     get_steam_platform,
     get_wayfinder_appimage_dir,
     is_wayfinder_flatpak_env,
@@ -76,7 +77,20 @@ PROJECT_ROOT = PACKAGE_DIR.parent.parent  # src/wayfinder -> project root
 # --filesystem=xdg-run/wayfinder-aura:create), so bind the socket under it instead.
 # Falls back to /tmp where no runtime dir exists (e.g. macOS) — unchanged behavior there.
 _runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-if _runtime_dir and os.path.isdir(_runtime_dir):
+if sys.platform == "darwin":
+    # macOS does not define XDG_RUNTIME_DIR. A predictable socket directly in
+    # /tmp can be pre-created by another local account and prevents Aura from
+    # starting its control channel. Keep every runtime artifact in a private,
+    # per-user cache directory instead.
+    _macos_runtime_dir = get_cache_dir() / "runtime"
+    _macos_runtime_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(_macos_runtime_dir, 0o700)
+    except OSError:
+        pass
+    SOCKET_PATH = str(_macos_runtime_dir / "wayfinder-aura.sock")
+    STATUS_PATH = str(_macos_runtime_dir / "status.json")
+elif _runtime_dir and os.path.isdir(_runtime_dir):
     SOCKET_PATH = os.path.join(_runtime_dir, "wayfinder-aura", "wayfinder-aura.sock")
     # A tiny status breadcrumb (tab + state) written next to the socket. The control
     # socket is fire-and-forget with no reply, so this file is how an external harness
@@ -162,7 +176,17 @@ else:
     # Windows executables need the .exe suffix to launch; Linux/macOS do not.
     _exe = ".exe" if sys.platform == "win32" else ""
     _default_whisper_binary = f"~/whisper.cpp/build/bin/whisper-cli{_exe}"
-    _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
+    if sys.platform == "darwin":
+        _default_model_path = str(
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "wayfinder-aura"
+            / "whisper-models"
+            / "ggml-base.en.bin"
+        )
+    else:
+        _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
     # LLM model for post-processing - prefer Qwen 3.5 if available, fall back to Qwen 2.5
     # Use platform-appropriate data dir (macOS: ~/Library/Application Support/, Linux: ~/.local/share/)
     if sys.platform == "darwin":
@@ -174,13 +198,28 @@ else:
     _default_llm_model_path = _pick_llm(_user_llm_dir)
     _default_llama_binary = f"~/llama.cpp/build/bin/llama-cli{_exe}"
 
+# Platform-native shortcut defaults. Fn+Space follows current Mac dictation-app
+# convention without colliding with Spotlight, input-source switching,
+# Character Viewer, or VoiceOver's Control+Option modifier.
+if sys.platform == "darwin":
+    _default_hotkey_modifiers = ["fn"]
+    _default_style_toggle_key = 28  # Enter
+    _default_style_toggle_modifiers = ["fn"]
+    _default_overlay_anchor = "bottom-right"
+else:
+    _default_hotkey_modifiers = ["ctrl", "alt"]
+    _default_style_toggle_key = 28  # Enter
+    _default_style_toggle_modifiers = ["ctrl", "alt"]
+    _default_overlay_anchor = "bottom-center"
+
+
 # Default configuration values
 DEFAULT_CONFIG: dict[str, Any] = {
     # Whisper settings
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
     
-    # Hotkey settings — Ctrl+Alt+Space / Ctrl+Alt+Enter by default.
+    # Hotkey settings — Fn+Space on macOS; Ctrl+Alt+Space elsewhere.
     # Chosen 2026-07 over Super+F2: first-run users didn't know what the
     # "Super" key was (launch feedback), and every keyboard labels Ctrl/Alt/
     # Space. Still game-safe: bare F-keys collide with countless game keybinds
@@ -188,13 +227,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # and the GameMode pause covers the rest. DE conflicts checked: unassigned
     # by default on KDE and GNOME. Existing user configs keep what they saved.
     "hotkey_key": 57,  # Space
-    "hotkey_modifiers": ["ctrl", "alt"],
+    "hotkey_modifiers": _default_hotkey_modifiers,
 
     # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal).
     # Enter (not a letter): KEY_CODES/display maps carry no letter keys, and
-    # Ctrl+Alt+letter chords collide with IDE bindings (e.g. Ctrl+Alt+S).
-    "style_toggle_key": 28,  # Enter
-    "style_toggle_modifiers": ["ctrl", "alt"],
+    # Non-macOS Ctrl+Alt+letter chords collide with IDE bindings (e.g. Ctrl+Alt+S).
+    "style_toggle_key": _default_style_toggle_key,
+    "style_toggle_modifiers": _default_style_toggle_modifiers,
+    "macos_hotkey_defaults_v2": sys.platform == "darwin",
+    "macos_overlay_anchor_defaults_v1": sys.platform == "darwin",
 
     # Auto press Enter after dictation (opt-in): dictate → text lands → Enter
     # fires, so chat inputs submit hands-free. Off by default — implicitly
@@ -237,6 +278,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # UI settings
     "start_minimized": False,
+    "enable_tray_icon": True,
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
     
@@ -337,7 +379,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Negative = higher on screen, positive = lower (can sit near/over the panel).
     # UI slider spans roughly -900..+120 (asymmetric: upward travel needs more range).
     "overlay_vertical_offset": 0,
-    "overlay_anchor": "bottom-center",  # {top,bottom}-{left,center,right}
+    "overlay_anchor": _default_overlay_anchor,  # {top,bottom}-{left,center,right}
     # Overlay render quality: "high" = the ambient corner wave animates continuously (smoothest
     # look); "performance" = the overlay holds still when idle to save CPU/battery on handhelds.
     # The wave still animates while recording/processing. Decks default to the battery-friendly
@@ -777,6 +819,7 @@ def load_config() -> dict:
             # Merge with defaults (user config overrides defaults)
             config = DEFAULT_CONFIG.copy()
             config.update(user_config)
+            _save_migrations = False
 
             # Duck Amount was historically limited to 50 in the UI. Keep every
             # valid saved choice while accepting the expanded 0-100 public range;
@@ -847,6 +890,33 @@ def load_config() -> dict:
                 if _key not in user_config:
                     config[_key] = _legacy
 
+            # The first macOS port inherited Ctrl+Alt+Space from Linux. On a
+            # Mac that reads as Control+Option+Space, colliding with both input
+            # source switching and VoiceOver. Migrate only the exact shipped
+            # defaults once; custom shortcuts remain untouched.
+            if sys.platform == "darwin" and not user_config.get("macos_hotkey_defaults_v2", False):
+                if (
+                    config.get("hotkey_key") == 57
+                    and config.get("hotkey_modifiers") == ["ctrl", "alt"]
+                ):
+                    config["hotkey_modifiers"] = ["fn"]
+                if (
+                    config.get("style_toggle_key") == 28
+                    and config.get("style_toggle_modifiers") == ["ctrl", "alt"]
+                ):
+                    config["style_toggle_modifiers"] = ["fn"]
+                config["macos_hotkey_defaults_v2"] = True
+                _save_migrations = True
+
+            if (
+                sys.platform == "darwin"
+                and not user_config.get("macos_overlay_anchor_defaults_v1", False)
+            ):
+                if config.get("overlay_anchor", "bottom-center") == "bottom-center":
+                    config["overlay_anchor"] = "bottom-right"
+                config["macos_overlay_anchor_defaults_v1"] = True
+                _save_migrations = True
+
             # Repair colliding combos (recording == style toggle). Merging new
             # default modifiers onto a partially-saved old config could land both
             # actions on one chord; style yields and returns to its legacy default.
@@ -872,6 +942,8 @@ def load_config() -> dict:
             if config.get("audio_device") is not None and not config.get("audio_device_name"):
                 config["audio_device"] = None
 
+            if _save_migrations:
+                save_config(config)
             return config
         except (json.JSONDecodeError, IOError) as e:
             # Don't silently wipe a corrupt config — preserve it for recovery.

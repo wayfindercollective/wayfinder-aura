@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "wayfinder-aura"
 # Keep in sync with src/wayfinder/__init__.py __version__
 version = "1.1.8"
-description = "Wayfinder Aura - Local voice dictation for Linux using whisper.cpp"
+description = "Wayfinder Aura - Local voice dictation for Linux and macOS using whisper.cpp"
 readme = "README.md"
 license = {text = "Elastic-2.0"}
 requires-python = ">=3.10"
@@ -20,6 +20,7 @@ classifiers = [
     "Intended Audience :: End Users/Desktop",
     "License :: Other/Proprietary License",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -38,6 +39,7 @@ dependencies = [
     "evdev>=1.6.0; sys_platform == 'linux'",
     "pynput>=1.7.6",
     "pyautogui>=0.9.54; sys_platform == 'darwin'",
+    "pyobjc-framework-Metal>=12.2.2; sys_platform == 'darwin'",
     "pystray>=0.19.0",
     "Pillow>=10.0.0",
     "openai>=1.0.0",

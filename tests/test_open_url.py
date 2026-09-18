@@ -63,10 +63,18 @@ def isolate_environment(monkeypatch):
     dependent. The in-flight guard is module state and leaks across tests.
     """
     monkeypatch.delenv("BROWSER", raising=False)
+    monkeypatch.setattr(ou.sys, "platform", "linux")
     monkeypatch.setattr(ou, "host_env", lambda: {"PATH": "/usr/bin"})
     ou._inflight.clear()
     yield
     ou._inflight.clear()
+
+
+def test_macos_uses_native_launchservices_opener(monkeypatch):
+    monkeypatch.setattr(ou.sys, "platform", "darwin")
+    assert list(ou._exec_candidates(URL, {"PATH": "/usr/bin"})) == [
+        ("macOS open", ["/usr/bin/open", URL])
+    ]
 
 
 @pytest.fixture

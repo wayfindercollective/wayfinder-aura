@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 
 from wayfinder.utils.hostexec import host_env
 
@@ -54,13 +55,23 @@ def read_xft_dpi() -> float | None:
     return dpi if 48.0 <= dpi <= 1024.0 else None
 
 
-def normalize_tk_font_dpi(root) -> float:
+def normalize_tk_font_dpi(root, platform_name: str | None = None) -> float:
     """Set `tk scaling` so pixel font sizes render pixel-exact. Returns the DPI used.
 
     Must run after the Tk root exists and before any font/widget is created.
     Best-effort: on failure Tk keeps its own default (correct on 96-dpi
     resource machines, the same machines where xrdb tends to be absent).
+
+    This correction is Linux/Xft-specific. Changing ``tk scaling`` after the
+    Aqua root exists corrupts macOS pointer hit-testing on Retina displays:
+    widgets paint in one coordinate system and receive clicks in another.
     """
+    active_platform = platform_name or sys.platform
+    if not active_platform.startswith("linux"):
+        try:
+            return float(root.tk.call("tk", "scaling")) * 72.0
+        except Exception:
+            return 96.0
     dpi = read_xft_dpi() or 96.0
     try:
         root.tk.call("tk", "scaling", dpi / 72.0)

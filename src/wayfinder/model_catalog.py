@@ -102,8 +102,9 @@ def format_resident_memory(size_bytes: Any) -> str:
 
 
 def _cache_path() -> Path:
-    base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    d = base / "wayfinder-aura"
+    from wayfinder.utils.platform import get_cache_dir
+
+    d = get_cache_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d / "model_catalog_v1.json"
 
@@ -644,27 +645,21 @@ def fetch_remote_catalog(
         return load_cached_catalog()
 
 
-def apply_remote_to_globals(
+def apply_document_to_globals(
     whisper_models: dict,
     llm_models: dict,
-    config: Optional[dict] = None,
+    remote: Optional[dict],
     *,
-    force: bool = False,
+    catalog_url: str = "",
 ) -> dict:
-    """
-    Merge remote catalog into the given mutable global catalog dicts.
-
-    Returns status dict: {source, whisper_count, llm_count, remote_applied}.
-    """
+    """Merge an already-fetched document without doing network I/O."""
     status = {
         "source": "builtin",
         "remote_applied": False,
         "whisper_count": len(whisper_models),
         "llm_count": len(llm_models),
-        "catalog_url": catalog_url_from_config(config),
+        "catalog_url": catalog_url,
     }
-    # Snapshot builtins before merge (for return of merged sizes)
-    remote = fetch_remote_catalog(config, force=force)
     if not remote:
         return status
 
@@ -697,3 +692,33 @@ def apply_remote_to_globals(
         }
     )
     return status
+
+
+def apply_cached_to_globals(
+    whisper_models: dict,
+    llm_models: dict,
+    config: Optional[dict] = None,
+) -> dict:
+    """Apply the last validated cache immediately, never touching the network."""
+    return apply_document_to_globals(
+        whisper_models,
+        llm_models,
+        load_cached_catalog(),
+        catalog_url=catalog_url_from_config(config),
+    )
+
+
+def apply_remote_to_globals(
+    whisper_models: dict,
+    llm_models: dict,
+    config: Optional[dict] = None,
+    *,
+    force: bool = False,
+) -> dict:
+    """Fetch, validate, and merge the remote catalog."""
+    return apply_document_to_globals(
+        whisper_models,
+        llm_models,
+        fetch_remote_catalog(config, force=force),
+        catalog_url=catalog_url_from_config(config),
+    )

@@ -20,6 +20,7 @@ from typing import Optional
 
 from wayfinder.config import IS_FLATPAK
 from wayfinder.utils.hostexec import bundle_binary_env
+from wayfinder.utils.child_supervisor import wrap_macos_child_command
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
 # subprocess kwargs that hide the child console window on Windows (empty on
@@ -109,6 +110,12 @@ def _which_runtime_file(name: str) -> str | None:
 
 def _resolve_whisper_cli_binary(configured: object) -> str:
     """Return a real whisper-cli when possible, even if config saved a blank path."""
+    from wayfinder.utils.runtime_assets import find_whisper_binary
+
+    bundled_or_discovered = find_whisper_binary({"whisper_binary": configured})
+    if bundled_or_discovered:
+        return bundled_or_discovered
+
     candidates: list[object] = [
         configured,
         "~/whisper.cpp/build/bin/whisper-cli",
@@ -811,7 +818,7 @@ class WhisperServerBackend(TranscriptionBackend):
         except Exception:
             return False
 
-    def _find_available_port(self, probe_timeout: float = 2, reuse_ok: bool = True) -> int:
+    def _find_available_port(self, probe_timeout: float = 2, reuse_ok: bool = False) -> int:
         """Find the configured port or the next available one.
 
         probe_timeout: budget for the reuse health-probe, so port discovery stays inside
@@ -826,9 +833,11 @@ class WhisperServerBackend(TranscriptionBackend):
             try:
                 if sock.connect_ex(("127.0.0.1", port)) != 0:
                     return port  # Port is free
-                # Port in use — reuse only if allowed AND it's our server.
-                if reuse_ok and self._is_our_server(port, timeout=probe_timeout):
-                    return port  # Reuse existing server
+                # Never adopt an unowned HTTP service. A process on the same
+                # machine can trivially serve a page containing "whisper" and
+                # would then receive Aura's recorded audio at /inference. The
+                # in-process _server_process handle is the ownership proof;
+                # occupied endpoints discovered here are always skipped.
                 port += 1  # Try next port
             finally:
                 sock.close()
@@ -1006,24 +1015,9 @@ class WhisperServerBackend(TranscriptionBackend):
                 raise TranscriptionError(
                     "whisper-server startup skipped — recovery deadline already passed")
 
-            # Under force (recovery), never re-adopt an occupied endpoint: a
-            # wedged-but-listening server we cannot prove we own must be treated as
-            # unavailable, so port discovery skips it (reuse_ok=False) AND the reuse
-            # branch is disabled — recovery MUST bind a fresh server, not the wedge.
-            port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
-
-            if not force and self._is_our_server(port, timeout=_probe_budget()):
-                WhisperServerBackend._server_port = port
-                WhisperServerBackend._server_model_path = self.model_path
-                # An adopted pre-existing server's actual spawn flags are
-                # unknowable — record honest-unknown (None). _server_reusable
-                # treats None as never-matching, so the next start re-probes
-                # adoption instead of trusting an unverified mode (Codex
-                # review; adoption also leaves _server_process None, so the
-                # in-memory reuse fast path never applied to it anyway).
-                WhisperServerBackend._server_use_gpu = None
-                print(f"[Whisper Server] Reusing existing server on port {port}")
-                return
+            port = self._find_available_port(
+                probe_timeout=_probe_budget(), reuse_ok=False
+            )
 
             last_error = ""
             for attempt, cmd in enumerate(self._server_cmd_attempts(port)):
@@ -1038,11 +1032,14 @@ class WhisperServerBackend(TranscriptionBackend):
                 else:
                     print(f"[Whisper Server] Starting on port {port}...")
 
+                spawn_cmd, spawn_env = wrap_macos_child_command(
+                    cmd, bundle_binary_env()
+                )
                 proc = subprocess.Popen(
-                    cmd,
+                    spawn_cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    env=bundle_binary_env(),
+                    env=spawn_env,
                     **_NO_WINDOW,
                 )
                 WhisperServerBackend._server_process = proc

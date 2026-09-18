@@ -529,6 +529,29 @@ class _Destroyable:
     def destroy(self):
         self.destroyed = True
 
+    def place_forget(self):
+        pass
+
+
+def test_premium_prompt_dismissal_is_idempotent_and_clears_escape_binding():
+    banner = _Destroyable()
+    unbound = []
+    app = SimpleNamespace(
+        _premium_banner=banner,
+        _premium_escape_bind_id="escape-handler",
+        unbind=lambda sequence, bind_id: unbound.append((sequence, bind_id)),
+        _write_status_breadcrumb=lambda: None,
+    )
+
+    assert wayfinder_main.WayfinderApp._dismiss_premium_prompt(app) == "break"
+    assert banner.destroyed
+    assert app._premium_banner is None
+    assert app._premium_escape_bind_id is None
+    assert unbound == [("<Escape>", "escape-handler")]
+
+    # A second exit route (for example Escape after Maybe later) is harmless.
+    assert wayfinder_main.WayfinderApp._dismiss_premium_prompt(app) == "break"
+
 
 def test_refresh_entitlement_ui_retires_visible_upsell_surfaces():
     """Field bug: the free-tier GPU nudge banner and the Ultra purchase panel

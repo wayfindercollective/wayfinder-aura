@@ -536,7 +536,9 @@ class TestHotkeyDefaultMigration:
         assert config["hotkey_key"] == 61
         assert config["hotkey_modifiers"] == []
 
-    def test_fresh_install_gets_ctrl_alt_space_defaults(self, temp_config_dir: Path):
+    def test_fresh_install_gets_platform_hotkey_defaults(self, temp_config_dir: Path):
+        import sys
+
         from wayfinder.config import load_config, CONFIG_FILE
 
         if CONFIG_FILE.exists():
@@ -544,9 +546,59 @@ class TestHotkeyDefaultMigration:
         config = load_config()
 
         assert config["hotkey_key"] == 57  # Space
-        assert config["hotkey_modifiers"] == ["ctrl", "alt"]
+        expected_modifiers = ["fn"] if sys.platform == "darwin" else ["ctrl", "alt"]
+        assert config["hotkey_modifiers"] == expected_modifiers
         assert config["style_toggle_key"] == 28  # Enter
-        assert config["style_toggle_modifiers"] == ["ctrl", "alt"]
+        assert config["style_toggle_modifiers"] == expected_modifiers
+
+    def test_old_macos_default_migrates_to_fn_once(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({
+            "hotkey_key": 57,
+            "hotkey_modifiers": ["ctrl", "alt"],
+            "style_toggle_key": 28,
+            "style_toggle_modifiers": ["ctrl", "alt"],
+        })
+
+        config = config_module.load_config()
+
+        assert config["hotkey_modifiers"] == ["fn"]
+        assert config["style_toggle_key"] == 28
+        assert config["style_toggle_modifiers"] == ["fn"]
+        assert config["macos_hotkey_defaults_v2"] is True
+
+    def test_explicit_post_migration_macos_shortcut_is_preserved(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({
+            "hotkey_key": 57,
+            "hotkey_modifiers": ["ctrl", "alt"],
+            "macos_hotkey_defaults_v2": True,
+        })
+
+        config = config_module.load_config()
+
+        assert config["hotkey_modifiers"] == ["ctrl", "alt"]
+
+    def test_old_macos_overlay_default_moves_to_bottom_right_once(
+        self, temp_config_dir: Path, monkeypatch
+    ):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({"overlay_anchor": "bottom-center"})
+
+        config = config_module.load_config()
+
+        assert config["overlay_anchor"] == "bottom-right"
+        assert config["macos_overlay_anchor_defaults_v1"] is True
+
+        config["overlay_anchor"] = "top-left"
+        config_module.save_config(config)
+        assert config_module.load_config()["overlay_anchor"] == "top-left"
 
     def test_colliding_combos_repaired(self, temp_config_dir: Path):
         from wayfinder.config import load_config

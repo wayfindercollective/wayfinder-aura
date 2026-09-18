@@ -19,9 +19,10 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
-from ..config import CONFIG_DIR
+from ..utils.platform import get_cache_dir
 
 # Cache file for update check results
+CONFIG_DIR = get_cache_dir()  # compatibility alias for tests/older callers
 APP_UPDATE_CACHE_FILE = CONFIG_DIR / "app_update_cache.json"
 
 # Check interval: once per day (seconds)
@@ -220,7 +221,7 @@ def _load_cache() -> Optional[Dict[str, Any]]:
 
 def _save_cache(data: Dict[str, Any]) -> None:
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        APP_UPDATE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(APP_UPDATE_CACHE_FILE, "w") as f:
             json.dump(data, f, indent=2)
     except IOError:

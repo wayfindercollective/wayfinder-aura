@@ -59,9 +59,10 @@ class OwnerOnlyRotatingFileHandler(RotatingFileHandler):
 
 # XDG Base Directory Specification
 def _get_log_dir() -> Path:
-    """Get the log directory following XDG spec (owner-only 0700)."""
-    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    log_dir = cache_home / "wayfinder-aura" / "logs"
+    """Get the platform-native log directory (owner-only 0700)."""
+    from wayfinder.utils.platform import get_cache_dir
+
+    log_dir = get_cache_dir() / "logs"
     return ensure_private_dir(log_dir)
 
 

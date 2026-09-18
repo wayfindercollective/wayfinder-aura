@@ -33,6 +33,7 @@ def socket_listener(
     echo "show"      | nc -U "$SOCK"   # Raise the main window
     echo "hide"      | nc -U "$SOCK"   # Hide main window to tray (keep running)
     echo "reset"     | nc -U "$SOCK"   # Abort stuck work and return to idle
+    echo "cancel"    | nc -U "$SOCK"   # Discard only the active recording
     echo "quit"      | nc -U "$SOCK"   # Quit cleanly
     echo "ping"      | nc -U "$SOCK"   # Health probe, replies "pong"
     ```
@@ -124,6 +125,9 @@ def socket_listener(
                     # Tray "Reset" — abort stuck/in-flight dictation, return to idle.
                     log("🔄 Reset received via socket")
                     event_queue.put((EventType.FORCE_RESET, None))
+                elif data_str == "cancel":
+                    log("✕ Cancel recording received via socket")
+                    event_queue.put((EventType.CANCEL_RECORDING, None))
                 elif data_str == "quit":
                     # Tray "Quit" — clean full shutdown.
                     log("👋 Quit received via socket")
@@ -194,4 +198,3 @@ def send_style(style: Optional[str] = None):
         return True
     except Exception:
         return False
-

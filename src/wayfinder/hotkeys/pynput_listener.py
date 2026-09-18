@@ -9,6 +9,7 @@ Uses pynput for global keyboard monitoring.
 # unavailable — the import guard sets Key=KeyCode=None, and `None | None` is a TypeError.
 from __future__ import annotations
 
+import sys
 import time
 from queue import Queue
 from threading import Event
@@ -133,8 +134,92 @@ for _mod, _key_names in [
     if _key is not None:
         MODIFIER_KEYS.setdefault(_mod, set()).add(_key)
 
+# Fn is a Quartz flag rather than a normal pynput Key on macOS. Keeping it in
+# this table lets the shared modifier matcher accept it; the live state is
+# populated from Quartz in ``pynput_hotkey_listener`` below.
+MODIFIER_KEYS.setdefault("fn", set())
+
 # Flat set of every modifier key — Detect skips pure modifier presses and waits for a real key.
 _ALL_MODIFIER_KEYS = {k for ks in MODIFIER_KEYS.values() for k in ks}
+
+
+def _darwin_fn_pressed() -> bool:
+    """Return whether the Mac Fn/Globe modifier is physically held."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        from Quartz import (
+            CGEventSourceFlagsState,
+            kCGEventFlagMaskSecondaryFn,
+            kCGEventSourceStateCombinedSessionState,
+        )
+
+        flags = CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState)
+        return bool(flags & kCGEventFlagMaskSecondaryFn)
+    except Exception:
+        return False
+
+
+_DARWIN_EVDEV_VK = {
+    # ANSI letters/numbers that pynput KeyCode.from_char does not expose with
+    # a virtual keycode. Special/function keys are resolved dynamically below.
+    30: 0, 31: 1, 32: 2, 33: 3, 35: 4, 34: 5,
+    44: 6, 45: 7, 46: 8, 47: 9, 48: 11,
+    16: 12, 17: 13, 18: 14, 19: 15, 21: 16, 20: 17,
+    2: 18, 3: 19, 4: 20, 5: 21, 7: 22, 6: 23,
+    10: 25, 8: 26, 9: 28, 11: 29,
+    24: 31, 22: 32, 23: 34, 25: 35,
+    38: 37, 36: 38, 37: 40, 49: 45, 50: 46,
+}
+
+
+def _darwin_virtual_keycode(evdev_code: object) -> int | None:
+    """Map a shared evdev-style key code to a macOS virtual keycode."""
+    try:
+        code = int(evdev_code)
+    except (TypeError, ValueError):
+        return None
+    if code in _DARWIN_EVDEV_VK:
+        return _DARWIN_EVDEV_VK[code]
+    key = evdev_code_to_pynput(code)
+    value = getattr(key, "value", key)
+    vk = getattr(value, "vk", None)
+    return int(vk) if isinstance(vk, int) else None
+
+
+def _darwin_key_pressed(evdev_code: object) -> bool:
+    """Read physical key state so a missed key-up cannot wedge a latch."""
+    if sys.platform != "darwin":
+        return False
+    virtual_key = _darwin_virtual_keycode(evdev_code)
+    if virtual_key is None:
+        return False
+    try:
+        from Quartz import (
+            CGEventSourceKeyState,
+            kCGEventSourceStateCombinedSessionState,
+        )
+
+        return bool(
+            CGEventSourceKeyState(
+                kCGEventSourceStateCombinedSessionState,
+                virtual_key,
+            )
+        )
+    except Exception:
+        # Fail closed: only an observed physical key-up may clear the latch.
+        return True
+
+
+def _modifier_display_name(name: str) -> str:
+    if sys.platform == "darwin":
+        return {
+            "alt": "Option",
+            "ctrl": "Control",
+            "super": "Command",
+            "fn": "Fn",
+        }.get(name.lower(), name.capitalize())
+    return name.capitalize()
 
 
 def evdev_code_to_pynput(evdev_code: int) -> Optional[Key | KeyCode]:
@@ -217,32 +302,48 @@ def pynput_hotkey_listener(
 
     # Initial key setup
     target_key = evdev_code_to_pynput(hotkey_key)
+    record_fell_back = target_key is None
     if target_key is None:
-        log(f"⚠️ Unknown hotkey code: {hotkey_key}")
-        return
+        # A shared config may carry a Linux-only mouse/keyboard code to macOS
+        # or Windows. Keep that saved preference intact, but fail safely to the
+        # cross-platform default for this session instead of disabling the
+        # listener altogether.
+        target_key = evdev_code_to_pynput(57)  # Space
+        log(f"⚠️ Hotkey code {hotkey_key} is unavailable here; using Space")
+        if target_key is None:
+            return
 
     style_target_key = evdev_code_to_pynput(style_toggle_key) if style_toggle_key else None
+    style_fell_back = bool(style_toggle_key) and style_target_key is None
+    if style_toggle_key and style_target_key is None:
+        style_target_key = evdev_code_to_pynput(28)  # Enter
+        log(f"⚠️ Style hotkey code {style_toggle_key} is unavailable here; using Enter")
 
     def _build_mod_set(mod_list):
         return {m.lower() for m in (mod_list or []) if m.lower() in MODIFIER_KEYS}
 
     required_modifiers = _build_mod_set(hotkey_modifiers)
     style_required_modifiers = _build_mod_set(style_toggle_modifiers)
+    if record_fell_back:
+        required_modifiers = {"fn"} if sys.platform == "darwin" else {"ctrl", "alt"}
+    if style_fell_back:
+        style_required_modifiers = {"fn"} if sys.platform == "darwin" else {"ctrl", "alt"}
 
     # Track currently pressed modifiers
     pressed_modifiers = set()
+    active_actions: set[str] = set()
 
     # Display hotkey info
     hotkey_display = get_key_name(target_key)
     if required_modifiers:
-        mod_str = "+".join(mod.capitalize() for mod in sorted(required_modifiers))
+        mod_str = "+".join(_modifier_display_name(mod) for mod in sorted(required_modifiers))
         hotkey_display = f"{mod_str}+{hotkey_display}"
     log(f"🎹 Listening for hotkey: {hotkey_display}")
 
     if style_target_key:
         style_display = get_key_name(style_target_key)
         if style_required_modifiers:
-            mod_str = "+".join(mod.capitalize() for mod in sorted(style_required_modifiers))
+            mod_str = "+".join(_modifier_display_name(mod) for mod in sorted(style_required_modifiers))
             style_display = f"{mod_str}+{style_display}"
         log(f"✎ Style toggle hotkey: {style_display}")
 
@@ -252,13 +353,22 @@ def pynput_hotkey_listener(
         if config_ref is not None:
             new_key = evdev_code_to_pynput(config_ref.get("hotkey_key", hotkey_key))
             new_style = evdev_code_to_pynput(config_ref.get("style_toggle_key", style_toggle_key or 0))
-            if new_key and new_key != target_key:
-                target_key = new_key
-                required_modifiers = _build_mod_set(config_ref.get("hotkey_modifiers", []))
+            new_required = _build_mod_set(config_ref.get("hotkey_modifiers", []))
+            new_style_required = _build_mod_set(config_ref.get("style_toggle_modifiers", []))
+            if new_key is None:
+                new_key = evdev_code_to_pynput(57)
+                new_required = {"fn"} if sys.platform == "darwin" else {"ctrl", "alt"}
+            changed = new_key != target_key or new_required != required_modifiers
+            target_key = new_key
+            required_modifiers = new_required
+            if changed:
                 log(f"🎹 Hotkey changed to: {get_key_name(target_key)}")
-            if new_style and new_style != style_target_key:
+            if style_toggle_key:
+                if new_style is None:
+                    new_style = evdev_code_to_pynput(28)
+                    new_style_required = {"fn"} if sys.platform == "darwin" else {"ctrl", "alt"}
                 style_target_key = new_style
-                style_required_modifiers = _build_mod_set(config_ref.get("style_toggle_modifiers", []))
+                style_required_modifiers = new_style_required
 
     def check_modifiers(required: set[str]) -> bool:
         if not required:
@@ -272,6 +382,12 @@ def pynput_hotkey_listener(
 
     def on_press(key):
         nonlocal pressed_modifiers, _last_hotkey_time, _last_style_time
+
+        if sys.platform == "darwin":
+            if _darwin_fn_pressed():
+                pressed_modifiers.add("fn")
+            else:
+                pressed_modifiers.discard("fn")
 
         # Track modifier state
         for mod_name, mod_keys in MODIFIER_KEYS.items():
@@ -302,8 +418,20 @@ def pynput_hotkey_listener(
 
         now = time.time()
 
+        # macOS has no compositor-owned global-shortcut portal. While Aura is
+        # recording, the app consumes this event as "discard"; at all other
+        # times it is a harmless no-op. Do not suppress the physical Escape —
+        # the foreground application should still receive its normal key.
+        if sys.platform == "darwin" and key == _k("esc"):
+            event_queue.put((EventType.CANCEL_RECORDING, None))
+
         # Check for main hotkey (with debounce)
-        if key == target_key and check_modifiers(required_modifiers):
+        if (
+            key == target_key
+            and check_modifiers(required_modifiers)
+            and "record" not in active_actions
+        ):
+            active_actions.add("record")
             if now - _last_hotkey_time >= DEBOUNCE_SECONDS:
                 _last_hotkey_time = now
                 print(f"[Hotkey] {get_key_name(target_key)} — activating!", flush=True)
@@ -311,7 +439,13 @@ def pynput_hotkey_listener(
                 event_queue.put((EventType.HOTKEY_PRESSED, None))
 
         # Check for style toggle hotkey (with debounce)
-        if style_target_key and key == style_target_key and check_modifiers(style_required_modifiers):
+        if (
+            style_target_key
+            and key == style_target_key
+            and check_modifiers(style_required_modifiers)
+            and "style" not in active_actions
+        ):
+            active_actions.add("style")
             if now - _last_style_time >= DEBOUNCE_SECONDS:
                 _last_style_time = now
                 log("✎ Style toggle activated!")
@@ -319,14 +453,110 @@ def pynput_hotkey_listener(
     
     def on_release(key):
         nonlocal pressed_modifiers
+
+        if key == target_key:
+            active_actions.discard("record")
+        if key == style_target_key:
+            active_actions.discard("style")
         
         # Track modifier state
         for mod_name, mod_keys in MODIFIER_KEYS.items():
             if key in mod_keys:
                 pressed_modifiers.discard(mod_name)
+
+        if sys.platform == "darwin" and not _darwin_fn_pressed():
+            pressed_modifiers.discard("fn")
     
     # Start the listener
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener_kwargs = {}
+    if sys.platform == "darwin":
+        try:
+            from Quartz import (
+                CGEventGetFlags,
+                CGEventGetIntegerValueField,
+                kCGEventFlagMaskSecondaryFn,
+                kCGEventFlagMaskAlternate,
+                kCGEventFlagMaskCommand,
+                kCGEventFlagMaskControl,
+                kCGEventFlagMaskShift,
+                kCGEventKeyDown,
+                kCGEventKeyUp,
+                kCGKeyboardEventKeycode,
+            )
+
+            suppressed_keycodes: set[int] = set()
+
+            modifier_masks = {
+                "fn": kCGEventFlagMaskSecondaryFn,
+                "alt": kCGEventFlagMaskAlternate,
+                "super": kCGEventFlagMaskCommand,
+                "ctrl": kCGEventFlagMaskControl,
+                "shift": kCGEventFlagMaskShift,
+            }
+
+            def _raw_chord_matches(keycode, configured_key, configured_modifiers, flags):
+                target_vk = _darwin_virtual_keycode(configured_key)
+                if target_vk is None or keycode != target_vk:
+                    return False
+                required = {str(value).lower() for value in configured_modifiers or ()}
+                return all(flags & modifier_masks[name] for name in required if name in modifier_masks)
+
+            def _darwin_intercept(event_type, event):
+                """Track Fn and stop Aura's Fn+Space from typing a space."""
+                flags = CGEventGetFlags(event)
+                fn_active = bool(flags & kCGEventFlagMaskSecondaryFn)
+                if fn_active:
+                    pressed_modifiers.add("fn")
+                else:
+                    pressed_modifiers.discard("fn")
+
+                keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+                current_key = (
+                    config_ref.get("hotkey_key", hotkey_key)
+                    if config_ref is not None else hotkey_key
+                )
+                current_modifiers = {
+                    str(value).lower()
+                    for value in (
+                        config_ref.get("hotkey_modifiers", hotkey_modifiers)
+                        if config_ref is not None else hotkey_modifiers
+                    )
+                }
+                current_style_key = (
+                    config_ref.get("style_toggle_key", style_toggle_key)
+                    if config_ref is not None else style_toggle_key
+                )
+                current_style_modifiers = (
+                    config_ref.get("style_toggle_modifiers", style_toggle_modifiers)
+                    if config_ref is not None else style_toggle_modifiers
+                ) or []
+                if _darwin_virtual_keycode(current_key) is None:
+                    current_key, current_modifiers = 57, {"fn"}
+                if current_style_key and _darwin_virtual_keycode(current_style_key) is None:
+                    current_style_key, current_style_modifiers = 28, {"fn"}
+
+                matches = _raw_chord_matches(
+                    keycode, current_key, current_modifiers, flags
+                ) or _raw_chord_matches(
+                    keycode, current_style_key, current_style_modifiers, flags
+                )
+                if event_type == kCGEventKeyDown and matches:
+                    suppressed_keycodes.add(int(keycode))
+                    return None
+                if event_type == kCGEventKeyUp and int(keycode) in suppressed_keycodes:
+                    suppressed_keycodes.discard(int(keycode))
+                    return None
+                return event
+
+            listener_kwargs["darwin_intercept"] = _darwin_intercept
+        except Exception as exc:
+            log(f"⚠️ Fn hotkey support unavailable: {exc}")
+
+    listener = keyboard.Listener(
+        on_press=on_press,
+        on_release=on_release,
+        **listener_kwargs,
+    )
     listener.start()
 
     print(f"[Hotkey] pynput listener started, waiting for: {get_key_name(target_key)}", flush=True)
@@ -334,6 +564,31 @@ def pynput_hotkey_listener(
     
     try:
         while not stop_event.is_set():
+            if sys.platform == "darwin":
+                # Aqua can occasionally omit a key-up across sleep/wake or an
+                # event-tap restart. Reconcile our repeat-suppression latches
+                # against Quartz's physical state so one lost release cannot
+                # disable only that chord for the rest of the process.
+                current_record_code = (
+                    config_ref.get("hotkey_key", hotkey_key)
+                    if config_ref is not None else hotkey_key
+                )
+                current_style_code = (
+                    config_ref.get("style_toggle_key", style_toggle_key or 0)
+                    if config_ref is not None else (style_toggle_key or 0)
+                )
+                if (
+                    "record" in active_actions
+                    and not _darwin_key_pressed(current_record_code)
+                ):
+                    active_actions.discard("record")
+                if (
+                    "style" in active_actions
+                    and not _darwin_key_pressed(current_style_code)
+                ):
+                    active_actions.discard("style")
+                if not getattr(listener, "running", True):
+                    raise RuntimeError("macOS event tap stopped")
             time.sleep(0.1)
     finally:
         # DELIBERATELY no liveness monitoring here. Watching the inner listener

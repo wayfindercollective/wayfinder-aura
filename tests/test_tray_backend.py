@@ -16,10 +16,11 @@ where those deps are absent (matching tests/test_hotkey_backend.py).
 """
 
 import pytest
+from types import SimpleNamespace
 
 pytest.importorskip("customtkinter")
 
-from wayfinder_main import should_host_qt_tray  # noqa: E402
+from wayfinder_main import WayfinderApp, should_host_qt_tray  # noqa: E402
 
 
 # ── Linux: always the Qt tray, pystray retired (desktop and Flatpak alike) ────
@@ -58,3 +59,33 @@ def test_macos_falls_back_to_qt_tray_without_pystray():
 def test_disabled_setting_hosts_no_tray(platform, has_pystray):
     assert should_host_qt_tray(platform, has_pystray=has_pystray,
                                enable_tray_icon=False) is False
+
+
+def test_microphone_tray_menu_contains_real_devices_and_processing_submenu():
+    app = SimpleNamespace(
+        config={"audio_preprocessing": "light"},
+        _get_microphone_dropdown_options=lambda: (
+            ["🎤 Auto-detect (Recommended)", "Studio Mic"],
+            "Studio Mic",
+        ),
+        _dispatch_tray_action=lambda callback: None,
+    )
+    app.create_microphone_setter = WayfinderApp.create_microphone_setter.__get__(app)
+    app.create_audio_processing_setter = (
+        WayfinderApp.create_audio_processing_setter.__get__(app)
+    )
+    app._create_audio_processing_tray_menu = (
+        WayfinderApp._create_audio_processing_tray_menu.__get__(app)
+    )
+
+    menu = WayfinderApp._create_microphone_tray_menu(app)
+    items = tuple(menu)
+
+    assert [item.text for item in items] == [
+        "🎤 Auto-detect (Recommended)",
+        "Studio Mic",
+        "- - - -",
+        "Audio Processing",
+    ]
+    assert items[1].checked is True
+    assert items[-1].submenu is not None

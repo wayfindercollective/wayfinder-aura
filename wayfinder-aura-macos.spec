@@ -6,8 +6,9 @@ PyInstaller spec file for Wayfinder Aura — macOS .app bundle
 Build with: pyinstaller wayfinder-aura-macos.spec --clean --noconfirm
 """
 
-import sys
 import os
+import platform
+import sys
 from pathlib import Path
 from datetime import datetime
 
@@ -21,16 +22,44 @@ import re as _re
 _pyproject = (PROJECT_ROOT / 'pyproject.toml').read_text()
 VERSION = _re.search(r'^version = "([^"]+)"', _pyproject, _re.MULTILINE).group(1)
 BUILD_DATE = datetime.now().strftime('%Y-%m-%d')
+TARGET_ARCH = os.environ.get('AURA_MACOS_ARCH', platform.machine()).lower()
+if TARGET_ARCH not in {'arm64', 'x86_64'}:
+    raise ValueError(
+        f"Unsupported macOS architecture {TARGET_ARCH!r}; expected arm64 or x86_64"
+    )
+
+# PyInstaller uses ad-hoc signing when this is unset. Release builds set a
+# Developer ID Application identity through the environment; keeping secrets
+# out of the spec makes the same file safe for local and CI builds.
+CODESIGN_IDENTITY = os.environ.get('MACOS_CODESIGN_IDENTITY') or None
+ENTITLEMENTS_FILE = str(PROJECT_ROOT / 'packaging' / 'macos' / 'entitlements.plist')
+
+# The macOS build helper places pinned, static whisper.cpp executables here.
+# A direct PyInstaller invocation remains useful for UI-only development, while
+# packaging/macos/build.py requires and verifies the complete runtime.
+NATIVE_BIN_DIR = PROJECT_ROOT / 'build' / 'macos-native' / 'bin'
+macos_binaries = []
+for binary_name in (
+    'whisper-cli', 'whisper-server',
+    'llama-simple',
+):
+    binary_path = NATIVE_BIN_DIR / binary_name
+    if binary_path.is_file():
+        macos_binaries.append((str(binary_path), 'bin'))
+hero_renderer = PROJECT_ROOT / 'build' / 'macos-native' / 'lib' / 'libwayfinder_hero.dylib'
+if hero_renderer.is_file():
+    macos_binaries.append((str(hero_renderer), 'lib'))
 
 a = Analysis(
     ['main.py'],
     pathex=[str(PROJECT_ROOT), str(SRC_DIR)],
-    binaries=[],
+    binaries=macos_binaries,
     datas=[
         # Include assets
         ('assets/icon.png', 'assets'),
         ('assets/icon.icns', 'assets'),
         ('assets/icons', 'assets/icons'),
+        ('assets/fonts', 'assets/fonts'),
         # Include the wayfinder package source (needed for overlay subprocess)
         ('src/wayfinder', 'wayfinder'),
         # Include overlay.py at top level of Resources for subprocess access
@@ -57,6 +86,7 @@ a = Analysis(
         'wayfinder.ui.theme',
         'wayfinder.ui.components',
         'wayfinder.ui.overlay',
+        'wayfinder.ui.macos_overlay_metal',
         'wayfinder.hotkeys',
         'wayfinder.hotkeys.pynput_listener',
         'wayfinder.hotkeys.types',
@@ -65,6 +95,7 @@ a = Analysis(
         'wayfinder.utils.gpu_simple',
         'wayfinder.utils.platform',
         'wayfinder.utils.lazy_imports',
+        'wayfinder.utils.macos_lifecycle',
         # CustomTkinter and dependencies
         'customtkinter',
         'PIL',
@@ -98,6 +129,7 @@ a = Analysis(
         'AppKit',
         'Foundation',
         'Cocoa',
+        'Metal',
         # HTTP clients
         'requests',
         'urllib3',
@@ -138,20 +170,6 @@ a = Analysis(
     noarchive=False,
 )
 
-# Remove duplicate entries
-def remove_duplicate_entries(entries):
-    seen = set()
-    unique = []
-    for entry in entries:
-        key = entry[1] if isinstance(entry, tuple) else str(entry)
-        if key not in seen:
-            seen.add(key)
-            unique.append(entry)
-    return unique
-
-a.binaries = remove_duplicate_entries(a.binaries)
-a.datas = remove_duplicate_entries(a.datas)
-
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
@@ -168,9 +186,9 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch='arm64',
-    codesign_identity=None,
-    entitlements_file=None,
+    target_arch=TARGET_ARCH,
+    codesign_identity=CODESIGN_IDENTITY,
+    entitlements_file=ENTITLEMENTS_FILE,
     icon='assets/icon.icns',
 )
 
@@ -198,15 +216,16 @@ app = BUNDLE(
         'CFBundleIdentifier': 'io.wayfindercollective.WayfinderAura',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
+        'LSApplicationCategoryType': 'public.app-category.productivity',
         'NSPrincipalClass': 'NSApplication',
         'NSHighResolutionCapable': True,
-        'LSMinimumSystemVersion': '12.0',
+        # NumPy/SciPy wheels in the locked Mac release stack target macOS 14.
+        # Never advertise an older OS than bundled native extensions can load.
+        'LSMinimumSystemVersion': '14.0',
         'LSBackgroundOnly': False,
         # Privacy permission descriptions (required by macOS)
         'NSMicrophoneUsageDescription':
             'Wayfinder Aura needs microphone access for voice dictation.',
-        'NSAppleEventsUsageDescription':
-            'Wayfinder Aura needs to send keystrokes to paste transcribed text.',
         # Allow the app to work in the background (tray mode)
         'LSUIElement': False,
     },
@@ -216,5 +235,8 @@ print(f"\n{'='*60}")
 print(f"Wayfinder Aura macOS Build")
 print(f"Version: {VERSION}")
 print(f"Build Date: {BUILD_DATE}")
+print(f"Architecture: {TARGET_ARCH}")
+print(f"Signing: {CODESIGN_IDENTITY or 'ad-hoc'}")
+print(f"Bundled native runtime payloads: {len(macos_binaries)}")
 print(f"Output: dist/Wayfinder Aura.app")
 print(f"{'='*60}\n")

@@ -211,7 +211,10 @@ def setup_gpu_environment(config: Optional[dict] = None) -> dict:
     
     # 2. macOS: Metal is used automatically, no Vulkan device selection needed
     if sys.platform == "darwin":
-        print("[GPU] macOS — using Metal acceleration (automatic)")
+        if config and config.get("use_gpu", False):
+            print("[GPU] macOS transcription — Metal enabled")
+        else:
+            print("[GPU] macOS transcription — CPU mode (Metal available when enabled)")
         return env_set
 
     # 3. Linux: Auto-detect discrete Vulkan GPU

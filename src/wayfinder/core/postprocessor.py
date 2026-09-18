@@ -3624,7 +3624,11 @@ def get_backend(config: dict) -> PostProcessorBackend:
     else:
         # Default to llama.cpp - prefer CLI backend if available
         use_cli = config.get("llama_cpp_use_cli", True)
-        llama_binary = os.path.expanduser(config.get("llama_cpp_binary", "~/llama.cpp/build/bin/llama-cli"))
+        from wayfinder.utils.runtime_assets import find_llama_binary
+
+        llama_binary = find_llama_binary(config) or os.path.expanduser(
+            config.get("llama_cpp_binary", "~/llama.cpp/build/bin/llama-cli")
+        )
 
         # Robust to upstream renames (llama-cli -> llama): the CLI backend is
         # usable if the configured binary OR any known sibling exists in its dir.

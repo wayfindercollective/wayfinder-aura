@@ -381,6 +381,7 @@ class AudioDucker:
         # Retained as a compatibility/debugging view for older callers.
         self._original_volumes: dict[int, int] = {}
         self._macos_original_volume: int | None = None
+        self._macos_ducked_volume: int | None = None
         self._is_ducked = False
         self._closed = False
         self._lock = threading.RLock()
@@ -398,6 +399,7 @@ class AudioDucker:
             print("⚠ pactl not available - audio ducking disabled")
         elif self._use_macos:
             print("ℹ Using macOS osascript for audio ducking")
+            self.recovery_result = self._recover_stale_macos_journal()
         else:
             self.recovery_result = self._recover_stale_journal()
 
@@ -486,6 +488,69 @@ class AudioDucker:
         except OSError:
             pass
 
+    def _write_macos_journal(self, original: int, ducked: int) -> None:
+        """Persist master-volume ownership before changing it."""
+        if self._recovery_path is None:
+            return
+        path = self._recovery_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        payload = {
+            "version": 2,
+            "pid": os.getpid(),
+            "macos": {"original": int(original), "ducked": int(ducked)},
+        }
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+
+    def _recover_stale_macos_journal(self) -> DuckingResult:
+        path = self._recovery_path
+        if path is None or not path.exists():
+            return DuckingResult(DuckingStatus.NO_CHANGE)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if payload.get("pid") != os.getpid() and _pid_is_alive(payload.get("pid")):
+                return DuckingResult(DuckingStatus.NO_CHANGE)
+            record = payload.get("macos")
+            if not isinstance(record, dict):
+                return DuckingResult(DuckingStatus.NO_CHANGE)
+            original = max(0, min(100, int(record["original"])))
+            ducked = max(0, min(100, int(record["ducked"])))
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            self._clear_journal()
+            return DuckingResult(DuckingStatus.NO_CHANGE)
+
+        current = _get_macos_volume()
+        if current is None:
+            return DuckingResult(
+                DuckingStatus.ERROR,
+                failed_count=1,
+                message="Could not inspect system volume for crash recovery.",
+            )
+        if current != ducked:
+            # The user changed volume after the crash; their newer value wins.
+            self._clear_journal()
+            return DuckingResult(DuckingStatus.NO_CHANGE, skipped_count=1)
+        if _set_macos_volume(original):
+            self._clear_journal()
+            print(f"🔊 Recovered macOS volume to {original}% after an interrupted session")
+            return DuckingResult(DuckingStatus.RESTORED, changed_count=1)
+        return DuckingResult(
+            DuckingStatus.ERROR,
+            failed_count=1,
+            message="Could not restore system volume after an interrupted session.",
+        )
     def _read_stale_records(self) -> dict[int, dict] | None:
         if self._recovery_path is None or not self._recovery_path.exists():
             return {}
@@ -552,9 +617,15 @@ class AudioDucker:
                 if current is None:
                     return self._remember(DuckingResult(DuckingStatus.ERROR, message="Could not read system volume."))
                 target = round(current * (100 - self._duck_percent) / 100)
+                if target == current:
+                    return self._remember(DuckingResult(DuckingStatus.NO_CHANGE))
                 self._macos_original_volume = current
+                self._macos_ducked_volume = target
+                self._write_macos_journal(current, target)
                 if not _set_macos_volume(target):
                     self._macos_original_volume = None
+                    self._macos_ducked_volume = None
+                    self._clear_journal()
                     return self._remember(DuckingResult(DuckingStatus.ERROR, message="Could not lower system volume."))
                 self._is_ducked = True
                 print(f"🔉 Ducked macOS volume {current}% → {target}%")
@@ -641,9 +712,30 @@ class AudioDucker:
                 return self._remember(DuckingResult(DuckingStatus.NOT_DUCKED))
             if self._use_macos:
                 original = self._macos_original_volume
-                self._macos_original_volume = None
-                self._is_ducked = False
-                if original is not None and _set_macos_volume(original):
+                target = self._macos_ducked_volume
+                current = _get_macos_volume()
+                if original is None or target is None:
+                    self._is_ducked = False
+                    self._clear_journal()
+                    return self._remember(DuckingResult(DuckingStatus.NOT_DUCKED))
+                if current is None:
+                    return self._remember(DuckingResult(
+                        DuckingStatus.ERROR,
+                        failed_count=1,
+                        message="Could not inspect system volume before restoring it.",
+                    ))
+                if current != target:
+                    # User changed volume while recording; never overwrite it.
+                    self._macos_original_volume = None
+                    self._macos_ducked_volume = None
+                    self._is_ducked = False
+                    self._clear_journal()
+                    return self._remember(DuckingResult(DuckingStatus.NO_CHANGE, skipped_count=1))
+                if _set_macos_volume(original):
+                    self._macos_original_volume = None
+                    self._macos_ducked_volume = None
+                    self._is_ducked = False
+                    self._clear_journal()
                     print(f"🔊 Restored macOS volume to {original}%")
                     return self._remember(DuckingResult(DuckingStatus.RESTORED, changed_count=1))
                 return self._remember(DuckingResult(DuckingStatus.ERROR, failed_count=1, message="Could not restore system volume."))

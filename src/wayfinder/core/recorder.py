@@ -1389,6 +1389,18 @@ class AudioRecorder:
 
         return temp_path
 
+    def cancel(self) -> None:
+        """Stop capture and discard buffered audio without producing a WAV."""
+        self._active = False
+        if self.warm_mic is not None:
+            self.warm_mic.release()
+        elif self.stream is not None:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+        self.frames = []
+        self.cleanup()
+
     def get_duration(self) -> float:
         """
         Get the duration of recorded audio in seconds.
@@ -1801,6 +1813,23 @@ class ChunkedRecorder:
                     final_path = self._save_chunk(remaining)
         
         return final_path, self._temp_files.copy()
+
+    def cancel(self) -> None:
+        """Stop capture and delete every partial chunk without finalizing."""
+        self._active = False
+        self._stop_event.set()
+        if self.warm_mic is not None:
+            self.warm_mic.release()
+        elif self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        if self._chunk_thread is not None:
+            self._chunk_thread.join(timeout=2.0)
+            self._chunk_thread = None
+        with self._buffer_lock:
+            self._buffer = []
+        self.cleanup()
 
     def get_duration(self) -> float:
         """Get total duration of recorded audio in seconds."""

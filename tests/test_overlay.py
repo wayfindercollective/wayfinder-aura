@@ -175,6 +175,33 @@ assert str(src_root) in sys.path
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_macos_overlay_selects_accessory_activation_policy(
+    monkeypatch, overlay_module
+):
+    """The renderer helper must not create a second Dock icon on macOS."""
+    import types
+
+    calls = []
+
+    class NativeApp:
+        @staticmethod
+        def setActivationPolicy_(policy):
+            calls.append(policy)
+            return True
+
+    appkit = types.ModuleType("AppKit")
+    appkit.NSApplication = type(
+        "NSApplication",
+        (),
+        {"sharedApplication": staticmethod(lambda: NativeApp())},
+    )
+    appkit.NSApplicationActivationPolicyAccessory = 1
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+
+    assert overlay_module.configure_macos_overlay_as_accessory("darwin") is True
+    assert calls == [1]
+
+
 def test_overlay_signal_handler_does_not_raise_through_qt():
     """SIGTERM during a Qt callback must stop the loop without aborting PyQt."""
     overlay = (
@@ -503,6 +530,44 @@ class TestLiquidWaveRenderer:
         initial_time = renderer.time
         renderer.advance_time(0.016)
         assert renderer.time > initial_time
+
+    def test_render_uses_ten_continuous_paths_not_overlapping_segments(
+        self, overlay_module
+    ):
+        """Four glow/core pairs + one highlight pair = ten draw calls.
+
+        The former 2px segments allocated hundreds of pens per frame and their
+        round caps accumulated alpha at every joint, producing fuzzy fringes.
+        """
+        from PyQt6.QtCore import QRectF
+        from PyQt6.QtGui import QColor
+
+        class Painter:
+            def __init__(self):
+                self.paths = []
+                self.pens = []
+
+            def save(self):
+                pass
+
+            def restore(self):
+                pass
+
+            def setRenderHint(self, *_args):
+                pass
+
+            def setPen(self, pen):
+                self.pens.append(pen)
+
+            def drawPath(self, path):
+                self.paths.append(path)
+
+        painter = Painter()
+        renderer = overlay_module.LiquidWaveRenderer()
+        renderer.render(painter, QRectF(0, 0, 90, 32), QColor("#5B8FD4"))
+
+        assert len(painter.paths) == 10
+        assert len(painter.pens) == 10
 
 
 # =============================================================================

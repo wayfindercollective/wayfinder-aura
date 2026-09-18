@@ -2,7 +2,7 @@
 
 **Press a key. Speak. Your words appear at your cursor.**
 
-Wayfinder Aura is local-first voice dictation for Linux. By default,
+Wayfinder Aura is local-first voice dictation for Linux and macOS. By default,
 transcription runs on *your* machine with whisper.cpp, offline. Text lands in
 any X11/XWayland app — which is most Linux apps today; on Wayland, native
 windows need a from-source/AppImage install with ydotool or wtype (see
@@ -38,7 +38,7 @@ does not regress the Linux app.
 
 | | |
 |---|---|
-| 🎙️ **Hotkey dictation** | Ctrl+Alt+Space to start/stop (configurable), text lands at your cursor in any X11/XWayland app |
+| 🎙️ **Hotkey dictation** | Fn+Space on macOS, Ctrl+Alt+Space elsewhere (configurable); text lands at your cursor |
 | 🔒 **100% local pipeline** | whisper.cpp transcription plus optional llama.cpp cleanup, both on-device |
 | ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
 | 🎨 **Tone presets (Ultra)** | Minimal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
@@ -95,6 +95,17 @@ One-click install from KDE Discover / GNOME Software is on the way. Until
 then, the AppImage above is the fastest path. (Developers can build the
 Flatpak locally from `flatpak/io.wayfindercollective.WayfinderAura.yml` with
 `flatpak-builder`.)
+
+### macOS candidate
+
+The Mac build targets Apple Silicon and macOS 14+. Download the architecture-
+labelled DMG, drag **Wayfinder Aura** into **Applications**, then launch that
+copy. The first-run flow downloads the Base speech model and walks through
+Microphone, Accessibility, and Input Monitoring. Input Monitoring may require
+clicking **+** and selecting `/Applications/Wayfinder Aura.app` manually.
+
+The default shortcuts are **Fn+Space** for dictation and **Fn+Enter** for the
+Ultra style cycle. The stateful menu-bar item is optional under Settings.
 
 ### From source
 
@@ -179,19 +190,21 @@ update options.
 
 ## Configuration
 
-Settings live in the app; the file is `~/.config/wayfinder-aura/config.json`.
+Settings live in the app. Linux stores them at
+`~/.config/wayfinder-aura/config.json`; macOS uses
+`~/Library/Application Support/wayfinder-aura/config.json`.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `hotkey_key` + `hotkey_modifiers` | Ctrl+Alt+Space | Recording toggle |
-| `style_toggle_key` + `style_toggle_modifiers` | Ctrl+Alt+Enter | Style cycle |
+| `hotkey_key` + `hotkey_modifiers` | Fn+Space on macOS; Ctrl+Alt+Space elsewhere | Recording toggle |
+| `style_toggle_key` + `style_toggle_modifiers` | Fn+Enter on macOS; Ctrl+Alt+Enter elsewhere | Style cycle |
 | `audio_device` / `audio_device_name` | auto | Microphone (saved by name — index-proof) |
 | `typing_speed` | instant | instant, fast, normal, slow, very_slow |
 | `post_processing_enabled` | false | Optional local LLM cleanup; existing installs keep their saved choice |
 | `chunked_mode` | Auto for Ultra; Off for Free | Under 30s stays one-shot in Auto; Off and On are selectable |
 | `press_enter_after_dictation` | false | Automatically submits after injection; review terminal/AI text before enabling |
 | `ui_scale` | 1.0 | 0.7–2.5, or Ctrl +/- in app |
-| `start_minimized` | true | Start in system tray |
+| `start_minimized` | false | Start hidden when enabled |
 
 ## Troubleshooting
 
@@ -215,6 +228,7 @@ Settings live in the app; the file is `~/.config/wayfinder-aura/config.json`.
 
 - Run: `python main.py` · Test: `python3 -m pytest tests/ -v`
 - Architecture and contribution notes: [AGENTS.md](AGENTS.md)
+- macOS app/DMG build: [packaging/macos/README.md](packaging/macos/README.md)
 - Packaging and store submission: [SHIPPING.md](SHIPPING.md) and
   [flatpak/BUILDING.md](flatpak/BUILDING.md)
 

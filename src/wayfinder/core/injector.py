@@ -8,7 +8,7 @@ Platform dispatch:
   wtype failure at injection time falls back to ydotool when possible. (A RemoteDesktop-portal
   backend — the universal path — is planned but NOT yet implemented.)
 - Linux/X11 fallback: ydotool if xdotool unavailable
-- macOS: clipboard paste via pbcopy + Cmd-V
+- macOS: native pasteboard snapshot + Cmd-V
 """
 
 import ctypes
@@ -318,35 +318,8 @@ def _probe_unix_socket(path: str, timeout: float = 1.0) -> bool:
 
 
 def _inject_text_macos(text: str) -> None:
-    """
-    Inject text on macOS by writing to clipboard then simulating Cmd+V.
-    This is the most reliable method on macOS — works in any app.
-    """
-    import subprocess
-    import time
-
-    # Write text to clipboard using pbcopy
-    proc = subprocess.run(
-        ["pbcopy"],
-        input=text.encode("utf-8"),
-        capture_output=True,
-        timeout=5,
-    )
-    if proc.returncode != 0:
-        raise InjectionError(f"pbcopy failed: {proc.stderr.decode()}")
-
-    # Small delay to ensure clipboard is ready
-    time.sleep(0.05)
-
-    # Simulate Cmd+V using osascript
-    script = 'tell application "System Events" to keystroke "v" using command down'
-    proc = subprocess.run(
-        ["osascript", "-e", script],
-        capture_output=True,
-        timeout=5,
-    )
-    if proc.returncode != 0:
-        raise InjectionError(f"osascript paste failed: {proc.stderr.decode()}")
+    """Compatibility alias for the native-pasteboard Mac injector."""
+    _inject_text_pyautogui(text, "instant")
 
 
 # Typing speed → pyautogui interval (seconds between keystrokes)
@@ -359,6 +332,78 @@ PYAUTOGUI_INTERVALS = {
 }
 
 
+def _snapshot_macos_pasteboard():
+    """Capture every pasteboard item/type, not just its plain-text projection."""
+    from AppKit import NSPasteboard
+
+    pasteboard = NSPasteboard.generalPasteboard()
+    items = []
+    for item in pasteboard.pasteboardItems() or ():
+        payload = []
+        for type_name in item.types() or ():
+            data = item.dataForType_(type_name)
+            if data is not None:
+                payload.append((str(type_name), bytes(data)))
+        items.append(payload)
+    return pasteboard, items
+
+
+def _write_macos_pasteboard_text(pasteboard, text: str) -> int:
+    from AppKit import NSPasteboardTypeString
+
+    pasteboard.clearContents()
+    if not pasteboard.setString_forType_(text, NSPasteboardTypeString):
+        raise InjectionError("macOS pasteboard refused the transcription text")
+    return int(pasteboard.changeCount())
+
+
+def _restore_macos_pasteboard(pasteboard, items) -> bool:
+    from AppKit import NSPasteboardItem
+    from Foundation import NSData
+
+    restored = []
+    for payload in items:
+        item = NSPasteboardItem.alloc().init()
+        for type_name, raw in payload:
+            data = NSData.dataWithBytes_length_(raw, len(raw))
+            item.setData_forType_(data, type_name)
+        restored.append(item)
+    pasteboard.clearContents()
+    if not restored:
+        return True
+    return bool(pasteboard.writeObjects_(restored))
+
+
+def _wait_for_macos_modifier_release(timeout: float = 2.0) -> bool:
+    """Wait until Command/Option/Control/Shift are physically released."""
+    if sys.platform != "darwin":
+        return True
+    try:
+        from Quartz import (
+            CGEventSourceFlagsState,
+            kCGEventFlagMaskAlternate,
+            kCGEventFlagMaskCommand,
+            kCGEventFlagMaskControl,
+            kCGEventFlagMaskShift,
+            kCGEventSourceStateCombinedSessionState,
+        )
+    except Exception:
+        return True
+    mask = (
+        kCGEventFlagMaskAlternate
+        | kCGEventFlagMaskCommand
+        | kCGEventFlagMaskControl
+        | kCGEventFlagMaskShift
+    )
+    deadline = time.monotonic() + timeout
+    while True:
+        if not (CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState) & mask):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
 def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
     """Inject text on macOS using clipboard paste (Cmd+V).
 
@@ -368,46 +413,41 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
     """
     try:
         import pyautogui
-        import subprocess
     except ImportError:
         raise InjectionError(
             "pyautogui not installed. Install with: pip install pyautogui"
         )
 
+    pasteboard = None
+    snapshot = None
+    injected_change = None
+    paste_succeeded = False
     try:
-        # Save current clipboard contents
-        try:
-            old_clipboard = subprocess.run(
-                ["pbpaste"], capture_output=True, text=True, timeout=5
-            ).stdout
-        except Exception:
-            old_clipboard = None
-
-        # Copy text to clipboard via pbcopy
-        proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
-        proc.communicate(text.encode("utf-8"))
-
-        # Paste with Cmd+V (no sleep needed — proc.communicate() is synchronous)
+        if not _wait_for_macos_modifier_release():
+            raise InjectionError(
+                "Command, Option, Control, or Shift is still held; release it and try again."
+            )
+        pasteboard, snapshot = _snapshot_macos_pasteboard()
+        injected_change = _write_macos_pasteboard_text(pasteboard, text)
         pyautogui.hotkey("command", "v")
-
-        # Restore original clipboard after paste completes
-        if old_clipboard is not None:
-            import time
-            time.sleep(0.1)
-            # Smart restore: only restore if clipboard still contains our injected text
-            # (user may have copied something new during the delay)
+        paste_succeeded = True
+        # Some Electron/WebKit controls consume pasteboard data on a later
+        # event-loop turn. PyAutoGUI also applies its normal post-call pause.
+        time.sleep(0.2)
+    except Exception as exc:
+        raise InjectionError(f"macOS text injection failed: {exc}") from exc
+    finally:
+        if pasteboard is not None and snapshot is not None and injected_change is not None:
             try:
-                current = subprocess.run(
-                    ["pbpaste"], capture_output=True, text=True, timeout=2
-                ).stdout
-                if current == text:
-                    proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
-                    proc.communicate(old_clipboard.encode("utf-8"))
+                # changeCount is the native ownership token. If the user copied
+                # anything after Aura wrote, their new clipboard must win.
+                if int(pasteboard.changeCount()) == injected_change:
+                    _restore_macos_pasteboard(pasteboard, snapshot)
             except Exception:
-                pass  # Best-effort restore
-
-    except Exception as e:
-        raise InjectionError(f"macOS text injection failed: {e}")
+                if not paste_succeeded:
+                    # The injection error remains authoritative; restoration is
+                    # best-effort and must not mask its actionable message.
+                    pass
 
 
 def warmup_clipboard() -> None:
@@ -916,6 +956,10 @@ def press_enter() -> None:
     """
     if sys.platform == "darwin":
         import pyautogui
+        if not _wait_for_macos_modifier_release():
+            raise InjectionError(
+                "Command, Option, Control, or Shift is still held; Enter was not pressed."
+            )
         pyautogui.press("enter")
         return
     if sys.platform == "win32":

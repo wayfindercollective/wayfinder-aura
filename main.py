@@ -38,6 +38,13 @@ src_dir = os.path.join(_base_dir, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
+# macOS has no PR_SET_PDEATHSIG. Long-lived native helpers are launched through
+# this lightweight sentinel so they cannot survive a crash of the owning app.
+if "--child-supervisor" in sys.argv:
+    from wayfinder.utils.child_supervisor import run_from_env
+
+    raise SystemExit(run_from_env())
+
 # Configure certificate trust before any license, catalog, cloud, or model
 # download code can create an HTTP client. This is essential for AppImages:
 # their bundled OpenSSL otherwise searches the build distro's CA paths, which
@@ -56,7 +63,11 @@ def _configure_frozen_fontconfig() -> Path | None:
     font files are inside the bundle.  Configure fontconfig before Tk/PyQt can
     initialize it so dogfood and release artifacts render identically.
     """
-    if not getattr(sys, "frozen", False) or os.environ.get("FONTCONFIG_FILE"):
+    if (
+        not sys.platform.startswith("linux")
+        or not getattr(sys, "frozen", False)
+        or os.environ.get("FONTCONFIG_FILE")
+    ):
         return None
 
     bundle_root = Path(getattr(sys, "_MEIPASS", _base_dir))
@@ -88,6 +99,20 @@ def _configure_frozen_fontconfig() -> Path | None:
 
 
 _configure_frozen_fontconfig()
+
+# A font file inside a macOS bundle is not automatically visible to Aqua Tk.
+# Register product faces before any renderer self-test or UI root is created.
+if sys.platform == "darwin":
+    try:
+        from wayfinder.utils.macos_fonts import register_bundled_macos_fonts
+
+        _REGISTERED_MACOS_FONTS = register_bundled_macos_fonts()
+    except Exception as _font_registration_error:
+        _REGISTERED_MACOS_FONTS = []
+        print(
+            f"[Fonts] Could not register bundled macOS fonts: {_font_registration_error}",
+            file=sys.stderr,
+        )
 
 
 # Packaged network release probe. It validates the same urllib + CA path used
@@ -274,8 +299,82 @@ if "--app-import-self-test" in sys.argv:
         sys.exit(1)
 
 
-# Scaling cache file location
-SCALING_CACHE_FILE = Path.home() / ".config" / "wayfinder-aura" / "display_scaling.json"
+# Confirm that native executables shipped beside the frozen application are
+# discoverable through the same resolver used by transcription and cleanup.
+if "--runtime-assets-self-test" in sys.argv:
+    try:
+        from wayfinder.utils.runtime_assets import find_llama_binary, find_whisper_binary
+
+        _whisper_binary = find_whisper_binary()
+        _llama_binary = find_llama_binary()
+        if not _whisper_binary:
+            raise RuntimeError("bundled whisper-cli was not resolved")
+        if not _llama_binary:
+            raise RuntimeError("bundled llama.cpp CLI was not resolved")
+        print(
+            "RUNTIME_ASSETS_SELF_TEST_OK "
+            f"whisper={_whisper_binary!r} llama={_llama_binary!r}",
+            flush=True,
+        )
+        sys.exit(0)
+    except Exception as _runtime_assets_error:
+        print(
+            "RUNTIME_ASSETS_SELF_TEST_FAILED "
+            f"{_runtime_assets_error.__class__.__name__}: {_runtime_assets_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+
+if "--macos-native-renderers-self-test" in sys.argv:
+    try:
+        import ctypes
+        from wayfinder.ui import macos_hero_metal as _hero_metal
+        from wayfinder.ui import macos_overlay_metal as _overlay_metal
+
+        _native_path = next(
+            path for path in _hero_metal._native_library_candidates() if path.is_file()
+        )
+        _native_lib = ctypes.CDLL(str(_native_path))
+        for _symbol in (
+            "wf_hero_create",
+            "wf_hero_destroy",
+            "wf_overlay_create",
+            "wf_overlay_destroy",
+        ):
+            getattr(_native_lib, _symbol)
+        _device = _hero_metal._default_device()
+        if _device is None:
+            raise RuntimeError("Metal device unavailable")
+        for _source, _function in (
+            (_hero_metal._SHADER, "hero_wave"),
+            (_overlay_metal._SHADER, "overlay_wave"),
+        ):
+            _result = _device.newLibraryWithSource_options_error_(_source, None, None)
+            _library, _error = _result if isinstance(_result, tuple) else (_result, None)
+            if _library is None or _library.newFunctionWithName_(_function) is None:
+                raise RuntimeError(f"Metal shader {_function} failed: {_error}")
+        print(
+            f"MACOS_NATIVE_RENDERERS_SELF_TEST_OK library={str(_native_path)!r}",
+            flush=True,
+        )
+        sys.exit(0)
+    except Exception as _native_renderer_error:
+        print(
+            "MACOS_NATIVE_RENDERERS_SELF_TEST_FAILED "
+            f"{_native_renderer_error.__class__.__name__}: {_native_renderer_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+
+# Scaling cache follows the platform directory contract. In particular, a
+# macOS build must not create a Linux-style ~/.config directory.
+from wayfinder.utils.platform import get_cache_dir
+
+SCALING_CACHE_FILE = get_cache_dir() / "display_scaling.json"
 
 
 def load_cached_scaling() -> float:
@@ -357,8 +456,9 @@ _INSTANCE_LOCK_FD = None  # keep open for process lifetime
 
 
 def _instance_lock_path() -> Path:
-    if sys.platform == "win32":
-        # Windows has no XDG_RUNTIME_DIR; keep the lock in the per-user cache dir.
+    if sys.platform in {"win32", "darwin"}:
+        # Windows/macOS have no XDG_RUNTIME_DIR; keep the lock in the
+        # platform-native per-user cache directory.
         from wayfinder.utils.platform import get_cache_dir
         return get_cache_dir() / "instance.lock"
     runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
@@ -606,6 +706,20 @@ def main():
     # flock-based: if another instance holds the lock, signal show and exit
     if _signal_existing_instance():
         sys.exit(0)
+
+    # Delete audio remnants left by a prior crash before any recorder can
+    # create files for this process. The legacy wayfinder_main.py entry point
+    # did this, but the real packaged entry point is this module.
+    try:
+        from wayfinder.utils.fs_security import (
+            cleanup_app_temp_dir,
+            migrate_legacy_macos_cache,
+        )
+
+        migrate_legacy_macos_cache()
+        cleanup_app_temp_dir()
+    except Exception:
+        pass
     
     # === GPU SETUP (do this FIRST, before any imports that might use GPU) ===
     # This sets GGML_VK_VISIBLE_DEVICES once, and all subprocesses inherit it
@@ -614,7 +728,53 @@ def main():
         from wayfinder.config import enforce_license_config, load_config, save_config
         from wayfinder.license import get_feature_gate
         config = load_config()
-        _entitlement_repairs = enforce_license_config(config, get_feature_gate())
+        if sys.platform == "darwin":
+            try:
+                from wayfinder.utils.macos_permissions import (
+                    MacOSInputPermissionStatus,
+                    macos_install_location_ready,
+                    request_startup_input_permissions,
+                )
+
+                # Request the grants in sequence. macOS may require Aura to be
+                # added manually to Input Monitoring; the in-app banner names
+                # that fallback explicitly.
+                if not macos_install_location_ready():
+                    print(
+                        "[Permissions] Move Wayfinder Aura to /Applications before "
+                        "granting macOS privacy permissions.",
+                        flush=True,
+                    )
+                    _permission_status = MacOSInputPermissionStatus(None, None, False)
+                else:
+                    _permission_status = request_startup_input_permissions(config)
+                _accessibility_trusted = _permission_status.accessibility
+                _input_monitoring_trusted = _permission_status.input_monitoring
+                if _permission_status.config_changed:
+                    save_config(config)
+                if _accessibility_trusted is False or _input_monitoring_trusted is False:
+                    print(
+                        "[Permissions] Allow Wayfinder Aura in System Settings > "
+                        "Privacy & Security > Accessibility and Input Monitoring, "
+                        "then restart the app.",
+                        flush=True,
+                    )
+                elif _accessibility_trusted is None or _input_monitoring_trusted is None:
+                    print(
+                        "[Permissions] Could not query macOS input permissions; "
+                        "global hotkeys and paste may require manual approval.",
+                        flush=True,
+                    )
+            except Exception as _permission_error:
+                print(
+                    f"[Permissions] macOS permission check failed: {_permission_error}",
+                    flush=True,
+                )
+        # Startup is offline-first. A stale-token refresh happens after first
+        # paint so a disconnected Mac never bounces for ten seconds before UI.
+        _entitlement_repairs = enforce_license_config(
+            config, get_feature_gate(refresh_online=False)
+        )
         if _entitlement_repairs:
             save_config(config)
             print(
@@ -646,6 +806,13 @@ def main():
         ctk.set_default_color_theme("dark-blue")
         
         app = WayfinderApp()
+
+        if sys.platform == "darwin":
+            def _graceful_macos_signal(_signum, _frame):
+                app.quit_app()
+
+            signal.signal(signal.SIGTERM, _graceful_macos_signal)
+            signal.signal(signal.SIGINT, _graceful_macos_signal)
         
         # ─── First-run flow: dependency setup (inline pane) → welcome tour ───
         # The dependency setup is now an IN-WINDOW pane (src/wayfinder/ui/setup_pane.py)
@@ -662,16 +829,32 @@ def main():
             from wayfinder.ui.setup_pane import first_run_plan, should_chain_welcome
 
             frozen = getattr(sys, 'frozen', False)
+            frozen_runtime_ready = True
             if frozen:
-                # Keep the flag in WayfinderApp's live config so later save_config()
-                # calls persist it (frozen builds never run the setup pane).
-                app.config["setup_completed"] = True
+                # Native dependencies are bundled, but speech-model weights are
+                # intentionally downloaded after install. Do not send a clean
+                # Mac into the live-dictation Welcome step until one exists.
+                frozen_runtime_ready = app._has_usable_whisper_model()
+                # Keep a genuinely clean install marked incomplete until the
+                # required model exists. Existing packaged users who already
+                # completed setup retain their marker if a model is later moved.
+                if frozen_runtime_ready:
+                    app.config["setup_completed"] = True
+                save_config(app.config)
 
             plan = first_run_plan(
                 setup_completed=app.config.get("setup_completed", False),
                 welcome_completed=app.config.get("welcome_completed", False),
                 frozen=frozen,
             )
+            if frozen and not frozen_runtime_ready:
+                # The packaged onboarding owns the required free Base-model
+                # download as its first step. A user who previously skipped the
+                # tour still gets the standalone model panel on later launches.
+                plan = {
+                    "show_setup": False,
+                    "show_welcome": not app.config.get("welcome_completed", False),
+                }
 
             def _after_setup(result: bool) -> None:
                 # Preserves the old wizard.result logging, then hands off to the
@@ -681,7 +864,13 @@ def main():
                 if should_chain_welcome(app.config.get("welcome_completed", False)):
                     app.after(400, app.show_welcome_pane)
 
-            if plan["show_setup"]:
+            if (
+                frozen
+                and not frozen_runtime_ready
+                and app.config.get("welcome_completed", False)
+            ):
+                app.after(500, app.show_first_run_model_setup)
+            elif plan["show_setup"]:
                 # Delayed so the window is mapped before the pane is placed over
                 # the tab content (mirrors the welcome-pane trigger).
                 app.after(300, lambda: app.show_setup_pane(on_done=_after_setup))
@@ -709,6 +898,10 @@ def main():
         schedule_scaling_detection(app)
 
         app.mainloop()
+        # Aqua's application menu can end the Tcl loop without delivering a
+        # window-close protocol on older Tk builds. Keep cleanup authoritative.
+        if sys.platform == "darwin":
+            app.quit_app()
         
     except Exception as e:
         error_msg = str(e)
