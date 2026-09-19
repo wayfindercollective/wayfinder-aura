@@ -12758,6 +12758,9 @@ class WayfinderApp(ctk.CTk):
             except ImportError:
                 self.log("⚠️ pyautogui not installed - text injection won't work")
                 self.log("💡 Install: pip install pyautogui")
+        elif sys.platform == "win32":
+            # Native Win32 adapter (clipboard paste + SendInput); no ydotool on Windows.
+            self.log("✓ Text injection: Windows (clipboard paste + SendInput)")
         else:
             # Package-manager-aware hints — the old hardcoded `dnf`/`ydotoold` strings were
             # Fedora-only and broke on Arch/SteamOS, where the unit is the USER-level
@@ -12897,6 +12900,9 @@ class WayfinderApp(ctk.CTk):
         - With True before sleep
         - With False after wake-up
         """
+        if sys.platform == "win32":
+            # login1 PrepareForSleep is a Linux D-Bus signal; nothing to listen for on Windows.
+            return
         if not DBUS_AVAILABLE:
             self.log("⚠️ D-Bus not available - overlay won't auto-recover after sleep")
             return
