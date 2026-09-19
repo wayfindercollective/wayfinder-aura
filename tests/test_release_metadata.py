@@ -754,7 +754,7 @@ def test_storefront_readiness_checker_rejects_unproven_checkout_payload():
     )
 
     assert any("Wayfinder Aura" in error for error in errors)
-    assert any("Pay with card" in error for error in errors)
+    assert any("Card details" in error for error in errors)
     assert any("$29.99" in error for error in errors)
 
 
@@ -774,7 +774,7 @@ def test_storefront_readiness_checker_accepts_client_rendered_checkout_markers()
         defaults["premium_info_url"]: (
             "Wayfinder Aura\nPress a key. Speak. Your words land at your cursor."
         ),
-        defaults["premium_url"]: "Wayfinder Aura\nOne-time license\nPay with card\n$29.99 launch",
+        defaults["premium_url"]: "Wayfinder Aura\nOne-time license\nCard details\n$29.99 launch",
     }
 
     errors = checker.live_readiness_errors(
@@ -801,7 +801,7 @@ def test_storefront_readiness_checker_rejects_free_gpu_claim():
             "GPU support on the lighter models"
         ),
         defaults["premium_url"]: (
-            "Wayfinder Aura One-time license Pay with card $29.99"
+            "Wayfinder Aura One-time license Card details $29.99"
         ),
     }
 
