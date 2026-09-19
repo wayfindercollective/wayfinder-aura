@@ -1,0 +1,57 @@
+name: Windows Candidate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "packaging/windows/**"
+      - ".github/workflows/windows-build.yml"
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # UTF-8 mode: the runner console defaults to cp1252, which can't encode the
+  # ✓ glyphs some checks print.
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  build:
+    name: Build unsigned Windows candidate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+
+      - name: Install application and build dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Run Windows tests
+        run: python -m pytest tests/ -q --tb=short -m "not ui and not slow and not network and not perf"
+
+      - name: Run native Windows contract check
+        run: python scripts/platform_smoke.py --expected windows
+
+      - name: Build app bundle + installer
+        run: python packaging/windows/build.py --require-installer
+
+      - name: Upload candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: wayfinder-aura-windows-x64
+          path: dist/installer/WayfinderAura-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 7

@@ -9,11 +9,13 @@ installer.iss to wrap that into dist/installer/WayfinderAura-Setup-<version>.exe
 
 Windows-only; it never touches the Linux AppImage/Flatpak or macOS .app builds.
 Prerequisites: the app's venv with `pyinstaller` installed, and (for the
-installer step) Inno Setup 6. If ISCC isn't found, the bundle is still produced.
+installer step) Inno Setup 6. If ISCC isn't found, the bundle is still produced
+unless --require-installer is passed (CI uses it so a missing ISCC fails loudly).
 """
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,7 +38,16 @@ def _find_iscc() -> Path | None:
     return Path(found) if found else None
 
 
+def _project_version() -> str:
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    if match is None:
+        raise SystemExit("could not read version from pyproject.toml")
+    return match.group(1)
+
+
 def main() -> int:
+    require_installer = "--require-installer" in sys.argv[1:]
     if sys.platform != "win32":
         print("The Windows installer build runs on Windows only.")
         return 1
@@ -59,13 +70,20 @@ def main() -> int:
 
     iscc = _find_iscc()
     if iscc is None:
+        if require_installer:
+            print("Inno Setup (ISCC.exe) not found and --require-installer was passed.")
+            return 1
         print("\nInno Setup (ISCC.exe) not found — the app bundle is ready at "
               "dist/Wayfinder Aura/. Install Inno Setup 6 to build the installer, "
               "or run: winget install JRSoftware.InnoSetup")
         return 0
 
     print("== Inno Setup: building the installer ==")
-    subprocess.run([str(iscc), str(HERE / "installer.iss")], cwd=str(ROOT), check=True)
+    version = _project_version()
+    subprocess.run(
+        [str(iscc), f"/DMyAppVersion={version}", str(HERE / "installer.iss")],
+        cwd=str(ROOT), check=True,
+    )
     print("\nDone → dist/installer/WayfinderAura-Setup-*.exe")
     return 0
 

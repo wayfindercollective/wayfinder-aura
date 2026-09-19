@@ -40,8 +40,8 @@ A good report gets a fast fix. Please include:
 
 1. What you did, what you expected, and what actually happened.
 2. Your platform: Linux distro + desktop (KDE/GNOME), or **Steam Deck**
-   (Desktop Mode vs Game Mode).
-3. How you installed it: Flatpak bundle, Flathub, or from source.
+   (Desktop Mode vs Game Mode), or Windows version.
+3. How you installed it: Windows installer, Flatpak bundle, Flathub, or from source.
 4. The relevant **logs** (below).
 
 ### Logs to attach
@@ -50,6 +50,12 @@ A good report gets a fast fix. Please include:
 
 ```
 ~/.cache/wayfinder-aura/activity.log
+```
+
+On Windows the log is:
+
+```
+%USERPROFILE%\.cache\wayfinder-aura\activity.log
 ```
 
 > Note: this log may contain snippets of your transcribed text. Skim it and
@@ -92,6 +98,10 @@ Try these before filing an issue — they cover the most common problems.
 
 ### Hotkey does nothing
 
+- **Windows:** the default is **Ctrl+Alt+Space**. If another app already owns
+  that shortcut, pick a different one in Settings. Hotkeys and typing do not
+  reach apps running as Administrator unless Aura is also elevated (a Windows
+  security boundary).
 - **Flatpak installs:** the app registers its hotkeys through the
   GlobalShortcuts portal. Approve the prompt from your desktop, or bind them
   in **System Settings → Shortcuts**. The defaults are **Ctrl+Alt+Space**

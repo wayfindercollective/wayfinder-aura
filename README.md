@@ -10,8 +10,7 @@ Troubleshooting).
 In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
-Linux is the current production release. macOS is an active port and Windows
-is planned; contributors should follow the
+Linux is the current production release. macOS and Windows are active ports; contributors should follow the
 [platform development contract](docs/PLATFORM-DEVELOPMENT.md) so platform work
 does not regress the Linux app.
 
@@ -95,6 +94,18 @@ One-click install from KDE Discover / GNOME Software is on the way. Until
 then, the AppImage above is the fastest path. (Developers can build the
 Flatpak locally from `flatpak/io.wayfindercollective.WayfinderAura.yml` with
 `flatpak-builder`.)
+
+### Windows candidate
+
+The Windows build targets 64-bit Windows 10/11. Run
+`WayfinderAura-Setup-<version>.exe`: it installs per-user (no admin prompt) and
+adds a Start Menu shortcut. The installer is not code-signed yet, so SmartScreen
+may say "Windows protected your PC" — click **More info** → **Run anyway**. The
+first launch downloads the whisper engine and the Base speech model.
+
+The default shortcuts are **Ctrl+Alt+Space** for dictation and
+**Ctrl+Alt+Enter** for the Ultra style cycle. Uninstall from **Settings → Apps**;
+your settings, models, and license are kept.
 
 ### From source
 
@@ -215,6 +226,7 @@ Settings live in the app; the file is `~/.config/wayfinder-aura/config.json`.
 
 - Run: `python main.py` · Test: `python3 -m pytest tests/ -v`
 - Architecture and contribution notes: [AGENTS.md](AGENTS.md)
+- Windows installer build: [packaging/windows/README.md](packaging/windows/README.md)
 - Packaging and store submission: [SHIPPING.md](SHIPPING.md) and
   [flatpak/BUILDING.md](flatpak/BUILDING.md)
 

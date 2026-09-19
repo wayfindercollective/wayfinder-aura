@@ -26,6 +26,14 @@ Prerequisites:
   (`winget install JRSoftware.InnoSetup`). If it's absent, step 1 still produces
   the runnable bundle.
 
+## CI candidate
+
+The **Windows Candidate** workflow (`.github/workflows/windows-build.yml`) runs
+the Windows suite, the platform smoke check, and this build on `windows-latest`,
+then uploads the unsigned installer as the `wayfinder-aura-windows-x64`
+artifact (kept 7 days). Run it from **Actions → Windows Candidate → Run
+workflow**; it also runs on PRs that touch `packaging/windows/`.
+
 ## What the installer does
 
 - **Per-user install** to `%LOCALAPPDATA%\Programs\Wayfinder Aura` — no admin/UAC.
