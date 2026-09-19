@@ -176,7 +176,9 @@ def live_readiness_errors(
         ),
         "premium_url": (
             checkout,
-            ("Wayfinder Aura", "One-time license", "Pay with card", launch_price),
+            # Live checkout (2026-09): the pay button now shows the total ("Pay $30.89"),
+            # so the Stripe form heading marks a rendered payment form instead.
+            ("Wayfinder Aura", "One-time license", "Card details", launch_price),
         ),
     }
     forbidden_markers = {
