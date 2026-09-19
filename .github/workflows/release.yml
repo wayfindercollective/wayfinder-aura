@@ -9,7 +9,7 @@ on:
       artifacts:
         description: "Artifacts to build"
         type: choice
-        options: [appimage, hosted-flatpak, all]
+        options: [appimage, hosted-flatpak, windows, all]
         default: appimage
 
 concurrency:
@@ -286,11 +286,17 @@ jobs:
     with:
       source_sha: ${{ github.sha }}
 
+  build-windows:
+    name: Build (Windows)
+    needs: [quality, release-readiness]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'windows' || inputs.artifacts == 'all'))
+    uses: ./.github/workflows/windows-build.yml
+
   # Release job (only on tags)
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [quality, release-readiness, build-appimage, build-flatpak]
+    needs: [quality, release-readiness, build-appimage, build-flatpak, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -309,6 +315,12 @@ jobs:
           name: wayfinder-aura-flatpak
           path: dist/
 
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: wayfinder-aura-windows-x64
+          path: dist/
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
@@ -316,6 +328,7 @@ jobs:
             dist/Wayfinder_Aura-*.AppImage
             dist/Wayfinder_Aura-*.AppImage.zsync
             dist/io.wayfindercollective.WayfinderAura.flatpak
+            dist/WayfinderAura-Setup-*.exe
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}

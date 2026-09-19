@@ -11,10 +11,14 @@ and tests drift, so they are not the development model for this project.
 |---|---|---|
 | Linux | Production baseline | AppImage and Flatpak behavior must not regress |
 | macOS | Active port | Source and bundle work may proceed behind macOS-specific branches |
-| Windows | Active port | Unsigned installer candidates are built by the Windows Candidate workflow; no signed release yet |
+| Windows | Public (unsigned) | Installer attached to tagged releases; SmartScreen warning disclosed until code signing |
 
-Do not advertise macOS or Windows as generally available until their manual
-release checklist has been completed on signed artifacts.
+Do not advertise macOS as generally available until its manual release
+checklist has been completed on signed artifacts.
+
+Windows ships unsigned by owner decision (2026-09-19), with the SmartScreen
+warning disclosed. Code signing remains a follow-up. The manual Windows
+checklist below is still required on the exact release artifact before distribution.
 
 ## Code ownership boundaries
 
@@ -95,9 +99,9 @@ fallback that types into an unknown window.
 
 ## Windows port checklist
 
-Windows is an active port with an unsigned installer candidate, not a signed release. A Windows developer
-should begin by adding explicit adapters and packaging, not by widening Linux
-or macOS conditionals until they happen to run.
+Windows ships a public unsigned installer. Windows development must use explicit
+adapters and packaging, not widen Linux or macOS conditionals until they happen
+to run. Complete this manual checklist on the exact release artifact.
 
 - Add a Windows text-injection adapter that supports Unicode, preserves the
   clipboard when paste is used, verifies modifier release, and fails closed if
@@ -110,9 +114,9 @@ or macOS conditionals until they happen to run.
   Bluetooth transitions, and audio duck/restore behavior.
 - Confirm overlay/tray behavior across DPI scaling, multiple monitors, virtual
   desktops, fullscreen applications, and taskbar positions.
-- Build an installer in a new `packaging/windows/` boundary. Verify upgrades,
-  uninstall, code signing, SmartScreen reputation expectations, and that no
-  Linux/macOS artifacts are packaged.
+- Build the installer in the `packaging/windows/` boundary. Verify upgrades,
+  uninstall, the unsigned SmartScreen warning disclosure (until code signing),
+  and that no Linux/macOS artifacts are packaged.
 - Run the complete shared suite plus native Windows adapter tests on the exact
   artifact intended for release.
 

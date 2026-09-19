@@ -27,6 +27,17 @@ if sys.platform == "darwin":
     except (OSError, ValueError):
         pass  # Already in a signal handler context or SIGTRAP not available
 
+# Windows: an inherited console or pipe uses the legacy code page (cp1252), so
+# the app's emoji status prints raise UnicodeEncodeError and kill startup.
+# Replace unencodable characters instead of crashing.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
+
 
 # Ensure the src directory is in the path for package imports
 if getattr(sys, 'frozen', False):
@@ -245,6 +256,35 @@ if "--ui-renderer-self-test" in sys.argv:
         print(
             "UI_RENDERER_SELF_TEST_FAILED "
             f"{_renderer_error.__class__.__name__}: {_renderer_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+
+# Probe the bundled local-cleanup engine before Tk or single-instance locking.
+# Manual acceptance can also exercise inference with an already-downloaded GGUF.
+if "--llm-engine-self-test" in sys.argv:
+    try:
+        import llama_cpp
+
+        llama_cpp.llama_print_system_info()
+        _llm_test_model = os.environ.get("WAYFINDER_LLM_SELFTEST_MODEL")
+        if _llm_test_model:
+            # llama_cpp.Llama is not a context manager in the pinned 0.3.x wheel.
+            _llm = llama_cpp.Llama(model_path=_llm_test_model, n_ctx=512, verbose=False)
+            try:
+                _llm_result = _llm.create_completion(prompt="The capital of France is", max_tokens=8)
+            finally:
+                _llm.close()
+            if not _llm_result["choices"][0]["text"].strip():
+                raise RuntimeError("LLM engine returned empty completion text")
+        print("LLM_ENGINE_SELF_TEST_OK", flush=True)
+        sys.exit(0)
+    except Exception as _llm_error:
+        print(
+            "LLM_ENGINE_SELF_TEST_FAILED "
+            f"{_llm_error.__class__.__name__}: {_llm_error}",
             file=sys.stderr,
             flush=True,
         )
