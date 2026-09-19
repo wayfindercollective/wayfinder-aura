@@ -11,7 +11,7 @@ and tests drift, so they are not the development model for this project.
 |---|---|---|
 | Linux | Production baseline | AppImage and Flatpak behavior must not regress |
 | macOS | Active port | Source and bundle work may proceed behind macOS-specific branches |
-| Windows | Planned | Import/path contracts are checked; no supported release yet |
+| Windows | Active port | Unsigned installer candidates are built by the Windows Candidate workflow; no signed release yet |
 
 Do not advertise macOS or Windows as generally available until their manual
 release checklist has been completed on signed artifacts.
@@ -95,7 +95,7 @@ fallback that types into an unknown window.
 
 ## Windows port checklist
 
-Windows is a planned target, not an implemented release. A Windows developer
+Windows is an active port with an unsigned installer candidate, not a signed release. A Windows developer
 should begin by adding explicit adapters and packaging, not by widening Linux
 or macOS conditionals until they happen to run.
 

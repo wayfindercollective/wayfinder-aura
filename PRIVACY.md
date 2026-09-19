@@ -46,8 +46,9 @@ transcription or cleanup service.
 ## Secrets stored on your machine
 
 Your settings — including any cloud API keys — live in
-`~/.config/wayfinder-aura/config.json`. Your license token (if you buy Ultra)
-lives in `~/.config/wayfinder-aura/license.json`.
+`~/.config/wayfinder-aura/config.json` (on Windows,
+`%APPDATA%\wayfinder-aura\config.json`). Your license token (if you buy Ultra)
+lives beside it as `license.json`.
 
 These files are stored **in plaintext**, but both are written with file
 permissions `0600` (`os.chmod(..., 0o600)`), meaning only your user account can
