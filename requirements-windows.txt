@@ -17,4 +17,5 @@
 
 # Local LLM post-processing (dictation cleanup) - prebuilt Windows CPU wheel.
 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-llama-cpp-python>=0.3.0
+--only-binary=llama-cpp-python
+llama-cpp-python==0.3.35

@@ -10,7 +10,7 @@ Troubleshooting).
 In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
-Linux is the current production release. macOS and Windows are active ports; contributors should follow the
+Linux and Windows are released; macOS is an active port. Contributors should follow the
 [platform development contract](docs/PLATFORM-DEVELOPMENT.md) so platform work
 does not regress the Linux app.
 
@@ -88,6 +88,16 @@ Keys activate online once and keep working offline.
 Works on Linux distributions from 2022 onward — Ubuntu 22.04+, Debian 12+,
 Fedora 35+, Bazzite, and the Steam Deck. Wayland and X11.
 
+**[Download for Windows](https://github.com/wayfindercollective/wayfinder-aura/releases/latest)** (64-bit Windows 10/11):
+
+1. Download `WayfinderAura-Setup-<version>.exe` from the latest release.
+2. Run the installer. If SmartScreen says "Windows protected your PC", choose
+   **More info** → **Run anyway**; the installer is currently unsigned.
+3. Complete the per-user install (no admin prompt), then launch from the Start
+   Menu and follow the prompt to download a speech model.
+
+Windows is CPU-only for now; GPU acceleration is Linux-only.
+
 ### Flathub (coming soon)
 
 One-click install from KDE Discover / GNOME Software is on the way. Until
@@ -95,13 +105,11 @@ then, the AppImage above is the fastest path. (Developers can build the
 Flatpak locally from `flatpak/io.wayfindercollective.WayfinderAura.yml` with
 `flatpak-builder`.)
 
-### Windows candidate
+### Windows
 
-The Windows build targets 64-bit Windows 10/11. Run
-`WayfinderAura-Setup-<version>.exe`: it installs per-user (no admin prompt) and
-adds a Start Menu shortcut. The installer is not code-signed yet, so SmartScreen
-may say "Windows protected your PC" — click **More info** → **Run anyway**. The
-first launch downloads the whisper engine and the Base speech model.
+Install with the [Windows download](#download-recommended) above. The installer
+adds a Start Menu shortcut. The whisper engine and the local cleanup engine are
+bundled; the app prompts you to download a speech model on first launch.
 
 The default shortcuts are **Ctrl+Alt+Space** for dictation and
 **Ctrl+Alt+Enter** for the Ultra style cycle. Uninstall from **Settings → Apps**;

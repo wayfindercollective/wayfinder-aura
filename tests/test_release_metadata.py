@@ -94,6 +94,20 @@ def _workflow_job_body(name: str) -> str:
     return match.group("body")
 
 
+def test_windows_release_build_is_gated_and_attached():
+    build = _workflow_job_body("build-windows")
+    release = _workflow_job_body("release")
+
+    assert "needs: [quality, release-readiness]" in build
+    assert "uses: ./.github/workflows/windows-build.yml" in build
+    assert "startsWith(github.ref, 'refs/tags/v')" in build
+    assert "inputs.artifacts == 'windows'" in build
+    assert "inputs.artifacts == 'all'" in build
+    assert "needs: [quality, release-readiness, build-appimage, build-flatpak, build-windows]" in release
+    assert "name: wayfinder-aura-windows-x64\n          path: dist/" in release
+    assert "dist/WayfinderAura-Setup-*.exe" in release
+
+
 def test_appimage_metadata_copies_authoritative_desktop_and_metainfo():
     script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
     metainfo = ET.parse(FLATPAK_METAINFO).getroot()
