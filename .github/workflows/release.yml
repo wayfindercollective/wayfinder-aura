@@ -286,6 +286,11 @@ jobs:
     with:
       source_sha: ${{ github.sha }}
 
+  # Windows builds run with the release gates, but the installer is NOT attached
+  # to the public release: owner decision (2026-09-21) keeps Windows internal
+  # until it is fully tested and signed off. The build uploads an artifact the
+  # team can install from. Re-attaching lives on
+  # release/windows-public-pending-signoff.
   build-windows:
     name: Build (Windows)
     needs: [quality, release-readiness]
@@ -296,7 +301,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [quality, release-readiness, build-appimage, build-flatpak, build-windows]
+    needs: [quality, release-readiness, build-appimage, build-flatpak]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -315,12 +320,6 @@ jobs:
           name: wayfinder-aura-flatpak
           path: dist/
 
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: wayfinder-aura-windows-x64
-          path: dist/
-
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
@@ -328,7 +327,6 @@ jobs:
             dist/Wayfinder_Aura-*.AppImage
             dist/Wayfinder_Aura-*.AppImage.zsync
             dist/io.wayfindercollective.WayfinderAura.flatpak
-            dist/WayfinderAura-Setup-*.exe
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}

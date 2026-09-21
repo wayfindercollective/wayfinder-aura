@@ -43,10 +43,11 @@ artifact (kept 7 days). Run it from **Actions → Windows Candidate → Run
 workflow**; it also runs on every PR targeting `main`.
 
 The Release workflow reuses this build after quality and release-readiness
-checks. Tagged releases attach `WayfinderAura-Setup-<version>.exe` to
-[GitHub Releases](https://github.com/wayfindercollective/wayfinder-aura/releases/latest).
-Dispatch Release with `artifacts: windows` to build a gated candidate without
-publishing. Manual Windows acceptance on the exact installer remains required
+checks, but the installer is **not attached to public releases**: Windows stays
+internal until testing is complete and the owner signs off (2026-09-21). Team
+members install from the workflow artifact. Dispatch Release with
+`artifacts: windows` for a fully gated candidate. The re-attach change is parked
+on `release/windows-public-pending-signoff`. Manual Windows acceptance on the exact installer remains required
 by [the platform contract](../../docs/PLATFORM-DEVELOPMENT.md).
 
 ## Packaged LLM engine self-test

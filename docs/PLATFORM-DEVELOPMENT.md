@@ -11,14 +11,12 @@ and tests drift, so they are not the development model for this project.
 |---|---|---|
 | Linux | Production baseline | AppImage and Flatpak behavior must not regress |
 | macOS | Active port | Source and bundle work may proceed behind macOS-specific branches |
-| Windows | Public (unsigned) | Installer attached to tagged releases; SmartScreen warning disclosed until code signing |
+| Windows | Internal candidate | Installer built and smoke-tested in CI; not attached to public releases until sign-off |
 
-Do not advertise macOS as generally available until its manual release
-checklist has been completed on signed artifacts.
-
-Windows ships unsigned by owner decision (2026-09-19), with the SmartScreen
-warning disclosed. Code signing remains a follow-up. The manual Windows
-checklist below is still required on the exact release artifact before distribution.
+Do not advertise macOS or Windows as generally available until their manual
+release checklist has been completed and the owner signs off (decision
+2026-09-21: Windows stays internal until then, and is published to neither the
+releases page nor the storefront).
 
 ## Code ownership boundaries
 
@@ -99,9 +97,10 @@ fallback that types into an unknown window.
 
 ## Windows port checklist
 
-Windows ships a public unsigned installer. Windows development must use explicit
-adapters and packaging, not widen Linux or macOS conditionals until they happen
-to run. Complete this manual checklist on the exact release artifact.
+Windows has a working, CI-tested installer that is not public yet. Windows
+development must use explicit adapters and packaging, not widen Linux or macOS
+conditionals until they happen to run. Complete this manual checklist on the
+exact artifact before any public release.
 
 - Add a Windows text-injection adapter that supports Unicode, preserves the
   clipboard when paste is used, verifies modifier release, and fails closed if

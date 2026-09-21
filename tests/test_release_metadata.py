@@ -94,7 +94,13 @@ def _workflow_job_body(name: str) -> str:
     return match.group("body")
 
 
-def test_windows_release_build_is_gated_and_attached():
+def test_windows_release_build_is_gated_but_not_published():
+    """Windows builds run behind the release gates; the installer stays internal.
+
+    Owner decision 2026-09-21: no public Windows distribution until testing is
+    complete and the owner signs off. The re-attach change is parked on
+    release/windows-public-pending-signoff.
+    """
     build = _workflow_job_body("build-windows")
     release = _workflow_job_body("release")
 
@@ -103,9 +109,10 @@ def test_windows_release_build_is_gated_and_attached():
     assert "startsWith(github.ref, 'refs/tags/v')" in build
     assert "inputs.artifacts == 'windows'" in build
     assert "inputs.artifacts == 'all'" in build
-    assert "needs: [quality, release-readiness, build-appimage, build-flatpak, build-windows]" in release
-    assert "name: wayfinder-aura-windows-x64\n          path: dist/" in release
-    assert "dist/WayfinderAura-Setup-*.exe" in release
+    # The published release must not carry the Windows installer.
+    assert "build-windows" not in release
+    assert "wayfinder-aura-windows-x64" not in release
+    assert "WayfinderAura-Setup" not in release
 
 
 def test_appimage_metadata_copies_authoritative_desktop_and_metainfo():
