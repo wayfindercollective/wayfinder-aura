@@ -10,7 +10,8 @@ Troubleshooting).
 In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
-Linux and Windows are released; macOS is an active port. Contributors should follow the
+Linux is the current production release. macOS and Windows are ports in
+testing, not publicly released; contributors should follow the
 [platform development contract](docs/PLATFORM-DEVELOPMENT.md) so platform work
 does not regress the Linux app.
 
@@ -88,16 +89,6 @@ Keys activate online once and keep working offline.
 Works on Linux distributions from 2022 onward — Ubuntu 22.04+, Debian 12+,
 Fedora 35+, Bazzite, and the Steam Deck. Wayland and X11.
 
-**[Download for Windows](https://github.com/wayfindercollective/wayfinder-aura/releases/latest)** (64-bit Windows 10/11):
-
-1. Download `WayfinderAura-Setup-<version>.exe` from the latest release.
-2. Run the installer. If SmartScreen says "Windows protected your PC", choose
-   **More info** → **Run anyway**; the installer is currently unsigned.
-3. Complete the per-user install (no admin prompt), then launch from the Start
-   Menu and follow the prompt to download a speech model.
-
-Windows is CPU-only for now; GPU acceleration is Linux-only.
-
 ### Flathub (coming soon)
 
 One-click install from KDE Discover / GNOME Software is on the way. Until
@@ -105,15 +96,12 @@ then, the AppImage above is the fastest path. (Developers can build the
 Flatpak locally from `flatpak/io.wayfindercollective.WayfinderAura.yml` with
 `flatpak-builder`.)
 
-### Windows
+### Windows (internal testing)
 
-Install with the [Windows download](#download-recommended) above. The installer
-adds a Start Menu shortcut. The whisper engine and the local cleanup engine are
-bundled; the app prompts you to download a speech model on first launch.
-
-The default shortcuts are **Ctrl+Alt+Space** for dictation and
-**Ctrl+Alt+Enter** for the Ultra style cycle. Uninstall from **Settings → Apps**;
-your settings, models, and license are kept.
+A Windows installer is built and tested in CI, but it is **not publicly
+released** yet: it ships once testing is complete and the owner signs off.
+Team members can install the candidate from the **Windows Candidate** workflow
+artifact; see [packaging/windows/README.md](packaging/windows/README.md).
 
 ### From source
 
