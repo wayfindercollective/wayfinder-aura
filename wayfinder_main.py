@@ -325,7 +325,7 @@ def get_optimal_thread_count() -> int:
                     ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
                     text=True, timeout=5
                 ).strip())
-                return max(2, min(8, perf_cores))
+                return max(2, min(12, perf_cores))  # measured: 8->12 threads = -13% on 12+ P-core chips
             except Exception:
                 pass
         cpu_count = os.cpu_count() or 4
@@ -5820,14 +5820,18 @@ class WayfinderApp(ctk.CTk):
         # SciPy's signal stack is deliberately absent from the first-frame import path. Warm it
         # once immediately after the UI maps so first-dictation processing stays just as snappy.
         # The worker exits after the import; this does not add a resident background service.
-        self.after(
-            100,
-            lambda: threading.Thread(
-                target=preload_audio_processing,
-                daemon=True,
-                name="wayfinder-audio-preload",
-            ).start(),
-        )
+        # macOS: Core Audio delivers 16 kHz directly and "light" preprocessing is
+        # numpy-only, so the ~0.5s / 77 MB import only pays off for medium/heavy
+        # (the lazy import still covers any later need).
+        if not IS_MACOS or self.config.get("audio_preprocessing", "light") in ("medium", "heavy"):
+            self.after(
+                100,
+                lambda: threading.Thread(
+                    target=preload_audio_processing,
+                    daemon=True,
+                    name="wayfinder-audio-preload",
+                ).start(),
+            )
         
         # Log animation refresh rate info
         if self._use_pyqt_overlay:
@@ -13630,12 +13634,18 @@ class WayfinderApp(ctk.CTk):
         
         # Check 3: Verify text injection is available
         if sys.platform == "darwin":
+            # Native Quartz paste (core/macos_paste); PyAutoGUI is only a
+            # fallback, so don't pay its ~66ms import on the UI thread here.
             try:
-                import pyautogui
-                self.log("✓ Text injection: pyautogui (macOS)")
-            except ImportError:
-                self.log("⚠️ pyautogui not installed - text injection won't work")
-                self.log("💡 Install: pip install pyautogui")
+                from wayfinder.core.macos_paste import accessibility_trusted
+
+                trusted = accessibility_trusted()
+            except Exception:
+                trusted = None
+            if trusted is False:
+                self.log("⚠️ Text injection: Accessibility is off — dictation will be left on the clipboard")
+            else:
+                self.log("✓ Text injection: native paste (macOS)")
         elif sys.platform == "win32":
             # Native Win32 adapter (clipboard paste + SendInput); no ydotool on Windows.
             self.log("✓ Text injection: Windows (clipboard paste + SendInput)")
@@ -20766,8 +20776,11 @@ class WayfinderApp(ctk.CTk):
             # Brief delay to let focus settle on the user's target window after
             # stop-recording / overlay state change. Keep this short — long sleeps
             # race a newer recording (checked below via session_generation).
+            # macOS: the pill is a non-activating accessory window and the
+            # hotkey never moves focus, so there is nothing to settle.
             import time as _time
-            _time.sleep(0.08)
+            if not IS_MACOS:
+                _time.sleep(0.08)
 
             # Re-check after the delay: a reset / new recording during the sleep must NOT result
             # in stale text being typed into whatever window the user has now focused.

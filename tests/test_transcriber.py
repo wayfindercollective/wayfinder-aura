@@ -2202,3 +2202,26 @@ class TestServerAdoptionPerPlatform:
         monkeypatch.setattr(backend, "_is_our_server", lambda port, timeout=2: True, raising=False)
 
         assert backend._find_available_port() == expected
+
+
+class TestServerReuseThreadsOnMacOS:
+    """The resident server's -t is fixed at spawn; macOS respawns when it changes."""
+
+    @pytest.mark.parametrize("platform_name, expected", [("darwin", False), ("linux", True)])
+    def test_thread_change_breaks_reuse_only_on_macos(self, monkeypatch, platform_name, expected):
+        import wayfinder.core.transcriber as transcriber
+
+        class Alive:
+            def poll(self):
+                return None
+
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(transcriber.sys, "platform", platform_name)
+        monkeypatch.setattr(cls, "_server_process", Alive())
+        monkeypatch.setattr(cls, "_server_model_path", "/m.bin")
+        monkeypatch.setattr(cls, "_server_use_gpu", False)
+        monkeypatch.setattr(cls, "_server_threads", 4)
+        backend = cls.__new__(cls)
+        backend.model_path, backend.use_gpu, backend.threads = "/m.bin", False, 12
+
+        assert backend._server_reusable() is expected

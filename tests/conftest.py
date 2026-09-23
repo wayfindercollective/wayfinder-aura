@@ -410,3 +410,24 @@ def reset_voice_profile():
         reset_voice_profile()
     except (ImportError, OSError):
         pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_macos_keystrokes(monkeypatch):
+    """Tests must never post real Cmd+V to the developer's frontmost app.
+
+    core/macos_paste posts through Quartz; stub it (and report Accessibility as
+    granted) for every test. Tests that need a failing paste patch over this.
+    """
+    if sys.platform != "darwin":
+        yield
+        return
+    try:
+        import wayfinder.core.macos_paste as macos_paste
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(macos_paste, "post_command_v", lambda: None)
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
+    yield
+    macos_paste.pending_restore.flush()

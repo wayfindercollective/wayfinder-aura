@@ -408,14 +408,30 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
     """Inject text on macOS using clipboard paste (Cmd+V).
 
     pyautogui.typewrite() only handles ASCII and is slow. Instead, we copy
-    the text to clipboard and simulate Cmd+V for instant, reliable paste
-    that supports all Unicode characters.
+    the text to clipboard and post Cmd+V for instant, reliable paste that
+    supports all Unicode characters. The key event goes straight through
+    Quartz (layout-aware V, no PyAutoGUI pauses or corner fail-safe; see
+    core/macos_paste); PyAutoGUI remains only as a fallback.
     """
-    try:
-        import pyautogui
-    except ImportError:
+    from wayfinder.core import macos_paste
+
+    # A previous paste's deferred restore must land before this snapshot, or
+    # the snapshot would capture Aura's own last dictation.
+    macos_paste.pending_restore.flush()
+
+    if macos_paste.accessibility_trusted() is False:
+        # macOS silently drops synthetic keys without Accessibility. Leave the
+        # dictation on the clipboard for a manual paste instead of "typing"
+        # nothing and then restoring the old clipboard over it.
+        try:
+            pasteboard, _snapshot = _snapshot_macos_pasteboard()
+            _write_macos_pasteboard_text(pasteboard, text)
+        except Exception:
+            pass
         raise InjectionError(
-            "pyautogui not installed. Install with: pip install pyautogui"
+            "macOS blocked the paste: Accessibility is off for Wayfinder Aura. "
+            "Your text is on the clipboard — press ⌘V. To paste automatically, "
+            "enable Wayfinder Aura in System Settings → Privacy & Security → Accessibility."
         )
 
     pasteboard = None
@@ -429,22 +445,31 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
             )
         pasteboard, snapshot = _snapshot_macos_pasteboard()
         injected_change = _write_macos_pasteboard_text(pasteboard, text)
-        pyautogui.hotkey("command", "v")
+        try:
+            macos_paste.post_command_v()
+        except Exception:
+            import pyautogui
+
+            pyautogui.hotkey("command", "v")
         paste_succeeded = True
-        # Some Electron/WebKit controls consume pasteboard data on a later
-        # event-loop turn. PyAutoGUI also applies its normal post-call pause.
-        time.sleep(0.2)
     except Exception as exc:
         raise InjectionError(f"macOS text injection failed: {exc}") from exc
     finally:
         if pasteboard is not None and snapshot is not None and injected_change is not None:
-            try:
+            def _restore(pasteboard=pasteboard, snapshot=snapshot, change=injected_change):
                 # changeCount is the native ownership token. If the user copied
                 # anything after Aura wrote, their new clipboard must win.
-                if int(pasteboard.changeCount()) == injected_change:
+                if int(pasteboard.changeCount()) == change:
                     _restore_macos_pasteboard(pasteboard, snapshot)
-            except Exception:
-                if not paste_succeeded:
+
+            if paste_succeeded:
+                # Some Electron/WebKit/remote apps read the pasteboard on a later
+                # event-loop turn; restore off-thread so injection returns now.
+                macos_paste.pending_restore.schedule(_restore)
+            else:
+                try:
+                    _restore()
+                except Exception:
                     # The injection error remains authoritative; restoration is
                     # best-effort and must not mask its actionable message.
                     pass

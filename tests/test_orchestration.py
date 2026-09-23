@@ -679,8 +679,10 @@ class TestHappyPath:
 
         app.do_inject("final processed text", app.session_generation)
 
-        assert events == [
-            ("sleep", 0.08),
+        # Linux lets focus settle 80ms before pasting; macOS has nothing to
+        # settle (non-activating pill, hotkey never moves focus).
+        settle = [] if wayfinder_main.IS_MACOS else [("sleep", 0.08)]
+        assert events == settle + [
             ("inject", "final processed text"),
             ("sleep", wayfinder_main._AUTO_ENTER_SETTLE_S),
             ("enter", None),

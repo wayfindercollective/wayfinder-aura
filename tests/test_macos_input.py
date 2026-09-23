@@ -231,10 +231,49 @@ def test_macos_injection_restores_full_snapshot_when_paste_fails(monkeypatch):
         lambda _pb, items: restored.append(items) or True,
     )
 
+    import wayfinder.core.macos_paste as macos_paste
+
+    def quartz_denied():
+        raise RuntimeError("quartz denied")
+
+    # Quartz post fails, then the PyAutoGUI fallback fails too.
+    monkeypatch.setattr(macos_paste, "post_command_v", quartz_denied)
+
     with pytest.raises(injector.InjectionError, match="denied"):
         injector._inject_text_pyautogui("hello")
 
+    # A failed paste restores immediately (no deferred restore pending).
     assert restored == [snapshot]
+
+
+def test_macos_injection_defers_restore_and_keeps_text_without_accessibility(monkeypatch):
+    import wayfinder.core.macos_paste as macos_paste
+
+    class Pasteboard:
+        @staticmethod
+        def changeCount():
+            return 7
+
+    pasteboard = Pasteboard()
+    restored, written, posted = [], [], []
+    monkeypatch.setattr(injector, "_snapshot_macos_pasteboard", lambda: (pasteboard, ["old"]))
+    monkeypatch.setattr(injector, "_write_macos_pasteboard_text", lambda _pb, text: written.append(text) or 7)
+    monkeypatch.setattr(injector, "_restore_macos_pasteboard", lambda _pb, items: restored.append(items))
+    monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", lambda: True)
+    monkeypatch.setattr(macos_paste, "post_command_v", lambda: posted.append(True))
+
+    # Successful paste: the restore is deferred, then lands on flush.
+    injector._inject_text_pyautogui("hello")
+    assert posted == [True] and restored == []
+    macos_paste.pending_restore.flush()
+    assert restored == [["old"]]
+
+    # No Accessibility: refuse, leave the text on the clipboard, never restore.
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: False)
+    restored.clear()
+    with pytest.raises(injector.InjectionError, match="Accessibility"):
+        injector._inject_text_pyautogui("second")
+    assert written[-1] == "second" and restored == []
 
 
 def test_aqua_wheel_click_scrolls_a_full_notch_but_trackpad_stream_stays_smooth():
@@ -245,3 +284,31 @@ def test_aqua_wheel_click_scrolls_a_full_notch_but_trackpad_stream_stays_smooth(
     assert _aqua_wheel_notches(-1, 0.016) == 0.25   # trackpad stream (~60 Hz)
     assert _aqua_wheel_notches(-120, 0.016) == 1.0  # notch-native delta
     assert _aqua_wheel_notches("bad", 0.5) == 0.0
+
+
+def test_post_command_v_releases_command_so_it_cannot_stick(monkeypatch):
+    """Command down, V down, V up, Command up with cleared flags (real posts stubbed)."""
+    import importlib
+    import types
+
+    import wayfinder.core.macos_paste as macos_paste
+
+    real = importlib.reload(macos_paste)  # undo the autouse stub for this module object
+    posted = []
+    quartz = types.ModuleType("Quartz")
+    quartz.kCGEventFlagMaskCommand = 0x100000
+    quartz.kCGHIDEventTap = 0
+    quartz.CGEventCreateKeyboardEvent = lambda _src, code, down: {"code": code, "down": down}
+    quartz.CGEventSetFlags = lambda event, flags: event.__setitem__("flags", flags)
+    quartz.CGEventPost = lambda _tap, event: posted.append(event)
+    monkeypatch.setitem(__import__("sys").modules, "Quartz", quartz)
+    monkeypatch.setattr(real, "keycode_for_character", lambda _c: 0x09)
+
+    real.post_command_v()
+
+    assert [(e["code"], e["down"], e["flags"]) for e in posted] == [
+        (0x37, True, 0x100000),
+        (0x09, True, 0x100000),
+        (0x09, False, 0x100000),
+        (0x37, False, 0),
+    ]

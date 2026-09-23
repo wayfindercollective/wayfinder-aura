@@ -228,6 +228,9 @@ app = BUNDLE(
             'Wayfinder Aura needs microphone access for voice dictation.',
         # Allow the app to work in the background (tray mode)
         'LSUIElement': False,
+        # A hotkey-driven background utility: App Nap throttles the Tk timers
+        # that turn a hotkey press into recording (late start, clipped words).
+        'LSAppNapIsDisabled': True,
     },
 )
 

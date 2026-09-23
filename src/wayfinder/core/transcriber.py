@@ -21,6 +21,7 @@ from typing import Optional
 
 from wayfinder.config import IS_FLATPAK
 from wayfinder.utils.hostexec import bundle_binary_env
+from wayfinder.utils.macos_ggml_env import whisper_metal_env
 from wayfinder.utils.child_supervisor import wrap_macos_child_command
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
@@ -353,7 +354,7 @@ class WhisperCppBackend(TranscriptionBackend):
                 capture_output=True,
                 text=True,
                 timeout=5,
-                env=bundle_binary_env(),
+                env=bundle_binary_env(whisper_metal_env(gpu=False)),
                 **_NO_WINDOW,
             )
             # Check for GPU-related flags in help output
@@ -391,7 +392,7 @@ class WhisperCppBackend(TranscriptionBackend):
             h = subprocess.run(
                 [binary or self.whisper_binary, "--help"],
                 capture_output=True, text=True, timeout=probe_timeout,
-                env=bundle_binary_env(),
+                env=bundle_binary_env(whisper_metal_env(gpu=False)),
                 **_NO_WINDOW,
             )
             flags = set(re.findall(r"--[a-z][a-z0-9-]+", (h.stdout or "") + (h.stderr or "")))
@@ -568,7 +569,8 @@ class WhisperCppBackend(TranscriptionBackend):
                     timeout=attempt_timeout,
                     # Preserve Vulkan selection while dropping PyInstaller's
                     # private library directory from native GPU children.
-                    env=bundle_binary_env(),
+                    # macOS: no Metal init/heartbeat in CPU mode (macos_ggml_env).
+                    env=bundle_binary_env(whisper_metal_env(cmd)),
                     **_NO_WINDOW,
                 )
             except subprocess.TimeoutExpired:
@@ -719,6 +721,7 @@ class WhisperServerBackend(TranscriptionBackend):
     # and respawn. Previously only toggle_gpu()'s explicit shutdown enforced
     # this — a single-write-site invariant nothing here guaranteed.
     _server_use_gpu: Optional[bool] = None
+    _server_threads: Optional[int] = None  # -t at spawn (macOS reuse check)
     # whisper-server is intentionally verbose (several KB per request). Its stdout
     # MUST be consumed continuously: leaving Popen(stdout=PIPE) unread eventually
     # fills the kernel pipe and blocks the server in write(), which looks exactly like
@@ -969,6 +972,13 @@ class WhisperServerBackend(TranscriptionBackend):
             # Unknown mode (None: adopted server / reset state) never matches.
             and WhisperServerBackend._server_use_gpu is not None
             and WhisperServerBackend._server_use_gpu == bool(self.use_gpu)
+            # macOS: -t is also fixed at spawn. The warm-up server starts before
+            # first-run thread auto-tuning, so without this the first session
+            # kept the 4-thread default (0.90s vs 0.64s at 8 on a CPU request).
+            and (
+                sys.platform != "darwin"
+                or WhisperServerBackend._server_threads == self.threads
+            )
         )
 
     def _start_server(self, deadline: float = None, force: bool = False) -> None:
@@ -1061,7 +1071,7 @@ class WhisperServerBackend(TranscriptionBackend):
                     print(f"[Whisper Server] Starting on port {port}...")
 
                 spawn_cmd, spawn_env = wrap_macos_child_command(
-                    cmd, bundle_binary_env()
+                    cmd, bundle_binary_env(whisper_metal_env(cmd))
                 )
                 proc = subprocess.Popen(
                     spawn_cmd,
@@ -1074,6 +1084,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
                 WhisperServerBackend._server_use_gpu = self.use_gpu
+                WhisperServerBackend._server_threads = self.threads
                 # Start draining BEFORE readiness probes. A chatty startup or repeated
                 # requests must never be able to fill stdout and deadlock inference.
                 WhisperServerBackend._start_server_output_drain(proc)
@@ -1083,8 +1094,13 @@ class WhisperServerBackend(TranscriptionBackend):
                 atexit.register(WhisperServerBackend.shutdown)
 
                 # Wait for server to be ready (model loading takes a few seconds).
+                # macOS polls every 0.1s: with a warm Metal cache the server is
+                # up in ~0.2s, so the 0.5s first sleep was pure latency on every
+                # (re)start. Same ~30s ceiling either way.
+                poll = 0.1 if sys.platform == "darwin" else 0.5
+                started = time.monotonic()
                 died = False
-                for i in range(60):  # up to ~30s (None) — or until the deadline
+                for i in range(int(30 / poll)):  # up to ~30s (None) — or until the deadline
                     if deadline is not None:
                         rem = _left()
                         if rem <= 0:
@@ -1093,13 +1109,13 @@ class WhisperServerBackend(TranscriptionBackend):
                             self._stop_server_internal(deadline=deadline)
                             raise TranscriptionError(
                                 "whisper-server startup exceeded the recovery deadline")
-                        sleep_to = min(0.5, rem)
+                        sleep_to = min(poll, rem)
                         probe_to = max(0.2, min(2.0, rem))
                     else:
-                        sleep_to, probe_to = 0.5, 2
+                        sleep_to, probe_to = poll, 2
                     time.sleep(sleep_to)
                     if self._is_our_server(port, timeout=probe_to):
-                        print(f"[Whisper Server] Ready on port {port} (took {(i+1)*0.5:.1f}s)")
+                        print(f"[Whisper Server] Ready on port {port} (took {time.monotonic() - started:.1f}s)")
                         return
                     if proc.poll() is not None:
                         last_error = WhisperServerBackend._server_output()[-500:]
