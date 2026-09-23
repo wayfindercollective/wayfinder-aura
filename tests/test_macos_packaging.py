@@ -67,3 +67,28 @@ def test_metal_compute_layers_allow_shader_writes():
     hero = (REPO / "src" / "wayfinder" / "ui" / "macos_hero_metal.py").read_text(encoding="utf-8")
     assert "setFramebufferOnly_(False)" in hero
     assert "setFramebufferOnly_(True)" not in hero
+
+
+def test_dmg_layout_places_app_and_applications_without_finder_chrome():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "dmg_assets", REPO / "packaging" / "macos" / "dmg_assets.py"
+    )
+    dmg_assets = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dmg_assets)
+
+    app = Path("/tmp/dist/Wayfinder Aura.app")
+    settings = dmg_assets.dmgbuild_settings(app, Path("bg.tiff"), Path("icon.icns"))
+
+    assert settings["icon_locations"] == {
+        "Wayfinder Aura.app": dmg_assets.APP_POSITION,
+        "Applications": dmg_assets.APPLICATIONS_POSITION,
+    }
+    assert settings["symlinks"] == {"Applications": "/Applications"}
+    assert not any(settings[k] for k in ("show_toolbar", "show_sidebar", "show_status_bar"))
+    assert settings["window_rect"][1] == dmg_assets.WINDOW_SIZE
+
+    builder = (REPO / "packaging" / "macos" / "build.py").read_text(encoding="utf-8")
+    assert "dmgbuild.build_dmg(" in builder
+    assert '"hdiutil", "create"' in builder  # fallback when dmgbuild is absent

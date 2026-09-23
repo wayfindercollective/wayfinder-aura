@@ -335,12 +335,30 @@ def create_dmg() -> Path:
 
     with tempfile.TemporaryDirectory(prefix="wayfinder-aura-dmg-") as temp_dir:
         stage = Path(temp_dir)
-        shutil.copytree(APP_PATH, stage / APP_PATH.name, symlinks=True)
-        os.symlink("/Applications", stage / "Applications")
-        run([
-            "hdiutil", "create", "-volname", "Wayfinder Aura",
-            "-srcfolder", stage, "-ov", "-format", "UDZO", dmg_path,
-        ])
+        try:
+            import dmgbuild
+        except ImportError:
+            dmgbuild = None
+        if dmgbuild is not None:
+            # Branded Finder window: dark background, guide arrow, fixed
+            # icon layout and the app icon as the volume icon.
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from dmg_assets import dmgbuild_settings, write_background
+
+            background = write_background(stage / "art")
+            settings = dmgbuild_settings(
+                APP_PATH, background, PROJECT_ROOT / "assets" / "icon.icns"
+            )
+            print(f"+ dmgbuild {dmg_path}", flush=True)
+            dmgbuild.build_dmg(str(dmg_path), "Wayfinder Aura", settings=settings)
+        else:
+            print("dmgbuild not installed; building a plain disk image", flush=True)
+            shutil.copytree(APP_PATH, stage / APP_PATH.name, symlinks=True)
+            os.symlink("/Applications", stage / "Applications")
+            run([
+                "hdiutil", "create", "-volname", "Wayfinder Aura",
+                "-srcfolder", stage, "-ov", "-format", "UDZO", dmg_path,
+            ])
     identity = os.environ.get("MACOS_CODESIGN_IDENTITY")
     if identity:
         run(["codesign", "--force", "--timestamp", "--sign", identity, dmg_path])

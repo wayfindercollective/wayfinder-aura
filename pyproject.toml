@@ -57,6 +57,7 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "types-requests>=2.28.0",
+    "dmgbuild>=1.6.7; sys_platform == 'darwin'",
 ]
 gpu = [
     "faster-whisper>=1.0.0",
