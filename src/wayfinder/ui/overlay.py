@@ -638,6 +638,135 @@ class LiquidWaveRenderer:
     def render(self, painter: QPainter, rect: QRectF, color: QColor):
         """
         Render the liquid wave within the given rectangle.
+
+        Linux/Windows keep main's per-segment strokes (the production look).
+        macOS draws each strand as one continuous path with a gradient edge
+        fade: per-segment round caps overlap at every joint on Retina.
+
+        Args:
+            painter: QPainter to draw with
+            rect: Bounding rectangle for the wave
+            color: Base color for the wave
+        """
+        if sys.platform == "darwin":
+            self._render_paths(painter, rect, color)
+        else:
+            self._render_segments(painter, rect, color)
+
+    def _render_segments(self, painter: QPainter, rect: QRectF, color: QColor):
+        """
+        Render the liquid wave within the given rectangle.
+        
+        Args:
+            painter: QPainter to draw with
+            rect: Bounding rectangle for the wave
+            color: Base color for the wave
+        """
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        width = rect.width()
+        height = rect.height()
+        center_y = rect.center().y()
+        max_amp = height * 0.4  # Maximum amplitude
+        
+        # Edge fade zone (pixels from edge where fade applies)
+        fade_zone = min(12, width * 0.25)  # 25% of width or 12px max
+        
+        def get_edge_fade(x_pos: float) -> float:
+            """Calculate fade factor (0-1) based on distance from edges."""
+            dist_from_left = x_pos - rect.left()
+            dist_from_right = rect.right() - x_pos
+            min_dist = min(dist_from_left, dist_from_right)
+            if min_dist >= fade_zone:
+                return 1.0
+            return min_dist / fade_zone if fade_zone > 0 else 1.0
+        
+        # Calculate amplitude based on audio level and breathing
+        base_breath = 0.15 + 0.12 * (0.5 + 0.5 * math.sin(self.breath))
+        voice_boost = (self.audio_level ** 0.6) * 12.0
+        amplitude_factor = min(1.0, base_breath + voice_boost)
+        
+        # Wave configurations: (frequency, phase_offset, alpha, thickness)
+        wave_configs = [
+            (0.07, 0.0, 0.15, 6),      # Slow background wave
+            (0.11, 1.0, 0.25, 5),      # Medium wave
+            (0.16, 2.2, 0.40, 4),      # Faster wave
+            (0.22, 0.7, 0.55, 3),      # Quick wave
+        ]
+        
+        for freq, phase, base_alpha, thickness in wave_configs:
+            amp = max_amp * amplitude_factor
+            
+            # Draw wave in segments with fading alpha at edges
+            prev_point = None
+            for x_pixel in range(int(rect.left()), int(rect.right()) + 1, 2):
+                x = x_pixel - rect.left()
+                
+                # Combine sine waves for organic motion
+                y = center_y + amp * math.sin(freq * x + self.time + phase)
+                y += (amp * 0.4) * math.sin(freq * 2.3 * x + self.time * 1.6 + phase)
+                y += (amp * 0.2) * math.sin(freq * 3.7 * x + self.time * 2.1 + phase * 0.5)
+                
+                # Clamp to bounds
+                y = max(rect.top(), min(rect.bottom(), y))
+                
+                if prev_point is not None:
+                    # Calculate edge fade for this segment
+                    fade = get_edge_fade(x_pixel)
+                    segment_alpha = base_alpha * fade
+                    
+                    # Draw glow segment
+                    glow_color = QColor(color)
+                    glow_color.setAlphaF(segment_alpha * 0.3)
+                    glow_pen = QPen(glow_color, thickness + 4)
+                    glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                    painter.setPen(glow_pen)
+                    painter.drawLine(QPointF(prev_point[0], prev_point[1]), QPointF(x_pixel, y))
+                    
+                    # Draw main wave segment
+                    wave_color = QColor(color)
+                    wave_color.setAlphaF(segment_alpha)
+                    pen = QPen(wave_color, thickness)
+                    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                    painter.setPen(pen)
+                    painter.drawLine(QPointF(prev_point[0], prev_point[1]), QPointF(x_pixel, y))
+                
+                prev_point = (x_pixel, y)
+        
+        # Draw bright center highlight wave with edge fade
+        highlight_amp = max_amp * amplitude_factor
+        prev_point = None
+        
+        for x_pixel in range(int(rect.left()), int(rect.right()) + 1, 2):
+            x = x_pixel - rect.left()
+            y = center_y + highlight_amp * math.sin(0.13 * x + self.time * 1.4)
+            y += (highlight_amp * 0.5) * math.sin(0.26 * x + self.time * 2.0 + 0.8)
+            y = max(rect.top(), min(rect.bottom(), y))
+            
+            if prev_point is not None:
+                fade = get_edge_fade(x_pixel)
+                
+                # Highlight glow with fade
+                highlight_glow = QColor(color)
+                highlight_glow.setAlphaF(0.4 * fade)
+                painter.setPen(QPen(highlight_glow, 6))
+                painter.drawLine(QPointF(prev_point[0], prev_point[1]), QPointF(x_pixel, y))
+                
+                # Bright highlight core with fade
+                highlight_core = QColor(color)
+                highlight_core.setAlphaF(fade)
+                painter.setPen(QPen(highlight_core, 2))
+                painter.drawLine(QPointF(prev_point[0], prev_point[1]), QPointF(x_pixel, y))
+            
+            prev_point = (x_pixel, y)
+        
+        painter.restore()
+
+
+    def _render_paths(self, painter: QPainter, rect: QRectF, color: QColor):
+        """
+        Render the liquid wave within the given rectangle.
         
         Args:
             painter: QPainter to draw with
@@ -1068,7 +1197,21 @@ class GlassmorphicOverlay(QWidget):
     def widget_height(self):
         """Total widget height including glow margins."""
         return self.scaled_height + (self.glow_margin * 2)
-    
+
+    @staticmethod
+    def _target_screen():
+        """Screen the pill is placed on.
+
+        macOS follows the display under the pointer (the active display). Linux
+        keeps the primary screen: on Wayland QCursor.pos() is unreliable for a
+        window that never has pointer focus.
+        """
+        if sys.platform == "darwin":
+            screen = QApplication.screenAt(QCursor.pos())
+            if screen:
+                return screen
+        return QApplication.primaryScreen()
+
     def _calculate_position(self, widget_width: int, widget_height: int) -> tuple[int, int]:
         """
         Calculate overlay position: centered horizontally, at bottom of available screen area.
@@ -1090,7 +1233,7 @@ class GlassmorphicOverlay(QWidget):
         Returns:
             (x, y) position tuple
         """
-        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        screen = self._target_screen()
         if not screen:
             return (0, 0)
         
@@ -1452,7 +1595,7 @@ class GlassmorphicOverlay(QWidget):
         x, y = self._calculate_position(w, h)
         
         # Validate position - if y is negative or unreasonable, use fallback
-        screen = QApplication.primaryScreen()
+        screen = self._target_screen()
         if screen:
             full = screen.geometry()
             # Sanity check: visible content should be on screen. The transparent
@@ -1603,9 +1746,13 @@ class GlassmorphicOverlay(QWidget):
         import time
         def _log(msg):
             try:
-                from wayfinder.utils.platform import get_cache_dir
+                if sys.platform == "darwin":
+                    from wayfinder.utils.platform import get_cache_dir
 
-                _log_dir = str(get_cache_dir())
+                    _log_dir = str(get_cache_dir())
+                else:  # Linux/Windows as on main
+                    _xdg_cache = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+                    _log_dir = os.path.join(_xdg_cache, "wayfinder-aura")
                 os.makedirs(_log_dir, mode=0o700, exist_ok=True)
                 _log_path = os.path.join(_log_dir, "overlay-debug.log")
                 # Owner-only create/open (no create-then-chmod race for new files).
@@ -2567,9 +2714,13 @@ def run_overlay():
             _debug_log(f"process_commands error: {e}")
     
     # Debug log file for tracing overlay commands (platform cache, never /tmp).
-    from wayfinder.utils.platform import get_cache_dir
+    if sys.platform == "darwin":
+        from wayfinder.utils.platform import get_cache_dir
 
-    _debug_log_dir = str(get_cache_dir())
+        _debug_log_dir = str(get_cache_dir())
+    else:  # Linux/Windows as on main
+        _cache_dir = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+        _debug_log_dir = os.path.join(_cache_dir, "wayfinder-aura")
     os.makedirs(_debug_log_dir, exist_ok=True)
     _debug_log_file = os.path.join(_debug_log_dir, "overlay-debug.log")
     

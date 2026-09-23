@@ -88,9 +88,18 @@ def get_app_temp_dir() -> Path:
     Prefer XDG cache so Flatpak sandboxes get a writable private path without
     new finish-args. Falls back to system temp + wayfinder-aura-<uid>.
     """
-    from wayfinder.utils.platform import get_cache_dir
+    if sys.platform == "darwin":
+        from wayfinder.utils.platform import get_cache_dir
 
-    base = get_cache_dir() / "tmp"
+        base = get_cache_dir() / "tmp"
+    else:
+        # Linux/Windows as on main. An empty XDG_CACHE_HOME counts as unset, so
+        # the startup purge can never run in a path relative to the cwd.
+        cache_home = os.environ.get("XDG_CACHE_HOME")
+        if cache_home:
+            base = Path(cache_home) / "wayfinder-aura" / "tmp"
+        else:
+            base = Path.home() / ".cache" / "wayfinder-aura" / "tmp"
     return ensure_private_dir(base)
 
 

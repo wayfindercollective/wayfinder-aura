@@ -7,6 +7,7 @@ Supports llama-cpp-python for local inference and Anthropic Claude for cloud.
 import gc
 import os
 import subprocess
+import sys
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -3624,9 +3625,15 @@ def get_backend(config: dict) -> PostProcessorBackend:
     else:
         # Default to llama.cpp - prefer CLI backend if available
         use_cli = config.get("llama_cpp_use_cli", True)
-        from wayfinder.utils.runtime_assets import find_llama_binary
+        # macOS resolves the bundled/Homebrew llama-simple first. Linux keeps
+        # main's behaviour: only the configured binary (and its siblings below)
+        # decide between the CLI and llama-cpp-python backends.
+        bundled_llama = None
+        if sys.platform == "darwin":
+            from wayfinder.utils.runtime_assets import find_llama_binary
 
-        llama_binary = find_llama_binary(config) or os.path.expanduser(
+            bundled_llama = find_llama_binary(config)
+        llama_binary = bundled_llama or os.path.expanduser(
             config.get("llama_cpp_binary", "~/llama.cpp/build/bin/llama-cli")
         )
 

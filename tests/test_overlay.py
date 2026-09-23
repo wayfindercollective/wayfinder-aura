@@ -564,9 +564,9 @@ class TestLiquidWaveRenderer:
         assert renderer.time > initial_time
 
     def test_render_uses_ten_continuous_paths_not_overlapping_segments(
-        self, overlay_module
+        self, overlay_module, monkeypatch
     ):
-        """Four glow/core pairs + one highlight pair = ten draw calls.
+        """macOS: four glow/core pairs + one highlight pair = ten draw calls.
 
         The former 2px segments allocated hundreds of pens per frame and their
         round caps accumulated alpha at every joint, producing fuzzy fringes.
@@ -594,12 +594,51 @@ class TestLiquidWaveRenderer:
             def drawPath(self, path):
                 self.paths.append(path)
 
+        monkeypatch.setattr(overlay_module.sys, "platform", "darwin")
         painter = Painter()
         renderer = overlay_module.LiquidWaveRenderer()
         renderer.render(painter, QRectF(0, 0, 90, 32), QColor("#5B8FD4"))
 
         assert len(painter.paths) == 10
         assert len(painter.pens) == 10
+
+    def test_linux_render_keeps_main_segment_strokes(self, overlay_module, monkeypatch):
+        """Linux keeps main's per-segment strokes (the production overlay look)."""
+        from PyQt6.QtCore import QRectF
+        from PyQt6.QtGui import QColor
+
+        class Painter:
+            def __init__(self):
+                self.lines = 0
+                self.paths = 0
+
+            def save(self):
+                pass
+
+            def restore(self):
+                pass
+
+            def setRenderHint(self, *_args):
+                pass
+
+            def setPen(self, _pen):
+                pass
+
+            def drawLine(self, *_args):
+                self.lines += 1
+
+            def drawPath(self, _path):
+                self.paths += 1
+
+        monkeypatch.setattr(overlay_module.sys, "platform", "linux")
+        painter = Painter()
+        overlay_module.LiquidWaveRenderer().render(
+            painter, QRectF(0, 0, 90, 32), QColor("#5B8FD4")
+        )
+
+        # x = 0..90 step 2 -> 46 samples, 45 segments; (4 waves + highlight) x (glow + core).
+        assert painter.lines == 45 * 10
+        assert painter.paths == 0
 
 
 # =============================================================================
@@ -681,3 +720,16 @@ class TestOverlayIsClickThrough:
             assert bool(ov.windowFlags() & Qt.WindowType.WindowTransparentForInput)
         finally:
             ov.deleteLater()
+
+
+@pytest.mark.parametrize("platform_name, expected", [("linux", "primary"), ("darwin", "pointer")])
+def test_overlay_screen_follows_pointer_on_macos_only(
+    monkeypatch, overlay_module, platform_name, expected
+):
+    """Linux keeps the primary screen (QCursor.pos() is unreliable on Wayland)."""
+    monkeypatch.setattr(overlay_module.sys, "platform", platform_name)
+    monkeypatch.setattr(overlay_module.QApplication, "primaryScreen", staticmethod(lambda: "primary"))
+    monkeypatch.setattr(overlay_module.QApplication, "screenAt", staticmethod(lambda pos: "pointer"))
+    monkeypatch.setattr(overlay_module.QCursor, "pos", staticmethod(lambda: None))
+
+    assert overlay_module.GlassmorphicOverlay._target_screen() == expected

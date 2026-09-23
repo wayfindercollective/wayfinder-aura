@@ -363,10 +363,19 @@ def pynput_hotkey_listener(
             required_modifiers = new_required
             if changed:
                 log(f"🎹 Hotkey changed to: {get_key_name(target_key)}")
-            if style_toggle_key:
-                if new_style is None:
-                    new_style = evdev_code_to_pynput(28)
-                    new_style_required = {"fn"} if sys.platform == "darwin" else {"ctrl", "alt"}
+            if sys.platform == "darwin":
+                if style_toggle_key:
+                    if new_style is None:
+                        new_style = evdev_code_to_pynput(28)
+                        new_style_required = {"fn"}
+                    style_target_key = new_style
+                    style_required_modifiers = new_style_required
+            elif new_style and (
+                new_style != style_target_key
+                or new_style_required != style_required_modifiers
+            ):
+                # Linux/Windows as on main: a style key set after start is picked
+                # up live, and an unset/unknown code keeps the current one.
                 style_target_key = new_style
                 style_required_modifiers = new_style_required
 

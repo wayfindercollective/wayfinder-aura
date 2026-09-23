@@ -7,15 +7,19 @@ Results are cached for 24 hours to avoid unnecessary API calls.
 
 import json
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from ..config import CONFIG_DIR as _CONFIG_DIR
 from ..utils.platform import get_cache_dir
 
 # Cache file for update check results
-CONFIG_DIR = get_cache_dir()  # compatibility alias for tests/older callers
+# macOS keeps update caches in ~/Library/Caches; Linux/Windows keep them in the
+# config dir, as on main.
+CONFIG_DIR = get_cache_dir() if sys.platform == "darwin" else _CONFIG_DIR
 UPDATE_CACHE_FILE = CONFIG_DIR / "model_updates_cache.json"
 
 # Check interval: once per week (seconds)

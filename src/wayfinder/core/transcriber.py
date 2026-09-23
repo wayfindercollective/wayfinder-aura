@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -818,7 +819,7 @@ class WhisperServerBackend(TranscriptionBackend):
         except Exception:
             return False
 
-    def _find_available_port(self, probe_timeout: float = 2, reuse_ok: bool = False) -> int:
+    def _find_available_port(self, probe_timeout: float = 2, reuse_ok: bool = True) -> int:
         """Find the configured port or the next available one.
 
         probe_timeout: budget for the reuse health-probe, so port discovery stays inside
@@ -833,11 +834,18 @@ class WhisperServerBackend(TranscriptionBackend):
             try:
                 if sock.connect_ex(("127.0.0.1", port)) != 0:
                     return port  # Port is free
-                # Never adopt an unowned HTTP service. A process on the same
-                # machine can trivially serve a page containing "whisper" and
-                # would then receive Aura's recorded audio at /inference. The
-                # in-process _server_process handle is the ownership proof;
-                # occupied endpoints discovered here are always skipped.
+                # macOS never adopts an unowned HTTP service: a local process
+                # could serve a page containing "whisper" and receive Aura's
+                # audio at /inference. There the supervised child is the
+                # ownership proof and cannot outlive the app. Linux keeps
+                # main's reuse of our own server (no supervisor yet, so a
+                # crash would otherwise stack a second server per launch).
+                if (
+                    sys.platform != "darwin"
+                    and reuse_ok
+                    and self._is_our_server(port, timeout=probe_timeout)
+                ):
+                    return port  # Reuse existing server
                 port += 1  # Try next port
             finally:
                 sock.close()
@@ -1015,9 +1023,29 @@ class WhisperServerBackend(TranscriptionBackend):
                 raise TranscriptionError(
                     "whisper-server startup skipped — recovery deadline already passed")
 
-            port = self._find_available_port(
-                probe_timeout=_probe_budget(), reuse_ok=False
-            )
+            # Under force (recovery), never re-adopt an occupied endpoint: a
+            # wedged-but-listening server we cannot prove we own must be treated as
+            # unavailable, so port discovery skips it (reuse_ok=False) AND the reuse
+            # branch is disabled — recovery MUST bind a fresh server, not the wedge.
+            # macOS never adopts (see _find_available_port).
+            port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
+
+            if (
+                sys.platform != "darwin"
+                and not force
+                and self._is_our_server(port, timeout=_probe_budget())
+            ):
+                WhisperServerBackend._server_port = port
+                WhisperServerBackend._server_model_path = self.model_path
+                # An adopted pre-existing server's actual spawn flags are
+                # unknowable — record honest-unknown (None). _server_reusable
+                # treats None as never-matching, so the next start re-probes
+                # adoption instead of trusting an unverified mode (Codex
+                # review; adoption also leaves _server_process None, so the
+                # in-memory reuse fast path never applied to it anyway).
+                WhisperServerBackend._server_use_gpu = None
+                print(f"[Whisper Server] Reusing existing server on port {port}")
+                return
 
             last_error = ""
             for attempt, cmd in enumerate(self._server_cmd_attempts(port)):

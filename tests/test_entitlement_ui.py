@@ -533,24 +533,29 @@ class _Destroyable:
         pass
 
 
-def test_premium_prompt_dismissal_is_idempotent_and_clears_escape_binding():
+def test_premium_prompt_dismissal_is_idempotent_and_keeps_root_bindings():
+    """Dismissal never unbinds <Escape>: on Python < 3.11.7 unbind(seq, funcid)
+    drops every root <Escape> binding, including the dropdown-close one."""
     banner = _Destroyable()
     unbound = []
     app = SimpleNamespace(
         _premium_banner=banner,
-        _premium_escape_bind_id="escape-handler",
-        unbind=lambda sequence, bind_id: unbound.append((sequence, bind_id)),
+        _premium_prompt_open=True,
+        unbind=lambda *args: unbound.append(args),
         _write_status_breadcrumb=lambda: None,
     )
+    app._dismiss_premium_prompt = lambda _event=None: wayfinder_main.WayfinderApp._dismiss_premium_prompt(app)
 
     assert wayfinder_main.WayfinderApp._dismiss_premium_prompt(app) == "break"
     assert banner.destroyed
     assert app._premium_banner is None
-    assert app._premium_escape_bind_id is None
-    assert unbound == [("<Escape>", "escape-handler")]
+    assert app._premium_prompt_open is False
+    assert unbound == []
 
-    # A second exit route (for example Escape after Maybe later) is harmless.
+    # A second exit route (for example Escape after Maybe later) is harmless,
+    # and the permanent Escape handler is inert once the panel is closed.
     assert wayfinder_main.WayfinderApp._dismiss_premium_prompt(app) == "break"
+    assert wayfinder_main.WayfinderApp._on_premium_escape(app) is None
 
 
 def test_refresh_entitlement_ui_retires_visible_upsell_surfaces():

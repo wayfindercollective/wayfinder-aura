@@ -5420,7 +5420,8 @@ class WayfinderApp(ctk.CTk):
         # multiplies with our explicit ui_scale and the UI double-scales — notably in the
         # Flatpak sandbox on the Steam Deck's 1280x800 panel. _get_recommended_scale() +
         # set_widget_scaling(ui_scale) then governs scaling alone. (CustomTkinter >=5.2 API.)
-        if sys.platform.startswith("linux"):
+        # Linux/Windows as on main. macOS keeps CTk's Aqua DPI handling.
+        if not IS_MACOS:
             try:
                 ctk.deactivate_automatic_dpi_awareness()
             except Exception:
@@ -7764,11 +7765,16 @@ class WayfinderApp(ctk.CTk):
                     font=(self.font_body[0], self.font_sizes["body"]),
                     text_color=COLORS["text_secondary"],
                 ).pack(expand=True)
-                # Cover the current page before doing the one-time build. Do
-                # not unmap it: Aqua can present the window between those two
-                # operations, which was the white tab-switch flash.
-                loading_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
-                loading_frame.lift()
+                if IS_MACOS:
+                    # Cover the current page before doing the one-time build. Do
+                    # not unmap it: Aqua can present the window between those two
+                    # operations, which was the white tab-switch flash.
+                    loading_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+                    loading_frame.lift()
+                else:
+                    for frame in self.tab_frames.values():
+                        frame.pack_forget()
+                    loading_frame.pack(fill="both", expand=True)
                 self.update_idletasks()
         except Exception:
             loading_frame = None
@@ -7908,18 +7914,26 @@ class WayfinderApp(ctk.CTk):
         WayfinderApp._sync_macos_hero_visibility(self)
         self._ensure_tab_created(tab_id)
         
-        # Keep every built page mapped in one stack and only raise the selected
-        # page. Unmapping/remapping Canvas-heavy CTkScrollableFrames makes Aqua
-        # expose their native white backing for one compositor frame.
-        for frame in self.tab_frames.values():
-            manager = frame.winfo_manager()
-            if manager != "place":
-                if manager == "pack":
+        if IS_MACOS:
+            # Keep every built page mapped in one stack and only raise the selected
+            # page. Unmapping/remapping Canvas-heavy CTkScrollableFrames makes Aqua
+            # expose their native white backing for one compositor frame.
+            for frame in self.tab_frames.values():
+                manager = frame.winfo_manager()
+                if manager != "place":
+                    if manager == "pack":
+                        frame.pack_forget()
+                    elif manager == "grid":
+                        frame.grid_forget()
+                    frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self.tab_frames[tab_id].lift()
+        else:
+            # Hide all tabs, show selected
+            for tid, frame in self.tab_frames.items():
+                if tid == tab_id:
+                    frame.pack(fill="both", expand=True)
+                else:
                     frame.pack_forget()
-                elif manager == "grid":
-                    frame.grid_forget()
-                frame.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self.tab_frames[tab_id].lift()
         WayfinderApp._sync_macos_hero_visibility(self)
         
         self._write_status_breadcrumb()
@@ -9199,10 +9213,14 @@ class WayfinderApp(ctk.CTk):
         # Result queue for thread-safe communication (dict payload)
         result_queue = queue.Queue()
         
-        # Debug logging to the platform-native cache directory.
-        from wayfinder.utils.platform import get_cache_dir
+        # Debug logging: macOS uses the platform cache dir; Linux/Windows keep
+        # main's ~/.cache/wayfinder-benchmark.log.
+        if IS_MACOS:
+            from wayfinder.utils.platform import get_cache_dir
 
-        log_file = get_cache_dir() / "benchmark.log"
+            log_file = get_cache_dir() / "benchmark.log"
+        else:
+            log_file = Path.home() / ".cache" / "wayfinder-benchmark.log"
         def debug_log(msg):
             try:
                 with open(log_file, "a") as f:
@@ -11284,10 +11302,13 @@ class WayfinderApp(ctk.CTk):
         
         # Re-show if it's the active tab
         if self.active_tab == "style":
-            self.tab_frames["style"].place(
-                relx=0, rely=0, relwidth=1, relheight=1
-            )
-            self.tab_frames["style"].lift()
+            if IS_MACOS:
+                self.tab_frames["style"].place(
+                    relx=0, rely=0, relwidth=1, relheight=1
+                )
+                self.tab_frames["style"].lift()
+            else:
+                self.tab_frames["style"].pack(fill="both", expand=True)
     
     def _on_smart_formatting_toggled(self) -> None:
         """Handle smart formatting toggle (legacy - kept for compatibility)."""
@@ -13439,7 +13460,7 @@ class WayfinderApp(ctk.CTk):
         # Check 1: Verify transcription backend is available
         backend = self.config.get("transcription_backend", "whisper_cpp")
         
-        if backend == "whisper_cpp":
+        if backend == "whisper_cpp" and IS_MACOS:
             from wayfinder.utils.runtime_assets import find_whisper_binary
 
             found = find_whisper_binary(self.config)
@@ -13447,13 +13468,28 @@ class WayfinderApp(ctk.CTk):
                 # Bundle paths depend on where the user installs the .app; never
                 # persist one. The runtime resolver finds the current path on
                 # every launch.
-                if not getattr(sys, "frozen", False):
+                if not getattr(sys, "frozen", False) and self.config.get("whisper_binary") != found:
                     self.config["whisper_binary"] = found
                     save_config(self.config)
                 self.log(f"✓ Found whisper-cli at {found}")
             else:
                 self.log("⚠️ whisper-cli not found - transcription won't work")
                 self.log("💡 Install whisper.cpp or use the complete packaged build")
+        elif backend == "whisper_cpp":
+            # Linux/Windows as on main: only look elsewhere when the configured
+            # binary is missing, and persist what was found.
+            whisper_binary = os.path.expanduser(
+                self.config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
+            )
+            if not Path(whisper_binary).exists():
+                found = shutil.which("whisper-cli")
+                if found:
+                    self.config["whisper_binary"] = found
+                    save_config(self.config)
+                    self.log(f"✓ Found whisper-cli at {found}")
+                else:
+                    self.log("⚠️ whisper-cli not found - transcription won't work")
+                    self.log("💡 Install: git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp && make")
         
         # Check 2: Adjust thread count on first run
         if "threads_auto_adjusted" not in self.config:
@@ -15325,9 +15361,14 @@ class WayfinderApp(ctk.CTk):
         """
         path = getattr(self, "_activity_log_path", None)
         if path is None:
-            from wayfinder.utils.platform import get_cache_dir
+            if IS_MACOS:
+                from wayfinder.utils.platform import get_cache_dir
 
-            path = get_cache_dir() / "activity.log"
+                path = get_cache_dir() / "activity.log"
+            else:
+                # Linux/Windows as on main (SUPPORT.md documents this path).
+                cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+                path = cache_home / "wayfinder-aura" / "activity.log"
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
@@ -15717,15 +15758,13 @@ class WayfinderApp(ctk.CTk):
         if confirmation is not None:
             confirmation.pack_forget()
 
+    def _on_premium_escape(self, _event=None):
+        if getattr(self, "_premium_prompt_open", False):
+            self._dismiss_premium_prompt()
+
     def _dismiss_premium_prompt(self, _event=None):
-        """Tear down the inline Ultra panel and its temporary Escape binding."""
-        bind_id = getattr(self, "_premium_escape_bind_id", None)
-        if bind_id is not None:
-            try:
-                self.unbind("<Escape>", bind_id)
-            except Exception:
-                pass
-            self._premium_escape_bind_id = None
+        """Tear down the inline Ultra panel."""
+        self._premium_prompt_open = False
         banner = getattr(self, "_premium_banner", None)
         if banner is not None:
             try:
@@ -15798,12 +15837,16 @@ class WayfinderApp(ctk.CTk):
             command=self._dismiss_premium_prompt,
         ).place(relx=1.0, x=-12, y=12, anchor="ne")
         scrim.bind("<Button-1>", self._dismiss_premium_prompt, add="+")
-        try:
-            self._premium_escape_bind_id = self.bind(
-                "<Escape>", self._dismiss_premium_prompt, add="+"
-            )
-        except Exception:
-            self._premium_escape_bind_id = None
+        # One permanent root binding that only acts while the panel is open.
+        # unbind(seq, funcid) on Python < 3.11.7 drops EVERY <Escape> binding
+        # on the root (including the dropdown-close one), so never unbind.
+        self._premium_prompt_open = True
+        if not getattr(self, "_premium_escape_bound", False):
+            try:
+                self.bind("<Escape>", self._on_premium_escape, add="+")
+                self._premium_escape_bound = True
+            except Exception:
+                pass
 
         inner = ctk.CTkFrame(card, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=SPACING["2xl"], pady=SPACING["xl"])
@@ -18184,8 +18227,16 @@ class WayfinderApp(ctk.CTk):
                 def on_complete(_path):
                     def update():
                         self.log(f"Downloaded: {info['name']}")
-                        if not self._on_whisper_model_ready(_path):
-                            show_download()
+                        # macOS: the download becomes the active model and resumes a
+                        # pending first-run Welcome. Linux keeps main's behaviour:
+                        # downloading never switches models.
+                        if IS_MACOS:
+                            resumed_welcome = self._on_whisper_model_ready(_path)
+                            if hasattr(self, "model_btn"):
+                                self.model_btn.configure(text=self.get_model_display())
+                            if resumed_welcome:
+                                return
+                        show_download()
                     self.after(0, update)
 
                 def on_error(error):

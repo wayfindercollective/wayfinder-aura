@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -102,9 +103,14 @@ def format_resident_memory(size_bytes: Any) -> str:
 
 
 def _cache_path() -> Path:
-    from wayfinder.utils.platform import get_cache_dir
+    if sys.platform == "darwin":
+        from wayfinder.utils.platform import get_cache_dir
 
-    d = get_cache_dir()
+        d = get_cache_dir()
+    else:
+        # Linux/Windows as on main.
+        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        d = base / "wayfinder-aura"
     d.mkdir(parents=True, exist_ok=True)
     return d / "model_catalog_v1.json"
 

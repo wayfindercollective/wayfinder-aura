@@ -414,7 +414,12 @@ if "--macos-native-renderers-self-test" in sys.argv:
 # macOS build must not create a Linux-style ~/.config directory.
 from wayfinder.utils.platform import get_cache_dir
 
-SCALING_CACHE_FILE = get_cache_dir() / "display_scaling.json"
+# macOS: ~/Library/Caches. Linux/Windows keep main's location.
+SCALING_CACHE_FILE = (
+    get_cache_dir() / "display_scaling.json"
+    if sys.platform == "darwin"
+    else Path.home() / ".config" / "wayfinder-aura" / "display_scaling.json"
+)
 
 
 def load_cached_scaling() -> float:
@@ -876,7 +881,7 @@ def main():
 
             frozen = getattr(sys, 'frozen', False)
             frozen_runtime_ready = True
-            if frozen:
+            if frozen and sys.platform == "darwin":
                 # Native dependencies are bundled, but speech-model weights are
                 # intentionally downloaded after install. Do not send a clean
                 # Mac into the live-dictation Welcome step until one exists.
@@ -887,6 +892,11 @@ def main():
                 if frozen_runtime_ready:
                     app.config["setup_completed"] = True
                 save_config(app.config)
+            elif frozen:
+                # Linux/Windows frozen builds (as on main): keep the flag in
+                # WayfinderApp's live config so later save_config() calls persist
+                # it (frozen builds never run the setup pane).
+                app.config["setup_completed"] = True
 
             plan = first_run_plan(
                 setup_completed=app.config.get("setup_completed", False),

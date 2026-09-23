@@ -97,3 +97,11 @@ def test_macos_preserves_native_tk_scaling(monkeypatch):
     root.call = lambda *args: 2.0 if args == ("tk", "scaling") else None
 
     assert tk_dpi.normalize_tk_font_dpi(root, platform_name="darwin") == 144.0
+
+
+def test_windows_keeps_main_forced_96_dpi(monkeypatch):
+    """Only Aqua skips the correction; Windows still pins 96 DPI as on main."""
+    monkeypatch.setattr(tk_dpi, "read_xft_dpi", lambda: None)
+    root = _FakeRoot()
+    assert tk_dpi.normalize_tk_font_dpi(root, platform_name="win32") == 96.0
+    assert root.calls == [("tk", "scaling", 96.0 / 72.0)]

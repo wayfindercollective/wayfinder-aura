@@ -2172,3 +2172,33 @@ class TestServerReuseIdentity:
         WhisperServerBackend._stop_server_internal()
         assert WhisperServerBackend._server_model_path == ""
         assert WhisperServerBackend._server_use_gpu is None
+
+
+class TestServerAdoptionPerPlatform:
+    """Linux keeps main's reuse of its own running server; macOS never adopts
+    (its supervised child cannot outlive the app, and adopting an unowned
+    listener would hand it recorded audio)."""
+
+    @pytest.mark.parametrize("platform_name, expected", [("linux", 8178), ("darwin", 8179)])
+    def test_occupied_port_reuse(self, monkeypatch, platform_name, expected):
+        import socket as socket_module
+
+        import wayfinder.core.transcriber as transcriber
+
+        class FakeSocket:
+            def __init__(self, *a, **k):
+                pass
+
+            def connect_ex(self, address):
+                return 0 if address[1] == 8178 else 1  # only 8178 is occupied
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(transcriber.sys, "platform", platform_name)
+        monkeypatch.setattr(socket_module, "socket", FakeSocket)
+        backend = transcriber.WhisperServerBackend.__new__(transcriber.WhisperServerBackend)
+        backend.port = 8178
+        monkeypatch.setattr(backend, "_is_our_server", lambda port, timeout=2: True, raising=False)
+
+        assert backend._find_available_port() == expected

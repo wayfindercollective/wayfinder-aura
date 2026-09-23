@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -62,8 +64,12 @@ assert DEFAULT_CONFIG['overlay_quality'] == 'performance'
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_inactive_tab_is_created_once_on_first_switch():
+@pytest.mark.parametrize("is_macos", [False, True])
+def test_inactive_tab_is_created_once_on_first_switch(monkeypatch, is_macos):
+    import wayfinder_main
     from wayfinder_main import WayfinderApp
+
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", is_macos)
 
     class Frame:
         def __init__(self):
@@ -115,9 +121,15 @@ def test_inactive_tab_is_created_once_on_first_switch():
     WayfinderApp._switch_tab(app, "settings")
 
     assert calls == ["settings"]
-    assert app.tab_frames["settings"].manager == "place"
-    assert app.tab_frames["settings"].raised is True
-    assert app.tab_frames["dictate"].manager == "place"
+    if is_macos:
+        # Aqua: every built page stays mapped; the selected one is raised.
+        assert app.tab_frames["settings"].manager == "place"
+        assert app.tab_frames["settings"].raised is True
+        assert app.tab_frames["dictate"].manager == "place"
+    else:
+        # Linux (as on main): only the selected page is packed.
+        assert app.tab_frames["settings"].manager == "pack"
+        assert app.tab_frames["dictate"].manager == ""
 
 
 def test_settings_preload_advances_one_slice_and_reschedules():

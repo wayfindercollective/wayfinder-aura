@@ -287,10 +287,14 @@ class WelcomePane:
         self._ctk = ctk
         self.parent = parent
         self.app = app
-        try:
-            needs_model = not bool(app._has_usable_whisper_model())
-        except Exception:
-            needs_model = False
+        # macOS Welcome owns the free Base-model download ("runs entirely on this
+        # Mac"). Linux keeps its separate setup flow and cue banner.
+        needs_model = False
+        if sys.platform == "darwin":
+            try:
+                needs_model = not bool(app._has_usable_whisper_model())
+            except Exception:
+                needs_model = False
         self.flow = WelcomeFlow(
             on_complete=self._complete_flow,
             include_model=needs_model,

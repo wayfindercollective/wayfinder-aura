@@ -1,4 +1,4 @@
-"""Headless tests for the pure-PIL hero liquid-wave renderer.
+"""Headless tests for the macOS (Aqua) path of the pure-PIL hero renderer.
 
 No Tk — imports ``wayfinder.ui.hero_render`` directly (PYTHONPATH=src). Covers
 mode/size, determinism, edge-fade polarity, morph amplitude spread, NaN/inf
@@ -18,9 +18,9 @@ BG = hr.BG_CARD
 
 
 @pytest.fixture(autouse=True)
-def _linux_reference_path(monkeypatch):
-    """These pin the USER-APPROVED Linux/Windows renderer, identical to main."""
-    monkeypatch.setattr(hr.sys, "platform", "linux")
+def _macos_aqua_path(monkeypatch):
+    """These pin the Aqua variant (macOS non-Metal fallback)."""
+    monkeypatch.setattr(hr.sys, "platform", "darwin")
     hr._HERO_CACHE.clear()
 
 
@@ -29,12 +29,12 @@ def _dist(a, b):
 
 
 def _col(img, x):
-    """Mean colour of column x below the 1px top highlight (rows 1..h-1)."""
+    """Mean colour of column x."""
     px = img.load()
-    w, h = img.size
-    n = h - 1
+    _w, h = img.size
+    n = h
     r = g = b = 0
-    for y in range(1, h):
+    for y in range(h):
         pr, pg, pb = px[x, y]
         r += pr; g += pg; b += pb
     return (r / n, g / n, b / n)
@@ -53,22 +53,19 @@ def test_determinism():
     assert a.tobytes() == b.tobytes()
 
 
-def test_edge_columns_are_background_except_top_row():
-    """Edge columns fade to the flat bg everywhere except the intentional 1px
-    top highlight (row 0)."""
+def test_edge_columns_are_background():
+    """Edge columns fade completely to the flat background."""
     img = hr.render_hero_wave(W, H, 1.3, 0.9, 1.0, ROSE)
     px = img.load()
     for x in (0, W - 1):
-        for y in range(1, H):  # skip row 0 (top highlight)
+        for y in range(H):
             assert px[x, y] == BG, f"edge col {x} row {y} = {px[x, y]} != bg"
 
 
-def test_top_row_is_highlight_not_bg():
+def test_top_row_has_no_hard_separator_line():
     img = hr.render_hero_wave(W, H, 1.3, 0.9, 1.0, ROSE)
     px = img.load()
-    # 6% toward white from bg; distinct from bg, same across the whole row.
-    assert px[0, 0] != BG
-    assert px[W // 2, 0] == px[0, 0]
+    assert all(px[x, 0] == BG for x in range(W))
 
 
 def test_center_differs_from_background():
@@ -79,12 +76,12 @@ def test_center_differs_from_background():
 
 def test_morph_increases_vertical_spread():
     """morph=1 (active) spreads the ribbon further from center than morph=0
-    (idle), measured on rows below the top highlight via non-bg extent."""
+    (idle), measured via non-bg extent."""
     def spread(morph):
         img = hr.render_hero_wave(W, H, 1.3, 0.6, morph, ROSE)
         px = img.load()
         ys = []
-        for y in range(1, H):  # below top highlight
+        for y in range(H):
             if _dist(px[W // 2, y], BG) > 20.0:
                 ys.append(y)
         return (max(ys) - min(ys)) if ys else 0
@@ -94,12 +91,12 @@ def test_morph_increases_vertical_spread():
 
 def test_no_hard_clipping_at_max_level():
     """At full energy (level=1, morph=1) the soft limiter keeps the ribbon off
-    the strip bounds: no non-bg pixel in the top/bottom 2 rows (excluding the
-    intentional row-0 highlight), across several animation phases."""
+    the strip bounds: no non-bg pixel in the top/bottom rows across several
+    animation phases."""
     for t in (0.0, 1.3, 2.9, 4.7, 7.1):
         img = hr.render_hero_wave(W, H, t, 1.0, 1.0, ROSE)
         px = img.load()
-        for y in (1, 2, H - 2, H - 1):
+        for y in (0, 1, 2, H - 2, H - 1):
             for x in range(W):
                 assert px[x, y] == BG, (
                     f"t={t}: ink at ({x},{y}) = {px[x, y]} — ribbon touches the "
@@ -141,6 +138,21 @@ def test_color_plumbing_rose_vs_indigo():
     assert _dist(rc, ic) > 15.0
     # rose is redder-than-blue; indigo is bluer-than-red
     assert rc[0] - rc[2] > ic[0] - ic[2]
+
+
+def test_stroke_scale_increases_wave_ink_without_changing_canvas_size():
+    normal = hr.render_hero_wave(W, H, 1.3, 0.6, 1.0, ROSE, stroke_scale=1.0)
+    scaled = hr.render_hero_wave(W, H, 1.3, 0.6, 1.0, ROSE, stroke_scale=1.25)
+
+    def ink_pixels(image):
+        return sum(
+            1
+            for pixel in image.getdata()
+            if _dist(pixel, BG) > 8.0
+        )
+
+    assert normal.size == scaled.size == (W, H)
+    assert ink_pixels(scaled) > ink_pixels(normal)
 
 
 def test_cache_memoization_and_mask_size():

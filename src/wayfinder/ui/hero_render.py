@@ -12,18 +12,18 @@ The visual language is ported from the PyQt6 overlay's ``LiquidWaveRenderer``
 breath ``0.26 + 0.09*sin``, the amplitude/brightness morph curves) are
 USER-APPROVED and reproduced here verbatim.
 
-Cost model (see plan): per frame = 10 source-over ``draw.line`` polylines
-(sampled every 6px, NO ``joint="curve"`` — that costs ~8.3ms/frame) + one
-``Image.composite`` through a baked edge-fade L mask.
-Pillow blends the RGBA strokes directly onto the opaque RGB card surface. That
-preserves real overlap opacity without handing Aqua a translucent Tk image or
-painting a pre-blended dark outline under each strand. All per-(w,h,color,bg)
+Cost model (see plan): per frame = 10 opaque ``draw.line`` polylines (sampled
+every 6px, NO ``joint="curve"`` — Codex benchmarked that at ~8.3ms/frame) + one
+``Image.composite`` through a baked edge-fade L mask + one 1px top-highlight
+line. Alpha is pre-blended over the opaque bg into solid RGBs (no per-segment
+RGBA compositing, no per-frame blur/supersample). All per-(w,h,color,bg)
 invariants are memoized in a bounded module-level cache. Target <=1.5ms/frame.
 """
 from __future__ import annotations
 
 import math
 import random
+import sys
 
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -73,27 +73,39 @@ def _clampf(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
 
 
-def get_hero_caches(w, h, color_rgb, bg_rgb=BG_CARD):
+def get_hero_caches(w, h, color_rgb, bg_rgb=BG_CARD, *, aqua=None):
     """Memoized per-(w,h,color,bg) invariants.
 
     Returns a dict with:
-      - ``layer_alphas``: per-layer glow/core opacity.
-      - ``highlight_alphas``: same for the bright center highlight wave.
+      - ``layer_deltas``: per-layer (color-bg)*alpha *deltas* for glow+core, so a
+        frame does ``rgb = bg + delta*brightness`` (linear in brightness — lets
+        morph scale layer brightness without re-blending).
+      - ``highlight_deltas``: same for the bright center highlight wave.
       - ``mask``: baked edge-fade L mask (255 center -> 0 at edges).
       - ``bg_flat``: an opaque flat bg image reused as the composite backdrop.
+      - macOS (``aqua``, default on darwin) also: ``layer_alphas``,
+        ``highlight_alphas`` and ``bg_rgba`` for the Aqua render path.
     """
-    key = (w, h, color_rgb, bg_rgb)
+    if aqua is None:
+        aqua = sys.platform == "darwin"
+    key = (w, h, color_rgb, bg_rgb, bool(aqua))
     cache = _HERO_CACHE.get(key)
     if cache is not None:
         return cache
 
-    layer_alphas = []
+    br, bg_, bb = bg_rgb
+    cr, cg, cb = color_rgb
+
+    def delta(alpha):
+        return ((cr - br) * alpha, (cg - bg_) * alpha, (cb - bb) * alpha)
+
+    layer_deltas = []
     for _freq, _phase, base_alpha, _thick in WAVE_CONFIGS:
-        layer_alphas.append({
-            "glow": base_alpha * 0.3,
-            "core": base_alpha,
+        layer_deltas.append({
+            "glow": delta(base_alpha * 0.3),
+            "core": delta(base_alpha),
         })
-    highlight_alphas = {"glow": 0.4, "core": 1.0}
+    highlight_deltas = {"glow": delta(0.4), "core": delta(1.0)}
 
     # Edge-fade L mask: 255 in the middle, ramp to 0 across a generous zone.
     fade_zone = max(24, w * 0.06)
@@ -105,15 +117,21 @@ def get_hero_caches(w, h, color_rgb, bg_rgb=BG_CARD):
         mdraw.line([(x, 0), (x, h - 1)], fill=val)
 
     bg_flat = Image.new("RGB", (w, h), bg_rgb)
-    bg_rgba = Image.new("RGBA", (w, h), (*bg_rgb, 255))
 
     cache = {
-        "layer_alphas": layer_alphas,
-        "highlight_alphas": highlight_alphas,
+        "layer_deltas": layer_deltas,
+        "highlight_deltas": highlight_deltas,
         "mask": mask,
         "bg_flat": bg_flat,
-        "bg_rgba": bg_rgba,
     }
+    if aqua:
+        # macOS render path: straight opacities + an RGBA backdrop.
+        cache["layer_alphas"] = [
+            {"glow": base_alpha * 0.3, "core": base_alpha}
+            for _freq, _phase, base_alpha, _thick in WAVE_CONFIGS
+        ]
+        cache["highlight_alphas"] = {"glow": 0.4, "core": 1.0}
+        cache["bg_rgba"] = Image.new("RGBA", (w, h), (*bg_rgb, 255))
     if len(_HERO_CACHE) >= _HERO_CACHE_MAX:
         _HERO_CACHE.clear()
     _HERO_CACHE[key] = cache
@@ -121,6 +139,157 @@ def get_hero_caches(w, h, color_rgb, bg_rgb=BG_CARD):
 
 
 def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
+                     caches=None, stardust=False, stroke_scale=1.0):
+    """Liquid-ribbon waveform onto a w x h RGB strip (``PIL.Image`` mode RGB).
+
+    Linux/Windows render the USER-APPROVED reference (pre-blended opaque strokes
+    plus the 1px top highlight) exactly as on main. macOS renders the Aqua
+    variant (RGBA strokes, blurred glow, ``stroke_scale`` for the unscaled raw
+    Tk canvas); it is also the non-Metal fallback behind the native hero layer.
+    """
+    if sys.platform == "darwin":
+        return _render_hero_wave_aqua(
+            w, h, t, level, morph, state_color_rgb, bg_rgb,
+            caches=caches, stardust=stardust, stroke_scale=stroke_scale,
+        )
+    return _render_hero_wave_reference(
+        w, h, t, level, morph, state_color_rgb, bg_rgb,
+        caches=caches, stardust=stardust,
+    )
+
+
+def _render_hero_wave_reference(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
+                     caches=None, stardust=False):
+    """Liquid-ribbon waveform onto a w x h RGB strip.
+
+    Args:
+        w, h: strip pixel size.
+        t: animation time (advanced delta-based by the caller).
+        level: audio level in [0,1].
+        morph: idle<->active morph in [0,1]. 0 = calm dim breath (idle),
+            1 = energetic bright (active). Scales amplitude reactivity + layer
+            brightness + voice-boost gain.
+        state_color_rgb: (r,g,b) ribbon colour for the current app state.
+        bg_rgb: opaque canvas background the alpha is pre-blended over.
+        caches: optional ``get_hero_caches`` result (else computed/looked up).
+        stardust: draw a few drifting sparkle points (placement B; unused by the
+            approved header-only design, kept for completeness).
+
+    Returns a ``PIL.Image`` in mode ``RGB``, size ``(w, h)``.
+    """
+    # NaN/inf guards — one bad value would poison every frame.
+    if t != t or t in (float("inf"), float("-inf")):
+        t = 0.0
+    if level != level or level in (float("inf"), float("-inf")):
+        level = 0.0
+    if morph != morph or morph in (float("inf"), float("-inf")):
+        morph = 0.0
+    level = _clampf(level, 0.0, 1.0)
+    morph = _clampf(morph, 0.0, 1.0)
+
+    if caches is None:
+        caches = get_hero_caches(w, h, state_color_rgb, bg_rgb)
+
+    center_y = h / 2.0
+    max_amp = h * 0.42
+    top, bottom = 1.0, h - 1.0
+
+    # Amplitude: calm gentle breath at idle (ribbon sits ~1/3 height), then morph
+    # + voice open it up while recording. The energy cap is 0.80 (not 1.0): at
+    # full drive the summed sines would push the soft limiter below deep into
+    # saturation and the peaks plateaued — capping the drive keeps the limiter
+    # in its gentle range so high-level peaks stay rounded and flowing. The
+    # energetic feel comes from motion + brightness, not from slamming bounds.
+    # (Idle is untouched: breath tops out at 0.35, far below the cap.)
+    breath = 0.26 + 0.09 * (0.5 + 0.5 * math.sin(t * 0.8))
+    amp = max_amp * min(0.80, breath + 0.20 * morph + (level ** 0.6) * 0.62 * morph)
+    fs = FREQ_SCALE
+
+    # Soft amplitude limiter: at high level the summed sines (worst case 1.6*amp
+    # centerline) used to slam the strip bounds and flatten — the ribbon read as
+    # "confined". Budget the usable half-height for the thickest stroke (glow
+    # width thick+4 = 10 -> radius 5) plus a 3px air margin, pass anything above
+    # a knee through tanh so peaks asymptotically approach (never touch) the
+    # bounds. Below the knee it's identity — the approved idle look (max
+    # displacement ~15px at h=64) is untouched.
+    max_stroke_rad = (max(cfg[3] for cfg in WAVE_CONFIGS) + 4) / 2.0
+    a_max = max(4.0, h / 2.0 - max_stroke_rad - 3.0)
+    knee = a_max * 0.7
+    soft_range = a_max - knee
+
+    def soft_limit(dy):
+        ad = dy if dy >= 0.0 else -dy
+        if ad <= knee:
+            return dy
+        lim = knee + soft_range * math.tanh((ad - knee) / soft_range)
+        return lim if dy >= 0.0 else -lim
+
+    # Layer brightness: dim & calm at idle, full & bright active.
+    brightness = 0.55 + 0.45 * morph
+    hi_brightness = 0.40 + 0.60 * morph
+
+    br, bg_, bb = bg_rgb
+    layer_deltas = caches["layer_deltas"]
+
+    img = caches["bg_flat"].copy()
+    draw = ImageDraw.Draw(img)
+
+    # Fixed point count in mock-reference space: x is the on-image pixel, u is
+    # the wave-space coordinate the sines are evaluated at.
+    # Idle (low morph) is low-amplitude — segments can't facet — and runs at
+    # 30fps, so it keeps the cheap mock density; the extra points only get paid
+    # for by the energetic 15fps active ribbon where curvature is visible.
+    n = _N_POINTS_MIN if morph < 0.3 else _n_points(w)
+    xus = [(w * i / (n - 1), _REF_W * i / (n - 1)) for i in range(n)]
+
+    def blend(delta, k):
+        dr, dg, db = delta
+        return (
+            int(_clampf(br + dr * k, 0, 255)),
+            int(_clampf(bg_ + dg * k, 0, 255)),
+            int(_clampf(bb + db * k, 0, 255)),
+        )
+
+    # --- 4 stacked layers: glow (wide, dim) UNDER core (narrow) --------------
+    for (freq, phase, _a, thick), deltas in zip(WAVE_CONFIGS, layer_deltas):
+        f = freq * fs
+        pts = []
+        for x, u in xus:
+            dy = amp * math.sin(f * u + t + phase)
+            dy += (amp * 0.4) * math.sin(f * 2.3 * u + t * 1.6 + phase)
+            dy += (amp * 0.2) * math.sin(f * 3.7 * u + t * 2.1 + phase * 0.5)
+            pts.append((x, _clampf(center_y + soft_limit(dy), top, bottom)))
+        draw.line(pts, fill=blend(deltas["glow"], brightness), width=thick + 4)
+        draw.line(pts, fill=blend(deltas["core"], brightness), width=thick)
+
+    # --- bright center highlight wave ---------------------------------------
+    hdelt = caches["highlight_deltas"]
+    hpts = []
+    for x, u in xus:
+        dy = amp * math.sin(0.13 * fs * u + t * 1.4)
+        dy += (amp * 0.5) * math.sin(0.26 * fs * u + t * 2.0 + 0.8)
+        hpts.append((x, _clampf(center_y + soft_limit(dy), top, bottom)))
+    draw.line(hpts, fill=blend(hdelt["glow"], hi_brightness), width=6)
+    draw.line(hpts, fill=blend(hdelt["core"], hi_brightness * 0.95), width=2)
+
+    # --- optional drifting stardust (placement B) ---------------------------
+    if stardust:
+        _draw_wave_stardust(draw, w, h, t, state_color_rgb, bg_rgb)
+
+    # --- edge fade: composite wave over flat bg through baked mask -----------
+    final = Image.composite(img, caches["bg_flat"], caches["mask"])
+
+    # --- 1px inner top-edge highlight (bg +6% toward white), post-composite --
+    # Intentionally NOT background (kept from hero-depth commit ae3da97) — the
+    # edge-fade test asserts every column EXCEPT row 0.
+    fdraw = ImageDraw.Draw(final)
+    hi = tuple(int(c + (255 - c) * 0.06) for c in bg_rgb)
+    fdraw.line([(0, 0), (w - 1, 0)], fill=hi)
+
+    return final
+
+
+def _render_hero_wave_aqua(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
                      caches=None, stardust=False, stroke_scale=1.0):
     """Liquid-ribbon waveform onto a w x h RGB strip.
 
@@ -152,8 +321,8 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     morph = _clampf(morph, 0.0, 1.0)
     stroke_scale = _clampf(float(stroke_scale), 0.7, 2.5)
 
-    if caches is None:
-        caches = get_hero_caches(w, h, state_color_rgb, bg_rgb)
+    if caches is None or "layer_alphas" not in caches:
+        caches = get_hero_caches(w, h, state_color_rgb, bg_rgb, aqua=True)
 
     center_y = h / 2.0
     max_amp = h * 0.42

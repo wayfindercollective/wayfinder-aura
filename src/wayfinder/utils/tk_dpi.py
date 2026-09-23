@@ -67,7 +67,7 @@ def normalize_tk_font_dpi(root, platform_name: str | None = None) -> float:
     widgets paint in one coordinate system and receive clicks in another.
     """
     active_platform = platform_name or sys.platform
-    if not active_platform.startswith("linux"):
+    if active_platform == "darwin":
         try:
             return float(root.tk.call("tk", "scaling")) * 72.0
         except Exception:

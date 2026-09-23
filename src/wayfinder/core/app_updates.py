@@ -16,13 +16,17 @@ unparseable tag) resolves to "no update" — a wrong nag is worse than a late on
 
 import json
 import re
+import sys
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
+from ..config import CONFIG_DIR as _CONFIG_DIR
 from ..utils.platform import get_cache_dir
 
 # Cache file for update check results
-CONFIG_DIR = get_cache_dir()  # compatibility alias for tests/older callers
+# macOS keeps update caches in ~/Library/Caches; Linux/Windows keep them in the
+# config dir, as on main.
+CONFIG_DIR = get_cache_dir() if sys.platform == "darwin" else _CONFIG_DIR
 APP_UPDATE_CACHE_FILE = CONFIG_DIR / "app_update_cache.json"
 
 # Check interval: once per day (seconds)
