@@ -287,3 +287,24 @@ def test_macos_docs_do_not_claim_python_311_is_supported():
     text = (Path(__file__).parents[1] / "packaging/macos/README.md").read_text()
     assert "3.11 also works" not in text
     assert "pinned to the 3.12 line" in text
+
+
+@pytest.mark.parametrize("is_macos, expected", [(True, False), (False, True)])
+def test_gated_developer_model_does_not_count_as_usable_on_macos(monkeypatch, is_macos, expected):
+    """A Free Mac with only small.en (Ultra) on disk must still be offered Base."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", is_macos)
+    monkeypatch.setattr(
+        wayfinder_main,
+        "_resolve_whisper_model",
+        lambda name: Path("/dev-models") / name if name == "ggml-small.en.bin" else None,
+    )
+    free_gate = SimpleNamespace(has_feature=lambda _feature: False)
+    app = SimpleNamespace(
+        config={"transcription_backend": "whisper_cpp", "model_path": "~/Library/x/ggml-base.en.bin"},
+        feature_gate=free_gate,
+    )
+
+    assert wayfinder_main.WayfinderApp._has_usable_whisper_model(app) is expected
