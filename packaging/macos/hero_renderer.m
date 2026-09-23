@@ -28,7 +28,21 @@ typedef struct {
 @property(nonatomic) int width;
 @property(nonatomic) int height;
 @property(nonatomic) BOOL stopped;
+@property(nonatomic) BOOL settled;
+@property(nonatomic) BOOL appActive;
+@property(nonatomic) BOOL windowVisible;
+@property(nonatomic) CFTimeInterval idleSince;
+@property(nonatomic, strong) NSMutableArray *observers;
 @end
+
+// The idle ribbon keeps its 30 fps breath while Aura is the active app. Once
+// Aura has been in the background this long (or at once when its window is
+// fully covered), stop issuing Metal work: the last frame stays on screen and
+// Core Animation breathes it in the render server. A continuously presenting
+// Metal client holds ~256 MB of GPU memory and 30 wakeups/s (M3 Ultra, macOS
+// 27). Recording, focus, visibility, resize or reveal restart it instantly.
+static const CFTimeInterval kWFHeroSettleAfterSeconds = 20.0;
+static NSString *const kWFHeroBreathKey = @"WayfinderHeroIdleBreath";
 
 @implementation WFHeroRenderer
 
@@ -93,13 +107,94 @@ typedef struct {
     _color = (vector_float4){91.0f / 255.0f, 143.0f / 255.0f, 212.0f / 255.0f, 1.0f};
     _bg = (vector_float4){30.0f / 255.0f, 30.0f / 255.0f, 31.0f / 255.0f, 1.0f};
 
+    _appActive = NSApp.isActive;
+    _windowVisible = YES;
+    _idleSince = CACurrentMediaTime();
+    _observers = [NSMutableArray array];
+    __weak WFHeroRenderer *weakSelf = self;
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    [_observers addObject:[center addObserverForName:NSApplicationDidBecomeActiveNotification
+                                              object:nil queue:NSOperationQueue.mainQueue
+                                          usingBlock:^(NSNotification *note) {
+        (void)note;
+        weakSelf.appActive = YES;
+        [weakSelf wake];
+    }]];
+    [_observers addObject:[center addObserverForName:NSApplicationDidResignActiveNotification
+                                              object:nil queue:NSOperationQueue.mainQueue
+                                          usingBlock:^(NSNotification *note) {
+        (void)note;
+        weakSelf.appActive = NO;
+        weakSelf.idleSince = CACurrentMediaTime();
+    }]];
+    [_observers addObject:[center addObserverForName:NSWindowDidChangeOcclusionStateNotification
+                                              object:nil queue:NSOperationQueue.mainQueue
+                                          usingBlock:^(NSNotification *note) {
+        [weakSelf windowOcclusionChanged:note.object];
+    }]];
+    [self startTimer];
+    return self;
+}
+
+- (void)startTimer {
+    if (_timer || _stopped) return;
+    _lastFrameTime = CACurrentMediaTime();
     _timer = [NSTimer timerWithTimeInterval:(1.0 / 30.0)
                                      target:self
                                    selector:@selector(drawFrame:)
                                    userInfo:nil
                                     repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:_timer forMode:NSRunLoopCommonModes];
-    return self;
+}
+
+- (void)stopTimer {
+    [_timer invalidate];
+    _timer = nil;
+}
+
+- (BOOL)ownsWindow:(NSWindow *)window {
+    CALayer *root = window.contentView.layer;
+    for (CALayer *layer = _metalLayer; layer != nil; layer = layer.superlayer) {
+        if (layer == root) return YES;
+    }
+    return NO;
+}
+
+- (void)windowOcclusionChanged:(NSWindow *)window {
+    if (![window isKindOfClass:NSWindow.class] || ![self ownsWindow:window]) return;
+    _windowVisible = (window.occlusionState & NSWindowOcclusionStateVisible) != 0;
+    if (_windowVisible) {
+        [self wake];
+    } else {
+        [self settleWithBreath:NO];  // nobody can see it: no work at all
+    }
+}
+
+- (void)settleWithBreath:(BOOL)breath {
+    if (_stopped) return;
+    [self stopTimer];
+    if (_settled) return;
+    _settled = YES;
+    if (!breath) return;
+    CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    pulse.fromValue = @1.0;
+    pulse.toValue = @0.8;
+    pulse.duration = 2.8;
+    pulse.autoreverses = YES;
+    pulse.repeatCount = HUGE_VALF;
+    pulse.timingFunction =
+        [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [_metalLayer addAnimation:pulse forKey:kWFHeroBreathKey];
+}
+
+- (void)wake {
+    _idleSince = CACurrentMediaTime();
+    if (_stopped || _metalLayer.hidden || !_windowVisible) return;
+    if (_settled) {
+        _settled = NO;
+        [_metalLayer removeAnimationForKey:kWFHeroBreathKey];
+    }
+    [self startTimer];
 }
 
 - (void)drawFrame:(NSTimer *)timer {
@@ -133,10 +228,16 @@ typedef struct {
         [encoder endEncoding];
         [commandBuffer presentDrawable:drawable];
         [commandBuffer commit];
+
+        BOOL calm = _targetMorph == 0.0f && _morph < 0.01f && _targetAudioLevel <= 0.0f;
+        if (calm && !_appActive && now - _idleSince >= kWFHeroSettleAfterSeconds) {
+            [self settleWithBreath:YES];
+        }
     }
 }
 
 - (void)setFrameX:(double)x y:(double)y width:(int)width height:(int)height {
+    if (width != _width || height != _height) [self wake];
     _width = width;
     _height = height;
     [CATransaction begin];
@@ -151,6 +252,7 @@ typedef struct {
              color:(vector_float4)color
                 bg:(vector_float4)bg
        strokeScale:(float)strokeScale {
+    if (active || (active ? 1.0f : 0.0f) != _targetMorph) [self wake];
     _targetMorph = active ? 1.0f : 0.0f;
     _targetAudioLevel = active ? fmaxf(0.0f, fminf(audioLevel, 1.0f)) : 0.0f;
     _color = color;
@@ -164,12 +266,20 @@ typedef struct {
     _metalLayer.hidden = hidden;
     [CATransaction commit];
     _lastFrameTime = CACurrentMediaTime();
+    if (hidden) {
+        [self stopTimer];  // a hidden layer used to keep 30 empty wakeups/s
+    } else {
+        [self wake];
+    }
 }
 
 - (void)stop {
     _stopped = YES;
-    [_timer invalidate];
-    _timer = nil;
+    [self stopTimer];
+    for (id observer in _observers) {
+        [NSNotificationCenter.defaultCenter removeObserver:observer];
+    }
+    [_observers removeAllObjects];
     [_metalLayer removeFromSuperlayer];
 }
 

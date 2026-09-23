@@ -197,6 +197,10 @@ class MacOSOverlayMetalLayer:
                 ctypes.c_float,
             ]
             library.wf_overlay_set_hidden.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            try:
+                library.wf_overlay_set_idle.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            except AttributeError:
+                pass  # an older renderer dylib: the wave simply never settles
             library.wf_overlay_destroy.argtypes = [ctypes.c_void_p]
             handle = library.wf_overlay_create(
                 ctypes.c_void_p(objc.pyobjc_id(parent)),
@@ -237,6 +241,11 @@ class MacOSOverlayMetalLayer:
     def set_hidden(self, hidden: bool) -> None:
         if self.handle:
             self.library.wf_overlay_set_hidden(self.handle, int(bool(hidden)))
+
+    def set_idle(self, idle: bool) -> None:
+        """READY with nothing happening: the native wave may settle (see .m)."""
+        if self.handle and hasattr(self.library, "wf_overlay_set_idle"):
+            self.library.wf_overlay_set_idle(self.handle, int(bool(idle)))
 
     def close(self) -> None:
         if self.handle:

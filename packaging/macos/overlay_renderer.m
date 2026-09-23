@@ -23,7 +23,18 @@ typedef struct {
 @property(nonatomic) vector_float4 color;
 @property(nonatomic) CFTimeInterval lastFrameTime;
 @property(nonatomic) BOOL stopped;
+@property(nonatomic) BOOL idle;
+@property(nonatomic) BOOL settled;
+@property(nonatomic) CFTimeInterval idleSince;
 @end
+
+// Idle READY pill: after this long with nothing happening, stop issuing Metal
+// work and let Core Animation breathe the last frame. Any Metal client that
+// presents continuously keeps ~256 MB of GPU memory and a 15 fps wakeup alive
+// (measured on M3 Ultra / macOS 27); the render server runs the breath for
+// free. Any state change, level, resize or reveal wakes the wave instantly.
+static const CFTimeInterval kWFSettleAfterSeconds = 20.0;
+static NSString *const kWFBreathKey = @"WayfinderIdleBreath";
 
 @implementation WFOverlayRenderer
 
@@ -75,14 +86,51 @@ typedef struct {
     [parentLayer addSublayer:_metalLayer];
 
     _lastFrameTime = CACurrentMediaTime();
+    _idleSince = _lastFrameTime;
     _color = (vector_float4){91.0f / 255.0f, 143.0f / 255.0f, 212.0f / 255.0f, 1.0f};
+    [self startTimer];
+    return self;
+}
+
+- (void)startTimer {
+    if (_timer || _stopped) return;
     _timer = [NSTimer timerWithTimeInterval:(1.0 / 15.0)
                                      target:self
                                    selector:@selector(drawFrame:)
                                    userInfo:nil
                                     repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:_timer forMode:NSRunLoopCommonModes];
-    return self;
+}
+
+- (void)settle {
+    if (_settled || _stopped) return;
+    _settled = YES;
+    [_timer invalidate];
+    _timer = nil;
+    CABasicAnimation *breath = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    breath.fromValue = @1.0;
+    breath.toValue = @0.7;
+    breath.duration = 2.4;
+    breath.autoreverses = YES;
+    breath.repeatCount = HUGE_VALF;
+    breath.timingFunction =
+        [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [_metalLayer addAnimation:breath forKey:kWFBreathKey];
+}
+
+- (void)wake {
+    _idleSince = CACurrentMediaTime();
+    if (!_settled || _stopped) return;
+    _settled = NO;
+    [_metalLayer removeAnimationForKey:kWFBreathKey];
+    _lastFrameTime = CACurrentMediaTime();
+    [self startTimer];
+}
+
+- (void)setIdleState:(BOOL)idle {
+    if (idle == _idle) return;
+    _idle = idle;
+    [self wake];
 }
 
 - (void)drawFrame:(NSTimer *)timer {
@@ -114,10 +162,15 @@ typedef struct {
         [encoder endEncoding];
         [commandBuffer presentDrawable:drawable];
         [commandBuffer commit];
+
+        if (_idle && _audioLevel < 0.01f && now - _idleSince >= kWFSettleAfterSeconds) {
+            [self settle];  // this frame stays on screen; CA breathes it
+        }
     }
 }
 
 - (void)setFrameX:(double)x y:(double)y width:(int)width height:(int)height {
+    if (width != _width || height != _height) [self wake];
     _width = width;
     _height = height;
     [CATransaction begin];
@@ -131,6 +184,7 @@ typedef struct {
 
 - (void)setAudioLevel:(float)audioLevel color:(vector_float4)color {
     _audioLevel = fmaxf(0.0f, fminf(audioLevel, 1.0f));
+    if (_audioLevel >= 0.01f || !simd_equal(color, _color)) [self wake];
     _color = color;
 }
 
@@ -140,6 +194,7 @@ typedef struct {
     _metalLayer.hidden = hidden;
     [CATransaction commit];
     _lastFrameTime = CACurrentMediaTime();
+    if (!hidden) [self wake];
 }
 
 - (void)stop {
@@ -169,6 +224,11 @@ void wf_overlay_set_state(void *handle, float audioLevel, float red, float green
     if (!handle) return;
     [(__bridge WFOverlayRenderer *)handle
         setAudioLevel:audioLevel color:(vector_float4){red, green, blue, 1.0f}];
+}
+
+void wf_overlay_set_idle(void *handle, int idle) {
+    if (!handle) return;
+    [(__bridge WFOverlayRenderer *)handle setIdleState:(idle != 0)];
 }
 
 void wf_overlay_set_hidden(void *handle, int hidden) {

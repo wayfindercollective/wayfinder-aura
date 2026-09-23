@@ -1873,6 +1873,11 @@ class GlassmorphicOverlay(QWidget):
             )
             return
         
+        if self._macos_wave_layer is not None:
+            # READY may settle to a still, CA-breathed frame after a while;
+            # any other state animates at full rate immediately.
+            self._macos_wave_layer.set_idle(state == OverlayState.READY)
+
         # Get colors for new state
         palette = STATE_PALETTES.get(state, STATE_PALETTES[OverlayState.READY])
         label = STATE_LABELS.get(state, "")
@@ -2319,6 +2324,7 @@ class GlassmorphicOverlay(QWidget):
             )
             if self._macos_wave_layer is not None:
                 print("overlay: native Metal waveform active", flush=True)
+                self._macos_wave_layer.set_idle(self._state == OverlayState.READY)
                 self.update()
         except Exception:
             self._macos_wave_layer = None

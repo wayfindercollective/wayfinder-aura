@@ -92,3 +92,26 @@ def test_dmg_layout_places_app_and_applications_without_finder_chrome():
     builder = (REPO / "packaging" / "macos" / "build.py").read_text(encoding="utf-8")
     assert "dmgbuild.build_dmg(" in builder
     assert '"hdiutil", "create"' in builder  # fallback when dmgbuild is absent
+
+
+def test_native_renderers_settle_when_idle_and_stop_when_hidden():
+    """The idle pill/hero stop issuing Metal work (GPU memory + wakeups) and
+    let Core Animation breathe the last frame; a hidden hero stops its timer."""
+    root = Path(__file__).resolve().parent.parent / "packaging" / "macos"
+    overlay = (root / "overlay_renderer.m").read_text()
+    hero = (root / "hero_renderer.m").read_text()
+    assert "wf_overlay_set_idle" in overlay and "kWFSettleAfterSeconds" in overlay
+    assert "animationWithKeyPath:@\"opacity\"" in overlay
+    assert "NSWindowDidChangeOcclusionStateNotification" in hero
+    assert "NSApplicationDidResignActiveNotification" in hero
+    assert "[self stopTimer];  // a hidden layer" in hero
+
+
+def test_overlay_bridge_tolerates_an_older_dylib():
+    import types
+    from wayfinder.ui.macos_overlay_metal import MacOSOverlayMetalLayer
+
+    layer = MacOSOverlayMetalLayer.__new__(MacOSOverlayMetalLayer)
+    layer.handle = 1
+    layer.library = types.SimpleNamespace()  # no wf_overlay_set_idle symbol
+    layer.set_idle(True)  # must not raise
