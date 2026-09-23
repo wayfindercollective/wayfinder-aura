@@ -12681,28 +12681,31 @@ class WayfinderApp(ctk.CTk):
                 # Success
                 def on_success():
                     self._inline_download_active = False
+                    self.log(f"✓ Downloaded: {model_info['name']} ({format_size(downloaded)}, avg {format_speed(avg_speed)})")
+
+                    # The user asked for this model: make it the active cleanup
+                    # model (queued until IDLE if a dictation is running, so the
+                    # resident model is never swapped mid-cleanup).
+                    outcome = self._activate_downloaded_model(
+                        "llm", str(model_file), model_info
+                    )
+                    name = _model_display_name(str(model_file))
+                    if outcome == "active":
+                        status = f"✓ {name} downloaded — now active"
+                    elif outcome == "deferred":
+                        status = f"✓ {name} downloaded — switching to it when this dictation finishes"
+                    else:
+                        status = f"✓ Downloaded {name}"
                     try:
                         self._llamacpp_progress_bar.set(1.0)
                         self._llamacpp_status_label.configure(
-                            text=f"✓ Downloaded {model_info['name']} ({format_size(downloaded)} in {format_eta(total_time)})",
+                            text=f"{status} ({format_size(downloaded)} in {format_eta(total_time)})",
                             text_color=COLORS["accent"]
                         )
                         self.update_idletasks()  # Force UI refresh
                     except:
                         pass
-                    self.log(f"✓ Downloaded: {model_info['name']} ({format_size(downloaded)}, avg {format_speed(avg_speed)})")
-                    
-                    # Auto-select the downloaded model
-                    self.config["llama_cpp_model_path"] = str(model_file)
-                    self.config["llama_cpp_model_requires_feature"] = model_info.get(
-                        "requires_feature"
-                    )
-                    save_config(self.config)
-                    # Changing the model must drop the OLD one: both caches are keyed by
-                    # model path, so a switch ADDS an entry and leaves the previous
-                    # weights resident behind a key nothing will ask for again.
-                    _release_cleanup_residency()
-                    
+
                     # Hide progress after 2 seconds and rebuild
                     self.after(2000, self._rebuild_postproc_section)
                 
@@ -16675,6 +16678,119 @@ class WayfinderApp(ctk.CTk):
         
         return models
 
+    # === Auto-activate a model the user just downloaded ===
+
+    def _set_active_whisper_model(self, path: str) -> None:
+        """Persist + apply a speech model: the Save & Apply path.
+
+        Shared by the Whisper Models panel and download auto-activation. The
+        transcriber reloads on the next dictation because the resident
+        whisper-server is keyed by model path.
+        """
+        store = str(path)
+        home = str(Path.home())
+        if store.startswith(home):
+            store = "~" + store[len(home):]
+        self.config["model_path"] = store
+        save_config(self.config)
+        if hasattr(self, "model_btn"):
+            try:
+                self.model_btn.configure(text=self.get_model_display())
+            except Exception:
+                pass
+        self.log(f"⚙ Model: {self.get_model_display()}")
+        if not self.feature_gate.has_feature("gpu_acceleration"):
+            self.log("⚙ Free transcription uses Base on CPU; GPU requires Ultra.")
+            if hasattr(self, "gpu_var"):
+                self.gpu_var.set(False)
+
+    def _activate_downloaded_model(
+        self, role: str, path: str, model_info: dict | None = None,
+    ) -> str:
+        """Make a model the user just fetched with Get/Download the active one.
+
+        ``role`` names the list it came from: ``"whisper"`` (speech model) or
+        ``"llm"`` (cleanup model). Only the user's own download buttons call
+        this; nothing that downloads in the background switches models.
+
+        Mid-dictation (any state but IDLE) the switch is queued and applied on
+        the next IDLE transition, so a model is never swapped under a running
+        recording/transcription. Returns "active", "deferred" or "skipped".
+        """
+        name = _model_display_name(path)
+        if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+            pending = getattr(self, "_pending_model_activations", None)
+            if pending is None:
+                pending = {}
+                self._pending_model_activations = pending
+            pending[role] = (path, model_info)  # latest download per role wins
+            self.log(f"✓ {name} downloaded — switching to it when this dictation finishes")
+            return "deferred"
+        if not self._apply_downloaded_model(role, path, model_info):
+            return "skipped"
+        self.log(f"✓ {name} downloaded — now active")
+        return "active"
+
+    def _apply_downloaded_model(
+        self, role: str, path: str, model_info: dict | None = None,
+    ) -> bool:
+        """Switch ``role`` to ``path`` exactly as Save & Apply would. False = not applied."""
+        name = _model_display_name(path)
+        if not Path(os.path.expanduser(str(path))).is_file():
+            self.log(f"⚠ {name} is not on disk — keeping the current model")
+            return False
+        if role == "whisper":
+            try:
+                from wayfinder.license import transcription_model_allowed
+                allowed = transcription_model_allowed(str(path), self.feature_gate)
+            except Exception:
+                allowed = False
+            if not allowed:
+                return False
+            self._set_active_whisper_model(str(path))
+            # A model now exists: drop the "download a model" cue if it was up.
+            try:
+                self._maybe_show_setup_cue()
+            except Exception:
+                pass
+            return True
+        if role == "llm":
+            if not self._cleanup_model_is_unlocked(str(path), model_info):
+                return False
+            self.config["llama_cpp_model_path"] = str(path)
+            self.config["llama_cpp_model_requires_feature"] = (model_info or {}).get(
+                "requires_feature"
+            )
+            save_config(self.config)
+            # Changing the model must drop the OLD one: both caches are keyed by
+            # model path, so a switch ADDS an entry and leaves the previous
+            # weights resident behind a key nothing will ask for again.
+            _release_cleanup_residency()
+            self.log(f"⚙ LLM Model: {name}")
+            try:
+                self._update_compatibility_banner()
+            except Exception:
+                pass
+            return True
+        return False
+
+    def _flush_pending_model_activations(self) -> None:
+        """Apply downloads that finished mid-dictation, now that the app is IDLE."""
+        pending = getattr(self, "_pending_model_activations", None)
+        if not pending or getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+            return
+        items = list(pending.items())
+        pending.clear()
+        for role, (path, model_info) in items:
+            if self._apply_downloaded_model(role, path, model_info):
+                self.log(f"✓ {_model_display_name(path)} is now active")
+                refresh = getattr(self, "_model_panel_refreshers", {}).get(role)
+                if refresh is not None:
+                    try:
+                        refresh()
+                    except Exception:
+                        pass
+
     def open_model_settings(self):
         """Show inline panel to select or download whisper models.
 
@@ -16810,25 +16926,24 @@ class WayfinderApp(ctk.CTk):
                 if not _model_unlocked(selected):
                     self._show_premium_prompt("large_models")
                     return
-                store = selected
-                home = str(Path.home())
-                if store.startswith(home):
-                    store = "~" + store[len(home):]
-                self.config["model_path"] = store
-                save_config(self.config)
-                if hasattr(self, "model_btn"):
-                    self.model_btn.configure(text=self.get_model_display())
-                self.log(f"⚙ Model: {self.get_model_display()}")
-                if not self.feature_gate.has_feature("gpu_acceleration"):
-                    self.log("⚙ Free transcription uses Base on CPU; GPU requires Ultra.")
-                    if hasattr(self, "gpu_var"):
-                        self.gpu_var.set(False)
+                self._set_active_whisper_model(selected)
                 if close:
                     close_panel()
 
-            def show_installed():
+            def show_installed(notice: str | None = None):
                 clear_content()
                 set_tab("installed")
+                # Read the ACTIVE model fresh: a download may have just made a
+                # new one active while this panel stayed open.
+                active_path = os.path.expanduser(self.config.get("model_path", "") or "")
+
+                if notice:
+                    ctk.CTkLabel(
+                        content_area, text=notice, anchor="w", justify="left",
+                        font=(fam, fs["caption"], "bold"),
+                        text_color=COLORS["accent_green"],
+                        wraplength=520,
+                    ).pack(fill="x", padx=SPACING["sm"], pady=(SPACING["xs"], 0))
 
                 models = list(self.get_available_models())
                 if not models:
@@ -16853,7 +16968,7 @@ class WayfinderApp(ctk.CTk):
                 # Active first, then recommended (Turbo Q5), then name
                 def _sort_key(m):
                     p = os.path.expanduser(m["path"])
-                    active = 0 if p == current_path else 1
+                    active = 0 if p == active_path else 1
                     mid = (m.get("model_id") or "").lower()
                     rec = 0 if (
                         m.get("recommended")
@@ -16888,7 +17003,7 @@ class WayfinderApp(ctk.CTk):
                 grid = tile_grid(scroll, columns=2, key="installed_tiles")
                 for i, model in enumerate(models):
                     path = model["path"]
-                    selected = os.path.expanduser(path) == current_path
+                    selected = os.path.expanduser(path) == active_path
                     title, badge = format_model_tile_title(model["name"], model.get("model_id"))
                     if not _model_unlocked(model.get("model_id") or path):
                         badge = "Ultra"
@@ -17327,10 +17442,28 @@ class WayfinderApp(ctk.CTk):
                             pass
                     self.after(0, update)
 
-                def on_complete(_path):
+                def on_complete(path):
                     def update():
                         self.log(f"Downloaded: {info['name']}")
-                        show_download()
+                        # The user asked for this model: make it the active speech
+                        # model now (queued until IDLE if a dictation is running),
+                        # instead of making them hunt for it under Installed.
+                        outcome = self._activate_downloaded_model("whisper", path)
+                        try:
+                            if not content_area.winfo_exists():
+                                return  # panel closed mid-download
+                        except Exception:
+                            return
+                        if outcome == "active":
+                            model_var.set(os.path.expanduser(path))
+                            show_installed(notice=f"✓ {info['name']} downloaded — now active")
+                        elif outcome == "deferred":
+                            show_installed(
+                                notice=f"✓ {info['name']} downloaded — switching to it "
+                                       "when this dictation finishes"
+                            )
+                        else:
+                            show_download()
                     self.after(0, update)
 
                 def on_error(error):
@@ -17345,6 +17478,16 @@ class WayfinderApp(ctk.CTk):
 
             installed_btn.configure(command=show_installed)
             download_btn.configure(command=show_download)
+
+            def _refresh_after_deferred_activation():
+                """A queued download went active at IDLE: show it selected."""
+                if content_area.winfo_exists():
+                    model_var.set(os.path.expanduser(self.config.get("model_path", "") or ""))
+                    show_installed()
+
+            if not hasattr(self, "_model_panel_refreshers"):
+                self._model_panel_refreshers = {}
+            self._model_panel_refreshers["whisper"] = _refresh_after_deferred_activation
             show_installed()
 
         self._show_inline_panel(container, "Whisper Models", build_panel)
@@ -17951,6 +18094,14 @@ class WayfinderApp(ctk.CTk):
                 self._start_recording_watchdog()
             elif old_state == AppState.RECORDING:
                 self._cancel_recording_watchdog()
+
+        # A model download the user started finished mid-dictation: apply it now
+        # that the pipeline is idle (after this transition's own work settles).
+        if new_state == AppState.IDLE and getattr(self, "_pending_model_activations", None):
+            try:
+                self.after(0, self._flush_pending_model_activations)
+            except Exception:
+                pass
 
         # Duck off the Tk thread via a single FIFO worker (order preserved; no race
         # where a slow duck finishes after restore and leaves audio attenuated).

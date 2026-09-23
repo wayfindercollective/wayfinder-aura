@@ -271,8 +271,15 @@ class LlamaDownloadApp:
 
     _download_selected_llamacpp_model = WApp._download_selected_llamacpp_model
     _cancel_llamacpp_download = WApp._cancel_llamacpp_download
+    # A finished user download auto-activates through the shared helpers.
+    _activate_downloaded_model = WApp._activate_downloaded_model
+    _apply_downloaded_model = WApp._apply_downloaded_model
+    _cleanup_model_is_unlocked = WApp._cleanup_model_is_unlocked
 
     def __init__(self, selection, model_info, installed=False):
+        self.app_state = wayfinder_main.AppState.IDLE
+        self.feature_gate = SimpleNamespace(has_feature=lambda _feature: True)
+        self._update_compatibility_banner = MagicMock()
         self._inline_download_active = False
         self._cancel_download = False
         self._llamacpp_model_var = SimpleNamespace(get=lambda: selection)
@@ -344,6 +351,35 @@ class TestLlamaCppInlineDownload:
         assert app.config["llama_cpp_model_path"] == str(model_file)
         assert app._inline_download_active is False
         app._llamacpp_progress_bar.set.assert_any_call(1.0)
+        status = app._llamacpp_status_label.configure.call_args_list[-1].kwargs["text"]
+        assert "downloaded — now active" in status
+
+    def test_download_finishing_mid_dictation_activates_at_idle(self, llama_env, monkeypatch):
+        import requests
+        tmp, info = llama_env
+        resp = FakeRequestResponse([b"\x00" * (1024 * 1024)] * 2, 2 * 1024 * 1024)
+        monkeypatch.setattr(requests, "Session", lambda: FakeSession(response=resp))
+        released = []
+        monkeypatch.setattr(wayfinder_main, "_release_cleanup_residency",
+                            lambda: released.append(True))
+
+        app = LlamaDownloadApp("Test GGUF", info)
+        app.app_state = wayfinder_main.AppState.PROCESSING
+        app._download_selected_llamacpp_model()
+
+        model_file = tmp / info["filename"]
+        assert model_file.exists()
+        # Not swapped under the running cleanup; queued for IDLE instead.
+        assert "llama_cpp_model_path" not in app.config
+        assert released == []
+        assert app._pending_model_activations["llm"][0] == str(model_file)
+        status = app._llamacpp_status_label.configure.call_args_list[-1].kwargs["text"]
+        assert "when this dictation finishes" in status
+
+        app.app_state = wayfinder_main.AppState.IDLE
+        WApp._flush_pending_model_activations(app)
+        assert app.config["llama_cpp_model_path"] == str(model_file)
+        assert released == [True]
 
     def test_network_error_unlocks_and_offers_retry(self, llama_env, monkeypatch):
         import requests
