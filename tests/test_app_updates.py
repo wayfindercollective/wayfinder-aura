@@ -7,6 +7,8 @@ has no channel until Flathub. The one behaviour that must never regress is
 """
 
 import json
+import queue
+import threading
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -443,3 +445,85 @@ class TestBannerWiring:
         from wayfinder.config import DEFAULT_CONFIG
         assert DEFAULT_CONFIG["check_for_app_updates"] is True
         assert DEFAULT_CONFIG["app_update_dismissed_version"] == ""
+
+    def test_check_for_updates_menu_item_is_mac_only(self, src):
+        body = src.split("update_items = (", 1)[1].split("menu = pystray.Menu(", 1)[0]
+        assert '"Check for Updates…", self.check_for_updates_from_tray' in body
+        assert 'if sys.platform == "darwin"' in body
+        assert "else []" in body
+
+
+class TestMacUpdateActions:
+    """The macOS-only UI paths, exercised on the unbound methods."""
+
+    @pytest.fixture
+    def wm(self):
+        import wayfinder_main
+        return wayfinder_main
+
+    @staticmethod
+    def _opener(info):
+        opened = []
+        app = types.SimpleNamespace(_app_update_info=info, _open_url=opened.append)
+        return app, opened
+
+    def test_get_update_downloads_the_dmg_on_mac(self, wm, monkeypatch):
+        monkeypatch.setattr(wm, "IS_MACOS", True)
+        app, opened = self._opener(
+            {"release_url": "https://r.invalid", "download_url": "https://d.invalid/a.dmg"})
+        wm.WayfinderApp._open_app_update_page(app)
+        assert opened == ["https://d.invalid/a.dmg"]
+
+    def test_get_update_falls_back_to_the_release_page_on_mac(self, wm, monkeypatch):
+        monkeypatch.setattr(wm, "IS_MACOS", True)
+        app, opened = self._opener({"release_url": "https://r.invalid", "download_url": ""})
+        wm.WayfinderApp._open_app_update_page(app)
+        assert opened == ["https://r.invalid"]
+
+    def test_get_update_off_mac_still_opens_the_release_page(self, wm, monkeypatch):
+        monkeypatch.setattr(wm, "IS_MACOS", False)
+        app, opened = self._opener(
+            {"release_url": "https://r.invalid", "download_url": "https://d.invalid/a.dmg"})
+        wm.WayfinderApp._open_app_update_page(app)
+        assert opened == ["https://r.invalid"]
+
+    def test_manual_check_forces_a_fresh_check_off_the_tk_thread(self, wm, monkeypatch):
+        calls = []
+        verdict = {"update_available": False, "latest_version": "v1.1.8", "error": None}
+
+        def fake_check(version, force=False):
+            calls.append((threading.current_thread(), force))
+            return verdict
+
+        monkeypatch.setattr(app_updates, "check_for_app_update", fake_check)
+        app = types.SimpleNamespace(event_queue=queue.Queue())
+        wm.WayfinderApp._check_app_update_now(app)
+        event_type, callback = app.event_queue.get(timeout=5)
+        assert event_type == wm.EventType.UI_CALLBACK
+        assert calls and calls[0][1] is True
+        assert calls[0][0] is not threading.main_thread()
+        reported = []
+        app._report_app_update_check = reported.append
+        callback()
+        assert reported == [verdict]
+
+    def test_manual_check_reports_up_to_date_or_shows_the_banner(self, wm):
+        from wayfinder import __version__
+
+        shown = []
+        app = types.SimpleNamespace(
+            _show_window=lambda: None,
+            _welcome_active=False,
+            _switch_tab=lambda tab: shown.append(("tab", tab)),
+            _show_app_update_banner=lambda info: shown.append(("banner", info)),
+            _show_app_update_status=lambda text: shown.append(("status", text)),
+            log=lambda message: None,
+        )
+        wm.WayfinderApp._report_app_update_check(
+            app, {"update_available": False, "error": None})
+        assert shown == [("tab", "dictate"), ("status", f"You're up to date (v{__version__}).")]
+
+        shown.clear()
+        info = {"update_available": True, "latest_version": "v9.9.9"}
+        wm.WayfinderApp._report_app_update_check(app, info)
+        assert shown == [("tab", "dictate"), ("banner", info)]

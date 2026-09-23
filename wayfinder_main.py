@@ -8345,14 +8345,17 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
             command=self._dismiss_app_update,
         ).pack(side="right", padx=(SPACING["sm"], 0))
-        ctk.CTkButton(
+        # Kept as an attribute so the macOS manual check can hide it while the
+        # banner shows a "You're up to date" result.
+        self.app_update_button = ctk.CTkButton(
             _au_inner, text="Get Update",
             font=(self.font_body[0], self.font_sizes["small"], "bold"),
             height=28, width=100, corner_radius=RADIUS["xs"],
             fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
             text_color=COLORS["bg_base"],
             command=self._open_app_update_page,
-        ).pack(side="right", padx=(SPACING["sm"], 0))
+        )
+        self.app_update_button.pack(side="right", padx=(SPACING["sm"], 0))
 
         # Card header
         header = ctk.CTkFrame(trans_card, fg_color="transparent")
@@ -13947,6 +13950,9 @@ class WayfinderApp(ctk.CTk):
             if IS_FLATPAK:
                 text += " Update via your software center, or download from GitHub."
             label.configure(text=text)
+            if IS_MACOS:
+                # A manual check may have hidden Get Update for a status line.
+                self._set_app_update_button_visible(True)
             if not banner.winfo_manager():
                 anchor = getattr(self, "_dictate_banner_anchor", None)
                 if anchor is not None:
@@ -13983,8 +13989,93 @@ class WayfinderApp(ctk.CTk):
         """Get Update button: open the release page. The banner stays up until
         dismissed or the new version is actually running."""
         from wayfinder.core.app_updates import RELEASES_PAGE
-        url = getattr(self, "_app_update_info", {}).get("release_url") or RELEASES_PAGE
+        info = getattr(self, "_app_update_info", {})
+        url = info.get("release_url") or RELEASES_PAGE
+        if IS_MACOS:
+            # Mac updates always carry a DMG (core/app_updates): download it
+            # in one click, falling back to the release page.
+            url = info.get("download_url") or url
         self._open_url(url)
+
+    # ── macOS "Check for Updates…" (menu-bar item) ──────────────────────────
+
+    def check_for_updates_from_tray(self, icon=None, item=None):
+        """macOS menu-bar "Check for Updates…"; runs once the menu has closed."""
+        self._dispatch_tray_action(self._check_app_update_now)
+
+    def _check_app_update_now(self) -> None:
+        """Manual update check: always asks GitHub (force=True).
+
+        The request runs off the Tk thread and the verdict returns through
+        event_queue. Unlike the daily check it ignores the settings toggle and
+        a dismissed version — the user asked."""
+        def _check():
+            try:
+                from wayfinder import __version__ as current_version
+                from wayfinder.core.app_updates import check_for_app_update
+
+                info = check_for_app_update(current_version, force=True)
+            except Exception as exc:
+                info = {"update_available": False, "error": str(exc)}
+            self.event_queue.put(
+                (EventType.UI_CALLBACK, lambda: self._report_app_update_check(info))
+            )
+
+        threading.Thread(target=_check, daemon=True, name="app-update-check").start()
+
+    def _report_app_update_check(self, info: dict) -> None:
+        """Show a manual check's verdict in the Dictate-tab update banner."""
+        from wayfinder import __version__ as current_version
+
+        self._show_window()
+        if not getattr(self, "_welcome_active", False):
+            try:
+                self._switch_tab("dictate")
+            except Exception:
+                pass
+        if info.get("update_available"):
+            self._show_app_update_banner(info)
+            return
+        if info.get("error"):
+            self.log(f"⚠ Update check failed: {info['error']}")
+            text = "Couldn't check for updates. Check your connection and try again."
+        else:
+            text = f"You're up to date (v{current_version})."
+        self._show_app_update_status(text)
+
+    def _show_app_update_status(self, text: str) -> None:
+        """Reuse the update banner for a one-line status without Get Update."""
+        banner = getattr(self, "app_update_banner", None)
+        label = getattr(self, "app_update_label", None)
+        if banner is None or label is None:
+            self.log(text)
+            return
+        try:
+            # Nothing to download, and Dismiss must not record a version.
+            self._app_update_info = {}
+            label.configure(text=text)
+            self._set_app_update_button_visible(False)
+            if not banner.winfo_manager():
+                anchor = getattr(self, "_dictate_banner_anchor", None)
+                if anchor is not None:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+                else:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
+    def _set_app_update_button_visible(self, visible: bool) -> None:
+        button = getattr(self, "app_update_button", None)
+        if button is None:
+            return
+        try:
+            if visible and not button.winfo_manager():
+                # Same options as when built: it re-packs left of Dismiss.
+                button.pack(side="right", padx=(SPACING["sm"], 0))
+            elif not visible and button.winfo_manager():
+                button.pack_forget()
+        except Exception:
+            pass
 
     def _start_display_wake_listener(self) -> None:
         """Start D-Bus listener for system wake-up events to refresh the overlay.
@@ -18983,6 +19074,12 @@ class WayfinderApp(ctk.CTk):
                 pystray.MenuItem("Hide to tray", self.hide_from_tray),
             ]
         )
+        # macOS: a manual "Check for Updates…" beside Quit, as Mac apps have.
+        update_items = (
+            [pystray.MenuItem("Check for Updates…", self.check_for_updates_from_tray)]
+            if sys.platform == "darwin"
+            else []
+        )
         menu = pystray.Menu(
             pystray.MenuItem("Toggle Recording", self.tray_record, default=True),
             pystray.MenuItem("Reset (unstick overlay)", self.tray_reset),
@@ -19001,6 +19098,7 @@ class WayfinderApp(ctk.CTk):
                 ),
             ),
             pystray.Menu.SEPARATOR,
+            *update_items,
             pystray.MenuItem("Quit", self.quit_from_tray),
         )
         
