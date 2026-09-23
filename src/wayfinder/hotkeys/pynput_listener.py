@@ -10,6 +10,7 @@ Uses pynput for global keyboard monitoring.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from queue import Queue
 from threading import Event
@@ -141,6 +142,109 @@ MODIFIER_KEYS.setdefault("fn", set())
 
 # Flat set of every modifier key — Detect skips pure modifier presses and waits for a real key.
 _ALL_MODIFIER_KEYS = {k for ks in MODIFIER_KEYS.values() for k in ks}
+# macOS Detect may bind these alone (tap/hold). Right-hand keys only: the left
+# ones are pressed constantly as part of ordinary shortcuts.
+_SOLO_CAPTURE_KEYS = {k for k in (_k("alt_r"), _k("cmd_r")) if k is not None}
+
+
+# macOS tap/hold gesture for a hotkey that is one bare modifier (Right Option).
+# Tap = press and release inside this window with no other key: toggles
+# recording. Held longer = push-to-talk: recording starts at the threshold and
+# stops on release. Any other key pressed first cancels (Option+e still types
+# an accent). 0.3s separates a deliberate tap from a hold without making the
+# hold feel laggy.
+SOLO_HOLD_SECONDS = 0.3
+HOLD_START = "hold_start"
+HOLD_END = "hold_end"
+
+
+class SoloModifierGesture:
+    """Turns presses of a single modifier key into tap / hold-start / hold-end.
+
+    ``emit`` receives "tap", HOLD_START or HOLD_END. Thread-safe: the hold
+    threshold fires from a one-shot timer thread while press/release arrive on
+    the event-tap thread.
+    """
+
+    def __init__(self, emit, hold_seconds: float = SOLO_HOLD_SECONDS,
+                 clock=time.monotonic, timer_factory=threading.Timer):
+        self._emit = emit
+        self._hold_seconds = hold_seconds
+        self._clock = clock
+        self._timer_factory = timer_factory
+        self._lock = threading.Lock()
+        self._down_at: float | None = None
+        self._interrupted = False
+        self._holding = False
+        self._timer = None
+
+    @property
+    def is_down(self) -> bool:
+        return self._down_at is not None
+
+    def press_target(self) -> None:
+        with self._lock:
+            if self._down_at is not None:
+                return  # repeat / duplicate press while held
+            self._down_at = self._clock()
+            self._interrupted = False
+            self._holding = False
+            timer = self._timer_factory(self._hold_seconds, self._on_hold)
+            timer.daemon = True
+            self._timer = timer
+        timer.start()
+
+    def press_other(self) -> None:
+        with self._lock:
+            if self._down_at is None or self._holding:
+                return
+            self._interrupted = True
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _on_hold(self) -> None:
+        with self._lock:
+            if self._down_at is None or self._interrupted or self._holding:
+                return
+            self._holding = True
+        self._emit(HOLD_START)
+
+    def release_target(self) -> None:
+        with self._lock:
+            if self._down_at is None:
+                return
+            held = self._clock() - self._down_at
+            holding, interrupted = self._holding, self._interrupted
+            timer, self._timer = self._timer, None
+            self._down_at = None
+            self._holding = self._interrupted = False
+        if timer is not None:
+            timer.cancel()
+        if holding:
+            self._emit(HOLD_END)
+        elif not interrupted and held < self._hold_seconds:
+            self._emit("tap")
+
+    def reset(self) -> None:
+        """Forget a gesture (hotkey changed) without emitting anything."""
+        with self._lock:
+            timer, self._timer = self._timer, None
+            self._down_at = None
+            self._holding = self._interrupted = False
+        if timer is not None:
+            timer.cancel()
+
+
+_DARWIN_KEYPAD_ENTER_VK = 76
+
+
+def _darwin_normalize_key(key):
+    """Keypad Enter (and Fn+Return on laptops) arrives as a bare vk 76 KeyCode;
+    treat it as Enter so an Enter-based hotkey works from either key."""
+    if KeyCode is not None and isinstance(key, KeyCode) and getattr(key, "vk", None) == _DARWIN_KEYPAD_ENTER_VK:
+        return _k("enter") or key
+    return key
 
 
 def _darwin_fn_pressed() -> bool:
@@ -333,6 +437,11 @@ def pynput_hotkey_listener(
     pressed_modifiers = set()
     active_actions: set[str] = set()
 
+    # Debounce
+    _last_hotkey_time = 0.0
+    _last_style_time = 0.0
+    DEBOUNCE_SECONDS = 0.5
+
     # Display hotkey info
     hotkey_display = get_key_name(target_key)
     if required_modifiers:
@@ -384,15 +493,41 @@ def pynput_hotkey_listener(
             return True
         return required <= pressed_modifiers
 
-    # Debounce
-    _last_hotkey_time = 0.0
-    _last_style_time = 0.0
-    DEBOUNCE_SECONDS = 0.5
+    solo_capture: dict = {"key": None}
+
+    def _solo_target_active() -> bool:
+        """macOS: the record hotkey is one bare modifier (e.g. Right Option)."""
+        return (
+            sys.platform == "darwin"
+            and not required_modifiers
+            and target_key in _ALL_MODIFIER_KEYS
+        )
+
+    def _emit_solo(kind: str) -> None:
+        nonlocal _last_hotkey_time
+        if kind == "tap":
+            now = time.time()
+            if now - _last_hotkey_time < DEBOUNCE_SECONDS:
+                return
+            _last_hotkey_time = now
+            print(f"[Hotkey] {get_key_name(target_key)} tap — activating!", flush=True)
+            event_queue.put((EventType.HOTKEY_PRESSED, None))
+            return
+        # Hold start/end are never debounced: a release must always be able to
+        # stop the push-to-talk recording its own hold began.
+        if kind == HOLD_START:
+            _last_hotkey_time = time.time()
+            print(f"[Hotkey] {get_key_name(target_key)} held — push-to-talk", flush=True)
+        event_queue.put((EventType.HOTKEY_PRESSED, kind))
+
+    solo_gesture = SoloModifierGesture(_emit_solo)
+
 
     def on_press(key):
         nonlocal pressed_modifiers, _last_hotkey_time, _last_style_time
 
         if sys.platform == "darwin":
+            key = _darwin_normalize_key(key)
             if _darwin_fn_pressed():
                 pressed_modifiers.add("fn")
             else:
@@ -408,7 +543,10 @@ def pynput_hotkey_listener(
         # buttons grabbed by the host trigger daemon never reach here — this is keyboard keys.
         if capture_state is not None and capture_state.get("armed"):
             if key in _ALL_MODIFIER_KEYS:
+                if sys.platform == "darwin" and key in _SOLO_CAPTURE_KEYS:
+                    solo_capture["key"] = key  # captured on release if nothing else is pressed
                 return  # wait for a real (non-modifier) key
+            solo_capture["key"] = None
             code = PYNPUT_TO_EVDEV.get(key)
             if code is None:
                 return  # unmapped key (e.g. a letter) — keep waiting; Detect times out otherwise
@@ -434,9 +572,17 @@ def pynput_hotkey_listener(
         if sys.platform == "darwin" and key == _k("esc"):
             event_queue.put((EventType.CANCEL_RECORDING, None))
 
+        solo_mode = _solo_target_active()
+        if solo_mode:
+            if key == target_key:
+                solo_gesture.press_target()
+            else:
+                solo_gesture.press_other()
+
         # Check for main hotkey (with debounce)
         if (
-            key == target_key
+            not solo_mode
+            and key == target_key
             and check_modifiers(required_modifiers)
             and "record" not in active_actions
         ):
@@ -463,8 +609,30 @@ def pynput_hotkey_listener(
     def on_release(key):
         nonlocal pressed_modifiers
 
+        if sys.platform == "darwin":
+            key = _darwin_normalize_key(key)
+
+        if (
+            capture_state is not None
+            and capture_state.get("armed")
+            and solo_capture["key"] is not None
+            and key == solo_capture["key"]
+        ):
+            # A bare right-side modifier pressed and released on its own
+            # during Detect: bind it as a tap/hold hotkey (macOS).
+            code = PYNPUT_TO_EVDEV.get(key)
+            solo_capture["key"] = None
+            if code is not None:
+                cap_gen = capture_state.get("gen")
+                capture_state["armed"] = False
+                event_queue.put((EventType.HOTKEY_CAPTURED,
+                                 {"code": code, "modifiers": [],
+                                  "device": "keyboard", "gen": cap_gen}))
+
         if key == target_key:
             active_actions.discard("record")
+            if _solo_target_active():
+                solo_gesture.release_target()
         if key == style_target_key:
             active_actions.discard("style")
         
@@ -591,6 +759,13 @@ def pynput_hotkey_listener(
                     and not _darwin_key_pressed(current_record_code)
                 ):
                     active_actions.discard("record")
+                if solo_gesture.is_down and (
+                    not _solo_target_active()
+                    or not _darwin_key_pressed(current_record_code)
+                ):
+                    # Lost key-up, or the hotkey changed mid-gesture: end it so
+                    # a push-to-talk recording cannot run on forever.
+                    solo_gesture.release_target()
                 if (
                     "style" in active_actions
                     and not _darwin_key_pressed(current_style_code)

@@ -677,9 +677,16 @@ class WelcomePane:
             text_color=COLORS["accent"],
         )
         token.pack(anchor="w", pady=(0, SPACING["md"]))
+        tap_hold = False
+        try:
+            tap_hold = sys.platform == "darwin" and bool(self.app._record_hotkey_is_tap_hold())
+        except Exception:
+            pass
         self._body_label(
             body,
-            "press it once to start a dictation — press it again to stop.",
+            "tap it to start a dictation and tap again to stop — or hold it while you talk."
+            if tap_hold
+            else "press it once to start a dictation — press it again to stop.",
         )
         if sys.platform == "darwin":
             try:

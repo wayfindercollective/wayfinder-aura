@@ -545,11 +545,15 @@ class TestHotkeyDefaultMigration:
             CONFIG_FILE.unlink()
         config = load_config()
 
-        assert config["hotkey_key"] == 57  # Space
-        expected_modifiers = ["fn"] if sys.platform == "darwin" else ["ctrl", "alt"]
-        assert config["hotkey_modifiers"] == expected_modifiers
+        if sys.platform == "darwin":
+            assert config["hotkey_key"] == 100  # Right Option, tap/hold
+            assert config["hotkey_modifiers"] == []
+            assert config["style_toggle_modifiers"] == ["fn"]
+        else:
+            assert config["hotkey_key"] == 57  # Space
+            assert config["hotkey_modifiers"] == ["ctrl", "alt"]
+            assert config["style_toggle_modifiers"] == ["ctrl", "alt"]
         assert config["style_toggle_key"] == 28  # Enter
-        assert config["style_toggle_modifiers"] == expected_modifiers
 
     def test_old_macos_default_migrates_to_fn_once(self, temp_config_dir: Path, monkeypatch):
         import wayfinder.config as config_module
@@ -564,10 +568,51 @@ class TestHotkeyDefaultMigration:
 
         config = config_module.load_config()
 
-        assert config["hotkey_modifiers"] == ["fn"]
+        # v2 moved Ctrl+Option+Space to Fn+Space; v3 then moves that untouched
+        # default to Right Option tap/hold. Style keeps Fn+Enter.
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (100, [])
         assert config["style_toggle_key"] == 28
         assert config["style_toggle_modifiers"] == ["fn"]
         assert config["macos_hotkey_defaults_v2"] is True
+        assert config["macos_hotkey_defaults_v3"] is True
+
+    def test_fn_space_default_moves_to_right_option_once(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({
+            "hotkey_key": 57,
+            "hotkey_modifiers": ["fn"],
+            "macos_hotkey_defaults_v2": True,
+        })
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (100, [])
+
+        # Choosing Fn+Space again afterwards is respected.
+        config["hotkey_key"], config["hotkey_modifiers"] = 57, ["fn"]
+        config_module.save_config(config)
+        again = config_module.load_config()
+        assert (again["hotkey_key"], again["hotkey_modifiers"]) == (57, ["fn"])
+
+    def test_custom_fn_chord_is_not_migrated(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({
+            "hotkey_key": 67,
+            "hotkey_modifiers": ["fn"],
+            "macos_hotkey_defaults_v2": True,
+        })
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (67, ["fn"])
+
+    def test_linux_never_runs_the_macos_hotkey_migration(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "linux")
+        self._write_config({"hotkey_key": 57, "hotkey_modifiers": ["fn"]})
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (57, ["fn"])
 
     def test_explicit_post_migration_macos_shortcut_is_preserved(self, temp_config_dir: Path, monkeypatch):
         import wayfinder.config as config_module

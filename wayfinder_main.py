@@ -3344,6 +3344,20 @@ _GPU_NUDGE_MIN_DURATION_S = 45.0
 _AUTO_ENTER_SETTLE_S = 0.35
 
 
+# macOS: bare right-hand modifiers usable as a tap/hold record hotkey (evdev
+# KEY_RIGHTALT / KEY_RIGHTMETA). Right Option is the macOS default.
+MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command"}
+
+
+def is_tap_hold_hotkey(code, modifiers, platform_name: str | None = None) -> bool:
+    """True when the record hotkey is a bare modifier (tap to toggle, hold to talk)."""
+    return (
+        (platform_name or sys.platform) == "darwin"
+        and code in MACOS_SOLO_HOTKEYS
+        and not modifiers
+    )
+
+
 def _keycode_display(code: int) -> str:
     """Human label for an evdev keycode — covers keys no dropdown lists (F13+, keypad,
     whatever an MMO-mouse side button emits)."""
@@ -3356,6 +3370,8 @@ def _keycode_display(code: int) -> str:
     }
     if code in known:
         return known[code]
+    if sys.platform == "darwin" and code in MACOS_SOLO_HOTKEYS:
+        return MACOS_SOLO_HOTKEYS[code]
     if HAS_EVDEV:
         try:
             name = ecodes.KEY.get(code) or ecodes.BTN.get(code)
@@ -3403,6 +3419,12 @@ def hotkey_key_options(
     active_platform = platform_name or sys.platform
     if active_platform.startswith("linux"):
         return _hotkey_key_codes
+    if active_platform == "darwin":
+        # Tap/hold modifiers first: they are the recommended Mac choice.
+        _hotkey_key_codes = {
+            **{name: code for code, name in MACOS_SOLO_HOTKEYS.items()},
+            **_hotkey_key_codes,
+        }
     if available_pynput_codes is None:
         try:
             from wayfinder.hotkeys.pynput_listener import EVDEV_TO_PYNPUT
@@ -8367,7 +8389,11 @@ class WayfinderApp(ctk.CTk):
         ).pack(anchor="w")
 
         tips = [
-            f"Press {self.get_hotkey_display()} to start/stop recording",
+            (
+                f"Tap {self.get_hotkey_display()} to start/stop, or hold it while you talk"
+                if self._record_hotkey_is_tap_hold()
+                else f"Press {self.get_hotkey_display()} to start/stop recording"
+            ),
             "Speak clearly and pause at punctuation",
             "Text is typed into any focused field",
         ]
@@ -8709,6 +8735,17 @@ class WayfinderApp(ctk.CTk):
             )
             checkbox.pack(side="right", padx=(8, 0))
             self._hotkey_mod_checks[mod] = checkbox
+
+        if sys.platform == "darwin":
+            # How the chosen hotkey behaves (tap/hold) or what it collides with.
+            self._hotkey_mod_shell = _mod_shell
+            self._hotkey_hint_label = ctk.CTkLabel(
+                system_content, text="",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_muted"], anchor="w", justify="left",
+                wraplength=520,
+            )
+            self._refresh_macos_hotkey_hint()
         
         # UI Scale slider
         self._create_scale_slider_row(system_content)
@@ -16355,6 +16392,11 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
+    def _record_hotkey_is_tap_hold(self) -> bool:
+        return is_tap_hold_hotkey(
+            self.config.get("hotkey_key"), self.config.get("hotkey_modifiers", [])
+        )
+
     def get_hotkey_display(self) -> str:
         hotkey_key = self.config.get("hotkey_key", 67)
         hotkey_modifiers = self.config.get("hotkey_modifiers", [])
@@ -16742,6 +16784,16 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ Detect capture ignored (bad payload): {e}")
             return
         modifiers = list(data.get("modifiers", []) or [])
+        if target == "style" and is_tap_hold_hotkey(code, modifiers):
+            # A bare Command/Option style key would fire on every ordinary
+            # shortcut (Cmd+C...). Tap/hold is a record-hotkey gesture only.
+            self._hotkey_capture_target = None
+            self._cancel_detect_timeout()
+            _HOTKEY_CAPTURE["armed"] = False
+            self._reset_detect_button(target)
+            self.log(f"⚠ {_keycode_display(code)} alone can only be the Record hotkey "
+                     "— add a key (e.g. Fn+Enter) for Style toggle.")
+            return
         label = self._pure_hotkey_label(code)
         display = label
         if modifiers:
@@ -16868,10 +16920,41 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self.log(f"⚠ Hotkey listener restart after Detect failed: {e}")
 
+    def _refresh_macos_hotkey_hint(self) -> None:
+        """macOS: explain tap/hold, or warn about a colliding shortcut."""
+        label = getattr(self, "_hotkey_hint_label", None)
+        if label is None:
+            return
+        code = self.config.get("hotkey_key")
+        modifiers = self.config.get("hotkey_modifiers", []) or []
+        if is_tap_hold_hotkey(code, modifiers):
+            text, color = (
+                f"Tap {_keycode_display(code)} to start and stop, or hold it while you "
+                "talk. Typing with it (like ⌥E) never starts a recording."
+            ), COLORS["text_secondary"]
+        else:
+            try:
+                from wayfinder.utils.macos_hotkey_conflicts import conflict_for
+                text = conflict_for(code, modifiers) or ""
+            except Exception:
+                text = ""
+            color = COLORS["accent_yellow"]
+        try:
+            if text:
+                label.configure(text=text, text_color=color)
+                label.pack(fill="x", padx=16, pady=(0, 10),
+                           after=getattr(self, "_hotkey_mod_shell", None))
+            else:
+                label.pack_forget()
+        except Exception:
+            pass
+
     def _apply_hotkey_change(self):
         """Apply hotkey config change and update the listener."""
         new_hotkey = self.get_hotkey_display()
         self._refresh_record_hotkey_surfaces()
+        if sys.platform == "darwin":
+            self._refresh_macos_hotkey_hint()
         self.log(f"⚙ Hotkey: {new_hotkey}")
         if sys.platform == "darwin":
             # macOS: pynput reads config live — nothing to restart.
@@ -16883,6 +16966,15 @@ class WayfinderApp(ctk.CTk):
         """Handle inline hotkey key dropdown change."""
         new_code = self._hotkey_key_codes.get(value, 67)
         self.config["hotkey_key"] = new_code
+        if sys.platform == "darwin" and new_code in MACOS_SOLO_HOTKEYS:
+            # Right Option/Command work alone (tap/hold); a leftover Fn or
+            # Command modifier would turn them back into a chord.
+            self.config["hotkey_modifiers"] = []
+            for var in getattr(self, "_hotkey_mod_vars", {}).values():
+                try:
+                    var.set(False)
+                except Exception:
+                    pass
         save_config(self.config)
         self._apply_hotkey_change()
 
@@ -20090,7 +20182,21 @@ class WayfinderApp(ctk.CTk):
                 getattr(self, "_record_toggle_suppress_until", 0) or 0
             ):
                 return
+            if data == "hold_end":
+                # macOS push-to-talk release: stop only a recording that this
+                # hold started (a hold that STOPPED a tapped recording must not
+                # start a new one on release).
+                started_by_hold = getattr(self, "_hold_started_recording", False)
+                self._hold_started_recording = False
+                if started_by_hold and self.app_state == AppState.RECORDING:
+                    self.stop_recording_and_process()
+                return
+            was_idle = self.app_state == AppState.IDLE
             self.on_hotkey()
+            if data == "hold_start":
+                self._hold_started_recording = (
+                    was_idle and self.app_state == AppState.RECORDING
+                )
         elif event_type == EventType.STYLE_TOGGLE:
             self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
         elif event_type == EventType.HOTKEY_CAPTURED:

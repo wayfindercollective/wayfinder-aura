@@ -211,15 +211,21 @@ else:
     _default_llm_model_path = _pick_llm(_user_llm_dir)
     _default_llama_binary = f"~/llama.cpp/build/bin/llama-cli{_exe}"
 
-# Platform-native shortcut defaults. Fn+Space follows current Mac dictation-app
-# convention without colliding with Spotlight, input-source switching,
-# Character Viewer, or VoiceOver's Control+Option modifier.
+# Platform-native shortcut defaults. macOS records with Right Option alone:
+# tap to start/stop, hold to talk (released = stop). Every Mac keyboard has
+# it — including third-party keyboards that cannot send Fn (Keychron, Logitech
+# in some modes), where the earlier Fn+Space default was silently dead — and a
+# bare Right Option collides with nothing: Spotlight is Cmd+Space, input
+# sources are Ctrl(+Option)+Space, Raycast/Alfred/ChatGPT use Option+Space,
+# and Option+letter still types accents (any other key cancels the gesture).
 if sys.platform == "darwin":
-    _default_hotkey_modifiers = ["fn"]
+    _default_hotkey_key = 100  # Right Option
+    _default_hotkey_modifiers = []
     _default_style_toggle_key = 28  # Enter
     _default_style_toggle_modifiers = ["fn"]
     _default_overlay_anchor = "bottom-right"
 else:
+    _default_hotkey_key = 57  # Space
     _default_hotkey_modifiers = ["ctrl", "alt"]
     _default_style_toggle_key = 28  # Enter
     _default_style_toggle_modifiers = ["ctrl", "alt"]
@@ -239,7 +245,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # (e.g. DAoC qbinds) but Ctrl+Alt chords are as rare in games as Super+F*,
     # and the GameMode pause covers the rest. DE conflicts checked: unassigned
     # by default on KDE and GNOME. Existing user configs keep what they saved.
-    "hotkey_key": 57,  # Space
+    "hotkey_key": _default_hotkey_key,  # Space; Right Option on macOS
     "hotkey_modifiers": _default_hotkey_modifiers,
 
     # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal).
@@ -248,6 +254,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "style_toggle_key": _default_style_toggle_key,
     "style_toggle_modifiers": _default_style_toggle_modifiers,
     "macos_hotkey_defaults_v2": sys.platform == "darwin",
+    "macos_hotkey_defaults_v3": sys.platform == "darwin",
     "macos_overlay_anchor_defaults_v1": sys.platform == "darwin",
 
     # Auto press Enter after dictation (opt-in): dictate → text lands → Enter
@@ -926,6 +933,19 @@ def load_config() -> dict:
                 ):
                     config["style_toggle_modifiers"] = ["fn"]
                 config["macos_hotkey_defaults_v2"] = True
+                _save_migrations = True
+
+            # Fn+Space (v2) could not be pressed on keyboards without an Fn
+            # key the Mac can see. Move only that exact untouched default to
+            # Right Option tap/hold; custom shortcuts remain untouched.
+            if sys.platform == "darwin" and not user_config.get("macos_hotkey_defaults_v3", False):
+                if (
+                    config.get("hotkey_key") == 57
+                    and config.get("hotkey_modifiers") == ["fn"]
+                ):
+                    config["hotkey_key"] = 100
+                    config["hotkey_modifiers"] = []
+                config["macos_hotkey_defaults_v3"] = True
                 _save_migrations = True
 
             if (
