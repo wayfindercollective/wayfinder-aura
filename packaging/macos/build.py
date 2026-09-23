@@ -200,6 +200,26 @@ def build_hero_renderer() -> None:
     ])
 
 
+def remove_previous_app() -> None:
+    """Clear the last bundle before PyInstaller rebuilds it.
+
+    Once a bundle has been launched, macOS App Management protection can refuse
+    to delete files inside it (EPERM), which aborts PyInstaller's cleanup. The
+    bundle as a whole can still be moved, so fall back to the user's Trash.
+    """
+    if not APP_PATH.exists():
+        return
+    try:
+        shutil.rmtree(APP_PATH)
+        return
+    except PermissionError:
+        pass
+    trash = Path.home() / ".Trash"
+    target = trash / f"{APP_PATH.stem} (previous build {os.getpid()}){APP_PATH.suffix}"
+    shutil.move(str(APP_PATH), str(target))
+    print(f"Previous app bundle is protected by macOS; moved it to {target}", flush=True)
+
+
 def build_app() -> None:
     pyinstaller = Path(sys.executable).with_name("pyinstaller")
     if not pyinstaller.is_file():
@@ -207,6 +227,7 @@ def build_app() -> None:
             f"PyInstaller is not installed for {sys.executable}. "
             "Run: python -m pip install -e '.[dev]'"
         )
+    remove_previous_app()
     env = os.environ.copy()
     env.setdefault("AURA_MACOS_ARCH", platform.machine())
     run([
