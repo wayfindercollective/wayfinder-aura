@@ -195,3 +195,34 @@ def test_macos_notary_submit_requires_an_accepted_verdict(monkeypatch, tmp_path)
     with pytest.raises(SystemExit, match="Invalid"):
         builder.notary_submit(tmp_path / "a.dmg", auth)
     assert calls[-1] == ["xcrun", "notarytool", "log", "sub-1", *auth]
+
+
+def test_release_workflow_macos_job_never_gates_the_linux_release():
+    workflow = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    mac = workflow.split("\n  build-macos:\n", 1)[1].split("\n  release:\n", 1)[0]
+    release = workflow.split("\n  release:\n", 1)[1].split("\n  publish-macos:\n", 1)[0]
+    publish = workflow.split("\n  publish-macos:\n", 1)[1]
+
+    # Linux assets are published without waiting on (or failing because of) macOS.
+    assert "needs: [quality, release-readiness, build-appimage, build-flatpak]" in release
+    assert "build-macos" not in release.split("steps:", 1)[0]
+    assert "options: [appimage, hosted-flatpak, windows, macos, all]" in workflow
+
+    # Same toolchain as the manual candidate workflow.
+    assert "runs-on: macos-latest" in mac
+    assert 'MACOS_PYTHON_VERSION: "3.12.10"' in mac
+    assert "-c packaging/macos/constraints.txt -e '.[dev]'" in mac
+    assert "python packaging/macos/build.py" in mac
+    # Signed DMGs are verified before they get the publishable artifact name;
+    # the temporary keychain is always removed.
+    assert mac.index("spctl --assess --type open --context context:primary-signature") \
+        < mac.index("name: wayfinder-aura-macos-dmg")
+    assert "xcrun stapler validate" in mac
+    assert "if: always()" in mac and "security delete-keychain" in mac
+
+    # Only a signed build, after the Linux release exists, reaches the release.
+    assert "needs: [release, build-macos]" in publish
+    assert "needs.build-macos.outputs.signed == 'true'" in publish
+    assert "name: wayfinder-aura-macos-dmg" in publish
+    assert "wayfinder-aura-macos-unsigned" not in publish
+    assert "gh release upload" in publish
