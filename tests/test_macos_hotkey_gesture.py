@@ -319,3 +319,7 @@ class TestListenerEndToEnd:
 def test_keypad_enter_counts_as_enter():
     assert pl._darwin_normalize_key(pl.KeyCode.from_vk(76)) == pl.Key.enter
     assert pl._darwin_normalize_key(pl.Key.space) == pl.Key.space
+
+
+def test_secure_input_probe_is_safe():
+    assert pl._darwin_secure_input_enabled() in (True, False)

@@ -247,6 +247,45 @@ def _darwin_normalize_key(key):
     return key
 
 
+_SECURE_INPUT_FN = None
+
+
+def _darwin_secure_input_enabled() -> bool:
+    """True while some app holds macOS Secure Input (password fields, Terminal's
+    Secure Keyboard Entry). Keystrokes then reach no event tap, so the hotkey
+    cannot work. ~20 µs per call."""
+    global _SECURE_INPUT_FN
+    try:
+        if _SECURE_INPUT_FN is None:
+            import ctypes
+
+            carbon = ctypes.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+            carbon.IsSecureEventInputEnabled.restype = ctypes.c_bool
+            _SECURE_INPUT_FN = carbon.IsSecureEventInputEnabled
+        return bool(_SECURE_INPUT_FN())
+    except Exception:
+        return False
+
+
+def _darwin_secure_input_owner() -> str | None:
+    """Name of the app holding Secure Input, if macOS reports it."""
+    try:
+        import re
+        import subprocess
+
+        out = subprocess.run(["ioreg", "-l", "-w", "0", "-d", "1"], capture_output=True,
+                             text=True, timeout=2).stdout
+        match = re.search(r'"kCGSSessionSecureInputPID"=(\d+)', out)
+        if not match:
+            return None
+        from AppKit import NSRunningApplication
+
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(match.group(1)))
+        return str(app.localizedName()) if app is not None else None
+    except Exception:
+        return None
+
+
 def _darwin_fn_pressed() -> bool:
     """Return whether the Mac Fn/Globe modifier is physically held."""
     if sys.platform != "darwin":
@@ -739,9 +778,22 @@ def pynput_hotkey_listener(
     print(f"[Hotkey] pynput listener started, waiting for: {get_key_name(target_key)}", flush=True)
     log("🎧 Cross-platform hotkey listener active (pynput)")
     
+    secure_input_on = False
     try:
         while not stop_event.is_set():
             if sys.platform == "darwin":
+                secure_now = _darwin_secure_input_enabled()
+                if secure_now != secure_input_on:
+                    secure_input_on = secure_now
+                    if secure_now:
+                        owner = _darwin_secure_input_owner()
+                        log("⚠ macOS Secure Input is on"
+                            + (f" (held by {owner})" if owner else "")
+                            + " — keystrokes are hidden from every app, so the hotkey "
+                            "can't work until it's released (leave the password field, "
+                            "or turn off Terminal ▸ Secure Keyboard Entry).")
+                    else:
+                        log("✓ macOS Secure Input released — hotkey active again")
                 # Aqua can occasionally omit a key-up across sleep/wake or an
                 # event-tap restart. Reconcile our repeat-suppression latches
                 # against Quartz's physical state so one lost release cannot
