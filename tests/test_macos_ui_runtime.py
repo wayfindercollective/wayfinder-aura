@@ -173,9 +173,11 @@ def test_tab_switch_raises_persistent_opaque_pages_instead_of_unmapping_them():
     switch_source = inspect.getsource(wayfinder_main.WayfinderApp._switch_tab)
     setup_source = inspect.getsource(wayfinder_main.WayfinderApp.setup_ui)
 
-    assert 'frame.place(relx=0, rely=0, relwidth=1, relheight=1)' in switch_source
+    assert 'place_in_macos_content_pane(frame)' in switch_source
     assert 'self.tab_frames[tab_id].lift()' in switch_source
-    assert '**_tab_surface_kwargs()' in setup_source
+    # The content pane is the rounded glass pane (or the opaque Aqua surface
+    # without glass); pages inside keep the opaque _tab_surface_kwargs().
+    assert '**self._content_pane_kwargs()' in setup_source
     assert wayfinder_main._tab_surface_kwargs("darwin") == {
         "fg_color": wayfinder_main.COLORS["bg_base"],
         "bg_color": wayfinder_main.COLORS["bg_base"],
