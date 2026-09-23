@@ -52,3 +52,18 @@ def test_manual_macos_candidate_workflow_uses_packaging_helper():
 def test_macos_bundle_declares_truthful_minimum_os():
     spec = (REPO / "wayfinder-aura-macos.spec").read_text(encoding="utf-8")
     assert "'LSMinimumSystemVersion': '14.0'" in spec
+
+
+def test_metal_compute_layers_allow_shader_writes():
+    # Compute kernels write straight into the CAMetalLayer drawable. A
+    # framebufferOnly layer vends render-target-only textures, so the write is
+    # invalid and M3 GPUs display solid magenta instead of the waveform.
+    for name in ("hero_renderer.m", "overlay_renderer.m"):
+        source = (REPO / "packaging" / "macos" / name).read_text(encoding="utf-8")
+        assert "computeCommandEncoder" in source
+        assert "framebufferOnly = NO;" in source
+        assert "framebufferOnly = YES" not in source
+
+    hero = (REPO / "src" / "wayfinder" / "ui" / "macos_hero_metal.py").read_text(encoding="utf-8")
+    assert "setFramebufferOnly_(False)" in hero
+    assert "setFramebufferOnly_(True)" not in hero

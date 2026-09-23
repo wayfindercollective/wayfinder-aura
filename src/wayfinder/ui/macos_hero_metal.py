@@ -240,7 +240,9 @@ class MetalHeroRenderer:
             layer.setName_("WayfinderHeroWaveformMetal")
             layer.setDevice_(device)
             layer.setPixelFormat_(_PIXEL_FORMAT_BGRA8_UNORM)
-            layer.setFramebufferOnly_(True)
+            # The compute kernel writes the drawable (needs ShaderWrite usage);
+            # framebufferOnly=True renders solid magenta on M3.
+            layer.setFramebufferOnly_(False)
             layer.setDisplaySyncEnabled_(True)
             layer.setPresentsWithTransaction_(False)
             layer.setOpaque_(True)

@@ -54,7 +54,10 @@ typedef struct {
     _metalLayer.name = @"WayfinderOverlayWaveformMetal";
     _metalLayer.device = device;
     _metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    _metalLayer.framebufferOnly = YES;
+    // The compute kernel writes the drawable, which needs ShaderWrite usage.
+    // framebufferOnly=YES gives render-target-only textures; on M3 the
+    // invalid write shows up as solid magenta.
+    _metalLayer.framebufferOnly = NO;
     _metalLayer.displaySyncEnabled = YES;
     _metalLayer.presentsWithTransaction = NO;
     _metalLayer.maximumDrawableCount = 3;
