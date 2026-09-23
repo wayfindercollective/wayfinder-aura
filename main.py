@@ -39,6 +39,47 @@ if sys.platform == "win32":
                 pass
 
 
+def _macos_route_console_to_log() -> None:
+    """Packaged macOS app: keep stdout/stderr in ~/Library/Logs, not /dev/null.
+
+    Launched from Finder, fds 1 and 2 are /dev/null, so every diagnostic
+    print (whisper-server failures, mic, ducking, overlay errors) vanished.
+    Only the main GUI process is redirected: the overlay subprocess speaks its
+    protocol on stdout, and helper modes print results to the caller.
+    """
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        return
+    if any(arg.startswith("--") and arg not in ("--minimized",) for arg in sys.argv[1:]):
+        return  # --overlay-subprocess, self-tests, CLI verbs...
+    try:
+        if os.isatty(1):
+            return  # started from a terminal: keep the terminal
+    except OSError:
+        pass
+    try:
+        log_dir = Path.home() / "Library" / "Logs" / "Wayfinder Aura"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(log_dir, 0o700)
+        log_path = log_dir / "app.log"
+        if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
+            os.replace(log_path, log_dir / "app.log.1")
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.fchmod(fd, 0o600)
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+        os.close(fd)
+        sys.stdout = open(1, "w", encoding="utf-8", errors="replace", buffering=1, closefd=False)
+        sys.stderr = open(2, "w", encoding="utf-8", errors="replace", buffering=1, closefd=False)
+        from datetime import datetime
+
+        print(f"\n===== Wayfinder Aura {datetime.now():%Y-%m-%d %H:%M:%S} =====", flush=True)
+    except OSError:
+        pass
+
+
+_macos_route_console_to_log()
+
+
 # Ensure the src directory is in the path for package imports
 if getattr(sys, 'frozen', False):
     # Running as bundled .app — modules are in the bundle

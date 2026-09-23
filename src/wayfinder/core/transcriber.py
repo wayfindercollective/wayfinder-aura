@@ -1187,19 +1187,22 @@ class WhisperServerBackend(TranscriptionBackend):
     def supports_gpu(self) -> bool:
         return True
 
-    def warm_up(self) -> None:
+    def warm_up(self) -> bool:
         """Pre-load the model into the server so the FIRST dictation is instant.
 
         Safe to call from a background thread at app startup. Swallows failures
         (a broken warm-up must never block launch — the lazy start in transcribe()
         is the fallback). No-op if the binary/model aren't present.
+        Returns True only when the server really started (callers may ignore it).
         """
         if not self.is_available():
-            return
+            return False
         try:
             self._start_server()
+            return True
         except Exception as e:
             print(f"[Whisper Server] Warm-up skipped: {e}")
+            return False
 
     def _resolve_cli_binary(self) -> str:
         """Find a whisper-cli binary that ACTUALLY EXISTS for the salvage fallback.
@@ -2059,7 +2062,7 @@ class OpenAIWhisperBackend(TranscriptionBackend):
             raise TranscriptionError(_friendly_cloud_error(e))
 
 
-def warm_up_transcription(config: dict) -> None:
+def warm_up_transcription(config: dict) -> bool:
     """Pre-load the transcription model so the first dictation is instant.
 
     Only does work for backends that benefit from a persistent process — today
@@ -2072,9 +2075,10 @@ def warm_up_transcription(config: dict) -> None:
         backend = get_backend(config)
         warm = getattr(backend, "warm_up", None)
         if callable(warm):
-            warm()
+            return warm() is not False
     except Exception as e:
         print(f"[Transcription] Warm-up skipped: {e}")
+    return False
 
 
 def get_backend(config: dict) -> TranscriptionBackend:

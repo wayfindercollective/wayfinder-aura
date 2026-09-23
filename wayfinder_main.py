@@ -3348,6 +3348,9 @@ _GPU_NUDGE_MIN_DURATION_S = 45.0
 _AUTO_ENTER_SETTLE_S = 0.35
 
 
+_ACTIVITY_LOG_INIT_LOCK = threading.Lock()
+
+
 def _macos_keep_awake(fn, key: str, reason: str):
     """macOS: run ``fn`` holding off idle sleep (a slept download restarts from 0)."""
     if not IS_MACOS:
@@ -15758,6 +15761,14 @@ class WayfinderApp(ctk.CTk):
         session if it has grown past ~5 MB so it can't grow without bound.
         """
         path = getattr(self, "_activity_log_path", None)
+        if path is None and IS_MACOS:
+            # Several startup threads log at once; without this each of them
+            # wrote its own "session start" header.
+            with _ACTIVITY_LOG_INIT_LOCK:
+                path = getattr(self, "_activity_log_path", None)
+                if path is None:
+                    self._init_activity_log()
+                    path = self._activity_log_path
         if path is None:
             if IS_MACOS:
                 from wayfinder.utils.platform import get_cache_dir
@@ -15785,6 +15796,22 @@ class WayfinderApp(ctk.CTk):
         except OSError:
             pass
     
+    def _init_activity_log(self) -> None:
+        """macOS: create the activity log once per session (header + 0600)."""
+        from wayfinder.utils.platform import get_cache_dir
+
+        path = get_cache_dir() / "activity.log"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
+                path.write_text("")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"\n===== session start {datetime.now():%Y-%m-%d %H:%M:%S} =====\n")
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        self._activity_log_path = path
+
     def _do_log(self, log_line: str):
         """Actually update the log textbox (must be called from main thread)."""
         if not hasattr(self, "log_textbox"):
@@ -20015,8 +20042,10 @@ class WayfinderApp(ctk.CTk):
                 from wayfinder.core.transcriber import warm_up_transcription
                 if self.config.get("whisper_server_mode"):
                     self.log("⏳ Warming up transcription model (first dictation will be instant)…")
-                warm_up_transcription(self.config)
-                if self.config.get("whisper_server_mode"):
+                loaded = warm_up_transcription(self.config)
+                if self.config.get("whisper_server_mode") and (loaded or not IS_MACOS):
+                    # macOS only claims "loaded" when a server really started
+                    # (it used to say so with no model installed at all).
                     self.log("✅ Transcription model loaded — ready for instant dictation")
             except Exception as e:
                 self.log(f"⚠️ Transcription warm-up skipped: {e}")
