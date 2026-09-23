@@ -202,6 +202,38 @@ def test_macos_overlay_selects_accessory_activation_policy(
     assert calls == [1]
 
 
+def test_macos_overlay_window_has_no_system_shadow(monkeypatch, overlay_module):
+    """AppKit's traced window shadow drew a stale halo around the pill's glow."""
+    import types
+
+    calls = []
+
+    class NativeWindow:
+        def title(self):
+            return "Wayfinder Aura Overlay"
+
+        def setLevel_(self, level):
+            calls.append(("level", level))
+
+        def setCollectionBehavior_(self, behavior):
+            calls.append(("behavior", behavior))
+
+        def setHidesOnDeactivate_(self, hides):
+            calls.append(("hides", hides))
+
+        def setHasShadow_(self, has_shadow):
+            calls.append(("shadow", has_shadow))
+
+    appkit = types.ModuleType("AppKit")
+    appkit.NSApp = types.SimpleNamespace(windows=lambda: [NativeWindow()])
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+
+    overlay_module.GlassmorphicOverlay._apply_macos_level(None)
+
+    assert ("shadow", False) in calls
+    assert ("level", 3) in calls
+
+
 def test_overlay_signal_handler_does_not_raise_through_qt():
     """SIGTERM during a Qt callback must stop the loop without aborting PyQt."""
     overlay = (

@@ -1199,6 +1199,11 @@ class GlassmorphicOverlay(QWidget):
             # taskbar (field bug: pinned at the panel strut). Override-redirect
             # escapes the clamp and renders above the panel.
             flags |= Qt.WindowType.X11BypassWindowManagerHint
+        if sys.platform == "darwin":
+            # The pill paints its own glow. AppKit's window shadow is traced from
+            # the translucent pixels and not refreshed as the waves animate, so
+            # it rendered as a dark, stale halo around the indicator.
+            flags |= Qt.WindowType.NoDropShadowWindowHint
         self.setWindowFlags(flags)
         
         # Critical for ARGB transparency on all platforms
@@ -1269,6 +1274,7 @@ class GlassmorphicOverlay(QWidget):
                     # canJoinAllSpaces + stationary + fullScreenAuxiliary.
                     nswin.setCollectionBehavior_((1 << 0) | (1 << 4) | (1 << 8))
                     nswin.setHidesOnDeactivate_(False)  # Don't hide when app loses focus
+                    nswin.setHasShadow_(False)  # pill draws its own glow (see _setup_window)
                     break
             else:
                 # Window not found yet, retry
