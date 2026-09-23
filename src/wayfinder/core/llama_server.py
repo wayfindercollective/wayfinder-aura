@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from wayfinder.utils.hostexec import bundle_binary_env
+from wayfinder.utils.loopback_http import urlopen_loopback
 
 
 DEFAULT_PORT = 8179  # whisper-server owns 8178
@@ -157,7 +158,7 @@ class LlamaServerManager:
         try:
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/props", headers=cls._auth_headers())
-            resp = urllib.request.urlopen(req, timeout=timeout)
+            resp = urlopen_loopback(req, timeout=timeout)
             return json.loads(resp.read().decode("utf-8", errors="replace"))
         except Exception:
             return None
@@ -377,7 +378,7 @@ class LlamaServerManager:
             if proc.poll() is not None:
                 return False  # died during load
             try:
-                resp = urllib.request.urlopen(
+                resp = urlopen_loopback(
                     f"http://127.0.0.1:{port}/health", timeout=1.0)
                 if resp.status == 200:
                     return True
@@ -615,7 +616,7 @@ class LlamaServerManager:
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json", **cls._auth_headers()},
         )
-        resp = urllib.request.urlopen(
+        resp = urlopen_loopback(
             req, timeout=cls.REQUEST_TIMEOUT if timeout is None else timeout)
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 

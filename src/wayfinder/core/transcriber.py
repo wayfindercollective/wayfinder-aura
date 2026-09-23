@@ -21,6 +21,7 @@ from typing import Optional
 
 from wayfinder.config import IS_FLATPAK
 from wayfinder.utils.hostexec import bundle_binary_env
+from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
 from wayfinder.utils.child_supervisor import wrap_macos_child_command
 from wayfinder.utils.platform import subprocess_no_window_kwargs
@@ -815,7 +816,7 @@ class WhisperServerBackend(TranscriptionBackend):
         try:
             import urllib.request
             req = urllib.request.Request(f"http://127.0.0.1:{port}/")
-            resp = urllib.request.urlopen(req, timeout=timeout)
+            resp = urlopen_loopback(req, timeout=timeout)
             # whisper-server returns an HTML page at root
             content = resp.read().decode("utf-8", errors="ignore")
             return "whisper" in content.lower()
@@ -1339,7 +1340,7 @@ class WhisperServerBackend(TranscriptionBackend):
                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
                     method="POST",
                 )
-                resp = urllib.request.urlopen(req, timeout=_timeout)
+                resp = urlopen_loopback(req, timeout=_timeout)
                 return json.loads(resp.read().decode("utf-8")).get("text", "").strip()
 
             try:
