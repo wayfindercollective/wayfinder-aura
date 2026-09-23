@@ -235,3 +235,13 @@ def test_macos_injection_restores_full_snapshot_when_paste_fails(monkeypatch):
         injector._inject_text_pyautogui("hello")
 
     assert restored == [snapshot]
+
+
+def test_aqua_wheel_click_scrolls_a_full_notch_but_trackpad_stream_stays_smooth():
+    from wayfinder_main import _aqua_wheel_notches
+
+    assert _aqua_wheel_notches(-1, 0.5) == 1.0      # lone mouse-wheel click
+    assert _aqua_wheel_notches(-3, 0.5) == 3.0      # accelerated click
+    assert _aqua_wheel_notches(-1, 0.016) == 0.25   # trackpad stream (~60 Hz)
+    assert _aqua_wheel_notches(-120, 0.016) == 1.0  # notch-native delta
+    assert _aqua_wheel_notches("bad", 0.5) == 0.0

@@ -618,7 +618,9 @@ class FeatureGate:
         upgrade prompt UI (see WayfinderApp._show_premium_prompt), not in this string."""
         if feature_id in PREMIUM_FEATURES:
             name, desc = PREMIUM_FEATURES[feature_id]
-            return f"🔒 {name} is a Wayfinder Ultra feature.\n\n{desc}"
+            # macOS shows no emoji as UI chrome (the prompt has its own lock icon).
+            lock = "" if platform.system() == "Darwin" else "🔒 "
+            return f"{lock}{name} is a Wayfinder Ultra feature.\n\n{desc}"
         return "This is a Wayfinder Ultra feature."
 
     def activate(self, key: str) -> LicenseInfo:

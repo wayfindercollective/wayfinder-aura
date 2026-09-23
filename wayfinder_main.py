@@ -81,6 +81,11 @@ except ImportError:
 
 import sys as _sys
 IS_MACOS = _sys.platform == 'darwin'
+# Microphone picker's first option (matched by the "Auto-detect" substring).
+# macOS drops the emoji prefix: no emoji as UI chrome (rule 11).
+AUTO_DETECT_MIC_LABEL = (
+    "Auto-detect (Recommended)" if IS_MACOS else "🎤 Auto-detect (Recommended)"
+)
 
 # SOCKET_PATH is the single source of truth in wayfinder.config (Rule #3) — it resolves
 # to $XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock (host<->sandbox shared) or /tmp.
@@ -1127,6 +1132,31 @@ def _wheel_event_notches(delta: object, platform_name: str | None = None) -> flo
     active_platform = platform_name or sys.platform
     divisor = 4.0 if active_platform == "darwin" and abs(numeric) < 120 else 120.0
     return -numeric / divisor
+
+
+# A wheel event arriving this long after the previous one is a discrete
+# mouse-wheel click; closer events are a trackpad (or momentum) stream.
+_AQUA_WHEEL_SPARSE_GAP_S = 0.08
+
+
+def _aqua_wheel_notches(delta: object, seconds_since_last: float) -> float:
+    """Aqua wheel delta -> notches, telling mouse clicks from trackpad streams.
+
+    Tk 8.6 on macOS reports a mouse-wheel click as delta ±1 (larger when
+    accelerated) and a trackpad swipe as a rapid stream of small deltas; it
+    does not say which. A lone event is a click and scrolls a full notch
+    (÷4 made each click a quarter step: "sluggish"); a stream keeps the
+    smooth ÷4 trackpad feel. ±120 deltas are notch-native.
+    """
+    try:
+        numeric = float(delta)
+    except (TypeError, ValueError):
+        return 0.0
+    if abs(numeric) >= 120:
+        return -numeric / 120.0
+    if seconds_since_last >= _AQUA_WHEEL_SPARSE_GAP_S:
+        return -numeric
+    return -numeric / 4.0
 
 
 def _hero_idle_interval_ms(platform_name: str | None = None) -> int | None:
@@ -6311,11 +6341,21 @@ class WayfinderApp(ctk.CTk):
 
         # Windows and Tk 9/X11 use ±120 wheel deltas; macOS trackpads emit
         # small high-resolution deltas. Normalize without crushing Aqua input.
-        self.bind_all(
-            "<MouseWheel>",
-            lambda e: _scroll_under_pointer(e, _wheel_event_notches(e.delta)),
-            add="+",
-        )
+        if IS_MACOS:
+            _last_wheel = [0.0]
+
+            def _aqua_wheel(e):
+                now = time.monotonic()
+                gap, _last_wheel[0] = now - _last_wheel[0], now
+                return _scroll_under_pointer(e, _aqua_wheel_notches(e.delta, gap))
+
+            self.bind_all("<MouseWheel>", _aqua_wheel, add="+")
+        else:
+            self.bind_all(
+                "<MouseWheel>",
+                lambda e: _scroll_under_pointer(e, _wheel_event_notches(e.delta)),
+                add="+",
+            )
         # Legacy X11 (pre-Tk9): one Button-4/5 press per notch.
         self.bind_all("<Button-4>", lambda e: _scroll_under_pointer(e, -1), add="+")
         self.bind_all("<Button-5>", lambda e: _scroll_under_pointer(e, 1), add="+")
@@ -6501,8 +6541,10 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             text_w = int(max((len(str(v)) for v in values), default=0)
                          * self.font_sizes["body"] * 0.62)
-        # icon(16) + compound gap + row padx + panel pad*2 + border + scrollbar
-        chrome = 16 + 10 + 8 + pad * 2 + 2 + (18 if scrollable else 0)
+        # icon(16) + compound gap + row padx + panel pad*2 + border + scrollbar.
+        # Aqua CTkButtons add ~20px more text inset (measured: text starts ~35px
+        # in), which clipped the longest row's tail on macOS.
+        chrome = 16 + 10 + 8 + pad * 2 + 2 + (18 if scrollable else 0) + (20 if IS_MACOS else 0)
         panel_w = clamp_dropdown_width(text_w + chrome, ctrl_w, win_w, margin=8)
 
         x, y, h, _opens_up = dropdown_panel_geometry(
@@ -7543,9 +7585,16 @@ class WayfinderApp(ctk.CTk):
         """Keep the independent CALayer behind tabs and full-window scrims."""
         native_layer = getattr(self, "_macos_hero_layer", None)
         if native_layer is not None:
-            native_layer.set_hidden(
-                WayfinderApp._macos_hero_is_occluded(self)
-            )
+            occluded = WayfinderApp._macos_hero_is_occluded(self)
+            native_layer.set_hidden(occluded)
+            if occluded:
+                # Tk may draw over the hero here (dropdowns, scrims), so the
+                # Metal layer hides; keep a still ribbon on the canvas below
+                # instead of an empty card.
+                try:
+                    self._draw_hero_waveform(force_canvas=True)
+                except Exception:
+                    pass
 
     def _init_hero_wave_items(self) -> None:
         """Create a single canvas image item for PIL-rendered waveform."""
@@ -7572,8 +7621,12 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass  # rule 10: canvas ops must never crash the app
     
-    def _draw_hero_waveform(self) -> None:
-        """Render waveform to PIL Image and blit as single canvas image (1 Tk call)."""
+    def _draw_hero_waveform(self, force_canvas: bool = False) -> None:
+        """Render waveform to PIL Image and blit as single canvas image (1 Tk call).
+
+        ``force_canvas`` (macOS) paints on the Tk canvas even when the native
+        layer exists: a still frame shown while that layer is hidden.
+        """
         if not self.hero_canvas:
             return
 
@@ -7605,7 +7658,7 @@ class WayfinderApp(ctk.CTk):
 
             stroke_scale = _hero_visual_scale(self.ui_scale)
             native_layer = None
-            if IS_MACOS:
+            if IS_MACOS and not force_canvas:
                 native_layer = getattr(self, "_macos_hero_layer", None)
                 now = time.monotonic()
                 if native_layer is None and now >= getattr(
@@ -7673,6 +7726,16 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
     
+    @staticmethod
+    def _style_tab_icon_and_label(unlocked: bool) -> tuple[str, str]:
+        """Style tab icon + label. macOS shows a line-icon lock in place of the
+        pen instead of an emoji suffix (rule 11: no emoji as UI chrome)."""
+        if unlocked:
+            return "pen-line", "Style"
+        if IS_MACOS:
+            return "lock", "Style"
+        return "pen-line", "Style  🔒"
+
     def _create_sidebar(self, parent) -> None:
         """Create the vertical sidebar navigation."""
         sidebar = ctk.CTkFrame(
@@ -7702,14 +7765,13 @@ class WayfinderApp(ctk.CTk):
         # Line icons (neutral tint) replace the old unicode glyphs. CTkButton
         # can't swap image color per active-state, so all four keep the quiet
         # text_secondary tint; the active tab only recolors its text (blue).
+        style_icon, style_label = self._style_tab_icon_and_label(
+            self.feature_gate.has_feature("tone_system")
+        )
         tabs = [
             ("dictate", "audio-waveform", "Dictate"),
             ("settings", "settings-2", "Settings"),
-            (
-                "style",
-                "pen-line",
-                "Style" if self.feature_gate.has_feature("tone_system") else "Style  🔒",
-            ),
+            ("style", style_icon, style_label),
             ("history", "history", "History"),
         ]
 
@@ -16229,7 +16291,14 @@ class WayfinderApp(ctk.CTk):
             style_unlocked = self.feature_gate.has_feature("tone_system")
             style_btn = self.tab_buttons.get("style")
             if style_btn is not None:
-                style_btn.configure(text="Style" if style_unlocked else "Style  🔒")
+                icon_name, label = self._style_tab_icon_and_label(style_unlocked)
+                if IS_MACOS:
+                    style_btn.configure(
+                        text=label,
+                        image=get_icon(icon_name, 18, COLORS["text_secondary"]),
+                    )
+                else:
+                    style_btn.configure(text=label)
         except Exception:
             pass
         try:
@@ -16911,7 +16980,7 @@ class WayfinderApp(ctk.CTk):
             Tuple of (list of display names, current selection name)
         """
         # Build options list with auto-detect first
-        options = ["🎤 Auto-detect (Recommended)"]
+        options = [AUTO_DETECT_MIC_LABEL]
         device_map = {}        # display name -> device index (may be None for a
                                # pactl source not yet mapped to a PortAudio device)
         display_to_name = {}   # display name -> full device/source name (persisted)
@@ -18405,7 +18474,7 @@ class WayfinderApp(ctk.CTk):
         try:
             options, current = self._get_microphone_dropdown_options()
         except Exception:
-            options, current = ["🎤 Auto-detect (Recommended)"], "🎤 Auto-detect (Recommended)"
+            options, current = [AUTO_DETECT_MIC_LABEL], AUTO_DETECT_MIC_LABEL
 
         items = []
         for selection in options:
