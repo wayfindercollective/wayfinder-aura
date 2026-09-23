@@ -130,6 +130,10 @@ class LicenseInfo:
     features: Optional[list] = None
     # Raw bearer token for CDN downloads (never log this).
     token: Optional[str] = None
+    # The token needed an online refresh that this read skipped (macOS offline-first
+    # startup). Grants nothing; callers defer destructive settings repairs until the
+    # online refresh has run.
+    refresh_deferred: bool = False
 
 
 # === Premium Feature Definitions ===
@@ -243,7 +247,8 @@ def get_machine_id() -> str:
     """
     # Try various sources for a stable ID
     sources = []
-    
+    mac_uuid_found = False
+
     # Stable Mac hardware identity. Hostname-only binding changes whenever the
     # user renames their Mac and can consume another activation slot.
     if platform.system() == "Darwin":
@@ -257,6 +262,7 @@ def get_machine_id() -> str:
             match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', result.stdout)
             if result.returncode == 0 and match:
                 sources.append("mac:" + match.group(1).strip().lower())
+                mac_uuid_found = True
         except Exception:
             pass
 
@@ -276,8 +282,10 @@ def get_machine_id() -> str:
     except Exception:
         pass
     
-    # Fallback to hostname only when no stable platform identifier was found.
-    if not sources:
+    # The hostname stays in the hash everywhere except a Mac with its hardware
+    # UUID. Linux/Windows must keep the original derivation: a changed ID makes
+    # any re-activation spend another activation slot.
+    if not mac_uuid_found:
         sources.append(platform.node())
     sources.append(platform.machine())
     
@@ -474,6 +482,7 @@ def load_stored_license(*, refresh_online: bool = True) -> LicenseInfo:
                 return info
             return info  # server says invalid (revoked/refunded/limit) — premium off
         # unreachable: fall back to the cached token below
+    refresh_deferred = bool(needs_refresh and key and not refresh_online)
 
     if payload is not None:
         try:
@@ -487,6 +496,7 @@ def load_stored_license(*, refresh_online: bool = True) -> LicenseInfo:
                 is_valid=False,
                 is_premium=False,
                 error_message="License needs re-activation (v2 feature token required)",
+                refresh_deferred=refresh_deferred,
             )
         return LicenseInfo(
             is_valid=True,
@@ -502,6 +512,7 @@ def load_stored_license(*, refresh_online: bool = True) -> LicenseInfo:
         is_valid=False,
         is_premium=False,
         error_message="License needs re-activation (offline grace expired)",
+        refresh_deferred=refresh_deferred,
     )
 
 
@@ -565,6 +576,14 @@ class FeatureGate:
     def license_info(self) -> LicenseInfo:
         """Get current license info."""
         return self._license_info
+
+    @property
+    def refresh_pending(self) -> bool:
+        """True when an offline-only read skipped a needed online refresh.
+
+        Premium stays off; only destructive settings repairs wait for the refresh.
+        """
+        return bool(self._license_info and self._license_info.refresh_deferred)
 
     def get_bearer_token(self) -> Optional[str]:
         """Return the stored offline license token for CDN Authorization headers."""

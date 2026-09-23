@@ -810,10 +810,16 @@ def main():
                     f"[Permissions] macOS permission check failed: {_permission_error}",
                     flush=True,
                 )
-        # Startup is offline-first. A stale-token refresh happens after first
-        # paint so a disconnected Mac never bounces for ten seconds before UI.
-        _entitlement_repairs = enforce_license_config(
-            config, get_feature_gate(refresh_online=False)
+        # macOS startup is offline-first: a stale-token refresh happens after
+        # first paint so a disconnected Mac never bounces for ten seconds before
+        # UI. Until that refresh runs, don't persist repairs (they reset Ultra
+        # settings) from a token that merely needed refreshing. Linux/Windows
+        # keep refreshing here, before the repair, as on main.
+        _startup_gate = get_feature_gate(refresh_online=sys.platform != "darwin")
+        _entitlement_repairs = (
+            []
+            if _startup_gate.refresh_pending
+            else enforce_license_config(config, _startup_gate)
         )
         if _entitlement_repairs:
             save_config(config)

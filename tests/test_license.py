@@ -535,3 +535,123 @@ class TestFeatureGate:
         gate3 = get_feature_gate(force_refresh=True)
         assert gate3 is not gate1
         assert gate3.is_premium
+
+
+class TestMachineIdDerivation:
+    """Pin each platform's machine-ID inputs: a changed ID costs users an activation."""
+
+    @staticmethod
+    def _fake_paths(monkeypatch, contents):
+        import wayfinder.license as lic
+
+        class FakePath:
+            def __init__(self, path):
+                self.path = str(path)
+
+            def exists(self):
+                return self.path in contents
+
+            def read_text(self):
+                return contents[self.path]
+
+        monkeypatch.setattr(lic, "Path", FakePath)
+        return lic
+
+    @staticmethod
+    def _expected(*parts):
+        import hashlib
+
+        return hashlib.sha256(":".join(parts).encode()).hexdigest()[:16].upper()
+
+    def test_linux_keeps_hostname_with_machine_id_and_dmi(self, monkeypatch):
+        lic = self._fake_paths(
+            monkeypatch,
+            {"/etc/machine-id": "abc123\n", "/sys/class/dmi/id/product_uuid": "dmi-uuid\n"},
+        )
+        monkeypatch.setattr(lic.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(lic.platform, "node", lambda: "steamdeck")
+        monkeypatch.setattr(lic.platform, "machine", lambda: "x86_64")
+
+        assert lic.get_machine_id() == self._expected("abc123", "dmi-uuid", "steamdeck", "x86_64")
+
+    def test_mac_hardware_uuid_replaces_hostname(self, monkeypatch):
+        import types
+
+        lic = self._fake_paths(monkeypatch, {})
+        monkeypatch.setattr(lic.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(lic.platform, "node", lambda: "Peters-Mac-Studio")
+        monkeypatch.setattr(lic.platform, "machine", lambda: "arm64")
+        monkeypatch.setattr(
+            lic.subprocess,
+            "run",
+            lambda *a, **k: types.SimpleNamespace(
+                returncode=0, stdout='  "IOPlatformUUID" = "ABCD-1234"\n'
+            ),
+        )
+
+        assert lic.get_machine_id() == self._expected("mac:abcd-1234", "arm64")
+
+    def test_mac_without_hardware_uuid_falls_back_to_hostname(self, monkeypatch):
+        lic = self._fake_paths(monkeypatch, {})
+        monkeypatch.setattr(lic.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(lic.platform, "node", lambda: "Peters-Mac-Studio")
+        monkeypatch.setattr(lic.platform, "machine", lambda: "arm64")
+
+        def fail(*a, **k):
+            raise OSError("no ioreg")
+
+        monkeypatch.setattr(lic.subprocess, "run", fail)
+
+        assert lic.get_machine_id() == self._expected("Peters-Mac-Studio", "arm64")
+
+
+class TestDeferredRefresh:
+    """macOS offline-first startup must not reset Ultra settings for a token that
+    only needed refreshing; Linux/Windows (online refresh first) are unaffected."""
+
+    @staticmethod
+    def _store_expired(monkeypatch):
+        import json
+
+        import wayfinder.license as lic
+
+        lic.get_license_path().write_text(json.dumps({
+            "license_key": SAMPLE_LICENSE_KEY,
+            "machine_id": "MACHINE123",
+            "token": "EXPIRED.TOKEN",
+        }))
+        monkeypatch.setattr(lic, "_verify_token", lambda token, machine_id=None: None)
+        return lic
+
+    def test_offline_read_marks_refresh_deferred_and_grants_nothing(
+        self, temp_config_dir: Path, monkeypatch
+    ):
+        lic = self._store_expired(monkeypatch)
+
+        def must_not_call(*a, **k):
+            raise AssertionError("offline-first read must not go online")
+
+        monkeypatch.setattr(lic, "activate_online", must_not_call)
+
+        info = lic.load_stored_license(refresh_online=False)
+        gate = lic.FeatureGate(refresh_online=False)
+
+        assert info.refresh_deferred is True
+        assert info.is_valid is False and info.is_premium is False
+        assert gate.refresh_pending is True
+        assert gate.is_premium is False
+
+    def test_online_read_that_could_not_refresh_is_not_deferred(
+        self, temp_config_dir: Path, monkeypatch
+    ):
+        lic = self._store_expired(monkeypatch)
+        monkeypatch.setattr(
+            lic,
+            "activate_online",
+            lambda key, machine_id: (lic.LicenseInfo(is_valid=False, is_premium=False), None, False),
+        )
+
+        info = lic.load_stored_license()
+
+        assert info.refresh_deferred is False
+        assert lic.FeatureGate().refresh_pending is False

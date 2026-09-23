@@ -5538,7 +5538,13 @@ class WayfinderApp(ctk.CTk):
         # repair before GPU environment setup; this second pass is defense in depth
         # for alternate entry points and license changes between those phases.
         from wayfinder.config import enforce_license_config
-        _entitlement_repairs = enforce_license_config(self.config, self.feature_gate)
+        # macOS: an offline-first read that skipped a needed refresh repairs
+        # nothing yet; _refresh_license_background re-runs this after first paint.
+        _entitlement_repairs = (
+            []
+            if self.feature_gate.refresh_pending
+            else enforce_license_config(self.config, self.feature_gate)
+        )
         if _entitlement_repairs:
             save_config(self.config)
             print(
@@ -5760,7 +5766,9 @@ class WayfinderApp(ctk.CTk):
         self._start_hotkey_supervisor()
         self.poll_events()
         self.after(350, self._refresh_model_catalog_background)
-        self.after(500, self._refresh_license_background)
+        if IS_MACOS:
+            # Linux/Windows already refreshed online in main.py before the UI.
+            self.after(500, self._refresh_license_background)
 
         # SciPy's signal stack is deliberately absent from the first-frame import path. Warm it
         # once immediately after the UI maps so first-dictation processing stays just as snappy.
