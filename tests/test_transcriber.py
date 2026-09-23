@@ -2232,3 +2232,38 @@ class TestServerReuseThreadsOnMacOS:
         backend.model_path, backend.use_gpu, backend.threads = "/m.bin", False, 12
 
         assert backend._server_reusable() is expected
+
+
+
+class TestMacServerRequestFields:
+    """macOS asks whisper-server for text only (no per-token timestamps)."""
+
+    def _body_for(self, platform, sample_audio_file, monkeypatch):
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from wayfinder.core import transcriber
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        monkeypatch.setattr(transcriber.sys, "platform", platform)
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=False, timeout=5)
+        resp = MagicMock()
+        resp.read.return_value = _json.dumps({"text": "hello"}).encode()
+        urlopen = MagicMock(return_value=resp)
+
+        def fake_start(*a, **k):
+            WhisperServerBackend._server_port = 8178
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch("urllib.request.urlopen", urlopen):
+            backend.transcribe(str(sample_audio_file))
+        return urlopen.call_args[0][0].data
+
+    def test_macos_disables_timestamps(self, sample_audio_file, monkeypatch):
+        body = self._body_for("darwin", sample_audio_file, monkeypatch)
+        assert b'name="no_timestamps"\r\n\r\ntrue' in body
+
+    def test_linux_request_is_unchanged(self, sample_audio_file, monkeypatch):
+        body = self._body_for("linux", sample_audio_file, monkeypatch)
+        assert b"no_timestamps" not in body
