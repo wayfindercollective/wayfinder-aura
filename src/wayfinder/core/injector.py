@@ -496,7 +496,15 @@ def get_active_window() -> "str | None":
 
     Captured at record-start so injection can target the user's window even if focus drifts
     during transcription (global-hotkey dictation). Best-effort; None on any failure.
+
+    macOS: "<pid>:<window number>" of the frontmost app's front window (no
+    permission needed). xdotool does not exist there, so the Auto-Enter focus
+    guard could never fire and Return could land in an app the user had just
+    switched to.
     """
+    if sys.platform == "darwin":
+        from .macos_paste import frontmost_window_id
+        return frontmost_window_id()
     try:
         from wayfinder.utils.hostexec import host_env
         result = subprocess.run(
@@ -980,12 +988,16 @@ def press_enter() -> None:
     same tool dispatch as text injection so it works wherever typing works.
     """
     if sys.platform == "darwin":
-        import pyautogui
         if not _wait_for_macos_modifier_release():
             raise InjectionError(
                 "Command, Option, Control, or Shift is still held; Enter was not pressed."
             )
-        pyautogui.press("enter")
+        from .macos_paste import accessibility_trusted, post_return
+        if accessibility_trusted() is False:
+            raise InjectionError("macOS blocked the key press: Accessibility is off.")
+        # Quartz, not PyAutoGUI: no ~0.2s import, no 0.1s built-in pause, and
+        # no corner fail-safe that aborts when the pointer rests in a corner.
+        post_return()
         return
     if sys.platform == "win32":
         from .injector_windows import press_enter_windows

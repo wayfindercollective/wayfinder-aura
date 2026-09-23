@@ -312,3 +312,43 @@ def test_post_command_v_releases_command_so_it_cannot_stick(monkeypatch):
         (0x09, False, 0x100000),
         (0x37, False, 0),
     ]
+
+
+def test_press_enter_posts_a_bare_return_through_quartz(monkeypatch):
+    import sys as _sys
+    from wayfinder.core import injector, macos_paste
+    monkeypatch.setattr(injector.sys, "platform", "darwin")
+    monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", lambda *a, **k: True)
+    sent = []
+    monkeypatch.setattr(macos_paste, "post_return", lambda: sent.append("return"))
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
+    injector.press_enter()
+    assert sent == ["return"]
+
+
+def test_press_enter_refuses_without_accessibility(monkeypatch):
+    import pytest as _pytest
+    from wayfinder.core import injector, macos_paste
+    monkeypatch.setattr(injector.sys, "platform", "darwin")
+    monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", lambda *a, **k: True)
+    monkeypatch.setattr(macos_paste, "post_return", lambda: None)
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: False)
+    with _pytest.raises(injector.InjectionError):
+        injector.press_enter()
+
+
+def test_active_window_is_reported_on_macos(monkeypatch):
+    from wayfinder.core import injector, macos_paste
+    monkeypatch.setattr(injector.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_paste, "frontmost_window_id", lambda: "123:456")
+    assert injector.get_active_window() == "123:456"
+
+
+def test_frontmost_window_id_live():
+    import sys as _sys
+    import pytest as _pytest
+    if _sys.platform != "darwin":
+        _pytest.skip("macOS only")
+    from wayfinder.core.macos_paste import frontmost_window_id
+    value = frontmost_window_id()
+    assert value is None or (":" in value and value.split(":")[0].isdigit())

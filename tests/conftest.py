@@ -433,6 +433,7 @@ def _no_real_macos_keystrokes(monkeypatch):
         yield
         return
     monkeypatch.setattr(macos_paste, "post_command_v", lambda: None)
+    monkeypatch.setattr(macos_paste, "post_return", lambda: None)
     monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
     yield
     macos_paste.pending_restore.flush()

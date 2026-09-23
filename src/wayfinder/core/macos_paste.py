@@ -23,6 +23,7 @@ import threading
 
 _KVK_ANSI_V = 0x09
 _KVK_COMMAND = 0x37
+_KVK_RETURN = 0x24
 _CARBON = "/System/Library/Frameworks/Carbon.framework/Carbon"
 _CORE_FOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 _UC_KEY_ACTION_DISPLAY = 3
@@ -120,6 +121,49 @@ def post_command_v() -> None:
             raise RuntimeError("could not create the Cmd+V key event")
         CGEventSetFlags(event, flags)
         CGEventPost(kCGHIDEventTap, event)
+
+
+def post_return() -> None:
+    """Post a plain Return (no modifiers) to the frontmost app via Quartz."""
+    from Quartz import CGEventCreateKeyboardEvent, CGEventPost, CGEventSetFlags, kCGHIDEventTap
+
+    for pressed in (True, False):
+        event = CGEventCreateKeyboardEvent(None, _KVK_RETURN, pressed)
+        if event is None:
+            raise RuntimeError("could not create the Return key event")
+        CGEventSetFlags(event, 0)
+        CGEventPost(kCGHIDEventTap, event)
+
+
+def frontmost_window_id() -> str | None:
+    """"<pid>:<window number>" for the frontmost app's front window, or None.
+
+    Window numbers and owner pids need no Screen Recording permission (only
+    titles do). Falls back to "<pid>:" when the app has no on-screen window.
+    """
+    try:
+        from AppKit import NSWorkspace
+        from Quartz import (
+            CGWindowListCopyWindowInfo,
+            kCGNullWindowID,
+            kCGWindowListExcludeDesktopElements,
+            kCGWindowListOptionOnScreenOnly,
+        )
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return None
+        pid = int(app.processIdentifier())
+        windows = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        ) or []
+        for info in windows:  # front-to-back
+            if int(info.get("kCGWindowOwnerPID", -1)) == pid and int(info.get("kCGWindowLayer", 1)) == 0:
+                return f"{pid}:{int(info.get('kCGWindowNumber', 0))}"
+        return f"{pid}:"
+    except Exception:
+        return None
 
 
 class DeferredRestore:

@@ -20543,11 +20543,16 @@ class WayfinderApp(ctk.CTk):
             # injection time is authoritative: users commonly click a different text box while
             # transcription finishes, and reactivating this older window would steal focus and
             # type into the wrong tab. Best-effort; X11 only.
-            try:
-                from wayfinder.core.injector import get_active_window
-                self._inject_target_window = get_active_window()
-            except Exception:
+            if IS_MACOS:
+                # Only xdotool can retarget; on macOS the injection-time front
+                # window is authoritative, so skip the query before capture.
                 self._inject_target_window = None
+            else:
+                try:
+                    from wayfinder.core.injector import get_active_window
+                    self._inject_target_window = get_active_window()
+                except Exception:
+                    self._inject_target_window = None
 
             # New recording session: bump the generation so any still-in-flight work or
             # scheduled callbacks from a previous session are recognised as stale and ignored.

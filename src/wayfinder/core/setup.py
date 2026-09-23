@@ -177,11 +177,13 @@ def check_text_injection() -> DependencyStatus:
     bundled ydotool binary as sufficient — Codex review / STEAMDECK-INSTALL-LOG Issue 4).
     """
     if sys.platform == "darwin":
+        # Injection posts Cmd+V / Return through Quartz (core/macos_paste);
+        # importing PyAutoGUI here only cost ~0.2 s of startup.
         try:
-            import pyautogui
-            return DependencyStatus(True, detail="pyautogui (macOS)")
+            import Quartz  # noqa: F401
+            return DependencyStatus(True, detail="Quartz events (macOS)")
         except ImportError:
-            return DependencyStatus(False, error="pyautogui not installed. Run: pip install pyautogui")
+            return DependencyStatus(False, error="PyObjC Quartz is missing from this build.")
 
     if sys.platform == "win32":
         # Native Win32 SendInput injection needs no external tool or daemon.
