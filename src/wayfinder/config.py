@@ -13,7 +13,10 @@ from typing import Any
 
 from wayfinder.utils.platform import (
     WAYFINDER_FLATPAK_ID,
+    get_legacy_flatpak_model_dirs,
     get_steam_platform,
+    get_user_llm_models_dir,
+    get_user_whisper_models_dir,
     get_wayfinder_appimage_dir,
     is_wayfinder_flatpak_env,
 )
@@ -142,8 +145,9 @@ if IS_FLATPAK:
     # base.en is the bundled model and the right Deck-class default (Issues 11/17).
     _default_model_path = f"{_default_model_dir}/ggml-base.en.bin"
     # LLM model for post-processing (bundled in Flatpak, or user-downloaded).
-    # Best-first across the bundled dir and the user data dir.
-    _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
+    # Best-first across the bundled dir and the user data dir — the Flatpak's
+    # persistent XDG_DATA_HOME, never the sandbox's throwaway ~/.local/share.
+    _user_llm_dir = str(get_user_llm_models_dir(flatpak=True))
     _default_llm_model_path = _pick_llm("/app/share/llm-models", _user_llm_dir)
     # Bundled CPU llama-simple — the subprocess fallback behind the resident
     # llama-cpp-python fast path (both ship in the Flatpak). Host paths like
@@ -160,7 +164,7 @@ elif IS_APPIMAGE and APPDIR:
         _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
     # Prefer the bundled model, then any user-downloaded one (best-first).
     _appimage_llm_dir = os.path.join(APPDIR, "usr", "share", "llm-models")
-    _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
+    _user_llm_dir = str(get_user_llm_models_dir(flatpak=False))
     _default_llm_model_path = _pick_llm(_appimage_llm_dir, _user_llm_dir)
     _appimage_llama = os.path.join(APPDIR, "usr", "bin", "llama-cli")
     _appimage_llama_simple = os.path.join(APPDIR, "usr", "bin", "llama-simple")
@@ -176,14 +180,14 @@ else:
         _windows_bundled_whisper() or f"~/whisper.cpp/build/bin/whisper-cli{_exe}"
     )
     _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
-    # LLM model for post-processing - prefer Qwen 3.5 if available, fall back to Qwen 2.5
-    # Use platform-appropriate data dir (macOS: ~/Library/Application Support/, Linux: ~/.local/share/)
-    if sys.platform == "darwin":
-        _user_llm_dir = str(Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models")
-    elif sys.platform == "win32":
+    # LLM model for post-processing - best-first from _LLM_PREFERENCE.
+    # Platform-appropriate data dir (macOS: ~/Library/Application Support/,
+    # Linux: ~/.local/share/). The Windows default has always been
+    # ~/AppData/Local/wayfinder-aura/llm-models; it is kept exactly as shipped.
+    if sys.platform == "win32":
         _user_llm_dir = str(Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models")
     else:
-        _user_llm_dir = str(Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models")
+        _user_llm_dir = str(get_user_llm_models_dir(flatpak=False))
     _default_llm_model_path = _pick_llm(_user_llm_dir)
     _default_llama_binary = f"~/llama.cpp/build/bin/llama-cli{_exe}"
 
@@ -523,6 +527,20 @@ def _which_runtime_path(name: str) -> str | None:
     return None
 
 
+def _user_whisper_model_dirs() -> list[Path]:
+    """Writable Whisper model dir(s) for this runtime, download dir first.
+
+    Outside the Flatpak this is just ~/whisper.cpp/models (unchanged). In the
+    Flatpak the persistent XDG_DATA_HOME dir leads; ~/whisper.cpp/models stays
+    listed for parity with older builds.
+    """
+    dirs = [get_user_whisper_models_dir(flatpak=IS_FLATPAK)]
+    host_dir = Path(os.path.expanduser("~/whisper.cpp/models"))
+    if host_dir not in dirs:
+        dirs.append(host_dir)
+    return dirs
+
+
 def _usable_model_candidates() -> list:
     """Existing whisper model files the CURRENT license may load, best first.
 
@@ -543,7 +561,7 @@ def _usable_model_candidates() -> list:
         except Exception:
             return name.lower() in ("ggml-base.bin", "ggml-base.en.bin")
 
-    dirs = [Path(os.path.expanduser("~/whisper.cpp/models"))]
+    dirs = _user_whisper_model_dirs()
     if IS_APPIMAGE and APPDIR:
         dirs.append(Path(APPDIR) / "usr" / "share" / "whisper-models")
     if IS_FLATPAK:
@@ -643,7 +661,7 @@ def enforce_license_config(config: dict, gate) -> list[str]:
         dirs: list[Path] = []
         if str(current.parent) not in ("", "."):
             dirs.append(current.parent)
-        dirs.append(Path(os.path.expanduser("~/whisper.cpp/models")))
+        dirs.extend(d for d in _user_whisper_model_dirs() if d not in dirs)
         if IS_APPIMAGE and APPDIR:
             dirs.append(Path(APPDIR) / "usr" / "share" / "whisper-models")
         if IS_FLATPAK:
@@ -773,6 +791,203 @@ def _repair_config_path(key: str, saved: object) -> object:
     return saved
 
 
+# ---------------------------------------------------------------------------
+# Flatpak model-storage migration + model-path notices
+# ---------------------------------------------------------------------------
+
+# Every persisted local-model path, with the kind of model it names.
+_MODEL_PATH_KEYS: tuple[tuple[str, str], ...] = (
+    ("model_path", "whisper-models"),
+    ("game_mode_model_path", "whisper-models"),
+    ("llama_cpp_model_path", "llm-models"),
+)
+
+# Notices recorded while loading config, for the UI to surface once it exists
+# (load_config runs before any window does). See consume_model_path_notices().
+_model_path_notices: list[dict] = []
+
+
+def _add_model_path_notice(notice: dict) -> None:
+    if notice not in _model_path_notices:
+        _model_path_notices.append(notice)
+
+
+def consume_model_path_notices() -> list[dict]:
+    """Return and clear the model-path notices recorded by load_config().
+
+    Each notice is a dict:
+      ``kind``        "migrated" (the path was repointed to the persistent
+                      copy) or "missing" (the selected file is gone),
+      ``key``         the config key (``model_path`` / ``llama_cpp_model_path``
+                      / ``game_mode_model_path``),
+      ``path``        the path the config held,
+      ``replacement`` the path now in use ("" when nothing could stand in).
+    """
+    notices = list(_model_path_notices)
+    _model_path_notices.clear()
+    return notices
+
+
+def _user_model_dir(kind: str) -> Path:
+    if kind == "whisper-models":
+        return get_user_whisper_models_dir(flatpak=IS_FLATPAK)
+    return get_user_llm_models_dir(flatpak=IS_FLATPAK)
+
+
+def _is_model_file_name(kind: str, name: str) -> bool:
+    """Finished model weights only — never a .downloading/.tmp partial."""
+    if kind == "whisper-models":
+        return name.startswith("ggml-") and name.endswith(".bin")
+    return name.endswith(".gguf")
+
+
+def _move_model_file(src: Path, dst: Path) -> bool:
+    """Move ``src`` to ``dst`` without ever leaving a half-written ``dst``.
+
+    Same-mount moves are a rename. Across mounts the file is copied to a
+    sibling temp name and renamed into place, so an interrupted copy can never
+    masquerade as a finished model. Returns False (source untouched) on failure.
+    """
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            return False
+    except OSError:
+        return False
+    try:
+        os.rename(src, dst)
+        return True
+    except OSError:
+        pass
+    tmp = dst.with_name(dst.name + ".migrating")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    try:
+        src.unlink()
+    except OSError:
+        pass  # the copy is complete; a leftover source only wastes space
+    return True
+
+
+def _collapse_home_like(original: str, new_path: Path) -> str:
+    """Store the new path in the style the config already used ('~/...' or absolute)."""
+    new = str(new_path)
+    if str(original).strip().startswith("~"):
+        home = str(Path.home())
+        if new.startswith(home + os.sep):
+            return "~" + new[len(home):]
+    return new
+
+
+def migrate_flatpak_model_storage(config: dict) -> dict[str, str]:
+    """Move Flatpak model downloads off the sandbox's throwaway ~/.local/share.
+
+    Flatpak builds before this fix downloaded Whisper and GGUF models into
+    $HOME/.local/share/wayfinder-aura/..., which the sandbox discards when the
+    app exits: users re-downloaded their model after every restart while
+    startup quietly fell back to bundled Base.en. Downloads now land in the
+    persistent XDG_DATA_HOME (get_user_*_models_dir). This repairs existing
+    installs so nobody has to download again:
+
+    1. Every finished model in the app-private legacy dir
+       (~/.var/app/<id>/.local/share/wayfinder-aura/<kind>, where a
+       ``--persist=.local`` override kept them) is moved into the new dir.
+    2. Each configured model path that no longer resolves is repointed to the
+       same filename in the new dir, else in a legacy dir that still has it.
+
+    A path that still exists is left alone — e.g. a host directory shared via a
+    ``--filesystem=home`` override belongs to the host and is never moved.
+    Mutates ``config`` and returns {key: new_value} for every rewritten key.
+    No-op outside the Flatpak.
+    """
+    if not IS_FLATPAK:
+        return {}
+
+    for kind in ("whisper-models", "llm-models"):
+        new_dir = _user_model_dir(kind)
+        private_legacy = get_legacy_flatpak_model_dirs(kind)[0]
+        try:
+            entries = sorted(private_legacy.iterdir()) if private_legacy.is_dir() else []
+        except OSError:
+            entries = []
+        for src in entries:
+            try:
+                if not src.is_file() or not _is_model_file_name(kind, src.name):
+                    continue
+            except OSError:
+                continue
+            dst = new_dir / src.name
+            if _move_model_file(src, dst):
+                print(f"[Config] Moved {src.name} to persistent storage: {new_dir}")
+
+    changes: dict[str, str] = {}
+    for key, kind in _MODEL_PATH_KEYS:
+        saved = str(config.get(key) or "").strip()
+        if not saved or _path_exists(saved):
+            continue
+        name = Path(os.path.expanduser(saved)).name
+        if not _is_model_file_name(kind, name):
+            continue
+        for directory in (_user_model_dir(kind), *get_legacy_flatpak_model_dirs(kind)):
+            candidate = directory / name
+            try:
+                found = candidate.is_file()
+            except OSError:
+                found = False
+            if not found:
+                continue
+            value = _collapse_home_like(saved, candidate)
+            config[key] = value
+            changes[key] = value
+            _add_model_path_notice({
+                "kind": "migrated", "key": key, "path": saved, "replacement": str(candidate),
+            })
+            print(f"[Config] {key}: {saved} -> {value} (persistent model storage)")
+            break
+    return changes
+
+
+def _note_missing_model(key: str, saved: object, repaired: object, config: dict) -> None:
+    """Record a notice when a model the user selected is gone from disk.
+
+    The path repair above keeps today's fallback (bundled/default Base for
+    Whisper); this only makes sure it is never silent. Default paths the user
+    never chose, and /app paths seen outside the Flatpak (a runtime switch, not
+    a lost download), are not reported.
+    """
+    if key == "llama_cpp_model_path":
+        if not config.get("post_processing_enabled", True):
+            return
+        if config.get("post_processing_backend", "llama_cpp") != "llama_cpp":
+            return
+    elif key != "model_path":
+        return
+    saved_str = str(saved or "").strip()
+    if not saved_str or _path_exists(saved_str):
+        return
+    if not _runtime_path_allowed(os.path.expanduser(saved_str)):
+        return
+    if saved_str == str(DEFAULT_CONFIG.get(key) or "").strip():
+        return
+    replacement = str(repaired or "").strip()
+    if not _path_exists(replacement):
+        replacement = ""
+    _add_model_path_notice({
+        "kind": "missing", "key": key, "path": saved_str, "replacement": replacement,
+    })
+    print(
+        f"[Config] WARNING: {key} {saved_str} is missing"
+        + (f" — using {replacement} instead" if replacement else "")
+    )
+
+
 def load_config() -> dict:
     """
     Load configuration from file, merging with defaults.
@@ -880,9 +1095,22 @@ def load_config() -> dict:
             # paths from a previous environment (e.g. Flatpak /app/bin after switching to venv,
             # or a saved host ~/llama.cpp path inside the sandbox where only
             # the bundled /app/bin/llama-simple exists).
+            # Flatpak: move models out of the sandbox's non-persistent
+            # ~/.local/share and repoint the config BEFORE repair can mistake
+            # them for missing. Persist only the rewritten keys so defaults the
+            # user never saved stay unsaved (the hotkey migration relies on it).
+            _migrated = migrate_flatpak_model_storage(config)
+            if _migrated:
+                try:
+                    save_config({**user_config, **_migrated})
+                except OSError as e:
+                    print(f"WARNING: could not save migrated model paths: {e}")
+
             _path_keys = ("whisper_binary", "model_path", "llama_cpp_model_path", "llama_cpp_binary")
             for key in _path_keys:
-                config[key] = _repair_config_path(key, config.get(key, ""))
+                _saved = config.get(key, "")
+                config[key] = _repair_config_path(key, _saved)
+                _note_missing_model(key, _saved, config[key], config)
 
             # Audio device: a saved bare INDEX with no matching device name is unreliable.
             # PortAudio/PipeWire renumber devices between sessions (and on PipeWire restart),

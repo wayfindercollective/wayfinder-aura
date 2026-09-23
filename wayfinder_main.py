@@ -95,7 +95,12 @@ from wayfinder.config import (
     normalize_duck_percent,
     save_config,
 )
-from wayfinder.utils.platform import get_portal_app_id
+from wayfinder.utils.platform import (
+    get_portal_app_id,
+    get_user_llm_models_dir,
+    get_user_whisper_models_dir,
+    get_whisper_model_search_dirs,
+)
 from wayfinder.core.injector import inject_text, InjectionError
 from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude, wav_has_speech_activity
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
@@ -145,38 +150,38 @@ MODIFIER_CODES = {
 
 
 def _get_llm_models_dir() -> Path:
-    """Get the LLM models directory (platform-aware)."""
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
-    return Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
+    """Writable GGUF cleanup-model directory for in-app downloads (platform-aware).
+
+    Flatpak: the persistent XDG_DATA_HOME. macOS: ~/Library/Application Support.
+    Elsewhere: ~/.local/share/wayfinder-aura/llm-models. See
+    `wayfinder.utils.platform.get_user_llm_models_dir`.
+    """
+    return get_user_llm_models_dir(flatpak=IS_FLATPAK)
 
 
 def _get_whisper_models_dir() -> Path:
     """Writable whisper models directory for in-app model downloads.
 
-    In a Flatpak, `$HOME` is the sandboxed app home (~/.var/app/<app-id>/), so
-    downloads under ~/.local/share/wayfinder-aura/... persist without host
-    filesystem grants (Flathub prefers minimized permissions). Outside a
-    Flatpak the long-standing ~/whisper.cpp/models location is kept (existing
-    installs, docs and from-source builds all use it).
+    Flatpak: $XDG_DATA_HOME/wayfinder-aura/whisper-models (~/.var/app/<id>/data).
+    The sandbox's $HOME/.local/share is NOT persistent — models downloaded there
+    vanished on every restart and startup silently fell back to bundled
+    Base.en. Outside a Flatpak the long-standing ~/whisper.cpp/models location
+    is kept (existing installs, docs and from-source builds all use it).
     """
-    if IS_FLATPAK:
-        return Path.home() / ".local" / "share" / "wayfinder-aura" / "whisper-models"
-    return Path.home() / "whisper.cpp" / "models"
+    return get_user_whisper_models_dir(flatpak=IS_FLATPAK)
 
 
 def _whisper_model_search_dirs() -> list[Path]:
     """Directories that may hold whisper GGML models, best-first.
 
     The writable download dir comes first so a freshly downloaded model wins; the
-    read-only host dirs and the bundled /app dir follow so pre-existing and
-    shipped models stay visible. Callers take the first match.
+    pre-fix Flatpak download dirs, read-only host dirs and the bundled /app dir
+    follow so pre-existing and shipped models stay visible. Callers take the
+    first match.
     """
     candidates = [
         _get_whisper_models_dir(),
-        Path.home() / "whisper.cpp" / "models",
-        Path.home() / ".local" / "share" / "whisper.cpp",
-        Path("/app/share/whisper-models"),  # bundled (Flatpak)
+        *get_whisper_model_search_dirs(flatpak=IS_FLATPAK),
     ]
     dirs: list[Path] = []
     for d in candidates:
@@ -193,6 +198,44 @@ def _resolve_whisper_model(filename: str) -> Path | None:
         if p.exists():
             return p
     return None
+
+
+def _model_display_name(path: str) -> str:
+    """Catalog name for a model file path (e.g. "Large v3 Turbo Q5"), else its filename."""
+    name = Path(os.path.expanduser(str(path or ""))).name
+    for catalog in (WHISPER_CPP_MODELS, LLM_GGUF_MODELS):
+        for info in catalog.values():
+            if info.get("filename") == name:
+                return str(info.get("name") or name).replace("⭐", "").strip()
+    return name
+
+
+def _format_model_path_notice(notice: dict) -> tuple[str, bool]:
+    """Activity-log text for a config.consume_model_path_notices() entry.
+
+    Returns (message, is_problem). Problems are also shown on the Dictate tab.
+    """
+    key = notice.get("key", "")
+    name = _model_display_name(notice.get("path", ""))
+    replacement = notice.get("replacement") or ""
+    if notice.get("kind") == "migrated":
+        where = str(Path(replacement).parent) if replacement else "persistent storage"
+        return f"📦 {name} moved to persistent model storage ({where})", False
+    if key == "llama_cpp_model_path":
+        return (
+            f"⚠ Cleanup model {name} is missing from disk — download it again in "
+            "Settings → Post-Processing → LLM Model."
+        ), True
+    if replacement:
+        return (
+            f"⚠ Speech model {name} is missing from disk — using "
+            f"{_model_display_name(replacement)} for now. Download it again in "
+            "Settings → Whisper Models."
+        ), True
+    return (
+        f"⚠ Speech model {name} is missing from disk — download it again in "
+        "Settings → Whisper Models."
+    ), True
 
 
 # load_config / save_config imported from wayfinder.config (single source).
@@ -6371,6 +6414,9 @@ class WayfinderApp(ctk.CTk):
         
         # Initial log entries
         self.log("✓ Wayfinder Aura started")
+        # Model files that moved to persistent storage, or went missing and
+        # were replaced by the fallback, are reported here — never silently.
+        self._surface_model_path_notices()
 
         # AppImage runs: self-integrate into the app menu (desktop entry +
         # icon pointing at the current AppImage path). No-op for Flatpak and
@@ -14188,6 +14234,30 @@ class WayfinderApp(ctk.CTk):
         if banner is not None:
             try:
                 banner.pack_forget()
+            except Exception:
+                pass
+
+    def _surface_model_path_notices(self) -> None:
+        """Log load_config()'s model-path notices; show problems on the Dictate tab.
+
+        A selected model that disappeared used to be replaced by bundled Base.en
+        with no word to the user. The fallback stays, but it is now explained in
+        the activity log and in the dismissible Dictate-tab banner.
+        """
+        try:
+            from wayfinder.config import consume_model_path_notices
+            notices = consume_model_path_notices()
+        except Exception:
+            return
+        problems: list[str] = []
+        for notice in notices:
+            message, is_problem = _format_model_path_notice(notice)
+            self.log(message)
+            if is_problem:
+                problems.append(message.lstrip("⚠ ").strip())
+        if problems:
+            try:
+                self._show_error_banner(" ".join(problems))
             except Exception:
                 pass
 

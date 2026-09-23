@@ -470,6 +470,102 @@ def ensure_directories():
 
 
 # =============================================================================
+# User-downloaded model storage
+# =============================================================================
+#
+# Inside Wayfinder's Flatpak only XDG_DATA_HOME (~/.var/app/<id>/data), the
+# config and the cache dirs survive the sandbox exiting. $HOME/.local/share in
+# the sandbox is scratch space that is discarded when the app quits (unless the
+# user adds `flatpak override --persist=.local`), so models downloaded there
+# vanished on every restart and startup quietly fell back to bundled Base.en.
+# Every download/lookup of Whisper, GGUF cleanup and Game Mode models goes
+# through these helpers. `flatpak=None` detects the runtime; config.py passes
+# its own IS_FLATPAK so the whole module agrees on one answer.
+
+def _in_wayfinder_flatpak(flatpak: bool | None) -> bool:
+    return is_wayfinder_flatpak_env() if flatpak is None else bool(flatpak)
+
+
+def _flatpak_data_home() -> Path:
+    """The Flatpak's persistent XDG_DATA_HOME (~/.var/app/<id>/data)."""
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    if xdg_data:
+        return Path(xdg_data)
+    return Path.home() / ".var" / "app" / WAYFINDER_FLATPAK_ID / "data"
+
+
+def get_user_whisper_models_dir(flatpak: bool | None = None) -> Path:
+    """Writable directory for user-downloaded Whisper (GGML) models.
+
+    - Flatpak: $XDG_DATA_HOME/wayfinder-aura/whisper-models (persistent)
+    - Everywhere else: ~/whisper.cpp/models (existing installs, docs and
+      from-source builds all use it — unchanged on Linux, macOS and Windows)
+    """
+    if _in_wayfinder_flatpak(flatpak):
+        return _flatpak_data_home() / "wayfinder-aura" / "whisper-models"
+    return Path.home() / "whisper.cpp" / "models"
+
+
+def get_user_llm_models_dir(flatpak: bool | None = None) -> Path:
+    """Writable directory for user-downloaded GGUF cleanup models.
+
+    - Flatpak: $XDG_DATA_HOME/wayfinder-aura/llm-models (persistent)
+    - macOS: ~/Library/Application Support/wayfinder-aura/llm-models
+    - Linux (source/AppImage) and Windows: ~/.local/share/wayfinder-aura/llm-models
+      (the in-app download location those platforms have always used)
+    """
+    if _in_wayfinder_flatpak(flatpak):
+        return _flatpak_data_home() / "wayfinder-aura" / "llm-models"
+    if is_macos():
+        return Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
+    return Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
+
+
+def get_legacy_flatpak_model_dirs(kind: str) -> list[Path]:
+    """Where Flatpak builds before the XDG_DATA_HOME fix put downloads.
+
+    ``kind`` is ``"whisper-models"`` or ``"llm-models"``. App-private first:
+
+    1. ``~/.var/app/<id>/.local/share/wayfinder-aura/<kind>`` — where a
+       ``--persist=.local`` override keeps them. Always app-private and visible
+       inside the sandbox even after that override is removed, so files here
+       are safe to move.
+    2. ``$HOME/.local/share/wayfinder-aura/<kind>`` — the path the old code
+       wrote. Sandbox scratch space unless persisted (then it is the same
+       directory as 1) or shared with the host (then it belongs to the host).
+    """
+    home = Path.home()
+    return [
+        home / ".var" / "app" / WAYFINDER_FLATPAK_ID / ".local" / "share" / "wayfinder-aura" / kind,
+        home / ".local" / "share" / "wayfinder-aura" / kind,
+    ]
+
+
+def get_whisper_model_search_dirs(flatpak: bool | None = None) -> list[Path]:
+    """Directories that may hold Whisper GGML models, best-first, deduplicated.
+
+    The writable download dir comes first so a fresh download wins, then (in
+    the Flatpak) the pre-fix download dirs, then the host dirs source installs
+    use, then the Flatpak-bundled dir. Outside the Flatpak this is exactly the
+    list the app always searched.
+    """
+    in_flatpak = _in_wayfinder_flatpak(flatpak)
+    candidates = [get_user_whisper_models_dir(in_flatpak)]
+    if in_flatpak:
+        candidates.extend(get_legacy_flatpak_model_dirs("whisper-models"))
+    candidates.extend([
+        Path.home() / "whisper.cpp" / "models",
+        Path.home() / ".local" / "share" / "whisper.cpp",
+        Path("/app/share/whisper-models"),  # bundled (Flatpak)
+    ])
+    dirs: list[Path] = []
+    for directory in candidates:
+        if directory not in dirs:
+            dirs.append(directory)
+    return dirs
+
+
+# =============================================================================
 # Text Injection Tool Detection
 # =============================================================================
 

@@ -268,6 +268,108 @@ class TestDirectoryPaths:
             assert get_cache_dir().exists()
 
 
+class TestUserModelDirs:
+    """Where model downloads land. Flatpak: only XDG_DATA_HOME persists."""
+
+    FLATPAK_ID = "io.wayfindercollective.WayfinderAura"
+
+    @pytest.fixture
+    def sandbox(self, tmp_path, monkeypatch):
+        """A Flatpak-shaped env: HOME is the (scratch) sandbox home, XDG_DATA_HOME
+        is ~/.var/app/<id>/data like the real runtime sets it."""
+        home = tmp_path / "home"
+        data = home / ".var" / "app" / self.FLATPAK_ID / "data"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("XDG_DATA_HOME", str(data))
+        monkeypatch.setenv("FLATPAK_ID", self.FLATPAK_ID)
+        monkeypatch.delenv("WAYFINDER_FLATPAK", raising=False)
+        return home, data
+
+    @pytest.fixture
+    def host(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("FLATPAK_ID", raising=False)
+        monkeypatch.delenv("WAYFINDER_FLATPAK", raising=False)
+        return home
+
+    def test_flatpak_downloads_use_persistent_xdg_data_home(self, sandbox):
+        home, data = sandbox
+        whisper = platform_mod.get_user_whisper_models_dir()
+        llm = platform_mod.get_user_llm_models_dir()
+        assert whisper == data / "wayfinder-aura" / "whisper-models"
+        assert llm == data / "wayfinder-aura" / "llm-models"
+        # Never the sandbox's throwaway ~/.local/share (the vanishing-model bug).
+        for directory in (whisper, llm):
+            assert not str(directory).startswith(str(home / ".local"))
+
+    def test_flatpak_without_xdg_data_home_still_persists(self, sandbox, monkeypatch):
+        home, _data = sandbox
+        monkeypatch.delenv("XDG_DATA_HOME")
+        assert platform_mod.get_user_whisper_models_dir() == (
+            home / ".var" / "app" / self.FLATPAK_ID / "data" / "wayfinder-aura" / "whisper-models"
+        )
+
+    def test_explicit_flatpak_flag_overrides_detection(self, host):
+        assert platform_mod.get_user_whisper_models_dir(flatpak=False) == (
+            host / "whisper.cpp" / "models"
+        )
+        flatpak_dir = platform_mod.get_user_llm_models_dir(flatpak=True)
+        assert flatpak_dir.parts[-2:] == ("wayfinder-aura", "llm-models")
+        assert ".local" not in flatpak_dir.parts
+
+    def test_linux_host_dirs_unchanged(self, host, monkeypatch):
+        # Even with XDG_DATA_HOME set, host installs keep their long-standing dirs.
+        monkeypatch.setenv("XDG_DATA_HOME", str(host / "elsewhere"))
+        with patch.object(sys, "platform", "linux"):
+            assert platform_mod.get_user_whisper_models_dir() == host / "whisper.cpp" / "models"
+            assert platform_mod.get_user_llm_models_dir() == (
+                host / ".local" / "share" / "wayfinder-aura" / "llm-models"
+            )
+
+    def test_macos_dirs_unchanged(self, host):
+        with patch.object(sys, "platform", "darwin"):
+            assert platform_mod.get_user_whisper_models_dir() == host / "whisper.cpp" / "models"
+            assert platform_mod.get_user_llm_models_dir() == (
+                host / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
+            )
+
+    def test_windows_dirs_unchanged(self, host):
+        # The in-app downloader has always used these on Windows.
+        with patch.object(sys, "platform", "win32"):
+            assert platform_mod.get_user_whisper_models_dir() == host / "whisper.cpp" / "models"
+            assert platform_mod.get_user_llm_models_dir() == (
+                host / ".local" / "share" / "wayfinder-aura" / "llm-models"
+            )
+
+    def test_legacy_flatpak_dirs_list_app_private_copy_first(self, sandbox):
+        home, _data = sandbox
+        assert platform_mod.get_legacy_flatpak_model_dirs("whisper-models") == [
+            home / ".var" / "app" / self.FLATPAK_ID / ".local" / "share"
+            / "wayfinder-aura" / "whisper-models",
+            home / ".local" / "share" / "wayfinder-aura" / "whisper-models",
+        ]
+
+    def test_host_whisper_search_dirs_match_the_historical_list(self, host):
+        assert platform_mod.get_whisper_model_search_dirs() == [
+            host / "whisper.cpp" / "models",
+            host / ".local" / "share" / "whisper.cpp",
+            Path("/app/share/whisper-models"),
+        ]
+
+    def test_flatpak_whisper_search_dirs_lead_with_persistent_dir(self, sandbox):
+        home, data = sandbox
+        dirs = platform_mod.get_whisper_model_search_dirs()
+        assert dirs[0] == data / "wayfinder-aura" / "whisper-models"
+        # Pre-fix download dirs stay visible so nothing already on disk is lost.
+        for legacy in platform_mod.get_legacy_flatpak_model_dirs("whisper-models"):
+            assert legacy in dirs
+        assert dirs[-1] == Path("/app/share/whisper-models")
+        assert len(dirs) == len(set(dirs))
+
+
 # =============================================================================
 # Binary Detection
 # =============================================================================

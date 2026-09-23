@@ -577,3 +577,275 @@ class TestHotkeyDefaultMigration:
         assert config["hotkey_modifiers"] == ["ctrl"]
         assert config["style_toggle_key"] == 68
         assert config["style_toggle_modifiers"] == ["alt"]
+
+
+class TestFlatpakModelStorageMigration:
+    """Flatpak builds used to download into the sandbox's throwaway
+    ~/.local/share; startup must move/repoint those models, never re-download."""
+
+    APP_ID = "io.wayfindercollective.WayfinderAura"
+    TURBO = "ggml-large-v3-turbo-q5_0.bin"
+    GEMMA = "google_gemma-3-1b-it-Q4_K_M.gguf"
+
+    @pytest.fixture
+    def flatpak(self, temp_config_dir: Path, monkeypatch: pytest.MonkeyPatch):
+        """Flatpak-shaped layout under a temp HOME (the owner's machine, in miniature)."""
+        from wayfinder import config as cfg
+
+        home = temp_config_dir.parents[1]
+        app = home / ".var" / "app" / self.APP_ID
+        data = app / "data"
+        monkeypatch.setenv("XDG_DATA_HOME", str(data))
+        monkeypatch.setattr(cfg, "IS_FLATPAK", True)
+        bundled = home / "app-share" / "ggml-base.en.bin"
+        bundled.parent.mkdir(parents=True)
+        bundled.write_bytes(b"base")
+        monkeypatch.setitem(cfg.DEFAULT_CONFIG, "model_path", str(bundled))
+        monkeypatch.setitem(
+            cfg.DEFAULT_CONFIG, "llama_cpp_model_path",
+            str(data / "wayfinder-aura" / "llm-models" / self.GEMMA),
+        )
+        cfg.consume_model_path_notices()
+        return {
+            "cfg": cfg,
+            "home": home,
+            "bundled": bundled,
+            "new_whisper": data / "wayfinder-aura" / "whisper-models",
+            "new_llm": data / "wayfinder-aura" / "llm-models",
+            # where `flatpak override --persist=.local` keeps the old downloads
+            "private_whisper": app / ".local" / "share" / "wayfinder-aura" / "whisper-models",
+            "private_llm": app / ".local" / "share" / "wayfinder-aura" / "llm-models",
+            # the path old builds wrote into config
+            "old_whisper": home / ".local" / "share" / "wayfinder-aura" / "whisper-models",
+            "old_llm": home / ".local" / "share" / "wayfinder-aura" / "llm-models",
+        }
+
+    @staticmethod
+    def _write(path: Path, data: bytes = b"weights") -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    @staticmethod
+    def _write_config(cfg, values: dict) -> None:
+        cfg.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cfg.CONFIG_FILE.write_text(json.dumps(values))
+
+    def _persist_override(self, f) -> None:
+        """Model the --persist=.local override: ~/.local IS ~/.var/app/<id>/.local."""
+        private_local = f["private_whisper"].parents[2]
+        private_local.mkdir(parents=True, exist_ok=True)
+        (f["home"] / ".local").symlink_to(private_local, target_is_directory=True)
+
+    @pytest.mark.linux_only
+    def test_persist_override_models_move_and_config_is_rewritten(self, flatpak):
+        f = flatpak
+        cfg = f["cfg"]
+        self._persist_override(f)
+        self._write(f["private_whisper"] / self.TURBO, b"turbo")
+        self._write(f["private_llm"] / self.GEMMA, b"gemma")
+        # Exactly what the owner's config.json holds.
+        self._write_config(cfg, {
+            "model_path": f"~/.local/share/wayfinder-aura/whisper-models/{self.TURBO}",
+            "llama_cpp_model_path": str(f["old_llm"] / self.GEMMA),
+        })
+        assert (f["old_whisper"] / self.TURBO).exists()  # visible through the override
+
+        config = cfg.load_config()
+
+        new_turbo = f["new_whisper"] / self.TURBO
+        new_gemma = f["new_llm"] / self.GEMMA
+        assert new_turbo.read_bytes() == b"turbo"
+        assert new_gemma.read_bytes() == b"gemma"
+        assert not (f["private_whisper"] / self.TURBO).exists()
+        # '~' style is kept; absolute stays absolute; both resolve to the new copy.
+        assert config["model_path"].startswith("~/.var/app/")
+        assert Path(os.path.expanduser(config["model_path"])) == new_turbo
+        assert config["llama_cpp_model_path"] == str(new_gemma)
+        # Persisted, so the next start (with or without the override) is clean.
+        saved = json.loads(cfg.CONFIG_FILE.read_text())
+        assert Path(os.path.expanduser(saved["model_path"])) == new_turbo
+        assert saved["llama_cpp_model_path"] == str(new_gemma)
+        # Only the rewritten keys were written — defaults stay unsaved.
+        assert "hotkey_key" not in saved
+        notices = cfg.consume_model_path_notices()
+        assert {n["key"] for n in notices if n["kind"] == "migrated"} == {
+            "model_path", "llama_cpp_model_path",
+        }
+        assert not [n for n in notices if n["kind"] == "missing"]
+
+        # Idempotent: a second load (main.py and the app both load) is a no-op.
+        again = cfg.load_config()
+        assert again["model_path"] == config["model_path"]
+        assert cfg.consume_model_path_notices() == []
+
+    def test_override_removed_models_still_recovered_from_app_dir(self, flatpak):
+        """Without the override ~/.local/share is empty, but ~/.var/app/<id> is
+        always mounted: the old copies there are found and moved."""
+        f = flatpak
+        cfg = f["cfg"]
+        self._write(f["private_whisper"] / self.TURBO)
+        self._write_config(cfg, {
+            "model_path": f"~/.local/share/wayfinder-aura/whisper-models/{self.TURBO}",
+        })
+
+        config = cfg.load_config()
+
+        assert Path(os.path.expanduser(config["model_path"])) == f["new_whisper"] / self.TURBO
+        assert (f["new_whisper"] / self.TURBO).exists()
+
+    def test_config_repointed_to_model_already_in_new_dir(self, flatpak):
+        f = flatpak
+        cfg = f["cfg"]
+        self._write(f["new_whisper"] / self.TURBO)
+        self._write_config(cfg, {
+            "model_path": f"~/.local/share/wayfinder-aura/whisper-models/{self.TURBO}",
+        })
+
+        config = cfg.load_config()
+
+        assert Path(os.path.expanduser(config["model_path"])) == f["new_whisper"] / self.TURBO
+        assert config["model_path"] != str(f["bundled"])
+
+    def test_game_mode_model_path_is_migrated_too(self, flatpak):
+        f = flatpak
+        cfg = f["cfg"]
+        tiny = "ggml-tiny.en.bin"
+        self._write(f["private_whisper"] / tiny)
+        self._write_config(cfg, {"game_mode_model_path": str(f["old_whisper"] / tiny)})
+
+        config = cfg.load_config()
+
+        assert config["game_mode_model_path"] == str(f["new_whisper"] / tiny)
+
+    def test_other_legacy_downloads_move_but_partials_do_not(self, flatpak):
+        f = flatpak
+        cfg = f["cfg"]
+        self._write(f["private_whisper"] / "ggml-small.en.bin")
+        self._write(f["private_whisper"] / "ggml-medium.bin.downloading")
+        self._write(f["private_llm"] / "Qwen3.5-2B-Q4_K_M.gguf.tmp")
+        self._write_config(cfg, {})
+
+        cfg.load_config()
+
+        assert (f["new_whisper"] / "ggml-small.en.bin").exists()
+        assert not (f["new_whisper"] / "ggml-medium.bin.downloading").exists()
+        assert (f["private_whisper"] / "ggml-medium.bin.downloading").exists()
+        assert not (f["new_llm"] / "Qwen3.5-2B-Q4_K_M.gguf.tmp").exists()
+
+    def test_existing_new_copy_is_never_overwritten(self, flatpak):
+        f = flatpak
+        cfg = f["cfg"]
+        self._write(f["new_whisper"] / self.TURBO, b"new")
+        self._write(f["private_whisper"] / self.TURBO, b"old")
+        self._write_config(cfg, {})
+
+        cfg.load_config()
+
+        assert (f["new_whisper"] / self.TURBO).read_bytes() == b"new"
+        assert (f["private_whisper"] / self.TURBO).read_bytes() == b"old"
+
+    def test_host_shared_dir_is_left_alone(self, flatpak):
+        """With a --filesystem=home override ~/.local/share is the HOST's dir:
+        the file still resolves, belongs to the host install, and stays put."""
+        f = flatpak
+        cfg = f["cfg"]
+        host_copy = self._write(f["old_llm"] / self.GEMMA)
+        self._write_config(cfg, {"llama_cpp_model_path": str(host_copy)})
+
+        config = cfg.load_config()
+
+        assert config["llama_cpp_model_path"] == str(host_copy)
+        assert host_copy.exists()
+        assert not (f["new_llm"] / self.GEMMA).exists()
+        assert cfg.consume_model_path_notices() == []
+
+    def test_truly_missing_model_falls_back_but_is_reported(self, flatpak):
+        f = flatpak
+        cfg = f["cfg"]
+        self._write_config(cfg, {
+            "model_path": f"~/.local/share/wayfinder-aura/whisper-models/{self.TURBO}",
+            "llama_cpp_model_path": str(f["old_llm"] / self.GEMMA),
+        })
+
+        config = cfg.load_config()
+
+        # Existing fallback behavior is kept: bundled Base.en...
+        assert config["model_path"] == str(f["bundled"])
+        # ...but it is no longer silent.
+        missing = {n["key"]: n for n in cfg.consume_model_path_notices() if n["kind"] == "missing"}
+        assert missing["model_path"]["path"].endswith(self.TURBO)
+        assert missing["model_path"]["replacement"] == str(f["bundled"])
+        assert missing["llama_cpp_model_path"]["path"].endswith(self.GEMMA)
+        assert missing["llama_cpp_model_path"]["replacement"] == ""
+
+    def test_missing_cleanup_model_not_reported_when_cleanup_is_off(self, flatpak):
+        f = flatpak
+        cfg = f["cfg"]
+        self._write_config(cfg, {
+            "llama_cpp_model_path": str(f["old_llm"] / self.GEMMA),
+            "post_processing_enabled": False,
+        })
+
+        cfg.load_config()
+
+        assert cfg.consume_model_path_notices() == []
+
+    def test_never_chosen_default_is_not_reported(self, flatpak):
+        """A default path the user never picked belongs to the first-run cue."""
+        f = flatpak
+        cfg = f["cfg"]
+        f["bundled"].unlink()
+        self._write_config(cfg, {"model_path": str(f["bundled"])})
+
+        cfg.load_config()
+
+        assert [n for n in cfg.consume_model_path_notices() if n["key"] == "model_path"] == []
+
+    def test_no_migration_outside_flatpak(self, flatpak, monkeypatch: pytest.MonkeyPatch):
+        f = flatpak
+        cfg = f["cfg"]
+        monkeypatch.setattr(cfg, "IS_FLATPAK", False)
+        self._write(f["private_whisper"] / self.TURBO)
+        config = {"model_path": str(f["old_whisper"] / self.TURBO)}
+
+        assert cfg.migrate_flatpak_model_storage(config) == {}
+        assert (f["private_whisper"] / self.TURBO).exists()
+        assert config["model_path"] == str(f["old_whisper"] / self.TURBO)
+
+
+class TestModelDirDefaults:
+    """Config-level model dirs route through the platform helpers."""
+
+    def test_flatpak_candidate_dirs_lead_with_persistent_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from wayfinder import config as cfg
+
+        data = tmp_path / "data"
+        monkeypatch.setenv("XDG_DATA_HOME", str(data))
+        monkeypatch.setattr(cfg, "IS_FLATPAK", True)
+        dirs = cfg._user_whisper_model_dirs()
+        assert dirs[0] == data / "wayfinder-aura" / "whisper-models"
+
+    def test_host_candidate_dirs_unchanged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from wayfinder import config as cfg
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(cfg, "IS_FLATPAK", False)
+        assert cfg._user_whisper_model_dirs() == [tmp_path / "whisper.cpp" / "models"]
+
+    def test_flatpak_installed_model_found_for_repair(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A Free user's Base download in the persistent dir is a usable candidate."""
+        from wayfinder import config as cfg
+
+        data = tmp_path / "data"
+        base = data / "wayfinder-aura" / "whisper-models" / "ggml-base.en.bin"
+        base.parent.mkdir(parents=True)
+        base.write_bytes(b"b")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("XDG_DATA_HOME", str(data))
+        monkeypatch.setattr(cfg, "IS_FLATPAK", True)
+        assert str(base) in cfg._usable_model_candidates()

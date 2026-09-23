@@ -20,6 +20,7 @@ import requests
 
 from ..config import IS_APPIMAGE, IS_FLATPAK, APPDIR
 from ..utils.hostexec import host_env
+from ..utils.platform import get_user_llm_models_dir, get_user_whisper_models_dir
 
 
 # ─── Model Catalog ───────────────────────────────────────────────
@@ -566,8 +567,8 @@ def check_whisper_model(config: dict) -> DependencyStatus:
         size_mb = Path(model_path).stat().st_size / 1_000_000
         return DependencyStatus(True, detail=f"{Path(model_path).name} ({size_mb:.0f} MB)")
 
-    # Check model directory for any usable models
-    model_dir = Path.home() / "whisper.cpp" / "models"
+    # Check the writable model directory for any usable models
+    model_dir = get_user_whisper_models_dir(flatpak=IS_FLATPAK)
     if model_dir.exists():
         models = [p for p in model_dir.glob("ggml-*.bin") if _usable(str(p))]
         if models:
@@ -944,7 +945,8 @@ def download_whisper_model(
         progress: Called with (downloaded_bytes, total_bytes) during download
     """
     url = f"{MODEL_DOWNLOAD_BASE}/ggml-{model_name}.bin"
-    model_dir = Path.home() / "whisper.cpp" / "models"
+    # Flatpak: persistent XDG_DATA_HOME (the sandbox's ~ is discarded on exit).
+    model_dir = get_user_whisper_models_dir(flatpak=IS_FLATPAK)
     target = model_dir / f"ggml-{model_name}.bin"
 
     def _run():
@@ -1099,7 +1101,7 @@ def download_llm_model(
 
     url = model_info["url"]
     filename = model_info["filename"]
-    model_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
+    model_dir = get_user_llm_models_dir(flatpak=IS_FLATPAK)
     target = model_dir / filename
 
     def _run():

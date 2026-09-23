@@ -312,11 +312,8 @@ def detect_ggml_devices() -> List[GgmlDevice]:
         return devices
     
     # Find the smallest model available for quick probing
-    model_dirs = [
-        Path.home() / "whisper.cpp" / "models",
-        Path.home() / ".local" / "share" / "whisper.cpp",
-        Path("/app/share/whisper-models"),
-    ]
+    from wayfinder.utils.platform import get_whisper_model_search_dirs
+    model_dirs = get_whisper_model_search_dirs()
     # Prefer smallest models for faster startup
     model_patterns = [
         "ggml-tiny.en.bin", "ggml-tiny.bin",
@@ -490,11 +487,8 @@ def benchmark_gpu_devices(
     
     # Find a model to test with (prefer tiny for speed)
     if not model_path:
-        model_dirs = [
-            Path.home() / "whisper.cpp" / "models",
-            Path.home() / ".local" / "share" / "whisper.cpp",
-            Path("/app/share/whisper-models"),
-        ]
+        from wayfinder.utils.platform import get_whisper_model_search_dirs
+        model_dirs = get_whisper_model_search_dirs()
         model_patterns = ["ggml-tiny.en.bin", "ggml-tiny.bin", "ggml-base.en.bin", "ggml-small.en.bin"]
         
         for model_dir in model_dirs:

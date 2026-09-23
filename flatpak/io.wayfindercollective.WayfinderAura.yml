@@ -61,9 +61,12 @@ finish-args:
   # old /tmp socket was unreachable from the host — this is the R4-dictation fix.
   - --filesystem=xdg-run/wayfinder-aura:create
 
-  # Model downloads use Path.home()/.local/share/wayfinder-aura/... which inside
-  # Flatpak is already the sandboxed app home (~/.var/app/<app-id>/...). Do NOT
-  # grant host ~/.local/share/... — Flathub requires minimized static permissions.
+  # Model downloads go to $XDG_DATA_HOME/wayfinder-aura/{whisper,llm}-models,
+  # i.e. ~/.var/app/<app-id>/data/..., which Flatpak persists with no extra
+  # permission. The sandbox's $HOME/.local/share is NOT persisted (older builds
+  # downloaded there and lost the models on every restart; config.py migrates
+  # them). Do NOT grant host ~/.local/share/... or add --persist — Flathub
+  # requires minimized static permissions.
   
   # GPU acceleration (Vulkan for whisper.cpp and llama.cpp)
   - --device=dri
