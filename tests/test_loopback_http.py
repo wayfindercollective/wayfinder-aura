@@ -24,7 +24,13 @@ def _serve(body: bytes, hits: list):
         def log_message(self, *args):
             pass
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    class Server(http.server.HTTPServer):
+        def server_bind(self):  # skip the reverse-DNS getfqdn() stall
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+    server = Server(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -45,8 +51,9 @@ def test_macos_bypasses_a_configured_proxy(servers, monkeypatch):
     monkeypatch.delenv("no_proxy", raising=False)
     monkeypatch.delenv("NO_PROXY", raising=False)
     url = f"http://127.0.0.1:{origin.server_port}/inference"
-    # Sanity: plain urlopen really would have used the proxy.
-    assert urllib.request.urlopen(url, timeout=5).read() == b"PROXY"
+    # Sanity: a default opener really would have used the proxy. (Built fresh:
+    # urlopen caches its opener, and so its proxy settings, on first use.)
+    assert urllib.request.build_opener().open(url, timeout=5).read() == b"PROXY"
     proxy_hits.clear()
     with patch.object(loopback_http.sys, "platform", "darwin"):
         assert loopback_http.urlopen_loopback(url, timeout=5).read() == b"origin"

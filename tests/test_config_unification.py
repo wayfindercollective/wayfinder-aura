@@ -103,8 +103,16 @@ def test_whisper_server_fields_in_defaults():
     assert DEFAULT_CONFIG["whisper_server_timeout"] == 30
 
 
-def test_fresh_install_creates_file_and_returns_defaults(temp_config_dir: Path):
+def test_fresh_install_creates_file_and_returns_defaults(temp_config_dir: Path, monkeypatch):
+    import wayfinder.config as config_module
     from wayfinder.config import load_config, save_config, DEFAULT_CONFIG, CONFIG_FILE
+
+    # First-run repair searches the HOST for whisper/llama binaries and models
+    # (~/whisper.cpp, Homebrew...). This test is about defaults, so the host
+    # must look empty — otherwise a developer's Homebrew llama-cli "fails" it.
+    monkeypatch.setattr(config_module, "_path_exists", lambda *_a, **_k: False)
+    monkeypatch.setattr(config_module, "_which_runtime_path", lambda *_a, **_k: None)
+    monkeypatch.setattr(config_module, "_first_existing_path", lambda *_a, **_k: None)
 
     assert not CONFIG_FILE.exists()
     config = load_config()

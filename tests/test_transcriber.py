@@ -1909,8 +1909,12 @@ class TestServerModeDefaultAndFallback:
                "model_path": str(model)}
         assert isinstance(get_backend(cfg), WhisperServerBackend)
 
-    def test_get_backend_falls_back_to_cli_when_server_missing(self, tmp_path):
+    def test_get_backend_falls_back_to_cli_when_server_missing(self, tmp_path, monkeypatch):
         from wayfinder.core.transcriber import get_backend, WhisperCppBackend
+        # Host isolation: discovery must not find a developer's ~/whisper.cpp
+        # build (which has a whisper-server beside it).
+        import wayfinder.utils.runtime_assets as runtime_assets
+        monkeypatch.setattr(runtime_assets, "find_whisper_binary", lambda *_a, **_k: None)
         # Only whisper-cli exists, no whisper-server next to it.
         cli = tmp_path / "whisper-cli"
         cli.write_text("#!/bin/sh\n")
@@ -2003,6 +2007,9 @@ class TestServerModeDefaultAndFallback:
 
         monkeypatch.setattr(transcriber, "IS_FLATPAK", True)
         monkeypatch.setattr(transcriber, "_existing_file", lambda path: path == "/app/bin/whisper-cli")
+        # Host isolation: a developer's ~/whisper.cpp build must not win discovery.
+        import wayfinder.utils.runtime_assets as runtime_assets
+        monkeypatch.setattr(runtime_assets, "find_whisper_binary", lambda *_a, **_k: None)
 
         assert transcriber._resolve_whisper_cli_binary("") == "/app/bin/whisper-cli"
 

@@ -103,8 +103,14 @@ class TestDefaultsAreModifieredKeys:
         import sys
 
         from wayfinder.config import DEFAULT_CONFIG
-        assert DEFAULT_CONFIG["hotkey_key"] == 57  # Space
-        expected_modifiers = ["fn"] if sys.platform == "darwin" else ["ctrl", "alt"]
-        assert DEFAULT_CONFIG["hotkey_modifiers"] == expected_modifiers
+        if sys.platform == "darwin":
+            # macOS records with a bare Right Option tap/hold (a lone modifier
+            # types nothing, so it cannot collide with text or game keys).
+            assert DEFAULT_CONFIG["hotkey_key"] == 100
+            assert DEFAULT_CONFIG["hotkey_modifiers"] == []
+            assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["fn"]
+        else:
+            assert DEFAULT_CONFIG["hotkey_key"] == 57  # Space
+            assert DEFAULT_CONFIG["hotkey_modifiers"] == ["ctrl", "alt"]
+            assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["ctrl", "alt"]
         assert DEFAULT_CONFIG["style_toggle_key"] == 28  # Enter
-        assert DEFAULT_CONFIG["style_toggle_modifiers"] == expected_modifiers
