@@ -2967,7 +2967,11 @@ class ModelDownloader:
                     except Exception:
                         pass
         
-        self._current_download = threading.Thread(target=download_thread, daemon=True)
+        self._current_download = threading.Thread(
+            target=_macos_keep_awake(download_thread, f"download:{model_id}",
+                                     "Downloading a speech model"),
+            daemon=True,
+        )
         self._current_download.start()
     
     def cancel_download(self):
@@ -3342,6 +3346,20 @@ _GPU_NUDGE_MIN_DURATION_S = 45.0
 # target event loop one brief turn before an opt-in submit key; without this,
 # ydotool's separate Return command can overtake the tail of a long injection.
 _AUTO_ENTER_SETTLE_S = 0.35
+
+
+def _macos_keep_awake(fn, key: str, reason: str):
+    """macOS: run ``fn`` holding off idle sleep (a slept download restarts from 0)."""
+    if not IS_MACOS:
+        return fn
+
+    def run(*args, **kwargs):
+        from wayfinder.utils import macos_activity
+
+        with macos_activity.held(key, reason):
+            return fn(*args, **kwargs)
+
+    return run
 
 
 def _macos_cloud_models(provider: str) -> list[str]:
@@ -13757,7 +13775,11 @@ class WayfinderApp(ctk.CTk):
                     pass
         
         self.log(f"🚀 Starting download of {model_info['name']}...")
-        threading.Thread(target=download_thread, daemon=True).start()
+        threading.Thread(
+            target=_macos_keep_awake(download_thread, "download:cleanup-model",
+                                     "Downloading a cleanup model"),
+            daemon=True,
+        ).start()
     
     def _cancel_llamacpp_download(self) -> None:
         """Cancel the current llama.cpp model download."""
@@ -19489,6 +19511,17 @@ class WayfinderApp(ctk.CTk):
         # stuck-overlay report can be correlated against the overlay-debug.log timeline.
         if old_state != new_state:
             print(f"[STATE] {old_state.name} -> {new_state.name}", flush=True)
+            if IS_MACOS:
+                # Hold off idle sleep / App Nap while a dictation is live: the
+                # will-sleep handler has to cancel a recording.
+                try:
+                    from wayfinder.utils import macos_activity
+                    if new_state == AppState.IDLE:
+                        macos_activity.end("dictation")
+                    else:
+                        macos_activity.begin("dictation", "Recording and transcribing a dictation")
+                except Exception:
+                    pass
             # Game Mode feedback — audio + optional rumble (overlay is off).
             # 'done'/'error' are fired from on_injection_done()/on_error(), NOT here: both
             # the success and failure paths funnel through IDLE, so a →IDLE cue here would

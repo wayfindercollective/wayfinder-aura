@@ -959,7 +959,18 @@ def download_whisper_model(
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _download_model_file(
+def _download_model_file(*args, **kwargs) -> None:
+    """Keep the Mac awake for the download (no-op elsewhere); see _impl."""
+    if sys.platform != "darwin":
+        return _download_model_file_impl(*args, **kwargs)
+    from wayfinder.utils import macos_activity
+
+    target = kwargs.get("target", args[1] if len(args) > 1 else "model")
+    with macos_activity.held(f"download:{Path(str(target)).name}", "Downloading a model"):
+        return _download_model_file_impl(*args, **kwargs)
+
+
+def _download_model_file_impl(
     url: str,
     target: Path,
     part_suffix: str,
