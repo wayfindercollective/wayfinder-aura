@@ -115,3 +115,83 @@ def test_overlay_bridge_tolerates_an_older_dylib():
     layer.handle = 1
     layer.library = types.SimpleNamespace()  # no wf_overlay_set_idle symbol
     layer.set_idle(True)  # must not raise
+
+
+def _load_builder():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "wayfinder_macos_build", REPO / "packaging" / "macos" / "build.py"
+    )
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    return builder
+
+
+def test_macos_builder_notarizes_the_app_before_building_the_dmg():
+    # Apple's order: notarize + staple the .app, put THAT app in the DMG, then
+    # notarize + staple the DMG. Stapling only after the DMG exists leaves the
+    # app inside the image without a ticket.
+    import inspect
+
+    builder = _load_builder()
+    main = inspect.getsource(builder.main)
+    assert main.index("notarize_app(notary_auth)") < main.index("create_dmg()")
+    assert main.index("create_dmg()") < main.index("notarize_dmg(dmg_path, notary_auth)")
+    stapled_app = inspect.getsource(builder.notarize_app)
+    assert '"ditto", "-c", "-k", "--sequesterRsrc", "--keepParent"' in stapled_app
+    assert '"stapler", "staple", APP_PATH' in stapled_app
+    stapled_dmg = inspect.getsource(builder.notarize_dmg)
+    assert '"stapler", "staple", dmg_path' in stapled_dmg
+
+
+def test_macos_notary_credentials_profile_api_key_or_none(monkeypatch, tmp_path):
+    import pytest
+
+    builder = _load_builder()
+    for name in builder.NOTARY_API_KEY_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    # Ad-hoc/local builds: nothing configured, nothing notarized.
+    assert builder.notary_credentials("") is None
+    assert builder.notary_credentials("wayfinder-aura-notary") == [
+        "--keychain-profile", "wayfinder-aura-notary",
+    ]
+
+    key = tmp_path / "AuthKey_TEST.p8"
+    key.write_text("not a real key")
+    monkeypatch.setenv("MACOS_NOTARY_API_KEY_PATH", str(key))
+    with pytest.raises(SystemExit, match="partially configured"):
+        builder.notary_credentials("")
+    monkeypatch.setenv("MACOS_NOTARY_API_KEY_ID", "KEYID")
+    monkeypatch.setenv("MACOS_NOTARY_API_ISSUER", "issuer-uuid")
+    assert builder.notary_credentials("") == [
+        "--key", str(key), "--key-id", "KEYID", "--issuer", "issuer-uuid",
+    ]
+
+
+def test_macos_notary_submit_requires_an_accepted_verdict(monkeypatch, tmp_path):
+    import subprocess
+
+    import pytest
+
+    builder = _load_builder()
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        stdout = '{"id": "sub-1", "status": "%s", "message": "done"}' % status
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    auth = ["--keychain-profile", "p"]
+
+    status = "Accepted"
+    builder.notary_submit(tmp_path / "a.dmg", auth)
+    assert calls[-1][:3] == ["xcrun", "notarytool", "submit"]
+    assert "--wait" in calls[-1]
+
+    status = "Invalid"
+    with pytest.raises(SystemExit, match="Invalid"):
+        builder.notary_submit(tmp_path / "a.dmg", auth)
+    assert calls[-1] == ["xcrun", "notarytool", "log", "sub-1", *auth]

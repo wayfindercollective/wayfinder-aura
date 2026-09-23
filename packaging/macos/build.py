@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import plistlib
@@ -366,11 +367,95 @@ def create_dmg() -> Path:
     return dmg_path
 
 
-def notarize(dmg_path: Path, profile: str) -> None:
-    run(["xcrun", "notarytool", "submit", dmg_path, "--keychain-profile", profile, "--wait"])
+NOTARY_API_KEY_ENV = (
+    "MACOS_NOTARY_API_KEY_PATH",
+    "MACOS_NOTARY_API_KEY_ID",
+    "MACOS_NOTARY_API_ISSUER",
+)
+
+
+def notary_credentials(profile: str) -> list[str] | None:
+    """notarytool authentication arguments, or None when notarization is off.
+
+    Local releases use a keychain profile (--notarize-profile or
+    MACOS_NOTARY_PROFILE). CI uses an App Store Connect API key instead:
+    MACOS_NOTARY_API_KEY_PATH (the .p8 file), MACOS_NOTARY_API_KEY_ID and
+    MACOS_NOTARY_API_ISSUER, all three together.
+    """
+    if profile:
+        return ["--keychain-profile", profile]
+    values = [os.environ.get(name, "") for name in NOTARY_API_KEY_ENV]
+    if not any(values):
+        return None
+    if not all(values):
+        missing = ", ".join(n for n, v in zip(NOTARY_API_KEY_ENV, values) if not v)
+        raise SystemExit(f"API-key notarization is partially configured; missing {missing}")
+    key_path, key_id, issuer = values
+    if not Path(key_path).is_file():
+        raise SystemExit(f"MACOS_NOTARY_API_KEY_PATH is not a file: {key_path}")
+    return ["--key", key_path, "--key-id", key_id, "--issuer", issuer]
+
+
+def notary_submit(path: Path, auth: list[str]) -> None:
+    """Submit to Apple's notary service; fail unless the verdict is Accepted.
+
+    The status is read from notarytool's JSON rather than trusting its exit
+    code, and a rejection prints Apple's log so CI shows the reason.
+    """
+    rendered = [
+        "xcrun", "notarytool", "submit", str(path), *auth,
+        "--wait", "--output-format", "json",
+    ]
+    print("+", " ".join(rendered), flush=True)
+    result = subprocess.run(rendered, capture_output=True, text=True)
+    if result.stderr:
+        print(result.stderr.rstrip(), file=sys.stderr, flush=True)
+    verdict: dict = {}
+    for line in reversed(result.stdout.strip().splitlines()):
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            verdict = parsed
+            break
+    print(json.dumps(verdict) if verdict else result.stdout.rstrip(), flush=True)
+    status = verdict.get("status")
+    if status == "Accepted" and result.returncode == 0:
+        return
+    submission = verdict.get("id")
+    if submission:
+        subprocess.run(["xcrun", "notarytool", "log", submission, *auth])
+    raise SystemExit(
+        f"Notarization of {path.name} failed: status={status!r} "
+        f"(notarytool exit {result.returncode})"
+    )
+
+
+def notarize_app(auth: list[str]) -> None:
+    """Notarize and staple the .app itself, BEFORE it is placed in the DMG.
+
+    The copy a user drags out of the DMG then carries its own ticket, so
+    Gatekeeper can verify it offline on first launch.
+    """
+    with tempfile.TemporaryDirectory(prefix="wayfinder-aura-notary-") as temp_dir:
+        archive = Path(temp_dir) / f"{APP_PATH.stem}.zip"
+        run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", APP_PATH, archive])
+        notary_submit(archive, auth)
     run(["xcrun", "stapler", "staple", APP_PATH])
-    run(["xcrun", "stapler", "staple", dmg_path])
+    run(["xcrun", "stapler", "validate", APP_PATH])
     run(["spctl", "--assess", "--type", "execute", "--verbose=2", APP_PATH])
+
+
+def notarize_dmg(dmg_path: Path, auth: list[str]) -> None:
+    """Notarize and staple the signed DMG that contains the stapled app."""
+    notary_submit(dmg_path, auth)
+    run(["xcrun", "stapler", "staple", dmg_path])
+    run(["xcrun", "stapler", "validate", dmg_path])
+    run([
+        "spctl", "--assess", "--type", "open",
+        "--context", "context:primary-signature", "--verbose=2", dmg_path,
+    ])
 
 
 def parse_args() -> argparse.Namespace:
@@ -380,7 +465,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--notarize-profile",
         default=os.environ.get("MACOS_NOTARY_PROFILE", ""),
-        help="notarytool keychain profile (or MACOS_NOTARY_PROFILE)",
+        help=(
+            "notarytool keychain profile (or MACOS_NOTARY_PROFILE); without one, "
+            "MACOS_NOTARY_API_KEY_PATH/_ID and MACOS_NOTARY_API_ISSUER select "
+            "App Store Connect API-key notarization"
+        ),
     )
     return parser.parse_args()
 
@@ -388,6 +477,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     require_macos()
+    # Validate the release configuration before a long native build, not after.
+    notary_auth = notary_credentials(args.notarize_profile)
+    if notary_auth:
+        if args.no_dmg:
+            raise SystemExit("Notarization requires a DMG; remove --no-dmg")
+        if not os.environ.get("MACOS_CODESIGN_IDENTITY"):
+            raise SystemExit("Notarization requires MACOS_CODESIGN_IDENTITY")
     if not args.skip_native_build:
         build_whisper()
         build_llama()
@@ -397,13 +493,14 @@ def main() -> int:
             raise SystemExit(f"Missing {NATIVE_BIN_DIR / name}; build without --skip-native-build")
     build_app()
     validate_app()
+    # Apple's order: notarize + staple the app, THEN build the DMG around the
+    # stapled app, then notarize + staple the (signed) DMG. Ad-hoc builds (no
+    # credentials) skip both steps exactly as before.
+    if notary_auth:
+        notarize_app(notary_auth)
     dmg_path = None if args.no_dmg else create_dmg()
-    if args.notarize_profile:
-        if dmg_path is None:
-            raise SystemExit("Notarization requires a DMG; remove --no-dmg")
-        if not os.environ.get("MACOS_CODESIGN_IDENTITY"):
-            raise SystemExit("Notarization requires MACOS_CODESIGN_IDENTITY")
-        notarize(dmg_path, args.notarize_profile)
+    if notary_auth and dmg_path is not None:
+        notarize_dmg(dmg_path, notary_auth)
 
     print(f"macOS app ready: {APP_PATH}")
     if dmg_path:
