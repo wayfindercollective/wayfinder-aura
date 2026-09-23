@@ -20,9 +20,10 @@ def test_platform_contract_declares_one_repo_and_honest_support_levels():
     assert "one repository" in contract
     assert "Linux | Production baseline" in contract
     assert "macOS | Active port" in contract
-    assert "Windows | Planned" in contract
+    assert "Windows | Internal candidate" in contract
     assert "Linux suite even for a macOS/Windows-only change" in contract
     assert "Do not advertise macOS or Windows" in contract
+    assert "2026-09-21: Windows stays internal" in contract
 
 
 def test_platform_dependencies_remain_os_scoped():

@@ -16,6 +16,8 @@ consume the Linux AppImage/Flatpak or macOS .app specs.
 import re
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+
 block_cipher = None
 
 # This spec lives in packaging/windows/, so the repo root is two levels up.
@@ -26,10 +28,29 @@ VERSION = re.search(
     r'^version = "([^"]+)"', (PROJECT_ROOT / "pyproject.toml").read_text(), re.MULTILINE
 ).group(1)
 
+# whisper.cpp binaries staged by build.py. Added as data (copied verbatim, no
+# dependency analysis) into their own folder: their ggml*.dll names collide with
+# llama_cpp's, and each exe loads the DLLs beside it.
+whisper_datas = [
+    (str(path), "whisper")
+    for path in sorted((PROJECT_ROOT / "build" / "windows-whisper").glob("*"))
+    if path.suffix in (".exe", ".dll")
+]
+
+llama_binaries, llama_datas, llama_hiddenimports = [], [], []
+try:
+    import llama_cpp  # noqa: F401
+except ImportError:
+    pass
+else:
+    llama_binaries = collect_dynamic_libs("llama_cpp")
+    llama_datas = collect_data_files("llama_cpp")
+    llama_hiddenimports = collect_submodules("llama_cpp")
+
 a = Analysis(
     [str(PROJECT_ROOT / "main.py")],
     pathex=[str(PROJECT_ROOT), str(SRC_DIR)],
-    binaries=[],
+    binaries=llama_binaries,
     datas=[
         (str(PROJECT_ROOT / "assets" / "icon.png"), "assets"),
         (str(PROJECT_ROOT / "assets" / "icon.ico"), "assets"),
@@ -38,7 +59,7 @@ a = Analysis(
         (str(SRC_DIR / "wayfinder"), "wayfinder"),
         (str(SRC_DIR / "wayfinder" / "ui" / "overlay.py"), "."),
         (str(PROJECT_ROOT / "wayfinder_main.py"), "."),
-    ],
+    ] + llama_datas + whisper_datas,
     hiddenimports=[
         "wayfinder", "wayfinder.config", "wayfinder.state", "wayfinder.app",
         "wayfinder.license", "wayfinder.core", "wayfinder.core.recorder",
@@ -66,7 +87,7 @@ a = Analysis(
         "PyQt6", "PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets",
         # HTTP + JSON (license activation, model downloads, whisper-server)
         "requests", "urllib3", "json",
-    ],
+    ] + llama_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

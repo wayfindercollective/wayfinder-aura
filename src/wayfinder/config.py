@@ -138,6 +138,17 @@ def _pick_llm(*dirs: str) -> str:
     return os.path.join(dirs[-1], _LLM_PREFERENCE[0])
 
 
+def _windows_bundled_whisper() -> str | None:
+    """whisper-cli.exe shipped inside the frozen Windows installer, if present."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return None
+    bundle = getattr(sys, "_MEIPASS", None)
+    if not bundle:
+        return None
+    cli = os.path.join(bundle, "whisper", "whisper-cli.exe")
+    return cli if os.path.exists(cli) else None
+
+
 # Default whisper paths - varies by runtime environment
 if IS_FLATPAK:
     _default_whisper_binary = "/app/bin/whisper-cli"
@@ -175,7 +186,9 @@ elif IS_APPIMAGE and APPDIR:
 else:
     # Windows executables need the .exe suffix to launch; Linux/macOS do not.
     _exe = ".exe" if sys.platform == "win32" else ""
-    _default_whisper_binary = f"~/whisper.cpp/build/bin/whisper-cli{_exe}"
+    _default_whisper_binary = (
+        _windows_bundled_whisper() or f"~/whisper.cpp/build/bin/whisper-cli{_exe}"
+    )
     if sys.platform == "darwin":
         _default_model_path = str(
             Path.home()
@@ -742,6 +755,13 @@ def _repair_config_path(key: str, saved: object) -> object:
             current_appimage_llama = os.path.join(APPDIR, "usr", "bin", "llama-cli")
             if _path_exists(current_appimage_llama):
                 return current_appimage_llama
+
+    # Frozen Windows installer: like the AppImage, the bundled whisper-cli wins
+    # (a config saved by an older build may still point at ~/whisper.cpp).
+    if key == "whisper_binary":
+        bundled_whisper = _windows_bundled_whisper()
+        if bundled_whisper:
+            return bundled_whisper
 
     if _path_exists(saved):
         return saved

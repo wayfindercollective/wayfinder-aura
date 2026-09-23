@@ -94,6 +94,27 @@ def _workflow_job_body(name: str) -> str:
     return match.group("body")
 
 
+def test_windows_release_build_is_gated_but_not_published():
+    """Windows builds run behind the release gates; the installer stays internal.
+
+    Owner decision 2026-09-21: no public Windows distribution until testing is
+    complete and the owner signs off. The re-attach change is parked on
+    release/windows-public-pending-signoff.
+    """
+    build = _workflow_job_body("build-windows")
+    release = _workflow_job_body("release")
+
+    assert "needs: [quality, release-readiness]" in build
+    assert "uses: ./.github/workflows/windows-build.yml" in build
+    assert "startsWith(github.ref, 'refs/tags/v')" in build
+    assert "inputs.artifacts == 'windows'" in build
+    assert "inputs.artifacts == 'all'" in build
+    # The published release must not carry the Windows installer.
+    assert "build-windows" not in release
+    assert "wayfinder-aura-windows-x64" not in release
+    assert "WayfinderAura-Setup" not in release
+
+
 def test_appimage_metadata_copies_authoritative_desktop_and_metainfo():
     script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
     metainfo = ET.parse(FLATPAK_METAINFO).getroot()
@@ -740,7 +761,7 @@ def test_storefront_readiness_checker_rejects_unproven_checkout_payload():
     )
 
     assert any("Wayfinder Aura" in error for error in errors)
-    assert any("Pay with card" in error for error in errors)
+    assert any("Card details" in error for error in errors)
     assert any("$29.99" in error for error in errors)
 
 
@@ -760,7 +781,7 @@ def test_storefront_readiness_checker_accepts_client_rendered_checkout_markers()
         defaults["premium_info_url"]: (
             "Wayfinder Aura\nPress a key. Speak. Your words land at your cursor."
         ),
-        defaults["premium_url"]: "Wayfinder Aura\nOne-time license\nPay with card\n$29.99 launch",
+        defaults["premium_url"]: "Wayfinder Aura\nOne-time license\nCard details\n$29.99 launch",
     }
 
     errors = checker.live_readiness_errors(
@@ -787,7 +808,7 @@ def test_storefront_readiness_checker_rejects_free_gpu_claim():
             "GPU support on the lighter models"
         ),
         defaults["premium_url"]: (
-            "Wayfinder Aura One-time license Pay with card $29.99"
+            "Wayfinder Aura One-time license Card details $29.99"
         ),
     }
 

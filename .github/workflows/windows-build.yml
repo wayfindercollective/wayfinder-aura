@@ -1,0 +1,108 @@
+name: Windows Candidate
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # UTF-8 mode: the runner console defaults to cp1252, which can't encode the
+  # ✓ glyphs some checks print.
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  build:
+    name: Build unsigned Windows candidate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+            requirements-windows.txt
+
+      - name: Install application and build dependencies
+        run: python -m pip install -r requirements-windows.txt -e ".[dev]"
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Run Windows tests
+        run: python -m pytest tests/ -q --tb=short -m "not ui and not slow and not network and not perf"
+
+      - name: Run native Windows contract check
+        run: python scripts/platform_smoke.py --expected windows
+
+      - name: Build app bundle + installer
+        run: python packaging/windows/build.py --require-installer
+
+      - name: Smoke-test installed application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-CheckedProcess {
+            param([string]$FilePath, [string[]]$Arguments, [int]$TimeoutMs = 120000)
+            $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -WindowStyle Hidden
+            if (-not $process.WaitForExit($TimeoutMs)) {
+              $process.Kill($true)
+              throw "Timed out after ${TimeoutMs}ms: $FilePath $Arguments"
+            }
+            if ($process.ExitCode -ne 0) {
+              throw "Process failed with exit code $($process.ExitCode): $FilePath $Arguments"
+            }
+          }
+
+          $installDir = Join-Path $env:RUNNER_TEMP 'Wayfinder Aura smoke'
+          $installers = @(Get-ChildItem 'dist/installer/WayfinderAura-Setup-*.exe')
+          if ($installers.Count -ne 1) {
+            throw "Expected one Windows installer, found $($installers.Count)"
+          }
+          Invoke-CheckedProcess -FilePath $installers[0].FullName -Arguments @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installDir`""
+          ) -TimeoutMs 300000
+
+          $app = Join-Path $installDir 'Wayfinder Aura.exe'
+          try {
+            foreach ($probe in @('--app-import-self-test', '--tls-self-test', '--llm-engine-self-test')) {
+              Invoke-CheckedProcess -FilePath $app -Arguments @($probe)
+            }
+            # The bundled whisper.cpp engine must be present and launchable.
+            foreach ($tool in @('whisper-cli.exe', 'whisper-server.exe')) {
+              $toolPath = Join-Path $installDir "_internal\whisper\$tool"
+              if (-not (Test-Path -LiteralPath $toolPath)) { throw "Bundle is missing $tool" }
+            }
+            Invoke-CheckedProcess -FilePath (Join-Path $installDir '_internal\whisper\whisper-cli.exe') -Arguments @('--help')
+          } finally {
+            Invoke-CheckedProcess -FilePath (Join-Path $installDir 'unins000.exe') -Arguments @(
+              '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+            ) -TimeoutMs 300000
+            # unins000.exe relaunches itself from %TEMP% and exits immediately,
+            # so poll for the removal instead of checking once.
+            $deadline = (Get-Date).AddMinutes(2)
+            while ((Test-Path -LiteralPath $app) -and (Get-Date) -lt $deadline) {
+              Start-Sleep -Seconds 2
+            }
+            if (Test-Path -LiteralPath $app) {
+              throw "Uninstall left the application executable behind: $app"
+            }
+          }
+
+      - name: Upload candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: wayfinder-aura-windows-x64
+          path: dist/installer/WayfinderAura-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 7

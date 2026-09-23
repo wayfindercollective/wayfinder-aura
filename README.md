@@ -10,8 +10,8 @@ Troubleshooting).
 In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
-Linux is the current production release. macOS is an active port and Windows
-is planned; contributors should follow the
+Linux is the current production release. macOS and Windows are ports in
+testing, not publicly released; contributors should follow the
 [platform development contract](docs/PLATFORM-DEVELOPMENT.md) so platform work
 does not regress the Linux app.
 
@@ -106,6 +106,13 @@ clicking **+** and selecting `/Applications/Wayfinder Aura.app` manually.
 
 The default shortcuts are **Fn+Space** for dictation and **Fn+Enter** for the
 Ultra style cycle. The stateful menu-bar item is optional under Settings.
+
+### Windows (internal testing)
+
+A Windows installer is built and tested in CI, but it is **not publicly
+released** yet: it ships once testing is complete and the owner signs off.
+Team members can install the candidate from the **Windows Candidate** workflow
+artifact; see [packaging/windows/README.md](packaging/windows/README.md).
 
 ### From source
 
@@ -229,6 +236,7 @@ Settings live in the app. Linux stores them at
 - Run: `python main.py` · Test: `python3 -m pytest tests/ -v`
 - Architecture and contribution notes: [AGENTS.md](AGENTS.md)
 - macOS app/DMG build: [packaging/macos/README.md](packaging/macos/README.md)
+- Windows installer build: [packaging/windows/README.md](packaging/windows/README.md)
 - Packaging and store submission: [SHIPPING.md](SHIPPING.md) and
   [flatpak/BUILDING.md](flatpak/BUILDING.md)
 
