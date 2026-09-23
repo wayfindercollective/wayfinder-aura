@@ -233,3 +233,29 @@ class TestWelcomeMicrophoneGuidance:
         message = microphone_error_guidance("audio device open timed out")
         assert "Reconnect" in message
         assert "restart Aura" in message
+
+
+class TestWelcomeCardFit:
+    """The welcome card shrinks to fit a compact window instead of overflowing."""
+
+    PREFERRED = (520, 360)
+    MINIMUM = (320, 300)
+
+    def test_roomy_area_keeps_preferred_size(self):
+        from wayfinder.ui.welcome import fit_card_size
+
+        assert fit_card_size(900, 700, self.PREFERRED, self.MINIMUM) == self.PREFERRED
+
+    def test_compact_area_shrinks_card_within_margin(self):
+        from wayfinder.ui.welcome import fit_card_size
+
+        # A 640pt macOS window leaves roughly 400x330 for the tab content.
+        width, height = fit_card_size(400, 330, self.PREFERRED, self.MINIMUM)
+        assert width <= 400 - 2 * 12
+        assert height <= 330 - 2 * 12
+        assert (width, height) >= self.MINIMUM
+
+    def test_never_below_minimum(self):
+        from wayfinder.ui.welcome import fit_card_size
+
+        assert fit_card_size(200, 150, self.PREFERRED, self.MINIMUM) == self.MINIMUM

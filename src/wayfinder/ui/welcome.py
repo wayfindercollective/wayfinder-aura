@@ -248,6 +248,17 @@ def microphone_error_guidance(error: object) -> str:
     )
 
 
+def fit_card_size(avail_w, avail_h, preferred, minimum, margin=2 * SPACING["md"]):
+    """Largest card size up to ``preferred`` that fits the area less ``margin``.
+
+    Never smaller than ``minimum``; the caller keeps an overflowing card's
+    top-left edge in view.
+    """
+    width = max(minimum[0], min(preferred[0], int(avail_w - margin)))
+    height = max(minimum[1], min(preferred[1], int(avail_h - margin)))
+    return width, height
+
+
 class WelcomePane:
     """Renders ``WelcomeFlow`` as a centered card over the tab content area.
 
@@ -263,6 +274,12 @@ class WelcomePane:
         "hotkey": "your hotkey",
         "dictate": "try it now",
     }
+
+    # Preferred card size. In a compact window the tab area can be smaller, so
+    # the card shrinks toward the minimum instead of overflowing every edge
+    # (which hid the title and clipped the start of each line).
+    _CARD_SIZE = (520, 360)
+    _CARD_MIN_SIZE = (320, 300)
 
     def __init__(self, parent, app):
         import customtkinter as ctk  # lazy: keep the module headless-importable
@@ -294,6 +311,8 @@ class WelcomePane:
         # timer swaps the calm "listening…" line for a troubleshooting affordance.
         self._help_after_id = None
         self._help_shown = False
+        self._card_size = self._CARD_SIZE
+        self._wrap_labels = []
 
         # Full-size dim underlay. CTk has no real alpha; a plain bg_base frame
         # covering the tab content reads as a focused/modal state.
@@ -307,15 +326,54 @@ class WelcomePane:
             corner_radius=RADIUS["lg"],
             border_width=1,
             border_color=COLORS["border_rim"],
-            width=520,
-            height=360,
+            width=self._CARD_SIZE[0],
+            height=self._CARD_SIZE[1],
         )
         self.card.place(relx=0.5, rely=0.5, anchor="center")
         self.card.pack_propagate(False)
+        if sys.platform == "darwin":
+            # macOS opens content-sized, so the tab area can be smaller than the
+            # card. Linux keeps its fixed card (its default window fits it).
+            self.underlay.bind("<Configure>", self._fit_card, add="+")
 
         self._render_step()
 
     # --- helpers -------------------------------------------------------------
+
+    def _fit_card(self, _event=None) -> None:
+        """Size the card to the tab area and keep its top-left edge in view."""
+        if self._destroyed:
+            return
+        try:
+            scale = self._ctk.ScalingTracker.get_widget_scaling(self.card)
+            avail_w = self.underlay.winfo_width() / scale
+            avail_h = self.underlay.winfo_height() / scale
+        except Exception:
+            return
+        if avail_w <= 1 or avail_h <= 1:
+            return
+        width, height = fit_card_size(avail_w, avail_h, self._CARD_SIZE, self._CARD_MIN_SIZE)
+        if (width, height) != self._card_size:
+            self._card_size = (width, height)
+            self.card.configure(width=width, height=height)
+            wrap = self._wraplength()
+            for label in self._wrap_labels:
+                try:
+                    label.configure(wraplength=wrap)
+                except Exception:
+                    pass
+        # Below the minimum the card still overflows; pin it to the top/left so
+        # the title and the start of every line stay readable.
+        relx, h_anchor = (0.5, "") if avail_w >= width else (0.0, "w")
+        rely, v_anchor = (0.5, "") if avail_h >= height else (0.0, "n")
+        try:
+            self.card.place_configure(relx=relx, rely=rely, anchor=(v_anchor + h_anchor) or "center")
+        except Exception:
+            pass
+
+    def _wraplength(self) -> int:
+        # 440 at the preferred 520 width: card minus the xl side pads and a 2xl gutter.
+        return self._card_size[0] - 2 * SPACING["xl"] - SPACING["2xl"]
 
     def _hotkey_text(self) -> str:
         try:
@@ -364,10 +422,11 @@ class WelcomePane:
             text=text,
             font=(FONTS["body"][0], FONT_SIZES["small"] if muted else FONT_SIZES["body"]),
             text_color=COLORS["text_muted"] if muted else COLORS["text_secondary"],
-            wraplength=440,
+            wraplength=self._wraplength(),
             justify="left",
         )
         lbl.pack(anchor="w", pady=pady)
+        self._wrap_labels.append(lbl)
         return lbl
 
     def _status_label(self, parent, text, color, pady=(SPACING["sm"], 0)):
@@ -377,10 +436,11 @@ class WelcomePane:
             text=text,
             font=(FONTS["body"][0], FONT_SIZES["small"]),
             text_color=color,
-            wraplength=440,
+            wraplength=self._wraplength(),
             justify="left",
         )
         lbl.pack(anchor="w", pady=pady)
+        self._wrap_labels.append(lbl)
         return lbl
 
     # --- rendering -----------------------------------------------------------
@@ -392,6 +452,7 @@ class WelcomePane:
         self._cancel_mic_meter_poll()
         for child in self.card.winfo_children():
             child.destroy()
+        self._wrap_labels = []
 
         pad = SPACING["xl"]  # one horizontal margin for header, body AND footer (they used to disagree: 28 vs 22)
 
@@ -674,10 +735,11 @@ class WelcomePane:
                 text=f'we heard: "{quote}"',
                 font=(FONTS["body"][0], FONT_SIZES["body"]),
                 text_color=COLORS["text_primary"],
-                wraplength=440,
+                wraplength=self._wraplength(),
                 justify="left",
             )
             heard.pack(anchor="w", pady=(SPACING["sm"], 0))
+            self._wrap_labels.append(heard)
             self._continue_button(body, "done", gold=True)
         elif self._help_shown:
             self._render_dictate_help(body)

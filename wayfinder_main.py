@@ -105,6 +105,7 @@ from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, s
 from wayfinder.utils.audio_ducker import AudioDucker
 from wayfinder.ui.icons import get_icon, STYLE_ICONS, tint_icon
 from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
+from wayfinder.ui.window_geometry import default_window_geometry
 from wayfinder.ui.steamdeck_help import (
     STEAM_DECK_BUTTON_HELP_BODY,
     STEAM_DECK_BUTTON_HELP_TITLE,
@@ -5986,12 +5987,9 @@ class WayfinderApp(ctk.CTk):
                 window_x = (screen_w - window_w) // 2
                 window_y = top_panel + (usable_h - window_h) // 2
         else:
-            # First run: fill the right half of the screen
-            window_w = screen_w // 2
-            window_h = usable_h
-            
-            window_x = screen_w // 2
-            window_y = top_panel
+            # First run: platform default (right half on Linux; content-sized
+            # and centred on macOS)
+            window_w, window_h, window_x, window_y = default_window_geometry(screen_w, screen_h)
         
         # Clamp to usable area. A previous session can save multi-monitor /
         # oversize geometry (e.g. 3800×2016) that leaves the window unusable on
@@ -6573,7 +6571,7 @@ class WayfinderApp(ctk.CTk):
         return recommended
     
     def rescue_window(self):
-        """Emergency rescue: reset window to right half of screen at a usable size.
+        """Emergency rescue: reset window to the platform default size and position.
         
         Use this if the window gets lost off-screen or under the taskbar.
         Bound to Ctrl+R as a keyboard shortcut.
@@ -6586,15 +6584,8 @@ class WayfinderApp(ctk.CTk):
         
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
-        taskbar_height = 56
-        top_panel = 32
-        usable_h = screen_h - taskbar_height - top_panel
-        
-        new_w = screen_w // 2
-        new_h = usable_h
-        new_x = screen_w // 2
-        new_y = top_panel
-        
+        new_w, new_h, new_x, new_y = default_window_geometry(screen_w, screen_h)
+
         # Update widget scaling only (not window scaling)
         ctk.set_widget_scaling(optimal_scale)
         
