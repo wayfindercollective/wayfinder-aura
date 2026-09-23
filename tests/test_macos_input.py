@@ -469,3 +469,35 @@ def test_restored_clipboard_is_marked_transient():
     types = {str(t) for t in pb.written[0].types()}
     assert {"public.utf8-plain-text", "org.nspasteboard.TransientType"} <= types
     assert pb.options == [1]
+
+
+def test_blocked_microphone_gets_a_permission_message_not_a_mute_hint(monkeypatch):
+    import queue as _queue
+    import wayfinder_main as wm
+    from wayfinder.utils import macos_permissions as mp
+
+    class _App:
+        config = {"audio_device_name": "DualSense Wireless Controller"}
+        event_queue = _queue.Queue()
+
+        def _refresh_macos_permission_banner(self):
+            pass
+
+    monkeypatch.setattr(wm, "IS_MACOS", True)
+    monkeypatch.setattr(mp, "microphone_authorization", lambda: mp.MIC_DENIED)
+    message = wm.WayfinderApp._silence_error_message(_App())
+    assert "Privacy & Security → Microphone" in message and "mute" not in message
+    assert not _App.event_queue.empty()  # banner refresh queued
+
+    monkeypatch.setattr(mp, "microphone_authorization", lambda: mp.MIC_AUTHORIZED)
+    message = wm.WayfinderApp._silence_error_message(_App())
+    assert "DualSense" in message and "mute" in message
+
+
+def test_microphone_authorization_reads_tcc():
+    import sys as _sys
+    import pytest as _pytest
+    if _sys.platform != "darwin":
+        _pytest.skip("macOS only")
+    from wayfinder.utils.macos_permissions import microphone_authorization
+    assert microphone_authorization() in (0, 1, 2, 3)

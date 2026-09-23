@@ -191,6 +191,9 @@ class FakeApp:
     handle_event = WApp.handle_event
     _split_gen = staticmethod(WApp._split_gen)  # real code: it's a @staticmethod
 
+    def _macos_follow_default_input(self):
+        """Real behaviour is covered in tests/test_macos_audio_input.py."""
+
     def __init__(self, config):
         self.config = config
         self.app_state = AppState.IDLE

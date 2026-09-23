@@ -114,6 +114,30 @@ def request_startup_input_permissions(config: dict) -> MacOSInputPermissionStatu
     )
 
 
+# AVAuthorizationStatus
+MIC_NOT_DETERMINED, MIC_RESTRICTED, MIC_DENIED, MIC_AUTHORIZED = 0, 1, 2, 3
+
+
+def microphone_authorization() -> int | None:
+    """AVCaptureDevice authorization for audio, or None if it cannot be read.
+
+    When macOS blocks the microphone, Core Audio still opens and delivers
+    digital silence, so the only honest diagnosis is to ask TCC directly.
+    Loads AVFoundation through pyobjc-core (no extra wrapper package).
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        import objc
+        from Foundation import NSBundle
+
+        NSBundle.bundleWithPath_("/System/Library/Frameworks/AVFoundation.framework").load()
+        device = objc.lookUpClass("AVCaptureDevice")
+        return int(device.authorizationStatusForMediaType_("soun"))  # AVMediaTypeAudio
+    except Exception:
+        return None
+
+
 def open_macos_privacy_settings(permission: str) -> bool:
     """Open the matching Privacy & Security pane."""
     if sys.platform != "darwin":
@@ -128,6 +152,7 @@ def open_macos_privacy_settings(permission: str) -> bool:
     anchors = {
         "accessibility": "Privacy_Accessibility",
         "input_monitoring": "Privacy_ListenEvent",
+        "microphone": "Privacy_Microphone",
     }
     anchor = anchors.get(permission)
     if anchor is None:

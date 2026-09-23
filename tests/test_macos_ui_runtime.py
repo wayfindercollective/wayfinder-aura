@@ -308,3 +308,45 @@ def test_gated_developer_model_does_not_count_as_usable_on_macos(monkeypatch, is
     )
 
     assert wayfinder_main.WayfinderApp._has_usable_whisper_model(app) is expected
+
+
+def test_blocked_microphone_banner_opens_the_microphone_pane(monkeypatch):
+    from wayfinder.utils import macos_permissions as mp
+
+    class Widget:
+        def __init__(self, managed=""):
+            self.managed = managed
+            self.options = {}
+
+        def configure(self, **kwargs):
+            self.options.update(kwargs)
+
+        def winfo_manager(self):
+            return self.managed
+
+        def pack(self, **kwargs):
+            self.managed = "pack"
+
+        def pack_forget(self):
+            self.managed = ""
+
+    banner, label, button = Widget(), Widget(), Widget()
+    app = type("App", (), {
+        "macos_permission_banner": banner,
+        "macos_permission_label": label,
+        "macos_permission_open_btn": button,
+        "_dictate_banner_anchor": Widget("pack"),
+        "_macos_permission_state": lambda self: (True, True),
+        "get_hotkey_display": lambda self: "Right Option",
+    })()
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    monkeypatch.setattr(mp, "microphone_authorization", lambda: mp.MIC_DENIED)
+    monkeypatch.setattr(mp, "macos_install_location_ready", lambda: True)
+    wayfinder_main.WayfinderApp._refresh_macos_permission_banner(app)
+    assert app._missing_macos_permission == "microphone"
+    assert button.options["text"] == "Open Microphone"
+
+    opened = []
+    monkeypatch.setattr(mp, "open_macos_privacy_settings", lambda perm: opened.append(perm) or True)
+    wayfinder_main.WayfinderApp._open_missing_macos_permission(app)
+    assert opened == ["microphone"]

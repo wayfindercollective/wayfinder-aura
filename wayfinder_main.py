@@ -3087,7 +3087,29 @@ def resolve_audio_device(config: dict) -> int | None:
 
     # No saved name → auto-select the best available device (config.audio_device, if any, is
     # a stale bare index from a prior session and is intentionally ignored).
+    if IS_MACOS:
+        # macOS users pick their input in System Settings / Control Center;
+        # "Auto" means exactly that device, never a keyword score (which, e.g.,
+        # vetoed AirPods the user had deliberately chosen).
+        return _macos_default_input_index()
     return find_best_input_device()
+
+
+def _macos_default_input_index() -> int | None:
+    """PortAudio index of the Mac's current default input, or None (= PA default)."""
+    try:
+        from wayfinder.utils.macos_audio import default_input_device
+        import sounddevice as _sd
+
+        current = default_input_device()
+        if current is None:
+            return None
+        for index, dev in enumerate(_sd.query_devices()):
+            if dev.get("name") == current.name and dev.get("max_input_channels", 0) > 0:
+                return index
+    except Exception:
+        pass
+    return None
 
 
 # Single source of truth for EventType — shared with hotkey listeners
@@ -15460,8 +15482,16 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             install_ready = True
         accessibility, input_monitoring = self._macos_permission_state()
+        try:
+            from wayfinder.utils.macos_permissions import (
+                MIC_DENIED, MIC_RESTRICTED, microphone_authorization,
+            )
+            mic_blocked = microphone_authorization() in (MIC_DENIED, MIC_RESTRICTED)
+        except Exception:
+            mic_blocked = False
         self._missing_macos_permission = (
             "install_location" if not install_ready
+            else "microphone" if mic_blocked
             else "accessibility" if accessibility is not True
             else "input_monitoring" if input_monitoring is not True
             else None
@@ -15472,22 +15502,32 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
             return
+        try:
+            hotkey = self.get_hotkey_display()
+        except Exception:
+            hotkey = "Your hotkey"
         if self._missing_macos_permission == "install_location":
             text = (
                 "Move Wayfinder Aura from the disk image into Applications before "
                 "granting permissions, then launch that copy."
             )
             button_text = "Open Applications"
+        elif self._missing_macos_permission == "microphone":
+            text = (
+                "Wayfinder Aura can't hear you: macOS is blocking the microphone. "
+                "Turn Wayfinder Aura on in Microphone, then try a dictation."
+            )
+            button_text = "Open Microphone"
         elif self._missing_macos_permission == "accessibility":
             text = (
-                "Fn+Space needs Accessibility. Enable the /Applications copy of "
-                "Wayfinder Aura, then quit and reopen Aura."
+                f"{hotkey} and pasting need Accessibility. Enable the "
+                "/Applications copy of Wayfinder Aura, then quit and reopen Aura."
             )
             button_text = "Open Accessibility"
         else:
             text = (
-                "Fn+Space also needs Input Monitoring on this Mac. Open the pane, "
-                "click +, add /Applications/Wayfinder Aura.app, enable it, then "
+                f"{hotkey} also needs Input Monitoring on this Mac. Open "
+                "the pane, click +, add /Applications/Wayfinder Aura.app, enable it, then "
                 "quit and reopen Aura."
             )
             button_text = "Open Input Monitoring"
@@ -20755,6 +20795,7 @@ class WayfinderApp(ctk.CTk):
                     self._resolved_audio_device = self.warm_mic.device
 
             if IS_MACOS:
+                self._macos_follow_default_input()
                 # Capture FIRST: the RECORDING overlay waits for the Qt
                 # thread's acknowledgement (~150-300 ms), and every word spoken
                 # in that window used to be lost. The mic is warm, so starting
@@ -20784,6 +20825,55 @@ class WayfinderApp(ctk.CTk):
             self._record_toggle_suppress_until = time.monotonic() + 0.75
             self.on_error(f"Microphone: {e}")
     
+    # macOS warm-mic window: long enough for a quick follow-up dictation, short
+    # enough that the orange mic indicator does not linger (Core Audio opens in
+    # ~0.1 s, unlike PipeWire's ~0.5 s that motivated 30 s on Linux). Bluetooth
+    # mics release at once so AirPods leave the call-quality profile.
+    _MACOS_WARM_MIC_SECS = 10.0
+    _MACOS_BLUETOOTH_WARM_MIC_SECS = 1.0
+
+    def _macos_follow_default_input(self) -> None:
+        """Before capture: track the input chosen in System Settings right now.
+
+        PortAudio's device table is a snapshot from launch, so switching the
+        Mac's input (or plugging in a headset) was ignored until a restart.
+        """
+        try:
+            from wayfinder.utils.macos_audio import default_input_device
+
+            current = default_input_device()
+        except Exception:
+            return
+        warm = getattr(self, "warm_mic", None)
+        if current is None or warm is None:
+            return
+        try:
+            warm.idle_secs = (
+                self._MACOS_BLUETOOTH_WARM_MIC_SECS if current.bluetooth
+                else min(float(self.config.get("mic_warm_idle_secs", 30.0) or 0.0)
+                         or self._MACOS_WARM_MIC_SECS, self._MACOS_WARM_MIC_SECS)
+            )
+        except Exception:
+            pass
+        if self.config.get("audio_device_name") or warm.in_use:
+            return  # an explicitly chosen mic, or mid-recording: leave it
+        try:
+            import sounddevice as _sd
+
+            index = warm.device
+            active = (_sd.query_devices(index) if index is not None
+                      else _sd.query_devices(kind="input"))
+            if active.get("name") == current.name:
+                return
+        except Exception:
+            pass
+        if not warm.rescan():
+            return
+        new_index = _macos_default_input_index()
+        warm.set_device(new_index, None)
+        self._resolved_audio_device = new_index
+        self.log(f"🎤 Following this Mac's input: {current.name}")
+
     def _start_chunked_recording(self, gen=None, mode="on"):
         """Start On/Auto chunk capture without switching mic streams mid-session."""
         self.chunk_transcriptions = []
@@ -20993,6 +21083,30 @@ class WayfinderApp(ctk.CTk):
         the hardware (e.g. a Shure MV7's touch-mute / gain knob), which reads as digital zero.
         Without the name, users assume it's a wrong-device bug and never check the mic itself.
         """
+        if IS_MACOS:
+            # A blocked microphone records pure digital silence; don't send
+            # the user off to check a mute switch that is not the problem.
+            try:
+                from wayfinder.utils.macos_permissions import (
+                    MIC_DENIED, MIC_RESTRICTED, microphone_authorization,
+                )
+                status = microphone_authorization()
+            except Exception:
+                status = None
+            if status in (MIC_DENIED, MIC_RESTRICTED):
+                # Surface the one-click "Open Microphone" banner too.
+                try:
+                    self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._refresh_macos_permission_banner)
+                    )
+                except Exception:
+                    pass
+            if status == MIC_DENIED:
+                return ("macOS is blocking the microphone for Wayfinder Aura — turn it on in "
+                        "System Settings → Privacy & Security → Microphone, then try again")
+            if status == MIC_RESTRICTED:
+                return ("Microphone access is restricted on this Mac (Screen Time or a device "
+                        "profile) — ask the Mac's administrator to allow Wayfinder Aura")
         name = self.config.get("audio_device_name")
         if name:
             return (f"No speech detected from “{name}” — check the mic's mute/gain, "
