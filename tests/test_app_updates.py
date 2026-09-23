@@ -7,6 +7,7 @@ has no channel until Flathub. The one behaviour that must never regress is
 """
 
 import json
+import types
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -20,15 +21,28 @@ from wayfinder.core.app_updates import (
     parse_version,
 )
 
-MAIN_SRC = Path(__file__).resolve().parent.parent / "wayfinder_main.py"
+REPO = Path(__file__).resolve().parent.parent
+MAIN_SRC = REPO / "wayfinder_main.py"
+
+
+def _simulate_platform(monkeypatch, name, machine="arm64"):
+    """Fake sys.platform / platform.machine() inside app_updates only."""
+    monkeypatch.setattr(app_updates, "sys", types.SimpleNamespace(platform=name))
+    monkeypatch.setattr(
+        app_updates, "platform", types.SimpleNamespace(machine=lambda: machine))
 
 
 @pytest.fixture(autouse=True)
 def _isolated_cache(tmp_path, monkeypatch):
-    """Point the cache at a temp dir so tests never touch the real config."""
+    """Point the cache at a temp dir so tests never touch the real config.
+
+    Also pin the platform to Linux: the Linux verdicts below must hold on
+    every host, including the macOS CI runner. Mac tests opt in explicitly.
+    """
     monkeypatch.setattr(app_updates, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(
         app_updates, "APP_UPDATE_CACHE_FILE", tmp_path / "app_update_cache.json")
+    _simulate_platform(monkeypatch, "linux", machine="x86_64")
 
 
 def _release(tag, url="https://github.com/wayfindercollective/wayfinder-aura/releases/tag/x", **flags):
@@ -236,6 +250,160 @@ class TestCheckForAppUpdate:
         with patch("requests.get", return_value=_github_response(_release("v9.9.9"))):
             info = check_for_app_update("1.1.8")
         assert info["update_available"] is True
+
+
+def _asset(name, state="uploaded", url=None):
+    return {
+        "name": name,
+        "state": state,
+        "browser_download_url": url or (
+            "https://github.com/wayfindercollective/wayfinder-aura/releases/download/x/" + name
+        ),
+    }
+
+
+def _linux_assets(version):
+    return [
+        _asset(f"Wayfinder_Aura-{version}-x86_64.AppImage"),
+        _asset(f"Wayfinder_Aura-{version}-x86_64.AppImage.zsync"),
+        _asset("io.wayfindercollective.WayfinderAura.flatpak"),
+    ]
+
+
+def _dmg(version, arch="arm64", **kw):
+    return _asset(f"Wayfinder_Aura-{version}-macOS-{arch}.dmg", **kw)
+
+
+# v1.1.9 shipped Linux-only; v1.1.8 carries a Mac DMG.
+MIXED_PAYLOAD = (
+    _release("v1.1.9", url="https://example.invalid/v1.1.9",
+             assets=_linux_assets("1.1.9")),
+    _release("v1.1.8", url="https://example.invalid/v1.1.8",
+             assets=_linux_assets("1.1.8") + [_dmg("1.1.8")]),
+)
+
+# The exact result shape Linux/Windows have always returned.
+LINUX_RESULT_KEYS = {
+    "update_available", "latest_version", "release_url",
+    "last_checked", "channel", "error",
+}
+
+
+class TestMacDownloads:
+    """macOS only counts releases that carry a DMG for this Mac."""
+
+    @pytest.fixture(autouse=True)
+    def _mac(self, monkeypatch):
+        _simulate_platform(monkeypatch, "darwin", machine="arm64")
+
+    def test_skips_linux_only_release_and_picks_older_release_with_a_dmg(self):
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            info = check_for_app_update("1.1.7")
+        assert info["update_available"] is True
+        assert info["latest_version"] == "v1.1.8"
+        assert info["release_url"] == "https://example.invalid/v1.1.8"
+
+    def test_returns_the_direct_dmg_download_url(self):
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            info = check_for_app_update("1.1.7")
+        assert info["download_url"] == (
+            "https://github.com/wayfindercollective/wayfinder-aura/releases/download/x/"
+            "Wayfinder_Aura-1.1.8-macOS-arm64.dmg"
+        )
+
+    def test_linux_only_newer_release_is_not_an_update_on_mac(self):
+        # The v1.1.8 situation: a newer tag exists, but has nothing for a Mac.
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            info = check_for_app_update("1.1.8")
+        assert info["update_available"] is False
+        assert info["latest_version"] == "v1.1.8"
+
+    def test_no_release_with_a_dmg_leaves_download_url_empty(self):
+        with patch("requests.get", return_value=_github_response(MIXED_PAYLOAD[0])):
+            info = check_for_app_update("1.1.7")
+        assert info["update_available"] is False
+        assert info["download_url"] == ""
+
+    def test_prerelease_dmg_matches_its_prerelease_tag(self):
+        with patch("requests.get", return_value=_github_response(
+            _release("v1.2.0-beta.2", prerelease=True, assets=[_dmg("1.2.0-beta.2")]),
+        )):
+            info = check_for_app_update("1.2.0-beta.1")
+        assert info["latest_version"] == "v1.2.0-beta.2"
+        assert info["download_url"].endswith("Wayfinder_Aura-1.2.0-beta.2-macOS-arm64.dmg")
+
+    @pytest.mark.parametrize("bad_asset", [
+        # A stale DMG attached to a newer tag would "update" to the old app forever.
+        _dmg("1.1.8"),
+        # An upload still in progress is not a download.
+        _dmg("1.1.9", state="open"),
+        # Only GitHub-served assets are handed to the browser.
+        _dmg("1.1.9", url="http://evil.invalid/Wayfinder_Aura-1.1.9-macOS-arm64.dmg"),
+        # Not the build.py naming.
+        _asset("Wayfinder Aura 1.1.9.dmg"),
+        _asset("Wayfinder_Aura-1.1.9-macOS-arm64.dmg.sha256"),
+        # Intel-only DMG on an Apple Silicon Mac.
+        _dmg("1.1.9", arch="x86_64"),
+    ])
+    def test_unusable_dmg_assets_do_not_count(self, bad_asset):
+        with patch("requests.get", return_value=_github_response(
+            _release("v1.1.9", assets=[bad_asset]),
+        )):
+            info = check_for_app_update("1.1.8")
+        assert info["update_available"] is False
+
+    def test_prefers_the_machines_own_architecture(self, monkeypatch):
+        _simulate_platform(monkeypatch, "darwin", machine="x86_64")
+        with patch("requests.get", return_value=_github_response(
+            _release("v1.1.9", assets=[_dmg("1.1.9", "arm64"), _dmg("1.1.9", "x86_64")]),
+        )):
+            info = check_for_app_update("1.1.8")
+        assert info["download_url"].endswith("-macOS-x86_64.dmg")
+
+    def test_cache_without_the_mac_filter_is_refetched(self):
+        # A verdict cached by a build that did not filter for DMGs (i.e. a
+        # Linux-style verdict) must not be served to the Mac.
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            check_for_app_update("1.1.7")
+        cache = json.loads(app_updates.APP_UPDATE_CACHE_FILE.read_text())
+        assert cache["platform"] == "darwin-arm64"
+        del cache["platform"]
+        cache["latest_version"] = "v1.1.9"
+        app_updates.APP_UPDATE_CACHE_FILE.write_text(json.dumps(cache))
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)) as get:
+            info = check_for_app_update("1.1.7")
+        assert get.call_count == 1
+        assert info["latest_version"] == "v1.1.8"
+
+    def test_fresh_mac_cache_is_reused_with_its_download_url(self):
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            check_for_app_update("1.1.7")
+        with patch("requests.get", side_effect=AssertionError("should use cache")):
+            info = check_for_app_update("1.1.7")
+        assert info["download_url"].endswith("Wayfinder_Aura-1.1.8-macOS-arm64.dmg")
+
+    def test_dmg_pattern_matches_the_name_build_py_produces(self):
+        builder = (REPO / "packaging" / "macos" / "build.py").read_text(encoding="utf-8")
+        assert 'f"Wayfinder_Aura-{version}-macOS-{architecture}.dmg"' in builder
+        assert app_updates._MAC_DMG_RE.match("Wayfinder_Aura-1.1.9-macOS-arm64.dmg")
+
+
+class TestLinuxUnchanged:
+    """The same payload on Linux behaves exactly as before the Mac filter."""
+
+    def test_linux_takes_the_newest_release_regardless_of_assets(self):
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            info = check_for_app_update("1.1.8")
+        assert info["update_available"] is True
+        assert info["latest_version"] == "v1.1.9"
+        assert info["release_url"] == "https://example.invalid/v1.1.9"
+        assert set(info) == LINUX_RESULT_KEYS
+
+    def test_linux_cache_format_is_unchanged(self):
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            check_for_app_update("1.1.8")
+        cache = json.loads(app_updates.APP_UPDATE_CACHE_FILE.read_text())
+        assert set(cache) == LINUX_RESULT_KEYS
 
 
 @pytest.fixture(scope="module")
