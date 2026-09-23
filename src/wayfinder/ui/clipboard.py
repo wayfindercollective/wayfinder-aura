@@ -8,6 +8,7 @@ The paste maths lives here as pure functions so it can be tested without a
 display; ``attach_secret_paste`` is a thin Tk binding over them.
 """
 
+import sys
 from typing import Optional, Tuple
 
 
@@ -228,6 +229,16 @@ def attach_secret_paste(entry, tk_module, *, log=None) -> bool:
         # Middle-click paste on X11; ours runs first and breaks the class
         # binding so tk::EntryPaste's append-at-click never fires.
         target.bind("<<PasteSelection>>", _do_paste_primary)
+        if sys.platform == "darwin":
+            # Aqua Tk: right-click is Button-2 (Control-click too), and ⌘V
+            # otherwise goes through Tk's stock paste, which keeps the stray
+            # newline/space a copied key often carries.
+            target.bind("<Button-2>", _popup)
+            target.bind("<Control-Button-1>", _popup)
+            target.bind("<Command-v>", _do_paste)
+            target.bind("<Command-V>", _do_paste)
+            target.bind("<Command-a>", _do_select_all)
+            target.bind("<Command-A>", _do_select_all)
         return True
     except Exception as exc:  # pragma: no cover - depends on the Tk build
         if log:

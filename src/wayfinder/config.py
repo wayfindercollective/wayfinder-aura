@@ -456,7 +456,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Cloud API settings (keys stored in config, loaded into environment on startup)
     "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
-    "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
+    # Claude 3 Haiku was retired 2026-04-20; macOS ships the current Haiku.
+    "anthropic_model": (
+        "claude-haiku-4-5-20251001" if sys.platform == "darwin" else "claude-3-haiku-20240307"
+    ),
     "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
     "openai_whisper_model": "whisper-1",  # OpenAI Whisper transcription model
@@ -530,6 +533,9 @@ KEY_CODES: dict[str, int] = {
     "mouse_forward": 277,   # BTN_FORWARD (0x115)
     "mouse_back": 278,      # BTN_BACK (0x116)
 }
+if sys.platform == "darwin":
+    # Bare right-hand modifiers: the macOS tap/hold record hotkey.
+    KEY_CODES.update({"right_option": 100, "right_command": 126})
 
 # Modifier key codes (left and right variants)
 MODIFIER_CODES: dict[str, list[int]] = {
@@ -982,6 +988,23 @@ def load_config() -> dict:
             if config.get("audio_device") is not None and not config.get("audio_device_name"):
                 config["audio_device"] = None
 
+            if sys.platform == "darwin":
+                # Retired cloud model IDs fail every request; move them to the
+                # provider's documented replacement.
+                try:
+                    from wayfinder.core.cloud_keys import RETIRED_MODEL_REPLACEMENTS
+
+                    for _mkey, _table in RETIRED_MODEL_REPLACEMENTS.items():
+                        _replacement = _table.get(config.get(_mkey))
+                        if _replacement:
+                            config[_mkey] = _replacement
+                            _save_migrations = True
+                except Exception:
+                    pass
+
+            if sys.platform == "darwin" and _load_macos_secrets(config, user_config):
+                _save_migrations = True
+
             if _save_migrations:
                 save_config(config)
             return config
@@ -1008,8 +1031,84 @@ def load_config() -> dict:
         config = DEFAULT_CONFIG.copy()
         for key in ("whisper_binary", "model_path", "llama_cpp_model_path", "llama_cpp_binary"):
             config[key] = _repair_config_path(key, config.get(key, ""))
+        if sys.platform == "darwin":
+            # A reinstall keeps the Keychain: bring saved keys back.
+            _load_macos_secrets(config, {})
         save_config(config)
         return config.copy()
+
+
+# Cloud API keys. On macOS they live in the login Keychain, not config.json.
+SECRET_CONFIG_KEYS = ("groq_api_key", "openai_api_key", "anthropic_api_key")
+_KEYCHAIN_SYNCED: dict[str, str] = {}
+
+
+def _macos_keychain():
+    """The Keychain module on macOS (None elsewhere, or when disabled/unavailable)."""
+    if sys.platform != "darwin" or os.environ.get("WAYFINDER_DISABLE_KEYCHAIN"):
+        return None
+    try:
+        from wayfinder.utils import macos_keychain
+    except Exception:
+        return None
+    return macos_keychain if macos_keychain.available() else None
+
+
+def _keychain_sync(keychain, name: str, value: str) -> bool:
+    """Make the Keychain hold exactly ``value`` ("" = no item). True on success."""
+    if _KEYCHAIN_SYNCED.get(name) == value:
+        return True
+    ok = keychain.set(name, value) if value else keychain.delete(name)
+    if ok:
+        _KEYCHAIN_SYNCED[name] = value
+    return ok
+
+
+def _scrub_secret_backups() -> None:
+    """Blank API keys left in owner-only config backups once they are in the Keychain."""
+    for path in CONFIG_DIR.glob("config.json.*"):
+        if path.suffix == ".tmp" or not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            continue  # corrupt/foreign backup: leave it (it is 0600)
+        if not isinstance(data, dict) or not any(data.get(k) for k in SECRET_CONFIG_KEYS):
+            continue
+        for k in SECRET_CONFIG_KEYS:
+            if k in data:
+                data[k] = ""
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError:
+            pass
+
+
+def _load_macos_secrets(config: dict, user_config: dict) -> bool:
+    """macOS: fill API keys from the Keychain; move any plain-text key into it.
+
+    Returns True when config.json must be rewritten (a key moved out of it).
+    """
+    keychain = _macos_keychain()
+    if keychain is None:
+        return False
+    moved = False
+    for name in SECRET_CONFIG_KEYS:
+        plain = str(user_config.get(name) or "").strip()
+        if plain:
+            if _keychain_sync(keychain, name, plain):
+                moved = True
+            config[name] = plain
+            continue
+        stored = keychain.get(name)
+        if stored is not None:
+            _KEYCHAIN_SYNCED[name] = stored
+            config[name] = stored
+    if moved:
+        _scrub_secret_backups()
+    return moved
 
 
 def save_config(config: dict) -> None:
@@ -1020,11 +1119,34 @@ def save_config(config: dict) -> None:
         config: Configuration dictionary to save.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    on_disk = config
+    if sys.platform == "darwin":
+        try:
+            os.chmod(CONFIG_DIR, 0o700)
+        except OSError:
+            pass
+        keychain = _macos_keychain()
+        if keychain is not None:
+            on_disk = dict(config)
+            for name in SECRET_CONFIG_KEYS:
+                value = str(config.get(name) or "").strip()
+                # Only a key the Keychain now holds leaves config.json; if the
+                # Keychain refused it, the owner-only file keeps it as before.
+                if _keychain_sync(keychain, name, value):
+                    on_disk[name] = ""
     # Atomic write: dump to a temp file, then os.replace() onto the real path so a
     # crash mid-write can never truncate/corrupt the existing config.
     tmp_file = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
-    with open(tmp_file, "w") as f:
-        json.dump(config, f, indent=2)
+    if sys.platform == "darwin":
+        # Owner-only before any byte is written, so the content is never
+        # briefly world-readable (fchmod also fixes a stale .tmp's mode).
+        _fd = os.open(tmp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(_fd, 0o600)
+        _tmp_handle = os.fdopen(_fd, "w")
+    else:
+        _tmp_handle = open(tmp_file, "w")
+    with _tmp_handle as f:
+        json.dump(on_disk, f, indent=2)
         f.flush()
         try:
             os.fsync(f.fileno())
@@ -1060,6 +1182,10 @@ def load_api_keys_to_env(config: dict) -> None:
     
     for config_key, env_var in api_key_mappings.items():
         key_value = config.get(config_key, "")
+        if sys.platform == "darwin":
+            # A pasted/hand-edited key can carry a newline, which breaks the
+            # Authorization header and reads as "check your internet".
+            key_value = str(key_value or "").strip()
         if key_value:
             os.environ[env_var] = key_value
 

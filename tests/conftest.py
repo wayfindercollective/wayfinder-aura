@@ -355,6 +355,11 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch):
     for key in ["APPIMAGE", "APPDIR", "FLATPAK_ID", "WAYFINDER_FLATPAK"]:
         monkeypatch.delenv(key, raising=False)
 
+    # macOS keeps API keys in the login Keychain. Tests must never read or
+    # write the developer's real items; tests/test_macos_keychain.py opts back
+    # in with a throwaway service name.
+    monkeypatch.setenv("WAYFINDER_DISABLE_KEYCHAIN", "1")
+
 
 @pytest.fixture
 def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):

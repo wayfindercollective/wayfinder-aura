@@ -63,6 +63,10 @@ if "--child-supervisor" in sys.argv:
 from wayfinder.tls import configure_tls_ca_bundle
 
 _TLS_CA_BUNDLE = configure_tls_ca_bundle()
+if sys.platform == "darwin":
+    from wayfinder.tls import use_macos_trust_store
+
+    _MACOS_TRUST_STORE = use_macos_trust_store()
 
 
 def _configure_frozen_fontconfig() -> Path | None:

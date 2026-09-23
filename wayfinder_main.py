@@ -3344,6 +3344,13 @@ _GPU_NUDGE_MIN_DURATION_S = 45.0
 _AUTO_ENTER_SETTLE_S = 0.35
 
 
+def _macos_cloud_models(provider: str) -> list[str]:
+    """Current cloud cleanup models (macOS panels)."""
+    from wayfinder.core.cloud_keys import ANTHROPIC_CLEANUP_MODELS, OPENAI_CLEANUP_MODELS
+
+    return list(ANTHROPIC_CLEANUP_MODELS if provider == "anthropic" else OPENAI_CLEANUP_MODELS)
+
+
 # macOS: bare right-hand modifiers usable as a tap/hold record hotkey (evdev
 # KEY_RIGHTALT / KEY_RIGHTMETA). Right Option is the macOS default.
 MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command"}
@@ -10522,6 +10529,122 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, "remote_api_btn") and self.remote_api_btn:
             self.remote_api_btn.configure(text=status)
     
+    def _build_macos_key_help(self, parent, provider: str, key_var, *, on_removed=None) -> None:
+        """macOS: how to get the key, a free Verify check, and where it is stored.
+
+        ``provider`` is "groq" | "openai" | "anthropic". Verification runs off
+        the Tk thread and only ever talks to the provider's own HTTPS host.
+        """
+        from wayfinder.core.cloud_keys import PROVIDERS, clean_key, format_warning, verify_key
+
+        info = PROVIDERS[provider]
+        box = ctk.CTkFrame(parent, fg_color="transparent")
+        box.pack(fill="x", padx=16, pady=(0, 12))
+
+        ctk.CTkLabel(
+            box, text=f"Don't have a key yet?\n{info.steps}",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"], justify="left", anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        link = ctk.CTkLabel(
+            box, text=f"Open {info.console_label} ↗",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["accent"], cursor="hand2",
+        )
+        link.pack(anchor="w", pady=(0, 10))
+        link.bind("<Button-1>", lambda e: self._open_url(info.console_url))
+        self._bind_link_hover(link, self.font_sizes["small"])
+
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x")
+        status = ctk.CTkLabel(
+            box, text="", font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"], justify="left", anchor="w", wraplength=440,
+        )
+        status.pack(anchor="w", pady=(6, 0))
+
+        def show(text, color):
+            try:
+                status.configure(text=text, text_color=color)
+            except Exception:
+                pass
+
+        def on_key_edit(*_):
+            warning = format_warning(provider, key_var.get())
+            show(warning or "", COLORS["accent_yellow"])
+
+        try:
+            key_var.trace_add("write", on_key_edit)
+        except Exception:
+            pass
+
+        def verify():
+            key = clean_key(key_var.get())
+            if key != key_var.get():
+                key_var.set(key)
+            show(f"Checking with {info.name}…", COLORS["text_secondary"])
+            try:
+                verify_btn.configure(state="disabled")
+            except Exception:
+                pass
+
+            def work():
+                ok, message = verify_key(provider, key)
+
+                def apply():
+                    show(message, COLORS["accent_green"] if ok else COLORS["error"])
+                    try:
+                        verify_btn.configure(state="normal")
+                    except Exception:
+                        pass
+
+                self.event_queue.put((EventType.UI_CALLBACK, apply))
+
+            threading.Thread(target=work, name="wayfinder-key-verify", daemon=True).start()
+
+        verify_btn = ctk.CTkButton(
+            row, text="Verify key",
+            font=(self.font_body[0], self.font_sizes["small"], "bold"),
+            fg_color=COLORS["bg_elevated"], hover_color=COLORS["bg_hover"],
+            border_width=1, border_color=COLORS["accent"], text_color=COLORS["accent"],
+            height=32, corner_radius=RADIUS["sm"], command=verify,
+        )
+        verify_btn.pack(side="left")
+
+        def remove():
+            key_var.set("")
+            self.config[info.key] = ""
+            os.environ.pop({"groq_api_key": "GROQ_API_KEY", "openai_api_key": "OPENAI_API_KEY",
+                            "anthropic_api_key": "ANTHROPIC_API_KEY"}[info.key], None)
+            save_config(self.config)
+            self.log(f"⚙ {info.name} API key removed")
+            show(f"{info.name} key removed from this Mac.", COLORS["text_secondary"])
+            if on_removed is not None:
+                on_removed()
+
+        if self.config.get(info.key):
+            ctk.CTkButton(
+                row, text="Remove key",
+                font=(self.font_body[0], self.font_sizes["small"]),
+                fg_color="transparent", hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_secondary"], height=32, width=100,
+                corner_radius=RADIUS["sm"], command=remove,
+            ).pack(side="left", padx=(8, 0))
+
+        try:
+            from wayfinder.utils import macos_keychain
+            stored_where = ("Stored in your Mac's Keychain — never in Aura's settings file."
+                            if macos_keychain.available() and not os.environ.get("WAYFINDER_DISABLE_KEYCHAIN")
+                            else "Stored only in Aura's private settings file on this Mac.")
+        except Exception:
+            stored_where = "Stored only on this Mac."
+        ctk.CTkLabel(
+            box, text=stored_where,
+            font=(self.font_body[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"], anchor="w",
+        ).pack(anchor="w", pady=(8, 0))
+        on_key_edit()
+
     def open_remote_api_settings(self) -> None:
         """Show an inline panel to configure the selected remote transcription API (Groq or OpenAI)."""
         backend = self.config.get("transcription_backend", "groq_whisper")
@@ -10593,28 +10716,42 @@ class WayfinderApp(ctk.CTk):
                 hover_color=COLORS["accent_dim"],
             ).pack(anchor="w", padx=16, pady=(0, 16))
 
-            # Link to get API key
-            if is_groq:
-                link_text = "Get your free API key at: console.groq.com/keys"
-                link_url = "https://console.groq.com/keys"
+            if sys.platform == "darwin":
+                self._build_macos_key_help(
+                    form_frame, "groq" if is_groq else "openai", key_var,
+                    on_removed=self._update_remote_api_status,
+                )
             else:
-                link_text = "Get your API key at: platform.openai.com/api-keys"
-                link_url = "https://platform.openai.com/api-keys"
+                # Link to get API key
+                if is_groq:
+                    link_text = "Get your free API key at: console.groq.com/keys"
+                    link_url = "https://console.groq.com/keys"
+                else:
+                    link_text = "Get your API key at: platform.openai.com/api-keys"
+                    link_url = "https://platform.openai.com/api-keys"
 
-            link = ctk.CTkLabel(
-                content,
-                text=link_text,
-                font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["accent"],
-                cursor="hand2",
-            )
-            link.pack(anchor="w", padx=8, pady=(8, 16))
-            link.bind("<Button-1>", lambda e: self._open_url(link_url))
-            self._bind_link_hover(link, self.font_sizes["small"])
+                link = ctk.CTkLabel(
+                    content,
+                    text=link_text,
+                    font=(self.font_body[0], self.font_sizes["small"]),
+                    text_color=COLORS["accent"],
+                    cursor="hand2",
+                )
+                link.pack(anchor="w", padx=8, pady=(8, 16))
+                link.bind("<Button-1>", lambda e: self._open_url(link_url))
+                self._bind_link_hover(link, self.font_sizes["small"])
 
             # Save button
             def save_and_close():
                 key = key_var.get().strip()
+                if sys.platform == "darwin":
+                    key = "".join(key.split())
+                    if not key and self.config.get(config_key):
+                        # Emptied field + Save removes the key (Keychain too).
+                        self.config[config_key] = ""
+                        os.environ.pop(env_var, None)
+                        save_config(self.config)
+                        self.log(f"⚙ {env_var} removed")
                 if key:
                     # Save to environment (for current session)
                     os.environ[env_var] = key
@@ -14033,6 +14170,13 @@ class WayfinderApp(ctk.CTk):
                 name = Path(model_path).name
                 return name[:25] + "..." if len(name) > 25 else name
             return "No model selected"
+        elif backend in ("anthropic", "openai") and sys.platform == "darwin":
+            key_name = f"{backend}_api_key"
+            model_key = f"{backend}_model"
+            model = self.config.get(model_key) or ""
+            if self.config.get(key_name) or os.environ.get(key_name.upper(), ""):
+                return f"{model}: ✓ Key set" if model else "✓ Key set"
+            return f"Add your {'Anthropic' if backend == 'anthropic' else 'OpenAI'} key"
         elif backend == "anthropic":
             # API keys are read from environment variables only for security
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -14207,7 +14351,11 @@ class WayfinderApp(ctk.CTk):
                 InlineOptionMenu(
                     api_frame,
                     variable=form_data["openai_model"],
-                    values=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+                    values=(
+                        _macos_cloud_models("openai")
+                        if sys.platform == "darwin"
+                        else ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
+                    ),
                     font=(self.font_body[0], self.font_sizes["body"]),
                     fg_color=COLORS["bg_input"],
                     button_color=COLORS["bg_input"],
@@ -14229,7 +14377,11 @@ class WayfinderApp(ctk.CTk):
                     text_color=COLORS["text_muted"],
                     wraplength=460,
                 ).pack(anchor="w", pady=(0, 8))
-                
+
+                if sys.platform == "darwin":
+                    self._build_macos_key_help(api_frame, "openai", form_data["openai_key"])
+                    return
+
                 link = ctk.CTkLabel(
                     settings_container,
                     text="Get your API key at: platform.openai.com/api-keys",
@@ -14294,12 +14446,16 @@ class WayfinderApp(ctk.CTk):
                 InlineOptionMenu(
                     api_frame,
                     variable=form_data["anthropic_model"],
-                    values=[
-                        "claude-3-haiku-20240307",
-                        "claude-3-5-haiku-20241022",
-                        "claude-3-sonnet-20240229",
-                        "claude-3-5-sonnet-20241022",
-                    ],
+                    values=(
+                        _macos_cloud_models("anthropic")
+                        if sys.platform == "darwin"
+                        else [
+                            "claude-3-haiku-20240307",
+                            "claude-3-5-haiku-20241022",
+                            "claude-3-sonnet-20240229",
+                            "claude-3-5-sonnet-20241022",
+                        ]
+                    ),
                     font=(self.font_body[0], self.font_sizes["body"]),
                     fg_color=COLORS["bg_input"],
                     button_color=COLORS["bg_input"],
@@ -14316,11 +14472,19 @@ class WayfinderApp(ctk.CTk):
                 
                 ctk.CTkLabel(
                     settings_container,
-                    text="Claude Haiku is fast and cheap (~$0.25/1M tokens). Sonnet is higher quality but slower.",
+                    text=(
+                        "Claude Haiku is fast and affordable. Sonnet is higher quality but slower."
+                        if sys.platform == "darwin"
+                        else "Claude Haiku is fast and cheap (~$0.25/1M tokens). Sonnet is higher quality but slower."
+                    ),
                     font=(self.font_body[0], self.font_sizes["caption"]),
                     text_color=COLORS["text_muted"],
                     wraplength=460,
                 ).pack(anchor="w", pady=(0, 8))
+
+                if sys.platform == "darwin":
+                    self._build_macos_key_help(api_frame, "anthropic", form_data["anthropic_key"])
+                    return
                 
                 link = ctk.CTkLabel(
                     settings_container,
@@ -14344,6 +14508,12 @@ class WayfinderApp(ctk.CTk):
             
             # Save OpenAI settings (to both env and config for persistence)
             openai_key = form_data["openai_key"].get().strip()
+            if sys.platform == "darwin":
+                # An emptied field removes the key (config, Keychain, env).
+                openai_key = "".join(openai_key.split())
+                if not openai_key:
+                    self.config["openai_api_key"] = ""
+                    os.environ.pop("OPENAI_API_KEY", None)
             if openai_key:
                 os.environ["OPENAI_API_KEY"] = openai_key
                 self.config["openai_api_key"] = openai_key  # Persist to config
@@ -14351,6 +14521,11 @@ class WayfinderApp(ctk.CTk):
             
             # Save Anthropic settings (to both env and config for persistence)
             anthropic_key = form_data["anthropic_key"].get().strip()
+            if sys.platform == "darwin":
+                anthropic_key = "".join(anthropic_key.split())
+                if not anthropic_key:
+                    self.config["anthropic_api_key"] = ""
+                    os.environ.pop("ANTHROPIC_API_KEY", None)
             if anthropic_key:
                 os.environ["ANTHROPIC_API_KEY"] = anthropic_key
                 self.config["anthropic_api_key"] = anthropic_key  # Persist to config
@@ -14363,7 +14538,11 @@ class WayfinderApp(ctk.CTk):
                 self.postproc_config_btn.configure(text=self._get_postproc_config_display())
             if hasattr(self, 'postproc_backend_var'):
                 self.postproc_backend_var.set(provider)
-            if hasattr(self, 'remote_api_btn'):
+            if sys.platform == "darwin":
+                # The transcription row reflects the TRANSCRIPTION provider's
+                # key, not whichever cleanup key happens to be set.
+                self._update_remote_api_status()
+            elif hasattr(self, 'remote_api_btn'):
                 status = "Configured ✓" if (openai_key or anthropic_key) else "Not configured"
                 self.remote_api_btn.configure(text=status)
             
