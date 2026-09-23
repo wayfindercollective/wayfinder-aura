@@ -41,7 +41,7 @@ NATIVE_BIN_DIR = PROJECT_ROOT / 'build' / 'macos-native' / 'bin'
 macos_binaries = []
 for binary_name in (
     'whisper-cli', 'whisper-server',
-    'llama-simple',
+    'llama-simple', 'llama-server',
 ):
     binary_path = NATIVE_BIN_DIR / binary_name
     if binary_path.is_file():

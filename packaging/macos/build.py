@@ -34,7 +34,7 @@ WHISPER_BINARIES = ("whisper-cli", "whisper-server")
 LLAMA_REPOSITORY = "https://github.com/ggml-org/llama.cpp.git"
 LLAMA_TAG = "b9608"
 LLAMA_COMMIT = "70b54e140c90a92285ba699d77e1e32e0868a0e2"
-LLAMA_BINARIES = ("llama-simple",)
+LLAMA_BINARIES = ("llama-simple", "llama-server")
 NATIVE_BINARIES = (*WHISPER_BINARIES, *LLAMA_BINARIES)
 
 
@@ -156,10 +156,10 @@ def build_llama() -> None:
         "-DGGML_NATIVE=OFF",
         "-DGGML_METAL=ON",
         "-DLLAMA_BUILD_EXAMPLES=ON",
-        # Cleanup remains fully functional through llama-simple. Omitting the
-        # optional resident server avoids its embedded web UI/npm dependency,
-        # making release builds deterministic and network-independent.
-        "-DLLAMA_BUILD_SERVER=OFF",
+        # The resident llama-server keeps the cleanup model loaded (~0.2-0.5s
+        # per dictation instead of ~2s reloading it through llama-simple). Its
+        # web UI stays off (below), so the build needs no npm/network access.
+        "-DLLAMA_BUILD_SERVER=ON",
         "-DLLAMA_BUILD_TESTS=OFF",
         "-DLLAMA_CURL=OFF",
         "-DLLAMA_BUILD_UI=OFF",

@@ -23,8 +23,10 @@ disable-after-failure fallback to the per-call CLI.
 """
 import json
 import os
+import secrets
 import socket
 import subprocess
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -112,6 +114,11 @@ class LlamaServerManager:
     # thrash a multi-GB model load on a one-off blip; this bounds both.
     _consecutive_failures: int = 0
     MAX_CONSECUTIVE_FAILURES = 3
+    # macOS only: a fresh random key per spawn, handed to the child through its
+    # environment (not argv, which any local process can read with ps). The
+    # server accepts CORS from every origin, so without a key any web page could
+    # drive the resident model over loopback. /health stays public.
+    _api_key: Optional[str] = None
 
     STARTUP_TIMEOUT = 90.0   # cold load of a 4B GGUF from disk
     # A WARM server answers in ~0.15s (GPU) and ~3.6s (CPU caricature, measured).
@@ -139,11 +146,18 @@ class LlamaServerManager:
     def _alive(cls) -> bool:
         return cls._process is not None and cls._process.poll() is None
 
-    @staticmethod
-    def _props(port: int, timeout: float = 2.0) -> Optional[dict]:
+    @classmethod
+    def _auth_headers(cls) -> dict:
+        """Authorization for a keyed (macOS) server; empty elsewhere."""
+        key = cls._api_key
+        return {"Authorization": f"Bearer {key}"} if key else {}
+
+    @classmethod
+    def _props(cls, port: int, timeout: float = 2.0) -> Optional[dict]:
         try:
-            resp = urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/props", timeout=timeout)
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/props", headers=cls._auth_headers())
+            resp = urllib.request.urlopen(req, timeout=timeout)
             return json.loads(resp.read().decode("utf-8", errors="replace"))
         except Exception:
             return None
@@ -287,7 +301,12 @@ class LlamaServerManager:
         would hand it every dictation. Since /props is unauthenticated, no reply
         it makes can be trusted; the only real proof is that the kernel says the
         listening socket belongs to the child WE spawned.
+
+        macOS has no /proc; libproc asks the kernel the same question there.
         """
+        if sys.platform == "darwin":
+            from wayfinder.utils.macos_procinfo import pid_listens_on_tcp
+            return pid_listens_on_tcp(proc.pid, port)
         inodes = cls._listener_inodes(port)
         if not inodes:
             return None
@@ -325,6 +344,9 @@ class LlamaServerManager:
             "--parallel", "1",   # one dictation at a time; keeps the KV cache whole
             "--no-webui",        # no reason to serve a UI from a dictation app
         ]
+        if sys.platform == "darwin":
+            # /slots would expose the cached prompt (the last dictation).
+            base.append("--no-slots")
         attempts = [[binary] + base + ["-ngl", str(n_gpu_layers)]]
         if n_gpu_layers != 0:
             attempts.append([binary] + base + ["-ngl", "0"])
@@ -332,6 +354,20 @@ class LlamaServerManager:
             if cpu_twin != binary and Path(cpu_twin).exists():
                 attempts.append([cpu_twin] + base + ["-ngl", "0"])
         return attempts
+
+    @classmethod
+    def _spawn_env_overrides(cls) -> Optional[dict]:
+        """Per-spawn environment. None (inherit unchanged) off macOS.
+
+        macOS: a new API key per spawn (see _api_key), and no Metal residency
+        heartbeat, which otherwise wakes an idle resident server ~170x/s. The
+        Metal device itself stays registered: Free's -ngl 0 still offloads
+        prompt processing to the GPU, which is intended.
+        """
+        if sys.platform != "darwin":
+            return None
+        cls._api_key = secrets.token_urlsafe(24)
+        return {"LLAMA_API_KEY": cls._api_key, "GGML_METAL_NO_RESIDENCY": "1"}
 
     @classmethod
     def _wait_ready(cls, proc: subprocess.Popen, port: int, deadline: float) -> bool:
@@ -432,7 +468,7 @@ class LlamaServerManager:
                     try:
                         proc = subprocess.Popen(
                             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env=bundle_binary_env(),
+                            env=bundle_binary_env(cls._spawn_env_overrides()),
                         )
                     except Exception as e:
                         errors.append(f"{Path(cmd[0]).name}: {type(e).__name__}: {e}")
@@ -577,7 +613,7 @@ class LlamaServerManager:
         req = urllib.request.Request(
             f"http://127.0.0.1:{use_port}/completion",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **cls._auth_headers()},
         )
         resp = urllib.request.urlopen(
             req, timeout=cls.REQUEST_TIMEOUT if timeout is None else timeout)

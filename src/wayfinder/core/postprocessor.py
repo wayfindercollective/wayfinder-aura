@@ -1500,6 +1500,31 @@ PROMPT_TEMPLATES: Dict[str, str] = {
 }
 
 
+_MACOS_CLEANUP_THREADS: Optional[int] = None
+
+
+def _cleanup_threads(config: dict) -> int:
+    """llama.cpp CPU threads for cleanup.
+
+    macOS: an untouched default (4) follows the performance-core count instead
+    (the same Apple Silicon rule whisper uses, capped at 12). MEASURED on an
+    M3 Ultra with Gemma 3 1B on the resident server at -ngl 0: median cleanup
+    0.46s at 4 threads, 0.35s at 8, 0.32s at 12. Cleanup never overlaps
+    transcription, so the two do not compete. Linux/Windows keep the value.
+    """
+    configured = config.get("llama_cpp_n_threads", 4)
+    if sys.platform != "darwin" or configured != 4:
+        return configured
+    global _MACOS_CLEANUP_THREADS
+    if _MACOS_CLEANUP_THREADS is None:
+        try:
+            from wayfinder.utils.gpu import get_optimal_thread_count
+            _MACOS_CLEANUP_THREADS = max(4, int(get_optimal_thread_count()))
+        except Exception:
+            _MACOS_CLEANUP_THREADS = 4
+    return _MACOS_CLEANUP_THREADS
+
+
 def _cleanup_budget_from(config: dict) -> float:
     """Half of the PROCESSING watchdog, which spans transcription AND cleanup.
 
@@ -3650,7 +3675,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 llama_binary=llama_binary,
                 model_path=_effective_model_path,
                 n_ctx=config.get("llama_cpp_n_ctx", 2048),
-                n_threads=config.get("llama_cpp_n_threads", 4),
+                n_threads=_cleanup_threads(config),
                 n_gpu_layers=_effective_gpu_layers,
                 max_tokens=config.get("post_processing_max_tokens", 1024),
                 temperature=config.get("post_processing_temperature", 0.1),
