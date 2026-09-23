@@ -72,6 +72,21 @@ class MacOSHeroLayer:
             native_renderer = NativeMetalHeroRenderer.try_create(
                 parent, backing_scale
             )
+            if native_renderer is not None:
+                # Seed the native timer with the card it sits on. It otherwise
+                # draws its compiled-in default until the first state push,
+                # which the idle path may never send.
+                try:
+                    r16, g16, b16 = canvas.winfo_rgb(canvas.cget("bg"))
+                    native_renderer.set_state(
+                        active=False,
+                        audio_level=0.0,
+                        stroke_scale=1.0,
+                        color_rgb=(91, 143, 212),
+                        bg_rgb=(r16 >> 8, g16 >> 8, b16 >> 8),
+                    )
+                except Exception:
+                    pass
             metal_renderer = None
             if native_renderer is not None:
                 layer = None
@@ -147,8 +162,9 @@ class MacOSHeroLayer:
     ) -> bool:
         """Render directly with Metal when its pipeline is available."""
         if self.native_renderer is not None:
-            if (width, height) != self._size and not self.update_geometry():
-                return False
+            # Colours first: the Python idle loop hands every later frame to the
+            # native timer, so an early geometry bail-out must not leave the
+            # renderer on its compiled-in default background.
             self.native_renderer.set_state(
                 active=active,
                 audio_level=audio_level,
@@ -156,6 +172,8 @@ class MacOSHeroLayer:
                 color_rgb=color_rgb,
                 bg_rgb=bg_rgb,
             )
+            if (width, height) != self._size and not self.update_geometry():
+                return False
             self.native_renderer.set_hidden(False)
             return True
         renderer = self.metal_renderer

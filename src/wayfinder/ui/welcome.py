@@ -321,7 +321,13 @@ class WelcomePane:
         # Full-size dim underlay. CTk has no real alpha; a plain bg_base frame
         # covering the tab content reads as a focused/modal state.
         self.underlay = ctk.CTkFrame(parent, fg_color=COLORS["bg_base"], corner_radius=0)
-        self.underlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        if sys.platform == "darwin":
+            from wayfinder.ui.macos_window import place_in_content_pane
+
+            # Stay inside the rounded content pane on the macOS glass.
+            place_in_content_pane(self.underlay)
+        else:
+            self.underlay.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         # Single centered card.
         self.card = ctk.CTkFrame(

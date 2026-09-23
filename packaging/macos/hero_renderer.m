@@ -65,6 +65,12 @@ typedef struct {
     // framebufferOnly=YES gives render-target-only textures; on M3 the
     // invalid write shows up as solid magenta.
     _metalLayer.framebufferOnly = NO;
+    // Tag the drawable as sRGB so its colours match Tk's sRGB surfaces; an
+    // untagged layer is shown in the display's native space and the hero
+    // strip reads as a differently tinted rectangle on its card.
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    _metalLayer.colorspace = srgb;
+    CGColorSpaceRelease(srgb);
     _metalLayer.displaySyncEnabled = YES;
     _metalLayer.presentsWithTransaction = NO;
     _metalLayer.maximumDrawableCount = 3;

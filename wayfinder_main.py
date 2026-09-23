@@ -106,6 +106,14 @@ from wayfinder.utils.audio_ducker import AudioDucker
 from wayfinder.ui.icons import get_icon, STYLE_ICONS, tint_icon
 from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
 from wayfinder.ui.window_geometry import default_window_geometry
+from wayfinder.ui.macos_window import (
+    TRANSPARENT as MACOS_TRANSPARENT,
+    apply_glass_palette as apply_macos_glass_palette,
+    apply_window_chrome as apply_macos_window_chrome,
+    glass_enabled as macos_glass_enabled,
+    place_in_content_pane as place_in_macos_content_pane,
+    prepare_tk_root as prepare_macos_tk_root,
+)
 from wayfinder.ui.steamdeck_help import (
     STEAM_DECK_BUTTON_HELP_BODY,
     STEAM_DECK_BUTTON_HELP_TITLE,
@@ -399,6 +407,13 @@ COLORS = {
     "success_bg": "#121A28",        # Soft blue wash for privacy/local banner
     "warning_bg": "#2A1A1A",        # Red-tinted banner background (cloud warning)
 }
+
+
+if IS_MACOS:
+    from wayfinder.ui import theme as _theme
+
+    # macOS glass: deeper ink panes (both token mirrors). No-op without glass.
+    apply_macos_glass_palette(COLORS, _theme.COLORS)
 
 
 def _tab_surface_kwargs(platform_name: str | None = None) -> dict:
@@ -5762,6 +5777,7 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"⚠ macOS lifecycle integration unavailable: {exc}")
         if IS_MACOS:
             self.after(1200, self._refresh_macos_permission_banner)
+            self._apply_macos_window_chrome()
         self._schedule_settings_preload()
         # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
         self._start_hotkey_supervisor()
@@ -6021,7 +6037,12 @@ class WayfinderApp(ctk.CTk):
         
         # Set reasonable minimum size
         self.minsize(360, 500)
-        self.configure(fg_color=COLORS["bg_dark"])
+        if IS_MACOS and macos_glass_enabled():
+            # Frosted glass shows through wherever Tk paints nothing.
+            prepare_macos_tk_root(self)
+            self.configure(fg_color=MACOS_TRANSPARENT)
+        else:
+            self.configure(fg_color=COLORS["bg_dark"])
         
         # Apply widget scaling only - this controls content size
         # NOT window scaling - that would fight with manual window resizing
@@ -6760,14 +6781,18 @@ class WayfinderApp(ctk.CTk):
         self.last_transcription = ""
         
         # Main container with gradient background
-        self.main_container = ctk.CTkFrame(self, fg_color=COLORS["bg_base"])
+        # macOS glass: the window surface is transparent over native vibrancy.
+        window_surface = (
+            MACOS_TRANSPARENT if IS_MACOS and macos_glass_enabled() else COLORS["bg_base"]
+        )
+        self.main_container = ctk.CTkFrame(self, fg_color=window_surface)
         self.main_container.pack(fill="both", expand=True)
         
         # Create gradient background canvas
         self.bg_canvas = ctk.CTkCanvas(
             self.main_container,
             highlightthickness=0,
-            bg=COLORS["bg_base"],
+            bg=window_surface,
         )
         self.bg_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.main_container.bind("<Configure>", self._draw_gradient_bg)
@@ -6800,7 +6825,7 @@ class WayfinderApp(ctk.CTk):
         # compositor frame while a Canvas-heavy page is being mapped.
         self.tab_content_container = ctk.CTkFrame(
             body_container,
-            **_tab_surface_kwargs(),
+            **self._content_pane_kwargs(),
         )
         self.tab_content_container.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
         
@@ -7009,6 +7034,7 @@ class WayfinderApp(ctk.CTk):
                 title_frame,
                 image=self._header_logo_img,
                 text="",
+                **self._macos_glass_chip_kwargs(),
             )
             logo_label.pack(side="left", padx=(0, 8))
             if is_ultra:
@@ -7101,7 +7127,7 @@ class WayfinderApp(ctk.CTk):
             image=get_icon("rotate-ccw", 14, COLORS["text_secondary"]),
             width=24,
             height=24,
-            fg_color="transparent",
+            fg_color=self._macos_glass_chip_kwargs().get("fg_color", "transparent"),
             hover_color=COLORS["bg_hover"],
             corner_radius=RADIUS["sm"],
             command=self.rescue_window,
@@ -7653,6 +7679,7 @@ class WayfinderApp(ctk.CTk):
             parent,
             fg_color=COLORS["bg_surface"],
             corner_radius=RADIUS["lg"],
+            **self._macos_glass_rim_kwargs(),
             width=188,
             # Hugs the nav content + tier footer with modest breathing room — the old
             # 380 left a large dead band between History and the footer.
@@ -7769,7 +7796,7 @@ class WayfinderApp(ctk.CTk):
                     # Cover the current page before doing the one-time build. Do
                     # not unmap it: Aqua can present the window between those two
                     # operations, which was the white tab-switch flash.
-                    loading_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+                    place_in_macos_content_pane(loading_frame)
                     loading_frame.lift()
                 else:
                     for frame in self.tab_frames.values():
@@ -7925,7 +7952,7 @@ class WayfinderApp(ctk.CTk):
                         frame.pack_forget()
                     elif manager == "grid":
                         frame.grid_forget()
-                    frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+                    place_in_macos_content_pane(frame)
             self.tab_frames[tab_id].lift()
         else:
             # Hide all tabs, show selected
@@ -11303,9 +11330,7 @@ class WayfinderApp(ctk.CTk):
         # Re-show if it's the active tab
         if self.active_tab == "style":
             if IS_MACOS:
-                self.tab_frames["style"].place(
-                    relx=0, rely=0, relwidth=1, relheight=1
-                )
+                place_in_macos_content_pane(self.tab_frames["style"])
                 self.tab_frames["style"].lift()
             else:
                 self.tab_frames["style"].pack(fill="both", expand=True)
@@ -11890,8 +11915,49 @@ class WayfinderApp(ctk.CTk):
         # Note: advanced_toggle_btn and advanced_container are created in _create_settings_tab
         # Do NOT overwrite them here!
     
+    def _macos_glass_rim_kwargs(self) -> dict:
+        """Lifted edge that defines a pane against the macOS glass."""
+        if IS_MACOS and macos_glass_enabled():
+            return {"border_width": 1, "border_color": COLORS["border_rim"]}
+        return {}
+
+    def _content_pane_kwargs(self) -> dict:
+        """The tab content container: a rounded opaque pane on macOS glass."""
+        if IS_MACOS and macos_glass_enabled():
+            return {
+                "fg_color": COLORS["bg_base"],
+                "bg_color": MACOS_TRANSPARENT,
+                "corner_radius": RADIUS["lg"],
+                **self._macos_glass_rim_kwargs(),
+            }
+        return _tab_surface_kwargs()
+
+    def _macos_glass_chip_kwargs(self) -> dict:
+        """Opaque chip for images that sit directly on the macOS glass.
+
+        Aqua Tk skips drawing images whose backdrop is systemTransparent, so an
+        icon on the window surface needs its own solid chip (matching the header
+        +/- buttons). Elsewhere this adds nothing.
+        """
+        if IS_MACOS and macos_glass_enabled():
+            return {"fg_color": COLORS["bg_input"], "corner_radius": RADIUS["sm"]}
+        return {}
+
+    def _apply_macos_window_chrome(self, attempt: int = 0) -> None:
+        """Unified title bar + glass backdrop (retries until AppKit maps the window)."""
+        try:
+            if apply_macos_window_chrome(self.title()):
+                return
+        except Exception as exc:
+            self.log(f"⚠ macOS window chrome unavailable: {exc}")
+            return
+        if attempt < 20:
+            self.after(150, lambda: self._apply_macos_window_chrome(attempt + 1))
+
     def _draw_gradient_bg(self, event=None):
         """Draw ambient gradient - GitHub Dark base with blue warmth."""
+        if IS_MACOS and macos_glass_enabled():
+            return  # native vibrancy is the backdrop
         # Skip when window is not visible
         try:
             if self.state() in ("iconic", "withdrawn"):

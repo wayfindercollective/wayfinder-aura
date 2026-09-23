@@ -70,6 +70,7 @@ def test_inactive_tab_is_created_once_on_first_switch(monkeypatch, is_macos):
     from wayfinder_main import WayfinderApp
 
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", is_macos)
+    monkeypatch.setattr(wayfinder_main, "place_in_macos_content_pane", lambda widget: widget.place())
 
     class Frame:
         def __init__(self):

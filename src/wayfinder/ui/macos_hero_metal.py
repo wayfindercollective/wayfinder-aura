@@ -243,6 +243,13 @@ class MetalHeroRenderer:
             # The compute kernel writes the drawable (needs ShaderWrite usage);
             # framebufferOnly=True renders solid magenta on M3.
             layer.setFramebufferOnly_(False)
+            try:
+                from Quartz import CGColorSpaceCreateWithName, kCGColorSpaceSRGB
+
+                # Match Tk's sRGB card colour (see hero_renderer.m).
+                layer.setColorspace_(CGColorSpaceCreateWithName(kCGColorSpaceSRGB))
+            except Exception:
+                pass
             layer.setDisplaySyncEnabled_(True)
             layer.setPresentsWithTransaction_(False)
             layer.setOpaque_(True)
