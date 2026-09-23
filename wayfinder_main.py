@@ -5561,7 +5561,13 @@ class WayfinderApp(ctk.CTk):
         load_api_keys_to_env(self.config)
         
         self.app_state = AppState.IDLE
-        self.event_queue = queue.Queue()
+        if IS_MACOS:
+            # put() wakes Tk immediately (hotkey → recording without waiting
+            # for the 250 ms idle poll); attached once the poll loop starts.
+            from wayfinder.ui.macos_tk_wakeup import WakingQueue
+            self.event_queue = WakingQueue()
+        else:
+            self.event_queue = queue.Queue()
         # Menu delegates (especially PyObjC's NSMenu callback) must never call
         # Tk/AppKit window code inline. poll_events drains this only after the
         # native menu tracking callback has returned to Tk's main loop.
@@ -20267,13 +20273,39 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"🔁 Hotkey listener restart ({reason})")
             self._start_evdev_listener()
 
-    def poll_events(self):
+    def _drain_event_queue_now(self) -> None:
+        """macOS pipe wake-up: handle queued events without rescheduling.
+
+        Guarded against re-entry (a handler that pumps Tk could otherwise
+        fire the file handler inside itself).
+        """
+        if getattr(self, "_draining_events", False):
+            return
+        self._draining_events = True
         try:
             while True:
                 event_type, data = self.event_queue.get_nowait()
                 self.handle_event(event_type, data)
         except queue.Empty:
             pass
+        finally:
+            self._draining_events = False
+
+    def poll_events(self):
+        if IS_MACOS and not getattr(self, "_event_wakeup_attached", False):
+            attach = getattr(self.event_queue, "attach", None)
+            self._event_wakeup_attached = bool(
+                attach is not None and attach(self, self._drain_event_queue_now)
+            )
+        if IS_MACOS and getattr(self, "_draining_events", False):
+            pass  # a wake-up drain is running further up this stack
+        else:
+            try:
+                while True:
+                    event_type, data = self.event_queue.get_nowait()
+                    self.handle_event(event_type, data)
+            except queue.Empty:
+                pass
         try:
             while True:
                 callback = self._tray_action_queue.get_nowait()
@@ -20370,11 +20402,11 @@ class WayfinderApp(ctk.CTk):
                 if started_by_hold and self.app_state == AppState.RECORDING:
                     self.stop_recording_and_process()
                 return
-            was_idle = self.app_state == AppState.IDLE
+            was_recording = self.app_state == AppState.RECORDING
             self.on_hotkey()
             if data == "hold_start":
                 self._hold_started_recording = (
-                    was_idle and self.app_state == AppState.RECORDING
+                    not was_recording and self.app_state == AppState.RECORDING
                 )
         elif event_type == EventType.STYLE_TOGGLE:
             self.on_style_toggle(data)  # data may be None (cycle) or a specific style name
@@ -20436,6 +20468,18 @@ class WayfinderApp(ctk.CTk):
             self.start_recording()
         elif self.app_state == AppState.RECORDING:
             self.stop_recording_and_process()
+        elif IS_MACOS and self._finish_injection_job is not None:
+            # The text is already inserted; only the minimum PROCESSING
+            # display (rule 7) is still running. A new press must not be
+            # swallowed by it: finish now and start the next dictation.
+            try:
+                self.after_cancel(self._finish_injection_job)
+            except Exception:
+                pass
+            self._finish_injection_job = None
+            self._finish_injection(self.session_generation)
+            if self.app_state == AppState.IDLE:
+                self.start_recording()
     
     def on_style_toggle(self, target_style=None):
         """
@@ -20516,15 +20560,6 @@ class WayfinderApp(ctk.CTk):
                     pass
                 self._finish_injection_job = None
 
-            # Update state FIRST for immediate feedback
-            self.update_state(AppState.RECORDING)
-            
-            # Show floating indicator / overlay (Never route tray_only → pill)
-            try:
-                self._set_status_indicator("listening")
-            except Exception as e:
-                self.log(f"⚠ Indicator error: {e}")
-            
             # Check if chunked mode is enabled
             # Note: Remote backends (Groq, OpenAI Whisper) handle long audio natively,
             # so we skip chunked mode for them to avoid prompt length issues
@@ -20541,17 +20576,37 @@ class WayfinderApp(ctk.CTk):
                 # must never turn a premium path on.
                 chunked_unlocked = False
             use_chunked = chunked_requested and chunked_unlocked and not is_remote
+
+            def _begin_capture():
+                if use_chunked:
+                    self._start_chunked_recording(gen, chunked_mode)
+                else:
+                    if chunked_requested and not chunked_unlocked:
+                        self.log("🔒 Chunked mode is unavailable on Free — using one-shot recording")
+                    elif is_remote and chunked_requested:
+                        self.log("ℹ️ Chunked mode skipped (cloud API handles long audio)")
+                    self.recorder.start()
+                    # Adopt the WarmMic's healed device index (see _start_chunked_recording).
+                    self._resolved_audio_device = self.warm_mic.device
+
+            if IS_MACOS:
+                # Capture FIRST: the RECORDING overlay waits for the Qt
+                # thread's acknowledgement (~150-300 ms), and every word spoken
+                # in that window used to be lost. The mic is warm, so starting
+                # it costs microseconds and the feedback follows immediately.
+                _begin_capture()
+
+            # Update state FIRST for immediate feedback
+            self.update_state(AppState.RECORDING)
             
-            if use_chunked:
-                self._start_chunked_recording(gen, chunked_mode)
-            else:
-                if chunked_requested and not chunked_unlocked:
-                    self.log("🔒 Chunked mode is unavailable on Free — using one-shot recording")
-                elif is_remote and chunked_requested:
-                    self.log("ℹ️ Chunked mode skipped (cloud API handles long audio)")
-                self.recorder.start()
-                # Adopt the WarmMic's healed device index (see _start_chunked_recording).
-                self._resolved_audio_device = self.warm_mic.device
+            # Show floating indicator / overlay (Never route tray_only → pill)
+            try:
+                self._set_status_indicator("listening")
+            except Exception as e:
+                self.log(f"⚠ Indicator error: {e}")
+
+            if not IS_MACOS:
+                _begin_capture()
             
             # Start duration update timer
             self._recording_start_time = time.time()

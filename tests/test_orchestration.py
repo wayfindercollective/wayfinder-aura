@@ -498,7 +498,10 @@ class TestStartRecording:
 
         assert starts == 1
         assert app.app_state == AppState.IDLE
-        assert app.states.count(AppState.RECORDING) == 1
+        # macOS opens the mic BEFORE showing RECORDING (no lost first words),
+        # so a failed open goes straight to the error; Linux shows it first.
+        expected = 0 if wayfinder_main.IS_MACOS else 1
+        assert app.states.count(AppState.RECORDING) == expected
 
 
 # ===========================================================================
@@ -1254,3 +1257,60 @@ class TestStatusBreadcrumb:
         ns = SimpleNamespace(app_state=AppState.IDLE, active_tab="dictate",
                              session_generation=0)
         wayfinder_main.WayfinderApp._write_status_breadcrumb(ns)  # must not raise
+
+
+class TestMacCaptureOrder:
+    """macOS starts the microphone before the (acked) RECORDING overlay."""
+
+    def test_capture_starts_before_recording_state(self, app, monkeypatch):
+        order = []
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        monkeypatch.setattr(app.recorder, "start", lambda: order.append("mic"))
+        real_update = app.update_state
+        monkeypatch.setattr(app, "update_state",
+                            lambda state, *a, **k: (order.append(state), real_update(state, *a, **k)))
+        app.config["chunked_mode"] = "off"
+        app.start_recording()
+        assert order[:2] == ["mic", AppState.RECORDING]
+
+    def test_linux_keeps_state_first(self, app, monkeypatch):
+        order = []
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(app.recorder, "start", lambda: order.append("mic"))
+        real_update = app.update_state
+        monkeypatch.setattr(app, "update_state",
+                            lambda state, *a, **k: (order.append(state), real_update(state, *a, **k)))
+        app.config["chunked_mode"] = "off"
+        app.start_recording()
+        assert order[:2] == [AppState.RECORDING, "mic"]
+
+
+class TestMacPreemptFinishTail:
+    """macOS: a press during the 800 ms minimum-PROCESSING display starts the
+    next dictation instead of being swallowed (the text is already in)."""
+
+    def _through_injection(self, app, monkeypatch):
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
+                            lambda path, cfg, **k: "First dictation.")
+        monkeypatch.setattr(wayfinder_main, "inject_text", lambda text, **k: None)
+        app.config["chunked_mode"] = "off"
+        app.on_record_button()
+        app.on_record_button()
+        app.pump_events()  # transcription done → paste
+        app.pump_events()  # injection done → min-display tail scheduled
+        assert app._finish_injection_job is not None
+        assert app.app_state != AppState.IDLE
+
+    def test_press_during_tail_starts_recording(self, app, monkeypatch):
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        self._through_injection(app, monkeypatch)
+        app.on_hotkey()
+        assert app.app_state == AppState.RECORDING
+        assert app._finish_injection_job is None
+
+    def test_linux_still_ignores_it(self, app, monkeypatch):
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        self._through_injection(app, monkeypatch)
+        before = app.app_state
+        app.on_hotkey()
+        assert app.app_state == before
