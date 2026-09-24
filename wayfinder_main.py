@@ -7460,12 +7460,13 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["accent"],
         )
         self.hotkey_label.pack(pady=(SPACING["sm"], 0))
-        ctk.CTkLabel(
+        self._hero_hotkey_hint = ctk.CTkLabel(
             hero_inner,
-            text="press to start/stop  ·  words appear at your cursor",
+            text=self._hero_hotkey_hint_text(),
             font=(self.font_body[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
-        ).pack(pady=(SPACING["xs"], 0))
+        )
+        self._hero_hotkey_hint.pack(pady=(SPACING["xs"], 0))
     
     def _on_mic_hover(self, entering: bool) -> None:
         """Redraw the mic button once on Enter/Leave with a brighter glow while hovered.
@@ -16776,6 +16777,11 @@ class WayfinderApp(ctk.CTk):
             return f"{mods}+{key_name}"
         return key_name
 
+    def _hero_hotkey_hint_text(self) -> str:
+        if self._record_hotkey_is_tap_hold():
+            return "tap to start/stop  ·  hold to talk  ·  words appear at your cursor"
+        return "press to start/stop  ·  words appear at your cursor"
+
     def _refresh_record_hotkey_surfaces(self) -> None:
         """Refresh returning-user surfaces after a live/config hotkey change."""
         new_hotkey = self.get_hotkey_display()
@@ -16783,6 +16789,12 @@ class WayfinderApp(ctk.CTk):
         if label is not None:
             try:
                 label.configure(text=new_hotkey)
+            except Exception:
+                pass
+        hint = getattr(self, "_hero_hotkey_hint", None)
+        if hint is not None:
+            try:
+                hint.configure(text=self._hero_hotkey_hint_text())
             except Exception:
                 pass
         try:

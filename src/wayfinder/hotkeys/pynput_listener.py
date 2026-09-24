@@ -405,6 +405,10 @@ def evdev_code_to_pynput(evdev_code: int) -> Optional[Key | KeyCode]:
 
 def get_key_name(key) -> str:
     """Get a human-readable name for a pynput key."""
+    if sys.platform == "darwin" and key is not None:
+        mac_names = {_k("alt_r"): "Right Option", _k("cmd_r"): "Right Command"}
+        if key in mac_names:
+            return mac_names[key]
     if key in PYNPUT_TO_NAME:
         return PYNPUT_TO_NAME[key]
     if isinstance(key, KeyCode):

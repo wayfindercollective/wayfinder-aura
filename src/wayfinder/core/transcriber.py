@@ -2341,8 +2341,15 @@ def get_backend(config: dict) -> TranscriptionBackend:
             )
             if server_backend.is_available():
                 return server_backend
-            print("[Transcription] whisper-server binary not found — using whisper-cli "
-                  "(per-dictation model load). Build whisper-server for instant mode.")
+            if sys.platform == "darwin" and not Path(
+                    os.path.expanduser(str(server_backend.model_path or ""))).is_file():
+                # is_available() also needs the model; say which one is missing.
+                print("[Transcription] no speech model installed yet "
+                      f"({server_backend.model_path or 'none configured'}) — "
+                      "download one in Settings or the welcome guide.")
+            else:
+                print("[Transcription] whisper-server binary not found — using whisper-cli "
+                      "(per-dictation model load). Build whisper-server for instant mode.")
         return WhisperCppBackend(
             whisper_binary=cli_binary,
             model_path=config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"),
