@@ -952,11 +952,11 @@ _NORMAL_STEPS = [
     # a sentence that is only a filler: "Hmm. Let me check." -> "Let me check."
     (re.compile(r"(^|[.!?]\s+)" + _NORMAL_F + r"[.!?…]+\s*", re.I), r"\1"),
     # clause-initial: "Um, so we..." -> "so we..."
-    (re.compile(r"(^|[.!?]\s+|\s)" + _NORMAL_F + r"\s*,\s*", re.I), r"\1"),
+    (re.compile(r"(^|[.!?]\s+|\s|[\"\u201c(])" + _NORMAL_F + r"\s*,\s*", re.I), r"\1"),
     # clause-final: "...ship it, um." -> "...ship it."
     (re.compile(r"\s*,\s*" + _NORMAL_F + r"(?=\s*[.!?]|\s*$)", re.I), ""),
     # anywhere else, bare: "need to um git" -> "need to git"
-    (re.compile(r"(^|\s)" + _NORMAL_F + r"(?=\s|$|[.,;!?])", re.I), r"\1"),
+    (re.compile(r"(^|\s|[\"\u201c(])" + _NORMAL_F + r"\s*(?=\S|$)", re.I), r"\1"),
 ]
 _NORMAL_REPEAT_RE = re.compile(
     r"\b(the|a|an|to|and|of|i|it|in|on|we|you|my|is)(\s+\1\b)+", re.IGNORECASE)
@@ -972,7 +972,7 @@ def normal_filler_removal(text: str) -> str:
     """
     if not text or not text.strip():
         return text
-    first = text.lstrip()[:1]
+    first_alpha = re.search(r"[A-Za-z]", text)
     out = text
     for pattern, repl in _NORMAL_STEPS:
         out = pattern.sub(repl, out)
@@ -982,8 +982,10 @@ def normal_filler_removal(text: str) -> str:
     out = re.sub(r",\s*([.!?])", r"\1", out)
     out = re.sub(r"^[\s,;.]+", "", out)
     out = re.sub(r"[ \t]{2,}", " ", out).strip()
-    if first.isupper() and out[:1].islower():
-        out = out[0].upper() + out[1:]
+    out_alpha = re.search(r"[A-Za-z]", out)
+    if first_alpha and out_alpha and first_alpha.group().isupper() and out_alpha.group().islower():
+        i = out_alpha.start()  # after a leading quote/bracket too: '"Um we' -> '"We'
+        out = out[:i] + out[i].upper() + out[i + 1:]
     return out
 
 

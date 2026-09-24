@@ -65,3 +65,11 @@ def test_normal_can_still_opt_into_the_model(monkeypatch):
     cfg = {"post_processing_enabled": True, "output_tone": "minimal", "normal_llm_cleanup": True}
     P.process_with_config("please send the quarterly report to the whole team", cfg)
     assert called
+
+
+@pytest.mark.parametrize("text,expected", [
+    ('"Um we should leave around noon."', '"We should leave around noon."'),
+    ("(uh, maybe) tomorrow", "(maybe) tomorrow"),
+])
+def test_fillers_after_quotes_and_brackets(text, expected):
+    assert P.normal_filler_removal(text) == expected
