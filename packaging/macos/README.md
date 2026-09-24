@@ -1,5 +1,8 @@
 # macOS packaging
 
+For what the port changes beyond packaging, see
+[docs/MACOS-PORT.md](../../docs/MACOS-PORT.md).
+
 The current macOS artifact supports **Apple Silicon on macOS 14 or newer**. It
 is an architecture-specific PyInstaller `.app` containing
 the Python UI and pinned Metal-enabled whisper.cpp and llama.cpp executables.

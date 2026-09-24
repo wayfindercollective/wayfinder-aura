@@ -140,6 +140,19 @@ pre-empts it (`on_hotkey`). All darwin-gated.
 - **Fix sketch (macOS):** `ctk.ScalingTracker.update_loop_interval = 3_600_000`
   right after importing customtkinter (`wayfinder_main.py`, darwin-gated).
 
+### 3.4 Wave animation judders when frames arrive unevenly
+- **Evidence (macOS):** the Metal waves were driven by a 30/15 fps timer on the
+  main loop: not aligned to the display, and skipped whenever the main thread
+  was busy. Motion advanced per *tick*, so an uneven tick became visible
+  judder; the pill's level also stepped at the ~20 Hz update rate.
+- **Linux check:** watch the hero and pill while the app transcribes or the
+  window is dragged; log tick intervals of the `after()` loops.
+- **Fix sketch (macOS):** a display-synced render thread (`wf_render_clock.m`),
+  wave time taken from each frame's display timestamp, per-second easing
+  (`1 - k**(dt*30)` instead of a per-frame factor), and eased audio level.
+  The Linux analogue: compute wave time from `time.monotonic()` and make the
+  easing dt-based, so a late frame shows the right phase instead of lagging.
+
 ## 4. Reliability
 
 ### 4.1 Orphaned whisper-server after a crash (Linux has no supervisor)
@@ -250,6 +263,17 @@ pre-empts it (`on_hotkey`). All darwin-gated.
   branch `feat/aura-feedback-dev` ("desktop feedback ingestion + Slack
   notify"). Needs merge + prod deploy + the Slack webhook env var. No client
   change needed.
+
+### 5.6 Fixed wraplengths clip text in narrower cards
+- **Evidence (macOS):** ~25 labels use fixed `wraplength` values (430-560 px)
+  sized for the 800 px Linux window. In a narrower card the label requests
+  more width than it has and Tk centres the overflow, clipping both edges
+  (Benchmark description, "No results yet" line).
+- **Linux check:** Steam Deck right-half (640 px), KDE at 1.25-1.5x, and the
+  narrowest window the app allows.
+- **Fix sketch (macOS):** `ui/macos_label_fit.py` clamps every stacked
+  label's wraplength to its container (min of the designed value and the
+  width minus padding) on `<Map>`/`<Configure>`.
 
 ## 6. Shared changes already on this branch that Linux should validate
 
