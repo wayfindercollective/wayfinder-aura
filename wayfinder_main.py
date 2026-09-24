@@ -17155,7 +17155,10 @@ class WayfinderApp(ctk.CTk):
 
         def _save():
             from wayfinder.core.transcriber import normalize_vocabulary_terms
-            new_words = normalize_vocabulary_terms(words_box.get("1.0", "end").splitlines())
+            import re as _re
+            # One per line, but "Wayfinder, Aura, Kubernetes" on one line works too.
+            new_words = normalize_vocabulary_terms(
+                _re.split(r"[\n,;]+", words_box.get("1.0", "end")))
             lines = [l for l in fixes_box.get("1.0", "end").splitlines() if l.strip()]
             pairs = parse_vocabulary_replacements(lines)
             self.config["custom_vocabulary"] = new_words
