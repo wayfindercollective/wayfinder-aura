@@ -6234,6 +6234,9 @@ class WayfinderApp(ctk.CTk):
         # Only handle events for the main window, not child widgets
         if event.widget != self:
             return
+        sync_mark = getattr(self, "_macos_brand_mark_sync", None)
+        if sync_mark is not None:
+            sync_mark()
         
         # Debounce: schedule a save after 500ms of no changes
         if self._geometry_save_pending:
@@ -7162,6 +7165,62 @@ class WayfinderApp(ctk.CTk):
 
         return canvas, (logical_w, logical_h)
 
+    def _create_macos_brand_mark(self, title_frame, is_ultra: bool) -> bool:
+        """macOS: reserve the logo slot; a Core Animation layer draws the mark.
+
+        The layer attaches once the slot is mapped (the NSWindow must exist) and
+        follows it on every relayout. If it cannot attach, the Tk bitmap is put
+        in the slot instead, so the header never loses its logo.
+        """
+        try:
+            from wayfinder.ui.macos_brand_mark import MARK_HEIGHT, MARK_WIDTH, MacOSBrandMark
+        except Exception:
+            return False
+        slot = ctk.CTkFrame(title_frame, width=MARK_WIDTH, height=MARK_HEIGHT,
+                            fg_color="transparent")
+        slot.pack(side="left", padx=(0, SPACING["xs"]))
+        slot.pack_propagate(False)
+        if is_ultra:
+            ToolTip(slot, "Ultra 😇 — thanks for supporting Wayfinder")
+        attempts = {"left": 5}
+
+        def _sync(_event=None):
+            if not slot.winfo_exists():
+                return
+            mark = getattr(self, "_macos_brand_mark", None)
+            if mark is not None and mark.anchor is slot:
+                mark.update_geometry()
+                return
+            if attempts["left"] <= 0 or not slot.winfo_ismapped():
+                return
+            attempts["left"] -= 1
+            mark = MacOSBrandMark.try_create(
+                self, slot, ICON_PATH, is_ultra=is_ultra,
+                accent=COLORS["accent"], gold=COLORS["accent_yellow"],
+            )
+            if mark is not None:
+                self._macos_brand_mark = mark
+            elif attempts["left"] == 0:
+                self._fill_logo_slot_with_bitmap(slot, is_ultra)
+
+        slot.bind("<Map>", _sync, add="+")
+        slot.bind("<Configure>", _sync, add="+")
+        # Window resizes move the slot in bottom-left layer coordinates too.
+        self._macos_brand_mark_sync = _sync
+        return True
+
+    def _fill_logo_slot_with_bitmap(self, slot, is_ultra: bool) -> None:
+        """Fallback when the native mark can't attach: the Tk bitmap logo."""
+        try:
+            logo_img, display_size = self._cosmic_header_logo(ICON_PATH, 24, is_ultra)
+            self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img,
+                                                 size=display_size)
+            slot.pack_propagate(True)
+            ctk.CTkLabel(slot, image=self._header_logo_img, text="",
+                         **self._macos_glass_chip_kwargs()).pack()
+        except Exception:
+            pass
+
     def _create_header(self, parent) -> None:
         """Create the app header with refined, minimal branding and scale controls."""
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -7178,23 +7237,30 @@ class WayfinderApp(ctk.CTk):
         # Logo icon - navigation arrow matching brand
         logo_size = 24
         is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
-        try:
-            # Cosmic signature: the brand arrow "in space" with a baked, static
-            # stardust trail (placement A · visible). Works for BOTH tiers — the
-            # Ultra gold glow composites on top of the trail inside the helper.
-            logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
-            self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
-            logo_label = ctk.CTkLabel(
-                title_frame,
-                image=self._header_logo_img,
-                text="",
-                **self._macos_glass_chip_kwargs(),
-            )
-            logo_label.pack(side="left", padx=(0, 8))
-            if is_ultra:
-                ToolTip(logo_label, "Ultra 😇 — thanks for supporting Wayfinder")
-        except Exception:
-            pass  # Skip logo if icon not found
+        old_mark = getattr(self, "_macos_brand_mark", None)
+        self._macos_brand_mark = None
+        if old_mark is not None:
+            old_mark.close()
+        # macOS: a Retina Core Animation mark straight on the glass; the Tk
+        # bitmap on an opaque chip below stays as the fallback (and on Linux).
+        if not (IS_MACOS and self._create_macos_brand_mark(title_frame, is_ultra)):
+            try:
+                # Cosmic signature: the brand arrow "in space" with a baked, static
+                # stardust trail (placement A · visible). Works for BOTH tiers — the
+                # Ultra gold glow composites on top of the trail inside the helper.
+                logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
+                self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
+                logo_label = ctk.CTkLabel(
+                    title_frame,
+                    image=self._header_logo_img,
+                    text="",
+                    **self._macos_glass_chip_kwargs(),
+                )
+                logo_label.pack(side="left", padx=(0, 8))
+                if is_ultra:
+                    ToolTip(logo_label, "Ultra 😇 — thanks for supporting Wayfinder")
+            except Exception:
+                pass  # Skip logo if icon not found
 
         # Smaller, refined logo wordmark (underlined when Ultra is active)
         wordmark_font = (
