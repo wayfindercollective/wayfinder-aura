@@ -89,8 +89,11 @@ def test_fn_space_is_tracked_and_suppressed_by_darwin_listener(monkeypatch):
     quartz.kCGEventKeyDown = 10
     quartz.kCGEventKeyUp = 11
     quartz.kCGKeyboardEventKeycode = 9
+    quartz.kCGEventSourceUnixProcessID = 12
     quartz.CGEventGetFlags = lambda event: event["flags"]
-    quartz.CGEventGetIntegerValueField = lambda event, _field: event["keycode"]
+    quartz.CGEventGetIntegerValueField = lambda event, field: (
+        event.get("source_pid", 0) if field == 12 else event["keycode"]
+    )
     monkeypatch.setitem(pynput_listener.sys.modules, "Quartz", quartz)
     monkeypatch.setattr(pynput_listener.sys, "platform", "darwin")
     monkeypatch.setattr(pynput_listener.keyboard, "Listener", FakeListener)
@@ -136,20 +139,27 @@ def test_fn_enter_style_chord_is_also_suppressed(monkeypatch):
     quartz.kCGEventKeyDown = 10
     quartz.kCGEventKeyUp = 11
     quartz.kCGKeyboardEventKeycode = 9
+    quartz.kCGEventSourceUnixProcessID = 12
     quartz.CGEventGetFlags = lambda event: event["flags"]
-    quartz.CGEventGetIntegerValueField = lambda event, _field: event["keycode"]
+    quartz.CGEventGetIntegerValueField = lambda event, field: (
+        event.get("source_pid", 0) if field == 12 else event["keycode"]
+    )
     monkeypatch.setitem(pynput_listener.sys.modules, "Quartz", quartz)
     monkeypatch.setattr(pynput_listener.sys, "platform", "darwin")
     monkeypatch.setattr(pynput_listener.keyboard, "Listener", FakeListener)
     stop = Event()
     stop.set()
+    events = Queue()
     pynput_listener.pynput_hotkey_listener(
-        Queue(), 57, ["fn"], stop,
+        events, 57, ["fn"], stop,
         style_toggle_key=28, style_toggle_modifiers=["fn"],
     )
 
     intercept = captured["darwin_intercept"]
+    captured["on_press"](pynput_listener.Key.enter, False)
     assert intercept(10, {"flags": 0x800000, "keycode": 0x24}) is None
+    assert events.get_nowait() == (EventType.STYLE_TOGGLE, None)
+    captured["on_release"](pynput_listener.Key.enter, False)
     assert intercept(11, {"flags": 0, "keycode": 0x24}) is None
 
 
@@ -169,19 +179,96 @@ def test_unsupported_macos_key_falls_back_to_fn_space_not_bare_space(monkeypatch
 
     monkeypatch.setattr(pynput_listener.sys, "platform", "darwin")
     monkeypatch.setattr(pynput_listener.keyboard, "Listener", FakeListener)
-    fn = {"value": False}
-    monkeypatch.setattr(pynput_listener, "_darwin_fn_pressed", lambda: fn["value"])
+    quartz = ModuleType("Quartz")
+    quartz.kCGEventFlagMaskSecondaryFn = 0x800000
+    quartz.kCGEventFlagMaskAlternate = 0x080000
+    quartz.kCGEventFlagMaskCommand = 0x100000
+    quartz.kCGEventFlagMaskControl = 0x040000
+    quartz.kCGEventFlagMaskShift = 0x020000
+    quartz.kCGEventKeyDown = 10
+    quartz.kCGEventKeyUp = 11
+    quartz.kCGKeyboardEventKeycode = 9
+    quartz.kCGEventSourceUnixProcessID = 12
+    quartz.CGEventGetFlags = lambda event: event["flags"]
+    quartz.CGEventGetIntegerValueField = lambda event, field: (
+        event.get("source_pid", 0) if field == 12 else event["keycode"]
+    )
+    monkeypatch.setitem(pynput_listener.sys.modules, "Quartz", quartz)
     stop = Event()
     stop.set()
     events = Queue()
     pynput_listener.pynput_hotkey_listener(events, 275, [], stop)
 
     captured["on_press"](pynput_listener.Key.space)
+    assert captured["darwin_intercept"](10, {"flags": 0, "keycode": 49}) is not None
     assert events.empty()
-    fn["value"] = True
-    captured["on_release"](pynput_listener.Key.space)
     captured["on_press"](pynput_listener.Key.space)
+    assert captured["darwin_intercept"](10, {"flags": 0x800000, "keycode": 49}) is None
     assert events.get_nowait() == (EventType.HOTKEY_PRESSED, None)
+
+
+@needs_pynput
+def test_macos_record_requires_physical_event_with_exact_fn_chord(monkeypatch):
+    captured = {}
+
+    class FakeListener:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    quartz = ModuleType("Quartz")
+    quartz.kCGEventFlagMaskSecondaryFn = 0x800000
+    quartz.kCGEventFlagMaskAlternate = 0x080000
+    quartz.kCGEventFlagMaskCommand = 0x100000
+    quartz.kCGEventFlagMaskControl = 0x040000
+    quartz.kCGEventFlagMaskShift = 0x020000
+    quartz.kCGEventKeyDown = 10
+    quartz.kCGEventKeyUp = 11
+    quartz.kCGKeyboardEventKeycode = 9
+    quartz.kCGEventSourceUnixProcessID = 12
+    quartz.CGEventGetFlags = lambda event: event["flags"]
+    quartz.CGEventGetIntegerValueField = lambda event, field: (
+        event.get("source_pid", 0) if field == 12 else event["keycode"]
+    )
+    monkeypatch.setitem(pynput_listener.sys.modules, "Quartz", quartz)
+    monkeypatch.setattr(pynput_listener.sys, "platform", "darwin")
+    monkeypatch.setattr(pynput_listener.keyboard, "Listener", FakeListener)
+    # The old listener trusted this separate global poll, even when the Space
+    # event itself lacked Fn. Reproducing that disagreement must not record.
+    monkeypatch.setattr(pynput_listener, "_darwin_fn_pressed", lambda: True)
+    stop = Event()
+    stop.set()
+    events = Queue()
+    pynput_listener.pynput_hotkey_listener(events, 57, ["fn"], stop)
+    press = captured["on_press"]
+    intercept = captured["darwin_intercept"]
+
+    press(pynput_listener.Key.space, False)
+    assert intercept(10, {"flags": 0, "keycode": 49}) is not None
+    assert events.empty()
+
+    press(pynput_listener.Key.space, True)
+    assert intercept(10, {"flags": 0x800000, "keycode": 49, "source_pid": 42}) is not None
+    assert events.empty()
+
+    press(pynput_listener.Key.space, False)
+    assert intercept(10, {"flags": 0x800000 | 0x020000, "keycode": 49}) is not None
+    assert events.empty()
+
+    press(pynput_listener.Key.space, False)
+    assert intercept(10, {"flags": 0x800000, "keycode": 49}) is None
+    assert events.get_nowait() == (EventType.HOTKEY_PRESSED, None)
+    # Key repeat stays latched until the physical key-up, then can fire again.
+    press(pynput_listener.Key.space, False)
+    assert intercept(10, {"flags": 0x800000, "keycode": 49}) is None
+    assert events.empty()
+    captured["on_release"](pynput_listener.Key.space, False)
+    assert intercept(11, {"flags": 0, "keycode": 49}) is None
 
 
 @needs_pynput
