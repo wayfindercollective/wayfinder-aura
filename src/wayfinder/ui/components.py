@@ -299,8 +299,6 @@ SETTING_TOOLTIPS: dict[str, str] = {
     
     # 🔴 MAJOR latency impact - These are the biggest factors
     "whisper_model": "Local on-device speech recognition model.\nBase is the Free default: fast and lightweight, but it can be inaccurate compared with Ultra models.\nProcessed entirely on your machine — no cloud API needed.",
-    "accuracy_mode": "Speed vs accuracy preset - affects beam search depth.\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)",
-    "beam_size": "Search width for finding best transcription.\n🔴 1 = fastest (-50%) | 5 = balanced | 10 = slowest (+100%)",
     
     # GPU/Backend - Can dramatically change all timings
     "backend": "Transcription engine selection.\n⚙️ Free: Base on CPU with whisper.cpp\n🚀 Ultra: GPU whisper.cpp, experimental Faster-Whisper, or optional cloud backends",
@@ -373,13 +371,6 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
             return f"{base_text}\n\n🚀 {processor_label} speeds (10s audio):\n{speeds}"
         
         return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
-    
-    # Accuracy mode tooltip with benchmarked impact
-    if key == "accuracy_mode":
-        base_text = "Speed vs accuracy preset - affects beam search depth."
-        if benchmark_results and fastest:
-            return f"{base_text}\n🔴 Fast: ~40% faster | Balanced: baseline | High: ~60% slower\n(Based on your {fastest.upper()} benchmarks)"
-        return f"{base_text}\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)\n⏱️ Run benchmark for exact timings"
     
     # GPU acceleration tooltip with measured speedup
     if key == "gpu_acceleration":

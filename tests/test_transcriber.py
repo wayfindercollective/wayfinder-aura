@@ -2267,3 +2267,57 @@ class TestMacServerRequestFields:
     def test_linux_request_is_unchanged(self, sample_audio_file, monkeypatch):
         body = self._body_for("linux", sample_audio_file, monkeypatch)
         assert b"no_timestamps" not in body
+
+
+class TestGreedyDecoding:
+    """docs/EVAL-2026-09-24.md: beam search never beat greedy on whisper.cpp."""
+
+    def test_greedy_even_when_a_saved_config_carries_old_beam_keys(self):
+        from wayfinder.core.transcriber import whisper_decoding
+        assert whisper_decoding({}) == (1, 1)
+        assert whisper_decoding({"accuracy_mode": "high", "beam_size": 8, "best_of": 5}) == (1, 1)
+
+    @pytest.mark.parametrize("value,expected", [
+        (5, (5, 5)), (8, (8, 5)), (12, (8, 5)), (0, (1, 1)), (-3, (1, 1)), ("x", (1, 1)), (None, (1, 1)),
+    ])
+    def test_hidden_override_is_clamped_to_what_whisper_cpp_accepts(self, value, expected):
+        from wayfinder.core.transcriber import whisper_decoding
+        assert whisper_decoding({"whisper_beam_size": value}) == expected
+
+    @pytest.mark.parametrize("server_mode", [True, False])
+    def test_server_and_cli_backends_get_greedy(self, server_mode):
+        from wayfinder.core.transcriber import get_backend
+        cfg = {"transcription_backend": "whisper_cpp", "accuracy_mode": "high",
+               "beam_size": 8, "best_of": 5, "whisper_server_mode": server_mode}
+        backend = get_backend(cfg)
+        assert (backend.beam_size, backend.best_of) == (1, 1)
+
+
+class TestServerRequestDecoding(TestMacServerRequestFields):
+    """Decoding params ride on every request, so a change needs no restart."""
+
+    @pytest.mark.parametrize("platform", ["darwin", "linux"])
+    def test_every_request_carries_beam_and_best_of(self, platform, sample_audio_file, monkeypatch):
+        body = self._body_for(platform, sample_audio_file, monkeypatch)
+        assert b'name="beam_size"\r\n\r\n' in body
+        assert b'name="best_of"\r\n\r\n' in body
+
+
+class TestSoundAnnotations:
+    """base.en typed "[sound of wind]" on noise-only audio (beam eval, 2026-09-24)."""
+
+    @pytest.mark.parametrize("raw,clean", [
+        ("[sound of wind]", ""),
+        ("Hello (sound of the rain) there.", "Hello there."),
+        ("Ship it [audience noise] now", "Ship it now"),
+    ])
+    def test_noise_annotations_with_joiners_are_removed(self, raw, clean):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        assert clean_whisper_artifacts(raw) == clean
+
+    @pytest.mark.parametrize("text", [
+        "See [of course] here", "I said (and the wind) okay", "Tag [sound of] stays",
+    ])
+    def test_dictated_brackets_survive(self, text):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        assert clean_whisper_artifacts(text) == text

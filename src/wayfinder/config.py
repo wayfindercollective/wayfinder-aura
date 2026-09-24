@@ -306,8 +306,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "processing_mode": "local",  # local | remote
     
     # Accuracy enhancement settings
-    "beam_size": 5,  # Beam search size (1-5 recommended, higher is slow)
-    "best_of": 3,  # Number of best candidates to consider
+    # beam_size/best_of (and accuracy_mode) now only feed Faster-Whisper.
+    # whisper.cpp decodes greedily: beam 2-8 never beat greedy in testing
+    # (docs/EVAL-2026-09-24.md). Hidden override, clamped to 1-8:
+    "whisper_beam_size": 1,
+    "beam_size": 5,  # Faster-Whisper beam search size
+    "best_of": 3,  # Faster-Whisper candidates for temperature fallback
     "language": "en",  # Language code: "en", "auto" for auto-detect
     "entropy_threshold": 2.6,  # Filter low-confidence outputs (higher = accept more)
     "no_speech_threshold": 0.5,  # Silence detection threshold (lower = more sensitive)

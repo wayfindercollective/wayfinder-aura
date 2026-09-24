@@ -1398,10 +1398,6 @@ SETTING_TOOLTIPS = {
     "whisper_model": (
         "The speech model. It runs on your computer; nothing is sent to the cloud."
     ),
-    "accuracy_mode": (
-        "How many candidate transcriptions the speech model weighs (beam search). "
-        "Fast checks one; Balanced and High check more, which takes longer."
-    ),
     "backend": (
         "Local transcription engine.\n\n"
         "• Auto / default — Free uses Base on CPU with whisper.cpp. Ultra uses\n"
@@ -1481,10 +1477,6 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
         return f"{base_text}\n\nRun Benchmark to measure speeds on your hardware."
     
     # Accuracy mode tooltip with benchmarked impact
-    if key == "accuracy_mode":
-        # No speed figures here: the benchmark does not measure presets, and
-        # hard-coded percentages were presented as measured on this machine.
-        return SETTING_TOOLTIPS["accuracy_mode"]
     
     # GPU acceleration tooltip with measured speedup
     if key == "gpu_acceleration":
@@ -9561,7 +9553,7 @@ class WayfinderApp(ctk.CTk):
     
     def _refresh_benchmark_tooltips(self):
         """Refresh all dynamic tooltips that depend on benchmark results."""
-        tooltip_keys = ["whisper_model", "gpu_acceleration", "accuracy_mode", "post_processing"]
+        tooltip_keys = ["whisper_model", "gpu_acceleration", "post_processing"]
         
         for key in tooltip_keys:
             if key in self.dynamic_tooltips:
@@ -10422,16 +10414,9 @@ class WayfinderApp(ctk.CTk):
             tooltip_key="gpu_acceleration",
         )
         
-        # Accuracy Mode
-        accuracy_mode = self.config.get("accuracy_mode", "balanced")
-        self.accuracy_mode_var = ctk.StringVar(value=accuracy_mode)
-        self.accuracy_mode_dropdown = self.create_dropdown_row(
-            parent, "Accuracy Mode", ["fast", "balanced", "high"],
-            self.accuracy_mode_var, self.on_accuracy_mode_changed,
-            tooltip=get_dynamic_tooltip("accuracy_mode", self.config), width=140,
-            tooltip_key="accuracy_mode",
-        )
-        
+        # No Accuracy Mode control: beam search never beat greedy decoding in
+        # testing (docs/EVAL-2026-09-24.md), so whisper.cpp always runs greedy.
+
         # Language
         language = self.config.get("language", "en")
         self.language_var = ctk.StringVar(value=language)
@@ -12616,30 +12601,6 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, 'preprocess_desc_label'):
             self.preprocess_desc_label.configure(text=self._get_preprocess_desc(value))
         self.log(f"⚙ Audio processing: {value}")
-    
-    def on_accuracy_mode_changed(self, value: str):
-        """Handle accuracy mode change from dropdown."""
-        self.config["accuracy_mode"] = value
-        # Apply preset settings
-        presets = {
-            "fast": {"beam_size": 1, "best_of": 1},
-            "balanced": {"beam_size": 5, "best_of": 3},
-            "high": {"beam_size": 8, "best_of": 5},
-        }
-        if value in presets:
-            for key, val in presets[value].items():
-                self.config[key] = val
-            # Update beam size dropdown to reflect preset
-            if hasattr(self, 'beam_size_var'):
-                self.beam_size_var.set(str(presets[value]["beam_size"]))
-        save_config(self.config)
-        self.log(f"⚙ Accuracy mode: {value}")
-    
-    def on_beam_size_changed(self, value: str):
-        """Handle beam size change from dropdown."""
-        self.config["beam_size"] = int(value)
-        save_config(self.config)
-        self.log(f"⚙ Beam size: {value}")
     
     def on_language_changed(self, value: str):
         """Handle language change from dropdown."""

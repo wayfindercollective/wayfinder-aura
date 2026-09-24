@@ -335,3 +335,12 @@ merge); a Linux pass should confirm each behaves well:
   `enable_tray_icon`) are written into Linux configs (additive).
 - AppImage whisper-cli resolution prefers the bundled binary over a stale
   configured path.
+
+### Beam search → greedy (2026-09-24, cross-platform)
+- whisper.cpp now decodes greedily on every platform (`whisper_decoding()`;
+  evidence in EVAL-2026-09-24.md "Beam search"). Linux check: re-run a
+  base.en/turbo slice on Vulkan and CUDA to confirm the same result there.
+- whisper-server ignores `-nf`; if no-fallback is intended, send
+  `temperature_inc=0` per request (latent: fallback changed no output in the
+  eval). Faster-Whisper still uses the accuracy_mode presets, unmeasured.
+

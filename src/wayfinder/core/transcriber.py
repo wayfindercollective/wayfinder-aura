@@ -1327,6 +1327,13 @@ class WhisperServerBackend(TranscriptionBackend):
             body += f"--{boundary}\r\n".encode()
             body += b'Content-Disposition: form-data; name="response_format"\r\n\r\n'
             body += b"json\r\n"
+            # Per request, not only at spawn: whisper-server applies these to
+            # this request and resets after, so a changed setting takes effect
+            # without a restart (the spawn flags never changed on the fly).
+            for _field, _value in (("beam_size", self.beam_size), ("best_of", self.best_of)):
+                body += f"--{boundary}\r\n".encode()
+                body += f'Content-Disposition: form-data; name="{_field}"\r\n\r\n'.encode()
+                body += f"{int(_value)}\r\n".encode()
             if sys.platform == "darwin":
                 # Only the text is read. The server otherwise computes per-token
                 # timestamps: MEASURED 3-14% slower (base.en, M3 Ultra), same WER.
@@ -2255,7 +2262,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
         except Exception as exc:
             print(f"[Personal Style] ⚠ Could not load voice profile: {exc}")
 
-    # Map accuracy_mode to beam_size/best_of overrides
+    # accuracy_mode presets now only feed Faster-Whisper (not measured there);
+    # whisper.cpp uses whisper_decoding() - greedy - below.
     accuracy_mode = config.get("accuracy_mode", "balanced")
     accuracy_presets = {
         "fast": {"beam_size": 1, "best_of": 1},
@@ -2318,6 +2326,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
         cli_binary = _resolve_whisper_cli_binary(
             config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
         )
+        _wc_beam, _wc_best_of = whisper_decoding(config)
         if config.get("whisper_server_mode", True):
             server_binary = _derive_whisper_server_binary(cli_binary)
             server_backend = WhisperServerBackend(
@@ -2330,8 +2339,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 # the dictation before the 120s PROCESSING watchdog abandons it.
                 timeout=config.get("whisper_server_timeout", 30),
                 use_gpu=use_gpu_effective,
-                beam_size=config.get("beam_size", 5),
-                best_of=config.get("best_of", 3),
+                beam_size=_wc_beam,
+                best_of=_wc_best_of,
                 language=config.get("language", "en"),
                 entropy_threshold=config.get("entropy_threshold", 2.6),
                 no_speech_threshold=config.get("no_speech_threshold", 0.5),
@@ -2358,8 +2367,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
             timeout=config.get("timeout", 120),
             use_gpu=use_gpu_effective,
             gpu_layers=config.get("gpu_layers", 0),
-            beam_size=config.get("beam_size", 5),
-            best_of=config.get("best_of", 3),
+            beam_size=_wc_beam,
+            best_of=_wc_best_of,
             language=config.get("language", "en"),
             entropy_threshold=config.get("entropy_threshold", 2.6),
             no_speech_threshold=config.get("no_speech_threshold", 0.5),
@@ -2474,6 +2483,30 @@ _WHISPER_PHRASE_HALLUCINATIONS = frozenset({
 })
 
 
+# whisper.cpp refuses more than 8 decoders ("too many decoders requested"),
+# which made a hand-edited beam_size of 9+ fail every dictation.
+WHISPER_MAX_DECODERS = 8
+
+
+def whisper_decoding(config: dict) -> tuple[int, int]:
+    """(beam_size, best_of) for the whisper.cpp backends: greedy by default.
+
+    docs/EVAL-2026-09-24.md (beam search): on 228 clips x base.en/small.en/
+    turbo, beam 2-8 never beat greedy (every CI includes zero or favours
+    greedy), cost 7-47% more time, and on the resident server made identical
+    requests return different text. The old Accuracy Mode presets and the
+    beam_size/best_of keys every saved config carries are therefore ignored;
+    the hidden ``whisper_beam_size`` key (1-8) remains for experiments.
+    """
+    try:
+        beam = int(config.get("whisper_beam_size", 1) or 1)
+    except (TypeError, ValueError):
+        beam = 1
+    beam = max(1, min(beam, WHISPER_MAX_DECODERS))
+    # best_of only matters for temperature fallback; keep it within the cap.
+    return beam, (1 if beam == 1 else min(beam, 5))
+
+
 def clean_whisper_artifacts(text: str) -> str:
     """
     Clean up common Whisper transcription artifacts.
@@ -2530,7 +2563,10 @@ def clean_whisper_artifacts(text: str) -> str:
         r'whispers|mumbling|mumbles|gasps?|gasping|groans?|groaning|'
         r'grunts?|grunting|snoring|yawning|swallowing|throat|clearing)'
     )
-    _noise_marker = r'\s*' + _noise_word + r'(?:\s+' + _noise_word + r'){0,2}\s*'
+    # Short joiners ("[sound of wind]", "(sound of the rain)") may sit between
+    # noise words; the annotation must still start and end with one.
+    _joiner = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
+    _noise_marker = r'\s*' + _noise_word + r'(?:' + _joiner + r'\s+' + _noise_word + r'){0,2}\s*'
     text = re.sub(r'\[' + _noise_marker + r'\]', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'\(' + _noise_marker + r'\)', ' ', text, flags=re.IGNORECASE)
 

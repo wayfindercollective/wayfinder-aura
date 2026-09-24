@@ -34,6 +34,9 @@ end.
   - Hover hints stay on screen: long ones wrap wider, and a hint goes above,
     below or beside its icon inside the usable screen
     (`wayfinder.ui.tooltip_geometry`).
+  - whisper.cpp decodes greedily everywhere and the Accuracy Mode dropdown
+    is gone: beam search never beat greedy (EVAL-2026-09-24.md, "Beam
+    search"). "[sound of wind]"-style annotations are stripped.
   Linux check: re-run `scripts/eval_matrix.py --stages tone` on the Linux
   cleanup path; confirm Normal-without-model is wanted there.
 
