@@ -236,6 +236,20 @@ def save_state(state: Dict) -> None:
 
 
 def main() -> int:
+    import fcntl  # POSIX only; the poller runs on the Mac Studio
+
+    # One run at a time (launchd's schedule plus a manual run would double-post).
+    BASE.mkdir(parents=True, exist_ok=True)
+    lock = open(BASE / "poller.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("another run is in progress; skipping")
+        return 0
+    return _run()
+
+
+def _run() -> int:
     webhooks = {"dev": keychain("SLACK_WEBHOOK_DEV"), "prod": keychain("SLACK_WEBHOOK_PROD")}
     if not webhooks["dev"] or not webhooks["prod"]:
         log("Slack webhooks are not in the Keychain yet (see install_slack_local_poller.sh); waiting")

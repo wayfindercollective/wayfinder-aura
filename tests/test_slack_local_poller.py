@@ -122,7 +122,9 @@ def test_only_slack_webhook_urls_are_ever_used(value, ok):
     assert poller.valid_webhook(value) is ok
 
 
-def test_main_refuses_a_non_webhook_keychain_value(monkeypatch, capsys):
+@pytest.mark.skipif(__import__("sys").platform == "win32", reason="the poller is POSIX-only")
+def test_main_refuses_a_non_webhook_keychain_value(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(poller, "BASE", tmp_path)
     values = {"SLACK_WEBHOOK_DEV": "abc123",
               "SLACK_WEBHOOK_PROD": "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"}
     monkeypatch.setattr(poller, "keychain", lambda service: values.get(service, ""))
