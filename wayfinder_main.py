@@ -128,7 +128,8 @@ from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, s
 from wayfinder.utils.audio_ducker import AudioDucker
 from wayfinder.ui.icons import get_icon, STYLE_ICONS, tint_icon
 from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
-from wayfinder.ui.window_geometry import default_window_geometry
+from wayfinder.ui.window_geometry import default_window_geometry, macos_visible_frame
+from wayfinder.ui.tooltip_geometry import anchor_in_area, tooltip_position, tooltip_wraplength
 from wayfinder.ui.macos_window import (
     TRANSPARENT as MACOS_TRANSPARENT,
     apply_glass_palette as apply_macos_glass_palette,
@@ -407,7 +408,8 @@ COLORS = {
     # Legacy state color aliases for compatibility
     "accent_green": "#5DD4A8",      # Muted mint - success
     "accent_red": "#E8707F",        # Muted rose - recording
-    "accent_yellow": "#E5AC2A",     # Muted gold - processing
+    "accent_yellow": "#E5AC2A",     # Muted gold - processing / Ultra
+    "accent_yellow_hover": "#F0C24D",  # Lighter gold on hover (Ultra Buy Now)
     "accent_blue": "#4682DC",       # Brand blue (same as primary accent)
     
     # Text hierarchy - calculated for dark bg readability
@@ -611,36 +613,29 @@ class ToolTip:
             text=self.text,
             font=("DejaVu Sans", 12),  # module-scope: no font_sizes access
             text_color=COLORS["text_primary"],
-            wraplength=260,
+            wraplength=tooltip_wraplength(self.text),
             justify="left",
         )
         label.pack(padx=12, pady=10)
-        
-        # Position tooltip above widget
+
+        # Above the widget if it fits, else below, else beside it - always
+        # inside the usable screen (macOS: menu bar and Dock excluded).
         tw.update_idletasks()
-        tw_width = tw.winfo_width()
-        tw_height = tw.winfo_height()
-        screen_width = tw.winfo_screenwidth()
-        screen_height = tw.winfo_screenheight()
-        
-        # Center above widget
-        widget_x = self.widget.winfo_rootx()
-        widget_width = self.widget.winfo_width()
-        x = widget_x + (widget_width - tw_width) // 2
-        
-        # Position above with gap
-        y = self.widget.winfo_rooty() - tw_height - 6
-        
-        # Keep on screen horizontally
-        if x < 10:
-            x = 10
-        elif x + tw_width > screen_width - 10:
-            x = screen_width - tw_width - 10
-        
-        # If would go off top, show below
-        if y < 10:
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-        
+        size = (tw.winfo_width(), tw.winfo_height())
+        screen_w, screen_h = tw.winfo_screenwidth(), tw.winfo_screenheight()
+        anchor = (self.widget.winfo_rootx(), self.widget.winfo_rooty(),
+                  self.widget.winfo_width(), self.widget.winfo_height())
+        area = (macos_visible_frame(screen_w, screen_h) if IS_MACOS
+                else (0, 0, screen_w, screen_h))
+        if anchor_in_area(anchor, area):
+            x, y = tooltip_position(anchor, size, area)
+        else:
+            # Another monitor: Tk only reports the primary screen, so don't
+            # pull the tooltip onto it; keep it centred above (or below) the widget.
+            x = anchor[0] + (anchor[2] - size[0]) // 2
+            y = anchor[1] - size[1] - 6
+            if y < 10:
+                y = anchor[1] + anchor[3] + 6
         tw.wm_geometry(f"+{x}+{y}")
     
     def hide_tooltip(self):
@@ -1353,67 +1348,60 @@ ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
 ctk.CTkSlider._mouse_scroll_event = lambda _self, _event: None
 
 
-# Setting tooltip descriptions with latency indicators
-# ═══════════════════════════════════════════════════════════════════════════════
-# LATENCY GUIDE: ⚡ = none, 🟢 = <10ms, 🟡 = 10-100ms, 🔴 = 100ms+, 🚀 = speedup
-# ═══════════════════════════════════════════════════════════════════════════════
+# Setting hints (hover the (i) next to a setting). Plain text, no emoji
+# (rule 11); keep claims to what the code does today. Benchmark-driven ones are
+# rebuilt by get_dynamic_tooltip.
 SETTING_TOOLTIPS = {
-    # ⚡ No latency impact - UI/configuration only
-    "hotkey": "The keyboard shortcut to start/stop voice recording.\n⚡ Latency: None",
-    "microphone": "Select which microphone/audio input device to use.\n⚡ Latency: None",
-    "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\n⚡ Latency: None",
-    "benchmark": "Measure end-to-end dictation speed on your hardware.\nTimes speech-to-text + cleanup, with a per-model breakdown.\n⏱️ Run once to get accurate timing predictions.",
-    "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
+    "hotkey": "The shortcut that starts and stops dictation.",
+    "microphone": "The microphone Aura listens to.",
+    "hotkey_devices": "Which keyboards, mice or keypads can trigger the shortcut.",
     "enable_tray_icon": (
-        "Show a stateful Wayfinder item in the macOS menu bar. Turn it off if "
-        "menu-bar space is limited.\n⚡ Latency: None"
+        "Show Aura in the menu bar, with its state and quick controls. "
+        "Turn it off if your menu bar is crowded."
     ),
-    "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
-    "overlay_type": "Choose the status indicator style:\n• Always On: Stays visible, never steals focus (PyQt6)\n• Disappearing: Shows only during recording (CTk)\n⚠️ Requires restart to take effect.",
-    "overlay_enabled": "Show the floating status pill (Listening / Processing / Ready).\nOff = no on-screen pill; system tray + dictation still work.\n⚡ Latency: None",
-    "overlay_scale": "Adjust the size of the status overlay.\nSeparate from the main UI scale.\n⚡ Latency: None",
-    "overlay_position": "Slide the overlay up or down on screen.\nNegative = higher (up to ~full height), Positive = lower (near/over the panel).\n⚡ Latency: None",
-    "prompt": "Initial text that guides transcription style.\n⚡ Latency: None (processed at model load)",
-    "language": "The language for transcription. English is most optimized.\n⚡ Latency: None",
-    
-    # 🟢 Minimal latency impact (<10ms per invocation)
-    "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
+    "ui_scale": "Size of Aura's window and text.",
+    "overlay_type": (
+        "Always On: the pill stays on screen and never takes focus.\n"
+        "Disappearing: it shows only while you dictate.\n"
+        "Applies after a restart."
+    ),
+    "overlay_enabled": (
+        "Show the floating status pill (Listening, Processing, Ready). "
+        "With it off, dictation still works."
+    ),
+    "overlay_scale": "Size of the status pill, separate from the window size.",
+    "overlay_position": "Move the status pill up or down the screen. Left is higher, right is lower.",
+    "language": (
+        "The language you dictate in. Other languages need a multilingual "
+        "model (one without .en in its name)."
+    ),
     "press_enter_after_dictation": (
-        "Press Enter automatically once dictated text finishes typing. Off by default.\n"
-        "⚠️ This immediately submits chat messages, terminal commands, and AI prompts.\n"
-        "Keep it off when you need to review dictated text first.\n"
-        "🟢 Latency: none (fires after injection)"
+        "Press Enter after the text is typed. Off by default.\n"
+        "This sends chat messages, runs terminal commands and submits AI prompts "
+        "straight away, so leave it off if you want to check the text first."
     ),
-    "ensure_punctuation": "Extra punctuation fixes if model output lacks periods/caps.\n🟢 Latency: +1-3ms (optional, most models handle this well)",
     "audio_preprocessing": (
-        "Conditions microphone audio before speech recognition.\n\n"
-        "• Off — Leaves audio untouched. Use as a diagnostic baseline or when your "
-        "mic/interface already produces clean, consistently leveled audio.\n\n"
-        "• Light — Safely evens out quiet or inconsistent mic levels without huge "
-        "noise boosts. Best everyday default.\n\n"
-        "• Medium — Light plus an 80 Hz high-pass filter. Use for electrical hum, "
-        "desk vibration, handling noise, or low HVAC rumble. It does not remove fan hiss.\n\n"
-        "• Heavy — Medium plus a soft gate that lowers steady noise between words. "
-        "Use only when background noise remains; it can suppress soft consonants or quiet speech.\n\n"
-        "Processing cannot repair clipping or replace correct microphone gain."
+        "Cleans up microphone audio before transcription.\n\n"
+        "Off: audio is left untouched.\n"
+        "Light: evens out quiet or uneven levels. Best for most mics.\n"
+        "Medium: Light plus a filter for hum, rumble and desk bumps.\n"
+        "Heavy: Medium plus quieting steady noise between words. It can swallow "
+        "soft speech, so use it only if noise remains.\n\n"
+        "It can't fix clipping or a wrong mic level."
     ),
-    
-    # 🟡 Moderate latency impact (10-100ms)
     "chunked_mode": (
-        "Choose when long recordings are split for background transcription.\n\n"
-        "• Off — Always one Whisper request.\n"
-        "• Auto — One request under 30s; chunk longer recordings.\n"
-        "• On — Begin chunking from the first 15s segment.\n\n"
-        "Auto is the recommended balance of short-dictation speed and long-recording latency."
+        "Splits long recordings so most of the work is done by the time you stop.\n\n"
+        "Off: one pass for the whole recording.\n"
+        "Auto: one pass under 30 s; longer recordings are split. Recommended.\n"
+        "On: split from the start, in 15 s pieces."
     ),
-    "chunk_duration": "New audio per segment (seconds).\nShorter = less work left when you stop, but more context loss and splice points.\n⚠️ 15s/2s is the tested default | 30s is safer with a slower tail",
-    
-    # 🔴 MAJOR latency impact - These are the biggest factors
-    "whisper_model": "Local on-device speech recognition model.\nBase is the Free default: fast and lightweight, but it can be inaccurate compared with Ultra models.\nProcessed entirely on your machine — no cloud API needed.",
-    "accuracy_mode": "Speed vs accuracy preset - affects beam search depth.\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)",
-    "beam_size": "Search width for finding best transcription.\n🔴 1 = fastest (-50%) | 5 = balanced | 10 = slowest (+100%)",
-    
-    # GPU/Backend - Can dramatically change all timings
+    "whisper_model": (
+        "The speech model. It runs on your computer; nothing is sent to the cloud."
+    ),
+    "accuracy_mode": (
+        "How many candidate transcriptions the speech model weighs (beam search). "
+        "Fast checks one; Balanced and High check more, which takes longer."
+    ),
     "backend": (
         "Local transcription engine.\n\n"
         "• Auto / default — Free uses Base on CPU with whisper.cpp. Ultra uses\n"
@@ -1424,15 +1412,18 @@ SETTING_TOOLTIPS = {
         "  Ultra feature. Manual pick turns Auto off."
     ),
     "gpu_acceleration": (
-        "Ultra-only GPU acceleration for transcription and local cleanup.\n"
-        "🚀 whisper.cpp: Vulkan (AMD/Intel), CUDA, Metal (recommended)\n"
-        "🚀 Faster-Whisper (experimental): NVIDIA CUDA via CTranslate2 only\n"
-        "Free runs Base on CPU. Run Benchmark for a GPU upgrade preview."
+        (
+            "Use the Mac's GPU (Metal) for transcription and local cleanup. Ultra.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
+        if IS_MACOS
+        else (
+            "Use your GPU for transcription and local cleanup. Ultra.\n"
+            "whisper.cpp: Vulkan (AMD/Intel), CUDA or Metal. "
+            "Faster-Whisper (experimental): NVIDIA CUDA only.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
     ),
-    "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
-
-    # Post-processing — static defaults; get_dynamic_tooltip fills in measured times
-    "post_processing": "Clean up transcription with an LLM.\nRemoves filler words, fixes grammar, formats output.\n🟡 Latency: +100ms–few seconds depending on model\n⏱️ Run Benchmark for measured times on your hardware.",
 }
 
 
@@ -1449,16 +1440,16 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     
     # Model-specific tooltip with actual benchmarked speeds
     if key == "whisper_model":
-        base_text = "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed."
+        base_text = SETTING_TOOLTIPS["whisper_model"]
         selected_name = Path(os.path.expanduser(str(config.get("model_path", "") or ""))).name.lower()
         if selected_name in ("ggml-base.en.bin", "ggml-base.bin"):
             base_text += (
-                "\n\nBase is the Free default: fast and lightweight, but it can be "
-                "inaccurate compared with the higher-accuracy Ultra models."
+                "\n\nBase is the Free default: fast and light, but less accurate. "
+                "Large v3 Turbo (Ultra) made 43% fewer mistakes in our tests."
             )
         
         if not benchmark_results:
-            return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
+            return f"{base_text}\n\nRun Benchmark to measure speeds on your hardware."
         
         # Build speed table from benchmarks
         speed_lines = []
@@ -1485,16 +1476,15 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
         
         if speed_lines:
             speeds = " | ".join(speed_lines)
-            return f"{base_text}\n\n🚀 {processor_label} speeds (10s audio):\n{speeds}"
+            return f"{base_text}\n\n{processor_label} time for 10 s of audio:\n{speeds}"
         
-        return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
+        return f"{base_text}\n\nRun Benchmark to measure speeds on your hardware."
     
     # Accuracy mode tooltip with benchmarked impact
     if key == "accuracy_mode":
-        base_text = "Speed vs accuracy preset - affects beam search depth."
-        if benchmark_results and fastest:
-            return f"{base_text}\n🔴 Fast: ~40% faster | Balanced: baseline | High: ~60% slower\n(Based on your {fastest.upper()} benchmarks)"
-        return f"{base_text}\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)\n⏱️ Run benchmark for exact timings"
+        # No speed figures here: the benchmark does not measure presets, and
+        # hard-coded percentages were presented as measured on this machine.
+        return SETTING_TOOLTIPS["accuracy_mode"]
     
     # GPU acceleration tooltip with measured speedup
     if key == "gpu_acceleration":
@@ -1509,7 +1499,7 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
                     speedups.append(cpu_time / gpu_time)
             if speedups:
                 avg_speedup = sum(speedups) / len(speedups)
-                return f"{base_text}\n\n🚀 Your GPU is {avg_speedup:.1f}x faster than CPU on average!"
+                return f"{base_text}\n\nOn your hardware the GPU was {avg_speedup:.1f}x faster than the CPU."
         return base_text
 
     # Backend: static rules + this machine's Auto recommendation
@@ -1547,8 +1537,8 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     # Post-processing tooltip with measured cleanup times + pipeline total
     if key == "post_processing":
         base_text = (
-            "Clean up transcription with an LLM.\n"
-            "Removes filler words, fixes grammar, formats output."
+            "Rewrites your dictation in the chosen style with a local model.\n"
+            "Normal needs no model: it removes filler words instantly."
         )
         pp_results = config.get("postprocessing_benchmark_results", {}) or {}
         pipeline = config.get("pipeline_benchmark", {}) or {}
@@ -1577,8 +1567,8 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
                 name = r.get("model_name", mid)
                 lines.append(f"  {name}: {format_bench_seconds(r['avg_time'])}{mark}")
         if lines:
-            return base_text + "\n\n⏱ Measured on your hardware:\n" + "\n".join(lines)
-        return base_text + "\n🟡 Latency: +100ms–few seconds depending on model\n⏱️ Run Benchmark for measured times."
+            return base_text + "\n\nMeasured on your hardware:\n" + "\n".join(lines)
+        return base_text + "\n\nRun Benchmark for measured times on your hardware."
     
     # Default to static tooltip
     return SETTING_TOOLTIPS.get(key, "")
@@ -16399,28 +16389,32 @@ class WayfinderApp(ctk.CTk):
     # Ultra benefits are rendered in two places (the upgrade panel and the Settings
     # License tile) — one list so the copy never drifts. Lucide row markers
     # (CLAUDE.md: no decorative emoji as UI chrome).
+    # Claims are measured (docs/EVAL-2026-09-24.md): Turbo Q5 6.6% vs Base 11.5%
+    # WER; every style graded A with Qwen3 4B (the model the styles need).
     ULTRA_BENEFITS = [
+        ("check", "Higher Accuracy", "Large v3 Turbo made 43% fewer mistakes than Base in our tests"),
+        ("pen-line", "Writing Styles", "Professional, Casual, Dev and Personal, each graded A"),
+        ("message-circle", "Your Vocabulary", "Names and terms spelled your way, plus your own corrections"),
         ("sparkles", "GPU Acceleration", "Faster transcription and local cleanup on supported GPUs"),
         ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),
-        ("pen-line", "Tone Presets", "Professional, Casual, Dev and Personal styles"),
         ("audio-waveform", "Chunked Recording", "Unlimited length with live feedback"),
-        ("check", "Higher Accuracy", "Large v3 Turbo: about 40% fewer mistakes, plus your own vocabulary"),
     ]
 
-    def _build_ultra_benefit_rows(self, parent) -> None:
+    def _build_ultra_benefit_rows(self, parent, icon_color: str | None = None) -> None:
         """Render the Ultra benefit rows (icon + title + description) into `parent`."""
+        icon_color = icon_color or COLORS["accent"]
         for icon_name, title, desc in self.ULTRA_BENEFITS:
             row = ctk.CTkFrame(parent, fg_color="transparent")
             row.pack(fill="x", pady=3)
             try:
                 ctk.CTkLabel(
-                    row, text="", image=get_icon(icon_name, 16, COLORS["accent"]),
+                    row, text="", image=get_icon(icon_name, 16, icon_color),
                     width=24,
                 ).pack(side="left", anchor="n", padx=(0, 6))
             except Exception:
                 ctk.CTkLabel(
                     row, text="·", font=(self.font_body[0], self.font_sizes["body"]),
-                    text_color=COLORS["accent"], width=24,
+                    text_color=icon_color, width=24,
                 ).pack(side="left", anchor="n")
             txt = ctk.CTkFrame(row, fg_color="transparent")
             txt.pack(side="left", fill="x", expand=True)
@@ -16762,9 +16756,12 @@ class WayfinderApp(ctk.CTk):
         # Content-hugging card (~470px) — the old relwidth=0.82 card stretched absurdly
         # wide on large windows. place() with no explicit size lets pack propagation size
         # the card to its content; the strut below sets the minimum content width.
+        # Ultra is gold everywhere (header glow, activation banner); the panel
+        # that sells it matches.
+        gold = COLORS["accent_yellow"]
         card = ctk.CTkFrame(
             scrim, fg_color=COLORS["bg_card"], corner_radius=RADIUS["xl"],
-            border_width=2, border_color=COLORS["accent"],
+            border_width=2, border_color=gold,
         )
         card.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -16794,11 +16791,25 @@ class WayfinderApp(ctk.CTk):
         inner.pack(fill="both", expand=True, padx=SPACING["2xl"], pady=SPACING["xl"])
         ctk.CTkFrame(inner, fg_color="transparent", width=420, height=1).pack()
 
+        title_row = ctk.CTkFrame(inner, fg_color="transparent")
+        title_row.pack(pady=(SPACING["xs"], 0))
+        try:
+            # The brand arrow with its Ultra gold glow, as in the header.
+            logo_img, logo_size = self._cosmic_header_logo(ICON_PATH, 30, True)
+            self._premium_logo_img = ctk.CTkImage(
+                light_image=logo_img, dark_image=logo_img, size=logo_size)
+            ctk.CTkLabel(title_row, image=self._premium_logo_img, text="").pack(
+                side="left", padx=(0, SPACING["sm"]))
+        except Exception:
+            pass
+        title_font = (self.font_header[0], self.font_sizes["display"], "bold")
         ctk.CTkLabel(
-            inner, text="😇  Wayfinder Ultra",
-            font=(self.font_header[0], self.font_sizes["display"], "bold"),
-            text_color=COLORS["accent"],
-        ).pack(pady=(SPACING["xs"], 0))
+            title_row, text="Wayfinder", font=title_font,
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+        ctk.CTkLabel(
+            title_row, text="Ultra", font=title_font, text_color=gold,
+        ).pack(side="left", padx=(SPACING["sm"], 0))
 
         ctk.CTkLabel(
             inner, text=feature_msg, font=(self.font_body[0], self.font_sizes["body"]),
@@ -16808,18 +16819,18 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkFrame(inner, fg_color=COLORS["border_subtle"], height=1).pack(
             fill="x", pady=(0, SPACING["md"]))
 
-        self._build_ultra_benefit_rows(inner)
+        self._build_ultra_benefit_rows(inner, icon_color=gold)
 
         ctk.CTkFrame(inner, fg_color=COLORS["border_subtle"], height=1).pack(
             fill="x", pady=(SPACING["md"], SPACING["md"]))
 
-        # Price: launch price large in accent, regular price struck through beside it.
+        # Price: launch price large in gold, regular price struck through beside it.
         price_row = ctk.CTkFrame(inner, fg_color="transparent")
         price_row.pack(pady=(0, SPACING["md"]))
         ctk.CTkLabel(
             price_row, text=price,
             font=(self.font_header[0], self.font_sizes["display"], "bold"),
-            text_color=COLORS["accent"],
+            text_color=gold,
         ).pack(side="left")
         ctk.CTkLabel(
             price_row, text=price_reg,
@@ -16835,7 +16846,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner, text=f"Buy Now — {price}",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            fg_color=gold, hover_color=COLORS["accent_yellow_hover"],
             text_color="#000000", height=42, corner_radius=RADIUS["md"],
             command=lambda: [self._open_url(checkout), self._dismiss_premium_prompt()],
         ).pack(fill="x")

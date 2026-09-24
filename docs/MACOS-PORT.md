@@ -26,6 +26,14 @@ end.
     terms last in Whisper's prompt budget.
   - The cleanup model is only kept loaded when the chosen style needs it.
   - Model descriptions and Ultra copy state measured results.
+  - The Ultra upgrade panel uses Ultra gold and the brand mark; its benefits
+    lead with the measured results and list Vocabulary on its own.
+  - Setting hints are plain text (no emoji), rewritten to match current
+    behaviour; unused ones were removed. The beam-search hint no longer shows
+    hard-coded speed figures as if they were measured.
+  - Hover hints stay on screen: long ones wrap wider, and a hint goes above,
+    below or beside its icon inside the usable screen
+    (`wayfinder.ui.tooltip_geometry`).
   Linux check: re-run `scripts/eval_matrix.py --stages tone` on the Linux
   cleanup path; confirm Normal-without-model is wanted there.
 
