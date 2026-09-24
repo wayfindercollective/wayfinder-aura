@@ -258,11 +258,22 @@ def ask_for_permission(permission: str) -> bool:
     """
     if sys.platform != "darwin":
         return False
+    # A TCC entry left by an older build (different signature) makes macOS
+    # skip the prompt, and its Settings switch then grants that old copy, not
+    # this one - the switch looks on while Aura stays blocked. Asking only
+    # happens while this copy is not allowed, so clearing Aura's own entry
+    # first is safe and lets the prompt and switch apply to the running app.
     if permission == "microphone":
+        if microphone_authorization() == MIC_DENIED:
+            _reset_own_entry("microphone")
         return request_microphone_access()
     if permission == "accessibility":
+        if request_accessibility_permission(prompt=False) is not True:
+            _reset_own_entry("accessibility")
         request_accessibility_permission(prompt=True)
     elif permission == "input_monitoring":
+        if request_input_monitoring_permission(prompt=False) is not True:
+            _reset_own_entry("input_monitoring")
         request_input_monitoring_permission(prompt=True)
     else:
         return False
@@ -279,6 +290,23 @@ def own_bundle_identifier() -> str | None:
         return None
 
 
+def _reset_own_entry(permission: str) -> bool:
+    """``tccutil reset <service> <Aura>``: clears only Wayfinder Aura's entry.
+
+    Refused unless this process IS the Wayfinder Aura bundle (a source run is
+    "Python"), so it can never touch another app's permissions.
+    """
+    service = _TCC_SERVICES.get(permission)
+    if service is None or own_bundle_identifier() != AURA_BUNDLE_ID:
+        return False
+    try:
+        result = subprocess.run(["/usr/bin/tccutil", "reset", service, AURA_BUNDLE_ID],
+                                capture_output=True, timeout=10, check=False)
+    except Exception:
+        return False
+    return getattr(result, "returncode", 1) == 0
+
+
 def repair_permission(permission: str) -> bool:
     """Reset Aura's OWN stale entry for one permission, then ask again.
 
@@ -290,13 +318,7 @@ def repair_permission(permission: str) -> bool:
     """
     if sys.platform != "darwin":
         return False
-    service = _TCC_SERVICES.get(permission)
-    bundle_id = own_bundle_identifier()
-    if service is None or bundle_id != AURA_BUNDLE_ID:
+    if _TCC_SERVICES.get(permission) is None or own_bundle_identifier() != AURA_BUNDLE_ID:
         return False
-    try:
-        subprocess.run(["/usr/bin/tccutil", "reset", service, bundle_id],
-                       capture_output=True, timeout=10, check=False)
-    except Exception:
-        return False
+    _reset_own_entry(permission)
     return ask_for_permission(permission)

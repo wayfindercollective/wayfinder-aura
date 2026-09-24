@@ -15884,8 +15884,32 @@ class WayfinderApp(ctk.CTk):
         try:
             self._switch_tab("settings")
             self.open_model_settings()
+            if IS_MACOS:
+                # The panel opens mid-page; without this the user lands on the
+                # Audio section at the top and the button seems to do nothing.
+                self._scroll_settings_to(getattr(self, "mode_settings_container", None))
         except Exception as e:
             self.log(f"⚠ Could not open model settings: {e}")
+
+    def _scroll_settings_to(self, widget) -> None:
+        """Bring ``widget`` to the top of the Settings scroll (after layout)."""
+        scroll = getattr(self, "_settings_scroll", None)
+        canvas = getattr(scroll, "_parent_canvas", None)
+        if widget is None or canvas is None:
+            return
+
+        def _go():
+            try:
+                self.update_idletasks()
+                bbox = canvas.bbox("all")
+                if not bbox or bbox[3] - bbox[1] <= 0:
+                    return
+                offset = widget.winfo_rooty() - scroll.winfo_rooty() - SPACING["md"]
+                canvas.yview_moveto(max(0.0, offset / float(bbox[3] - bbox[1])))
+            except Exception:
+                pass
+
+        self.after_idle(_go)
 
     # === Dictate-tab free-tier GPU upsell nudge (E) ===
     def _maybe_show_gpu_nudge(self, duration: float) -> None:

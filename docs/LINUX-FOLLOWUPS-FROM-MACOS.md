@@ -234,6 +234,23 @@ pre-empts it (`on_hotkey`). All darwin-gated.
   `dropdown_panel_geometry` callers assumed. Check long device/model names on
   KDE at 1x and 2x.
 
+### 5.4 "Finish Setup" (no-model cue) seems to do nothing
+- **Evidence (macOS, likely identical on Linux):** `_open_setup_from_cue`
+  opens the model panel inside `mode_settings_container`, mid-way down the
+  Settings scroll, while the view stays at the top (Audio). Users read it as
+  a dead button.
+- **Fix sketch (macOS, darwin-gated):** `_scroll_settings_to(container)`
+  moves the Settings canvas so the panel is at the top after layout.
+
+### 5.5 Feedback form posts to an endpoint that isn't deployed
+- **Evidence:** `POST https://fine-shrimp-886.convex.site/api/aura/feedback`
+  answers 404 "No matching routes found" (checked 2026-09-23). The Linux
+  v1.1.8 form shows "Couldn't send feedback (HTTP 404)"; nothing is stored.
+- **Server code exists, unmerged:** Wayfinder-OS PR #151,
+  branch `feat/aura-feedback-dev` ("desktop feedback ingestion + Slack
+  notify"). Needs merge + prod deploy + the Slack webhook env var. No client
+  change needed.
+
 ## 6. Shared changes already on this branch that Linux should validate
 
 The audit accepted these low-risk shared changes (they run on Linux after the

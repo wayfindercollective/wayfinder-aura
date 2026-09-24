@@ -195,3 +195,39 @@ def test_repair_resets_only_auras_own_entry_then_asks_again(monkeypatch):
 def test_repair_is_a_noop_off_macos(monkeypatch):
     monkeypatch.setattr(macos_permissions.sys, "platform", "linux")
     assert macos_permissions.repair_permission("accessibility") is False
+
+
+def _ask_env(monkeypatch, *, trusted, bundle):
+    calls, prompts = [], []
+    monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_permissions, "own_bundle_identifier", lambda: bundle)
+    monkeypatch.setattr(macos_permissions.subprocess, "run",
+                        lambda args, **k: calls.append(args)
+                        or type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(macos_permissions, "request_accessibility_permission",
+                        lambda *, prompt: prompts.append(prompt) or trusted)
+    return calls, prompts
+
+
+def test_allow_clears_auras_stale_entry_before_prompting(monkeypatch):
+    # An entry from an older signature makes the Settings switch grant that
+    # copy instead of this one; "allow" resets Aura's own entry, then asks.
+    calls, prompts = _ask_env(monkeypatch, trusted=False,
+                              bundle=macos_permissions.AURA_BUNDLE_ID)
+    assert macos_permissions.ask_for_permission("accessibility") is True
+    assert calls[0] == ["/usr/bin/tccutil", "reset", "Accessibility",
+                        macos_permissions.AURA_BUNDLE_ID]
+    assert "Privacy_Accessibility" in calls[1][1]  # then the Settings pane
+    assert prompts == [False, True]
+
+
+def test_allow_never_resets_a_working_grant(monkeypatch):
+    calls, _ = _ask_env(monkeypatch, trusted=True, bundle=macos_permissions.AURA_BUNDLE_ID)
+    macos_permissions.ask_for_permission("accessibility")
+    assert not any("tccutil" in str(c) for c in calls)
+
+
+def test_allow_never_resets_from_a_source_run(monkeypatch):
+    calls, _ = _ask_env(monkeypatch, trusted=False, bundle="org.python.python")
+    macos_permissions.ask_for_permission("accessibility")
+    assert not any("tccutil" in str(c) for c in calls)
