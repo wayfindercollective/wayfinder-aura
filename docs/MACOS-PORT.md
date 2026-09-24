@@ -15,6 +15,19 @@ end.
 - **Linux ideas are written down, not implemented** — see
   [LINUX-FOLLOWUPS-FROM-MACOS.md](LINUX-FOLLOWUPS-FROM-MACOS.md) and the table
   at the end of this file.
+- **Exception — deliberate cross-platform product changes (2026-09-24).**
+  Approved by the owner and backed by `docs/EVAL-2026-09-24.md`, these change
+  Linux too and need a Linux check before `main`:
+  - Normal (was "Minimal"/"Raw") is instant `normal_filler_removal()` — no
+    cleanup model; `normal_llm_cleanup` opts back in.
+  - Styles a cleanup model can't do are greyed out (`STYLE_SUPPORT`,
+    `style_availability()`); cleanup falls back instead of running them.
+  - Custom Vocabulary: Settings card, "heard -> write" corrections, and user
+    terms last in Whisper's prompt budget.
+  - The cleanup model is only kept loaded when the chosen style needs it.
+  - Model descriptions and Ultra copy state measured results.
+  Linux check: re-run `scripts/eval_matrix.py --stages tone` on the Linux
+  cleanup path; confirm Normal-without-model is wanted there.
 
 Target: macOS 14+ on Apple silicon (arm64 build), bundle ID
 `io.wayfindercollective.WayfinderAura`, signed with *Developer ID Application:
