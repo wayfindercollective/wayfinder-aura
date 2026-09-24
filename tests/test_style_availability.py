@@ -32,7 +32,7 @@ def test_styles_need_cleanup_turned_on(model):
     table = P.style_availability(_cfg(model("google_gemma-3-1b-it-Q4_K_M.gguf"),
                                       post_processing_enabled=False))
     ok, reason = table["professional"]["standard"]
-    assert ok is False and "Turn on text cleanup" in reason
+    assert ok is False and "Turn on Post-Processing" in reason
 
 
 def test_styles_need_a_cleanup_model_on_disk(tmp_path):

@@ -10467,7 +10467,9 @@ class WayfinderApp(ctk.CTk):
         )
         
         # === Post-Processing Section ===
-        self._create_mode_section_header(parent, "Post-Processing (LLM Cleanup)")
+        # Kept so "Turn on / download a model" hints can scroll straight here.
+        self._postproc_section_anchor = self._create_mode_section_header(
+            parent, "Post-Processing (LLM Cleanup)")
         
         # Post-processing toggle
         postproc_enabled = self.config.get("post_processing_enabled", False)
@@ -10697,7 +10699,7 @@ class WayfinderApp(ctk.CTk):
                 tooltip="Configure API key and model for LLM post-processing",
             )
     
-    def _create_mode_section_header(self, parent, text: str) -> None:
+    def _create_mode_section_header(self, parent, text: str):
         """Create a section header within mode settings.
 
         Label + hairline divider filling the rest of the row — sub-sections get
@@ -10717,6 +10719,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkFrame(
             wrap, fg_color=COLORS["border_subtle"], height=1,
         ).pack(side="left", fill="x", expand=True, padx=(12, 0))
+        return wrap
     
     def _on_remote_provider_changed(self, display_value: str) -> None:
         """Handle remote provider selection change."""
@@ -11680,6 +11683,7 @@ class WayfinderApp(ctk.CTk):
             if "Settings" in reason:  # cleanup off / no model: take them there
                 try:
                     self._switch_tab("settings")
+                    self._scroll_settings_to(getattr(self, "_postproc_section_anchor", None))
                 except Exception:
                     pass
             return

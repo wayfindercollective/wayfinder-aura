@@ -713,9 +713,9 @@ def style_availability(config: dict) -> Dict[str, Dict[str, tuple]]:
                 result[tone][intensity] = (True, None)
                 continue
             if not config.get("post_processing_enabled", True):
-                reason = "Turn on text cleanup in Settings to use styles."
+                reason = "Turn on Post-Processing in Settings to use styles."
             elif model_missing:
-                reason = "Download a cleanup model in Settings (Gemma 3 1B is recommended)."
+                reason = "Download a cleanup model in Settings ▸ Post-Processing (Gemma 3 1B is recommended)."
             elif intensity == "strong" and not strong_ok:
                 reason = f"Strong needs a larger model than {pretty} (Qwen3 4B or cloud)."
             elif support and (tone, intensity) in support.get("unsupported", ()):
