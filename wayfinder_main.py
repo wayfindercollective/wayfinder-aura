@@ -11298,7 +11298,7 @@ class WayfinderApp(ctk.CTk):
         # Note: intensity modes are model-limited — cloud (Ultra) gives the best results
         ctk.CTkLabel(
             modes_frame,
-            text="💡 Strong & Caricature shine with Cloud AI (Ultra) — or a 🎭-marked local model like Qwen3 4B.",
+            text="Strong and Caricature need Qwen3 4B or a cloud model (Ultra).",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", pady=(6, 0))
