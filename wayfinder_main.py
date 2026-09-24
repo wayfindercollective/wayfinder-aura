@@ -5736,6 +5736,14 @@ class WayfinderApp(ctk.CTk):
         self._duck_failure_message = None
         
         self.executor = ThreadPoolExecutor(max_workers=1)
+        if IS_MACOS:
+            # The paste thread must never read the keyboard layout itself (it
+            # hangs on macOS 27); read it here, on the main thread.
+            try:
+                from wayfinder.core import macos_paste
+                macos_paste.refresh_layout_cache()
+            except Exception:
+                pass
         self.logs = []
         
         # UI scaling for high-DPI screens (saved in config)
@@ -20296,6 +20304,15 @@ class WayfinderApp(ctk.CTk):
             elif old_state == AppState.PROCESSING:
                 self._cancel_processing_watchdog()
 
+            # PASTING watchdog (macOS): a paste is a single Cmd+V, so one that
+            # hasn't finished in seconds is hung. Linux types keystroke by
+            # keystroke (long text legitimately takes a while), so it is not armed there.
+            if IS_MACOS:
+                if new_state == AppState.PASTING:
+                    self._start_paste_watchdog()
+                elif old_state == AppState.PASTING:
+                    self._cancel_paste_watchdog()
+
             # Optional RECORDING cap (config max_recording_duration; 0 = off).
             if new_state == AppState.RECORDING:
                 self._start_recording_watchdog()
@@ -20439,6 +20456,47 @@ class WayfinderApp(ctk.CTk):
             "post-processing step. Reset to idle; see the activity log for details.",
             self.session_generation,
         )
+
+    # === PASTING watchdog (macOS; recover from a paste that never returns) ===
+
+    PASTE_WATCHDOG_S = 10
+
+    def _start_paste_watchdog(self) -> None:
+        self._cancel_paste_watchdog()
+        gen = self.session_generation
+        self._paste_watchdog_job = self.after(
+            self.PASTE_WATCHDOG_S * 1000, lambda: self._on_paste_timeout(gen)
+        )
+
+    def _cancel_paste_watchdog(self) -> None:
+        job = getattr(self, "_paste_watchdog_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._paste_watchdog_job = None
+
+    def _on_paste_timeout(self, gen: int) -> None:
+        """PASTING outlived the watchdog: hand the text over and reset to IDLE."""
+        self._paste_watchdog_job = None
+        if self.app_state != AppState.PASTING or gen != self.session_generation:
+            return
+        # The hung worker holds the one-thread injection executor; without a
+        # fresh one every later paste would queue behind it forever.
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.session_generation += 1
+        text = getattr(self, "_pasting_text", "") or ""
+        copied = False
+        if text:
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(text)
+                copied = True
+            except Exception:
+                pass
+        where = "on the clipboard: press ⌘V." if copied else "in History."
+        self.on_error(f"The paste didn't finish. Your text is {where}", self.session_generation)
 
     # === RECORDING cap (optional; max_recording_duration seconds, 0 = off) ===
 
@@ -21326,6 +21384,13 @@ class WayfinderApp(ctk.CTk):
         self._set_output_style(next_style)
 
     def start_recording(self):
+        if IS_MACOS:
+            # Pick up a keyboard-layout switch before this dictation's paste.
+            try:
+                from wayfinder.core import macos_paste
+                self.after_idle(macos_paste.refresh_layout_cache)
+            except Exception:
+                pass
         try:
             self.log("🎤 Listening...")
             # A new dictation clears any stale runtime-error banner from the last run.
@@ -22001,6 +22066,7 @@ class WayfinderApp(ctk.CTk):
             self.on_injection_done(g)  # reuse the normal state-reset (no inject_text)
             return
 
+        self._pasting_text = processed_text
         self.update_state(AppState.PASTING)
         g = gen if gen is not None else self.session_generation
         self.executor.submit(self.do_inject, processed_text, g)

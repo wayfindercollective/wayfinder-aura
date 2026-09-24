@@ -311,7 +311,7 @@ def test_post_command_v_releases_command_so_it_cannot_stick(monkeypatch):
     quartz.CGEventSetFlags = lambda event, flags: event.__setitem__("flags", flags)
     quartz.CGEventPost = lambda _tap, event: posted.append(event)
     monkeypatch.setitem(__import__("sys").modules, "Quartz", quartz)
-    monkeypatch.setattr(real, "keycode_for_character", lambda _c: 0x09)
+    monkeypatch.setattr(real, "_v_keycode", 0x09)
 
     real.post_command_v()
 

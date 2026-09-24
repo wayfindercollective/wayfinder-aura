@@ -6,6 +6,10 @@
 * ``post_command_v`` — Cmd+V posted straight through Quartz. The V keycode
   comes from the active keyboard layout (on Dvorak, QWERTY's V position is K,
   so a fixed keycode sent Cmd+K: Terminal clears scrollback, Slack searches).
+  The layout is read on the MAIN thread only (``refresh_layout_cache``): on
+  macOS 27 the Text Input Sources API asserts it is on the main queue, and a
+  call from the paste thread hung that thread forever - Aura sat on
+  "Typing..." and nothing was pasted.
   No PyAutoGUI: its ~140ms of built-in pauses and its corner fail-safe (which
   aborts the paste whenever the pointer rests in a screen corner) are gone.
 * ``DeferredRestore`` — the previous clipboard comes back ~0.8s after the paste
@@ -31,6 +35,32 @@ _UC_KEY_TRANSLATE_NO_DEAD_KEYS = 1
 
 RESTORE_DELAY_S = 0.8
 
+# Layout-aware V keycode, read on the main thread (see refresh_layout_cache).
+_v_keycode: int | None = None
+
+
+def _on_main_thread() -> bool:
+    return threading.current_thread() is threading.main_thread()
+
+
+def refresh_layout_cache() -> None:
+    """Re-read the keyboard layout's V key. Main thread only (no-op elsewhere).
+
+    Called at startup and whenever a recording starts, so a layout switch
+    between dictations is picked up before the next paste.
+    """
+    global _v_keycode
+    if not _on_main_thread():
+        return
+    code = keycode_for_character("v")
+    if code is not None:
+        _v_keycode = code
+
+
+def paste_keycode() -> int:
+    """V keycode for the paste: cached layout value, else the ANSI position."""
+    return _v_keycode if _v_keycode is not None else _KVK_ANSI_V
+
 
 def accessibility_trusted() -> bool | None:
     """True/False from AXIsProcessTrusted, or None if it cannot be queried."""
@@ -43,7 +73,12 @@ def accessibility_trusted() -> bool | None:
 
 
 def keycode_for_character(character: str) -> int | None:
-    """Virtual keycode that types ``character`` (no modifiers) in the active layout."""
+    """Virtual keycode that types ``character`` (no modifiers) in the active layout.
+
+    None off the main thread: Text Input Sources must not be called there.
+    """
+    if not _on_main_thread():
+        return None
     try:
         carbon = ctypes.cdll.LoadLibrary(_CARBON)
         cf = ctypes.cdll.LoadLibrary(_CORE_FOUNDATION)
@@ -106,9 +141,7 @@ def post_command_v() -> None:
         kCGHIDEventTap,
     )
 
-    code = keycode_for_character("v")
-    if code is None:
-        code = _KVK_ANSI_V
+    code = paste_keycode()
     sequence = (
         (_KVK_COMMAND, True, kCGEventFlagMaskCommand),
         (code, True, kCGEventFlagMaskCommand),
