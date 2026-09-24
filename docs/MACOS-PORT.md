@@ -133,6 +133,34 @@ with no Terminal:
   managers, and the previous clipboard is restored.
 - Auto-Enter checks the frontmost window hasn't changed before pressing
   Return.
+- The layout-aware V key is read on the main thread only (startup and each
+  recording start): on macOS 27 the Text Input Sources API asserts the main
+  queue and hung the paste thread. A 10 s PASTING watchdog (longer for long
+  game-chat text) hands the text to the clipboard if a paste ever stalls.
+
+### Game chat (World of Warcraft first)
+
+`core/macos_game_chat.py`, Settings ▸ "Dictate into game chat" and "Send game
+messages" (both on by default; `macos_game_chat`, `game_chat_send`).
+
+- When the app in front at paste time matches a game profile (WoW retail,
+  Classic and Classic Era by bundle id `com.blizzard.worldofwarcraft*` or
+  name), Aura presses Return to open chat, pastes, and presses Return to
+  send. Dictation longer than WoW's 255-character limit goes out as several
+  messages split at sentence, then word, breaks, 0.45 s apart.
+- In games Aura only pastes, never types keys: letters are keybinds there,
+  and a paste that misses the chat box does nothing.
+- Return is only pressed while the matched game is still frontmost (an
+  alt-tab mid-send stops the sequence); modifiers are released first
+  (Option+Return toggles WoW's window mode).
+- The player does not press Enter first: tap the shortcut, speak, tap again.
+- Other profiles (Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings
+  Online, Albion Online: Return opens chat; RuneScape and EVE Online: chat
+  input is live) use each game's known convention with a conservative
+  200-character split; none has been tried in the game yet.
+- Status: unit-tested with recorded key sequences. Needs an in-game check in
+  WoW (paste into the chat box, the 255 split, Classic); a guarded live
+  harness is in the session notes.
 
 ## 6. Speech and cleanup pipeline
 

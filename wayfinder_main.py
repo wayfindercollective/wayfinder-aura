@@ -1360,6 +1360,18 @@ SETTING_TOOLTIPS = {
         "Turn it off if your menu bar is crowded."
     ),
     "ui_scale": "Size of Aura's window and text.",
+    "macos_game_chat": (
+        "In World of Warcraft, don't press Enter first: tap your shortcut, speak, "
+        "tap again. Aura opens chat, pastes and sends. Long messages are split to "
+        "fit WoW's 255-character limit.\n"
+        "Also set up for Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings "
+        "Online, Albion Online, RuneScape and EVE Online. In games Aura only pastes, "
+        "never types keys, so dictation can't trigger a keybind."
+    ),
+    "game_chat_send": (
+        "On: Aura presses Enter to send each message.\n"
+        "Off: the text is left in the chat box for you to check and send."
+    ),
     "overlay_type": (
         "Always On: the pill stays on screen and never takes focus.\n"
         "Disappearing: it shows only while you dictate.\n"
@@ -9069,6 +9081,7 @@ class WayfinderApp(ctk.CTk):
         )
 
         if IS_MACOS:
+            self._create_game_chat_rows(system_content)
             self._create_login_item_row(system_content)
 
         yield "system"
@@ -17085,6 +17098,30 @@ class WayfinderApp(ctk.CTk):
 
         threading.Thread(target=_worker, daemon=True, name="feedback-post").start()
 
+    def _create_game_chat_rows(self, parent) -> None:
+        """macOS: dictate into World of Warcraft (and other MMO) chat."""
+        self.game_chat_var = ctk.BooleanVar(value=bool(self.config.get("macos_game_chat", True)))
+        self.game_chat_send_var = ctk.BooleanVar(value=bool(self.config.get("game_chat_send", True)))
+
+        def _toggled(key, var, on_text, off_text):
+            self.config[key] = bool(var.get())
+            save_config(self.config)
+            self.log("🎮 " + (on_text if var.get() else off_text))
+
+        self.create_toggle_row(
+            parent, "Dictate into game chat", self.game_chat_var,
+            lambda: _toggled("macos_game_chat", self.game_chat_var,
+                             "Game chat on", "Game chat off: games get a plain paste"),
+            tooltip=SETTING_TOOLTIPS["macos_game_chat"],
+        )
+        self.create_toggle_row(
+            parent, "Send game messages", self.game_chat_send_var,
+            lambda: _toggled("game_chat_send", self.game_chat_send_var,
+                             "Game messages send automatically",
+                             "Game messages are left in chat for you to send"),
+            tooltip=SETTING_TOOLTIPS["game_chat_send"],
+        )
+
     def _create_login_item_row(self, parent) -> None:
         """macOS: "Open at login" (SMAppService). Off until the user turns it on."""
         try:
@@ -20426,8 +20463,12 @@ class WayfinderApp(ctk.CTk):
     def _start_paste_watchdog(self) -> None:
         self._cancel_paste_watchdog()
         gen = self.session_generation
+        # Game chat sends long dictation as several messages (~1 s each), so
+        # the budget grows with the text; a plain paste is still ~10 s.
+        text_len = len(getattr(self, "_pasting_text", "") or "")
+        timeout_s = self.PASTE_WATCHDOG_S + text_len // 100
         self._paste_watchdog_job = self.after(
-            self.PASTE_WATCHDOG_S * 1000, lambda: self._on_paste_timeout(gen)
+            int(timeout_s * 1000), lambda: self._on_paste_timeout(gen)
         )
 
     def _cancel_paste_watchdog(self) -> None:
@@ -22102,6 +22143,14 @@ class WayfinderApp(ctk.CTk):
             if gen is not None and gen != self.session_generation:
                 return
 
+            # macOS game chat: an MMO (World of Warcraft first) is in front, so
+            # open its chat box, paste and send instead of a plain paste.
+            game_chat = getattr(self, "_inject_into_game_chat", None)
+            if IS_MACOS and game_chat is not None and self.config.get("macos_game_chat", True):
+                if game_chat(text, gen):
+                    self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
+                    return
+
             # Phase 3.2: optional desktop clipboard paste when focus already drifted
             # and the type backend cannot retarget (Wayland ydotool/wtype). Off by
             # default — paste can still hit the wrong field if the user refocused
@@ -22175,6 +22224,40 @@ class WayfinderApp(ctk.CTk):
             self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
+
+    def _inject_into_game_chat(self, text: str, gen=None) -> bool:
+        """macOS: dictate into a supported game's chat. False = not a game.
+
+        Runs on the injection worker. Raises (-> INJECTION_ERROR) if the game
+        left the foreground mid-send; the text stays in History.
+        """
+        from wayfinder.core import macos_game_chat as game_chat
+        from wayfinder.core.injector import inject_text, press_enter
+
+        pid, bundle_id, app_name = game_chat.frontmost_app()
+        profile = game_chat.match_profile(bundle_id, app_name)
+        if profile is None:
+            return False
+        send = bool(self.config.get("game_chat_send", True))
+        self.log(
+            f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste'}"
+            f"{'' if profile.open_chat else ' (chat already live)'}"
+        )
+        try:
+            count = game_chat.send_to_chat(
+                text, profile,
+                game_pid=pid,
+                send=send,
+                paste=lambda message: inject_text(message, typing_speed="instant"),
+                press_return=press_enter,
+                frontmost_pid=lambda: game_chat.frontmost_app()[0],
+                still_current=lambda: gen is None or gen == self.session_generation,
+            )
+        except game_chat.GameChatAborted as exc:
+            raise InjectionError(f"Game chat stopped: {exc}. Your text is in History.") from exc
+        if count > 1:
+            self.log(f"🎮 Sent as {count} messages ({profile.name} chat limit {profile.max_chars})")
+        return True
 
     def on_injection_done(self, gen=None):
         # Ignore completion of a superseded session (force_reset / newer recording).

@@ -344,3 +344,11 @@ merge); a Linux pass should confirm each behaves well:
   `temperature_inc=0` per request (latent: fallback changed no output in the
   eval). Faster-Whisper still uses the accuracy_mode presets, unmeasured.
 
+### Game chat for MMOs (from macOS, 2026-09-24)
+- macOS opens a supported game's chat, pastes and sends, splitting at the
+  game's chat limit (`core/macos_game_chat.py`: profiles, `split_for_chat`,
+  `send_to_chat` with injectable paste/Return/frontmost). The profile table
+  and splitter are platform-neutral; on Linux desktop (WoW under Wine/Proton,
+  FFXIV via XIVLauncher) the same flow could use ydotool/xdotool paste plus
+  Return, with the frontmost check from the active window id.
+

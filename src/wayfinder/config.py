@@ -377,6 +377,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Master switch for the on-screen status pill. Off = no visual overlay; a
     # tray-only overlay subprocess still hosts the Qt StatusNotifier tray on Linux.
     "overlay_enabled": True,
+    # macOS game chat: when World of Warcraft (or another supported MMO) is in
+    # front, open its chat box, paste and send (src/wayfinder/core/macos_game_chat.py).
+    "macos_game_chat": True,
+    "game_chat_send": True,
     # SteamOS Game Mode dictation (audio cues + rumble, no overlay). This module is the
     # single source of DEFAULT_CONFIG — wayfinder_main.py imports it (no mirror to keep in sync).
     "game_mode_dictation": False,
