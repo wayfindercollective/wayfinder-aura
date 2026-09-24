@@ -8185,9 +8185,43 @@ class WayfinderApp(ctk.CTk):
         finally:
             self._settings_build_iterator = None
 
-    def _switch_tab(self, tab_id: str) -> None:
+    def _inspect_ui(self, tab_id: str) -> None:
+        """Dump a tab's live widget tree (headless QA; see wayfinder.ui.ui_inspect).
+
+        Shows the tab without the Ultra check - inspection only reads the UI;
+        choosing a style stays gated - then returns to the previous tab.
+        """
+        previous = getattr(self, "active_tab", "dictate")
+        try:
+            self._switch_tab(tab_id, inspection=True)
+        except Exception as exc:
+            self.log(f"⚠ Inspect {tab_id}: {exc}")
+            return
+
+        def _dump():
+            try:
+                from wayfinder.config import SOCKET_PATH
+                from wayfinder.ui.ui_inspect import write_inspection
+
+                self.update_idletasks()
+                path = Path(SOCKET_PATH).parent / f"ui-inspect-{tab_id}.json"
+                summary = write_inspection(self.tab_frames[tab_id], self, path)
+                self.log(f"🔎 Inspected {tab_id}: {len(summary['texts'])} texts, "
+                         f"{len(summary['clipped'])} clipped → {path.name}")
+            except Exception as exc:
+                self.log(f"⚠ Inspect {tab_id} failed: {exc}")
+            finally:
+                if previous != tab_id:
+                    try:
+                        self._switch_tab(previous)
+                    except Exception:
+                        pass
+
+        self.after(400, _dump)  # let layout and label fitting settle
+
+    def _switch_tab(self, tab_id: str, inspection: bool = False) -> None:
         """Switch to the specified tab."""
-        required_feature = feature_for_tab(tab_id)
+        required_feature = None if inspection else feature_for_tab(tab_id)
         if required_feature:
             gate = getattr(self, "feature_gate", None)
             try:
@@ -21184,6 +21218,9 @@ class WayfinderApp(ctk.CTk):
         elif event_type == EventType.SWITCH_TAB:
             if data in ("dictate", "settings", "style", "history"):
                 self._switch_tab(data)
+        elif event_type == EventType.INSPECT_UI:
+            if data in ("dictate", "settings", "style", "history"):
+                self._inspect_ui(data)
         elif event_type == EventType.TRANSCRIPTION_DONE:
             text, gen = self._split_gen(data)
             self.on_transcription_done(text, gen)
