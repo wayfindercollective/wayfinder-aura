@@ -66,6 +66,63 @@ except ImportError:  # standalone script run — no bundle env to scrub
         return env
 
 
+_MACOS_QUIT_HANDLER = None
+
+
+def _fourcc(code: str) -> int:
+    return int.from_bytes(code.encode("ascii"), "big")
+
+
+def _forward_quit_to_main_app(timeout: float = 0.5) -> bool:
+    """Ask the main Aura process to quit through its control socket."""
+    try:
+        import socket as _socket
+        from wayfinder.config import SOCKET_PATH
+
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(str(SOCKET_PATH))
+            sock.sendall(b"quit\n")
+        finally:
+            sock.close()
+        return True
+    except Exception:
+        return False
+
+
+def install_macos_quit_handler(platform_name: str | None = None) -> bool:
+    """Never refuse a Quit Apple event in the overlay helper (macOS).
+
+    The helper runs from the same bundle, so macOS treats it as a second
+    "Wayfinder Aura" app: logout/restart/shutdown and AppleScript's `quit` can
+    be delivered to it. Qt refused that event here (the pill stayed up, which
+    interrupts a logout). Take over kAEQuitApplication: hand the quit to the
+    main app - which stops everything, including this helper - and exit now.
+    Must run after Qt finished launching, or Qt re-registers its own handler.
+    """
+    global _MACOS_QUIT_HANDLER
+    if (platform_name or sys.platform) != "darwin":
+        return False
+    try:
+        from Foundation import NSAppleEventManager, NSObject
+
+        class _QuitHandler(NSObject):
+            def handleQuit_withReplyEvent_(self, _event, _reply):
+                _forward_quit_to_main_app()
+                os._exit(0)
+
+        handler = _QuitHandler.alloc().init()
+        NSAppleEventManager.sharedAppleEventManager().setEventHandler_andSelector_forEventClass_andEventID_(
+            handler, "handleQuit:withReplyEvent:", _fourcc("aevt"), _fourcc("quit"),
+        )
+        _MACOS_QUIT_HANDLER = handler  # keep the delegate alive
+        return True
+    except Exception as exc:
+        print(f"overlay: could not install the macOS quit handler ({exc})", file=sys.stderr, flush=True)
+        return False
+
+
 def configure_macos_overlay_as_accessory(
     platform_name: str | None = None,
 ) -> bool:
@@ -2570,6 +2627,10 @@ def run_overlay():
     app = QApplication([sys.argv[0]])
     configure_macos_overlay_as_accessory()
     app.setQuitOnLastWindowClosed(False)
+    if sys.platform == "darwin":
+        # After [NSApp finishLaunching] (first event-loop turn), so Qt's own
+        # quit handler cannot replace ours.
+        QTimer.singleShot(0, install_macos_quit_handler)
 
     # Give KDE's StatusNotifier host the identity it needs to render our tray item.
     # Without an app name / desktop-file name / window icon, Plasma's systemtray reads

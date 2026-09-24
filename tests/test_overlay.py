@@ -733,3 +733,47 @@ def test_overlay_screen_follows_pointer_on_macos_only(
     monkeypatch.setattr(overlay_module.QCursor, "pos", staticmethod(lambda: None))
 
     assert overlay_module.GlassmorphicOverlay._target_screen() == expected
+
+
+class TestMacQuitAppleEvent:
+    """The overlay helper must never refuse Quit (logout/restart/shutdown)."""
+
+    def test_quit_is_forwarded_to_the_main_app(self, tmp_path, monkeypatch):
+        import socket
+        import threading
+        import wayfinder.config as config_module
+        from wayfinder.ui import overlay as ov
+
+        import tempfile
+        # AF_UNIX paths are limited to 104 bytes on macOS; pytest's tmp_path is longer.
+        path = Path(tempfile.mkdtemp(prefix="wfq", dir="/tmp")) / "a.sock"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(path))
+        server.listen(1)
+        got = []
+
+        def accept():
+            conn, _ = server.accept()
+            got.append(conn.recv(64))
+            conn.close()
+
+        thread = threading.Thread(target=accept, daemon=True)
+        thread.start()
+        monkeypatch.setattr(config_module, "SOCKET_PATH", str(path))
+        assert ov._forward_quit_to_main_app() is True
+        thread.join(2)
+        server.close()
+        assert got == [b"quit\n"]
+
+    def test_forwarding_without_a_main_app_is_harmless(self, tmp_path, monkeypatch):
+        import wayfinder.config as config_module
+        from wayfinder.ui import overlay as ov
+        monkeypatch.setattr(config_module, "SOCKET_PATH", str(tmp_path / "missing.sock"))
+        assert ov._forward_quit_to_main_app() is False
+
+    def test_handler_installs_on_macos_only(self):
+        import sys as _sys
+        from wayfinder.ui import overlay as ov
+        assert ov.install_macos_quit_handler("linux") is False
+        if _sys.platform == "darwin":
+            assert ov.install_macos_quit_handler() is True
