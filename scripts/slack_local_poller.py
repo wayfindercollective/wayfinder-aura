@@ -142,6 +142,15 @@ def fetch_releases() -> List[Dict]:
 
 # --- secrets -------------------------------------------------------------------
 
+WEBHOOK_PREFIX = "https://hooks.slack.com/"
+
+
+def valid_webhook(value: str) -> bool:
+    """Only a Slack incoming-webhook URL may be used (a mistyped password in
+    the Keychain slot must never be sent anywhere, not even as a hostname)."""
+    return value.startswith(WEBHOOK_PREFIX) and len(value) > len(WEBHOOK_PREFIX) + 20
+
+
 def keychain(service: str) -> str:
     out = subprocess.run(
         ["/usr/bin/security", "find-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", service, "-w"],
@@ -230,6 +239,12 @@ def main() -> int:
     webhooks = {"dev": keychain("SLACK_WEBHOOK_DEV"), "prod": keychain("SLACK_WEBHOOK_PROD")}
     if not webhooks["dev"] or not webhooks["prod"]:
         log("Slack webhooks are not in the Keychain yet (see install_slack_local_poller.sh); waiting")
+        return 0
+    bad = [name for name, value in webhooks.items() if not valid_webhook(value)]
+    if bad:
+        # Never log the value: it may be something the user typed by mistake.
+        log(f"Keychain entry for {', '.join(bad)} is not a Slack webhook URL "
+            f"(must start with {WEBHOOK_PREFIX}); not posting")
         return 0
     try:
         refresh_mirror()

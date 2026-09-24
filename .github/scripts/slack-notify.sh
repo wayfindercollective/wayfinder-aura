@@ -62,6 +62,12 @@ post() {  # $1 = prod|dev, $2 = text
     echo "::warning::SLACK_WEBHOOK_$(echo "$channel" | tr '[:lower:]' '[:upper:]') is not set on this repo; skipping the Slack post."
     return 0
   fi
+  case "$webhook" in
+    https://hooks.slack.com/*) ;;
+    *)  # never send (or print) a value that is not a Slack webhook
+      echo "::error::SLACK_WEBHOOK_$(echo "$channel" | tr '[:lower:]' '[:upper:]') is not a Slack webhook URL; not posting."
+      return 1 ;;
+  esac
   payload=$(jq -n --arg text "$text" '{ text: $text }')
   response=$(curl -sS --connect-timeout 10 --max-time 30 -w $'\n%{http_code}' -X POST "$webhook" \
     -H 'Content-Type: application/json' -d "$payload" 2>&1)

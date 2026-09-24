@@ -109,3 +109,24 @@ def test_notify_script_reads_commits_from_another_git_dir(tmp_path):
                          cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert "=== DRY RUN -> dev ===" in out.stdout and head[:8] in out.stdout
+
+
+@pytest.mark.parametrize("value,ok", [
+    ("https://hooks.slack.com/services/T000/B000/abcdefghijklmnop", True),
+    ("abc123", False),                          # a password typed by mistake
+    ("http://hooks.slack.com/services/x/y/z", False),
+    ("https://example.com/hooks.slack.com/services/a/b/c", False),
+    ("", False),
+])
+def test_only_slack_webhook_urls_are_ever_used(value, ok):
+    assert poller.valid_webhook(value) is ok
+
+
+def test_main_refuses_a_non_webhook_keychain_value(monkeypatch, capsys):
+    values = {"SLACK_WEBHOOK_DEV": "abc123",
+              "SLACK_WEBHOOK_PROD": "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"}
+    monkeypatch.setattr(poller, "keychain", lambda service: values.get(service, ""))
+    monkeypatch.setattr(poller, "refresh_mirror", lambda: pytest.fail("must not fetch or post"))
+    assert poller.main() == 0
+    out = capsys.readouterr().out
+    assert "dev" in out and "not a Slack webhook" in out and "abc123" not in out
