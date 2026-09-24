@@ -319,12 +319,13 @@ class TestAudioDucker:
         assert ducker.duck().status is DuckingStatus.UNAVAILABLE
         assert ducker.restore().status is DuckingStatus.UNAVAILABLE
 
+    @patch("wayfinder.utils.audio_ducker._core_audio", return_value=None)
     @patch("wayfinder.utils.audio_ducker._set_macos_volume")
     @patch("wayfinder.utils.audio_ducker._get_macos_volume")
     @patch("wayfinder.utils.audio_ducker.is_macos", return_value=True)
     @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=False)
     def test_macos_duck_does_not_overwrite_user_volume_change(
-        self, _pactl, _macos, get_volume, set_volume, tmp_path
+        self, _pactl, _macos, get_volume, set_volume, _core, tmp_path
     ):
         from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
 
@@ -340,13 +341,14 @@ class TestAudioDucker:
         set_volume.assert_called_once_with(56)
         assert not (tmp_path / "duck.json").exists()
 
+    @patch("wayfinder.utils.audio_ducker._core_audio", return_value=None)
     @patch("wayfinder.utils.audio_ducker._set_macos_volume", return_value=True)
     @patch("wayfinder.utils.audio_ducker._get_macos_volume", return_value=56)
     @patch("wayfinder.utils.audio_ducker._pid_is_alive", return_value=False)
     @patch("wayfinder.utils.audio_ducker.is_macos", return_value=True)
     @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=False)
     def test_macos_recovers_stale_duck_journal(
-        self, _pactl, _macos, _alive, _get, set_volume, tmp_path
+        self, _pactl, _macos, _alive, _get, set_volume, _core, tmp_path
     ):
         from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
 
@@ -362,6 +364,45 @@ class TestAudioDucker:
         assert ducker.recovery_result.status is DuckingStatus.RESTORED
         set_volume.assert_called_once_with(80)
         assert not path.exists()
+
+    @patch("wayfinder.utils.audio_ducker.is_macos", return_value=True)
+    @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=False)
+    def test_macos_output_without_volume_is_reported_once_not_failed(self, _pactl, _macos, tmp_path):
+        from types import SimpleNamespace
+        from wayfinder.utils import audio_ducker
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
+
+        core = SimpleNamespace(output_volume_settable=lambda: False,
+                               output_volume=lambda: None, set_output_volume=lambda v: False)
+        with patch.object(audio_ducker, "_core_audio", return_value=core):
+            ducker = AudioDucker(duck_percent=30, recovery_path=tmp_path / "duck.json")
+            result = ducker.duck()
+        assert result.status is DuckingStatus.UNAVAILABLE
+        assert "no volume control" in result.message
+        assert not (tmp_path / "duck.json").exists()
+
+    @patch("wayfinder.utils.audio_ducker.is_macos", return_value=True)
+    @patch("wayfinder.utils.audio_ducker.is_pactl_available", return_value=False)
+    def test_macos_core_audio_duck_and_restore_tolerates_step_quantisation(self, _pactl, _macos, tmp_path):
+        from types import SimpleNamespace
+        from wayfinder.utils import audio_ducker
+        from wayfinder.utils.audio_ducker import AudioDucker, DuckingStatus
+
+        volume = {"v": 0.80}
+        writes = []
+
+        def set_volume(value):
+            writes.append(round(value, 3))
+            volume["v"] = value + 0.004  # device snaps to its nearest step
+            return True
+
+        core = SimpleNamespace(output_volume_settable=lambda: True,
+                               output_volume=lambda: volume["v"], set_output_volume=set_volume)
+        with patch.object(audio_ducker, "_core_audio", return_value=core):
+            ducker = AudioDucker(duck_percent=30, recovery_path=tmp_path / "duck.json")
+            assert ducker.duck().status is DuckingStatus.APPLIED
+            assert ducker.restore().status is DuckingStatus.RESTORED
+        assert writes == [0.56, 0.8]
 
     @patch("wayfinder.utils.audio_ducker._set_sink_input_channel_volumes")
     @patch("wayfinder.utils.audio_ducker._query_sink_inputs")

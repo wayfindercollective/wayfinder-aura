@@ -101,8 +101,26 @@ def is_macos() -> bool:
     return platform.system() == "Darwin"
 
 
+def _core_audio():
+    """The Core Audio volume helpers, or None when they cannot load."""
+    try:
+        from wayfinder.utils import macos_audio
+
+        return macos_audio if macos_audio._load() is not None else None
+    except Exception:
+        return None
+
+
 def _get_macos_volume() -> int | None:
-    """Get current macOS output volume (0-100). Returns None on failure."""
+    """Get current macOS output volume (0-100). Returns None on failure.
+
+    Core Audio answers in well under a millisecond; osascript took ~150 ms per
+    call (music stayed loud ~0.3 s into speech) and is only the fallback.
+    """
+    core = _core_audio()
+    if core is not None:
+        value = core.output_volume()
+        return None if value is None else int(round(value * 100))
     try:
         result = subprocess.run(
             ["osascript", "-e", "output volume of (get volume settings)"],
@@ -119,6 +137,9 @@ def _get_macos_volume() -> int | None:
 
 def _set_macos_volume(volume: int) -> bool:
     """Set macOS output volume (0-100). Returns True on success."""
+    core = _core_audio()
+    if core is not None:
+        return core.set_output_volume(max(0, min(100, volume)) / 100.0)
     try:
         volume = max(0, min(100, volume))
         result = subprocess.run(
@@ -398,7 +419,8 @@ class AudioDucker:
         if not self._available:
             print("⚠ pactl not available - audio ducking disabled")
         elif self._use_macos:
-            print("ℹ Using macOS osascript for audio ducking")
+            print("ℹ Using macOS " + ("Core Audio" if _core_audio() else "osascript")
+                  + " for audio ducking")
             self.recovery_result = self._recover_stale_macos_journal()
         else:
             self.recovery_result = self._recover_stale_journal()
@@ -613,6 +635,14 @@ class AudioDucker:
                 return self._remember(DuckingResult(DuckingStatus.NO_CHANGE))
 
             if self._use_macos:
+                core = _core_audio()
+                if core is not None and not core.output_volume_settable():
+                    return self._remember(DuckingResult(
+                        DuckingStatus.UNAVAILABLE,
+                        message=("The current sound output has no volume control "
+                                 "(e.g. HDMI/DisplayPort), so music can't be lowered "
+                                 "while you dictate."),
+                    ))
                 current = _get_macos_volume()
                 if current is None:
                     return self._remember(DuckingResult(DuckingStatus.ERROR, message="Could not read system volume."))
@@ -724,8 +754,9 @@ class AudioDucker:
                         failed_count=1,
                         message="Could not inspect system volume before restoring it.",
                     ))
-                if current != target:
+                if abs(current - target) > 1:
                     # User changed volume while recording; never overwrite it.
+                    # (±1: Core Audio may quantise to the device's volume steps.)
                     self._macos_original_volume = None
                     self._macos_ducked_volume = None
                     self._is_ducked = False
