@@ -74,6 +74,26 @@ confirm it on Linux; **Fix sketch** is the macOS fix, for reference.
   wakeups (`perf`/`powertop`) and first-start time; if Vulkan initialises, try
   `GGML_VK_VISIBLE_DEVICES=` (empty) for CPU mode.
 
+### 1.8 The resident llama-server is reachable by any web page
+- **Evidence:** llama-server answers CORS from every origin and, with no API
+  key, accepts `POST /completion` from any site the user visits (the page can
+  read the reply). `/slots` is on by default and can expose the cached prompt,
+  i.e. the last dictation.
+- **Fix sketch (macOS):** a random key per spawn in the child's environment
+  (`LLAMA_API_KEY`, never argv), `Authorization: Bearer` on our requests, and
+  `--no-slots` (`llama_server.py`, darwin-gated).
+
+### 1.9 whisper-server computes token timestamps nobody reads
+- **Evidence:** requests send only file/response_format/prompt, so the server
+  computes per-token timestamps. `no_timestamps=true`: 3-14% faster, same WER
+  (base.en, M3 Ultra). Shared request code; Linux would gain the same.
+
+### 1.10 Cleanup model quality
+- **Evidence (server path, all 5 tones):** Gemma 3 1B (the recommended
+  default) cleans well; Qwen 3.5 2B barely changes text with or without the
+  chat template (it Title-Cases whole sentences in professional). If Linux
+  users have Qwen 3.5 selected, suggest Gemma.
+
 ## 2. Responsiveness
 
 ### 2.1 The 800 ms minimum "processing" display swallows the next hotkey
@@ -93,6 +113,10 @@ confirm it on Linux; **Fix sketch** is the macOS fix, for reference.
 - **Evidence:** the listener thread only enqueues; the Tk loop drains every
   250 ms idle / 100 ms active. A self-pipe + `createfilehandler` wakes Tk
   immediately (works on Linux Tk too).
+
+**Done on macOS (for reference):** self-pipe wake-up (`ui/macos_tk_wakeup.py`),
+capture-before-overlay in `start_recording`, and a press during the 800 ms tail
+pre-empts it (`on_hotkey`). All darwin-gated.
 
 ## 3. Idle CPU / energy
 
@@ -129,6 +153,59 @@ confirm it on Linux; **Fix sketch** is the macOS fix, for reference.
 - **Fix sketch:** only notify when the release has an asset for this platform
   (`.AppImage`/`.flatpak` on Linux, `-macOS-arm64.dmg` on macOS) and link the
   asset directly.
+
+### 4.4 Loopback requests go through `http_proxy`
+- **Evidence:** `urlopen` to 127.0.0.1 honours `http_proxy` unless `no_proxy`
+  lists it, so dictation audio and cleanup text are sent to the proxy.
+- **Fix sketch (macOS):** `utils/loopback_http.py` (proxy-free opener).
+
+### 4.5 API keys are stored and handled loosely
+- Plain text in `config.json`; the temp file is created 0644 before chmod
+  (brief world-readable window); the config dir is not 0700; every native
+  child (whisper/llama servers) inherits the keys through `os.environ`.
+- **Fix sketch (macOS):** Keychain + owner-only writes + env scrub
+  (`utils/macos_keychain.py`, `config.save_config`, `hostexec.bundle_binary_env`).
+  Linux equivalent: Secret Service (libsecret) with the 0600 file as fallback.
+
+### 4.6 Retired / retiring cloud models (affects Linux today)
+- **Every Anthropic model offered is retired**, including the default
+  `claude-3-haiku-20240307` (retired 2026-04-20): Anthropic cleanup fails on
+  every request. Replacements: `claude-haiku-4-5-20251001`, `claude-sonnet-4-6`.
+- `gpt-4-turbo` / `gpt-3.5-turbo` shut down 2026-10-23; `whisper-1` is
+  deprecated (shutdown 2027-02-26, replacement `gpt-transcribe`).
+- **Fix sketch (macOS):** `core/cloud_keys.py` model lists + a config
+  migration of retired IDs (darwin-gated in `config.py`).
+
+### 4.7 Cloud key panels
+- A saved key cannot be removed (empty field + Save keeps it).
+- Saving cleanup settings marks the Groq/OpenAI transcription row
+  "Configured" if any cleanup key exists; the Anthropic label shows "3: ✓".
+- "Set ANTHROPIC_API_KEY env var" wording is stale (keys are in config).
+- No way to verify a key; paste via Ctrl+V keeps stray whitespace.
+- **Fix sketch (macOS):** `_build_macos_key_help` (Verify via each
+  provider's models endpoint, redirects refused, Remove key, format hints).
+
+### 4.8 Auto-Enter focus guard is blind on Wayland
+- `get_active_window()` uses xdotool; on native Wayland it returns None, so
+  "focus changed → skip Enter" never fires. (macOS now uses NSWorkspace.)
+
+### 4.9 Dictations land in clipboard history
+- The paste path puts the dictation on the clipboard without a "transient"
+  hint, so Klipper/CopyQ record every dictation (and the restore). KDE honours
+  `x-kde-passwordManagerHint: secret`; CopyQ honours `application/x-copyq-hidden`.
+
+### 4.10 No sleep inhibit during a dictation or a model download
+- Idle sleep mid-memo cancels the recording; a slept download restarts from
+  zero. Linux: `systemd-inhibit`/portal Inhibit for the same windows.
+
+### 4.11 Misleading logs
+- "✅ Transcription model loaded" is logged even when no model exists
+  (`warm_up_transcription` now returns whether a server started; the UI only
+  uses it on macOS). Concurrent startup logging writes several
+  "session start" headers.
+
+### 4.12 Warm mic keeps Bluetooth headsets in call-quality mode for 30 s
+- macOS now releases Bluetooth mics after 1 s and others after 10 s.
 
 ## 5. UI
 

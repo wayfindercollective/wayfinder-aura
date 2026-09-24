@@ -170,6 +170,31 @@ a = Analysis(
     noarchive=False,
 )
 
+# Qt pieces the Mac build never loads (~11 MB). QtGui links QtDBus, so that
+# framework stays; the overlay only needs cocoa + macstyle, and its icons are
+# PNG (built into QtGui). PDF/SVG image plugins pull in QtPdf/QtSvg.
+_UNUSED_QT = (
+    'PyQt6/Qt6/lib/QtPdf.framework', 'PyQt6/Qt6/lib/QtNetwork.framework',
+    'PyQt6/Qt6/lib/QtSvg.framework',
+    'PyQt6/Qt6/plugins/iconengines', 'PyQt6/Qt6/plugins/generic',
+    'PyQt6/Qt6/plugins/platforms/libqminimal', 'PyQt6/Qt6/plugins/platforms/libqoffscreen',
+    'PyQt6/Qt6/plugins/imageformats/libqpdf', 'PyQt6/Qt6/plugins/imageformats/libqsvg',
+    'PyQt6/Qt6/plugins/imageformats/libqtga', 'PyQt6/Qt6/plugins/imageformats/libqwbmp',
+    'PyQt6/Qt6/plugins/imageformats/libqwebp', 'PyQt6/Qt6/plugins/imageformats/libqtiff',
+    'PyQt6/Qt6/plugins/imageformats/libqgif', 'PyQt6/Qt6/plugins/imageformats/libqmacheif',
+    'PyQt6/Qt6/plugins/imageformats/libqmacjp2',
+    'PyQt6/QtNetwork', 'PyQt6/QtPdf', 'PyQt6/QtSvg',
+)
+
+
+def _keep(entry):
+    dest = entry[0].replace('\\', '/')
+    return not any(dest.startswith(prefix) for prefix in _UNUSED_QT)
+
+
+a.binaries = [entry for entry in a.binaries if _keep(entry)]
+a.datas = [entry for entry in a.datas if _keep(entry)]
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
