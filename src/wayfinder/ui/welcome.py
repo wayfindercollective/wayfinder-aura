@@ -385,6 +385,7 @@ class WelcomePane:
         )
         self.card.place(relx=0.5, rely=0.5, anchor="center")
         self.card.pack_propagate(False)
+        self.card._wf_manages_wrap = True  # its labels rewrap on card resize
         if sys.platform == "darwin":
             # macOS opens content-sized, so the tab area can be smaller than the
             # card. Linux keeps its fixed card (its default window fits it).

@@ -6995,6 +6995,16 @@ class WayfinderApp(ctk.CTk):
         _welcome_done = bool(self.config.get("welcome_completed", False))
         self.active_tab = "dictate" if (_setup_done and _welcome_done) else "settings"
         
+        if IS_MACOS:
+            # Fixed wraplengths sized for the Linux window overflow the Mac's
+            # narrower cards (text clipped on both edges); fit them on map.
+            try:
+                from wayfinder.ui import macos_label_fit
+
+                macos_label_fit.install(self, ctk.CTkLabel)
+            except Exception as exc:
+                self.log(f"⚠ Label fitting unavailable: {exc}")
+
         # Dictate is the returning-user landing page and remains eager. The other tabs contain
         # hundreds of widgets and cost seconds on Deck-class CPUs, so create them on first use.
         # First-run still eagerly creates Settings because that is its active landing page.
