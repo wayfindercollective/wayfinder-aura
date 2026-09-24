@@ -50,6 +50,7 @@ def test_fn_state_is_false_off_macos(monkeypatch):
     assert pynput_listener._darwin_fn_pressed() is False
 
 
+@pytest.mark.posix_only
 def test_physical_key_state_uses_quartz_virtual_keycode(monkeypatch):
     quartz = ModuleType("Quartz")
     quartz.kCGEventSourceStateCombinedSessionState = 0
@@ -61,6 +62,7 @@ def test_physical_key_state_uses_quartz_virtual_keycode(monkeypatch):
     assert pynput_listener._darwin_key_pressed(28) is False
 
 
+@pytest.mark.posix_only
 def test_fn_space_is_tracked_and_suppressed_by_darwin_listener(monkeypatch):
     captured = {}
 
@@ -107,6 +109,7 @@ def test_fn_space_is_tracked_and_suppressed_by_darwin_listener(monkeypatch):
     assert intercept(10, other) is other
 
 
+@pytest.mark.posix_only
 def test_fn_enter_style_chord_is_also_suppressed(monkeypatch):
     captured = {}
 

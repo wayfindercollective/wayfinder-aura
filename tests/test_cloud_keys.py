@@ -99,6 +99,7 @@ def test_model_lists_contain_no_retired_ids():
     assert not retired & set(ck.OPENAI_CLEANUP_MODELS + ck.ANTHROPIC_CLEANUP_MODELS)
 
 
+@pytest.mark.posix_only
 def test_macos_config_moves_retired_models(tmp_path, monkeypatch):
     import wayfinder.config as config_module
     monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)

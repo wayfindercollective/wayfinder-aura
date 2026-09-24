@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from wayfinder.utils import macos_login_item as L
 
 
@@ -13,6 +15,7 @@ def test_not_available_off_macos(monkeypatch):
     assert L.set_enabled(True) == (False, "Available in the installed app.")
 
 
+@pytest.mark.posix_only
 def test_source_run_is_not_a_login_item(monkeypatch):
     import Foundation
 

@@ -5,6 +5,8 @@ import json
 import os
 import stat
 
+import pytest
+
 from wayfinder.ui import ui_inspect as U
 
 
@@ -29,6 +31,7 @@ class _W:
     def get(self, *a): return self._content
 
 
+@pytest.mark.posix_only
 def test_texts_disabled_and_clipped_are_reported(tmp_path):
     ok = _W("CTkLabel", text="Fits", req=80)
     clipped = _W("CTkLabel", text="Much too long for this card", req=300)

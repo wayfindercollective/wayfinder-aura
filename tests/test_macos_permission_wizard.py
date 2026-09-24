@@ -8,6 +8,8 @@ from __future__ import annotations
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 import wayfinder_main
 from wayfinder_main import WayfinderApp
 
@@ -149,6 +151,7 @@ class TestListenerRestartEventWiring:
         assert ns._pynput_listener_started is False
 
 
+@pytest.mark.posix_only
 class TestRelaunch:
     def test_linux_never_relaunches(self, monkeypatch):
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)

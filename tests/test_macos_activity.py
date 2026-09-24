@@ -1,5 +1,6 @@
 """Idle-sleep holds during dictation and downloads (macOS)."""
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,11 @@ def test_begin_is_idempotent_and_end_is_safe(monkeypatch):
 
     monkeypatch.setattr(macos_activity.sys, "platform", "darwin")
     monkeypatch.setattr(macos_activity, "_process_info", lambda: _Info())
+    # begin() imports the option constant from PyObjC's Foundation; provide it
+    # so the test also runs where PyObjC is not installed (Linux/Windows CI).
+    foundation = types.ModuleType("Foundation")
+    foundation.NSActivityUserInitiated = 0x00FFFFFF
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
     assert macos_activity.begin("k", "r") and macos_activity.begin("k", "r")
     macos_activity.end("k")
     macos_activity.end("k")

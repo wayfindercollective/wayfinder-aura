@@ -33,10 +33,16 @@ def pytest_configure(config):
         "AF_UNIX sockets, POSIX file-mode bits, SteamOS/gamemode, GPU/Vulkan "
         "fallback, AppImage/Flatpak packaging); auto-skipped on macOS/Windows.",
     )
+    config.addinivalue_line(
+        "markers",
+        "posix_only: simulates macOS on a POSIX host (os.fchmod, AF_UNIX, "
+        "PyObjC, Tk file handlers, POSIX file modes); auto-skipped on Windows.",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip ``@pytest.mark.linux_only`` tests when not on Linux.
+    """Skip ``@pytest.mark.linux_only`` tests when not on Linux, and
+    ``@pytest.mark.posix_only`` tests on Windows.
 
     Those tests cover mechanisms with no macOS/Windows equivalent, so they can
     only run on Linux. They STILL run on Linux — the production regression gate
@@ -44,6 +50,13 @@ def pytest_collection_modifyitems(config, items):
     without ever weakening Linux coverage. It is not a substitute for a proper
     adapter: shared behavior must stay unmarked and pass on every platform.
     """
+    if sys.platform == "win32":
+        posix_skip = pytest.mark.skip(
+            reason="Needs a POSIX host; not applicable on Windows"
+        )
+        for item in items:
+            if "posix_only" in item.keywords:
+                item.add_marker(posix_skip)
     if sys.platform == "linux":
         return
     skip_marker = pytest.mark.skip(

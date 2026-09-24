@@ -30,6 +30,7 @@ def test_a_full_pipe_never_blocks_put():
     assert q.qsize() == 100_000
 
 
+@pytest.mark.posix_only
 def test_tk_is_woken_immediately():
     tk = pytest.importorskip("tkinter")
     try:

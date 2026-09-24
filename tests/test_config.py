@@ -501,6 +501,7 @@ class TestKeyCodeMappings:
             assert len(codes) >= 2
 
 
+@pytest.mark.posix_only
 class TestHotkeyDefaultMigration:
     """Existing installs keep bare F3/F10; only fresh installs get Super+F2/F3.
 
