@@ -111,20 +111,20 @@ elif IS_APPIMAGE and APPDIR:
 else:
     ICON_PATH = PROJECT_ROOT / "assets" / "icon.png"
 
-# Preferred local post-processing models, best-first. The June 2026 tone eval
-# found Gemma 3 1B the most consistent "gentle guide" cleaner — it reliably
-# applies per-tone formatting (e.g. professional "oh thats tight bro" ->
-# "Oh, very cool brother.") where Qwen 3.5 2B was inconsistent and LFM2.5 echoed
-# the input verbatim. Keep Qwen 3.5 / 2.5 as fallbacks. New models added here are
-# picked up automatically by _pick_llm (no per-environment edits needed).
+# Preferred local post-processing models, best-first among those INSTALLED.
+# The 2026-09-24 speech x style matrix (docs/EVAL-2026-09-24.md) graded Qwen3
+# 4B A on every style; Gemma 3 1B reworded meaning ("diff" -> "difference")
+# and Qwen 3.5 2B mostly echoed its input, so styles need Qwen3 4B (Ultra).
+# Normal needs no model at all (instant filler removal).
 _LLM_PREFERENCE = [
+    "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
     "google_gemma-3-1b-it-Q4_K_M.gguf",
     "Qwen3.5-2B-Q4_K_M.gguf",
-    # Strong/caricature flagship — preferred over the legacy Qwen 2.5 as a
-    # default, but Gemma/Qwen3.5 stay first (faster for everyday cleanup).
-    "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
     "qwen2.5-1.5b-instruct-q4_k_m.gguf",
 ]
+# When nothing is installed yet, the default target is the free model: a Free
+# install must never default to an Ultra-only download.
+_LLM_DEFAULT_DOWNLOAD = "google_gemma-3-1b-it-Q4_K_M.gguf"
 
 
 def _pick_llm(*dirs: str) -> str:
@@ -135,7 +135,7 @@ def _pick_llm(*dirs: str) -> str:
             p = os.path.join(d, fname)
             if os.path.exists(p):
                 return p
-    return os.path.join(dirs[-1], _LLM_PREFERENCE[0])
+    return os.path.join(dirs[-1], _LLM_DEFAULT_DOWNLOAD)
 
 
 def _windows_bundled_whisper() -> str | None:

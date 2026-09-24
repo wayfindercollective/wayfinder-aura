@@ -2539,7 +2539,7 @@ def format_model_tile_meta(
 # Recommended GGUF models for post-processing (llama.cpp)
 LLM_GGUF_MODELS = {
     "gemma3-1b": {
-        "name": "Gemma 3 1B ⭐",
+        "name": "Gemma 3 1B",
         "size": "806 MB",
         "size_bytes": 806_058_496,
         "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116f76234503685a98f572982177b11d44ec8ff1/google_gemma-3-1b-it-Q4_K_M.gguf",
@@ -2549,7 +2549,6 @@ LLM_GGUF_MODELS = {
         "description": "Small and fast. Great for Normal cleanup; for styles use Qwen3 4B (in testing Gemma reworded technical terms).",
         "speed": "Very Fast",
         "accuracy": "Excellent",
-        "recommended": True,
     },
     "qwen3.5-2b": {
         "name": "Qwen 3.5 2B",
@@ -2564,7 +2563,7 @@ LLM_GGUF_MODELS = {
         "accuracy": "Excellent",
     },
     # 2026-09 lineup refresh — three tiers:
-    #   light  = Gemma 3 1B (Free, recommended default)
+    #   light  = Gemma 3 1B (Free; Normal needs no model since 2026-09)
     #   medium = Qwen 3.5 2B (Free)
     #   heavy  = Qwen3 4B Instruct 2507 (Ultra, requires large_cleanup_models)
     # Retired as superseded: Phi-3 Mini, Qwen2.5 1.5B, SmolLM2 360M, Llama 3.2 1B.
@@ -2583,7 +2582,7 @@ LLM_GGUF_MODELS = {
     # via Browse…, the config._LLM_PREFERENCE legacy tail and
     # FREE_CLEANUP_MODEL_FILENAMES; their R2 objects remain for old clients.
     "qwen3-4b-2507": {
-        "name": "Qwen3 4B Instruct 2507",
+        "name": "Qwen3 4B Instruct 2507 ⭐",
         "size": "2.5 GB",
         "size_bytes": 2_497_280_736,
         "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
@@ -2595,6 +2594,7 @@ LLM_GGUF_MODELS = {
         # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
         "cdn_object": "llm/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "requires_feature": "large_cleanup_models",
+        "recommended": True,
     },
 }
 

@@ -34,7 +34,7 @@ CHECK_INTERVAL = 604800
 MONITORED_MODELS = {
     "llm_gemma3_1b": {
         "repo_id": "bartowski/google_gemma-3-1b-it-GGUF",
-        "description": "Gemma 3 1B (post-processing, recommended)",
+        "description": "Gemma 3 1B (post-processing)",
         "current_filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
         "category": "llm",
     },
