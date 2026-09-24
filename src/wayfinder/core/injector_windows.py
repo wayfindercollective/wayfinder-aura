@@ -228,6 +228,18 @@ def _require_foreground_window() -> None:
         )
 
 
+def foreground_window_id() -> str | None:
+    """The foreground window handle as a string, or None.
+
+    Backs ``injector.get_active_window`` so the Auto-Enter focus guard can see
+    a window switch between injecting the text and pressing Return.
+    """
+    if _user32 is None:
+        return None
+    hwnd = _user32.GetForegroundWindow()
+    return str(hwnd) if hwnd else None
+
+
 # ---------------------------------------------------------------------------
 # Public injection entry points
 # ---------------------------------------------------------------------------
@@ -296,6 +308,47 @@ if _user32 is not None:
     _kernel32.GlobalLock.restype = ctypes.c_void_p
     _kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
     _kernel32.GlobalUnlock.restype = wintypes.BOOL
+    _user32.RegisterClipboardFormatW.argtypes = (wintypes.LPCWSTR,)
+    _user32.RegisterClipboardFormatW.restype = wintypes.UINT
+
+# Registered formats Windows' clipboard history (Win+V), Cloud Clipboard sync
+# and well-behaved clipboard managers honour. Dictations and the restored
+# previous clipboard are marked with them so each dictation doesn't leave two
+# history entries or sync to the user's other devices.
+_TRANSIENT_FORMATS = (
+    ("ExcludeClipboardContentFromMonitorProcessing", None),
+    ("CanIncludeInClipboardHistory", 0),
+    ("CanUploadToCloudClipboard", 0),
+)
+
+
+def _global_copy(raw: bytes):
+    """A GMEM_MOVEABLE block holding *raw*, or None."""
+    h_global = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, max(1, len(raw)))
+    if not h_global:
+        return None
+    ptr = _kernel32.GlobalLock(h_global)
+    if not ptr:
+        return None
+    if raw:
+        ctypes.memmove(ptr, raw, len(raw))
+    _kernel32.GlobalUnlock(h_global)
+    return h_global
+
+
+def _mark_transient() -> None:
+    """Add the clipboard-history exclusion formats (clipboard already open)."""
+    for name, dword in _TRANSIENT_FORMATS:
+        try:
+            fmt = _user32.RegisterClipboardFormatW(name)
+            if not fmt:
+                continue
+            raw = b"\x00" if dword is None else int(dword).to_bytes(4, "little")
+            h_global = _global_copy(raw)
+            if h_global:
+                _user32.SetClipboardData(fmt, h_global)
+        except Exception:
+            pass  # best effort: the paste itself must not fail over a hint
 
 
 def _open_clipboard(retries: int = 5) -> bool:
@@ -326,8 +379,11 @@ def _clipboard_get_windows() -> str | None:
         _user32.CloseClipboard()
 
 
-def _clipboard_set_windows(text: str) -> bool:
-    """Replace clipboard contents with *text* (CF_UNICODETEXT). True on success."""
+def _clipboard_set_windows(text: str, transient: bool = False) -> bool:
+    """Replace clipboard contents with *text* (CF_UNICODETEXT). True on success.
+
+    *transient* also marks it as excluded from clipboard history and sync.
+    """
     if not _open_clipboard():
         return False
     try:
@@ -346,6 +402,8 @@ def _clipboard_set_windows(text: str) -> bool:
         # Ownership of h_global passes to the system on success.
         if not _user32.SetClipboardData(_CF_UNICODETEXT, h_global):
             return False
+        if transient:
+            _mark_transient()
         return True
     finally:
         _user32.CloseClipboard()
@@ -363,7 +421,7 @@ def inject_text_paste_windows(text: str) -> None:
     require_modifier_release_windows()
 
     previous = _clipboard_get_windows()
-    if not _clipboard_set_windows(text):
+    if not _clipboard_set_windows(text, transient=True):
         raise InjectionError("Could not write to the Windows clipboard for paste.")
     try:
         time.sleep(0.03)
@@ -382,6 +440,6 @@ def inject_text_paste_windows(text: str) -> None:
             try:
                 time.sleep(0.08)
                 if _clipboard_get_windows() == text:
-                    _clipboard_set_windows(previous)
+                    _clipboard_set_windows(previous, transient=True)
             except Exception:
                 pass

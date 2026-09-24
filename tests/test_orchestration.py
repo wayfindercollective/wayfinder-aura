@@ -501,9 +501,9 @@ class TestStartRecording:
 
         assert starts == 1
         assert app.app_state == AppState.IDLE
-        # macOS opens the mic BEFORE showing RECORDING (no lost first words),
-        # so a failed open goes straight to the error; Linux shows it first.
-        expected = 0 if wayfinder_main.IS_MACOS else 1
+        # macOS/Windows open the mic BEFORE showing RECORDING (no lost first
+        # words), so a failed open goes straight to the error; Linux shows it first.
+        expected = 0 if (wayfinder_main.IS_MACOS or wayfinder_main.IS_WINDOWS) else 1
         assert app.states.count(AppState.RECORDING) == expected
 
 
@@ -1276,9 +1276,22 @@ class TestMacCaptureOrder:
         app.start_recording()
         assert order[:2] == ["mic", AppState.RECORDING]
 
+    def test_windows_also_captures_first(self, app, monkeypatch):
+        order = []
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+        monkeypatch.setattr(app.recorder, "start", lambda: order.append("mic"))
+        real_update = app.update_state
+        monkeypatch.setattr(app, "update_state",
+                            lambda state, *a, **k: (order.append(state), real_update(state, *a, **k)))
+        app.config["chunked_mode"] = "off"
+        app.start_recording()
+        assert order[:2] == ["mic", AppState.RECORDING]
+
     def test_linux_keeps_state_first(self, app, monkeypatch):
         order = []
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
         monkeypatch.setattr(app.recorder, "start", lambda: order.append("mic"))
         real_update = app.update_state
         monkeypatch.setattr(app, "update_state",
@@ -1311,8 +1324,17 @@ class TestMacPreemptFinishTail:
         assert app.app_state == AppState.RECORDING
         assert app._finish_injection_job is None
 
+    def test_press_during_tail_starts_recording_on_windows(self, app, monkeypatch):
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+        self._through_injection(app, monkeypatch)
+        app.on_hotkey()
+        assert app.app_state == AppState.RECORDING
+        assert app._finish_injection_job is None
+
     def test_linux_still_ignores_it(self, app, monkeypatch):
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
         self._through_injection(app, monkeypatch)
         before = app.app_state
         app.on_hotkey()

@@ -15,6 +15,10 @@
 
 -r requirements.txt
 
+# Verify HTTPS against the Windows certificate store (corporate TLS-inspection
+# roots), as on macOS; certifi stays the fallback. Pinned like the Mac build.
+truststore==0.10.4
+
 # Local LLM post-processing (dictation cleanup) - prebuilt Windows CPU wheel.
 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 --only-binary=llama-cpp-python

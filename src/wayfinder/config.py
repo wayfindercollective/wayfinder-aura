@@ -458,9 +458,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Cloud API settings (keys stored in config, loaded into environment on startup)
     "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
-    # Claude 3 Haiku was retired 2026-04-20; macOS ships the current Haiku.
+    # Claude 3 Haiku was retired 2026-04-20; macOS and Windows ship the current Haiku.
     "anthropic_model": (
-        "claude-haiku-4-5-20251001" if sys.platform == "darwin" else "claude-3-haiku-20240307"
+        "claude-haiku-4-5-20251001" if sys.platform in ("darwin", "win32")
+        else "claude-3-haiku-20240307"
     ),
     "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
@@ -990,7 +991,7 @@ def load_config() -> dict:
             if config.get("audio_device") is not None and not config.get("audio_device_name"):
                 config["audio_device"] = None
 
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 # Retired cloud model IDs fail every request; move them to the
                 # provider's documented replacement.
                 try:
@@ -1004,7 +1005,7 @@ def load_config() -> dict:
                 except Exception:
                     pass
 
-            if sys.platform == "darwin" and _load_macos_secrets(config, user_config):
+            if sys.platform in ("darwin", "win32") and _load_macos_secrets(config, user_config):
                 _save_migrations = True
 
             if _save_migrations:
@@ -1033,21 +1034,35 @@ def load_config() -> dict:
         config = DEFAULT_CONFIG.copy()
         for key in ("whisper_binary", "model_path", "llama_cpp_model_path", "llama_cpp_binary"):
             config[key] = _repair_config_path(key, config.get(key, ""))
-        if sys.platform == "darwin":
-            # A reinstall keeps the Keychain: bring saved keys back.
+        if sys.platform in ("darwin", "win32"):
+            # A reinstall keeps the Keychain / Credential Manager: bring saved
+            # keys back.
             _load_macos_secrets(config, {})
         save_config(config)
         return config.copy()
 
 
-# Cloud API keys. On macOS they live in the login Keychain, not config.json.
+# Cloud API keys. On macOS they live in the login Keychain, on Windows in
+# Credential Manager (utils/windows_credentials.py), not config.json.
 SECRET_CONFIG_KEYS = ("groq_api_key", "openai_api_key", "anthropic_api_key")
 _KEYCHAIN_SYNCED: dict[str, str] = {}
 
 
 def _macos_keychain():
-    """The Keychain module on macOS (None elsewhere, or when disabled/unavailable)."""
-    if sys.platform != "darwin" or os.environ.get("WAYFINDER_DISABLE_KEYCHAIN"):
+    """The OS secret store: the Keychain on macOS, Credential Manager on Windows.
+
+    None on Linux, or when disabled/unavailable. Both modules share the
+    get/set/delete contract.
+    """
+    if os.environ.get("WAYFINDER_DISABLE_KEYCHAIN"):
+        return None
+    if sys.platform == "win32":
+        try:
+            from wayfinder.utils import windows_credentials
+        except Exception:
+            return None
+        return windows_credentials if windows_credentials.available() else None
+    if sys.platform != "darwin":
         return None
     try:
         from wayfinder.utils import macos_keychain
@@ -1089,7 +1104,7 @@ def _scrub_secret_backups() -> None:
 
 
 def _load_macos_secrets(config: dict, user_config: dict) -> bool:
-    """macOS: fill API keys from the Keychain; move any plain-text key into it.
+    """macOS/Windows: fill API keys from the OS secret store; move any plain-text key into it.
 
     Returns True when config.json must be rewritten (a key moved out of it).
     """
@@ -1122,18 +1137,20 @@ def save_config(config: dict) -> None:
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     on_disk = config
-    if sys.platform == "darwin":
-        try:
-            os.chmod(CONFIG_DIR, 0o700)
-        except OSError:
-            pass
+    if sys.platform in ("darwin", "win32"):
+        if sys.platform == "darwin":
+            try:
+                os.chmod(CONFIG_DIR, 0o700)
+            except OSError:
+                pass
         keychain = _macos_keychain()
         if keychain is not None:
             on_disk = dict(config)
             for name in SECRET_CONFIG_KEYS:
                 value = str(config.get(name) or "").strip()
-                # Only a key the Keychain now holds leaves config.json; if the
-                # Keychain refused it, the owner-only file keeps it as before.
+                # Only a key the Keychain (Windows: Credential Manager) now
+                # holds leaves config.json; if it refused it, the file keeps it
+                # as before.
                 if _keychain_sync(keychain, name, value):
                     on_disk[name] = ""
     # Atomic write: dump to a temp file, then os.replace() onto the real path so a
@@ -1184,7 +1201,7 @@ def load_api_keys_to_env(config: dict) -> None:
     
     for config_key, env_var in api_key_mappings.items():
         key_value = config.get(config_key, "")
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             # A pasted/hand-edited key can carry a newline, which breaks the
             # Authorization header and reads as "check your internet".
             key_value = str(key_value or "").strip()

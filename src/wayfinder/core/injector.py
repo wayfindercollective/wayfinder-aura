@@ -564,10 +564,16 @@ def get_active_window() -> "str | None":
     permission needed). xdotool does not exist there, so the Auto-Enter focus
     guard could never fire and Return could land in an app the user had just
     switched to.
+
+    Windows: the foreground window handle (same reason).
     """
     if sys.platform == "darwin":
         from .macos_paste import frontmost_window_id
         return frontmost_window_id()
+    if sys.platform == "win32":
+        # The foreground HWND; xdotool does not exist on Windows either.
+        from .injector_windows import foreground_window_id
+        return foreground_window_id()
     try:
         from wayfinder.utils.hostexec import host_env
         result = subprocess.run(

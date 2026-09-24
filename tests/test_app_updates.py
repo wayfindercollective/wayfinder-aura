@@ -390,6 +390,70 @@ class TestMacDownloads:
         assert app_updates._MAC_DMG_RE.match("Wayfinder_Aura-1.1.9-macOS-arm64.dmg")
 
 
+def _setup_exe(version, **kw):
+    return _asset(f"WayfinderAura-Setup-{version}.exe", **kw)
+
+
+class TestWindowsDownloads:
+    """Windows only counts releases that carry its Setup exe."""
+
+    @pytest.fixture(autouse=True)
+    def _windows(self, monkeypatch):
+        _simulate_platform(monkeypatch, "win32", machine="AMD64")
+
+    def test_release_without_an_installer_is_not_an_update(self):
+        # Today's situation: Windows is internal, tags carry no Setup exe.
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            info = check_for_app_update("1.1.7")
+        assert info["update_available"] is False
+        assert info["download_url"] == ""
+
+    def test_skips_newer_release_without_installer(self):
+        payload = (
+            MIXED_PAYLOAD[0],
+            _release("v1.1.8", url="https://example.invalid/v1.1.8",
+                     assets=_linux_assets("1.1.8") + [_setup_exe("1.1.8")]),
+        )
+        with patch("requests.get", return_value=_github_response(*payload)):
+            info = check_for_app_update("1.1.7")
+        assert info["update_available"] is True
+        assert info["latest_version"] == "v1.1.8"
+        assert info["download_url"].endswith("WayfinderAura-Setup-1.1.8.exe")
+
+    @pytest.mark.parametrize("bad_asset", [
+        _setup_exe("1.1.8"),  # stale installer on a newer tag
+        _setup_exe("1.1.9", state="open"),
+        _setup_exe("1.1.9", url="http://evil.invalid/WayfinderAura-Setup-1.1.9.exe"),
+        _asset("WayfinderAura-Setup-1.1.9.exe.sha256"),
+    ])
+    def test_unusable_installer_assets_do_not_count(self, bad_asset):
+        with patch("requests.get", return_value=_github_response(
+            _release("v1.1.9", assets=[bad_asset]),
+        )):
+            info = check_for_app_update("1.1.8")
+        assert info["update_available"] is False
+
+    def test_cache_is_tagged_with_the_windows_filter(self):
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            check_for_app_update("1.1.7")
+        cache = json.loads(app_updates.APP_UPDATE_CACHE_FILE.read_text())
+        assert cache["platform"] == "win32-x64"
+        # A Linux-style verdict cached by an older Windows build is refetched.
+        del cache["platform"]
+        cache["latest_version"] = "v1.1.9"
+        cache["update_available"] = True
+        app_updates.APP_UPDATE_CACHE_FILE.write_text(json.dumps(cache))
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)) as get:
+            info = check_for_app_update("1.1.7")
+        assert get.call_count == 1
+        assert info["update_available"] is False
+
+    def test_pattern_matches_the_installer_iss_name(self):
+        iss = (REPO / "packaging" / "windows" / "installer.iss").read_text(encoding="utf-8")
+        assert "OutputBaseFilename=WayfinderAura-Setup-{#MyAppVersion}" in iss
+        assert app_updates._WIN_SETUP_RE.match("WayfinderAura-Setup-1.1.9.exe")
+
+
 class TestLinuxUnchanged:
     """The same payload on Linux behaves exactly as before the Mac filter."""
 
@@ -482,10 +546,19 @@ class TestMacUpdateActions:
 
     def test_get_update_off_mac_still_opens_the_release_page(self, wm, monkeypatch):
         monkeypatch.setattr(wm, "IS_MACOS", False)
+        monkeypatch.setattr(wm, "IS_WINDOWS", False)
         app, opened = self._opener(
             {"release_url": "https://r.invalid", "download_url": "https://d.invalid/a.dmg"})
         wm.WayfinderApp._open_app_update_page(app)
         assert opened == ["https://r.invalid"]
+
+    def test_get_update_downloads_the_installer_on_windows(self, wm, monkeypatch):
+        monkeypatch.setattr(wm, "IS_MACOS", False)
+        monkeypatch.setattr(wm, "IS_WINDOWS", True)
+        app, opened = self._opener(
+            {"release_url": "https://r.invalid", "download_url": "https://d.invalid/a.exe"})
+        wm.WayfinderApp._open_app_update_page(app)
+        assert opened == ["https://d.invalid/a.exe"]
 
     def test_manual_check_forces_a_fresh_check_off_the_tk_thread(self, wm, monkeypatch):
         calls = []

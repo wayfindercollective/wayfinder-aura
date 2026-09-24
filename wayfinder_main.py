@@ -81,13 +81,23 @@ except ImportError:
 
 import sys as _sys
 IS_MACOS = _sys.platform == 'darwin'
+IS_WINDOWS = _sys.platform == 'win32'
 
 
-def _footer_tagline(is_macos: bool | None = None) -> str:
+def _device_noun() -> str:
+    """How user-facing copy names this computer."""
+    return "PC" if IS_WINDOWS else "Mac"
+
+
+def _footer_tagline(is_macos: bool | None = None, is_windows: bool | None = None) -> str:
     """Settings footer line; names the platform the build was made for."""
     if is_macos is None:
         is_macos = IS_MACOS
-    return "handcrafted for Mac" if is_macos else "handcrafted for Linux"
+    if is_windows is None:
+        is_windows = IS_WINDOWS
+    if is_macos:
+        return "handcrafted for Mac"
+    return "handcrafted for Windows" if is_windows else "handcrafted for Linux"
 
 
 if IS_MACOS:
@@ -3392,8 +3402,8 @@ _ACTIVITY_LOG_INIT_LOCK = threading.Lock()
 
 
 def _macos_keep_awake(fn, key: str, reason: str):
-    """macOS: run ``fn`` holding off idle sleep (a slept download restarts from 0)."""
-    if not IS_MACOS:
+    """macOS/Windows: run ``fn`` holding off idle sleep (a slept download restarts from 0)."""
+    if not (IS_MACOS or IS_WINDOWS):
         return fn
 
     def run(*args, **kwargs):
@@ -9076,7 +9086,7 @@ class WayfinderApp(ctk.CTk):
             ),
         )
 
-        if IS_MACOS:
+        if IS_MACOS or IS_WINDOWS:
             self._create_login_item_row(system_content)
 
         yield "system"
@@ -10790,7 +10800,7 @@ class WayfinderApp(ctk.CTk):
             self.remote_api_btn.configure(text=status)
     
     def _build_macos_key_help(self, parent, provider: str, key_var, *, on_removed=None) -> None:
-        """macOS: how to get the key, a free Verify check, and where it is stored.
+        """macOS/Windows: how to get the key, a free Verify check, and where it is stored.
 
         ``provider`` is "groq" | "openai" | "anthropic". Verification runs off
         the Tk thread and only ever talks to the provider's own HTTPS host.
@@ -10878,7 +10888,7 @@ class WayfinderApp(ctk.CTk):
                             "anthropic_api_key": "ANTHROPIC_API_KEY"}[info.key], None)
             save_config(self.config)
             self.log(f"⚙ {info.name} API key removed")
-            show(f"{info.name} key removed from this Mac.", COLORS["text_secondary"])
+            show(f"{info.name} key removed from this {_device_noun()}.", COLORS["text_secondary"])
             if on_removed is not None:
                 on_removed()
 
@@ -10892,12 +10902,17 @@ class WayfinderApp(ctk.CTk):
             ).pack(side="left", padx=(8, 0))
 
         try:
-            from wayfinder.utils import macos_keychain
-            stored_where = ("Stored in your Mac's Keychain — never in Aura's settings file."
-                            if macos_keychain.available() and not os.environ.get("WAYFINDER_DISABLE_KEYCHAIN")
-                            else "Stored only in Aura's private settings file on this Mac.")
+            if IS_WINDOWS:
+                from wayfinder.utils import windows_credentials as secret_store
+                in_store = "Stored in Windows Credential Manager — never in Aura's settings file."
+            else:
+                from wayfinder.utils import macos_keychain as secret_store
+                in_store = "Stored in your Mac's Keychain — never in Aura's settings file."
+            stored_where = (in_store
+                            if secret_store.available() and not os.environ.get("WAYFINDER_DISABLE_KEYCHAIN")
+                            else f"Stored only in Aura's private settings file on this {_device_noun()}.")
         except Exception:
-            stored_where = "Stored only on this Mac."
+            stored_where = f"Stored only on this {_device_noun()}."
         ctk.CTkLabel(
             box, text=stored_where,
             font=(self.font_body[0], self.font_sizes["caption"]),
@@ -10976,7 +10991,7 @@ class WayfinderApp(ctk.CTk):
                 hover_color=COLORS["accent_dim"],
             ).pack(anchor="w", padx=16, pady=(0, 16))
 
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 self._build_macos_key_help(
                     form_frame, "groq" if is_groq else "openai", key_var,
                     on_removed=self._update_remote_api_status,
@@ -11004,7 +11019,7 @@ class WayfinderApp(ctk.CTk):
             # Save button
             def save_and_close():
                 key = key_var.get().strip()
-                if sys.platform == "darwin":
+                if sys.platform in ("darwin", "win32"):
                     key = "".join(key.split())
                     if not key and self.config.get(config_key):
                         # Emptied field + Save removes the key (Keychain too).
@@ -14298,9 +14313,10 @@ class WayfinderApp(ctk.CTk):
         from wayfinder.core.app_updates import RELEASES_PAGE
         info = getattr(self, "_app_update_info", {})
         url = info.get("release_url") or RELEASES_PAGE
-        if IS_MACOS:
-            # Mac updates always carry a DMG (core/app_updates): download it
-            # in one click, falling back to the release page.
+        if IS_MACOS or IS_WINDOWS:
+            # Mac/Windows updates always carry a DMG / Setup exe
+            # (core/app_updates): download it in one click, falling back to
+            # the release page.
             url = info.get("download_url") or url
         self._open_url(url)
 
@@ -14599,7 +14615,7 @@ class WayfinderApp(ctk.CTk):
                 name = Path(model_path).name
                 return name[:25] + "..." if len(name) > 25 else name
             return "No model selected"
-        elif backend in ("anthropic", "openai") and sys.platform == "darwin":
+        elif backend in ("anthropic", "openai") and sys.platform in ("darwin", "win32"):
             key_name = f"{backend}_api_key"
             model_key = f"{backend}_model"
             model = self.config.get(model_key) or ""
@@ -14782,7 +14798,7 @@ class WayfinderApp(ctk.CTk):
                     variable=form_data["openai_model"],
                     values=(
                         _macos_cloud_models("openai")
-                        if sys.platform == "darwin"
+                        if sys.platform in ("darwin", "win32")
                         else ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
                     ),
                     font=(self.font_body[0], self.font_sizes["body"]),
@@ -14807,7 +14823,7 @@ class WayfinderApp(ctk.CTk):
                     wraplength=460,
                 ).pack(anchor="w", pady=(0, 8))
 
-                if sys.platform == "darwin":
+                if sys.platform in ("darwin", "win32"):
                     self._build_macos_key_help(api_frame, "openai", form_data["openai_key"])
                     return
 
@@ -14877,7 +14893,7 @@ class WayfinderApp(ctk.CTk):
                     variable=form_data["anthropic_model"],
                     values=(
                         _macos_cloud_models("anthropic")
-                        if sys.platform == "darwin"
+                        if sys.platform in ("darwin", "win32")
                         else [
                             "claude-3-haiku-20240307",
                             "claude-3-5-haiku-20241022",
@@ -14903,7 +14919,7 @@ class WayfinderApp(ctk.CTk):
                     settings_container,
                     text=(
                         "Claude Haiku is fast and affordable. Sonnet is higher quality but slower."
-                        if sys.platform == "darwin"
+                        if sys.platform in ("darwin", "win32")
                         else "Claude Haiku is fast and cheap (~$0.25/1M tokens). Sonnet is higher quality but slower."
                     ),
                     font=(self.font_body[0], self.font_sizes["caption"]),
@@ -14911,7 +14927,7 @@ class WayfinderApp(ctk.CTk):
                     wraplength=460,
                 ).pack(anchor="w", pady=(0, 8))
 
-                if sys.platform == "darwin":
+                if sys.platform in ("darwin", "win32"):
                     self._build_macos_key_help(api_frame, "anthropic", form_data["anthropic_key"])
                     return
                 
@@ -14937,7 +14953,7 @@ class WayfinderApp(ctk.CTk):
             
             # Save OpenAI settings (to both env and config for persistence)
             openai_key = form_data["openai_key"].get().strip()
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 # An emptied field removes the key (config, Keychain, env).
                 openai_key = "".join(openai_key.split())
                 if not openai_key:
@@ -14950,7 +14966,7 @@ class WayfinderApp(ctk.CTk):
             
             # Save Anthropic settings (to both env and config for persistence)
             anthropic_key = form_data["anthropic_key"].get().strip()
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 anthropic_key = "".join(anthropic_key.split())
                 if not anthropic_key:
                     self.config["anthropic_api_key"] = ""
@@ -14967,7 +14983,7 @@ class WayfinderApp(ctk.CTk):
                 self.postproc_config_btn.configure(text=self._get_postproc_config_display())
             if hasattr(self, 'postproc_backend_var'):
                 self.postproc_backend_var.set(provider)
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 # The transcription row reflects the TRANSCRIPTION provider's
                 # key, not whichever cleanup key happens to be set.
                 self._update_remote_api_status()
@@ -15927,14 +15943,14 @@ class WayfinderApp(ctk.CTk):
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("groq_whisper", "openai_whisper", "faster_whisper"):
             return True
-        # macOS: only count a model this license may load. A Free Mac with
+        # macOS/Windows: only count a model this license may load. A Free install with
         # developer models (e.g. small.en in ~/whisper.cpp/models) otherwise
         # skipped the Base download, then every dictation failed because the
         # config repair (correctly) never switches Free to a gated model.
         def usable(path) -> bool:
             if path is None:
                 return False
-            if not IS_MACOS:
+            if not (IS_MACOS or IS_WINDOWS):
                 return True
             try:
                 from wayfinder.license import transcription_model_allowed
@@ -16038,7 +16054,7 @@ class WayfinderApp(ctk.CTk):
         try:
             self._switch_tab("settings")
             self.open_model_settings()
-            if IS_MACOS:
+            if IS_MACOS or IS_WINDOWS:
                 # The panel opens mid-page; without this the user lands on the
                 # Audio section at the top and the button seems to do nothing.
                 self._scroll_settings_to(getattr(self, "mode_settings_container", None))
@@ -17103,9 +17119,14 @@ class WayfinderApp(ctk.CTk):
         threading.Thread(target=_worker, daemon=True, name="feedback-post").start()
 
     def _create_login_item_row(self, parent) -> None:
-        """macOS: "Open at login" (SMAppService). Off until the user turns it on."""
+        """macOS/Windows: "Open at login" (SMAppService / the per-user Run key).
+
+        Off until the user turns it on."""
         try:
-            from wayfinder.utils import macos_login_item as login_item
+            if IS_WINDOWS:
+                from wayfinder.utils import windows_login_item as login_item
+            else:
+                from wayfinder.utils import macos_login_item as login_item
         except Exception:
             return
         if not login_item.available():
@@ -17125,7 +17146,8 @@ class WayfinderApp(ctk.CTk):
         self.create_toggle_row(
             parent, "Open at login", self.login_item_var, _toggled,
             tooltip="Start Wayfinder Aura when you log in, so the hotkey is always ready. "
-                    "Also listed in System Settings ▸ General ▸ Login Items.",
+                    + ("Also listed in Settings ▸ Apps ▸ Startup." if IS_WINDOWS
+                       else "Also listed in System Settings ▸ General ▸ Login Items."),
         )
 
     def _render_vocabulary_tile(self) -> None:
@@ -20250,9 +20272,10 @@ class WayfinderApp(ctk.CTk):
         # stuck-overlay report can be correlated against the overlay-debug.log timeline.
         if old_state != new_state:
             print(f"[STATE] {old_state.name} -> {new_state.name}", flush=True)
-            if IS_MACOS:
+            if IS_MACOS or IS_WINDOWS:
                 # Hold off idle sleep / App Nap while a dictation is live: the
-                # will-sleep handler has to cancel a recording.
+                # will-sleep handler has to cancel a recording (Windows: a
+                # power request, utils/windows_power.py).
                 try:
                     from wayfinder.utils import macos_activity
                     if new_state == AppState.IDLE:
@@ -21262,7 +21285,7 @@ class WayfinderApp(ctk.CTk):
             self.start_recording()
         elif self.app_state == AppState.RECORDING:
             self.stop_recording_and_process()
-        elif IS_MACOS and self._finish_injection_job is not None:
+        elif (IS_MACOS or IS_WINDOWS) and self._finish_injection_job is not None:
             # The text is already inserted; only the minimum PROCESSING
             # display (rule 7) is still running. A new press must not be
             # swallowed by it: finish now and start the next dictation.
@@ -21395,12 +21418,14 @@ class WayfinderApp(ctk.CTk):
                     # Adopt the WarmMic's healed device index (see _start_chunked_recording).
                     self._resolved_audio_device = self.warm_mic.device
 
-            if IS_MACOS:
-                self._macos_follow_default_input()
+            if IS_MACOS or IS_WINDOWS:
+                if IS_MACOS:
+                    self._macos_follow_default_input()
                 # Capture FIRST: the RECORDING overlay waits for the Qt
                 # thread's acknowledgement (~150-300 ms), and every word spoken
                 # in that window used to be lost. The mic is warm, so starting
                 # it costs microseconds and the feedback follows immediately.
+                # Windows' overlay is the same Qt subprocess with the same ack.
                 _begin_capture()
 
             # Update state FIRST for immediate feedback
@@ -21412,7 +21437,7 @@ class WayfinderApp(ctk.CTk):
             except Exception as e:
                 self.log(f"⚠ Indicator error: {e}")
 
-            if not IS_MACOS:
+            if not (IS_MACOS or IS_WINDOWS):
                 _begin_capture()
             
             # Start duration update timer

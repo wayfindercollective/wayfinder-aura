@@ -23,7 +23,7 @@ from wayfinder.config import IS_FLATPAK
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
-from wayfinder.utils.child_supervisor import wrap_macos_child_command
+from wayfinder.utils.child_supervisor import bind_to_app_lifetime, wrap_macos_child_command
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
 # subprocess kwargs that hide the child console window on Windows (empty on
@@ -722,7 +722,7 @@ class WhisperServerBackend(TranscriptionBackend):
     # and respawn. Previously only toggle_gpu()'s explicit shutdown enforced
     # this — a single-write-site invariant nothing here guaranteed.
     _server_use_gpu: Optional[bool] = None
-    _server_threads: Optional[int] = None  # -t at spawn (macOS reuse check)
+    _server_threads: Optional[int] = None  # -t at spawn (macOS/Windows reuse check)
     # whisper-server is intentionally verbose (several KB per request). Its stdout
     # MUST be consumed continuously: leaving Popen(stdout=PIPE) unread eventually
     # fills the kernel pipe and blocks the server in write(), which looks exactly like
@@ -973,11 +973,12 @@ class WhisperServerBackend(TranscriptionBackend):
             # Unknown mode (None: adopted server / reset state) never matches.
             and WhisperServerBackend._server_use_gpu is not None
             and WhisperServerBackend._server_use_gpu == bool(self.use_gpu)
-            # macOS: -t is also fixed at spawn. The warm-up server starts before
-            # first-run thread auto-tuning, so without this the first session
-            # kept the 4-thread default (0.90s vs 0.64s at 8 on a CPU request).
+            # macOS/Windows: -t is also fixed at spawn. The warm-up server starts
+            # before first-run thread auto-tuning, so without this the first
+            # session kept the 4-thread default (0.90s vs 0.64s at 8 on a CPU
+            # request).
             and (
-                sys.platform != "darwin"
+                sys.platform not in ("darwin", "win32")
                 or WhisperServerBackend._server_threads == self.threads
             )
         )
@@ -1081,6 +1082,9 @@ class WhisperServerBackend(TranscriptionBackend):
                     env=spawn_env,
                     **_NO_WINDOW,
                 )
+                # Windows: the server dies with the app even on a crash (job
+                # object); no-op elsewhere.
+                bind_to_app_lifetime(proc)
                 WhisperServerBackend._server_process = proc
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
@@ -1095,10 +1099,11 @@ class WhisperServerBackend(TranscriptionBackend):
                 atexit.register(WhisperServerBackend.shutdown)
 
                 # Wait for server to be ready (model loading takes a few seconds).
-                # macOS polls every 0.1s: with a warm Metal cache the server is
-                # up in ~0.2s, so the 0.5s first sleep was pure latency on every
-                # (re)start. Same ~30s ceiling either way.
-                poll = 0.1 if sys.platform == "darwin" else 0.5
+                # macOS/Windows poll every 0.1s: with a warm Metal cache (or the
+                # OS file cache on Windows) the server is up in ~0.2s, so the
+                # 0.5s first sleep was pure latency on every (re)start. Same ~30s
+                # ceiling either way.
+                poll = 0.1 if sys.platform in ("darwin", "win32") else 0.5
                 started = time.monotonic()
                 died = False
                 for i in range(int(30 / poll)):  # up to ~30s (None) — or until the deadline
@@ -1327,9 +1332,10 @@ class WhisperServerBackend(TranscriptionBackend):
             body += f"--{boundary}\r\n".encode()
             body += b'Content-Disposition: form-data; name="response_format"\r\n\r\n'
             body += b"json\r\n"
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 # Only the text is read. The server otherwise computes per-token
-                # timestamps: MEASURED 3-14% slower (base.en, M3 Ultra), same WER.
+                # timestamps: MEASURED 3-14% slower (base.en, M3 Ultra), same WER;
+                # ~5% on Windows (pinned b4938 CPU build, base.en), one line of text.
                 body += f"--{boundary}\r\n".encode()
                 body += b'Content-Disposition: form-data; name="no_timestamps"\r\n\r\n'
                 body += b"true\r\n"
@@ -2341,7 +2347,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             )
             if server_backend.is_available():
                 return server_backend
-            if sys.platform == "darwin" and not Path(
+            if sys.platform in ("darwin", "win32") and not Path(
                     os.path.expanduser(str(server_backend.model_path or ""))).is_file():
                 # is_available() also needs the model; say which one is missing.
                 print("[Transcription] no speech model installed yet "

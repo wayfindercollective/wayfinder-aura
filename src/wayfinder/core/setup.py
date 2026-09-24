@@ -960,8 +960,8 @@ def download_whisper_model(
 
 
 def _download_model_file(*args, **kwargs) -> None:
-    """Keep the Mac awake for the download (no-op elsewhere); see _impl."""
-    if sys.platform != "darwin":
+    """Keep the Mac/PC awake for the download (no-op on Linux); see _impl."""
+    if sys.platform not in ("darwin", "win32"):
         return _download_model_file_impl(*args, **kwargs)
     from wayfinder.utils import macos_activity
 
