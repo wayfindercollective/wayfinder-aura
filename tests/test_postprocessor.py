@@ -116,7 +116,7 @@ class TestGetModelQuirks:
         assert "hallucination_prone" in quirks["issues"]
 
     def test_qwen3_4b_is_the_recommendation_not_qwen_3_5_2b(self):
-        # docs/EVAL-2026-09-24.md: Qwen3 4B graded A on every style; Qwen 3.5 2B
+        # docs/EVAL-2026-09-24.md: Qwen3 4B was the most reliable in every style; Qwen 3.5 2B
         # mostly echoed its input, so it is no longer the recommendation.
         assert get_model_quirks("qwen3:4b").get("recommended") is True
         assert not get_model_quirks("qwen3.5:2b").get("recommended")

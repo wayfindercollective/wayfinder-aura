@@ -2580,7 +2580,7 @@ LLM_GGUF_MODELS = {
         "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
-        "description": "Best for styles: every style graded A in testing at ~0.3 s on Apple silicon. Sharpest instruction-follower in its class.",
+        "description": "Best for styles: the most reliable in every style we tested, at ~0.3 s on Apple silicon. Keeps your meaning.",
         "speed": "Fast",
         "accuracy": "Excellent",
         # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
@@ -16398,10 +16398,11 @@ class WayfinderApp(ctk.CTk):
     # License tile) — one list so the copy never drifts. Lucide row markers
     # (CLAUDE.md: no decorative emoji as UI chrome).
     # Claims are measured (docs/EVAL-2026-09-24.md): Turbo Q5 6.6% vs Base 11.5%
-    # WER; every style graded A with Qwen3 4B (the model the styles need).
+    # WER; Qwen3 4B was the most reliable cleanup model in every style and kept
+    # meaning (Professional/Standard scored C on metrics, fine on reading).
     ULTRA_BENEFITS = [
         ("check", "Higher Accuracy", "Large v3 Turbo made 43% fewer mistakes than Base in our tests"),
-        ("pen-line", "Writing Styles", "Professional, Casual, Dev and Personal, each graded A"),
+        ("pen-line", "Writing Styles", "Four styles, tested to keep your meaning"),
         ("message-circle", "Your Vocabulary", "Names and terms spelled your way, plus your own corrections"),
         ("sparkles", "GPU Acceleration", "Faster transcription and local cleanup on supported GPUs"),
         ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),

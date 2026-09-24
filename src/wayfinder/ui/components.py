@@ -241,7 +241,7 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
 # Model recommendations for post-processing (based on testing)
 MODEL_RECOMMENDATIONS = """
 ✅ Styles (Professional, Casual, Dev, Personal):
-  • qwen3:4b — ⭐ Best overall (every style graded A in testing; Ultra)
+  • qwen3:4b — ⭐ Best overall (most reliable in every style we tested; Ultra)
 
 ✅ Normal needs no model — it removes um/uh instantly.
   • gemma3:1b — Fast; fine for Normal, but rewords technical terms in styles

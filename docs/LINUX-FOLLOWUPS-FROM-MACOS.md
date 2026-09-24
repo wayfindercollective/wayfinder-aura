@@ -96,7 +96,8 @@ confirm it on Linux; **Fix sketch** is the macOS fix, for reference.
 
 ### 1.11 Cleanup models graded per style (matrix 2026-09-24)
 - **Evidence (macOS, resident llama-server, 22 samples x 5 styles x 2
-  strengths):** Qwen3 4B graded A on every style (~0.3 s). Gemma 3 1B
+  strengths):** Qwen3 4B was the most reliable in every style (~0.3 s; A
+  except Professional/Standard C on metrics, fine on reading). Gemma 3 1B
   rewrote meaning — "diff" -> "difference", "auth module" -> "authentication
   module", "a couple more days" -> "two more days" — failing Dev and
   Professional (F), Casual/Personal (C), even Normal (C). Qwen 3.5 2B echoed

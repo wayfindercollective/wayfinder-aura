@@ -664,8 +664,9 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
 # Matrix 2026-09-24 (M3 Ultra, resident llama-server): Gemma 3 1B rewrote
 # meaning (diff -> "difference", "or nah" -> "Yeah, I'm hungry") and failed
 # Dev/Professional (F) and Casual/Personal (C); Qwen 3.5 2B echoed its input
-# (fillers kept, Professional F). Qwen3 4B graded A on every style (its
-# Professional/Standard C was sentence splitting, fine on reading).
+# (fillers kept, Professional F). Qwen3 4B was the most reliable in every
+# style (A, except Professional/Standard C on metrics - sentence splitting,
+# fine on reading - and Dev B end to end, from speech errors).
 _SMALL_MODEL_STYLE_GAPS = frozenset(
     (tone, intensity)
     for tone in ("professional", "casual", "dev", "personal")
@@ -4234,12 +4235,12 @@ def get_recommended_models() -> list:
         {
             "tier": "recommended",
             # Order and ⭐ must agree with the shipped lineup: the catalog row
-            # flagged `recommended` is qwen3-4b-2507 (graded A on every style,
+            # flagged `recommended` is qwen3-4b-2507 (most reliable in every style,
             # docs/EVAL-2026-09-24.md), and components.MODEL_RECOMMENDATIONS says
             # "qwen3:4b — ⭐ Best overall". Ratcheted by
             # tests/test_catalog_ratchet.py::TestRecommendationsMatchTheLineup.
             "models": [
-                {"name": "qwen3:4b", "description": "⭐ Best overall - every style graded A (Ultra)"},
+                {"name": "qwen3:4b", "description": "⭐ Best overall - most reliable in every style we tested (Ultra)"},
                 {"name": "gemma3:1b", "description": "Fast and free - fine for Normal; styles need Qwen3 4B"},
                 {"name": "qwen3.5:2b", "description": "Leaves text largely unchanged - Normal only"},
             ],

@@ -28,7 +28,7 @@
     "qwen3-4b-2507": {
       "accuracy": "Excellent",
       "cdn_object": "llm/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-      "description": "Best for styles: every style graded A in testing at ~0.3 s on Apple silicon. Sharpest instruction-follower in its class.",
+      "description": "Best for styles: the most reliable in every style we tested, at ~0.3 s on Apple silicon. Keeps your meaning.",
       "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
       "name": "Qwen3 4B Instruct 2507 \u2b50",
       "recommended": true,
