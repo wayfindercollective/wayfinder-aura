@@ -5709,7 +5709,11 @@ class WayfinderApp(ctk.CTk):
         self.warm_mic = WarmMic(
             device=self._resolved_audio_device,
             sample_rate=self.config["sample_rate"],
-            idle_secs=self.config.get("mic_warm_idle_secs", 30.0),
+            # macOS opens a capture stream in ~0.1 s (measured, USB headset), not
+            # the ~0.5 s PipeWire cost the 30 s window exists for; 5 s still makes
+            # back-to-back dictations instant while the orange mic dot clears
+            # right after you finish ("uses the microphone only while you dictate").
+            idle_secs=self.config.get("mic_warm_idle_secs", 5.0 if IS_MACOS else 30.0),
             preferred_name=self.config.get("audio_device_name"),
             # Called after a PortAudio rescan when every input fails: re-resolves the
             # user's saved mic BY NAME against the fresh device table. Covers the
