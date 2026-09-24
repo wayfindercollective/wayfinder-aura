@@ -94,6 +94,46 @@ confirm it on Linux; **Fix sketch** is the macOS fix, for reference.
   chat template (it Title-Cases whole sentences in professional). If Linux
   users have Qwen 3.5 selected, suggest Gemma.
 
+### 1.11 Cleanup models graded per style (matrix 2026-09-24)
+- **Evidence (macOS, resident llama-server, 22 samples x 5 styles x 2
+  strengths):** Qwen3 4B graded A on every style (~0.3 s). Gemma 3 1B
+  rewrote meaning — "diff" -> "difference", "auth module" -> "authentication
+  module", "a couple more days" -> "two more days" — failing Dev and
+  Professional (F), Casual/Personal (C), even Normal (C). Qwen 3.5 2B echoed
+  its input (fillers kept; Professional F). Full tables: `docs/EVAL-2026-09-24.md`.
+- **Linux check:** re-run `scripts/eval_matrix.py --stages tone` on the
+  Linux cleanup path (llama-simple CLI vs server, §1.1) before relying on
+  these grades; the prompt path differs.
+- **Done on `feature/styles-vocabulary` (cross-platform):** STYLE_SUPPORT
+  greys out styles a model fails, with the reason; runtime falls back to
+  Standard/Normal instead of producing a bad result.
+
+### 1.12 `fast_filler_removal` deletes words that carry meaning
+- **Evidence:** its patterns remove every "right" (`turn right` -> `turn`),
+  bare "you know" (`do you know him` -> `do him`), "actually", "honestly",
+  "kind of", and collapse legitimate repeats ("had had", "that that").
+- **Done on `feature/styles-vocabulary`:** Normal uses a conservative
+  `normal_filler_removal()` (filler sounds + doubled small words only);
+  the aggressive regex stays behind its explicit toggle.
+
+### 1.13 Bigger speech models write more fillers down
+- **Evidence (66 spoken clips):** Large v3 Turbo Q5 kept a filler in 27
+  clips, Medium 21, Small.en 18, Base 3. Ultra users need filler removal
+  more than Free users, not less.
+
+### 1.14 Custom vocabulary was cut first (whisper keeps the prompt's tail)
+- **Evidence:** user terms were placed before the built-in Dev/Casual lists
+  and whisper.cpp keeps only the last ~224 prompt tokens; the server path
+  also sliced the first 50 terms. **Done on `feature/styles-vocabulary`**
+  (user terms last, 560-char budget; "heard -> write" corrections).
+
+### 1.15 The live remote model catalog is stale
+- **Evidence:** `.../v1/catalog` is from 2026-07-11: rounded sizes (every
+  shipped entry is rejected as "weakens its size") and Small/Tiny listed
+  as Free. Republish it from `catalog/v1.json`
+  (`scripts/publish_model_catalog.py`). Until then its descriptions also
+  override the shipped ones.
+
 ## 2. Responsiveness
 
 ### 2.1 The 800 ms minimum "processing" display swallows the next hotkey
