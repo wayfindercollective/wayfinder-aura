@@ -657,6 +657,93 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
         }
 
 
+# Which styles each cleanup model handles reliably, from the speech x style
+# matrix (scripts/eval_matrix.py; grades A/B = offered, C/F = greyed out).
+# Keyed by a lowercase filename fragment. A model not listed here is limited
+# only by its size tier (MODEL_TIERS max_intensity).
+STYLE_SUPPORT: Dict[str, Dict[str, Any]] = {}
+
+STYLE_IDS = ("minimal", "professional", "casual", "dev", "personal")
+STYLE_NAMES = {"minimal": "Normal", "professional": "Professional", "casual": "Casual",
+               "dev": "Dev", "personal": "Personal"}
+
+
+def _cleanup_model_name(config: dict) -> tuple[str, str]:
+    """(backend, model name) of the configured cleanup model."""
+    backend = config.get("post_processing_backend", "llama_cpp")
+    if backend == "llama_cpp":
+        path = config.get("llama_cpp_model_path", "") or ""
+        return backend, (Path(path).stem if path else "")
+    if backend == "openai":
+        return backend, config.get("openai_model", "gpt-4o-mini")
+    if backend == "anthropic":
+        return backend, config.get("anthropic_model", "claude-3-haiku")
+    return backend, ""
+
+
+def style_availability(config: dict) -> Dict[str, Dict[str, tuple]]:
+    """What each style x strength can actually do with this cleanup setup.
+
+    Returns {tone: {"standard"|"strong": (available: bool, reason: str|None)}}.
+    Normal (minimal) always works. Everything else needs text cleanup on, a
+    cleanup model on disk, a model big enough for Strong, and a model that
+    passed that style in the evaluation matrix. The reasons are short,
+    user-facing sentences for the Style tab.
+    """
+    backend, model_name = _cleanup_model_name(config)
+    model_missing = False
+    if backend == "llama_cpp":
+        path = os.path.expanduser(config.get("llama_cpp_model_path", "") or "")
+        model_missing = not (path and os.path.isfile(path))
+    tier = detect_model_tier(model_name, backend=backend) if model_name else "small"
+    strong_ok = MODEL_TIERS[tier]["max_intensity"] in ("strong",)
+    support = None
+    lowered = (model_name or "").lower()
+    for fragment, info in STYLE_SUPPORT.items():
+        if fragment in lowered:
+            support = info
+            break
+    pretty = (support or {}).get("name") or model_name or "this model"
+
+    result: Dict[str, Dict[str, tuple]] = {}
+    for tone in STYLE_IDS:
+        result[tone] = {}
+        for intensity in ("standard", "strong"):
+            if tone == "minimal":
+                result[tone][intensity] = (True, None)
+                continue
+            if not config.get("post_processing_enabled", True):
+                reason = "Turn on text cleanup in Settings to use styles."
+            elif model_missing:
+                reason = "Download a cleanup model in Settings (Gemma 3 1B is recommended)."
+            elif intensity == "strong" and not strong_ok:
+                reason = f"Strong needs a larger model than {pretty} (Qwen3 4B or cloud)."
+            elif support and (tone, intensity) in support.get("unsupported", ()):
+                better = support.get("better", "Qwen3 4B")
+                label = STYLE_NAMES[tone] + (" Strong" if intensity == "strong" else "")
+                reason = f"{pretty} can't do {label} reliably — try {better}."
+            else:
+                reason = None
+            result[tone][intensity] = (reason is None, reason)
+    return result
+
+
+def effective_style(config: dict) -> tuple[str, str, Optional[str]]:
+    """(tone, intensity, note) actually run: an unavailable choice falls back to
+    the same style at Standard, else to Normal - never a style that fails."""
+    tone = config.get("output_tone", "minimal") or "minimal"
+    intensity = "strong" if config.get("strong_mode") else "standard"
+    if tone not in STYLE_IDS or config.get("caricature_mode"):
+        return tone, intensity, None
+    table = style_availability(config)
+    ok, reason = table[tone][intensity]
+    if ok:
+        return tone, intensity, None
+    if intensity == "strong" and table[tone]["standard"][0]:
+        return tone, "standard", reason
+    return "minimal", "standard", reason
+
+
 def check_settings_compatibility(config: dict) -> Dict[str, Any]:
     """
     Check if current config settings are compatible with the selected model.
@@ -3775,6 +3862,18 @@ def _process_with_config(text: str, config: dict) -> str:
                 config["custom_vocabulary"] = list(config.get("custom_vocabulary") or []) + corrected
         except Exception:
             pass
+
+    # Never run a style this setup can't do well (it's greyed out in the Style
+    # tab): Strong falls back to Standard, else the style to Normal.
+    if config.get("output_tone", "minimal") != "minimal" and not config.get("caricature_mode"):
+        _eff_tone, _eff_intensity, _note = effective_style(config)
+        if _note:
+            config = dict(config)
+            config["output_tone"] = _eff_tone
+            config["strong_mode"] = _eff_intensity == "strong"
+            print(f"[Post-processing] ↩ {_note} Using "
+                  f"{STYLE_NAMES.get(_eff_tone, _eff_tone)}"
+                  f"{' Strong' if _eff_intensity == 'strong' else ''}.")
 
     tone = config.get("output_tone", "professional")
 
