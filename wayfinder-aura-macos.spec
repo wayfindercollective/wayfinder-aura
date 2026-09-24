@@ -184,6 +184,9 @@ _UNUSED_QT = (
     'PyQt6/Qt6/plugins/imageformats/libqgif', 'PyQt6/Qt6/plugins/imageformats/libqmacheif',
     'PyQt6/Qt6/plugins/imageformats/libqmacjp2',
     'PyQt6/QtNetwork', 'PyQt6/QtPdf', 'PyQt6/QtSvg',
+    # PyInstaller's top-level framework shortcuts (Frameworks/QtNetwork ->
+    # PyQt6/...): left behind they are dangling links the validator rejects.
+    'QtNetwork', 'QtPdf', 'QtSvg',
 )
 
 
