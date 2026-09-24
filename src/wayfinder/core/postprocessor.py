@@ -3705,6 +3705,21 @@ def get_backend(config: dict) -> PostProcessorBackend:
 
 
 def process_with_config(text: str, config: dict) -> str:
+    """Post-process, then re-apply the user's vocabulary corrections (Ultra).
+
+    The cleanup model can re-spell a corrected term ("Wayfinder" -> "Way
+    finder"); applying the corrections to its output keeps them authoritative.
+    """
+    result = _process_with_config(text, config)
+    try:
+        from .transcriber import apply_vocabulary_replacements, licensed_vocabulary_replacements
+
+        return apply_vocabulary_replacements(result, licensed_vocabulary_replacements(config))
+    except Exception:
+        return result
+
+
+def _process_with_config(text: str, config: dict) -> str:
     """
     Post-process transcription using settings from config dictionary.
     This is the main entry point for post-processing.
@@ -3749,6 +3764,17 @@ def process_with_config(text: str, config: dict) -> str:
             config["caricature_mode"] = False
         if not _vocabulary_allowed:
             config["custom_vocabulary"] = []
+    if _vocabulary_allowed and config.get("vocabulary_replacements"):
+        try:
+            from .transcriber import parse_vocabulary_replacements
+
+            corrected = [w for _h, w in parse_vocabulary_replacements(
+                config.get("vocabulary_replacements"))]
+            if corrected:
+                config = dict(config)
+                config["custom_vocabulary"] = list(config.get("custom_vocabulary") or []) + corrected
+        except Exception:
+            pass
 
     tone = config.get("output_tone", "professional")
 

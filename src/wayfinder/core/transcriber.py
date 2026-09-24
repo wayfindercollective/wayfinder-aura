@@ -800,7 +800,7 @@ class WhisperServerBackend(TranscriptionBackend):
         elif self.prompt:
             parts.append(self.prompt)
         if self.custom_vocabulary:
-            vocab_str = ", ".join(self.custom_vocabulary[:50])
+            vocab_str = ", ".join(self.custom_vocabulary[-60:])  # tail = user terms
             # Keep vocabulary as bare recognition hints, matching the CLI backend.
             # A literal "Vocabulary:" label leaked into output when Whisper received
             # a silent trailing chunk and then continued hallucinating prose.
@@ -2218,21 +2218,21 @@ def get_backend(config: dict) -> TranscriptionBackend:
     # paid custom vocabulary / voice-profile data while still allowing the
     # built-in Dev and Casual dictionaries as part of the licensed tone system.
     _effective_prompt = str(config.get("prompt", "") or "")
-    _effective_custom_vocabulary: list[str] = []
+    _user_vocabulary: list[str] = []
     if _has_feature("custom_vocabulary"):
-        raw_vocab = config.get("custom_vocabulary", [])
-        if isinstance(raw_vocab, (list, tuple)):
-            _effective_custom_vocabulary = [
-                str(term).strip() for term in raw_vocab if str(term).strip()
-            ]
+        # The spellings a user asked for in corrections are terms too.
+        _user_vocabulary = normalize_vocabulary_terms(
+            list(config.get("custom_vocabulary", []) or [])
+            + [write for _heard, write in parse_vocabulary_replacements(
+                config.get("vocabulary_replacements", []))]
+        )
 
     _effective_tone = str(config.get("output_tone", "minimal") or "minimal")
+    _builtin_vocabulary: list[str] = []
     if _has_feature("tone_system") and _effective_tone in ("dev", "casual"):
-        builtin_vocab = DEV_VOCABULARY if _effective_tone == "dev" else CASUAL_VOCABULARY
-        seen_vocab = {term.lower() for term in _effective_custom_vocabulary}
-        _effective_custom_vocabulary.extend(
-            term for term in builtin_vocab if term.lower() not in seen_vocab
-        )
+        _builtin_vocabulary = DEV_VOCABULARY if _effective_tone == "dev" else CASUAL_VOCABULARY
+    # User terms last and first in the budget: Whisper keeps the prompt's tail.
+    _effective_custom_vocabulary = vocabulary_prompt_terms(_user_vocabulary, _builtin_vocabulary)
 
     if (
         _effective_tone == "personal"
@@ -2601,6 +2601,113 @@ def clean_whisper_artifacts(text: str) -> str:
     return text
 
 
+# =============================================================================
+# Custom Vocabulary (Ultra): prompt budget + "heard -> write" corrections
+# =============================================================================
+
+# whisper.cpp keeps only the LAST n_text_ctx/2 (224) tokens of the prompt, so
+# anything early in a long prompt is silently dropped. ~3.5 chars/token for
+# English terms; this leaves room for the base prompt and punctuation hint.
+VOCAB_PROMPT_CHAR_BUDGET = 560
+VOCAB_TERM_MAX_CHARS = 80
+VOCAB_MAX_REPLACEMENTS = 100
+
+
+def normalize_vocabulary_terms(raw) -> list[str]:
+    """User terms: stripped, <= 80 chars, case-insensitively de-duplicated."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    seen, terms = set(), []
+    for term in raw:
+        term = " ".join(str(term or "").split())[:VOCAB_TERM_MAX_CHARS]
+        if term and term.lower() not in seen:
+            seen.add(term.lower())
+            terms.append(term)
+    return terms
+
+
+def vocabulary_prompt_terms(user_terms, builtin_terms=(),
+                            budget: int = VOCAB_PROMPT_CHAR_BUDGET) -> list[str]:
+    """Order and trim vocabulary for Whisper's prompt window.
+
+    The user's own terms go LAST (the end of the prompt is what Whisper keeps
+    and weighs most) and take the budget first, in their order; built-in tone
+    lists (dev/casual) fill whatever room is left, in front of them.
+    """
+    user = normalize_vocabulary_terms(list(user_terms or []))
+    kept_user, used = [], 0
+    for term in user:
+        cost = len(term) + 2
+        if used + cost > budget:
+            break
+        kept_user.append(term)
+        used += cost
+    taken = {t.lower() for t in kept_user}
+    kept_builtin = []
+    for term in builtin_terms or ():
+        cost = len(term) + 2
+        if term.lower() in taken or used + cost > budget:
+            continue
+        kept_builtin.append(term)
+        taken.add(term.lower())
+        used += cost
+    return kept_builtin + kept_user
+
+
+def parse_vocabulary_replacements(raw) -> list[tuple[str, str]]:
+    """Accept [[heard, write]], [{"heard","write"}] or ["heard -> write"]."""
+    pairs, seen = [], set()
+    if not isinstance(raw, (list, tuple)):
+        return pairs
+    for item in raw:
+        heard = write = None
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            heard, write = item
+        elif isinstance(item, dict):
+            heard, write = item.get("heard"), item.get("write")
+        elif isinstance(item, str):
+            for arrow in ("->", "→", "=>"):
+                if arrow in item:
+                    heard, write = item.split(arrow, 1)
+                    break
+        heard = " ".join(str(heard or "").split())[:VOCAB_TERM_MAX_CHARS]
+        write = " ".join(str(write or "").split())[:VOCAB_TERM_MAX_CHARS]
+        if not heard or not write or heard == write or heard.lower() in seen:
+            continue
+        seen.add(heard.lower())
+        pairs.append((heard, write))
+        if len(pairs) >= VOCAB_MAX_REPLACEMENTS:
+            break
+    return pairs
+
+
+def apply_vocabulary_replacements(text: str, replacements) -> str:
+    """Replace each "heard" phrase (whole words, any case, any spacing) with its
+    exact "write" spelling. Longest phrases first, so "way finder aura" wins
+    over "way finder"."""
+    import re
+
+    pairs = parse_vocabulary_replacements(replacements)
+    if not text or not pairs:
+        return text
+    for heard, write in sorted(pairs, key=lambda p: -len(p[0])):
+        pattern = r"(?<!\w)" + r"\s+".join(re.escape(w) for w in heard.split()) + r"(?!\w)"
+        text = re.sub(pattern, lambda _m, w=write: w, text, flags=re.IGNORECASE)
+    return text
+
+
+def licensed_vocabulary_replacements(config: dict) -> list[tuple[str, str]]:
+    """The user's corrections, only when Custom Vocabulary is licensed."""
+    try:
+        from wayfinder.license import get_feature_gate
+
+        if not get_feature_gate().has_feature("custom_vocabulary"):
+            return []
+    except Exception:
+        return []
+    return parse_vocabulary_replacements(config.get("vocabulary_replacements", []))
+
+
 def drop_whisper_prompt_leak(text: str, custom_vocabulary: list | None = None) -> str:
     """Drop a chunk that begins with Aura's former internal vocabulary marker.
 
@@ -2796,6 +2903,9 @@ def transcribe_with_config(
     if text:
         text = clean_whisper_artifacts(text)
         text = normalize_whisper_caps(text)
+        # Ultra "heard -> write" corrections run LAST, after caps normalisation,
+        # so the user's exact spelling (GitHub, iOS, McKenna) is what lands.
+        text = apply_vocabulary_replacements(text, licensed_vocabulary_replacements(config))
 
     # Apply basic post-processing if punctuation is enabled
     if ensure_punct and text:
