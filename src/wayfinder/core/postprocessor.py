@@ -3668,6 +3668,33 @@ class OpenAIBackend(PostProcessorBackend):
 # Factory Functions
 # =============================================================================
 
+def cleanup_model_needed(config: dict) -> bool:
+    """Whether the current settings run the local cleanup model at all.
+
+    Normal is instant filler removal, and Free is always Normal - so keeping a
+    1-3 GB model resident for them (measured: 2.6 GB for Qwen 3.5 2B) buys
+    nothing. Styled tones, caricature, and Normal-via-model do need it.
+    """
+    if not config.get("post_processing_enabled", True):
+        return False
+    if config.get("post_processing_backend", "llama_cpp") != "llama_cpp":
+        return False
+    try:
+        from ..license import get_feature_gate
+
+        styled = get_feature_gate().has_feature("tone_system")
+    except Exception:
+        styled = False
+    tone = config.get("output_tone", "minimal") or "minimal"
+    if styled and config.get("caricature_mode"):
+        return True
+    if styled and tone != "minimal":
+        # A greyed-out style runs as Normal, which needs no model.
+        if effective_style(config)[0] != "minimal":
+            return True
+    return bool(config.get("normal_llm_cleanup")) and not config.get("fast_filler_removal")
+
+
 def warm_up_postprocessing(config: dict) -> None:
     """Pre-load the local LLM so the first dictation's cleanup is instant.
 
@@ -3677,10 +3704,8 @@ def warm_up_postprocessing(config: dict) -> None:
     never raises.
     """
     try:
-        if config.get("post_processing_backend", "llama_cpp") != "llama_cpp":
-            return
-        if not config.get("post_processing_enabled", True):
-            return
+        if not cleanup_model_needed(config):
+            return  # Normal/Free: nothing to keep resident
         backend = get_backend(config)
         warm = getattr(backend, "warm_up", None)
         if callable(warm):

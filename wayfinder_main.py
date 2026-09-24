@@ -11645,6 +11645,22 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
+    def _sync_cleanup_residency(self) -> None:
+        """Hold the cleanup model only while the chosen style uses it: warm it
+        in the background when switching to a style (no first-dictation wait),
+        release it (often 1-3 GB) when switching back to Normal."""
+        try:
+            from wayfinder.core.postprocessor import cleanup_model_needed, warm_up_postprocessing
+        except Exception:
+            return
+        cfg = dict(self.config)
+        if cleanup_model_needed(cfg):
+            threading.Thread(target=warm_up_postprocessing, args=(cfg,),
+                             daemon=True, name="cleanup-warm").start()
+        else:
+            threading.Thread(target=_release_cleanup_residency, daemon=True,
+                             name="cleanup-release").start()
+
     def _style_availability(self) -> dict:
         try:
             from wayfinder.core.postprocessor import style_availability
@@ -11836,6 +11852,7 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
         self.log(f"✎ Style: {STYLE_LABELS.get(tone_id, tone_id)}")
         self._apply_style_to_ui(tone_id)
+        self._sync_cleanup_residency()
         # Strong's availability depends on the style: refresh if it changed.
         if getattr(self, "active_tab", None) == "style" and "style" in getattr(self, "tab_frames", {}):
             if self._style_availability_signature() != getattr(self, "_style_tab_signature", None):

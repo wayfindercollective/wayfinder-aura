@@ -70,6 +70,7 @@ def test_ultra_style_selection_persists_and_updates_ui(monkeypatch):
         config={"output_tone": "minimal", "prompt": "old"},
         log=lambda _message: None,
         _apply_style_to_ui=applied.append,
+        _sync_cleanup_residency=lambda: None,
     )
     monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
 

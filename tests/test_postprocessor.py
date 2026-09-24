@@ -1114,7 +1114,9 @@ class TestResidentLlamaFastPath:
         model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
         cfg = {"post_processing_backend": "llama_cpp", "post_processing_enabled": True,
                "llama_cpp_use_cli": True, "llama_cpp_binary": str(binary),
-               "llama_cpp_model_path": str(model)}
+               "llama_cpp_model_path": str(model),
+               # Normal needs no model unless opted in (cleanup_model_needed).
+               "normal_llm_cleanup": True}
         with patch.object(postprocessor.LlamaCppCliBackend, "warm_up") as warm:
             postprocessor.warm_up_postprocessing(cfg)
             warm.assert_called_once()

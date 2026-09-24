@@ -73,3 +73,51 @@ def test_normal_can_still_opt_into_the_model(monkeypatch):
 ])
 def test_fillers_after_quotes_and_brackets(text, expected):
     assert P.normal_filler_removal(text) == expected
+
+
+class TestCleanupResidency:
+    """The cleanup model is only kept loaded when the chosen style uses it."""
+
+    @staticmethod
+    def _gate(monkeypatch, premium):
+        import wayfinder.license as lic
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(lic, "get_feature_gate", lambda *a, **k: SimpleNamespace(
+            is_premium=premium, has_feature=lambda f: premium))
+
+    def test_normal_needs_no_model(self, monkeypatch):
+        self._gate(monkeypatch, True)
+        assert P.cleanup_model_needed({"post_processing_enabled": True,
+                                       "output_tone": "minimal"}) is False
+
+    def test_free_never_needs_a_model(self, monkeypatch):
+        self._gate(monkeypatch, False)
+        assert P.cleanup_model_needed({"post_processing_enabled": True,
+                                       "output_tone": "professional"}) is False
+
+    def test_a_working_style_needs_the_model(self, monkeypatch, tmp_path):
+        self._gate(monkeypatch, True)
+        model = tmp_path / "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+        model.write_bytes(b"\0")
+        assert P.cleanup_model_needed({"post_processing_enabled": True, "output_tone": "dev",
+                                       "llama_cpp_model_path": str(model)}) is True
+
+    def test_a_greyed_style_runs_as_normal_and_needs_no_model(self, monkeypatch, tmp_path):
+        self._gate(monkeypatch, True)
+        model = tmp_path / "Qwen3.5-2B-Q4_K_M.gguf"
+        model.write_bytes(b"\0")
+        assert P.cleanup_model_needed({"post_processing_enabled": True, "output_tone": "dev",
+                                       "llama_cpp_model_path": str(model)}) is False
+
+    def test_opting_normal_into_the_model(self, monkeypatch):
+        self._gate(monkeypatch, False)
+        cfg = {"post_processing_enabled": True, "output_tone": "minimal", "normal_llm_cleanup": True}
+        assert P.cleanup_model_needed(cfg) is True
+        cfg["fast_filler_removal"] = True
+        assert P.cleanup_model_needed(cfg) is False
+
+    def test_warm_up_skips_when_no_model_is_needed(self, monkeypatch):
+        self._gate(monkeypatch, False)
+        monkeypatch.setattr(P, "get_backend", lambda cfg: pytest.fail("must not load a model"))
+        P.warm_up_postprocessing({"post_processing_enabled": True, "output_tone": "minimal"})
