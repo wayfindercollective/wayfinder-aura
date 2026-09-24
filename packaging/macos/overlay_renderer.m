@@ -107,6 +107,8 @@ static NSString *const kWFBreathKey = @"WayfinderIdleBreath";
     _settled = YES;
     [_timer invalidate];
     _timer = nil;
+    // Reduce Motion: a still frame, no breathing.
+    if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) return;
     CABasicAnimation *breath = [CABasicAnimation animationWithKeyPath:@"opacity"];
     breath.fromValue = @1.0;
     breath.toValue = @0.7;
@@ -163,7 +165,9 @@ static NSString *const kWFBreathKey = @"WayfinderIdleBreath";
         [commandBuffer presentDrawable:drawable];
         [commandBuffer commit];
 
-        if (_idle && _audioLevel < 0.01f && now - _idleSince >= kWFSettleAfterSeconds) {
+        BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+        CFTimeInterval settleAfter = reduceMotion ? 1.0 : kWFSettleAfterSeconds;
+        if (_idle && _audioLevel < 0.01f && now - _idleSince >= settleAfter) {
             [self settle];  // this frame stays on screen; CA breathes it
         }
     }

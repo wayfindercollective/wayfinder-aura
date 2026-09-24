@@ -15,6 +15,7 @@ surface.
 
 from __future__ import annotations
 
+import functools
 import os
 import sys
 
@@ -78,8 +79,26 @@ def apply_glass_palette(*color_maps) -> bool:
     return True
 
 
+@functools.lru_cache(maxsize=1)
+def _reduce_transparency() -> bool:
+    """System Settings → Accessibility → Display → Reduce transparency.
+
+    Read once per launch (the palette is chosen before the UI is built)."""
+    try:
+        from AppKit import NSWorkspace
+
+        return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceTransparency())
+    except Exception:
+        return False
+
+
 def glass_enabled() -> bool:
-    return sys.platform == "darwin" and os.environ.get("WAYFINDER_MACOS_GLASS", "1") != "0"
+    # Honour Reduce Transparency: the solid dark palette instead of glass.
+    return (
+        sys.platform == "darwin"
+        and os.environ.get("WAYFINDER_MACOS_GLASS", "1") != "0"
+        and not _reduce_transparency()
+    )
 
 
 def prepare_tk_root(root) -> bool:

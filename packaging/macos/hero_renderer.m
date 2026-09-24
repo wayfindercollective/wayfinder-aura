@@ -230,7 +230,10 @@ static NSString *const kWFHeroBreathKey = @"WayfinderHeroIdleBreath";
         [commandBuffer commit];
 
         BOOL calm = _targetMorph == 0.0f && _morph < 0.01f && _targetAudioLevel <= 0.0f;
-        if (calm && !_appActive && now - _idleSince >= kWFHeroSettleAfterSeconds) {
+        BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+        if (calm && reduceMotion && now - _idleSince >= 1.0) {
+            [self settleWithBreath:NO];  // Reduce Motion: a still ribbon when idle
+        } else if (calm && !_appActive && now - _idleSince >= kWFHeroSettleAfterSeconds) {
             [self settleWithBreath:YES];
         }
     }

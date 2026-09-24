@@ -226,3 +226,26 @@ def test_release_workflow_macos_job_never_gates_the_linux_release():
     assert "name: wayfinder-aura-macos-dmg" in publish
     assert "wayfinder-aura-macos-unsigned" not in publish
     assert "gh release upload" in publish
+
+
+def test_info_plist_polish_and_accessibility_hooks():
+    root = Path(__file__).resolve().parent.parent
+    spec = (root / "wayfinder-aura-macos.spec").read_text()
+    build = (root / "packaging" / "macos" / "build.py").read_text()
+    mic = "Wayfinder Aura uses the microphone only while you dictate, to turn your speech into text."
+    assert mic in spec and mic in build  # validator and bundle must agree
+    assert "NSHumanReadableCopyright" in spec
+    for native in ("overlay_renderer.m", "hero_renderer.m"):
+        assert "accessibilityDisplayShouldReduceMotion" in (root / "packaging" / "macos" / native).read_text()
+    main = (root / "wayfinder_main.py").read_text()
+    assert "::tk::mac::ShowPreferences" in main and "<Command-w>" in main
+
+
+def test_reduce_transparency_turns_glass_off(monkeypatch):
+    from wayfinder.ui import macos_window
+    monkeypatch.setattr(macos_window.sys, "platform", "darwin")
+    monkeypatch.delenv("WAYFINDER_MACOS_GLASS", raising=False)
+    monkeypatch.setattr(macos_window, "_reduce_transparency", lambda: True)
+    assert macos_window.glass_enabled() is False
+    monkeypatch.setattr(macos_window, "_reduce_transparency", lambda: False)
+    assert macos_window.glass_enabled() is True

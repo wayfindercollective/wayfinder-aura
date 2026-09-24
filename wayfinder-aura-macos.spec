@@ -225,12 +225,13 @@ app = BUNDLE(
         'LSBackgroundOnly': False,
         # Privacy permission descriptions (required by macOS)
         'NSMicrophoneUsageDescription':
-            'Wayfinder Aura needs microphone access for voice dictation.',
+            'Wayfinder Aura uses the microphone only while you dictate, to turn your speech into text.',
         # Allow the app to work in the background (tray mode)
         'LSUIElement': False,
         # A hotkey-driven background utility: App Nap throttles the Tk timers
         # that turn a hotkey press into recording (late start, clipped words).
         'LSAppNapIsDisabled': True,
+        'NSHumanReadableCopyright': f'© {datetime.now().year} Wayfinder Collective',
     },
 )
 

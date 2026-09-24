@@ -285,7 +285,7 @@ def validate_app() -> None:
         plist = plistlib.load(handle)
     expected = {
         "CFBundleIdentifier": "io.wayfindercollective.WayfinderAura",
-        "NSMicrophoneUsageDescription": "Wayfinder Aura needs microphone access for voice dictation.",
+        "NSMicrophoneUsageDescription": "Wayfinder Aura uses the microphone only while you dictate, to turn your speech into text.",
     }
     for key, value in expected.items():
         if plist.get(key) != value:

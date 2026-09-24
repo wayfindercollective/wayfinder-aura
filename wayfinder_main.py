@@ -5929,6 +5929,10 @@ class WayfinderApp(ctk.CTk):
         if IS_MACOS:
             try:
                 self.createcommand("::tk::mac::Quit", self.quit_app)
+                # App menu "Settings…" with ⌘, (Tk adds the item once this
+                # command exists) and the standard ⌘W to close the window.
+                self.createcommand("::tk::mac::ShowPreferences", self._macos_show_settings)
+                self.bind_all("<Command-w>", lambda _e: self.hide_to_tray())
             except Exception:
                 pass
         
@@ -19469,6 +19473,17 @@ class WayfinderApp(ctk.CTk):
         try:
             self.attributes("-topmost", True)
             self.after(200, lambda: self.attributes("-topmost", False))
+        except Exception:
+            pass
+
+    def _macos_show_settings(self) -> None:
+        """App menu → Settings… (⌘,): bring the window forward on Settings."""
+        try:
+            self.show_from_tray()
+        except Exception:
+            pass
+        try:
+            self._switch_tab("settings")
         except Exception:
             pass
 
