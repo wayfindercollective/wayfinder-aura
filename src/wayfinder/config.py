@@ -320,6 +320,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Vocabulary and hallucination suppression
     "custom_vocabulary": [],  # User's personal terms appended to prompt
     "vocabulary_replacements": [],  # Ultra: [[heard, write], ...] corrections
+    "normal_llm_cleanup": False,  # Normal style via the cleanup model (default: instant filler removal)
     "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
     
     # Voice profile learning (auto-enabled when output_tone is "personal")

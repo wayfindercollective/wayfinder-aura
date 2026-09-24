@@ -847,7 +847,9 @@ class TestProcessWithConfig:
         result = process_with_config("um hello world", config)
         assert result[0].isupper()
 
-    def test_minimal_tone_uses_neutral_llm_cleanup_by_default(self):
+    def test_minimal_tone_uses_neutral_llm_cleanup_when_opted_in(self):
+        # Default Normal is instant filler removal (tests/test_normal_style.py);
+        # normal_llm_cleanup keeps the model path for users who want it.
         backend = SimpleNamespace(
             is_available=lambda: True,
             process=MagicMock(return_value="This is neutral cleaned text."),
@@ -855,6 +857,7 @@ class TestProcessWithConfig:
         config = {
             "output_tone": "minimal",
             "post_processing_enabled": True,
+            "normal_llm_cleanup": True,
             "fast_filler_removal": False,
             "post_processing_backend": "llama_cpp",
             "llama_cpp_model_path": "/tmp/model.gguf",
@@ -888,6 +891,7 @@ class TestProcessWithConfig:
             "post_processing_backend": "llama_cpp",
             "llama_cpp_model_path": "/tmp/model.gguf",
             "custom_vocabulary": ["Wayfinder Aura"],
+            "normal_llm_cleanup": True,  # minimal: exercise the model prompt
         }
 
         with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
@@ -911,6 +915,7 @@ class TestProcessWithConfig:
             "post_processing_backend": "llama_cpp",
             "llama_cpp_model_path": "/tmp/model.gguf",
             "custom_vocabulary": ["PaidTerm"],
+            "normal_llm_cleanup": True,  # Free -> Normal; exercise the model prompt
         }
 
         with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):

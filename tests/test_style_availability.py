@@ -42,7 +42,8 @@ def test_styles_need_a_cleanup_model_on_disk(tmp_path):
 
 
 def test_strong_needs_a_bigger_model(model):
-    table = P.style_availability(_cfg(model("google_gemma-3-1b-it-Q4_K_M.gguf")))
+    # An ungraded small model: only the size tier limits it.
+    table = P.style_availability(_cfg(model("Llama-3.2-1B-Instruct-Q4_K_M.gguf")))
     assert table["dev"]["standard"] == (True, None)
     ok, reason = table["dev"]["strong"]
     assert ok is False and "Qwen3 4B" in reason
@@ -63,11 +64,31 @@ def test_graded_failures_are_unavailable(model, monkeypatch):
 
 
 def test_effective_style_falls_back_to_standard_then_normal(model, monkeypatch):
-    gemma = model("google_gemma-3-1b-it-Q4_K_M.gguf")
-    assert P.effective_style(_cfg(gemma, output_tone="dev", strong_mode=True))[:2] == ("dev", "standard")
-    monkeypatch.setitem(P.STYLE_SUPPORT, "gemma-3-1b", {
-        "name": "Gemma 3 1B", "unsupported": {("dev", "standard")}})
-    assert P.effective_style(_cfg(gemma, output_tone="dev", strong_mode=True))[:2] == ("minimal", "standard")
+    small = model("Llama-3.2-1B-Instruct-Q4_K_M.gguf")
+    assert P.effective_style(_cfg(small, output_tone="dev", strong_mode=True))[:2] == ("dev", "standard")
+    monkeypatch.setitem(P.STYLE_SUPPORT, "llama-3.2-1b", {
+        "name": "Llama 3.2 1B", "unsupported": {("dev", "standard")}})
+    assert P.effective_style(_cfg(small, output_tone="dev", strong_mode=True))[:2] == ("minimal", "standard")
+
+
+def test_graded_small_models_only_do_normal(model):
+    for name in ("google_gemma-3-1b-it-Q4_K_M.gguf", "Qwen3.5-2B-Q4_K_M.gguf"):
+        table = P.style_availability(_cfg(model(name)))
+        assert table["minimal"]["standard"] == (True, None)
+        for tone in ("professional", "casual", "dev", "personal"):
+            ok, reason = table[tone]["standard"]
+            assert ok is False and "try Qwen3 4B" in reason
+
+
+def test_qwen3_4b_offers_every_style(model):
+    table = P.style_availability(_cfg(model("Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf")))
+    assert all(v == (True, None) for d in table.values() for v in d.values())
+
+
+def test_missing_model_is_a_ui_hint_not_a_runtime_fallback(tmp_path):
+    cfg = _cfg(str(tmp_path / "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"), output_tone="dev")
+    assert P.style_availability(cfg)["dev"]["standard"][0] is False
+    assert P.effective_style(cfg)[:2] == ("dev", "standard")
 
 
 def test_cleanup_runs_the_effective_style(model, monkeypatch):
@@ -87,7 +108,7 @@ def test_cleanup_runs_the_effective_style(model, monkeypatch):
         return _Backend()
 
     monkeypatch.setattr(P, "get_backend", fake_get_backend)
-    cfg = _cfg(model("google_gemma-3-1b-it-Q4_K_M.gguf"), output_tone="professional",
+    cfg = _cfg(model("Llama-3.2-1B-Instruct-Q4_K_M.gguf"), output_tone="professional",
                strong_mode=True)
     P.process_with_config("please send the quarterly report to the whole team today", cfg)
     assert seen == {"tone": "professional", "strong": False}

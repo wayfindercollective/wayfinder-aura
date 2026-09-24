@@ -661,7 +661,21 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
 # matrix (scripts/eval_matrix.py; grades A/B = offered, C/F = greyed out).
 # Keyed by a lowercase filename fragment. A model not listed here is limited
 # only by its size tier (MODEL_TIERS max_intensity).
-STYLE_SUPPORT: Dict[str, Dict[str, Any]] = {}
+# Matrix 2026-09-24 (M3 Ultra, resident llama-server): Gemma 3 1B rewrote
+# meaning (diff -> "difference", "or nah" -> "Yeah, I'm hungry") and failed
+# Dev/Professional (F) and Casual/Personal (C); Qwen 3.5 2B echoed its input
+# (fillers kept, Professional F). Qwen3 4B graded A on every style (its
+# Professional/Standard C was sentence splitting, fine on reading).
+_SMALL_MODEL_STYLE_GAPS = frozenset(
+    (tone, intensity)
+    for tone in ("professional", "casual", "dev", "personal")
+    for intensity in ("standard", "strong"))
+STYLE_SUPPORT: Dict[str, Dict[str, Any]] = {
+    "gemma-3-1b": {"name": "Gemma 3 1B", "unsupported": _SMALL_MODEL_STYLE_GAPS,
+                   "better": "Qwen3 4B"},
+    "qwen3.5-2b": {"name": "Qwen 3.5 2B", "unsupported": _SMALL_MODEL_STYLE_GAPS,
+                   "better": "Qwen3 4B"},
+}
 
 STYLE_IDS = ("minimal", "professional", "casual", "dev", "personal")
 STYLE_NAMES = {"minimal": "Normal", "professional": "Professional", "casual": "Casual",
@@ -681,7 +695,7 @@ def _cleanup_model_name(config: dict) -> tuple[str, str]:
     return backend, ""
 
 
-def style_availability(config: dict) -> Dict[str, Dict[str, tuple]]:
+def style_availability(config: dict, check_model_file: bool = True) -> Dict[str, Dict[str, tuple]]:
     """What each style x strength can actually do with this cleanup setup.
 
     Returns {tone: {"standard"|"strong": (available: bool, reason: str|None)}}.
@@ -692,7 +706,7 @@ def style_availability(config: dict) -> Dict[str, Dict[str, tuple]]:
     """
     backend, model_name = _cleanup_model_name(config)
     model_missing = False
-    if backend == "llama_cpp":
+    if backend == "llama_cpp" and check_model_file:
         path = os.path.expanduser(config.get("llama_cpp_model_path", "") or "")
         model_missing = not (path and os.path.isfile(path))
     tier = detect_model_tier(model_name, backend=backend) if model_name else "small"
@@ -715,7 +729,7 @@ def style_availability(config: dict) -> Dict[str, Dict[str, tuple]]:
             if not config.get("post_processing_enabled", True):
                 reason = "Turn on Post-Processing in Settings to use styles."
             elif model_missing:
-                reason = "Download a cleanup model in Settings ▸ Post-Processing (Gemma 3 1B is recommended)."
+                reason = "Download a cleanup model in Settings ▸ Post-Processing (Qwen3 4B for styles)."
             elif intensity == "strong" and not strong_ok:
                 reason = f"Strong needs a larger model than {pretty} (Qwen3 4B or cloud)."
             elif support and (tone, intensity) in support.get("unsupported", ()):
@@ -735,7 +749,9 @@ def effective_style(config: dict) -> tuple[str, str, Optional[str]]:
     intensity = "strong" if config.get("strong_mode") else "standard"
     if tone not in STYLE_IDS or config.get("caricature_mode"):
         return tone, intensity, None
-    table = style_availability(config)
+    # A missing model file is a UI hint only: at runtime the model path already
+    # fails safely, and fake/remote paths shouldn't be second-guessed here.
+    table = style_availability(config, check_model_file=False)
     ok, reason = table[tone][intensity]
     if ok:
         return tone, intensity, None
@@ -924,6 +940,51 @@ FILLER_REGEX_PATTERNS = [
 
 # Compiled regex for efficiency
 _FILLER_REGEX = re.compile('|'.join(FILLER_REGEX_PATTERNS), re.IGNORECASE)
+
+
+# Normal ("minimal") promises "just removes um/uh - your exact words": only
+# filler SOUNDS go, never words that carry meaning ("right", "you know",
+# "actually"), and only accidental doubles of small words ("the the").
+_NORMAL_F = r"(?<![\w'])(?:u+h+m*|u+m+|e+r+m+|er|a+h+|h+m+|m{2,})(?![\w'])"
+_NORMAL_STEPS = [
+    # "I, uh, think" -> "I think" (Whisper brackets fillers with commas)
+    (re.compile(r"\s*,\s*" + _NORMAL_F + r"\s*,\s*", re.I), " "),
+    # a sentence that is only a filler: "Hmm. Let me check." -> "Let me check."
+    (re.compile(r"(^|[.!?]\s+)" + _NORMAL_F + r"[.!?…]+\s*", re.I), r"\1"),
+    # clause-initial: "Um, so we..." -> "so we..."
+    (re.compile(r"(^|[.!?]\s+|\s)" + _NORMAL_F + r"\s*,\s*", re.I), r"\1"),
+    # clause-final: "...ship it, um." -> "...ship it."
+    (re.compile(r"\s*,\s*" + _NORMAL_F + r"(?=\s*[.!?]|\s*$)", re.I), ""),
+    # anywhere else, bare: "need to um git" -> "need to git"
+    (re.compile(r"(^|\s)" + _NORMAL_F + r"(?=\s|$|[.,;!?])", re.I), r"\1"),
+]
+_NORMAL_REPEAT_RE = re.compile(
+    r"\b(the|a|an|to|and|of|i|it|in|on|we|you|my|is)(\s+\1\b)+", re.IGNORECASE)
+
+
+def normal_filler_removal(text: str) -> str:
+    """Normal style: remove um/uh-type sounds and doubled small words. Instant,
+    deterministic, needs no cleanup model, and cannot change meaning.
+
+    The speech x style matrix showed small cleanup models rewriting Normal
+    ("a couple more days" -> "two more days") or echoing the fillers back.
+    Words that carry meaning ("right", "you know", "actually") always stay.
+    """
+    if not text or not text.strip():
+        return text
+    first = text.lstrip()[:1]
+    out = text
+    for pattern, repl in _NORMAL_STEPS:
+        out = pattern.sub(repl, out)
+    out = _NORMAL_REPEAT_RE.sub(r"\1", out)
+    out = re.sub(r"\s+([,.;!?])", r"\1", out)
+    out = re.sub(r",\s*,+", ",", out)
+    out = re.sub(r",\s*([.!?])", r"\1", out)
+    out = re.sub(r"^[\s,;.]+", "", out)
+    out = re.sub(r"[ \t]{2,}", " ", out).strip()
+    if first.isupper() and out[:1].islower():
+        out = out[0].upper() + out[1:]
+    return out
 
 
 def fast_filler_removal(text: str) -> str:
@@ -3906,6 +3967,11 @@ def _process_with_config(text: str, config: dict) -> str:
             else:
                 use_caricature = False
         use_fast_regex = bool(config.get("fast_filler_removal", False))
+        if not use_caricature and not use_fast_regex and not config.get("normal_llm_cleanup", False):
+            start_time = time.time()
+            result = normal_filler_removal(text)
+            print(f"[Normal] Filler sounds removed in {(time.time() - start_time) * 1000:.1f}ms")
+            return result
         if not use_caricature and use_fast_regex:
             start_time = time.time()
             input_words = len(text.split())
