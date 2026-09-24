@@ -81,6 +81,15 @@ except ImportError:
 
 import sys as _sys
 IS_MACOS = _sys.platform == 'darwin'
+
+
+def _footer_tagline(is_macos: bool | None = None) -> str:
+    """Settings footer line; names the platform the build was made for."""
+    if is_macos is None:
+        is_macos = IS_MACOS
+    return "handcrafted for Mac" if is_macos else "handcrafted for Linux"
+
+
 if IS_MACOS:
     # CustomTkinter polls every window's DPI every 100 ms forever (a Tcl
     # `after`, winfo_exists and `wm state` per window, 10 wakeups/s), but on
@@ -9208,7 +9217,7 @@ class WayfinderApp(ctk.CTk):
         self._footer_version = _wf_version
         ctk.CTkLabel(
             scroll,
-            text="handcrafted for Linux",
+            text=_footer_tagline(),
             font=(self.font_mono[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
         ).pack(pady=(2, 2))
@@ -21791,6 +21800,9 @@ class WayfinderApp(ctk.CTk):
             return any(n in m for n in needles)
 
         if has("inject", "ydotool", "wtype", "type"):
+            if IS_MACOS:
+                return ("Couldn't paste the text — make sure Accessibility is on "
+                        "for Wayfinder Aura (Privacy & Security).")
             return "Couldn't type the text — check input permissions (Settings) or install ydotool."
         if has("api key", "401", "unauthorized"):
             return "Cloud API key issue — re-check it in Settings."

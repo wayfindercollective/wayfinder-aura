@@ -406,3 +406,20 @@ def test_ctk_dpi_poll_is_idle_on_macos():
         assert _ctk.ScalingTracker.update_loop_interval >= 60_000
         # The check it would run is a constant on macOS, so nothing is lost.
         assert _ctk.ScalingTracker.get_window_dpi_scaling(None) == 1
+
+
+def test_settings_footer_names_the_platform():
+    assert wayfinder_main._footer_tagline(is_macos=True) == "handcrafted for Mac"
+    # Linux (and every non-Mac build) keeps its original line.
+    assert wayfinder_main._footer_tagline(is_macos=False) == "handcrafted for Linux"
+
+
+def test_paste_failure_guidance_is_platform_specific(monkeypatch):
+    ns = object()
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    mac = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
+    assert "Accessibility" in mac and "ydotool" not in mac
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    linux = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
+    assert linux == ("Couldn't type the text — check input permissions (Settings) "
+                     "or install ydotool.")
