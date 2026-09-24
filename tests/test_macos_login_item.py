@@ -48,3 +48,21 @@ def test_disable_unregisters(monkeypatch):
     monkeypatch.setattr(L, "_service", lambda: svc)
     assert L.set_enabled(False) == (True, None)
     assert calls == ["off"]
+
+
+def test_setup_guide_applies_the_login_choice_only_when_ticked(monkeypatch):
+    from wayfinder.ui.welcome import WelcomePane
+
+    calls = []
+    monkeypatch.setattr(L, "set_enabled", lambda on: calls.append(on) or (True, None))
+    pane = WelcomePane.__new__(WelcomePane)
+    pane.app = SimpleNamespace(log=lambda m: None)
+    pane._login_item_var = SimpleNamespace(get=lambda: False)
+    pane._apply_login_item_choice()
+    assert calls == []
+    pane._login_item_var = SimpleNamespace(get=lambda: True)
+    pane._apply_login_item_choice()
+    assert calls == [True]
+    pane._login_item_var = None  # not offered (Linux, source run, already on)
+    pane._apply_login_item_choice()
+    assert calls == [True]

@@ -981,6 +981,7 @@ class WelcomePane:
             )
             heard.pack(anchor="w", pady=(SPACING["sm"], 0))
             self._wrap_labels.append(heard)
+            self._login_item_choice(body)
             self._continue_button(body, "done", gold=True)
         elif self._help_shown:
             self._render_dictate_help(body)
@@ -993,6 +994,42 @@ class WelcomePane:
                 pady=(SPACING["sm"], 0),
             )
             self._schedule_help()
+
+    def _login_item_choice(self, body) -> None:
+        """macOS: offer "open at login" where it matters - right after the first
+        dictation works. A visible, pre-ticked box the user can untick; applied
+        on "done" (SMAppService, listed in System Settings ▸ Login Items)."""
+        self._login_item_var = None
+        if sys.platform != "darwin":
+            return
+        try:
+            from wayfinder.utils import macos_login_item
+
+            if not macos_login_item.available() or macos_login_item.is_enabled():
+                return
+        except Exception:
+            return
+        ctk = self._ctk
+        self._login_item_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            body, text="open aura when I log in", variable=self._login_item_var,
+            font=(FONTS["body"][0], FONT_SIZES["small"]),
+            text_color=COLORS["text_secondary"], fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"], border_color=COLORS["border_rim"],
+            corner_radius=RADIUS["xs"], checkbox_width=18, checkbox_height=18,
+        ).pack(anchor="w", pady=(SPACING["md"], 0))
+
+    def _apply_login_item_choice(self) -> None:
+        var = getattr(self, "_login_item_var", None)
+        if var is None or not var.get():
+            return
+        try:
+            from wayfinder.utils import macos_login_item
+
+            ok, message = macos_login_item.set_enabled(True)
+            self.app.log(("✓ " if ok else "⚠ ") + (message or "Aura will open when you log in"))
+        except Exception:
+            pass
 
     def _render_dictate_help(self, body) -> None:
         """The recovery variant of the dictate step, shown once the wait elapses
@@ -1390,6 +1427,7 @@ class WelcomePane:
             save_config(self.app.config)
         except Exception:
             pass
+        self._apply_login_item_choice()
         # Collapse first-session Dictate tips once the tour is done.
         try:
             if hasattr(self.app, "_hide_dictate_tips"):
