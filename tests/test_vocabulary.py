@@ -146,3 +146,18 @@ def test_cleanup_leaves_text_alone_on_free(free, monkeypatch):
     monkeypatch.setattr(P, "_process_with_config", lambda text, cfg: "Ship it on Way Finder.")
     cfg = {"vocabulary_replacements": [["way finder", "Wayfinder"]]}
     assert P.process_with_config("x", cfg) == "Ship it on Way Finder."
+
+
+def test_corrections_are_idempotent_when_the_spelling_contains_the_heard_phrase():
+    pairs = [["aura", "Wayfinder Aura"]]
+    once = T.apply_vocabulary_replacements("try aura today", pairs)
+    assert once == "try Wayfinder Aura today"
+    assert T.apply_vocabulary_replacements(once, pairs) == once
+    assert T.apply_vocabulary_replacements("wayfinder aura rocks", pairs) == "Wayfinder Aura rocks"
+
+
+def test_inserted_text_is_not_rescanned_by_other_corrections():
+    pairs = [["git", "git commit"], ["commit", "Commit"]]
+    out = T.apply_vocabulary_replacements("run git now", pairs)
+    assert out == "run git commit now"
+    assert T.apply_vocabulary_replacements(out, pairs) == out

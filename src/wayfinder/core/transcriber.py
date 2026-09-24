@@ -2683,17 +2683,28 @@ def parse_vocabulary_replacements(raw) -> list[tuple[str, str]]:
 
 def apply_vocabulary_replacements(text: str, replacements) -> str:
     """Replace each "heard" phrase (whole words, any case, any spacing) with its
-    exact "write" spelling. Longest phrases first, so "way finder aura" wins
-    over "way finder"."""
+    exact "write" spelling, in ONE pass.
+
+    Idempotent - it runs after transcription and again after cleanup: text
+    already in a "write" spelling is matched first and kept (casing
+    normalised), so "aura -> Wayfinder Aura" never becomes "Wayfinder Wayfinder
+    Aura", and inserted text is never re-scanned. Longest phrases win.
+    """
     import re
 
     pairs = parse_vocabulary_replacements(replacements)
     if not text or not pairs:
         return text
-    for heard, write in sorted(pairs, key=lambda p: -len(p[0])):
-        pattern = r"(?<!\w)" + r"\s+".join(re.escape(w) for w in heard.split()) + r"(?!\w)"
-        text = re.sub(pattern, lambda _m, w=write: w, text, flags=re.IGNORECASE)
-    return text
+    target = {}
+    for heard, write in pairs:
+        target.setdefault(" ".join(write.lower().split()), write)
+        target.setdefault(" ".join(heard.lower().split()), write)
+    phrases = sorted(target, key=len, reverse=True)
+    pattern = re.compile(
+        "|".join(r"(?<!\w)" + r"\s+".join(re.escape(w) for w in phrase.split()) + r"(?!\w)"
+                 for phrase in phrases),
+        re.IGNORECASE)
+    return pattern.sub(lambda m: target[" ".join(m.group(0).lower().split())], text)
 
 
 def licensed_vocabulary_replacements(config: dict) -> list[tuple[str, str]]:
