@@ -318,6 +318,7 @@ class WelcomePane:
         self._perm_poll_id = None
         self._perm_snapshot = None
         self._perm_done_scheduled = False
+        self._perm_requested: set[str] = set()  # rows whose "allow" was clicked
         # macOS Welcome owns the free Base-model download ("runs entirely on this
         # Mac"). Linux keeps its separate setup flow and cue banner.
         needs_model = False
@@ -570,6 +571,12 @@ class WelcomePane:
         rows.pack(fill="x", pady=(SPACING["md"], 0))
         for name, title, why, icon in self._PERMISSION_ROWS:
             granted = snapshot.get(name) is True
+            # macOS hands an Input Monitoring grant to new processes only (its
+            # own Settings offers "Quit & Reopen"): once asked, offer that here.
+            relaunch = (not granted and name == "input_monitoring"
+                        and name in self._perm_requested)
+            if relaunch:
+                why = "switched it on? relaunch aura to finish"
             row = ctk.CTkFrame(rows, fg_color="transparent")
             row.pack(fill="x", pady=(0, SPACING["sm"]))
             if get_icon is not None:
@@ -589,6 +596,15 @@ class WelcomePane:
             if granted:
                 ctk.CTkLabel(row, text="on", font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
                              text_color=COLORS["accent_green"]).pack(side="right")
+            elif relaunch:
+                ctk.CTkButton(
+                    row, text="relaunch", width=86, height=30,
+                    corner_radius=RADIUS["sm"],
+                    fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+                    text_color=COLORS["bg_base"],
+                    font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
+                    command=self._relaunch_for_permissions,
+                ).pack(side="right")
             else:
                 repair = name in seen and name != "microphone"
                 ctk.CTkButton(
@@ -612,7 +628,20 @@ class WelcomePane:
         later.bind("<Button-1>", lambda _e: self._permissions_complete())
         self._perm_poll_id = self.card.after(self._PERMISSION_POLL_MS, self._poll_permissions)
 
+    def _relaunch_for_permissions(self) -> None:
+        try:
+            if self.app.relaunch_app():
+                return
+        except Exception:
+            pass
+        # No bundle to reopen (source run): the Settings pane is the fallback.
+        self._request_permission("input_monitoring")
+
     def _request_permission(self, name: str, repair: bool = False) -> None:
+        first_ask = name not in self._perm_requested
+        self._perm_requested.add(name)
+        if first_ask and name == "input_monitoring":
+            self._render_step()  # show the relaunch hint beside "allow"
         try:
             from wayfinder.utils import macos_permissions as perms
 

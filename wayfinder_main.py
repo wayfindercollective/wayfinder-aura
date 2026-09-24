@@ -19773,6 +19773,38 @@ class WayfinderApp(ctk.CTk):
         """Tray 'Reset' action — abandon any stuck/in-flight dictation and return to idle."""
         self._dispatch_tray_action(self.force_reset)
 
+    def relaunch_app(self) -> bool:
+        """macOS: quit, then reopen the bundle through LaunchServices.
+
+        Input Monitoring grants reach a *new* process only (macOS itself offers
+        "Quit & Reopen"). A helper shell waits for this PID to exit before
+        ``open`` so the old instance can't just be re-activated.
+        """
+        if not IS_MACOS:
+            return False
+        try:
+            from Foundation import NSBundle
+
+            bundle = str(NSBundle.mainBundle().bundlePath())
+        except Exception:
+            return False
+        if not bundle.endswith(".app"):
+            return False  # a source run has no bundle to reopen
+        try:
+            subprocess.Popen(
+                ["/bin/sh", "-c",
+                 'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2"',
+                 "wayfinder-relaunch", str(os.getpid()), bundle],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+        except Exception as exc:
+            self.log(f"⚠ Could not relaunch: {exc}")
+            return False
+        self.log("↻ Relaunching Wayfinder Aura")
+        self.quit_app()
+        return True
+
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
         # Signal all background threads to stop
