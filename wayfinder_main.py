@@ -81,6 +81,15 @@ except ImportError:
 
 import sys as _sys
 IS_MACOS = _sys.platform == 'darwin'
+if IS_MACOS:
+    # CustomTkinter polls every window's DPI every 100 ms forever (a Tcl
+    # `after`, winfo_exists and `wm state` per window, 10 wakeups/s), but on
+    # macOS its DPI check is hard-wired to 1.0 - Aqua scales on its own - so
+    # the loop can never find a change. Hourly keeps it alive but idle.
+    try:
+        ctk.ScalingTracker.update_loop_interval = 3_600_000
+    except Exception:
+        pass
 # Microphone picker's first option (matched by the "Auto-detect" substring).
 # macOS drops the emoji prefix: no emoji as UI chrome (rule 11).
 AUTO_DETECT_MIC_LABEL = (

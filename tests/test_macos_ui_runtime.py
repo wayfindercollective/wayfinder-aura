@@ -395,3 +395,12 @@ def test_unhide_restores_the_native_hero(monkeypatch):
     wayfinder_main.WayfinderApp._on_macos_app_visibility_changed(app)
     # The test process is not a hidden NSApplication, so this is the unhide path.
     assert events == ["menu", "geometry", "sync", "breath"]
+
+
+def test_ctk_dpi_poll_is_idle_on_macos():
+    import sys as _sys
+    import customtkinter as _ctk
+    if _sys.platform == "darwin":
+        assert _ctk.ScalingTracker.update_loop_interval >= 60_000
+        # The check it would run is a constant on macOS, so nothing is lost.
+        assert _ctk.ScalingTracker.get_window_dpi_scaling(None) == 1

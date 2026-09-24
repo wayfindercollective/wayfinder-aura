@@ -132,6 +132,14 @@ pre-empts it (`on_hotkey`). All darwin-gated.
 - **Linux check:** measure the overlay process idle; consider a lower idle
   frame rate once the pill has been idle for a few seconds.
 
+### 3.3 CustomTkinter polls DPI every 100 ms for nothing
+- **Evidence (sampled on macOS):** `ScalingTracker.check_dpi_scaling` re-arms
+  `after(100)` forever and calls `winfo_exists()` + `wm state` on every CTk
+  window: 10 wakeups/s. Its DPI query returns a constant 1 on Linux ("not
+  implemented") as on macOS, so it can never detect anything.
+- **Fix sketch (macOS):** `ctk.ScalingTracker.update_loop_interval = 3_600_000`
+  right after importing customtkinter (`wayfinder_main.py`, darwin-gated).
+
 ## 4. Reliability
 
 ### 4.1 Orphaned whisper-server after a crash (Linux has no supervisor)
