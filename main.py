@@ -844,9 +844,9 @@ def main():
                     save_config(config)
                 if _accessibility_trusted is False or _input_monitoring_trusted is False:
                     print(
-                        "[Permissions] Allow Wayfinder Aura in System Settings > "
-                        "Privacy & Security > Accessibility and Input Monitoring, "
-                        "then restart the app.",
+                        "[Permissions] Waiting for Accessibility / Input Monitoring: "
+                        "use the checklist in the Aura window (the hotkey starts "
+                        "working as soon as both are on - no restart needed).",
                         flush=True,
                     )
                 elif _accessibility_trusted is None or _input_monitoring_trusted is None:

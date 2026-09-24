@@ -157,33 +157,6 @@ def configure_macos_overlay_as_accessory(
         return False
 
 
-_MACOS_DOCK_METRICS: tuple[str, float] | None = None
-
-
-def _macos_dock_metrics() -> tuple[str, float]:
-    """Return Dock orientation/tile size once; defaults are native 52px bottom."""
-    global _MACOS_DOCK_METRICS
-    if _MACOS_DOCK_METRICS is not None:
-        return _MACOS_DOCK_METRICS
-
-    def _read(key: str) -> str:
-        result = subprocess.run(
-            ["/usr/bin/defaults", "read", "com.apple.dock", key],
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
-
-    try:
-        orientation = _read("orientation").lower() or "bottom"
-        tile_size = float(_read("tilesize") or 52.0)
-    except Exception:
-        orientation, tile_size = "bottom", 52.0
-    _MACOS_DOCK_METRICS = orientation, tile_size
-    return _MACOS_DOCK_METRICS
-
-
 def _load_kwin_script(script_path: str) -> bool:
     """Load+start a KWin script over D-Bus. In-process Qt D-Bus first.
 
@@ -1311,20 +1284,11 @@ class GlassmorphicOverlay(QWidget):
             vertical=vertical, visual_inset=self.glow_margin,
         )
 
-        # On macOS the bottom-right corner is normally empty beside the
-        # centered Dock. Use the user's actual Dock tile size (52px by default)
-        # to center the visible pill in that strip instead of wasting the full
-        # Dock height above it. Other anchors keep the conservative work-area
-        # placement.
-        if sys.platform == "darwin" and vertical == "bottom" and horizontal == "right":
-            orientation, tile_size = _macos_dock_metrics()
-            if orientation == "bottom":
-                dock_band = max(44.0, min(128.0, tile_size + 12.0))
-                visible_h = max(1.0, widget_height - self.glow_margin * 2.0)
-                screen_bottom = full.y() + full.height()
-                visible_top = screen_bottom - dock_band / 2.0 - visible_h / 2.0
-                y = int(round(visible_top - self.glow_margin))
-                y = max(full.y(), min(y, screen_bottom - widget_height + self.glow_margin))
+        # macOS: availableGeometry is NSScreen.visibleFrame, which already
+        # excludes the Dock's band at its real size (and follows Dock resizes
+        # via screen-parameter changes). The pill used to be dropped into that
+        # band beside a centred Dock, which put it behind any Dock wide enough
+        # to reach the corner.
 
         return (x, y)
     
