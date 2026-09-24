@@ -163,7 +163,7 @@ def test_fn_enter_style_chord_is_also_suppressed(monkeypatch):
     assert intercept(11, {"flags": 0, "keycode": 0x24}) is None
 
 
-@needs_pynput
+@pytest.mark.macos_only
 def test_unsupported_macos_key_falls_back_to_fn_space_not_bare_space(monkeypatch):
     captured = {}
 
@@ -207,7 +207,7 @@ def test_unsupported_macos_key_falls_back_to_fn_space_not_bare_space(monkeypatch
     assert events.get_nowait() == (EventType.HOTKEY_PRESSED, None)
 
 
-@needs_pynput
+@pytest.mark.macos_only
 def test_macos_record_requires_physical_event_with_exact_fn_chord(monkeypatch):
     captured = {}
 
