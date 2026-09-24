@@ -2549,6 +2549,8 @@ LLM_GGUF_MODELS = {
         "description": "Small and fast. Great for Normal cleanup; for styles use Qwen3 4B (in testing Gemma reworded technical terms).",
         "speed": "Very Fast",
         "accuracy": "Excellent",
+        # Explicit False: old clients built with it True must drop the flag.
+        "recommended": False,
     },
     "qwen3.5-2b": {
         "name": "Qwen 3.5 2B",
