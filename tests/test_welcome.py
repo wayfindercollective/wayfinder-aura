@@ -259,3 +259,53 @@ class TestWelcomeCardFit:
         from wayfinder.ui.welcome import fit_card_size
 
         assert fit_card_size(200, 150, self.PREFERRED, self.MINIMUM) == self.MINIMUM
+
+
+class TestWelcomePermissionsDetour:
+    """macOS permissions checklist: a detour that resumes the current step."""
+
+    def test_permissions_step_is_first_when_requested(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow(include_permissions=True)
+        assert flow.steps == ["permissions", "mic", "hotkey", "dictate"]
+        assert flow.current == "permissions"
+
+    def test_linux_default_has_no_permissions_step(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        assert "permissions" not in WelcomeFlow().steps
+
+    def test_detour_from_hotkey_resumes_hotkey(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow()
+        flow.pass_mic_test()
+        flow.advance()
+        assert flow.current == "hotkey"
+        flow.detour_to("permissions")
+        assert flow.current == "permissions"
+        flow.advance()
+        assert flow.current == "hotkey"
+
+    def test_detour_moves_an_earlier_permissions_step_instead_of_replaying_mic(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow(include_permissions=True)
+        flow.advance()           # past permissions ("not now")
+        flow.pass_mic_test()
+        flow.advance()
+        assert flow.current == "hotkey"
+        flow.detour_to("permissions")
+        assert flow.current == "permissions"
+        assert flow.steps.count("permissions") == 1
+        flow.advance()
+        assert flow.current == "hotkey"  # mic test is not repeated
+
+    def test_detour_is_a_noop_once_complete(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow()
+        flow.skip()
+        flow.detour_to("permissions")
+        assert flow.current is None

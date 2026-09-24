@@ -90,7 +90,7 @@ def test_startup_does_not_stack_input_prompt_behind_accessibility(monkeypatch):
         "request_input_monitoring_permission",
         lambda *, prompt: prompts.append(("input", prompt)) or False,
     )
-    config = {"macos_input_permissions_prompted_v1": True}
+    config = {"welcome_completed": True, "macos_input_permissions_prompted_v1": True}
 
     status = macos_permissions.request_startup_input_permissions(config)
 
@@ -113,7 +113,7 @@ def test_input_monitoring_gets_its_own_request_after_accessibility(monkeypatch):
         "request_input_monitoring_permission",
         lambda *, prompt: prompts.append(("input", prompt)) or False,
     )
-    config = {"macos_accessibility_request_attempted_v2": True}
+    config = {"welcome_completed": True, "macos_accessibility_request_attempted_v2": True}
 
     status = macos_permissions.request_startup_input_permissions(config)
 
@@ -136,3 +136,62 @@ def test_open_input_monitoring_settings_uses_listen_event_pane(monkeypatch):
 
     assert macos_permissions.open_macos_privacy_settings("input_monitoring") is True
     assert "Privacy_ListenEvent" in calls[0][0][1]
+
+
+def test_permission_snapshot_is_all_granted_off_macos(monkeypatch):
+    monkeypatch.setattr(macos_permissions.sys, "platform", "linux")
+    assert macos_permissions.permission_snapshot() == {
+        "microphone": True, "accessibility": True, "input_monitoring": True,
+    }
+
+
+def test_first_run_startup_never_prompts_before_the_setup_guide(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_permissions, "request_accessibility_permission",
+        lambda *, prompt: prompts.append(("accessibility", prompt)) or False,
+    )
+    monkeypatch.setattr(
+        macos_permissions, "request_input_monitoring_permission",
+        lambda *, prompt: prompts.append(("input", prompt)) or False,
+    )
+    config = {}
+
+    status = macos_permissions.request_startup_input_permissions(config)
+
+    assert all(prompt is False for _, prompt in prompts)
+    assert status.config_changed is False
+    assert config == {}
+
+
+def test_repair_refuses_any_bundle_but_aura(monkeypatch):
+    calls = []
+    monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_permissions, "own_bundle_identifier", lambda: "org.python.python")
+    monkeypatch.setattr(macos_permissions.subprocess, "run",
+                        lambda *a, **k: calls.append(a))
+
+    assert macos_permissions.repair_permission("accessibility") is False
+    assert calls == []
+
+
+def test_repair_resets_only_auras_own_entry_then_asks_again(monkeypatch):
+    calls, asked = [], []
+    monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_permissions, "own_bundle_identifier",
+                        lambda: macos_permissions.AURA_BUNDLE_ID)
+    monkeypatch.setattr(macos_permissions.subprocess, "run",
+                        lambda args, **k: calls.append(args))
+    monkeypatch.setattr(macos_permissions, "ask_for_permission",
+                        lambda name: asked.append(name) or True)
+
+    assert macos_permissions.repair_permission("input_monitoring") is True
+    assert calls == [["/usr/bin/tccutil", "reset", "ListenEvent",
+                      macos_permissions.AURA_BUNDLE_ID]]
+    assert asked == ["input_monitoring"]
+
+
+def test_repair_is_a_noop_off_macos(monkeypatch):
+    monkeypatch.setattr(macos_permissions.sys, "platform", "linux")
+    assert macos_permissions.repair_permission("accessibility") is False

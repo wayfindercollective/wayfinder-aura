@@ -38,10 +38,14 @@ class WelcomeFlow:
 
     STEPS = ("mic", "hotkey", "dictate")
 
-    def __init__(self, on_complete=None, *, include_model: bool = False):
-        self.steps = list(self.STEPS)
-        if include_model:
+    def __init__(self, on_complete=None, *, include_model: bool = False,
+                 include_permissions: bool = False, steps=None):
+        self.steps = list(steps) if steps else list(self.STEPS)
+        if include_model and not steps:
             self.steps.insert(1, "model")
+        if include_permissions and not steps:
+            # macOS: grant mic/Accessibility/Input Monitoring before the mic test.
+            self.steps.insert(0, "permissions")
         self._index = 0
         self.is_complete = False
         self.on_complete = on_complete
@@ -51,6 +55,18 @@ class WelcomeFlow:
         self.mic_test_state = "idle"
         self.mic_test_error = ""
         self._mic_test_generation = 0
+
+    def detour_to(self, step) -> None:
+        """Show ``step`` now; advancing past it resumes the current step
+        (instead of replaying the steps between them)."""
+        if self.is_complete or self.current == step:
+            return
+        if step in self.steps:
+            at = self.steps.index(step)
+            self.steps.pop(at)
+            if at < self._index:
+                self._index -= 1
+        self.steps.insert(self._index, step)
 
     @property
     def current(self):
@@ -269,11 +285,20 @@ class WelcomePane:
 
     # Per-step card titles (rendered in the fixed header, above the divider).
     _STEP_TITLES = {
+        "permissions": "welcome to wayfinder aura",
         "model": "set up local dictation",
         "mic": "welcome to wayfinder aura",
         "hotkey": "your hotkey",
         "dictate": "try it now",
     }
+
+    # macOS permission rows: (id, title, why, icon).
+    _PERMISSION_ROWS = (
+        ("microphone", "Microphone", "to hear you", "mic"),
+        ("accessibility", "Accessibility", "to type your words into any app", "pen-line"),
+        ("input_monitoring", "Input Monitoring", "to hear your hotkey anywhere", "lock"),
+    )
+    _PERMISSION_POLL_MS = 1000  # live grant pickup while the step is up (rule 1: >= 100 ms)
 
     # Preferred card size. In a compact window the tab area can be smaller, so
     # the card shrinks toward the minimum instead of overflowing every edge
@@ -281,12 +306,18 @@ class WelcomePane:
     _CARD_SIZE = (520, 360)
     _CARD_MIN_SIZE = (320, 300)
 
-    def __init__(self, parent, app):
+    def __init__(self, parent, app, *, only_permissions: bool = False):
         import customtkinter as ctk  # lazy: keep the module headless-importable
 
         self._ctk = ctk
         self.parent = parent
         self.app = app
+        # Permissions-only pane (e.g. after Ultra activation): one step, and it
+        # never marks the first-run tour as done.
+        self._only_permissions = bool(only_permissions)
+        self._perm_poll_id = None
+        self._perm_snapshot = None
+        self._perm_done_scheduled = False
         # macOS Welcome owns the free Base-model download ("runs entirely on this
         # Mac"). Linux keeps its separate setup flow and cue banner.
         needs_model = False
@@ -295,10 +326,22 @@ class WelcomePane:
                 needs_model = not bool(app._has_usable_whisper_model())
             except Exception:
                 needs_model = False
-        self.flow = WelcomeFlow(
-            on_complete=self._complete_flow,
-            include_model=needs_model,
-        )
+        needs_permissions = False
+        if sys.platform == "darwin":
+            try:
+                from wayfinder.utils.macos_permissions import permission_snapshot
+
+                needs_permissions = any(v is not True for v in permission_snapshot().values())
+            except Exception:
+                needs_permissions = False
+        if self._only_permissions:
+            self.flow = WelcomeFlow(on_complete=self._complete_flow, steps=["permissions"])
+        else:
+            self.flow = WelcomeFlow(
+                on_complete=self._complete_flow,
+                include_model=needs_model,
+                include_permissions=needs_permissions,
+            )
         self._transcript = None
         self._dictation_error = ""
         self._destroyed = False
@@ -460,6 +503,7 @@ class WelcomePane:
         if self.flow.is_complete:
             return
         self._cancel_mic_meter_poll()
+        self._cancel_permission_poll()
         for child in self.card.winfo_children():
             child.destroy()
         self._wrap_labels = []
@@ -469,7 +513,12 @@ class WelcomePane:
         # Title + divider: a fixed header pinned to the top of the card.
         header = ctk.CTkFrame(self.card, fg_color="transparent")
         header.pack(side="top", fill="x", padx=pad, pady=(pad, 0))
-        self._title(header, self._STEP_TITLES.get(self.flow.current, ""))
+        title = self._STEP_TITLES.get(self.flow.current, "")
+        if self.flow.current == "permissions" and self._only_permissions:
+            title = "finish setting up"
+        elif self.flow.current == "mic" and "permissions" in self.flow.steps:
+            title = "test your microphone"
+        self._title(header, title)
 
         # Footer (dots + skip) pinned to the bottom — packed BEFORE the body so the
         # body's expand fills only the band between header and footer.
@@ -486,7 +535,9 @@ class WelcomePane:
         body.pack(expand=True, fill="x")
 
         step = self.flow.current
-        if step == "model":
+        if step == "permissions":
+            self._render_permissions(body)
+        elif step == "model":
             self._render_model(body)
         elif step == "mic":
             self._render_mic(body)
@@ -494,6 +545,129 @@ class WelcomePane:
             self._render_hotkey(body)
         elif step == "dictate":
             self._render_dictate(body)
+
+    def _render_permissions(self, body) -> None:
+        """Three live rows; Allow/Repair trigger macOS's own prompts."""
+        ctk = self._ctk
+        from wayfinder.utils.macos_permissions import permission_snapshot
+
+        snapshot = permission_snapshot()
+        self._perm_snapshot = snapshot
+        self._remember_granted_permissions(snapshot)
+        all_on = all(v is True for v in snapshot.values())
+        self._body_label(
+            body,
+            "all set — Aura can hear you and type for you."
+            if all_on
+            else "turn these on once. each opens a mac prompt, and aura picks it up right away.",
+        )
+        seen = set(self.app.config.get("macos_permissions_seen", []) or [])
+        try:
+            from wayfinder.ui.icons import get_icon
+        except Exception:
+            get_icon = None
+        rows = ctk.CTkFrame(body, fg_color="transparent")
+        rows.pack(fill="x", pady=(SPACING["md"], 0))
+        for name, title, why, icon in self._PERMISSION_ROWS:
+            granted = snapshot.get(name) is True
+            row = ctk.CTkFrame(rows, fg_color="transparent")
+            row.pack(fill="x", pady=(0, SPACING["sm"]))
+            if get_icon is not None:
+                image = get_icon("check" if granted else icon, 16,
+                                 COLORS["accent_green"] if granted else COLORS["text_secondary"])
+                ctk.CTkLabel(row, text="", image=image, width=20).pack(side="left", padx=(0, SPACING["sm"]))
+            text = ctk.CTkFrame(row, fg_color="transparent")
+            text.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(text, text=title, anchor="w",
+                         font=(FONTS["body"][0], FONT_SIZES["body"], "bold"),
+                         text_color=COLORS["text_primary"]).pack(anchor="w")
+            ctk.CTkLabel(text, text=why, anchor="w",
+                         font=(FONTS["body"][0], FONT_SIZES["small"]),
+                         text_color=COLORS["text_muted"]).pack(anchor="w")
+            if granted:
+                ctk.CTkLabel(row, text="on", font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
+                             text_color=COLORS["accent_green"]).pack(side="right")
+            else:
+                repair = name in seen and name != "microphone"
+                ctk.CTkButton(
+                    row, text="repair" if repair else "allow", width=86, height=30,
+                    corner_radius=RADIUS["sm"],
+                    fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+                    text_color=COLORS["bg_base"],
+                    font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
+                    command=lambda n=name, r=repair: self._request_permission(n, r),
+                ).pack(side="right")
+        if all_on:
+            if not self._perm_done_scheduled:
+                # Let the green checks register, then move on by themselves.
+                self._perm_done_scheduled = True
+                self.card.after(900, self._permissions_complete)
+            return
+        later = ctk.CTkLabel(body, text="not now", font=(FONTS["body"][0], FONT_SIZES["small"]),
+                             text_color=COLORS["text_muted"], cursor="hand2")
+        later.pack(anchor="w", pady=(SPACING["sm"], 0))
+        later.bind("<Button-1>", lambda _e: self._permissions_complete())
+        self._perm_poll_id = self.card.after(self._PERMISSION_POLL_MS, self._poll_permissions)
+
+    def _request_permission(self, name: str, repair: bool = False) -> None:
+        try:
+            from wayfinder.utils import macos_permissions as perms
+
+            if repair:
+                perms.repair_permission(name)
+            else:
+                perms.ask_for_permission(name)
+        except Exception:
+            pass
+
+    def _remember_granted_permissions(self, snapshot) -> None:
+        """Remember grants once seen, so a later loss shows Repair, not Allow."""
+        try:
+            seen = list(self.app.config.get("macos_permissions_seen", []) or [])
+            added = [n for n, v in snapshot.items() if v is True and n not in seen]
+            if added:
+                self.app.config["macos_permissions_seen"] = seen + added
+                save_config(self.app.config)
+        except Exception:
+            pass
+
+    def _poll_permissions(self) -> None:
+        self._perm_poll_id = None
+        if self._destroyed or self.flow.current != "permissions":
+            return
+        try:
+            from wayfinder.utils.macos_permissions import permission_snapshot
+
+            snapshot = permission_snapshot()
+        except Exception:
+            snapshot = self._perm_snapshot
+        before = self._perm_snapshot or {}
+        if snapshot != before:
+            newly = [n for n in ("accessibility", "input_monitoring")
+                     if snapshot.get(n) is True and before.get(n) is not True]
+            if newly:
+                try:
+                    self.app._macos_permissions_granted(newly)
+                except Exception:
+                    pass
+            self._render_step()  # redraws rows (and re-arms the poll)
+            return
+        self._perm_poll_id = self.card.after(self._PERMISSION_POLL_MS, self._poll_permissions)
+
+    def _cancel_permission_poll(self) -> None:
+        if self._perm_poll_id is not None:
+            try:
+                self.card.after_cancel(self._perm_poll_id)
+            except Exception:
+                pass
+            self._perm_poll_id = None
+
+    def _permissions_complete(self) -> None:
+        if self._destroyed or self.flow.current != "permissions":
+            return
+        self._cancel_permission_poll()
+        self._perm_done_scheduled = False
+        self._on_continue()
 
     def _render_model(self, body) -> None:
         ctk = self._ctk
@@ -726,19 +900,36 @@ class WelcomePane:
                     COLORS["accent_yellow"],
                     pady=(SPACING["md"], 0),
                 )
-                self._body_label(
-                    body,
-                    "After enabling it, quit and reopen Aura; this tour will resume here.",
-                    muted=True,
-                    pady=(SPACING["sm"], 0),
-                )
+                if missing == "install_location":
+                    self._body_label(
+                        body,
+                        "After moving it, open Aura from Applications; this tour resumes here.",
+                        muted=True,
+                        pady=(SPACING["sm"], 0),
+                    )
+                    self._continue_button(
+                        body, "open applications",
+                        command=self.app._open_missing_macos_permission,
+                    )
+                    return
+                # Aura picks new grants up live - no quit and reopen.
                 self._continue_button(
                     body,
-                    f"open {pane.lower()}",
-                    command=self.app._open_missing_macos_permission,
+                    "turn on permissions",
+                    command=self._show_permission_checklist,
                 )
                 return
         self._continue_button(body, "continue")
+
+    def show_permissions_step(self) -> None:
+        """Show the permissions checklist inside this pane (app entry point)."""
+        if self._destroyed or self.flow.is_complete:
+            return
+        self.flow.detour_to("permissions")
+        self._render_step()
+
+    def _show_permission_checklist(self) -> None:
+        self.show_permissions_step()
 
     def _render_dictate(self, body) -> None:
         ctk = self._ctk
@@ -1158,6 +1349,9 @@ class WelcomePane:
 
     def _complete_flow(self) -> None:
         """Called once by the flow on complete/skip: persist + tear down."""
+        if self._only_permissions:
+            self._teardown()
+            return
         try:
             self.app.config["welcome_completed"] = True
             save_config(self.app.config)
@@ -1182,12 +1376,20 @@ class WelcomePane:
                 pass
         self._cancel_mic_test()
         self._cancel_help()
-        # Clear the app-side flag so normal injection resumes.
-        try:
-            self.app._welcome_active = False
-            self.app._welcome_pane = None
-        except Exception:
-            pass
+        self._cancel_permission_poll()
+        if self._only_permissions:
+            try:
+                self.app._permissions_pane = None
+                self.app._refresh_macos_permission_banner()
+            except Exception:
+                pass
+        else:
+            # Clear the app-side flag so normal injection resumes.
+            try:
+                self.app._welcome_active = False
+                self.app._welcome_pane = None
+            except Exception:
+                pass
         try:
             self.underlay.destroy()
         except Exception:

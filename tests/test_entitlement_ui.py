@@ -434,6 +434,8 @@ def test_successful_activation_replaces_form_with_active_state():
         _render_license_tile=lambda: events.append("license"),
         _show_ultra_banner=lambda: events.append("banner"),
         _write_status_breadcrumb=lambda: events.append("breadcrumb"),
+        after=lambda _ms, _fn: events.append("permissions-check"),
+        show_permissions_setup=lambda: None,
     )
 
     with patch("wayfinder.license.store_license", return_value=result), patch(
@@ -443,7 +445,10 @@ def test_successful_activation_replaces_form_with_active_state():
 
     assert app.feature_gate is gate
     assert feedback.options["text"] == "Activating…"
-    assert events[-4:] == ["header", "entitlements", "license", "banner"]
+    ui = [e for e in events if e != "permissions-check"]
+    assert ui[-4:] == ["header", "entitlements", "license", "banner"]
+    # macOS offers the permissions checklist after the gold banner; never elsewhere.
+    assert ("permissions-check" in events) == bool(wayfinder_main.IS_MACOS)
     # Entitlements changed, so locked_tabs must be republished — a stale
     # breadcrumb would misreport the Style tab as locked after activation.
     assert "breadcrumb" in events

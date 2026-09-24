@@ -338,6 +338,8 @@ def test_blocked_microphone_banner_opens_the_microphone_pane(monkeypatch):
         "_dictate_banner_anchor": Widget("pack"),
         "_macos_permission_state": lambda self: (True, True),
         "get_hotkey_display": lambda self: "Right Option",
+        # Checklist unavailable → falls back to opening the Settings pane.
+        "show_permissions_setup": lambda self, force=False: False,
     })()
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
     monkeypatch.setattr(mp, "microphone_authorization", lambda: mp.MIC_DENIED)

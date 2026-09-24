@@ -15604,6 +15604,10 @@ class WayfinderApp(ctk.CTk):
             permission = getattr(self, "_missing_macos_permission", None)
         if permission is None:
             return
+        # Grants go through the in-app checklist (native prompts + live status);
+        # moving the app into Applications is the one step it can't do.
+        if permission != "install_location" and self.show_permissions_setup(force=True):
+            return
         try:
             from wayfinder.utils.macos_permissions import open_macos_privacy_settings
 
@@ -15611,6 +15615,78 @@ class WayfinderApp(ctk.CTk):
                 self.log("⚠ Could not open macOS Privacy & Security settings")
         except Exception as exc:
             self.log(f"⚠ Could not open macOS permission settings: {exc}")
+
+    def show_permissions_setup(self, force: bool = False) -> bool:
+        """macOS: show the inline permissions checklist (mic, Accessibility,
+        Input Monitoring) over the Dictate tab. Returns True when it is shown.
+
+        Without ``force`` it only appears while something is still missing.
+        During the first-run tour the tour's own permissions step is used.
+        """
+        if not IS_MACOS:
+            return False
+        try:
+            from wayfinder.utils.macos_permissions import permission_snapshot
+
+            missing = any(v is not True for v in permission_snapshot().values())
+        except Exception:
+            return False
+        if not missing and not force:
+            return False
+        welcome = getattr(self, "_welcome_pane", None)
+        if getattr(self, "_welcome_active", False) and welcome is not None:
+            try:
+                welcome.show_permissions_step()
+                return True
+            except Exception:
+                return False
+        if getattr(self, "_permissions_pane", None) is not None:
+            self._switch_tab("dictate")
+            return True
+        try:
+            from wayfinder.ui.welcome import WelcomePane
+
+            self._switch_tab("dictate")
+            # Not flagged _welcome_active: dictation keeps injecting normally.
+            self._permissions_pane = WelcomePane(
+                self.tab_content_container, self, only_permissions=True
+            )
+            return True
+        except Exception as e:
+            self.log(f"⚠ Could not show the permissions checklist: {e}")
+            self._permissions_pane = None
+            return False
+
+    def _macos_permissions_granted(self, names) -> None:
+        """Checklist callback: a grant just landed. A new event tap picks up
+        Accessibility / Input Monitoring immediately, so re-create the hotkey
+        listener instead of asking the user to quit and reopen."""
+        if not IS_MACOS:
+            return
+        if any(n in ("accessibility", "input_monitoring") for n in names):
+            self.log("✓ macOS permission granted — restarting the hotkey listener")
+            self._restart_pynput_listener()
+        self._refresh_macos_permission_banner()
+
+    def _restart_pynput_listener(self) -> None:
+        """macOS: stop the current pynput listener (its own restart event, never
+        the shared stop_event) and start a fresh one off the Tk thread."""
+        if not IS_MACOS or self.stop_event.is_set():
+            return
+
+        def _restart():
+            restart_event = getattr(self, "_pynput_restart_event", None)
+            old_thread = getattr(self, "_pynput_thread", None)
+            if restart_event is not None:
+                restart_event.set()
+            if old_thread is not None and old_thread.is_alive():
+                old_thread.join(timeout=2.0)  # loop wakes every 0.1 s
+            if self.stop_event.is_set():
+                return
+            self._pynput_listener_started = False
+            self._start_pynput_listener()
+
+        threading.Thread(target=_restart, daemon=True, name="pynput-restart").start()
 
     # === Dictate-tab "finish setup — download a model" cue (D) ===
     def _has_usable_whisper_model(self) -> bool:
@@ -16562,6 +16638,11 @@ class WayfinderApp(ctk.CTk):
             # Replace the activation form with persistent confirmation.
             self._render_license_tile()
             self._show_ultra_banner()
+            if IS_MACOS:
+                # Anything still missing (a "not now" in setup) would stop Ultra
+                # from working on first use: offer the checklist once the gold
+                # confirmation has been seen. No-op when everything is granted.
+                self.after(1800, self.show_permissions_setup)
         else:
             feedback.configure(
                 text=result.error_message or "Activation failed",
@@ -20380,6 +20461,11 @@ class WayfinderApp(ctk.CTk):
             platform_label = "X11 Flatpak fallback"
         self.log(f"🖥️ {platform_label} — using pynput (global keyboard listener)")
         self._pynput_listener_started = True
+        # macOS: a per-listener restart event lets a permission grant re-create
+        # the event tap live (see _restart_pynput_listener). Elsewhere None, so
+        # the listener behaves exactly as before.
+        restart_event = threading.Event() if IS_MACOS else None
+        self._pynput_restart_event = restart_event
 
         def _pynput_wrapper():
             try:
@@ -20389,13 +20475,17 @@ class WayfinderApp(ctk.CTk):
                     style_toggle_key, style_toggle_modifiers,
                     config_ref=self.config,
                     capture_state=_HOTKEY_CAPTURE,
+                    **({"restart_event": restart_event} if restart_event is not None else {}),
                 )
             except Exception as e:
                 print(f"[Hotkey] pynput listener crashed: {e}", flush=True)
                 import traceback
                 traceback.print_exc()
             finally:
-                if not self.stop_event.is_set():
+                # Only the current listener may clear the flag: a superseded one
+                # finishing late must not let a duplicate listener start.
+                if (not self.stop_event.is_set()
+                        and getattr(self, "_pynput_thread", None) is threading.current_thread()):
                     self._pynput_listener_started = False
 
         self._pynput_thread = threading.Thread(

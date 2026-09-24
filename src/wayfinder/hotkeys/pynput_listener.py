@@ -429,12 +429,17 @@ def pynput_hotkey_listener(
     style_toggle_modifiers: Optional[list[str]] = None,
     config_ref: Optional[dict] = None,
     capture_state: Optional[dict] = None,
+    restart_event: Optional[Event] = None,
 ):
     """
     Cross-platform hotkey listener using pynput.
 
     If config_ref is provided, the listener reads hotkey settings from it
     on each keypress, allowing live hotkey changes without restarting.
+
+    restart_event (optional) ends just this listener, leaving the shared
+    stop_event untouched — macOS uses it to re-create the event tap once
+    Accessibility / Input Monitoring is granted, without a relaunch.
     """
     def log(msg: str):
         if log_callback:
@@ -784,7 +789,9 @@ def pynput_hotkey_listener(
     
     secure_input_on = False
     try:
-        while not stop_event.is_set():
+        while not stop_event.is_set() and not (
+            restart_event is not None and restart_event.is_set()
+        ):
             if sys.platform == "darwin":
                 secure_now = _darwin_secure_input_enabled()
                 if secure_now != secure_input_on:

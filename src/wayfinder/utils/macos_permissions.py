@@ -81,9 +81,19 @@ def request_startup_input_permissions(config: dict) -> MacOSInputPermissionStatu
     Accessibility is requested first. Input Monitoring is requested only when
     Accessibility is already trusted; on current macOS versions the request may
     not add Aura to the pane, so the UI also gives manual ``+`` instructions.
+
+    On a first run (setup not finished) nothing is prompted here: the setup
+    guide's permissions step asks for each grant with context instead of
+    system alerts appearing before the window does.
     """
     if sys.platform != "darwin":
         return MacOSInputPermissionStatus(True, True, False)
+    if not config.get("welcome_completed", False):
+        return MacOSInputPermissionStatus(
+            request_accessibility_permission(prompt=False),
+            request_input_monitoring_permission(prompt=False),
+            False,
+        )
 
     changed = False
     accessibility_attempted = bool(
@@ -170,3 +180,123 @@ def open_macos_privacy_settings(permission: str) -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Setup-guide helpers: one live snapshot, native prompts, and a self-repair.
+# ---------------------------------------------------------------------------
+
+AURA_BUNDLE_ID = "io.wayfindercollective.WayfinderAura"
+PERMISSIONS = ("microphone", "accessibility", "input_monitoring")
+_TCC_SERVICES = {
+    "microphone": "Microphone",
+    "accessibility": "Accessibility",
+    "input_monitoring": "ListenEvent",
+}
+
+
+def permission_snapshot() -> dict[str, bool | None]:
+    """Current grant for each permission (True/False, None = unknown). Cheap."""
+    if sys.platform != "darwin":
+        return {name: True for name in PERMISSIONS}
+    mic = microphone_authorization()
+    return {
+        "microphone": None if mic is None else mic == MIC_AUTHORIZED,
+        "accessibility": request_accessibility_permission(prompt=False),
+        "input_monitoring": request_input_monitoring_permission(prompt=False),
+    }
+
+
+def _register_mic_request_signature() -> None:
+    """Tell PyObjC the completion block's type (no AVFoundation wrapper ships)."""
+    import objc
+
+    objc.registerMetaDataForSelector(
+        b"AVCaptureDevice",
+        b"requestAccessForMediaType:completionHandler:",
+        {"arguments": {3: {"callable": {"retval": {"type": b"v"},
+                                        "arguments": {0: {"type": b"^v"}, 1: {"type": b"Z"}}}}}},
+    )
+
+
+def request_microphone_access(on_done=None) -> bool:
+    """Show macOS's microphone prompt the first time; open the pane after a Deny.
+
+    ``on_done(granted)`` may run on a background thread. Returns True when a
+    prompt was shown or the pane opened.
+    """
+    if sys.platform != "darwin":
+        return False
+    status = microphone_authorization()
+    if status == MIC_AUTHORIZED:
+        if on_done:
+            on_done(True)
+        return True
+    if status == MIC_NOT_DETERMINED:
+        try:
+            import objc
+            from Foundation import NSBundle
+
+            NSBundle.bundleWithPath_("/System/Library/Frameworks/AVFoundation.framework").load()
+            _register_mic_request_signature()
+            device = objc.lookUpClass("AVCaptureDevice")
+            device.requestAccessForMediaType_completionHandler_(
+                "soun", lambda granted: on_done(bool(granted)) if on_done else None
+            )
+            return True
+        except Exception:
+            pass  # fall through to the pane
+    return open_macos_privacy_settings("microphone")
+
+
+def ask_for_permission(permission: str) -> bool:
+    """The native request for one permission, then its Settings pane.
+
+    Accessibility and Input Monitoring prompts add Aura to their lists so the
+    user only flips a switch (no "+" hunting); the pane is opened as well
+    because macOS shows each prompt only once.
+    """
+    if sys.platform != "darwin":
+        return False
+    if permission == "microphone":
+        return request_microphone_access()
+    if permission == "accessibility":
+        request_accessibility_permission(prompt=True)
+    elif permission == "input_monitoring":
+        request_input_monitoring_permission(prompt=True)
+    else:
+        return False
+    return open_macos_privacy_settings(permission)
+
+
+def own_bundle_identifier() -> str | None:
+    try:
+        from Foundation import NSBundle
+
+        value = NSBundle.mainBundle().bundleIdentifier()
+        return str(value) if value else None
+    except Exception:
+        return None
+
+
+def repair_permission(permission: str) -> bool:
+    """Reset Aura's OWN stale entry for one permission, then ask again.
+
+    After an update of an unsigned/ad-hoc build, System Settings can show Aura
+    as allowed while macOS no longer trusts the new copy. Clearing Aura's own
+    entry (what `tccutil reset <service> <bundle id>` does) lets the grant be
+    made fresh. Only ever touches the Wayfinder Aura bundle - never another app
+    (a source run is "Python", so it is refused).
+    """
+    if sys.platform != "darwin":
+        return False
+    service = _TCC_SERVICES.get(permission)
+    bundle_id = own_bundle_identifier()
+    if service is None or bundle_id != AURA_BUNDLE_ID:
+        return False
+    try:
+        subprocess.run(["/usr/bin/tccutil", "reset", service, bundle_id],
+                       capture_output=True, timeout=10, check=False)
+    except Exception:
+        return False
+    return ask_for_permission(permission)
