@@ -6698,6 +6698,14 @@ class WayfinderApp(ctk.CTk):
         self._active_dropdown_panel = panel
         self._active_dropdown_owner = option_menu
         self._ensure_dropdown_dismiss_bindings()
+        if IS_MACOS:
+            # Aqua Tk delivers keys only to the focus widget; after clicking a
+            # CTk option menu nothing holds focus, so Escape never reached the
+            # dismiss binding. Focus the panel so Escape closes it.
+            try:
+                panel.focus_set()
+            except Exception:
+                pass
 
     def _get_recommended_scale(self) -> float:
         """Calculate recommended UI scale based on screen resolution for READABILITY.
@@ -8226,13 +8234,14 @@ class WayfinderApp(ctk.CTk):
             self.macos_permission_banner, fg_color="transparent"
         )
         _mp_inner.pack(fill="x", padx=SPACING["md"], pady=SPACING["sm"])
+        # Buttons are packed BEFORE the label: pack gives space in order, and
+        # a label packed first squeezed "Recheck" down to "echec".
         self.macos_permission_label = ctk.CTkLabel(
             _mp_inner, text="",
             font=(self.font_body[0], self.font_sizes["small"]),
-            text_color=COLORS["accent_yellow"], wraplength=330,
+            text_color=COLORS["accent_yellow"], wraplength=250,
             justify="left", anchor="w",
         )
-        self.macos_permission_label.pack(side="left", fill="x", expand=True)
         self.macos_permission_open_btn = ctk.CTkButton(
             _mp_inner, text="Open Settings",
             font=(self.font_body[0], self.font_sizes["small"], "bold"),
@@ -8250,6 +8259,7 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
             command=self._refresh_macos_permission_banner,
         ).pack(side="right")
+        self.macos_permission_label.pack(side="left", fill="x", expand=True)
 
         # (D) Persistent "finish setup — download a model" cue.
         self.setup_cue_banner = ctk.CTkFrame(
@@ -8807,7 +8817,7 @@ class WayfinderApp(ctk.CTk):
                 system_content, text="",
                 font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_muted"], anchor="w", justify="left",
-                wraplength=520,
+                wraplength=430,  # fits the Settings card at the default 800px window
             )
             self._refresh_macos_hotkey_hint()
         
@@ -10214,7 +10224,12 @@ class WayfinderApp(ctk.CTk):
         _gpu_unlocked = self.feature_gate.has_feature("gpu_acceleration")
         _want_gpu = bool(self.config.get("use_gpu", False))
         self.gpu_var = ctk.BooleanVar(value=_want_gpu and _gpu_unlocked)
-        _gpu_label = "GPU Acceleration" if _gpu_unlocked else "GPU Acceleration  🔒 Ultra"
+        _gpu_label = (
+            "GPU Acceleration" if _gpu_unlocked
+            # macOS: no emoji chrome (rule 11) — same "(Ultra)" as Chunk Processing.
+            else "GPU Acceleration (Ultra)" if IS_MACOS
+            else "GPU Acceleration  🔒 Ultra"
+        )
         self.create_toggle_row(
             parent, _gpu_label,
             self.gpu_var, self.toggle_gpu,
@@ -15525,15 +15540,14 @@ class WayfinderApp(ctk.CTk):
             button_text = "Open Microphone"
         elif self._missing_macos_permission == "accessibility":
             text = (
-                f"{hotkey} and pasting need Accessibility. Enable the "
-                "/Applications copy of Wayfinder Aura, then quit and reopen Aura."
+                f"{hotkey} and pasting need Accessibility: turn on Wayfinder Aura "
+                "(the copy in Applications), then quit and reopen it."
             )
             button_text = "Open Accessibility"
         else:
             text = (
-                f"{hotkey} also needs Input Monitoring on this Mac. Open "
-                "the pane, click +, add /Applications/Wayfinder Aura.app, enable it, then "
-                "quit and reopen Aura."
+                f"{hotkey} also needs Input Monitoring: click +, add Wayfinder Aura "
+                "from Applications, turn it on, then quit and reopen it."
             )
             button_text = "Open Input Monitoring"
         try:

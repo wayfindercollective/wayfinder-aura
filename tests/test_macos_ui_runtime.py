@@ -263,7 +263,7 @@ def test_missing_input_monitoring_stays_visible_with_manual_add_guidance(monkeyp
 
     assert app._missing_macos_permission == "input_monitoring"
     assert "click +" in label.options["text"]
-    assert "/Applications/Wayfinder Aura.app" in label.options["text"]
+    assert "Wayfinder Aura from Applications" in label.options["text"]
     assert button.options["text"] == "Open Input Monitoring"
     assert banner.managed == "pack"
 
