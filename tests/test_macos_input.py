@@ -10,6 +10,10 @@ from wayfinder.core import injector
 from wayfinder.hotkeys import pynput_listener
 from wayfinder.hotkeys.types import EventType
 
+# pynput cannot import on a headless Linux runner (no X display).
+needs_pynput = pytest.mark.skipif(pynput_listener.keyboard is None,
+                                  reason="pynput unavailable here")
+
 
 def test_macos_trackpad_deltas_are_not_divided_by_120():
     assert _wheel_event_notches(-1, "darwin") == 0.25
@@ -50,6 +54,7 @@ def test_fn_state_is_false_off_macos(monkeypatch):
     assert pynput_listener._darwin_fn_pressed() is False
 
 
+@pytest.mark.macos_only
 def test_physical_key_state_uses_quartz_virtual_keycode(monkeypatch):
     quartz = ModuleType("Quartz")
     quartz.kCGEventSourceStateCombinedSessionState = 0
@@ -61,6 +66,7 @@ def test_physical_key_state_uses_quartz_virtual_keycode(monkeypatch):
     assert pynput_listener._darwin_key_pressed(28) is False
 
 
+@pytest.mark.macos_only
 def test_fn_space_is_tracked_and_suppressed_by_darwin_listener(monkeypatch):
     captured = {}
 
@@ -107,6 +113,7 @@ def test_fn_space_is_tracked_and_suppressed_by_darwin_listener(monkeypatch):
     assert intercept(10, other) is other
 
 
+@pytest.mark.macos_only
 def test_fn_enter_style_chord_is_also_suppressed(monkeypatch):
     captured = {}
 
@@ -146,6 +153,7 @@ def test_fn_enter_style_chord_is_also_suppressed(monkeypatch):
     assert intercept(11, {"flags": 0, "keycode": 0x24}) is None
 
 
+@needs_pynput
 def test_unsupported_macos_key_falls_back_to_fn_space_not_bare_space(monkeypatch):
     captured = {}
 
@@ -176,6 +184,7 @@ def test_unsupported_macos_key_falls_back_to_fn_space_not_bare_space(monkeypatch
     assert events.get_nowait() == (EventType.HOTKEY_PRESSED, None)
 
 
+@needs_pynput
 def test_escape_queues_global_recording_cancel_on_macos(monkeypatch):
     captured = {}
 

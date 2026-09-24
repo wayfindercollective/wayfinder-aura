@@ -354,10 +354,21 @@ def test_blocked_microphone_banner_opens_the_microphone_pane(monkeypatch):
     assert opened == ["microphone"]
 
 
+def _stub_appkit(monkeypatch, hidden=False):
+    """An AppKit stand-in (not hidden), so these run where PyObjC is absent."""
+    from types import ModuleType, SimpleNamespace
+
+    appkit = ModuleType("AppKit")
+    app = SimpleNamespace(isHidden=lambda: hidden)
+    appkit.NSApplication = SimpleNamespace(sharedApplication=lambda: app)
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+
+
 def test_hidden_window_with_native_hero_does_not_poll(monkeypatch):
     """A withdrawn/hidden window used to re-poll every 250 ms (a Core Animation
     commit each tick) even though the native layer was stopped."""
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    _stub_appkit(monkeypatch)
     hidden_calls = []
     scheduled = []
 
@@ -381,6 +392,7 @@ def test_hidden_window_with_native_hero_does_not_poll(monkeypatch):
 
 def test_unhide_restores_the_native_hero(monkeypatch):
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    _stub_appkit(monkeypatch)
     events = []
 
     class Native:
@@ -395,7 +407,7 @@ def test_unhide_restores_the_native_hero(monkeypatch):
         "_start_idle_breath": lambda self: events.append("breath"),
     })()
     wayfinder_main.WayfinderApp._on_macos_app_visibility_changed(app)
-    # The test process is not a hidden NSApplication, so this is the unhide path.
+    # NSApplication reports not hidden, so this is the unhide path.
     assert events == ["menu", "geometry", "sync", "breath"]
 
 

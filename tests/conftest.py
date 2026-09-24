@@ -33,10 +33,17 @@ def pytest_configure(config):
         "AF_UNIX sockets, POSIX file-mode bits, SteamOS/gamemode, GPU/Vulkan "
         "fallback, AppImage/Flatpak packaging); auto-skipped on macOS/Windows.",
     )
+    config.addinivalue_line(
+        "markers",
+        "macos_only: needs a real macOS backend (pynput's darwin key codes and "
+        "event tap); auto-skipped elsewhere. Prefer stubbing Quartz/AppKit/"
+        "Foundation so a macOS test runs everywhere.",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip ``@pytest.mark.linux_only`` tests when not on Linux.
+    """Skip ``@pytest.mark.linux_only`` tests when not on Linux (and
+    ``@pytest.mark.macos_only`` tests when not on macOS).
 
     Those tests cover mechanisms with no macOS/Windows equivalent, so they can
     only run on Linux. They STILL run on Linux — the production regression gate
@@ -44,14 +51,17 @@ def pytest_collection_modifyitems(config, items):
     without ever weakening Linux coverage. It is not a substitute for a proper
     adapter: shared behavior must stay unmarked and pass on every platform.
     """
-    if sys.platform == "linux":
-        return
-    skip_marker = pytest.mark.skip(
+    skip_linux = pytest.mark.skip(
         reason="Linux-only mechanism; not applicable on this platform"
     )
+    skip_macos = pytest.mark.skip(
+        reason="macOS-only backend; not applicable on this platform"
+    )
     for item in items:
-        if "linux_only" in item.keywords:
-            item.add_marker(skip_marker)
+        if "linux_only" in item.keywords and sys.platform != "linux":
+            item.add_marker(skip_linux)
+        if "macos_only" in item.keywords and sys.platform != "darwin":
+            item.add_marker(skip_macos)
 
 
 # Add src to path for imports

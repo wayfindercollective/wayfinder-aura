@@ -5,8 +5,9 @@ created. Every macOS path has a Linux-unchanged counterpart.
 """
 from __future__ import annotations
 
+import sys
 import threading
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import wayfinder_main
 from wayfinder_main import WayfinderApp
@@ -149,30 +150,30 @@ class TestListenerRestartEventWiring:
         assert ns._pynput_listener_started is False
 
 
+def _stub_bundle(monkeypatch, path):
+    """A Foundation stand-in, so these run where PyObjC is absent (CI)."""
+    foundation = ModuleType("Foundation")
+    bundle = SimpleNamespace(bundlePath=lambda: path)
+    foundation.NSBundle = SimpleNamespace(mainBundle=lambda: bundle)
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
+
+
 class TestRelaunch:
     def test_linux_never_relaunches(self, monkeypatch):
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
         assert WayfinderApp.relaunch_app(_ns()) is False
 
     def test_source_run_has_no_bundle_to_reopen(self, monkeypatch):
-        import Foundation
-
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
         quit_calls = []
-        bundle = SimpleNamespace(bundlePath=lambda: "/usr/local/bin")
-        monkeypatch.setattr(Foundation, "NSBundle",
-                            SimpleNamespace(mainBundle=lambda: bundle))
+        _stub_bundle(monkeypatch, "/usr/local/bin")
         ns = _ns(quit_app=lambda: quit_calls.append(True))
         assert WayfinderApp.relaunch_app(ns) is False
         assert quit_calls == []
 
     def test_bundle_relaunch_waits_for_this_pid_then_opens(self, monkeypatch):
-        import Foundation
-
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
-        bundle = SimpleNamespace(bundlePath=lambda: "/Applications/Wayfinder Aura.app")
-        monkeypatch.setattr(Foundation, "NSBundle",
-                            SimpleNamespace(mainBundle=lambda: bundle))
+        _stub_bundle(monkeypatch, "/Applications/Wayfinder Aura.app")
         spawned, quit_calls = [], []
         monkeypatch.setattr(wayfinder_main.subprocess, "Popen",
                             lambda args, **k: spawned.append((args, k)))

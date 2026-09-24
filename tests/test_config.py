@@ -509,6 +509,13 @@ class TestHotkeyDefaultMigration:
     mapped to bare F3 — and a later settings save baked the corruption in.
     """
 
+    @pytest.fixture(autouse=True)
+    def _fchmod_where_darwin_is_simulated(self, monkeypatch):
+        # Some tests simulate macOS; its private-write path uses os.fchmod,
+        # which Windows does not have.
+        if not hasattr(os, "fchmod"):
+            monkeypatch.setattr(os, "fchmod", lambda _fd, _mode: None, raising=False)
+
     def _write_config(self, data: dict):
         from wayfinder.config import CONFIG_FILE
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)

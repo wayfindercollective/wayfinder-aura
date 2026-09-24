@@ -42,4 +42,5 @@ def test_texts_disabled_and_clipped_are_reported(tmp_path):
     raw = (tmp_path / "ui.json").read_text()
     assert "secret key" not in raw  # contents never recorded, only length
     assert json.loads(raw)["tree"]["children"][3]["content_chars"] == 14
-    assert stat.S_IMODE(os.stat(tmp_path / "ui.json").st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(os.stat(tmp_path / "ui.json").st_mode) == 0o600
