@@ -1,0 +1,50 @@
+"""Open-at-login (SMAppService) wrapper: safe off macOS and outside a bundle."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from wayfinder.utils import macos_login_item as L
+
+
+def test_not_available_off_macos(monkeypatch):
+    monkeypatch.setattr(L.sys, "platform", "linux")
+    assert L.available() is False
+    assert L.status() is None
+    assert L.set_enabled(True) == (False, "Available in the installed app.")
+
+
+def test_source_run_is_not_a_login_item(monkeypatch):
+    import Foundation
+
+    monkeypatch.setattr(L.sys, "platform", "darwin")
+    monkeypatch.setattr(Foundation, "NSBundle", SimpleNamespace(
+        mainBundle=lambda: SimpleNamespace(bundlePath=lambda: "/usr/local/bin")))
+    assert L.available() is False
+
+
+def test_enable_reports_approval_needed(monkeypatch):
+    svc = SimpleNamespace(registerAndReturnError_=lambda _e: (True, None),
+                          status=lambda: L.REQUIRES_APPROVAL)
+    monkeypatch.setattr(L, "available", lambda: True)
+    monkeypatch.setattr(L, "_service", lambda: svc)
+    ok, msg = L.set_enabled(True)
+    assert ok is True and "Login Items" in msg
+
+
+def test_refusal_is_reported_not_raised(monkeypatch):
+    err = SimpleNamespace(localizedDescription=lambda: "Operation not permitted")
+    svc = SimpleNamespace(registerAndReturnError_=lambda _e: (False, err),
+                          status=lambda: L.NOT_REGISTERED)
+    monkeypatch.setattr(L, "available", lambda: True)
+    monkeypatch.setattr(L, "_service", lambda: svc)
+    assert L.set_enabled(True) == (False, "macOS refused: Operation not permitted")
+
+
+def test_disable_unregisters(monkeypatch):
+    calls = []
+    svc = SimpleNamespace(unregisterAndReturnError_=lambda _e: calls.append("off") or (True, None),
+                          status=lambda: L.NOT_REGISTERED)
+    monkeypatch.setattr(L, "available", lambda: True)
+    monkeypatch.setattr(L, "_service", lambda: svc)
+    assert L.set_enabled(False) == (True, None)
+    assert calls == ["off"]

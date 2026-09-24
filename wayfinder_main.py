@@ -9031,6 +9031,9 @@ class WayfinderApp(ctk.CTk):
             ),
         )
 
+        if IS_MACOS:
+            self._create_login_item_row(system_content)
+
         yield "system"
 
         # === BENTO TILE: Status Overlay ===
@@ -16973,6 +16976,32 @@ class WayfinderApp(ctk.CTk):
                 pass  # app teardown mid-flight — nothing left to update
 
         threading.Thread(target=_worker, daemon=True, name="feedback-post").start()
+
+    def _create_login_item_row(self, parent) -> None:
+        """macOS: "Open at login" (SMAppService). Off until the user turns it on."""
+        try:
+            from wayfinder.utils import macos_login_item as login_item
+        except Exception:
+            return
+        if not login_item.available():
+            return  # source run: nothing to register
+        self.login_item_var = ctk.BooleanVar(value=login_item.is_enabled())
+
+        def _toggled():
+            want = bool(self.login_item_var.get())
+            ok, message = login_item.set_enabled(want)
+            if not ok:
+                self.login_item_var.set(login_item.is_enabled())
+            self.log(("✓ " if ok else "⚠ ") + (message or (
+                "Aura will open when you log in" if want else "Aura won't open at login")))
+            if message and "Approve" in message:
+                login_item.open_login_items_settings()
+
+        self.create_toggle_row(
+            parent, "Open at login", self.login_item_var, _toggled,
+            tooltip="Start Wayfinder Aura when you log in, so the hotkey is always ready. "
+                    "Also listed in System Settings ▸ General ▸ Login Items.",
+        )
 
     def _render_vocabulary_tile(self) -> None:
         """Settings ▸ Vocabulary: the user's terms + "heard -> write" fixes (Ultra)."""
