@@ -8198,6 +8198,17 @@ class WayfinderApp(ctk.CTk):
                 self._show_premium_prompt(required_feature)
                 return
 
+        # Style availability depends on cleanup settings made elsewhere (model,
+        # on/off, style): rebuild the Style tab when that picture changed.
+        if tab_id == "style" and "style" in getattr(self, "tab_frames", {}):
+            signature = self._style_availability_signature()
+            if signature != getattr(self, "_style_tab_signature", signature):
+                try:
+                    self._rebuild_style_tab()
+                except Exception as exc:
+                    self.log(f"⚠ Could not refresh styles: {exc}")
+            self._style_tab_signature = signature
+
         # Update button styles for sidebar
         for tid, btn in self.tab_buttons.items():
             color = self.tab_colors[tid]
@@ -11067,8 +11078,13 @@ class WayfinderApp(ctk.CTk):
             ("personal", "Personal", "Clean + your learned speech patterns"),
         ]
 
+        _availability = self._style_availability()
+        self._style_tab_signature = self._style_availability_signature()
         for i, (tone_id, label, desc) in enumerate(tones):
             is_selected = tone_id == current_tone
+            _ok, _why = _availability.get(tone_id, {}).get("standard", (True, None))
+            if not _ok:
+                desc = _why  # say exactly why it's greyed out
             
             card = ctk.CTkFrame(
                 tone_container,
@@ -11093,7 +11109,8 @@ class WayfinderApp(ctk.CTk):
                 image=get_icon(STYLE_ICONS[tone_id], 14, COLORS["text_secondary"]),
                 compound="left",
                 font=(self.font_body[0], self.font_sizes["body"], "bold"),
-                text_color=COLORS["text_bright"] if is_selected else COLORS["text_primary"],
+                text_color=(COLORS["text_bright"] if is_selected
+                            else COLORS["text_primary"] if _ok else COLORS["text_muted"]),
             )
             title_label.pack(side="left")
             self.tone_title_labels[tone_id] = title_label
@@ -11113,7 +11130,8 @@ class WayfinderApp(ctk.CTk):
                 card_inner,
                 text=desc,
                 font=(self.font_body[0], self.font_sizes["small"]),
-                text_color=COLORS["text_muted"],
+                text_color=COLORS["text_muted"] if _ok else COLORS["accent_yellow"],
+                justify="left",
             ).pack(anchor="w", pady=(4, 0))
             
             # Bind click for style selection + hover feedback (instant bg swap, no timers).
@@ -11161,7 +11179,7 @@ class WayfinderApp(ctk.CTk):
         
         strong_label = ctk.CTkLabel(
             strong_inner,
-            text="💪 Strong Mode",
+            text="Strong",
             font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_primary"],
         )
@@ -11183,9 +11201,24 @@ class WayfinderApp(ctk.CTk):
             button_hover_color=COLORS["text_bright"],
         )
         strong_toggle.pack(side="right")
+        # Greyed out with the reason when this model can't do Strong for the
+        # selected style (cleanup would fall back to Standard anyway).
+        try:
+            _strong_ok, _strong_why = self._style_availability().get(
+                self.config.get("output_tone", "minimal"), {}).get("strong", (True, None))
+        except Exception:
+            _strong_ok, _strong_why = True, None
+        if not _strong_ok:
+            strong_toggle.configure(state="disabled")
+            strong_label.configure(text_color=COLORS["text_muted"])
+            ctk.CTkLabel(
+                strong_container, text=_strong_why, justify="left", anchor="w",
+                font=(self.font_body[0], self.font_sizes["caption"]),
+                text_color=COLORS["accent_yellow"], wraplength=220,
+            ).pack(fill="x", padx=12, pady=(0, 8))
         
         # Add tooltip for strong mode
-        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your exact words.\nWorks best with Cloud AI (Ultra) or a 🎭-marked local model like Qwen3 4B.")
+        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your exact words.\nNeeds Qwen3 4B or a cloud model (Ultra).")
         
         # Caricature mode toggle (right side) - always visible now!
         caricature_container = ctk.CTkFrame(toggles_row, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
@@ -11609,6 +11642,27 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
+    def _style_availability(self) -> dict:
+        try:
+            from wayfinder.core.postprocessor import style_availability
+
+            return style_availability(self.config)
+        except Exception:
+            return {}
+
+    def _style_availability_signature(self):
+        table = self._style_availability()
+        return (self.config.get("output_tone"), bool(self.config.get("strong_mode")),
+                tuple(sorted((t, i, v[0]) for t, d in table.items() for i, v in d.items())))
+
+    def _style_available_map(self) -> dict:
+        """{tone: available at Standard} for the cycle hotkey and Style tab."""
+        return {tone: bool(v.get("standard", (True, None))[0])
+                for tone, v in self._style_availability().items()}
+
+    def _style_unavailable_reason(self, tone_id: str, intensity: str = "standard"):
+        return self._style_availability().get(tone_id, {}).get(intensity, (True, None))[1]
+
     def _on_tone_selected(self, tone_id: str) -> None:
         """Handle tone selection from Style tab."""
         # The whole Style workspace is Ultra. Minimal remains the automatic Free
@@ -11619,6 +11673,15 @@ class WayfinderApp(ctk.CTk):
 
         current_tone = self.config.get("output_tone", "minimal")
         if tone_id == current_tone:
+            return
+        reason = self._style_unavailable_reason(tone_id)
+        if reason:
+            self.log(f"⚠ {reason}")
+            if "Settings" in reason:  # cleanup off / no model: take them there
+                try:
+                    self._switch_tab("settings")
+                except Exception:
+                    pass
             return
 
         # Everything else (config + Whisper prompt + save + log + smooth UI/overlay sync)
@@ -11769,6 +11832,13 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
         self.log(f"✎ Style: {STYLE_LABELS.get(tone_id, tone_id)}")
         self._apply_style_to_ui(tone_id)
+        # Strong's availability depends on the style: refresh if it changed.
+        if getattr(self, "active_tab", None) == "style" and "style" in getattr(self, "tab_frames", {}):
+            if self._style_availability_signature() != getattr(self, "_style_tab_signature", None):
+                try:
+                    self._rebuild_style_tab()
+                except Exception:
+                    pass
 
     def _rebuild_style_tab(self) -> None:
         """Rebuild the style tab to reflect current settings."""
@@ -21169,6 +21239,13 @@ class WayfinderApp(ctk.CTk):
             
             next_index = (current_index + 1) % len(STYLE_CYCLE)
             next_style = STYLE_CYCLE[next_index]
+            # Skip styles this cleanup setup can't do (greyed out in the Style tab).
+            available = self._style_available_map()
+            for step in range(len(STYLE_CYCLE)):
+                candidate = STYLE_CYCLE[(current_index + 1 + step) % len(STYLE_CYCLE)]
+                if available.get(candidate, True):
+                    next_style = candidate
+                    break
         
         # Shared core handles skip-if-same, config + Whisper prompt, save, log, and the smooth
         # UI + overlay-pill sync — identical to the in-app Style tab click (no path drift).
