@@ -52,7 +52,9 @@ float wave_y(float x, float width, float height, float t, float amp,
     float f = freq * 0.32;
     float dy = amp * sin(f * u + t + phase);
     dy += amp * 0.4 * sin(f * 2.3 * u + t * 1.6 + phase);
-    dy += amp * 0.2 * sin(f * 3.7 * u + t * 2.1 + phase * 0.5);
+    // 2.0 (was 2.1): whole cycles in the calm Core Animation loop
+    // (hero_renderer.m), so Metal <-> vector hand-offs keep phase.
+    dy += amp * 0.2 * sin(f * 3.7 * u + t * 2.0 + phase * 0.5);
     return clampf(height * 0.5 + soft_limit(dy, height, stroke_scale), 1.0, height - 1.0);
 }
 

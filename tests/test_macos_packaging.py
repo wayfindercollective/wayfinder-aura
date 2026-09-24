@@ -100,10 +100,10 @@ def test_native_renderers_settle_when_idle_and_stop_when_hidden():
     root = Path(__file__).resolve().parent.parent / "packaging" / "macos"
     overlay = (root / "overlay_renderer.m").read_text()
     hero = (root / "hero_renderer.m").read_text()
-    assert "wf_overlay_set_idle" in overlay and "kWFSettleAfterSeconds" in overlay
-    assert "animationWithKeyPath:@\"opacity\"" in overlay
+    assert "wf_overlay_set_idle" in overlay and "enterVectorIdle" in overlay
+    assert "animationWithKeyPath:@\"path\"" in overlay  # vector idle flow
     assert "NSWindowDidChangeOcclusionStateNotification" in hero
-    assert "NSApplicationDidResignActiveNotification" in hero
+    assert "enterVectorIdle" in hero and "animationWithKeyPath:@\"path\"" in hero
     assert "[self stopTimer];  // a hidden layer" in hero
 
 

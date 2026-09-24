@@ -52,7 +52,9 @@ float wave_y(float x, float center, float amp, float freq, float phase,
              float t, float height) {
     float y = center + amp * sin(freq * x + t + phase);
     y += amp * 0.4 * sin(freq * 2.3 * x + t * 1.6 + phase);
-    y += amp * 0.2 * sin(freq * 3.7 * x + t * 2.1 + phase * 0.5);
+    // 2.0 (was 2.1): every term then completes whole cycles in the idle
+    // Core Animation loop (overlay_renderer.m), so hand-offs keep phase.
+    y += amp * 0.2 * sin(freq * 3.7 * x + t * 2.0 + phase * 0.5);
     return clamp(y, 0.0, height);
 }
 
