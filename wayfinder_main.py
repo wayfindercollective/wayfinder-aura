@@ -16351,7 +16351,7 @@ class WayfinderApp(ctk.CTk):
         ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),
         ("pen-line", "Tone Presets", "Professional, Casual, Dev and Personal styles"),
         ("audio-waveform", "Chunked Recording", "Unlimited length with live feedback"),
-        ("check", "Higher Accuracy", "Large models, beam search, and custom vocabulary"),
+        ("check", "Higher Accuracy", "Large v3 Turbo: about 40% fewer mistakes, plus your own vocabulary"),
     ]
 
     def _build_ultra_benefit_rows(self, parent) -> None:
