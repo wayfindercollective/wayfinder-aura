@@ -41,7 +41,7 @@ does not regress the Linux app.
 | 🎙️ **Hotkey dictation** | Fn+Space on macOS, Ctrl+Alt+Space elsewhere (configurable); text lands at your cursor |
 | 🔒 **100% local pipeline** | whisper.cpp transcription plus optional llama.cpp cleanup, both on-device |
 | ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
-| 🎨 **Tone presets (Ultra)** | Minimal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
+| 🎨 **Tone presets (Ultra)** | Normal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
 | 🎮 **Game-aware** | Hotkeys pause while a GameMode game is registered (Lutris/Steam) |
 | 🖥️ **Glassmorphic overlay** | Always-visible recording status, designed for Wayland |
 | 🎧 **Smart mic handling** | Picker shows exactly the mics your OS sees; selections survive device renumbering |
@@ -138,7 +138,7 @@ python main.py
 2. Press **Ctrl+Alt+Space**, speak, press **Ctrl+Alt+Space** again.
 3. Your raw transcript is typed at the cursor. Enable local LLM cleanup in
    Settings when you want filler removal, punctuation cleanup, or styles.
-4. With Ultra, press **Ctrl+Alt+Enter** to cycle output styles (Minimal →
+4. With Ultra, press **Ctrl+Alt+Enter** to cycle output styles (Normal →
    Professional → Casual → Dev → Personal).
 
 First run walks you through model download, microphone selection, and — where

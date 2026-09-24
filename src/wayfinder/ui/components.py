@@ -312,7 +312,7 @@ SETTING_TOOLTIPS: dict[str, str] = {
     
     # Post-processing tooltips
     "post_processing": "Clean up transcription locally.\nFree includes minimal filler/grammar cleanup; Ultra adds larger cleanup models and selectable styles.\n🟡 Latency: +100ms to a few seconds depending on model",
-    "fast_filler_removal": "⚡ INSTANT filler removal (~1ms)\n\nUses regex instead of LLM to remove:\num, uh, ah, er, eh, hmm, mm\n\n✅ ~1000x faster than LLM\n✅ No model loading required\n✅ Perfect for 'Minimal' style\n\n🟢 Best when you just want ums/ahs removed\n    and don't need grammar fixes.",
+    "fast_filler_removal": "⚡ INSTANT filler removal (~1ms)\n\nUses regex instead of LLM to remove:\num, uh, ah, er, eh, hmm, mm\n\n✅ ~1000x faster than LLM\n✅ No model loading required\n✅ Perfect for the 'Normal' style\n\n🟢 Best when you just want ums/ahs removed\n    and don't need grammar fixes.",
     "output_tone": "Style for processed output:\n• Professional — Polished, business-appropriate\n• AI Prompt — Optimized for talking to LLMs\n• Casual — Relaxed, conversational",
     "intensity": "How aggressively to clean up text:\n• Light — Minimal cleanup, preserves natural speech\n• Standard — Balanced cleanup (recommended)\n• Strong — Heavy cleanup, may alter phrasing",
 }

@@ -513,7 +513,7 @@ TONE_PROMPTS = {
 # wayfinder.ui.icons.STYLE_ICONS and are rendered on the tone cards; the emoji
 # that used to prefix these strings were retired with the icon system.
 STYLE_LABELS = {
-    "minimal": "Minimal",
+    "minimal": "Normal",  # id stays "minimal"; users see "Normal"
     "professional": "Professional",
     "casual": "Casual",
     "dev": "Dev",
@@ -11041,7 +11041,7 @@ class WayfinderApp(ctk.CTk):
         # from STYLE_ICONS (wayfinder.ui.icons); the emoji that used to prefix the
         # titles were retired with the icon system.
         tones = [
-            ("minimal", "Minimal", "Just removes um/uh. Your exact words, nothing changed."),
+            ("minimal", "Normal", "Just removes um/uh. Your exact words, nothing changed."),
             ("professional", "Professional", "Clean + business-appropriate tone"),
             ("casual", "Casual", "Clean + relaxed texting style"),
             ("dev", "Dev", "Developer mode - recognizes git & code terms"),
@@ -11235,7 +11235,7 @@ class WayfinderApp(ctk.CTk):
         
         ctk.CTkLabel(
             hotkey_content,
-            text="Press this key to cycle: Minimal → Professional → Casual → Dev → Personal",
+            text="Press this key to cycle: Normal → Professional → Casual → Dev → Personal",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_muted"],
         ).pack(anchor="w", padx=16, pady=(0, 4))

@@ -527,7 +527,7 @@ class StyleColors:
 # so these are DUPLICATED by design; the parity test fails if they drift.
 STYLE_PALETTES = {
     "minimal": StyleColors(
-        letter="Raw",       # Raw/unprocessed — reads quiet
+        letter="Normal",    # the "Normal" style: only um/uh removed — reads quiet
         color="#8B8B8F",    # app text_secondary (muted gray)
     ),
     "professional": StyleColors(
