@@ -11,6 +11,9 @@
 #   release       a release published by hand (e.g. the macOS preview)
 #
 # DRY_RUN=1 prints the destination and message instead of posting.
+# NOTIFY_GIT_DIR reads commits from another clone (the local Slack poller's
+# bare mirror, scripts/slack_local_poller.py); PUSH_SHAS gives the commit
+# list explicitly (a new branch: only the commits no other branch has).
 # A missing webhook is a warning, not a failure: until the secrets are added
 # to this repo, pushes stay green.
 
@@ -23,6 +26,8 @@ SERVER="${GITHUB_SERVER_URL:-https://github.com}"
 DRY_RUN="${DRY_RUN:-0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
+GIT_ROOT="${NOTIFY_GIT_DIR:-$ROOT}"
+PROMPTS="$HERE/../prompts"
 PRODUCT="*Wayfinder Aura*"
 
 ev() { jq -r "$1 // empty" "$EVENT_PATH" 2>/dev/null; }
@@ -142,15 +147,15 @@ notify_push() {
   branch="${GITHUB_REF_NAME:-$(ev '.ref' | sed 's#^refs/heads/##')}"
   before="${PUSH_BEFORE:-$(ev '.before')}"
   after="${PUSH_AFTER:-$(ev '.after')}"
-  [ -z "$after" ] && after="$(git -C "$ROOT" rev-parse HEAD)"
+  [ -z "$after" ] && after="$(git -C "$GIT_ROOT" rev-parse HEAD)"
   if [ "$after" = "$zero" ]; then
     echo "Branch ${branch} was deleted; nothing to announce."
     return 0
   fi
 
-  local shas=""
-  if [ -n "$before" ] && [ "$before" != "$zero" ] && git -C "$ROOT" cat-file -e "${before}^{commit}" 2>/dev/null; then
-    shas=$(git -C "$ROOT" rev-list --reverse "${before}..${after}" | tail -250)
+  local shas="${PUSH_SHAS:-}"
+  if [ -z "$shas" ] && [ -n "$before" ] && [ "$before" != "$zero" ] && git -C "$GIT_ROOT" cat-file -e "${before}^{commit}" 2>/dev/null; then
+    shas=$(git -C "$GIT_ROOT" rev-list --reverse "${before}..${after}" | tail -250)
   fi
   [ -z "$shas" ] && shas="$after"
 
@@ -158,8 +163,8 @@ notify_push() {
   while IFS= read -r sha; do
     [ -z "$sha" ] && continue
     short="${sha:0:8}"
-    subject=$(git -C "$ROOT" log -1 --format=%s "$sha")
-    author=$(git -C "$ROOT" log -1 --format=%an "$sha")
+    subject=$(git -C "$GIT_ROOT" log -1 --format=%s "$sha")
+    author=$(git -C "$GIT_ROOT" log -1 --format=%an "$sha")
     count=$((count + 1))
     commits="${commits}${count}. <${SERVER}/${REPO}/commit/${sha}|\`${short}\`> ${subject}"$'\n'
     authors="${authors}${author}"$'\n'
@@ -177,19 +182,19 @@ notify_push() {
       while IFS= read -r sha; do
         [ -z "$sha" ] && continue
         echo "=== commit ==="
-        git -C "$ROOT" log -1 --format=%B "$sha"
+        git -C "$GIT_ROOT" log -1 --format=%B "$sha"
       done <<< "$shas"
     else
       echo "Commit subjects (one per line):"
       while IFS= read -r sha; do
         [ -z "$sha" ] && continue
-        echo "- $(git -C "$ROOT" log -1 --format=%s "$sha")"
+        echo "- $(git -C "$GIT_ROOT" log -1 --format=%s "$sha")"
       done <<< "$shas"
     fi
     echo ""
     echo "Largest product-source changes (tests, docs, generated files excluded):"
     if [ -n "$before" ] && [ "$before" != "$zero" ]; then
-      git -C "$ROOT" diff "${before}..${after}" --numstat 2>/dev/null \
+      git -C "$GIT_ROOT" diff "${before}..${after}" --numstat 2>/dev/null \
         | awk -F '\t' '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
             p=$3
             if (p !~ /(^|\/)(tests?|docs?|scripts|\.github|\.claude|dist|build)(\/|$)/ && p !~ /(\.lock$|\.json$)/) print ($1 + $2) "\t" p
@@ -205,10 +210,11 @@ notify_push() {
 
   local summary="" source="" result=""
   if [ "$DRY_RUN" != "1" ] || [ -n "${LITELLM_BASE_URL:-}${OPENAI_API_KEY:-}" ]; then
-    result=$(summarize "$(<"$ROOT/.github/prompts/$prompt_file")" || true)
+    result=$(summarize "$(<"$PROMPTS/$prompt_file")" || true)
     if [ -n "$result" ]; then
       source="${result%%|||*}"
-      summary="${result#*|||}"
+      # Slack mrkdwn bolds with single asterisks; models write Markdown's **x**.
+      summary=$(printf '%s' "${result#*|||}" | sed -E 's/\*\*([^*]+)\*\*/*\1*/g')
     else
       echo "No summary model answered; posting the commit list only."
     fi

@@ -27,6 +27,10 @@ jobs:
     # free for public repositories).
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Stand down while the local poller posts (scripts/slack_local_poller.py:
+    # same messages, summaries from the local Qwen model on the Mac Studio).
+    # Set with: gh variable set SLACK_POSTER --body local
+    if: vars.SLACK_POSTER != 'local'
     steps:
       - uses: actions/checkout@v7
         with:
