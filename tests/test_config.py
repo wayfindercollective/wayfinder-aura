@@ -581,7 +581,12 @@ class TestHotkeyDefaultMigration:
 
 class TestFlatpakModelStorageMigration:
     """Flatpak builds used to download into the sandbox's throwaway
-    ~/.local/share; startup must move/repoint those models, never re-download."""
+    ~/.local/share; startup must move/repoint those models, never re-download.
+
+    The migration only ever runs in the (Linux) Flatpak, so its tests are
+    ``linux_only``. The missing-model notices and the outside-Flatpak no-op are
+    shared behavior and run on every platform.
+    """
 
     APP_ID = "io.wayfindercollective.WayfinderAura"
     TURBO = "ggml-large-v3-turbo-q5_0.bin"
@@ -593,6 +598,8 @@ class TestFlatpakModelStorageMigration:
         from wayfinder import config as cfg
 
         home = temp_config_dir.parents[1]
+        # temp_config_dir sets HOME; Windows resolves ~ from USERPROFILE.
+        monkeypatch.setenv("USERPROFILE", str(home))
         app = home / ".var" / "app" / self.APP_ID
         data = app / "data"
         monkeypatch.setenv("XDG_DATA_HOME", str(data))
@@ -679,6 +686,7 @@ class TestFlatpakModelStorageMigration:
         assert again["model_path"] == config["model_path"]
         assert cfg.consume_model_path_notices() == []
 
+    @pytest.mark.linux_only
     def test_override_removed_models_still_recovered_from_app_dir(self, flatpak):
         """Without the override ~/.local/share is empty, but ~/.var/app/<id> is
         always mounted: the old copies there are found and moved."""
@@ -694,6 +702,7 @@ class TestFlatpakModelStorageMigration:
         assert Path(os.path.expanduser(config["model_path"])) == f["new_whisper"] / self.TURBO
         assert (f["new_whisper"] / self.TURBO).exists()
 
+    @pytest.mark.linux_only
     def test_config_repointed_to_model_already_in_new_dir(self, flatpak):
         f = flatpak
         cfg = f["cfg"]
@@ -707,6 +716,7 @@ class TestFlatpakModelStorageMigration:
         assert Path(os.path.expanduser(config["model_path"])) == f["new_whisper"] / self.TURBO
         assert config["model_path"] != str(f["bundled"])
 
+    @pytest.mark.linux_only
     def test_game_mode_model_path_is_migrated_too(self, flatpak):
         f = flatpak
         cfg = f["cfg"]
@@ -718,6 +728,7 @@ class TestFlatpakModelStorageMigration:
 
         assert config["game_mode_model_path"] == str(f["new_whisper"] / tiny)
 
+    @pytest.mark.linux_only
     def test_other_legacy_downloads_move_but_partials_do_not(self, flatpak):
         f = flatpak
         cfg = f["cfg"]
@@ -733,6 +744,7 @@ class TestFlatpakModelStorageMigration:
         assert (f["private_whisper"] / "ggml-medium.bin.downloading").exists()
         assert not (f["new_llm"] / "Qwen3.5-2B-Q4_K_M.gguf.tmp").exists()
 
+    @pytest.mark.linux_only
     def test_existing_new_copy_is_never_overwritten(self, flatpak):
         f = flatpak
         cfg = f["cfg"]
@@ -745,6 +757,7 @@ class TestFlatpakModelStorageMigration:
         assert (f["new_whisper"] / self.TURBO).read_bytes() == b"new"
         assert (f["private_whisper"] / self.TURBO).read_bytes() == b"old"
 
+    @pytest.mark.linux_only
     def test_host_shared_dir_is_left_alone(self, flatpak):
         """With a --filesystem=home override ~/.local/share is the HOST's dir:
         the file still resolves, belongs to the host install, and stays put."""
@@ -817,6 +830,7 @@ class TestFlatpakModelStorageMigration:
 class TestModelDirDefaults:
     """Config-level model dirs route through the platform helpers."""
 
+    @pytest.mark.linux_only
     def test_flatpak_candidate_dirs_lead_with_persistent_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -828,13 +842,22 @@ class TestModelDirDefaults:
         dirs = cfg._user_whisper_model_dirs()
         assert dirs[0] == data / "wayfinder-aura" / "whisper-models"
 
-    def test_host_candidate_dirs_unchanged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    @pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+    def test_host_candidate_dirs_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+    ):
         from wayfinder import config as cfg
 
+        # Path.home()/expanduser read HOME on POSIX but USERPROFILE on Windows.
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         monkeypatch.setattr(cfg, "IS_FLATPAK", False)
-        assert cfg._user_whisper_model_dirs() == [tmp_path / "whisper.cpp" / "models"]
+        with monkeypatch.context() as m:
+            m.setattr(sys, "platform", platform)
+            dirs = cfg._user_whisper_model_dirs()
+        assert dirs == [tmp_path / "whisper.cpp" / "models"]
 
+    @pytest.mark.linux_only
     def test_flatpak_installed_model_found_for_repair(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

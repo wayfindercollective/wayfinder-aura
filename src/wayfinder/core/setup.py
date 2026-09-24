@@ -1101,7 +1101,12 @@ def download_llm_model(
 
     url = model_info["url"]
     filename = model_info["filename"]
-    model_dir = get_user_llm_models_dir(flatpak=IS_FLATPAK)
+    # Flatpak: persistent XDG_DATA_HOME. Everywhere else (macOS included) the
+    # wizard keeps the dir it has always used.
+    if IS_FLATPAK:
+        model_dir = get_user_llm_models_dir(flatpak=True)
+    else:
+        model_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
     target = model_dir / filename
 
     def _run():

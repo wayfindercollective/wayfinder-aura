@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from wayfinder.utils.hostexec import bundle_binary_env
-from wayfinder.utils.platform import get_user_llm_models_dir, subprocess_no_window_kwargs
+from wayfinder.utils.platform import (
+    get_user_llm_models_dir,
+    is_wayfinder_flatpak_env,
+    subprocess_no_window_kwargs,
+)
 
 # Hide the child console window on Windows (empty on POSIX); splatted into each
 # llama subprocess spawn so no stray terminal appears.
@@ -366,7 +370,14 @@ def free_cleanup_model_fallback(model_ref: str, default_ref: str = "") -> str:
                 continue
     if default_ref and detect_model_tier(default.stem) in ("tiny", "small"):
         return str(default)
-    directory = dirs[0] if dirs else get_user_llm_models_dir()
+    if dirs:
+        directory = dirs[0]
+    elif is_wayfinder_flatpak_env():
+        # Flatpak: the persistent XDG_DATA_HOME download dir.
+        directory = get_user_llm_models_dir(flatpak=True)
+    else:
+        # Unchanged outside the Flatpak (macOS and Windows included).
+        directory = Path.home() / ".local/share/wayfinder-aura/llm-models"
     return str(directory / FREE_CLEANUP_MODEL_FILENAMES[0])
 
 

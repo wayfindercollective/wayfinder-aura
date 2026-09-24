@@ -269,9 +269,19 @@ class TestDirectoryPaths:
 
 
 class TestUserModelDirs:
-    """Where model downloads land. Flatpak: only XDG_DATA_HOME persists."""
+    """Where model downloads land. Flatpak: only XDG_DATA_HOME persists.
+
+    Flatpak/XDG tests are ``linux_only``; the host-dir tests run everywhere and
+    simulate the other platforms through ``sys.platform``.
+    """
 
     FLATPAK_ID = "io.wayfindercollective.WayfinderAura"
+
+    @staticmethod
+    def _set_home(monkeypatch, home):
+        # Path.home()/expanduser read HOME on POSIX but USERPROFILE on Windows.
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
 
     @pytest.fixture
     def sandbox(self, tmp_path, monkeypatch):
@@ -280,7 +290,7 @@ class TestUserModelDirs:
         home = tmp_path / "home"
         data = home / ".var" / "app" / self.FLATPAK_ID / "data"
         home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        self._set_home(monkeypatch, home)
         monkeypatch.setenv("XDG_DATA_HOME", str(data))
         monkeypatch.setenv("FLATPAK_ID", self.FLATPAK_ID)
         monkeypatch.delenv("WAYFINDER_FLATPAK", raising=False)
@@ -290,11 +300,13 @@ class TestUserModelDirs:
     def host(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        self._set_home(monkeypatch, home)
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         monkeypatch.delenv("FLATPAK_ID", raising=False)
         monkeypatch.delenv("WAYFINDER_FLATPAK", raising=False)
         return home
 
+    @pytest.mark.linux_only
     def test_flatpak_downloads_use_persistent_xdg_data_home(self, sandbox):
         home, data = sandbox
         whisper = platform_mod.get_user_whisper_models_dir()
@@ -305,6 +317,7 @@ class TestUserModelDirs:
         for directory in (whisper, llm):
             assert not str(directory).startswith(str(home / ".local"))
 
+    @pytest.mark.linux_only
     def test_flatpak_without_xdg_data_home_still_persists(self, sandbox, monkeypatch):
         home, _data = sandbox
         monkeypatch.delenv("XDG_DATA_HOME")
@@ -344,6 +357,7 @@ class TestUserModelDirs:
                 host / ".local" / "share" / "wayfinder-aura" / "llm-models"
             )
 
+    @pytest.mark.linux_only
     def test_legacy_flatpak_dirs_list_app_private_copy_first(self, sandbox):
         home, _data = sandbox
         assert platform_mod.get_legacy_flatpak_model_dirs("whisper-models") == [
@@ -359,6 +373,7 @@ class TestUserModelDirs:
             Path("/app/share/whisper-models"),
         ]
 
+    @pytest.mark.linux_only
     def test_flatpak_whisper_search_dirs_lead_with_persistent_dir(self, sandbox):
         home, data = sandbox
         dirs = platform_mod.get_whisper_model_search_dirs()

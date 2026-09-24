@@ -3,6 +3,8 @@ role right away — no Installed tab, no Save & Apply — but never mid-dictatio
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -60,7 +62,9 @@ def env(tmp_path, monkeypatch):
     llm_dir = whisper_dir.parent / "llm-models"
     whisper_dir.mkdir(parents=True)
     llm_dir.mkdir(parents=True)
+    # Path.home()/expanduser read HOME on POSIX but USERPROFILE on Windows.
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     turbo = whisper_dir / TURBO
     turbo.write_bytes(b"turbo")
     gemma = llm_dir / GEMMA
@@ -76,8 +80,9 @@ def test_downloaded_whisper_model_becomes_active_when_idle(env):
     outcome = app._activate_downloaded_model("whisper", str(env.turbo))
 
     assert outcome == "active"
-    # Stored like Save & Apply stores it ('~' for $HOME) and persisted.
-    assert app.config["model_path"] == "~/" + str(env.turbo.relative_to(env.home))
+    # Stored like Save & Apply stores it ('~' for the home dir) and persisted.
+    assert app.config["model_path"] == "~" + os.sep + str(env.turbo.relative_to(env.home))
+    assert Path(os.path.expanduser(app.config["model_path"])) == env.turbo
     assert env.saved and env.saved[-1]["model_path"] == app.config["model_path"]
     app.model_btn.configure.assert_called_with(text="Turbo Q5 (Balanced)")
     assert "✓ Large v3 Turbo Q5 downloaded — now active" in app.logs

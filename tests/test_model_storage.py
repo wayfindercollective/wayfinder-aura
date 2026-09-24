@@ -1,11 +1,20 @@
 """Flatpak model storage: downloads must land in the persistent data dir, and a
 selected model that vanished (or was moved there) must be reported to the user,
-never swapped for Base.en silently."""
+never swapped for Base.en silently.
+
+Flatpak/XDG tests are ``linux_only``. Outside the Flatpak (Linux host, macOS,
+Windows) every download/lookup dir must stay exactly what it was before the
+fix; those guards run on every platform and simulate the others through
+``sys.platform``.
+"""
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import wayfinder_main as wm
 
 TURBO_OLD = "~/.local/share/wayfinder-aura/whisper-models/ggml-large-v3-turbo-q5_0.bin"
@@ -89,6 +98,7 @@ def test_notices_are_consumed_once(monkeypatch):
     assert cfg.consume_model_path_notices() == []
 
 
+@pytest.mark.linux_only
 def test_app_model_dirs_follow_the_platform_helpers(tmp_path, monkeypatch):
     data = tmp_path / "data"
     monkeypatch.setenv("XDG_DATA_HOME", str(data))
@@ -99,6 +109,7 @@ def test_app_model_dirs_follow_the_platform_helpers(tmp_path, monkeypatch):
     assert wm._whisper_model_search_dirs()[0] == data / "wayfinder-aura" / "whisper-models"
 
 
+@pytest.mark.linux_only
 def test_setup_wizard_downloads_into_the_persistent_flatpak_dir(tmp_path, monkeypatch):
     from wayfinder.core import setup
 
@@ -125,6 +136,7 @@ def test_setup_wizard_downloads_into_the_persistent_flatpak_dir(tmp_path, monkey
     assert targets == [data / "wayfinder-aura" / "whisper-models" / "ggml-base.en.bin"]
 
 
+@pytest.mark.linux_only
 def test_setup_check_finds_model_in_persistent_flatpak_dir(tmp_path, monkeypatch):
     from wayfinder.core import setup
 
@@ -141,6 +153,7 @@ def test_setup_check_finds_model_in_persistent_flatpak_dir(tmp_path, monkeypatch
     assert "ggml-base.en.bin" in status.detail
 
 
+@pytest.mark.linux_only
 def test_game_mode_light_model_found_in_persistent_flatpak_dir(tmp_path, monkeypatch):
     from wayfinder.core import gm_asr
 
@@ -154,3 +167,102 @@ def test_game_mode_light_model_found_in_persistent_flatpak_dir(tmp_path, monkeyp
 
     # The desktop model lives somewhere else (e.g. a Browse… pick).
     assert gm_asr._pick_light_model_path(str(tmp_path / "other" / "ggml-large-v3.bin"), "") == str(tiny)
+
+
+# --- outside the Flatpak: the pre-fix dirs, on every platform ------------------
+
+
+class _SyncThread:
+    def __init__(self, target, daemon=None):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+@pytest.fixture
+def host_home(tmp_path, monkeypatch):
+    """A non-Flatpak runtime whose home is a temp dir (HOME on POSIX,
+    USERPROFILE on Windows). XDG_DATA_HOME is set to prove host runs ignore it."""
+    from wayfinder.core import setup
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.delenv("FLATPAK_ID", raising=False)
+    monkeypatch.delenv("WAYFINDER_FLATPAK", raising=False)
+    monkeypatch.setattr(wm, "IS_FLATPAK", False)
+    monkeypatch.setattr(setup, "IS_FLATPAK", False)
+    return home
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_host_app_model_dirs_are_unchanged(host_home, monkeypatch, platform):
+    home = host_home
+    with monkeypatch.context() as m:
+        m.setattr(sys, "platform", platform)
+        whisper_dir = wm._get_whisper_models_dir()
+        llm_dir = wm._get_llm_models_dir()
+        search_dirs = wm._whisper_model_search_dirs()
+
+    assert whisper_dir == home / "whisper.cpp" / "models"
+    if platform == "darwin":
+        assert llm_dir == home / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
+    else:
+        assert llm_dir == home / ".local" / "share" / "wayfinder-aura" / "llm-models"
+    assert search_dirs == [
+        home / "whisper.cpp" / "models",
+        home / ".local" / "share" / "whisper.cpp",
+        Path("/app/share/whisper-models"),
+    ]
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_host_setup_wizard_dirs_are_unchanged(host_home, monkeypatch, platform):
+    from wayfinder.core import setup
+
+    home = host_home
+    targets: list = []
+    monkeypatch.setattr(
+        setup, "_download_model_file",
+        lambda url, target, *a, **k: targets.append(target),
+    )
+    monkeypatch.setattr(setup.threading, "Thread", _SyncThread)
+    base = home / "whisper.cpp" / "models" / "ggml-base.en.bin"
+    base.parent.mkdir(parents=True)
+    base.write_bytes(b"x" * 10)
+    gemma_key = "google_gemma-3-1b-it-Q4_K_M"
+
+    with monkeypatch.context() as m:
+        m.setattr(sys, "platform", platform)
+        setup.download_whisper_model("base.en", lambda _m: None, lambda _ok, _d: None)
+        setup.download_llm_model(gemma_key, lambda _m: None, lambda _ok, _d: None)
+    # Outside the platform patch: the licence check behind it is platform-aware.
+    status = setup.check_whisper_model({"model_path": str(home / "gone" / "ggml-base.en.bin")})
+
+    assert targets == [
+        home / "whisper.cpp" / "models" / "ggml-base.en.bin",
+        # The wizard's GGUF dir has always been ~/.local/share, macOS included.
+        home / ".local" / "share" / "wayfinder-aura" / "llm-models"
+        / setup.LLM_MODELS[gemma_key]["filename"],
+    ]
+    assert status.installed and "ggml-base.en.bin" in status.detail
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_host_free_cleanup_fallback_dir_is_unchanged(host_home, monkeypatch, platform):
+    from wayfinder.core.postprocessor import (
+        FREE_CLEANUP_MODEL_FILENAMES,
+        free_cleanup_model_fallback,
+    )
+
+    with monkeypatch.context() as m:
+        m.setattr(sys, "platform", platform)
+        fallback = free_cleanup_model_fallback("", "")
+
+    assert Path(fallback) == (
+        host_home / ".local" / "share" / "wayfinder-aura" / "llm-models"
+        / FREE_CLEANUP_MODEL_FILENAMES[0]
+    )
