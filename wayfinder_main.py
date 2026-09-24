@@ -8826,6 +8826,18 @@ class WayfinderApp(ctk.CTk):
         self._build_mode_settings(current_mode)
 
         yield "processing"
+
+        # === BENTO TILE: Vocabulary (Ultra) — names/jargon + corrections ===
+        vocab_tile = ctk.CTkFrame(
+            scroll, fg_color=COLORS["bg_card"],
+            corner_radius=RADIUS["lg"], border_width=1,
+            border_color=COLORS["border_rim"],
+        )
+        vocab_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
+        self._vocabulary_tile = vocab_tile
+        self._render_vocabulary_tile()
+
+        yield "vocabulary"
         
         # === BENTO TILE 3: System (expanded with Hotkey and Typing Speed) ===
         system_tile = ctk.CTkFrame(
@@ -16958,8 +16970,110 @@ class WayfinderApp(ctk.CTk):
 
         threading.Thread(target=_worker, daemon=True, name="feedback-post").start()
 
+    def _render_vocabulary_tile(self) -> None:
+        """Settings ▸ Vocabulary: the user's terms + "heard -> write" fixes (Ultra)."""
+        tile = getattr(self, "_vocabulary_tile", None)
+        if tile is None:
+            return
+        try:
+            for child in tile.winfo_children():
+                child.destroy()
+        except Exception:
+            return
+        unlocked = self.feature_gate.has_feature("custom_vocabulary")
+        fam, fs = self.font_body[0], self.font_sizes
+
+        header = ctk.CTkFrame(tile, fg_color="transparent")
+        header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
+        ctk.CTkLabel(
+            header, text="VOCABULARY",
+            font=(self.font_header[0], fs["caption"]), text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+        if not unlocked:
+            ctk.CTkLabel(
+                header, text="ULTRA", font=(self.font_header[0], fs["caption"], "bold"),
+                text_color=COLORS["accent_yellow"],
+            ).pack(side="left", padx=(SPACING["sm"], 0))
+
+        body = ctk.CTkFrame(tile, fg_color="transparent")
+        body.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+
+        def _label(text, *, muted=True, top=0):
+            lbl = ctk.CTkLabel(
+                body, text=text, font=(fam, fs["small"]), anchor="w", justify="left",
+                text_color=COLORS["text_muted"] if muted else COLORS["text_primary"],
+                wraplength=440,
+            )
+            lbl.pack(fill="x", pady=(top, 4))
+            return lbl
+
+        intro = _label("Names, brands and jargon Aura should always get right — "
+                       "they steer the speech model and are never \"cleaned\" away.")
+        body.bind("<Configure>", lambda e, l=intro: l.configure(wraplength=max(200, e.width - 8)), add="+")
+
+        if not unlocked:
+            ctk.CTkButton(
+                body, text="Unlock with Ultra", font=(fam, fs["small"]),
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+                text_color=COLORS["bg_base"], height=30, corner_radius=RADIUS["sm"],
+                command=lambda: self._show_premium_prompt("custom_vocabulary"),
+            ).pack(anchor="w", pady=(4, 0))
+            return
+
+        def _box(height):
+            box = ctk.CTkTextbox(
+                body, font=(fam, fs["body"]), fg_color=COLORS["bg_input"],
+                text_color=COLORS["text_primary"], corner_radius=RADIUS["sm"],
+                height=height, wrap="none",
+            )
+            box.pack(fill="x")
+            return box
+
+        _label("Words and names — one per line", muted=False, top=4)
+        words_box = _box(96)
+        words = [str(t) for t in (self.config.get("custom_vocabulary") or []) if str(t).strip()]
+        if words:
+            words_box.insert("1.0", "\n".join(words))
+
+        _label("Corrections — one per line:  heard -> write", muted=False, top=SPACING["md"])
+        fixes_box = _box(72)
+        from wayfinder.core.transcriber import parse_vocabulary_replacements
+        fixes = parse_vocabulary_replacements(self.config.get("vocabulary_replacements") or [])
+        if fixes:
+            fixes_box.insert("1.0", "\n".join(f"{h} -> {w}" for h, w in fixes))
+
+        row = ctk.CTkFrame(body, fg_color="transparent")
+        row.pack(fill="x", pady=(SPACING["md"], 0))
+        status = ctk.CTkLabel(row, text="", font=(fam, fs["small"]), text_color=COLORS["text_muted"])
+
+        def _save():
+            from wayfinder.core.transcriber import normalize_vocabulary_terms
+            new_words = normalize_vocabulary_terms(words_box.get("1.0", "end").splitlines())
+            lines = [l for l in fixes_box.get("1.0", "end").splitlines() if l.strip()]
+            pairs = parse_vocabulary_replacements(lines)
+            self.config["custom_vocabulary"] = new_words
+            self.config["vocabulary_replacements"] = [[h, w] for h, w in pairs]
+            save_config(self.config)
+            skipped = len(lines) - len(pairs)
+            msg = f"Saved · {len(new_words)} words · {len(pairs)} corrections"
+            if skipped:
+                msg += f" · {skipped} skipped (use: heard -> write)"
+            status.configure(text=msg, text_color=COLORS["error"] if skipped else COLORS["accent"])
+            self.log(f"✎ Vocabulary: {len(new_words)} words, {len(pairs)} corrections")
+
+        ctk.CTkButton(
+            row, text="Save", width=86, height=30, font=(fam, fs["small"], "bold"),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            text_color=COLORS["bg_base"], corner_radius=RADIUS["sm"], command=_save,
+        ).pack(side="left")
+        status.pack(side="left", padx=(SPACING["sm"], 0))
+
     def _refresh_entitlement_ui(self) -> None:
         """Refresh controls whose lock state can change after live activation."""
+        try:
+            self._render_vocabulary_tile()
+        except Exception:
+            pass
         try:
             style_unlocked = self.feature_gate.has_feature("tone_system")
             style_btn = self.tab_buttons.get("style")
