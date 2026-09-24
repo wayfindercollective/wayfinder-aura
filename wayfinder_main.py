@@ -5878,7 +5878,7 @@ class WayfinderApp(ctk.CTk):
                         (EventType.UI_CALLBACK, self._on_macos_screens_changed)
                     ),
                     on_visibility_changed=lambda: self.event_queue.put(
-                        (EventType.UI_CALLBACK, self._refresh_tray_menu)
+                        (EventType.UI_CALLBACK, self._on_macos_app_visibility_changed)
                     ),
                 )
             except Exception as exc:
@@ -7652,6 +7652,30 @@ class WayfinderApp(ctk.CTk):
             self._hero_wave_items_created = False
             self._init_hero_wave_items()
 
+    def _on_macos_app_visibility_changed(self) -> None:
+        """NSApp hide/unhide: refresh the menu, and bring the hero back on unhide.
+
+        Hide keeps Tk's windows mapped, so no <Map> event restarts the hero; the
+        idle loop no longer polls while hidden, so unhide re-seeds it here.
+        """
+        self._refresh_tray_menu()
+        try:
+            from AppKit import NSApplication
+
+            if NSApplication.sharedApplication().isHidden():
+                return
+        except Exception:
+            return
+        native_layer = getattr(self, "_macos_hero_layer", None)
+        if native_layer is not None:
+            try:
+                native_layer.update_geometry()
+            except Exception:
+                pass
+            self._sync_macos_hero_visibility()
+        if self.app_state == AppState.IDLE:
+            self._start_idle_breath()
+
     def _on_hero_canvas_map(self, event=None) -> None:
         """Restore the native hero after deminiaturize or returning to Dictate."""
         def restore():
@@ -7660,6 +7684,9 @@ class WayfinderApp(ctk.CTk):
                 return
             native_layer.update_geometry()
             self._sync_macos_hero_visibility()
+            if IS_MACOS and self.app_state == AppState.IDLE:
+                # The idle loop stops while hidden; one pass re-seeds it.
+                self._start_idle_breath()
 
         self.after(50, restore)
 
@@ -19979,6 +20006,11 @@ class WayfinderApp(ctk.CTk):
                     native_layer = getattr(self, "_macos_hero_layer", None)
                     if native_layer is not None:
                         native_layer.set_hidden(True)
+                        if native_layer.native_renderer is not None:
+                            # Nothing to poll: the native layer is stopped and
+                            # _on_hero_canvas_map restarts it when shown.
+                            self._idle_breath_job = None
+                            return
                     self._idle_breath_job = self.after(500, self._animate_idle_breath)
                     return
             win_state = self.state()
@@ -19987,6 +20019,9 @@ class WayfinderApp(ctk.CTk):
                 native_layer = getattr(self, "_macos_hero_layer", None)
                 if native_layer is not None:
                     native_layer.set_hidden(True)
+                    if IS_MACOS and native_layer.native_renderer is not None:
+                        self._idle_breath_job = None
+                        return
                 delay = 250 if native_layer is not None else 2000
                 self._idle_breath_job = self.after(delay, self._animate_idle_breath)
                 return

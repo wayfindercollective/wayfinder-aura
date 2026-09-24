@@ -350,3 +350,48 @@ def test_blocked_microphone_banner_opens_the_microphone_pane(monkeypatch):
     monkeypatch.setattr(mp, "open_macos_privacy_settings", lambda perm: opened.append(perm) or True)
     wayfinder_main.WayfinderApp._open_missing_macos_permission(app)
     assert opened == ["microphone"]
+
+
+def test_hidden_window_with_native_hero_does_not_poll(monkeypatch):
+    """A withdrawn/hidden window used to re-poll every 250 ms (a Core Animation
+    commit each tick) even though the native layer was stopped."""
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    hidden_calls = []
+    scheduled = []
+
+    class Native:
+        native_renderer = object()
+
+        def set_hidden(self, hidden):
+            hidden_calls.append(hidden)
+
+    app = type("App", (), {
+        "app_state": wayfinder_main.AppState.IDLE,
+        "_macos_hero_layer": Native(),
+        "_idle_breath_job": "pending",
+        "state": lambda self: "withdrawn",
+        "after": lambda self, ms, fn: scheduled.append(ms) or "job",
+    })()
+    wayfinder_main.WayfinderApp._animate_idle_breath(app)
+    assert hidden_calls == [True]
+    assert scheduled == [] and app._idle_breath_job is None
+
+
+def test_unhide_restores_the_native_hero(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    events = []
+
+    class Native:
+        def update_geometry(self):
+            events.append("geometry")
+
+    app = type("App", (), {
+        "app_state": wayfinder_main.AppState.IDLE,
+        "_macos_hero_layer": Native(),
+        "_refresh_tray_menu": lambda self: events.append("menu"),
+        "_sync_macos_hero_visibility": lambda self: events.append("sync"),
+        "_start_idle_breath": lambda self: events.append("breath"),
+    })()
+    wayfinder_main.WayfinderApp._on_macos_app_visibility_changed(app)
+    # The test process is not a hidden NSApplication, so this is the unhide path.
+    assert events == ["menu", "geometry", "sync", "breath"]

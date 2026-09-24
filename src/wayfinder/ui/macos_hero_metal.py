@@ -409,7 +409,13 @@ class NativeMetalHeroRenderer:
         )
 
     def set_hidden(self, hidden: bool) -> None:
-        self.library.wf_hero_set_hidden(self.handle, int(bool(hidden)))
+        # Idempotent: each native call is a Core Animation commit, and the
+        # visibility sync re-asserts the same state often.
+        hidden = bool(hidden)
+        if getattr(self, "_hidden", None) is hidden:
+            return
+        self._hidden = hidden
+        self.library.wf_hero_set_hidden(self.handle, int(hidden))
 
     def close(self) -> None:
         if self.handle:
