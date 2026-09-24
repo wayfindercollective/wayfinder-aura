@@ -120,7 +120,13 @@ def llm_models(filter_: str | None) -> list[Path]:
 
 def voices_available() -> set:
     out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout
-    return {line.split("  ")[0].strip() for line in out.splitlines()}
+    # "Samantha (English (US)) en_US    # Hello!" - the name ends at the locale.
+    names = set()
+    for line in out.splitlines():
+        m = re.match(r"^(.*?)\s+[a-z]{2,3}_[A-Z]{2,3}\s+#", line)
+        if m:
+            names.add(m.group(1).strip())
+    return names
 
 
 # -------------------------------------------------------------- audio corpus
@@ -418,7 +424,7 @@ def main() -> int:
     ap.add_argument("--whisper", help="comma filters on model file names")
     ap.add_argument("--llm", help="comma filters on model file names")
     ap.add_argument("--modes", default="cpu,gpu")
-    ap.add_argument("--voices", default="Samantha (English (US)),Daniel (English (UK)),Rishi")
+    ap.add_argument("--voices", default="Samantha (English (US)),Daniel (English (UK)),Rishi (English (India))")
     ap.add_argument("--pipeline-voice", default="Samantha")
     ap.add_argument("--pipeline-mode", default="gpu")
     ap.add_argument("--cleanup-gpu", action="store_true", default=True)
