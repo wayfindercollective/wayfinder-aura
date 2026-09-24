@@ -359,12 +359,44 @@ def _p90(xs):
     return round(xs[min(len(xs) - 1, int(0.9 * len(xs)))], 3) if xs else None
 
 
+FILLER_RE = re.compile(r"\b(um+|uh+|ah+|er+|hmm+|mm+)\b")
+
+
+def wer_no_fillers(reference: str, hypothesis: str) -> float:
+    """WER with filler sounds removed from both sides: Whisper omits um/uh by
+    design, and the tone corpus text includes them."""
+    from tone_eval import metrics as M
+
+    ref = " ".join(FILLER_RE.sub(" ", norm_words(reference)).split())
+    hyp = " ".join(FILLER_RE.sub(" ", norm_words(hypothesis)).split())
+    return M.wer(ref, hyp)
+
+
+def grade(pass_rate: float, errors: int, leaks: int, n: int) -> str:
+    """A >= 90 %, B >= 75 %, C >= 50 %, else F; any leak or >10 % errors caps at C."""
+    g = "A" if pass_rate >= 0.9 else "B" if pass_rate >= 0.75 else "C" if pass_rate >= 0.5 else "F"
+    if (leaks or (n and errors / n > 0.1)) and g in ("A", "B"):
+        g = "C"
+    return g
+
+
+def _references() -> dict:
+    from manifest import CLIPS
+    from tone_eval.corpus import CORPUS
+
+    refs = {f"golden/{c['id']}": c.get("reference_text", "") for c in CLIPS}
+    refs.update({s["id"]: s["text"] for s in CORPUS})
+    return refs
+
+
 def report(out_dir: Path) -> Path:
     lines = [f"# Wayfinder Aura - speech x style matrix ({datetime.now():%Y-%m-%d %H:%M})", ""]
+    refs = _references()
     asr = out_dir / "asr.jsonl"
     if asr.exists():
         rows = [json.loads(l) for l in asr.read_text().splitlines()]
         lines += ["## Speech models", "",
+                  "WER excludes um/uh-type fillers (Whisper drops them by design).", "",
                   "| Model | Mode | WER mean | WER p90 | Silence words | Latency mean s | p90 s | Warm-up s |",
                   "|---|---|---|---|---|---|---|---|"]
         combos = sorted({(r["model"], r["mode"]) for r in rows},
@@ -373,6 +405,10 @@ def report(out_dir: Path) -> Path:
         for model, mode in combos:
             rs = [r for r in rows if r["model"] == model and r["mode"] == mode]
             scored = [r for r in rs if "wer" in r]
+            for r in scored:
+                ref = refs.get(r["sample_id"]) if r.get("sample_id") else refs.get(r["clip"])
+                if ref is not None:
+                    r["wer"] = round(wer_no_fillers(ref, r.get("text") or ""), 4)
             sil = [r.get("silence_words") for r in rs if "silence_words" in r]
             warm = [r.get("warmup_s") for r in rs if "warmup_s" in r]
             lines.append(f"| {model} | {mode} | {_mean([r['wer'] for r in scored])} | "
@@ -388,8 +424,8 @@ def report(out_dir: Path) -> Path:
             continue
         rows = [json.loads(l) for l in path.read_text().splitlines()]
         lines += [f"## {title}", "",
-                  "| Cleanup model | Tone | Strength | Pass rate | Guide score | Leaks | Unchanged | Errors | Latency mean s | p90 s | Top failing gates |",
-                  "|---|---|---|---|---|---|---|---|---|---|---|"]
+                  "| Cleanup model | Tone | Strength | Grade | Pass rate | Guide score | Leaks | Unchanged | Errors | Latency mean s | p90 s | Top failing gates |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for key in sorted({tuple(r[g] for g in group) for r in rows}):
             rs = [r for r in rows if tuple(r[g] for g in group) == key]
             gates = {}
@@ -398,8 +434,11 @@ def report(out_dir: Path) -> Path:
                     gates[g] = gates.get(g, 0) + 1
             top = ", ".join(f"{g} x{n}" for g, n in sorted(gates.items(), key=lambda kv: -kv[1])[:3])
             n = len(rs)
+            passed = sum(r["all_pass"] for r in rs)
+            errs = sum(bool(r["error"] or r["markers"]) for r in rs)
+            g = grade(passed / n if n else 0.0, errs, sum(r["leak"] for r in rs), n)
             lines.append(
-                f"| {key[0]} | {key[1]} | {key[2]} | {sum(r['all_pass'] for r in rs)}/{n} | "
+                f"| {key[0]} | {key[1]} | {key[2]} | **{g}** | {passed}/{n} | "
                 f"{_mean([r.get('guide_score') for r in rs])} | {sum(r['leak'] for r in rs)} | "
                 f"{sum(r['unchanged'] for r in rs)} | {sum(bool(r['error'] or r['markers']) for r in rs)} | "
                 f"{_mean([r['seconds'] for r in rs])} | {_p90([r['seconds'] for r in rs])} | {top} |")
