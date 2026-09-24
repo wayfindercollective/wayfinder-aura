@@ -578,10 +578,12 @@ class WelcomePane:
                 ctk.CTkLabel(row, text="", image=image, width=20).pack(side="left", padx=(0, SPACING["sm"]))
             text = ctk.CTkFrame(row, fg_color="transparent")
             text.pack(side="left", fill="x", expand=True)
-            ctk.CTkLabel(text, text=title, anchor="w",
+            # Line-height labels (CTkLabel's default 28 px min height doubled
+            # each row, pushing "not now" under the footer).
+            ctk.CTkLabel(text, text=title, anchor="w", height=FONT_SIZES["body"] + 6,
                          font=(FONTS["body"][0], FONT_SIZES["body"], "bold"),
                          text_color=COLORS["text_primary"]).pack(anchor="w")
-            ctk.CTkLabel(text, text=why, anchor="w",
+            ctk.CTkLabel(text, text=why, anchor="w", height=FONT_SIZES["small"] + 5,
                          font=(FONTS["body"][0], FONT_SIZES["small"]),
                          text_color=COLORS["text_muted"]).pack(anchor="w")
             if granted:
@@ -603,9 +605,10 @@ class WelcomePane:
                 self._perm_done_scheduled = True
                 self.card.after(900, self._permissions_complete)
             return
-        later = ctk.CTkLabel(body, text="not now", font=(FONTS["body"][0], FONT_SIZES["small"]),
+        later = ctk.CTkLabel(body, text="not now", height=FONT_SIZES["small"] + 5,
+                             font=(FONTS["body"][0], FONT_SIZES["small"]),
                              text_color=COLORS["text_muted"], cursor="hand2")
-        later.pack(anchor="w", pady=(SPACING["sm"], 0))
+        later.pack(anchor="w", pady=(SPACING["xs"], 0))
         later.bind("<Button-1>", lambda _e: self._permissions_complete())
         self._perm_poll_id = self.card.after(self._PERMISSION_POLL_MS, self._poll_permissions)
 
