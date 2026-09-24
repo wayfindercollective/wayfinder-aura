@@ -249,3 +249,22 @@ def test_reduce_transparency_turns_glass_off(monkeypatch):
     assert macos_window.glass_enabled() is False
     monkeypatch.setattr(macos_window, "_reduce_transparency", lambda: False)
     assert macos_window.glass_enabled() is True
+
+
+def test_metal_waves_are_display_synced_off_the_main_thread():
+    """Active waves render from a CADisplayLink on a private thread: frames land
+    on every refresh (no NSTimer judder) and a busy main thread can't skip them."""
+    root = REPO / "packaging" / "macos"
+    clock = (root / "wf_render_clock.m").read_text()
+    assert "displayLinkWithTarget:" in clock
+    assert "addToRunLoop:WFRenderRunLoop()" in clock
+    assert "NSQualityOfServiceUserInteractive" in clock
+    for name in ("hero_renderer.m", "overlay_renderer.m"):
+        source = (root / name).read_text()
+        assert "NSTimer" not in source, name
+        assert "renderClockTickAt:" in source and "WFRenderClock" in source, name
+        assert "os_unfair_lock" in source, name  # state shared with the render thread
+    overlay = (root / "overlay_renderer.m").read_text()
+    assert "kWFLevelAttack" in overlay and "_targetAudioLevel" in overlay  # eased level
+    builder = (root / "build.py").read_text()
+    assert "wf_render_clock.m" in builder

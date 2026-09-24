@@ -187,6 +187,8 @@ def build_hero_renderer() -> None:
     """Build native Metal schedulers used by the Mac hero and floating pill."""
     source = PROJECT_ROOT / "packaging" / "macos" / "hero_renderer.m"
     overlay_source = PROJECT_ROOT / "packaging" / "macos" / "overlay_renderer.m"
+    # Display-synced render thread shared by both renderers.
+    clock_source = PROJECT_ROOT / "packaging" / "macos" / "wf_render_clock.m"
     output_path = NATIVE_LIB_DIR / "libwayfinder_hero.dylib"
     NATIVE_LIB_DIR.mkdir(parents=True, exist_ok=True)
     run([
@@ -196,7 +198,7 @@ def build_hero_renderer() -> None:
         "-framework", "Cocoa",
         "-framework", "QuartzCore",
         "-framework", "Metal",
-        source, overlay_source,
+        source, overlay_source, clock_source,
         "-o", output_path,
     ])
 

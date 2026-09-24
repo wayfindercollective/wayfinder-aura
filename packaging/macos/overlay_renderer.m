@@ -1,7 +1,10 @@
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#import <os/lock.h>
 #import <simd/simd.h>
+
+#import "wf_render_clock.h"
 
 typedef struct {
     vector_float4 dims;    // logical width, height, wave time, breath time
@@ -17,7 +20,7 @@ typedef struct {
 // screen all day, so after a short idle the same wave is handed to vector
 // CAShapeLayers whose paths are animated by the render server: the app does no
 // per-frame work, holds no Metal memory, and the motion runs at the display's
-// refresh rate (smoother than the 15 fps Metal loop).
+// refresh rate.
 //
 // The vector strands evaluate the same functions as the Metal shader
 // (src/wayfinder/ui/macos_overlay_metal.py). Every time rate is chosen so each
@@ -32,6 +35,11 @@ static const int kWFKeyframesPerSecond = 30;
 static const CFTimeInterval kWFVectorAfterSeconds = 1.0;  // let state transitions finish
 static const CFTimeInterval kWFCrossfadeSeconds = 0.3;
 static const float kWFBleed = 4.0f;         // params.z in the Metal path
+static const float kWFFramesPerSecond = 60.0f;  // Metal (speaking) frames, display-synced
+// Voice level easing (seconds): quick to rise, gentler to fall, so the wave
+// follows speech without stepping between the ~20 Hz level updates.
+static const float kWFLevelAttack = 0.045f;
+static const float kWFLevelRelease = 0.14f;
 
 static const float kWFFreqs[4] = {0.07f, 0.11f, 0.16f, 0.22f};
 static const float kWFPhases[4] = {0.0f, 1.0f, 2.2f, 0.7f};
@@ -74,16 +82,17 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
     return path;
 }
 
-@interface WFOverlayRenderer : NSObject
+@interface WFOverlayRenderer : NSObject <WFRenderClockTarget>
 @property(nonatomic, strong) CAMetalLayer *metalLayer;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) id<MTLComputePipelineState> pipeline;
-@property(nonatomic, strong) NSTimer *timer;
+@property(nonatomic, strong) WFRenderClock *clock;
 @property(nonatomic) CGFloat backingScale;
 @property(nonatomic) int width;
 @property(nonatomic) int height;
 @property(nonatomic) float waveTime;
-@property(nonatomic) float audioLevel;
+@property(nonatomic) float audioLevel;        // eased, what is drawn
+@property(nonatomic) float targetAudioLevel;  // latest from Qt
 @property(nonatomic) vector_float4 color;
 @property(nonatomic) CFTimeInterval lastFrameTime;
 @property(nonatomic) BOOL stopped;
@@ -99,9 +108,15 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
 @property(nonatomic) CFTimeInterval vectorStartTime;
 @property(nonatomic) double vectorStartLoopPos;
 @property(nonatomic) NSUInteger vectorGeneration;
+@property(nonatomic) BOOL settleRequested;
 @end
 
-@implementation WFOverlayRenderer
+// Threading: the clock ticks on the render thread; everything else runs on
+// the main (Qt) thread. _lock guards the state both touch and is never held
+// across Metal calls.
+@implementation WFOverlayRenderer {
+    os_unfair_lock _lock;
+}
 
 - (instancetype)initWithParentLayer:(CALayer *)parentLayer
                        backingScale:(CGFloat)backingScale
@@ -160,6 +175,15 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
     _vectorLayer.hidden = YES;
     [parentLayer addSublayer:_vectorLayer];
 
+    _lock = OS_UNFAIR_LOCK_INIT;
+    _clock = [[WFRenderClock alloc] initWithLayer:parentLayer
+                                           target:self
+                                     preferredFPS:kWFFramesPerSecond];
+    if (!_clock) {
+        [_metalLayer removeFromSuperlayer];
+        [_vectorLayer removeFromSuperlayer];
+        return nil;
+    }
     _lastFrameTime = CACurrentMediaTime();
     _idleSince = _lastFrameTime;
     _color = (vector_float4){91.0f / 255.0f, 143.0f / 255.0f, 212.0f / 255.0f, 1.0f};
@@ -173,19 +197,15 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
 }
 
 - (void)startTimer {
-    if (_timer || _stopped) return;
+    if (_stopped || _clock.running) return;
+    os_unfair_lock_lock(&_lock);
     _lastFrameTime = CACurrentMediaTime();
-    _timer = [NSTimer timerWithTimeInterval:(1.0 / 15.0)
-                                     target:self
-                                   selector:@selector(drawFrame:)
-                                   userInfo:nil
-                                    repeats:YES];
-    [[NSRunLoop mainRunLoop] addTimer:_timer forMode:NSRunLoopCommonModes];
+    os_unfair_lock_unlock(&_lock);
+    [_clock start];
 }
 
 - (void)stopTimer {
-    [_timer invalidate];
-    _timer = nil;
+    [_clock stop];
 }
 
 // ---------------- vector idle ----------------
@@ -316,12 +336,19 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
 }
 
 - (void)enterVectorIdle {
-    if (_vectorActive || _stopped || _rendererHidden || _width <= 1 || _height <= 1) return;
+    os_unfair_lock_lock(&_lock);
+    _settleRequested = NO;
+    BOOL quiet = _idle && _audioLevel < 0.01f && _targetAudioLevel < 0.01f;
+    // Carry the last Metal frame's phase (timed for its display moment) to now.
+    double loopPos = fmod((double)_waveTime / kWFWaveRate
+                          + (CACurrentMediaTime() - _lastFrameTime), kWFLoopSeconds);
+    if (loopPos < 0.0) loopPos += kWFLoopSeconds;
+    os_unfair_lock_unlock(&_lock);
+    if (!quiet || _vectorActive || _stopped || _rendererHidden || _width <= 1 || _height <= 1) return;
     _vectorActive = YES;
     _vectorGeneration += 1;
     [self buildVectorStrokesIfNeeded];
     [self refreshVectorColors];
-    double loopPos = fmod((double)_waveTime / kWFWaveRate, kWFLoopSeconds);
     _vectorStartLoopPos = loopPos;
     _vectorStartTime = CACurrentMediaTime();
     [self applyVectorAnimationsFromLoopPosition:loopPos];
@@ -348,9 +375,11 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
     _vectorActive = NO;
     _vectorGeneration += 1;
     // Resume Metal exactly where the vector loop is now.
+    os_unfair_lock_lock(&_lock);
     _waveTime = (float)([self currentVectorLoopPosition] * kWFWaveRate);
-    [self startTimer];
-    [self drawFrame:nil];
+    _lastFrameTime = CACurrentMediaTime();
+    os_unfair_lock_unlock(&_lock);
+    [_clock start];  // first frame lands on the next refresh
     [self crossfadeMetal:1.0f vector:0.0f];
     NSUInteger generation = _vectorGeneration;
     __weak WFOverlayRenderer *weakSelf = self;
@@ -367,7 +396,9 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
 }
 
 - (void)wake {
+    os_unfair_lock_lock(&_lock);
     _idleSince = CACurrentMediaTime();
+    os_unfair_lock_unlock(&_lock);
     if (_stopped || _rendererHidden) return;
     if (_vectorActive) {
         [self leaveVectorIdle];
@@ -378,55 +409,66 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
 
 - (void)setIdleState:(BOOL)idle {
     if (idle == _idle) return;
+    os_unfair_lock_lock(&_lock);
     _idle = idle;
+    os_unfair_lock_unlock(&_lock);
     [self wake];
 }
 
 // ---------------- Metal ----------------
 
-- (void)drawFrame:(NSTimer *)timer {
-    (void)timer;
-    if (_stopped || _rendererHidden || _width <= 1 || _height <= 1) return;
-    @autoreleasepool {
-        CFTimeInterval now = CACurrentMediaTime();
-        float dt = (float)fmin(fmax(now - _lastFrameTime, 0.0), 0.1);
-        _lastFrameTime = now;
-        _waveTime += dt * kWFWaveRate;
-        // Keep the float small: every term is periodic in the loop.
-        float loopUnits = (float)(kWFLoopSeconds * kWFWaveRate);
-        if (_waveTime > loopUnits * 64.0f) _waveTime = fmodf(_waveTime, loopUnits);
+// Render thread. ``now`` is this frame's display time (see WFRenderClock).
+- (void)renderClockTickAt:(CFTimeInterval)now {
+    if (_stopped || _rendererHidden) return;
+    os_unfair_lock_lock(&_lock);
+    float dt = (float)fmin(fmax(now - _lastFrameTime, 0.0), 0.1);
+    _lastFrameTime = now;
+    _waveTime += dt * kWFWaveRate;
+    // Keep the float small: every term is periodic in the loop.
+    float loopUnits = (float)(kWFLoopSeconds * kWFWaveRate);
+    if (_waveTime > loopUnits * 64.0f) _waveTime = fmodf(_waveTime, loopUnits);
+    float tau = _targetAudioLevel > _audioLevel ? kWFLevelAttack : kWFLevelRelease;
+    _audioLevel += (_targetAudioLevel - _audioLevel) * (1.0f - expf(-dt / tau));
+    BOOL sized = _width > 1 && _height > 1;
+    WFOverlayUniforms uniforms = {
+        .dims = (vector_float4){(float)_width, (float)_height, _waveTime, [self breathTime]},
+        // Match the Qt path renderer: the wave layout box has 4px of
+        // vertical breathing room before the pill clips its outer glow.
+        .params = (vector_float4){_audioLevel, (float)_backingScale, kWFBleed, 0.0f},
+        .color = _color,
+    };
+    BOOL settle = !_vectorActive && !_settleRequested && _idle
+        && _audioLevel < 0.01f && _targetAudioLevel < 0.01f
+        && CACurrentMediaTime() - _idleSince >= kWFVectorAfterSeconds;
+    if (settle) _settleRequested = YES;
+    os_unfair_lock_unlock(&_lock);
+    if (!sized) return;
 
-        id<CAMetalDrawable> drawable = [_metalLayer nextDrawable];
-        if (!drawable) return;
-        WFOverlayUniforms uniforms = {
-            .dims = (vector_float4){(float)_width, (float)_height, _waveTime, [self breathTime]},
-            // Match the Qt path renderer: the wave layout box has 4px of
-            // vertical breathing room before the pill clips its outer glow.
-            .params = (vector_float4){_audioLevel, (float)_backingScale, kWFBleed, 0.0f},
-            .color = _color,
-        };
-        id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-        [encoder setComputePipelineState:_pipeline];
-        [encoder setTexture:drawable.texture atIndex:0];
-        [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
-        [encoder dispatchThreads:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
-            threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
-        [encoder endEncoding];
-        [commandBuffer presentDrawable:drawable];
-        [commandBuffer commit];
+    id<CAMetalDrawable> drawable = [_metalLayer nextDrawable];
+    if (!drawable) return;
+    id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    [encoder setComputePipelineState:_pipeline];
+    [encoder setTexture:drawable.texture atIndex:0];
+    [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder dispatchThreads:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
+        threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
+    [encoder endEncoding];
+    [commandBuffer presentDrawable:drawable];
+    [commandBuffer commit];
 
-        if (!_vectorActive && _idle && _audioLevel < 0.01f
-                && now - _idleSince >= kWFVectorAfterSeconds) {
-            [self enterVectorIdle];
-        }
+    if (settle) {
+        __weak WFOverlayRenderer *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf enterVectorIdle]; });
     }
 }
 
 - (void)setFrameX:(double)x y:(double)y width:(int)width height:(int)height {
     BOOL resized = width != _width || height != _height;
+    os_unfair_lock_lock(&_lock);
     _width = width;
     _height = height;
+    os_unfair_lock_unlock(&_lock);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _metalLayer.frame = CGRectMake(x, y, width, height);
@@ -439,10 +481,13 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
 }
 
 - (void)setAudioLevel:(float)audioLevel color:(vector_float4)color {
-    _audioLevel = fmaxf(0.0f, fminf(audioLevel, 1.0f));
+    float level = fmaxf(0.0f, fminf(audioLevel, 1.0f));
+    os_unfair_lock_lock(&_lock);
+    _targetAudioLevel = level;  // the render thread eases toward it
     BOOL recolored = !simd_equal(color, _color);
     _color = color;
-    if (_audioLevel >= 0.01f || recolored) [self wake];
+    os_unfair_lock_unlock(&_lock);
+    if (level >= 0.01f || recolored) [self wake];
 }
 
 - (void)setRendererHidden:(BOOL)hidden {
@@ -463,14 +508,16 @@ static CGPathRef WFCreateStrandPath(int strand, float width, float height, float
         _vectorGeneration += 1;
         [self stopTimer];  // nothing is visible: no wakeups at all
     } else {
+        os_unfair_lock_lock(&_lock);
         _lastFrameTime = CACurrentMediaTime();
+        os_unfair_lock_unlock(&_lock);
         [self wake];
     }
 }
 
 - (void)stop {
     _stopped = YES;
-    [self stopTimer];
+    [_clock invalidate];
     [_metalLayer removeFromSuperlayer];
     [_vectorLayer removeFromSuperlayer];
 }

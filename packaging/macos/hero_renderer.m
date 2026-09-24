@@ -1,7 +1,10 @@
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#import <os/lock.h>
 #import <simd/simd.h>
+
+#import "wf_render_clock.h"
 
 typedef struct {
     vector_float4 dims;
@@ -26,7 +29,8 @@ typedef struct {
 // ---------------------------------------------------------------------------
 static const float kWFHeroCalmSpeed = 2.4f;              // wave units per second at morph 0
 static const double kWFHeroLoopUnits = 10.0 * M_PI;      // 5/8/10 + 7/10 cycles, 4 breaths
-static const int kWFHeroKeyframesPerSecond = 20;
+static const int kWFHeroKeyframesPerSecond = 30;       // half a 60 Hz refresh: no visible facets
+static const float kWFHeroFramesPerSecond = 60.0f;      // Metal (active) frames, display-synced
 static const CFTimeInterval kWFHeroVectorAfterSeconds = 1.0;
 static const CFTimeInterval kWFHeroCrossfadeSeconds = 0.35;
 static const int kWFHeroPointCount = 109;                // the shader's calm point count
@@ -77,12 +81,12 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
     return path;
 }
 
-@interface WFHeroRenderer : NSObject
+@interface WFHeroRenderer : NSObject <WFRenderClockTarget>
 @property(nonatomic, strong) CAMetalLayer *metalLayer;
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) id<MTLComputePipelineState> pipeline;
-@property(nonatomic, strong) NSTimer *timer;
+@property(nonatomic, strong) WFRenderClock *clock;
 @property(nonatomic) CGFloat backingScale;
 @property(nonatomic) CFTimeInterval lastFrameTime;
 @property(nonatomic) float waveTime;
@@ -111,9 +115,16 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
 @property(nonatomic) CFTimeInterval vectorStartTime;
 @property(nonatomic) double vectorStartLoopUnits;
 @property(nonatomic) NSUInteger vectorGeneration;
+@property(nonatomic) BOOL settleRequested;
 @end
 
-@implementation WFHeroRenderer
+// Threading: the clock ticks on the render thread; everything else runs on
+// the main thread. _lock guards the animation state both sides touch (wave
+// time, easing, targets, colours, size, idle timing) and is never held
+// across Metal calls, so neither side can stall the other.
+@implementation WFHeroRenderer {
+    os_unfair_lock _lock;
+}
 
 - (instancetype)initWithParentLayer:(CALayer *)parentLayer
                         backingScale:(CGFloat)backingScale
@@ -190,6 +201,16 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
     _color = (vector_float4){91.0f / 255.0f, 143.0f / 255.0f, 212.0f / 255.0f, 1.0f};
     _bg = (vector_float4){30.0f / 255.0f, 30.0f / 255.0f, 31.0f / 255.0f, 1.0f};
 
+    _lock = OS_UNFAIR_LOCK_INIT;
+    _clock = [[WFRenderClock alloc] initWithLayer:parentLayer
+                                           target:self
+                                     preferredFPS:kWFHeroFramesPerSecond];
+    if (!_clock) {
+        [_metalLayer removeFromSuperlayer];
+        [_vectorLayer removeFromSuperlayer];
+        return nil;
+    }
+
     _windowVisible = YES;
     _idleSince = CACurrentMediaTime();
     _observers = [NSMutableArray array];
@@ -205,19 +226,15 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
 }
 
 - (void)startTimer {
-    if (_timer || _stopped) return;
+    if (_stopped || _clock.running) return;
+    os_unfair_lock_lock(&_lock);
     _lastFrameTime = CACurrentMediaTime();
-    _timer = [NSTimer timerWithTimeInterval:(1.0 / 30.0)
-                                     target:self
-                                   selector:@selector(drawFrame:)
-                                   userInfo:nil
-                                    repeats:YES];
-    [[NSRunLoop mainRunLoop] addTimer:_timer forMode:NSRunLoopCommonModes];
+    os_unfair_lock_unlock(&_lock);
+    [_clock start];
 }
 
 - (void)stopTimer {
-    [_timer invalidate];
-    _timer = nil;
+    [_clock stop];
 }
 
 - (BOOL)ownsWindow:(NSWindow *)window {
@@ -238,8 +255,16 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
     }
 }
 
-- (BOOL)calm {
+// Caller holds _lock.
+- (BOOL)calmLocked {
     return _targetMorph == 0.0f && _morph < 0.01f && _targetAudioLevel <= 0.0f;
+}
+
+- (BOOL)calm {
+    os_unfair_lock_lock(&_lock);
+    BOOL calm = [self calmLocked];
+    os_unfair_lock_unlock(&_lock);
+    return calm;
 }
 
 // ---------------- vector calm ribbon ----------------
@@ -380,12 +405,21 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
 }
 
 - (void)enterVectorIdle {
-    if (_vectorActive || _stopped || _rendererHidden || _width <= 1 || _height <= 1) return;
+    os_unfair_lock_lock(&_lock);
+    _settleRequested = NO;
+    BOOL calm = [self calmLocked];
+    // The last Metal frame was timed for its display moment; carry its phase
+    // to *now* so the vector strands start exactly where Metal is.
+    double loopUnits = fmod((double)_waveTime
+                            + (CACurrentMediaTime() - _lastFrameTime) * kWFHeroCalmSpeed,
+                            kWFHeroLoopUnits);
+    if (loopUnits < 0.0) loopUnits += kWFHeroLoopUnits;
+    os_unfair_lock_unlock(&_lock);
+    if (!calm || _vectorActive || _stopped || _rendererHidden || _width <= 1 || _height <= 1) return;
     _vectorActive = YES;
     _vectorGeneration += 1;
     [self buildVectorStrokesIfNeeded];
     [self refreshVectorColors];
-    double loopUnits = fmod((double)_waveTime, kWFHeroLoopUnits);
     _vectorStartLoopUnits = loopUnits;
     _vectorStartTime = CACurrentMediaTime();
     [self applyVectorAnimationsFromLoopUnits:loopUnits];
@@ -409,9 +443,11 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
     if (!_vectorActive) return;
     _vectorActive = NO;
     _vectorGeneration += 1;
+    os_unfair_lock_lock(&_lock);
     _waveTime = (float)[self currentVectorLoopUnits];  // Metal resumes in phase
-    [self startTimer];
-    [self drawFrame:nil];
+    _lastFrameTime = CACurrentMediaTime();
+    os_unfair_lock_unlock(&_lock);
+    [_clock start];  // first frame lands on the next refresh
     [self crossfadeMetal:1.0f vector:0.0f];
     NSUInteger generation = _vectorGeneration;
     __weak WFHeroRenderer *weakSelf = self;
@@ -428,7 +464,9 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
 }
 
 - (void)wake {
+    os_unfair_lock_lock(&_lock);
     _idleSince = CACurrentMediaTime();
+    os_unfair_lock_unlock(&_lock);
     if (_stopped || _rendererHidden || !_windowVisible) return;
     if (_vectorActive) {
         if ([self calm]) return;  // calm and already flowing on Core Animation
@@ -440,51 +478,63 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
 
 // ---------------- Metal ----------------
 
-- (void)drawFrame:(NSTimer *)timer {
-    (void)timer;
-    if (_stopped || _rendererHidden || _width <= 1 || _height <= 1) return;
-    @autoreleasepool {
-        CFTimeInterval now = CACurrentMediaTime();
-        float dt = (float)fmin(fmax(now - _lastFrameTime, 0.0), 0.1);
-        _lastFrameTime = now;
-        _morph += (_targetMorph - _morph) * 0.25f;
-        float speed = kWFHeroCalmSpeed + (9.0f - kWFHeroCalmSpeed) * _morph;
-        _waveTime += dt * speed;
-        if (_waveTime > (float)(kWFHeroLoopUnits * 64.0)) {
-            _waveTime = fmodf(_waveTime, (float)kWFHeroLoopUnits);  // every term is periodic
-        }
-        float smoothFactor = powf(0.7f, 4.0f);
-        _audioLevel = _audioLevel * smoothFactor + _targetAudioLevel * (1.0f - smoothFactor);
+// Render thread. ``now`` is the display time of this frame (see WFRenderClock),
+// and every easing is per-second, so motion is identical at 60 Hz or 120 Hz.
+- (void)renderClockTickAt:(CFTimeInterval)now {
+    if (_stopped || _rendererHidden) return;
+    os_unfair_lock_lock(&_lock);
+    float dt = (float)fmin(fmax(now - _lastFrameTime, 0.0), 0.1);
+    _lastFrameTime = now;
+    _morph += (_targetMorph - _morph) * (1.0f - powf(0.75f, dt * 30.0f));  // 0.25/frame @30
+    float speed = kWFHeroCalmSpeed + (9.0f - kWFHeroCalmSpeed) * _morph;
+    _waveTime += dt * speed;
+    if (_waveTime > (float)(kWFHeroLoopUnits * 64.0)) {
+        _waveTime = fmodf(_waveTime, (float)kWFHeroLoopUnits);  // every term is periodic
+    }
+    float keep = powf(0.7f, 4.0f * dt * 30.0f);  // 0.7^4 per frame @30
+    _audioLevel = _audioLevel * keep + _targetAudioLevel * (1.0f - keep);
+    BOOL sized = _width > 1 && _height > 1;
+    WFHeroUniforms uniforms = {
+        .dims = (vector_float4){(float)_width, (float)_height, _waveTime, _audioLevel},
+        .params = (vector_float4){_morph, _strokeScale, 0.0f, 0.0f},
+        .color = _color,
+        .bg = _bg,
+    };
+    BOOL settle = !_vectorActive && !_settleRequested && [self calmLocked]
+        && CACurrentMediaTime() - _idleSince >= kWFHeroVectorAfterSeconds;
+    if (settle) _settleRequested = YES;
+    os_unfair_lock_unlock(&_lock);
+    if (!sized) return;
 
-        id<CAMetalDrawable> drawable = [_metalLayer nextDrawable];
-        if (!drawable) return;
-        WFHeroUniforms uniforms = {
-            .dims = (vector_float4){(float)_width, (float)_height, _waveTime, _audioLevel},
-            .params = (vector_float4){_morph, _strokeScale, 0.0f, 0.0f},
-            .color = _color,
-            .bg = _bg,
-        };
-        id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBufferWithUnretainedReferences];
-        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-        [encoder setComputePipelineState:_pipeline];
-        [encoder setTexture:drawable.texture atIndex:0];
-        [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
-        [encoder dispatchThreads:MTLSizeMake((NSUInteger)_width, (NSUInteger)_height, 1)
-            threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
-        [encoder endEncoding];
-        [commandBuffer presentDrawable:drawable];
-        [commandBuffer commit];
+    id<CAMetalDrawable> drawable = [_metalLayer nextDrawable];
+    if (!drawable) return;
+    // Size from the drawable itself: a resize on the main thread can land
+    // between the snapshot above and this frame.
+    NSUInteger w = drawable.texture.width, h = drawable.texture.height;
+    uniforms.dims.x = (float)w;
+    uniforms.dims.y = (float)h;
+    id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBufferWithUnretainedReferences];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    [encoder setComputePipelineState:_pipeline];
+    [encoder setTexture:drawable.texture atIndex:0];
+    [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder dispatchThreads:MTLSizeMake(w, h, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
+    [encoder endEncoding];
+    [commandBuffer presentDrawable:drawable];
+    [commandBuffer commit];
 
-        if (!_vectorActive && [self calm] && now - _idleSince >= kWFHeroVectorAfterSeconds) {
-            [self enterVectorIdle];
-        }
+    if (settle) {
+        __weak WFHeroRenderer *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf enterVectorIdle]; });
     }
 }
 
 - (void)setFrameX:(double)x y:(double)y width:(int)width height:(int)height {
     BOOL resized = width != _width || height != _height;
+    os_unfair_lock_lock(&_lock);
     _width = width;
     _height = height;
+    os_unfair_lock_unlock(&_lock);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _metalLayer.frame = CGRectMake(x, y, width, height);
@@ -512,15 +562,17 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
                 bg:(vector_float4)bg
        strokeScale:(float)strokeScale {
     float target = active ? 1.0f : 0.0f;
+    float clampedScale = fmaxf(0.7f, fminf(strokeScale, 2.5f));
+    os_unfair_lock_lock(&_lock);
     BOOL changedTarget = target != _targetMorph;
     BOOL recolored = !simd_equal(color, _color) || !simd_equal(bg, _bg);
-    float clampedScale = fmaxf(0.7f, fminf(strokeScale, 2.5f));
     BOOL rescaled = clampedScale != _strokeScale;
     _targetMorph = target;
     _targetAudioLevel = active ? fmaxf(0.0f, fminf(audioLevel, 1.0f)) : 0.0f;
     _color = color;
     _bg = bg;
     _strokeScale = clampedScale;
+    os_unfair_lock_unlock(&_lock);
     if (active || changedTarget) {
         [self wake];
     } else if (_vectorActive && rescaled) {
@@ -548,7 +600,9 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
         _vectorLayer.opacity = 0.0f;
     }
     [CATransaction commit];
+    os_unfair_lock_lock(&_lock);
     _lastFrameTime = CACurrentMediaTime();
+    os_unfair_lock_unlock(&_lock);
     if (hidden) {
         _vectorActive = NO;
         _vectorGeneration += 1;
@@ -560,7 +614,7 @@ static CGPathRef WFHeroCreateStrandPath(int strand, float width, float height, f
 
 - (void)stop {
     _stopped = YES;
-    [self stopTimer];
+    [_clock invalidate];
     for (id observer in _observers) {
         [NSNotificationCenter.defaultCenter removeObserver:observer];
     }
