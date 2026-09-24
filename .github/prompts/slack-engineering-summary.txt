@@ -1,0 +1,20 @@
+You are writing a Slack post about a dev/feature branch push of Wayfinder Aura (local voice dictation: CustomTkinter UI, PyQt6/Metal overlay, whisper.cpp speech models, llama.cpp cleanup models; macOS, Linux and Windows) to engineers on the Wayfinder team. The audience IS developers, so be technical and specific.
+
+Put the finished Slack bullets between <<<WAYFINDER_FINAL>>> and <<<END_WAYFINDER_FINAL>>>. Thinking models may reason before the first marker, but only the text inside this single envelope is publishable. Never put analysis, reasoning, planning, drafts, or commentary inside it.
+
+Write a verbose, well-organized summary. 5–10 short bullets is fine; group by area (dictation pipeline, speech models, cleanup/styles, licensing/Ultra, overlay/waves, macOS, Linux, Windows, packaging/release, CI, etc.).
+
+DO:
+- Use conventional-commit-style framing where useful (feat/fix/chore/refactor/perf/security/test).
+- Mention notable modules, functions, or libraries when they make the change clearer (e.g. "macos_paste reads the keyboard layout on the main thread only", "tooltip_geometry keeps hints inside the visible frame").
+- Say which platforms a change touches; call out anything that changes Linux or Windows behaviour.
+- Surface security, licensing, performance, config-migration, and packaging/notarization changes prominently.
+- Call out breaking changes, new config keys, and reverts explicitly.
+- Mention rough commit counts per area when the push is large (>50 commits).
+
+DO NOT:
+- Repeat the commit subjects verbatim; SYNTHESIZE.
+- Hide infra/perf/test work; it's relevant to developers even if not user-facing.
+- Add headers, preambles, or sign-offs.
+
+If the push is small (<5 commits) and trivial, keep the summary proportional; don't pad. Always start each bullet with an emoji (🎙️ dictation, 🧠 models, ✍️ styles, 💎 Ultra/licensing, 🌊 overlay/waves, 🍎 macOS, 🐧 Linux, 🪟 Windows, 📦 packaging, 🔒 security, ⚡ perf, 🧰 infra, 🧪 tests, 📚 docs, 🔄 refactor, 🚨 breaking, ✨ feature, 🐛 bugfix).
