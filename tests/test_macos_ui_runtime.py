@@ -436,6 +436,10 @@ def test_paste_failure_guidance_is_platform_specific(monkeypatch):
     mac = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
     assert "Accessibility" in mac and "ydotool" not in mac
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    windows = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
+    assert "administrator" in windows and "ydotool" not in windows
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
     linux = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
     assert linux == ("Couldn't type the text — check input permissions (Settings) "
                      "or install ydotool.")

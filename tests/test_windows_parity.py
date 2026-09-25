@@ -437,3 +437,49 @@ def test_windows_key_help_says_ctrl_v(monkeypatch):
 
     src = inspect.getsource(wayfinder_main.WayfinderApp._build_macos_key_help)
     assert 'info.steps.replace("(⌘V)", "(Ctrl+V)") if IS_WINDOWS' in src
+
+
+# --- First run: the welcome tour downloads Base; open-at-login offer ----------
+
+@pytest.mark.parametrize("platform_name, module", [
+    ("win32", "windows_login_item"), ("darwin", "macos_login_item")])
+def test_welcome_login_offer_uses_the_platform_backend(monkeypatch, platform_name, module):
+    from wayfinder.ui import welcome
+
+    monkeypatch.setattr(welcome.sys, "platform", platform_name)
+    assert welcome._login_item_module().__name__.endswith(module)
+
+
+def test_welcome_copy_names_the_pc_on_windows(monkeypatch):
+    from wayfinder.ui import welcome
+
+    monkeypatch.setattr(welcome.sys, "platform", "win32")
+    assert welcome._device_noun() == "PC"
+    monkeypatch.setattr(welcome.sys, "platform", "darwin")
+    assert welcome._device_noun() == "Mac"
+
+
+def test_windows_first_run_waits_for_a_speech_model():
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+    assert 'if frozen and sys.platform in ("darwin", "win32"):' in src
+
+
+# --- Window look: content-sized first run, work-area tooltips ------------------
+
+def test_windows_first_run_window_is_content_sized_and_centred():
+    from wayfinder.ui.window_geometry import default_window_geometry
+
+    w, h, x, y = default_window_geometry(1463, 914, platform="win32",
+                                         visible_frame=(0, 0, 1463, 866))
+    assert (w, h) == (800, 780)
+    assert x == (1463 - 800) // 2
+    # Linux keeps the right half.
+    assert default_window_geometry(1920, 1080, platform="linux")[2] == 960
+
+
+def test_windows_colour_helpers():
+    from wayfinder.ui.windows_window import colorref
+
+    assert colorref("#0A0D13") == 0x00130D0A

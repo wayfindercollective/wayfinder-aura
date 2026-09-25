@@ -28,6 +28,22 @@ from wayfinder.config import save_config
 from wayfinder.ui.theme import COLORS, FONT_SIZES, FONTS, RADIUS, SPACING
 
 
+def _login_item_module():
+    """Open-at-login backend: the Run key on Windows, SMAppService on macOS."""
+    if sys.platform == "win32":
+        from wayfinder.utils import windows_login_item
+
+        return windows_login_item
+    from wayfinder.utils import macos_login_item
+
+    return macos_login_item
+
+
+def _device_noun() -> str:
+    """How the copy names this computer ("PC" on Windows, else "Mac")."""
+    return "PC" if sys.platform == "win32" else "Mac"
+
+
 class WelcomeFlow:
     """Pure state machine for the first-run welcome tour.
 
@@ -322,7 +338,7 @@ class WelcomePane:
         # macOS Welcome owns the free Base-model download ("runs entirely on this
         # Mac"). Linux keeps its separate setup flow and cue banner.
         needs_model = False
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             try:
                 needs_model = not bool(app._has_usable_whisper_model())
             except Exception:
@@ -386,9 +402,9 @@ class WelcomePane:
         self.card.place(relx=0.5, rely=0.5, anchor="center")
         self.card.pack_propagate(False)
         self.card._wf_manages_wrap = True  # its labels rewrap on card resize
-        if sys.platform == "darwin":
-            # macOS opens content-sized, so the tab area can be smaller than the
-            # card. Linux keeps its fixed card (its default window fits it).
+        if sys.platform in ("darwin", "win32"):
+            # macOS/Windows open content-sized, so the tab area can be smaller than
+            # the card. Linux keeps its fixed card (its default window fits it).
             self.underlay.bind("<Configure>", self._fit_card, add="+")
 
         self._render_step()
@@ -714,7 +730,7 @@ class WelcomePane:
             self._body_label(body, f"downloading {model_label}…")
             self._body_label(
                 body,
-                "the free model runs entirely on this Mac after download.",
+                f"the free model runs entirely on this {_device_noun()} after download.",
                 muted=True,
                 pady=(SPACING["sm"], SPACING["md"]),
             )
@@ -749,7 +765,7 @@ class WelcomePane:
         self._body_label(body, "Choose a free speech model for private local dictation.")
         self._body_label(
             body,
-            "Both run entirely on this Mac after download.",
+            f"Both run entirely on this {_device_noun()} after download.",
             muted=True,
             pady=(SPACING["sm"], 0),
         )
@@ -998,14 +1014,15 @@ class WelcomePane:
     def _login_item_choice(self, body) -> None:
         """macOS: offer "open at login" where it matters - right after the first
         dictation works. A visible, pre-ticked box the user can untick; applied
-        on "done" (SMAppService, listed in System Settings ▸ Login Items)."""
+        on "done" (SMAppService, listed in System Settings ▸ Login Items).
+        Windows offers the same through the per-user Run key."""
         self._login_item_var = None
-        if sys.platform != "darwin":
+        if sys.platform not in ("darwin", "win32"):
             return
         try:
-            from wayfinder.utils import macos_login_item
+            login_item = _login_item_module()
 
-            if not macos_login_item.available() or macos_login_item.is_enabled():
+            if not login_item.available() or login_item.is_enabled():
                 return
         except Exception:
             return
@@ -1024,9 +1041,7 @@ class WelcomePane:
         if var is None or not var.get():
             return
         try:
-            from wayfinder.utils import macos_login_item
-
-            ok, message = macos_login_item.set_enabled(True)
+            ok, message = _login_item_module().set_enabled(True)
             self.app.log(("✓ " if ok else "⚠ ") + (message or "Aura will open when you log in"))
         except Exception:
             pass

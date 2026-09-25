@@ -82,6 +82,13 @@ except ImportError:
 import sys as _sys
 IS_MACOS = _sys.platform == 'darwin'
 IS_WINDOWS = _sys.platform == 'win32'
+# Windows wears the macOS design (docs/WINDOWS-FROM-MACOS.md): the glass
+# palette and pane rims on a flat deep-ink surface (Tk cannot show real
+# vibrancy), a rounded content pane, no gradient, a dark caption bar.
+# WAYFINDER_WINDOWS_MAC_LOOK=0 restores the previous (Linux) look.
+WINDOWS_MAC_LOOK = IS_WINDOWS and os.environ.get("WAYFINDER_WINDOWS_MAC_LOOK", "1") != "0"
+# What shows between panes where the Mac shows its dark glass.
+WINDOWS_GLASS_SURFACE = "#07090D"
 
 
 def _device_noun() -> str:
@@ -112,9 +119,9 @@ if IS_MACOS or IS_WINDOWS:
     except Exception:
         pass
 # Microphone picker's first option (matched by the "Auto-detect" substring).
-# macOS drops the emoji prefix: no emoji as UI chrome (rule 11).
+# macOS and Windows drop the emoji prefix: no emoji as UI chrome (rule 11).
 AUTO_DETECT_MIC_LABEL = (
-    "Auto-detect (Recommended)" if IS_MACOS else "🎤 Auto-detect (Recommended)"
+    "Auto-detect (Recommended)" if (IS_MACOS or IS_WINDOWS) else "🎤 Auto-detect (Recommended)"
 )
 
 # SOCKET_PATH is the single source of truth in wayfinder.config (Rule #3) — it resolves
@@ -140,7 +147,11 @@ from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, s
 from wayfinder.utils.audio_ducker import AudioDucker
 from wayfinder.ui.icons import get_icon, STYLE_ICONS, tint_icon
 from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
-from wayfinder.ui.window_geometry import default_window_geometry, macos_visible_frame
+from wayfinder.ui.window_geometry import (
+    default_window_geometry,
+    macos_visible_frame,
+    windows_work_area,
+)
 from wayfinder.ui.tooltip_geometry import anchor_in_area, tooltip_position, tooltip_wraplength
 from wayfinder.ui.macos_window import (
     TRANSPARENT as MACOS_TRANSPARENT,
@@ -452,6 +463,14 @@ if IS_MACOS:
     # macOS glass: deeper ink panes (both token mirrors). No-op without glass.
     apply_macos_glass_palette(COLORS, _theme.COLORS)
 
+if WINDOWS_MAC_LOOK:
+    from wayfinder.ui import theme as _theme
+    from wayfinder.ui.macos_window import GLASS_PALETTE as _GLASS_PALETTE
+
+    # Same deeper ink panes and lifted rim as the Mac glass (both mirrors).
+    for _colors in (COLORS, _theme.COLORS):
+        _colors.update(_GLASS_PALETTE)
+
 
 def _tab_surface_kwargs(platform_name: str | None = None) -> dict:
     """CTk page colors, with an opaque Aqua backing to prevent white flashes."""
@@ -638,6 +657,7 @@ class ToolTip:
         anchor = (self.widget.winfo_rootx(), self.widget.winfo_rooty(),
                   self.widget.winfo_width(), self.widget.winfo_height())
         area = (macos_visible_frame(screen_w, screen_h) if IS_MACOS
+                else windows_work_area(screen_w, screen_h) if IS_WINDOWS
                 else (0, 0, screen_w, screen_h))
         if anchor_in_area(anchor, area):
             x, y = tooltip_position(anchor, size, area)
@@ -1191,9 +1211,9 @@ def _hero_idle_interval_ms(platform_name: str | None = None) -> int | None:
 
 
 def _hero_active_interval_ms(platform_name: str | None = None) -> int:
-    """Recording cadence: 30 fps on Aqua, established 15 fps elsewhere."""
+    """Recording cadence: 30 fps on Aqua and Windows, established 15 fps on Linux."""
     active_platform = platform_name or sys.platform
-    return 33 if active_platform == "darwin" else 66
+    return 33 if active_platform in ("darwin", "win32") else 66
 
 
 def _hero_visual_scale(
@@ -5931,6 +5951,14 @@ class WayfinderApp(ctk.CTk):
         if IS_MACOS:
             self.after(1200, self._refresh_macos_permission_banner)
             self._apply_macos_window_chrome()
+        if WINDOWS_MAC_LOOK:
+            # Caption bar in the app's ink, rim-coloured border (the Mac's
+            # unified title bar). After mapping: DWM needs the real HWND.
+            def _windows_chrome():
+                from wayfinder.ui.windows_window import apply_window_chrome
+                apply_window_chrome(self, WINDOWS_GLASS_SURFACE, COLORS["border_rim"],
+                                    COLORS["text_primary"])
+            self.after(50, _windows_chrome)
         self._schedule_settings_preload()
         # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
         self._start_hotkey_supervisor()
@@ -5967,10 +5995,15 @@ class WayfinderApp(ctk.CTk):
         
         # A Mac utility remains available from its Dock/menu-bar item when its
         # last window closes. Command-Q is the explicit full-quit path.
+        # Windows behaves the same: the window's close button hides Aura to
+        # the tray (hotkey keeps working); the tray menu's Quit ends it.
         self.protocol(
             "WM_DELETE_WINDOW",
-            self.hide_to_tray if IS_MACOS else self.quit_app,
+            self.hide_to_tray if (IS_MACOS or IS_WINDOWS) else self.quit_app,
         )
+        if IS_WINDOWS:
+            # The Mac's ⌘, (Settings…) as Ctrl+, while the window has focus.
+            self.bind_all("<Control-comma>", lambda _e: self._macos_show_settings())
         if IS_MACOS:
             try:
                 self.createcommand("::tk::mac::Quit", self.quit_app)
@@ -6202,6 +6235,8 @@ class WayfinderApp(ctk.CTk):
             # Frosted glass shows through wherever Tk paints nothing.
             prepare_macos_tk_root(self)
             self.configure(fg_color=MACOS_TRANSPARENT)
+        elif WINDOWS_MAC_LOOK:
+            self.configure(fg_color=WINDOWS_GLASS_SURFACE)
         else:
             self.configure(fg_color=COLORS["bg_dark"])
         
@@ -6967,7 +7002,9 @@ class WayfinderApp(ctk.CTk):
         # Main container with gradient background
         # macOS glass: the window surface is transparent over native vibrancy.
         window_surface = (
-            MACOS_TRANSPARENT if IS_MACOS and macos_glass_enabled() else COLORS["bg_base"]
+            MACOS_TRANSPARENT if IS_MACOS and macos_glass_enabled()
+            else WINDOWS_GLASS_SURFACE if WINDOWS_MAC_LOOK
+            else COLORS["bg_base"]
         )
         self.main_container = ctk.CTkFrame(self, fg_color=window_surface)
         self.main_container.pack(fill="both", expand=True)
@@ -7012,6 +7049,15 @@ class WayfinderApp(ctk.CTk):
             **self._content_pane_kwargs(),
         )
         self.tab_content_container.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        if WINDOWS_MAC_LOOK:
+            # Pages live in an inset host so the pane's rounded corners and rim
+            # stay visible (the Mac insets its placed pages the same way).
+            from wayfinder.ui.macos_window import CONTENT_PANE_INSET
+
+            self._content_pane = self.tab_content_container
+            self.tab_content_container = ctk.CTkFrame(self._content_pane, fg_color="transparent")
+            self.tab_content_container.pack(
+                fill="both", expand=True, padx=CONTENT_PANE_INSET, pady=CONTENT_PANE_INSET)
         
         # Create tab frames
         self.tab_frames = {}
@@ -7345,7 +7391,7 @@ class WayfinderApp(ctk.CTk):
         # Aqua already provides Close and Minimize in the native traffic-light
         # frame. Duplicating them inside the header looked non-native and gave
         # Hide two conflicting meanings. Other desktops keep the custom pair.
-        if not IS_MACOS:
+        if not (IS_MACOS or IS_WINDOWS):
             ctk.CTkButton(
                 right_controls,
                 text="×",
@@ -7975,7 +8021,7 @@ class WayfinderApp(ctk.CTk):
         pen instead of an emoji suffix (rule 11: no emoji as UI chrome)."""
         if unlocked:
             return "pen-line", "Style"
-        if IS_MACOS:
+        if IS_MACOS or IS_WINDOWS:
             return "lock", "Style"
         return "pen-line", "Style  🔒"
 
@@ -10442,7 +10488,7 @@ class WayfinderApp(ctk.CTk):
         _gpu_label = (
             "GPU Acceleration" if _gpu_unlocked
             # macOS: no emoji chrome (rule 11) — same "(Ultra)" as Chunk Processing.
-            else "GPU Acceleration (Ultra)" if IS_MACOS
+            else "GPU Acceleration (Ultra)" if (IS_MACOS or IS_WINDOWS)
             else "GPU Acceleration  🔒 Ultra"
         )
         self.create_toggle_row(
@@ -12639,8 +12685,8 @@ class WayfinderApp(ctk.CTk):
         # Do NOT overwrite them here!
     
     def _macos_glass_rim_kwargs(self) -> dict:
-        """Lifted edge that defines a pane against the macOS glass."""
-        if IS_MACOS and macos_glass_enabled():
+        """Lifted edge that defines a pane against the macOS glass (and the Windows surface)."""
+        if (IS_MACOS and macos_glass_enabled()) or WINDOWS_MAC_LOOK:
             return {"border_width": 1, "border_color": COLORS["border_rim"]}
         return {}
 
@@ -12650,6 +12696,13 @@ class WayfinderApp(ctk.CTk):
             return {
                 "fg_color": COLORS["bg_base"],
                 "bg_color": MACOS_TRANSPARENT,
+                "corner_radius": RADIUS["lg"],
+                **self._macos_glass_rim_kwargs(),
+            }
+        if WINDOWS_MAC_LOOK:
+            return {
+                "fg_color": COLORS["bg_base"],
+                "bg_color": WINDOWS_GLASS_SURFACE,
                 "corner_radius": RADIUS["lg"],
                 **self._macos_glass_rim_kwargs(),
             }
@@ -12679,8 +12732,8 @@ class WayfinderApp(ctk.CTk):
 
     def _draw_gradient_bg(self, event=None):
         """Draw ambient gradient - GitHub Dark base with blue warmth."""
-        if IS_MACOS and macos_glass_enabled():
-            return  # native vibrancy is the backdrop
+        if (IS_MACOS and macos_glass_enabled()) or WINDOWS_MAC_LOOK:
+            return  # native vibrancy (Windows: the flat glass surface) is the backdrop
         # Skip when window is not visible
         try:
             if self.state() in ("iconic", "withdrawn"):
@@ -16115,7 +16168,7 @@ class WayfinderApp(ctk.CTk):
             self._switch_tab("settings")
             self._finish_settings_build()
             self.open_model_settings()
-            self.log("↓ Download the Base model to finish Mac setup")
+            self.log(f"↓ Download the Base model to finish {_device_noun()} setup")
         except Exception as exc:
             self.log(f"⚠ Could not open first-run model setup: {exc}")
 
@@ -19560,10 +19613,10 @@ class WayfinderApp(ctk.CTk):
                 def on_complete(_path):
                     def update():
                         self.log(f"Downloaded: {info['name']}")
-                        # macOS: the download becomes the active model and resumes a
-                        # pending first-run Welcome. Linux keeps main's behaviour:
-                        # downloading never switches models.
-                        if IS_MACOS:
+                        # macOS/Windows: the download becomes the active model and
+                        # resumes a pending first-run Welcome. Linux keeps main's
+                        # behaviour: downloading never switches models.
+                        if IS_MACOS or IS_WINDOWS:
                             resumed_welcome = self._on_whisper_model_ready(_path)
                             if hasattr(self, "model_btn"):
                                 self.model_btn.configure(text=self.get_model_display())

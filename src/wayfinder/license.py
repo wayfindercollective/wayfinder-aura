@@ -618,8 +618,8 @@ class FeatureGate:
         upgrade prompt UI (see WayfinderApp._show_premium_prompt), not in this string."""
         if feature_id in PREMIUM_FEATURES:
             name, desc = PREMIUM_FEATURES[feature_id]
-            # macOS shows no emoji as UI chrome (the prompt has its own lock icon).
-            lock = "" if platform.system() == "Darwin" else "🔒 "
+            # macOS/Windows show no emoji as UI chrome (the prompt has its own lock icon).
+            lock = "" if platform.system() in ("Darwin", "Windows") else "🔒 "
             return f"{lock}Unlock {name} with Wayfinder Ultra.\n\n{desc}"
         return "Unlock this with Wayfinder Ultra."
 

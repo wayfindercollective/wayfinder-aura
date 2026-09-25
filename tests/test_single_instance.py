@@ -297,6 +297,9 @@ class TestHotkeyDetect:
         from unittest.mock import MagicMock
 
         app, saved, logs = self._make_detect_app(monkeypatch)
+        # Linux behaviour: Detect restarts the evdev listener (Windows/pynput
+        # reads the new key live instead).
+        monkeypatch.setattr(wayfinder_main.sys, "platform", "linux")
         order = []
 
         def save_side(cfg):
@@ -323,6 +326,20 @@ class TestHotkeyDetect:
         assert any("restart after Detect failed" in m for m in logs)
         assert app._hotkey_capture_target is None
         assert wayfinder_main._HOTKEY_CAPTURE["armed"] is False
+
+    def test_windows_detect_applies_live_without_listener_restart(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        app, saved, logs = self._make_detect_app(monkeypatch)
+        monkeypatch.setattr(wayfinder_main.sys, "platform", "win32")
+        app.restart_evdev_listener = MagicMock()
+        app._hotkey_capture_gen = 1
+        app._apply_captured_hotkey(
+            {"code": 24, "modifiers": [], "device": "Keyboard", "gen": 1}
+        )
+        assert saved and saved[0]["hotkey_key"] == 24
+        app.restart_evdev_listener.assert_not_called()
+        assert any("updated (live)" in m for m in logs)
 
     def test_apply_rolls_back_config_when_save_fails(self, monkeypatch):
         app, saved, logs = self._make_detect_app(monkeypatch)

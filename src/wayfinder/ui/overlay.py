@@ -678,7 +678,7 @@ class LiquidWaveRenderer:
             rect: Bounding rectangle for the wave
             color: Base color for the wave
         """
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             self._render_paths(painter, rect, color)
         else:
             self._render_segments(painter, rect, color)
@@ -1232,11 +1232,11 @@ class GlassmorphicOverlay(QWidget):
     def _target_screen():
         """Screen the pill is placed on.
 
-        macOS follows the display under the pointer (the active display). Linux
-        keeps the primary screen: on Wayland QCursor.pos() is unreliable for a
-        window that never has pointer focus.
+        macOS and Windows follow the display under the pointer (the active
+        display). Linux keeps the primary screen: on Wayland QCursor.pos() is
+        unreliable for a window that never has pointer focus.
         """
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             screen = QApplication.screenAt(QCursor.pos())
             if screen:
                 return screen
