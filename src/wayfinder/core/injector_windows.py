@@ -22,7 +22,9 @@ Safety, per the contract's Windows checklist:
 from __future__ import annotations
 
 import ctypes
+import threading
 import time
+from contextlib import contextmanager
 from ctypes import wintypes
 
 from .injector import InjectionError
@@ -46,6 +48,7 @@ ULONG_PTR = wintypes.WPARAM  # pointer-sized unsigned (matches dwExtraInfo)
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_SCANCODE = 0x0008
 
 VK_RETURN = 0x0D
 VK_TAB = 0x09
@@ -106,6 +109,8 @@ if _user32 is not None:
     _user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
     _user32.GetAsyncKeyState.restype = ctypes.c_short
     _user32.GetForegroundWindow.restype = wintypes.HWND
+    _user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
+    _user32.MapVirtualKeyW.restype = wintypes.UINT
 
 
 def _keyboard_input(*, wVk: int = 0, wScan: int = 0, flags: int = 0) -> _INPUT:
@@ -280,11 +285,58 @@ def inject_text_windows(text: str, typing_speed: str = "instant") -> None:
         time.sleep(interval)
 
 
+# Game chat (Gamer mode): some engines sample the keyboard once per frame and
+# miss a key whose down and up arrive together, and read hardware scan codes
+# rather than virtual keys. While hold_keys() is active, Ctrl+V and Enter go
+# out as scan codes and each key is held (the Mac's macos_paste.hold_keys).
+_hold = threading.local()
+
+
+@contextmanager
+def hold_keys(seconds: float):
+    """Hold each synthesized Ctrl+V / Enter key for *seconds* (game chat)."""
+    previous = getattr(_hold, "seconds", 0.0)
+    _hold.seconds = max(0.0, float(seconds))
+    try:
+        yield
+    finally:
+        _hold.seconds = previous
+
+
+def _held_seconds() -> float:
+    return getattr(_hold, "seconds", 0.0)
+
+
+def _scan_input(vk: int, *, up: bool) -> _INPUT:
+    scan = _user32.MapVirtualKeyW(vk, 0) if _user32 is not None else 0  # MAPVK_VK_TO_VSC
+    flags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if up else 0)
+    return _keyboard_input(wScan=scan, flags=flags)
+
+
+def _press_keys(vks: list[int]) -> None:
+    """Press *vks* in order and release in reverse.
+
+    Normally one batched SendInput (as before). Inside hold_keys(): scan codes,
+    with the keys held down for the configured time before release.
+    """
+    hold = _held_seconds()
+    if hold <= 0:
+        _send([_keyboard_input(wVk=vk) for vk in vks]
+              + [_keyboard_input(wVk=vk, flags=KEYEVENTF_KEYUP) for vk in reversed(vks)])
+        return
+    _send([_scan_input(vk, up=False) for vk in vks])
+    time.sleep(hold)
+    _send([_scan_input(vk, up=True) for vk in reversed(vks)])
+
+
 def press_enter_windows() -> None:
     """Synthesize a single Enter keypress (Auto-press-Enter setting)."""
     _require_foreground_window()
     # A held Shift would send Shift+Enter — a newline instead of submit.
     require_modifier_release_windows()
+    if _held_seconds() > 0:
+        _press_keys([VK_RETURN])
+        return
     _send(_vkey_inputs(VK_RETURN))
 
 
@@ -425,14 +477,7 @@ def inject_text_paste_windows(text: str) -> None:
         raise InjectionError("Could not write to the Windows clipboard for paste.")
     try:
         time.sleep(0.03)
-        _send(
-            [
-                _keyboard_input(wVk=VK_CONTROL),
-                _keyboard_input(wVk=VK_V),
-                _keyboard_input(wVk=VK_V, flags=KEYEVENTF_KEYUP),
-                _keyboard_input(wVk=VK_CONTROL, flags=KEYEVENTF_KEYUP),
-            ]
-        )
+        _press_keys([VK_CONTROL, VK_V])
     finally:
         # Best-effort restore, only if the clipboard still holds our text
         # (the user may have copied something new in the meantime).

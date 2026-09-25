@@ -732,3 +732,68 @@ def test_reduce_motion_parks_the_idle_pill_on_windows(monkeypatch):
     monkeypatch.setattr(overlay.sys, "platform", "linux")
     monkeypatch.setattr(windows_window, "animations_enabled", lambda: False)
     assert overlay._windows_reduce_motion() is False
+
+
+# --- Gamer mode / Games tab (core/windows_game_chat.py) --------------------------
+
+@pytest.mark.parametrize("exe, title, key", [
+    ("Wow.exe", "World of Warcraft", "wow"),
+    ("WowClassic.exe", "", "wow"),
+    ("ffxiv_dx11.exe", "FINAL FANTASY XIV", "ffxiv"),
+    ("exefile.exe", "EVE - Pilot", "eve"),
+    ("RuneLite.exe", "RuneLite", "jagex"),
+    ("League of Legends.exe", "", "lol"),
+    ("game.exe", "The Elder Scrolls Online", "eso"),   # title fallback
+    ("Code.exe", "wow.py - Visual Studio Code", None),
+])
+def test_windows_game_detection(exe, title, key):
+    from wayfinder.core import windows_game_chat as g
+
+    profile = g.match_profile(exe, title)
+    assert (profile.key if profile else None) == key
+
+
+def test_windows_games_tab_has_no_mac_only_notes():
+    from wayfinder.core import windows_game_chat as g
+
+    for entry in g.game_list():
+        assert "Cmd+V" not in entry.note and "on a Mac" not in entry.note, entry.name
+    assert len(g.game_list()) == len(g.PROFILES) + len(g.INFO_ONLY)
+
+
+def test_windows_unlisted_game_reasons():
+    from wayfinder.core import windows_game_chat as g
+
+    assert g.unlisted_game_reason("x.exe", exe_path=r"D:\SteamLibrary\steamapps\common\Valheim\valheim.exe") \
+        == "it is a Steam game"
+    assert g.unlisted_game_reason("GeForceNOW.exe") == "it is a cloud-gaming app"
+    assert g.unlisted_game_reason("notepad.exe", exe_path=r"C:\Windows\notepad.exe") is None
+
+
+@windows_only
+def test_game_keys_are_held_scan_codes(monkeypatch):
+    from wayfinder.core import injector_windows as w
+
+    batches, sleeps = [], []
+    monkeypatch.setattr(w, "_send", lambda inputs: batches.append(
+        [(i.u.ki.wVk, i.u.ki.wScan, i.u.ki.dwFlags) for i in inputs]))
+    monkeypatch.setattr(w.time, "sleep", lambda s: sleeps.append(s))
+    w._press_keys([w.VK_CONTROL, w.VK_V])       # normal: one batched vk burst
+    assert len(batches) == 1 and all(vk for vk, _s, _f in batches[0])
+    batches.clear()
+    with w.hold_keys(0.035):
+        w._press_keys([w.VK_CONTROL, w.VK_V])   # game: scan codes, held
+    assert len(batches) == 2 and 0.035 in sleeps
+    assert all(flags & w.KEYEVENTF_SCANCODE and scan for _vk, scan, flags in batches[0] + batches[1])
+    assert not any(flags & w.KEYEVENTF_KEYUP for _v, _s, flags in batches[0])
+    assert all(flags & w.KEYEVENTF_KEYUP for _v, _s, flags in batches[1])
+    assert w._held_seconds() == 0.0  # restored after the block
+
+
+def test_app_picks_the_windows_game_backend(monkeypatch):
+    import wayfinder_main
+
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    assert wayfinder_main._game_chat_module().__name__.endswith("windows_game_chat")
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+    assert wayfinder_main._game_chat_module().__name__.endswith("macos_game_chat")

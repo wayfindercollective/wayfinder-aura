@@ -91,6 +91,15 @@ WINDOWS_MAC_LOOK = IS_WINDOWS and os.environ.get("WAYFINDER_WINDOWS_MAC_LOOK", "
 WINDOWS_GLASS_SURFACE = "#07090D"
 
 
+def _game_chat_module():
+    """Gamer mode backend: macos_game_chat, or its Windows twin (same interface)."""
+    if IS_WINDOWS and not IS_MACOS:
+        from wayfinder.core import windows_game_chat
+        return windows_game_chat
+    from wayfinder.core import macos_game_chat
+    return macos_game_chat
+
+
 def _device_noun() -> str:
     """How user-facing copy names this computer."""
     return "PC" if IS_WINDOWS else "Mac"
@@ -8131,7 +8140,7 @@ class WayfinderApp(ctk.CTk):
             ("settings", "settings-2", "Settings"),
             ("style", style_icon, style_label),
         ]
-        if IS_MACOS:
+        if IS_MACOS or IS_WINDOWS:
             tabs.append(("games", "gamepad-2", "Games"))
         tabs.append(("history", "history", "History"))
 
@@ -12556,14 +12565,16 @@ class WayfinderApp(ctk.CTk):
     @staticmethod
     def _socket_tab_ids() -> tuple[str, ...]:
         """Tabs the control socket may open (tab:/inspect:)."""
-        return ("dictate", "settings", "style", "history") + (("games",) if IS_MACOS else ())
+        return ("dictate", "settings", "style", "history") + (
+            ("games",) if (IS_MACOS or IS_WINDOWS) else ())
 
     def _create_games_tab(self) -> None:
         """Games tab (macOS): Gamer mode switches, how it works, and a searchable
         list of games with Steam Deck-style verdicts (Verified / Playable /
         Untested / Not recommended). Aura never restricts a game; the list
-        explains where it works best and where it's a bad idea."""
-        from wayfinder.core import macos_game_chat as game_chat
+        explains where it works best and where it's a bad idea. Windows shows
+        the same tab from windows_game_chat."""
+        game_chat = _game_chat_module()
 
         frame = ctk.CTkFrame(self.tab_content_container, **_tab_surface_kwargs())
         self.tab_frames["games"] = frame
@@ -21740,11 +21751,11 @@ class WayfinderApp(ctk.CTk):
         self._set_output_style(next_style)
 
     def _gamer_profile_now(self):
-        """macOS Gamer mode: the supported game in front right now, or None."""
-        if not (IS_MACOS and self.config.get("gamer_mode", True)):
+        """macOS/Windows Gamer mode: the supported game in front right now, or None."""
+        if not ((IS_MACOS or IS_WINDOWS) and self.config.get("gamer_mode", True)):
             return None
         try:
-            from wayfinder.core import macos_game_chat as game_chat
+            game_chat = _game_chat_module()
             _pid, bundle_id, app_name = game_chat.frontmost_app()
             return game_chat.match_profile(bundle_id, app_name)
         except Exception:
@@ -22591,7 +22602,8 @@ class WayfinderApp(ctk.CTk):
             # macOS game chat: an MMO (World of Warcraft first) is in front, so
             # open its chat box, paste and send instead of a plain paste.
             game_chat = getattr(self, "_inject_into_game_chat", None)
-            if IS_MACOS and game_chat is not None and self.config.get("gamer_mode", True):
+            if ((IS_MACOS or IS_WINDOWS) and game_chat is not None
+                    and self.config.get("gamer_mode", True)):
                 if game_chat(text, gen):
                     self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
                     return
@@ -22671,12 +22683,12 @@ class WayfinderApp(ctk.CTk):
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
 
     def _inject_into_game_chat(self, text: str, gen=None) -> bool:
-        """macOS: dictate into a supported game's chat. False = not a game.
+        """macOS/Windows: dictate into a supported game's chat. False = not a game.
 
         Runs on the injection worker. Raises (-> INJECTION_ERROR) if the game
         left the foreground mid-send; the text stays in History.
         """
-        from wayfinder.core import macos_game_chat as game_chat
+        game_chat = _game_chat_module()
         from wayfinder.core.injector import inject_text, press_enter
 
         pid, bundle_id, app_name = game_chat.frontmost_app()
@@ -22699,14 +22711,25 @@ class WayfinderApp(ctk.CTk):
             f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste for you to send'}"
             f"{'' if profile.open_chat else ' (click into chat first)'}"
         )
-        from wayfinder.core.macos_paste import hold_keys
+        if IS_WINDOWS and not IS_MACOS:
+            # Ctrl+V only: never the SendInput typing fallback in a game,
+            # where letters are keybinds.
+            from wayfinder.core.injector_windows import hold_keys, inject_text_paste_windows
+
+            def paste(message):
+                inject_text_paste_windows(message)
+        else:
+            from wayfinder.core.macos_paste import hold_keys
+
+            def paste(message):
+                inject_text(message, typing_speed="instant")
         try:
             with hold_keys(game_chat.KEY_HOLD_S):
                 result = game_chat.send_to_chat(
                     text, profile,
                     game_pid=pid,
                     send=send,
-                    paste=lambda message: inject_text(message, typing_speed="instant"),
+                    paste=paste,
                     press_return=press_enter,
                     frontmost_pid=lambda: game_chat.frontmost_app()[0],
                     still_current=lambda: gen is None or gen == self.session_generation,
