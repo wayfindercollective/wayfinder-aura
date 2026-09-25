@@ -352,7 +352,8 @@ def test_base_tooltip_is_candid_about_free_default_accuracy():
 
     assert "free default" in tip
     assert "fast" in tip
-    assert "inaccurate" in tip
+    assert "less accurate" in tip
+    assert "43% fewer mistakes" in tip  # the measured gap, not a vague claim
 
 
 def test_benchmark_can_compare_gpu_while_free_pipeline_remains_cpu():
@@ -417,7 +418,7 @@ def test_root_tooltip_retires_legacy_cold_benchmarks():
     )
 
     assert "0.6" not in tip and "0.8" not in tip
-    assert "Run benchmark" in tip
+    assert "Run Benchmark" in tip
 
 
 def test_successful_activation_replaces_form_with_active_state():

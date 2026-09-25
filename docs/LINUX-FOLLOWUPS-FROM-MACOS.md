@@ -96,7 +96,8 @@ confirm it on Linux; **Fix sketch** is the macOS fix, for reference.
 
 ### 1.11 Cleanup models graded per style (matrix 2026-09-24)
 - **Evidence (macOS, resident llama-server, 22 samples x 5 styles x 2
-  strengths):** Qwen3 4B graded A on every style (~0.3 s). Gemma 3 1B
+  strengths):** Qwen3 4B was the most reliable in every style (~0.3 s; A
+  except Professional/Standard C on metrics, fine on reading). Gemma 3 1B
   rewrote meaning — "diff" -> "difference", "auth module" -> "authentication
   module", "a couple more days" -> "two more days" — failing Dev and
   Professional (F), Casual/Personal (C), even Normal (C). Qwen 3.5 2B echoed
@@ -334,3 +335,20 @@ merge); a Linux pass should confirm each behaves well:
   `enable_tray_icon`) are written into Linux configs (additive).
 - AppImage whisper-cli resolution prefers the bundled binary over a stale
   configured path.
+
+### Beam search → greedy (2026-09-24, cross-platform)
+- whisper.cpp now decodes greedily on every platform (`whisper_decoding()`;
+  evidence in EVAL-2026-09-24.md "Beam search"). Linux check: re-run a
+  base.en/turbo slice on Vulkan and CUDA to confirm the same result there.
+- whisper-server ignores `-nf`; if no-fallback is intended, send
+  `temperature_inc=0` per request (latent: fallback changed no output in the
+  eval). Faster-Whisper still uses the accuracy_mode presets, unmeasured.
+
+### Game chat for MMOs (from macOS, 2026-09-24)
+- macOS opens a supported game's chat, pastes and sends, splitting at the
+  game's chat limit (`core/macos_game_chat.py`: profiles, `split_for_chat`,
+  `send_to_chat` with injectable paste/Return/frontmost). The profile table
+  and splitter are platform-neutral; on Linux desktop (WoW under Wine/Proton,
+  FFXIV via XIVLauncher) the same flow could use ydotool/xdotool paste plus
+  Return, with the frontmost check from the active window id.
+

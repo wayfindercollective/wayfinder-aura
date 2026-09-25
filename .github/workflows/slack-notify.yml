@@ -1,0 +1,51 @@
+# Slack notifications, mirroring Wayfinder OS: main and stable releases go to
+# the prod channel, every other branch and pre-releases go to dev.
+# Logic lives in .github/scripts/slack-notify.sh (DRY_RUN=1 to try it locally).
+
+name: Notify Slack
+
+on:
+  push:
+    branches:
+      - "**"
+  # Tag builds publish with GITHUB_TOKEN, which never fires `release`; the
+  # finished Release workflow announces them instead.
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  # Releases published by hand (e.g. the macOS preview).
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    # Hosted runner on purpose: this repository is public, so the self-hosted
+    # runner Wayfinder OS uses must not be attached to it (hosted minutes are
+    # free for public repositories).
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Stand down while the local poller posts (scripts/slack_local_poller.py:
+    # same messages, summaries from the local Qwen model on the Mac Studio).
+    # Set with: gh variable set SLACK_POSTER --body local
+    if: vars.SLACK_POSTER != 'local'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Post to Slack
+        env:
+          SLACK_WEBHOOK_DEV: ${{ secrets.SLACK_WEBHOOK_DEV }}
+          SLACK_WEBHOOK_PROD: ${{ secrets.SLACK_WEBHOOK_PROD }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          LITELLM_DEFAULT_MODEL: ${{ vars.LITELLM_DEFAULT_MODEL || 'qwen3.8-flash-next' }}
+          LITELLM_STATUS_PATH: ${{ vars.LITELLM_STATUS_PATH || '/omlx/status' }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/slack-notify.sh

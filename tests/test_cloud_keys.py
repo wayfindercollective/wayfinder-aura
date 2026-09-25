@@ -99,12 +99,13 @@ def test_model_lists_contain_no_retired_ids():
     assert not retired & set(ck.OPENAI_CLEANUP_MODELS + ck.ANTHROPIC_CLEANUP_MODELS)
 
 
-@pytest.mark.posix_only
 def test_macos_config_moves_retired_models(tmp_path, monkeypatch):
     import wayfinder.config as config_module
     monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(config_module, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(config_module.sys, "platform", "darwin")
+    if not hasattr(config_module.os, "fchmod"):  # Windows simulating macOS
+        monkeypatch.setattr(config_module.os, "fchmod", lambda _fd, _mode: None, raising=False)
     (tmp_path / "config.json").write_text(json.dumps({
         "anthropic_model": "claude-3-haiku-20240307", "openai_model": "gpt-3.5-turbo",
     }))

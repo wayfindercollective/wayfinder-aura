@@ -735,10 +735,10 @@ def test_overlay_screen_follows_pointer_on_macos_only(
     assert overlay_module.GlassmorphicOverlay._target_screen() == expected
 
 
-@pytest.mark.posix_only
 class TestMacQuitAppleEvent:
     """The overlay helper must never refuse Quit (logout/restart/shutdown)."""
 
+    @pytest.mark.skipif(not hasattr(__import__("socket"), "AF_UNIX"), reason="needs AF_UNIX")
     def test_quit_is_forwarded_to_the_main_app(self, tmp_path, monkeypatch):
         import socket
         import threading

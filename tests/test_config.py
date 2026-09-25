@@ -501,7 +501,6 @@ class TestKeyCodeMappings:
             assert len(codes) >= 2
 
 
-@pytest.mark.posix_only
 class TestHotkeyDefaultMigration:
     """Existing installs keep bare F3/F10; only fresh installs get Super+F2/F3.
 
@@ -509,6 +508,13 @@ class TestHotkeyDefaultMigration:
     default modifiers ['super'] merged on top, silently breaking a mouse button
     mapped to bare F3 — and a later settings save baked the corruption in.
     """
+
+    @pytest.fixture(autouse=True)
+    def _fchmod_where_darwin_is_simulated(self, monkeypatch):
+        # Some tests simulate macOS; its private-write path uses os.fchmod,
+        # which Windows does not have.
+        if not hasattr(os, "fchmod"):
+            monkeypatch.setattr(os, "fchmod", lambda _fd, _mode: None, raising=False)
 
     def _write_config(self, data: dict):
         from wayfinder.config import CONFIG_FILE

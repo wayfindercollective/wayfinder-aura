@@ -26,6 +26,17 @@ end.
     terms last in Whisper's prompt budget.
   - The cleanup model is only kept loaded when the chosen style needs it.
   - Model descriptions and Ultra copy state measured results.
+  - The Ultra upgrade panel uses Ultra gold and the brand mark; its benefits
+    lead with the measured results and list Vocabulary on its own.
+  - Setting hints are plain text (no emoji), rewritten to match current
+    behaviour; unused ones were removed. The beam-search hint no longer shows
+    hard-coded speed figures as if they were measured.
+  - Hover hints stay on screen: long ones wrap wider, and a hint goes above,
+    below or beside its icon inside the usable screen
+    (`wayfinder.ui.tooltip_geometry`).
+  - whisper.cpp decodes greedily everywhere and the Accuracy Mode dropdown
+    is gone: beam search never beat greedy (EVAL-2026-09-24.md, "Beam
+    search"). "[sound of wind]"-style annotations are stripped.
   Linux check: re-run `scripts/eval_matrix.py --stages tone` on the Linux
   cleanup path; confirm Normal-without-model is wanted there.
 
@@ -122,6 +133,50 @@ with no Terminal:
   managers, and the previous clipboard is restored.
 - Auto-Enter checks the frontmost window hasn't changed before pressing
   Return.
+- The layout-aware V key is read on the main thread only (startup and each
+  recording start): on macOS 27 the Text Input Sources API asserts the main
+  queue and hung the paste thread. A 10 s PASTING watchdog (longer for long
+  game-chat text) hands the text to the clipboard if a paste ever stalls.
+
+### Gamer mode (World of Warcraft first)
+
+`core/macos_game_chat.py`; its own **Games** tab (sidebar, gamepad icon) holds
+the switches ("Gamer mode", "Send game messages"; `gamer_mode`,
+`game_chat_send`), how it works, and a searchable game list.
+
+- **Per dictation**, when a profiled game is in front: Whisper is primed with
+  MMO slang plus the game's words (`gamer_asr_overlay`, never saved) and
+  cleanup stays Normal. Measured on Base (2 synthetic voices x 8 WoW chat
+  lines): gamer terms heard right 24/42 (57%) -> 35/42 (83%).
+- **One message per dictation** (owner decision, 2026-09-24): game rules draw
+  the line at one message per keypress (Path of Exile's tool policy; the
+  Blizzard players' rule of thumb). WoW: open chat, paste, send. Past the
+  255-character limit the next part is pasted into a fresh chat box for the
+  player's Enter; anything beyond stays in History.
+- **Only pastes, never types keys** (letters are keybinds). Return only while
+  the matched game is still frontmost; keys are held 35 ms in games (some
+  engines miss an instant down+up); modifiers released first.
+- **Educate, don't restrict** (owner decision): every game still gets at
+  least the normal paste. Profiles: WoW auto-sends; FFXIV, ESO, LOTRO,
+  Albion, Path of Exile open chat and paste, the player sends; EVE pastes
+  only (Return is its Confirm key). "Not recommended" (RuneScape - Jagex bans
+  software key presses and chat takes no paste; League of Legends - no paste;
+  Black Desert - first-offence macro bans) get the normal paste plus a
+  heads-up. Unlisted games (App Store games category, Steam library, Wine,
+  GeForce NOW) get the normal paste and a note that they're untested.
+- **Games tab list**, Steam Deck-style: Verified (tested in game), Playable
+  (works with a step), Untested (from documentation), Not recommended (why).
+  Profiles plus info-only entries from the 2026-09-24 compatibility and
+  market research (Minecraft: T opens chat; Roblox: /; Guild Wars 2 and
+  cloud gaming: Cmd+V doesn't paste under Wine / streaming yet; ...). A
+  profile becomes Verified only when `tested=True` after an in-game check.
+  Trademark note: "not affiliated with or endorsed by any game publisher";
+  market as "Works with World of Warcraft on Mac", never "Built for WoW".
+- **Open work:** in-game WoW check (Starter Edition covers /say), Wine
+  games (Ctrl+V, detect via window title, 2 s clipboard pacing), per-game
+  open keys (T, /, Y), sound cues for fullscreen, Windows/Linux adapters.
+- Live-checked against a native stand-in for WoW's chat, by script and by
+  voice through the installed app (before one-message-per-dictation).
 
 ## 6. Speech and cleanup pipeline
 

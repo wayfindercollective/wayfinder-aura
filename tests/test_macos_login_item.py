@@ -1,9 +1,8 @@
 """Open-at-login (SMAppService) wrapper: safe off macOS and outside a bundle."""
 from __future__ import annotations
 
-from types import SimpleNamespace
-
-import pytest
+import sys
+from types import ModuleType, SimpleNamespace
 
 from wayfinder.utils import macos_login_item as L
 
@@ -15,13 +14,12 @@ def test_not_available_off_macos(monkeypatch):
     assert L.set_enabled(True) == (False, "Available in the installed app.")
 
 
-@pytest.mark.posix_only
 def test_source_run_is_not_a_login_item(monkeypatch):
-    import Foundation
-
+    foundation = ModuleType("Foundation")
+    foundation.NSBundle = SimpleNamespace(
+        mainBundle=lambda: SimpleNamespace(bundlePath=lambda: "/usr/local/bin"))
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
     monkeypatch.setattr(L.sys, "platform", "darwin")
-    monkeypatch.setattr(Foundation, "NSBundle", SimpleNamespace(
-        mainBundle=lambda: SimpleNamespace(bundlePath=lambda: "/usr/local/bin")))
     assert L.available() is False
 
 

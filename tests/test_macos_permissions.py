@@ -1,3 +1,4 @@
+import sys
 from types import ModuleType
 
 import pytest
@@ -11,7 +12,7 @@ def test_non_macos_is_always_ready(monkeypatch):
     assert macos_permissions.request_accessibility_permission() is True
 
 
-@pytest.mark.posix_only
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX bundle paths")
 def test_frozen_macos_permissions_require_applications_copy(monkeypatch):
     monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
     monkeypatch.setattr(macos_permissions.sys, "frozen", True, raising=False)

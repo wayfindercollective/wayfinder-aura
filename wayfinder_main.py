@@ -138,7 +138,8 @@ from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, s
 from wayfinder.utils.audio_ducker import AudioDucker
 from wayfinder.ui.icons import get_icon, STYLE_ICONS, tint_icon
 from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
-from wayfinder.ui.window_geometry import default_window_geometry
+from wayfinder.ui.window_geometry import default_window_geometry, macos_visible_frame
+from wayfinder.ui.tooltip_geometry import anchor_in_area, tooltip_position, tooltip_wraplength
 from wayfinder.ui.macos_window import (
     TRANSPARENT as MACOS_TRANSPARENT,
     apply_glass_palette as apply_macos_glass_palette,
@@ -417,7 +418,8 @@ COLORS = {
     # Legacy state color aliases for compatibility
     "accent_green": "#5DD4A8",      # Muted mint - success
     "accent_red": "#E8707F",        # Muted rose - recording
-    "accent_yellow": "#E5AC2A",     # Muted gold - processing
+    "accent_yellow": "#E5AC2A",     # Muted gold - processing / Ultra
+    "accent_yellow_hover": "#F0C24D",  # Lighter gold on hover (Ultra Buy Now)
     "accent_blue": "#4682DC",       # Brand blue (same as primary accent)
     
     # Text hierarchy - calculated for dark bg readability
@@ -621,36 +623,29 @@ class ToolTip:
             text=self.text,
             font=("DejaVu Sans", 12),  # module-scope: no font_sizes access
             text_color=COLORS["text_primary"],
-            wraplength=260,
+            wraplength=tooltip_wraplength(self.text),
             justify="left",
         )
         label.pack(padx=12, pady=10)
-        
-        # Position tooltip above widget
+
+        # Above the widget if it fits, else below, else beside it - always
+        # inside the usable screen (macOS: menu bar and Dock excluded).
         tw.update_idletasks()
-        tw_width = tw.winfo_width()
-        tw_height = tw.winfo_height()
-        screen_width = tw.winfo_screenwidth()
-        screen_height = tw.winfo_screenheight()
-        
-        # Center above widget
-        widget_x = self.widget.winfo_rootx()
-        widget_width = self.widget.winfo_width()
-        x = widget_x + (widget_width - tw_width) // 2
-        
-        # Position above with gap
-        y = self.widget.winfo_rooty() - tw_height - 6
-        
-        # Keep on screen horizontally
-        if x < 10:
-            x = 10
-        elif x + tw_width > screen_width - 10:
-            x = screen_width - tw_width - 10
-        
-        # If would go off top, show below
-        if y < 10:
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-        
+        size = (tw.winfo_width(), tw.winfo_height())
+        screen_w, screen_h = tw.winfo_screenwidth(), tw.winfo_screenheight()
+        anchor = (self.widget.winfo_rootx(), self.widget.winfo_rooty(),
+                  self.widget.winfo_width(), self.widget.winfo_height())
+        area = (macos_visible_frame(screen_w, screen_h) if IS_MACOS
+                else (0, 0, screen_w, screen_h))
+        if anchor_in_area(anchor, area):
+            x, y = tooltip_position(anchor, size, area)
+        else:
+            # Another monitor: Tk only reports the primary screen, so don't
+            # pull the tooltip onto it; keep it centred above (or below) the widget.
+            x = anchor[0] + (anchor[2] - size[0]) // 2
+            y = anchor[1] - size[1] - 6
+            if y < 10:
+                y = anchor[1] + anchor[3] + 6
         tw.wm_geometry(f"+{x}+{y}")
     
     def hide_tooltip(self):
@@ -1363,67 +1358,70 @@ ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
 ctk.CTkSlider._mouse_scroll_event = lambda _self, _event: None
 
 
-# Setting tooltip descriptions with latency indicators
-# ═══════════════════════════════════════════════════════════════════════════════
-# LATENCY GUIDE: ⚡ = none, 🟢 = <10ms, 🟡 = 10-100ms, 🔴 = 100ms+, 🚀 = speedup
-# ═══════════════════════════════════════════════════════════════════════════════
+# Setting hints (hover the (i) next to a setting). Plain text, no emoji
+# (rule 11); keep claims to what the code does today. Benchmark-driven ones are
+# rebuilt by get_dynamic_tooltip.
 SETTING_TOOLTIPS = {
-    # ⚡ No latency impact - UI/configuration only
-    "hotkey": "The keyboard shortcut to start/stop voice recording.\n⚡ Latency: None",
-    "microphone": "Select which microphone/audio input device to use.\n⚡ Latency: None",
-    "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\n⚡ Latency: None",
-    "benchmark": "Measure end-to-end dictation speed on your hardware.\nTimes speech-to-text + cleanup, with a per-model breakdown.\n⏱️ Run once to get accurate timing predictions.",
-    "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
+    "hotkey": "The shortcut that starts and stops dictation.",
+    "microphone": "The microphone Aura listens to.",
+    "hotkey_devices": "Which keyboards, mice or keypads can trigger the shortcut.",
     "enable_tray_icon": (
-        "Show a stateful Wayfinder item in the macOS menu bar. Turn it off if "
-        "menu-bar space is limited.\n⚡ Latency: None"
+        "Show Aura in the menu bar, with its state and quick controls. "
+        "Turn it off if your menu bar is crowded."
     ),
-    "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
-    "overlay_type": "Choose the status indicator style:\n• Always On: Stays visible, never steals focus (PyQt6)\n• Disappearing: Shows only during recording (CTk)\n⚠️ Requires restart to take effect.",
-    "overlay_enabled": "Show the floating status pill (Listening / Processing / Ready).\nOff = no on-screen pill; system tray + dictation still work.\n⚡ Latency: None",
-    "overlay_scale": "Adjust the size of the status overlay.\nSeparate from the main UI scale.\n⚡ Latency: None",
-    "overlay_position": "Slide the overlay up or down on screen.\nNegative = higher (up to ~full height), Positive = lower (near/over the panel).\n⚡ Latency: None",
-    "prompt": "Initial text that guides transcription style.\n⚡ Latency: None (processed at model load)",
-    "language": "The language for transcription. English is most optimized.\n⚡ Latency: None",
-    
-    # 🟢 Minimal latency impact (<10ms per invocation)
-    "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
+    "ui_scale": "Size of Aura's window and text.",
+    "gamer_mode": (
+        "When World of Warcraft is in front, Aura hears gamer talk (inc, pull, LFG, "
+        "M+...), keeps your words as said, and sends them to chat: don't press "
+        "Enter first, just tap your shortcut, speak, tap again. One message per "
+        "dictation: past WoW's 255-character limit, the next part waits in chat "
+        "for your Enter.\n"
+        "Also set up for Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings "
+        "Online, Albion Online, RuneScape and EVE Online. In games Aura only pastes, "
+        "never types keys, so dictation can't trigger a keybind."
+    ),
+    "game_chat_send": (
+        "On: Aura presses Enter to send each message.\n"
+        "Off: the text is left in the chat box for you to check and send."
+    ),
+    "overlay_type": (
+        "Always On: the pill stays on screen and never takes focus.\n"
+        "Disappearing: it shows only while you dictate.\n"
+        "Applies after a restart."
+    ),
+    "overlay_enabled": (
+        "Show the floating status pill (Listening, Processing, Ready). "
+        "With it off, dictation still works."
+    ),
+    "overlay_scale": "Size of the status pill, separate from the window size.",
+    "overlay_position": "Move the status pill up or down the screen. Left is higher, right is lower.",
+    "language": (
+        "The language you dictate in. Other languages need a multilingual "
+        "model (one without .en in its name)."
+    ),
     "press_enter_after_dictation": (
-        "Press Enter automatically once dictated text finishes typing. Off by default.\n"
-        "⚠️ This immediately submits chat messages, terminal commands, and AI prompts.\n"
-        "Keep it off when you need to review dictated text first.\n"
-        "🟢 Latency: none (fires after injection)"
+        "Press Enter after the text is typed. Off by default.\n"
+        "This sends chat messages, runs terminal commands and submits AI prompts "
+        "straight away, so leave it off if you want to check the text first."
     ),
-    "ensure_punctuation": "Extra punctuation fixes if model output lacks periods/caps.\n🟢 Latency: +1-3ms (optional, most models handle this well)",
     "audio_preprocessing": (
-        "Conditions microphone audio before speech recognition.\n\n"
-        "• Off — Leaves audio untouched. Use as a diagnostic baseline or when your "
-        "mic/interface already produces clean, consistently leveled audio.\n\n"
-        "• Light — Safely evens out quiet or inconsistent mic levels without huge "
-        "noise boosts. Best everyday default.\n\n"
-        "• Medium — Light plus an 80 Hz high-pass filter. Use for electrical hum, "
-        "desk vibration, handling noise, or low HVAC rumble. It does not remove fan hiss.\n\n"
-        "• Heavy — Medium plus a soft gate that lowers steady noise between words. "
-        "Use only when background noise remains; it can suppress soft consonants or quiet speech.\n\n"
-        "Processing cannot repair clipping or replace correct microphone gain."
+        "Cleans up microphone audio before transcription.\n\n"
+        "Off: audio is left untouched.\n"
+        "Light: evens out quiet or uneven levels. Best for most mics.\n"
+        "Medium: Light plus a filter for hum, rumble and desk bumps.\n"
+        "Heavy: Medium plus quieting steady noise between words. It can swallow "
+        "soft speech, so use it only if noise remains.\n\n"
+        "It can't fix clipping or a wrong mic level."
     ),
-    
-    # 🟡 Moderate latency impact (10-100ms)
     "chunked_mode": (
-        "Choose when long recordings are split for background transcription.\n\n"
-        "• Off — Always one Whisper request.\n"
-        "• Auto — One request under 30s; chunk longer recordings.\n"
-        "• On — Begin chunking from the first 15s segment.\n\n"
-        "Auto is the recommended balance of short-dictation speed and long-recording latency."
+        "Splits long recordings so most of the work is done by the time you stop.\n\n"
+        "Off: one pass for the whole recording.\n"
+        "Auto: one pass under 30 s; longer recordings are split. Recommended.\n"
+        "On: split from the start, in 15 s pieces."
     ),
-    "chunk_duration": "New audio per segment (seconds).\nShorter = less work left when you stop, but more context loss and splice points.\n⚠️ 15s/2s is the tested default | 30s is safer with a slower tail",
-    
-    # 🔴 MAJOR latency impact - These are the biggest factors
-    "whisper_model": "Local on-device speech recognition model.\nBase is the Free default: fast and lightweight, but it can be inaccurate compared with Ultra models.\nProcessed entirely on your machine — no cloud API needed.",
-    "accuracy_mode": "Speed vs accuracy preset - affects beam search depth.\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)",
-    "beam_size": "Search width for finding best transcription.\n🔴 1 = fastest (-50%) | 5 = balanced | 10 = slowest (+100%)",
-    
-    # GPU/Backend - Can dramatically change all timings
+    "whisper_model": (
+        "The speech model. It runs on your computer; nothing is sent to the cloud."
+    ),
     "backend": (
         "Local transcription engine.\n\n"
         "• Auto / default — Free uses Base on CPU with whisper.cpp. Ultra uses\n"
@@ -1434,15 +1432,18 @@ SETTING_TOOLTIPS = {
         "  Ultra feature. Manual pick turns Auto off."
     ),
     "gpu_acceleration": (
-        "Ultra-only GPU acceleration for transcription and local cleanup.\n"
-        "🚀 whisper.cpp: Vulkan (AMD/Intel), CUDA, Metal (recommended)\n"
-        "🚀 Faster-Whisper (experimental): NVIDIA CUDA via CTranslate2 only\n"
-        "Free runs Base on CPU. Run Benchmark for a GPU upgrade preview."
+        (
+            "Use the Mac's GPU (Metal) for transcription and local cleanup. Ultra.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
+        if IS_MACOS
+        else (
+            "Use your GPU for transcription and local cleanup. Ultra.\n"
+            "whisper.cpp: Vulkan (AMD/Intel), CUDA or Metal. "
+            "Faster-Whisper (experimental): NVIDIA CUDA only.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
     ),
-    "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
-
-    # Post-processing — static defaults; get_dynamic_tooltip fills in measured times
-    "post_processing": "Clean up transcription with an LLM.\nRemoves filler words, fixes grammar, formats output.\n🟡 Latency: +100ms–few seconds depending on model\n⏱️ Run Benchmark for measured times on your hardware.",
 }
 
 
@@ -1459,16 +1460,16 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     
     # Model-specific tooltip with actual benchmarked speeds
     if key == "whisper_model":
-        base_text = "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed."
+        base_text = SETTING_TOOLTIPS["whisper_model"]
         selected_name = Path(os.path.expanduser(str(config.get("model_path", "") or ""))).name.lower()
         if selected_name in ("ggml-base.en.bin", "ggml-base.bin"):
             base_text += (
-                "\n\nBase is the Free default: fast and lightweight, but it can be "
-                "inaccurate compared with the higher-accuracy Ultra models."
+                "\n\nBase is the Free default: fast and light, but less accurate. "
+                "Large v3 Turbo (Ultra) made 43% fewer mistakes in our tests."
             )
         
         if not benchmark_results:
-            return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
+            return f"{base_text}\n\nRun Benchmark to measure speeds on your hardware."
         
         # Build speed table from benchmarks
         speed_lines = []
@@ -1495,16 +1496,11 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
         
         if speed_lines:
             speeds = " | ".join(speed_lines)
-            return f"{base_text}\n\n🚀 {processor_label} speeds (10s audio):\n{speeds}"
+            return f"{base_text}\n\n{processor_label} time for 10 s of audio:\n{speeds}"
         
-        return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
+        return f"{base_text}\n\nRun Benchmark to measure speeds on your hardware."
     
     # Accuracy mode tooltip with benchmarked impact
-    if key == "accuracy_mode":
-        base_text = "Speed vs accuracy preset - affects beam search depth."
-        if benchmark_results and fastest:
-            return f"{base_text}\n🔴 Fast: ~40% faster | Balanced: baseline | High: ~60% slower\n(Based on your {fastest.upper()} benchmarks)"
-        return f"{base_text}\n🔴 Fast: -40% time (beam=1) | Balanced: baseline (beam=5) | High: +60% time (beam=8)\n⏱️ Run benchmark for exact timings"
     
     # GPU acceleration tooltip with measured speedup
     if key == "gpu_acceleration":
@@ -1519,7 +1515,7 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
                     speedups.append(cpu_time / gpu_time)
             if speedups:
                 avg_speedup = sum(speedups) / len(speedups)
-                return f"{base_text}\n\n🚀 Your GPU is {avg_speedup:.1f}x faster than CPU on average!"
+                return f"{base_text}\n\nOn your hardware the GPU was {avg_speedup:.1f}x faster than the CPU."
         return base_text
 
     # Backend: static rules + this machine's Auto recommendation
@@ -1557,8 +1553,8 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     # Post-processing tooltip with measured cleanup times + pipeline total
     if key == "post_processing":
         base_text = (
-            "Clean up transcription with an LLM.\n"
-            "Removes filler words, fixes grammar, formats output."
+            "Rewrites your dictation in the chosen style with a local model.\n"
+            "Normal needs no model: it removes filler words instantly."
         )
         pp_results = config.get("postprocessing_benchmark_results", {}) or {}
         pipeline = config.get("pipeline_benchmark", {}) or {}
@@ -1587,8 +1583,8 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
                 name = r.get("model_name", mid)
                 lines.append(f"  {name}: {format_bench_seconds(r['avg_time'])}{mark}")
         if lines:
-            return base_text + "\n\n⏱ Measured on your hardware:\n" + "\n".join(lines)
-        return base_text + "\n🟡 Latency: +100ms–few seconds depending on model\n⏱️ Run Benchmark for measured times."
+            return base_text + "\n\nMeasured on your hardware:\n" + "\n".join(lines)
+        return base_text + "\n\nRun Benchmark for measured times on your hardware."
     
     # Default to static tooltip
     return SETTING_TOOLTIPS.get(key, "")
@@ -2549,7 +2545,7 @@ def format_model_tile_meta(
 # Recommended GGUF models for post-processing (llama.cpp)
 LLM_GGUF_MODELS = {
     "gemma3-1b": {
-        "name": "Gemma 3 1B ⭐",
+        "name": "Gemma 3 1B",
         "size": "806 MB",
         "size_bytes": 806_058_496,
         "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116f76234503685a98f572982177b11d44ec8ff1/google_gemma-3-1b-it-Q4_K_M.gguf",
@@ -2559,7 +2555,8 @@ LLM_GGUF_MODELS = {
         "description": "Small and fast. Great for Normal cleanup; for styles use Qwen3 4B (in testing Gemma reworded technical terms).",
         "speed": "Very Fast",
         "accuracy": "Excellent",
-        "recommended": True,
+        # Explicit False: old clients built with it True must drop the flag.
+        "recommended": False,
     },
     "qwen3.5-2b": {
         "name": "Qwen 3.5 2B",
@@ -2574,7 +2571,7 @@ LLM_GGUF_MODELS = {
         "accuracy": "Excellent",
     },
     # 2026-09 lineup refresh — three tiers:
-    #   light  = Gemma 3 1B (Free, recommended default)
+    #   light  = Gemma 3 1B (Free; Normal needs no model since 2026-09)
     #   medium = Qwen 3.5 2B (Free)
     #   heavy  = Qwen3 4B Instruct 2507 (Ultra, requires large_cleanup_models)
     # Retired as superseded: Phi-3 Mini, Qwen2.5 1.5B, SmolLM2 360M, Llama 3.2 1B.
@@ -2593,18 +2590,19 @@ LLM_GGUF_MODELS = {
     # via Browse…, the config._LLM_PREFERENCE legacy tail and
     # FREE_CLEANUP_MODEL_FILENAMES; their R2 objects remain for old clients.
     "qwen3-4b-2507": {
-        "name": "Qwen3 4B Instruct 2507",
+        "name": "Qwen3 4B Instruct 2507 ⭐",
         "size": "2.5 GB",
         "size_bytes": 2_497_280_736,
         "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
-        "description": "Best for styles: every style graded A in testing at ~0.3 s on Apple silicon. Sharpest instruction-follower in its class.",
+        "description": "Best for styles: the most reliable in every style we tested, at ~0.3 s on Apple silicon. Keeps your meaning.",
         "speed": "Fast",
         "accuracy": "Excellent",
         # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
         "cdn_object": "llm/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "requires_feature": "large_cleanup_models",
+        "recommended": True,
     },
 }
 
@@ -5754,6 +5752,14 @@ class WayfinderApp(ctk.CTk):
         self._duck_failure_message = None
         
         self.executor = ThreadPoolExecutor(max_workers=1)
+        if IS_MACOS:
+            # The paste thread must never read the keyboard layout itself (it
+            # hangs on macOS 27); read it here, on the main thread.
+            try:
+                from wayfinder.core import macos_paste
+                macos_paste.refresh_layout_cache()
+            except Exception:
+                pass
         self.logs = []
         
         # UI scaling for high-DPI screens (saved in config)
@@ -8002,8 +8008,10 @@ class WayfinderApp(ctk.CTk):
             ("dictate", "audio-waveform", "Dictate"),
             ("settings", "settings-2", "Settings"),
             ("style", style_icon, style_label),
-            ("history", "history", "History"),
         ]
+        if IS_MACOS:
+            tabs.append(("games", "gamepad-2", "Games"))
+        tabs.append(("history", "history", "History"))
 
         for tab_id, icon_name, label in tabs:
             # Fixed-height nav rows (the old expand-to-fill made four huge
@@ -8060,12 +8068,13 @@ class WayfinderApp(ctk.CTk):
         ):
             return
         builders = {
-            "dictate": self._create_dictate_tab,
-            "settings": self._create_settings_tab,
-            "style": self._create_style_tab,
-            "history": self._create_history_tab,
+            "dictate": "_create_dictate_tab",
+            "settings": "_create_settings_tab",
+            "style": "_create_style_tab",
+            "history": "_create_history_tab",
+            "games": "_create_games_tab",
         }
-        builder = builders.get(tab_id)
+        builder = getattr(self, builders[tab_id], None) if tab_id in builders else None
         if builder is None:
             raise ValueError(f"Unknown tab: {tab_id}")
 
@@ -9571,7 +9580,7 @@ class WayfinderApp(ctk.CTk):
     
     def _refresh_benchmark_tooltips(self):
         """Refresh all dynamic tooltips that depend on benchmark results."""
-        tooltip_keys = ["whisper_model", "gpu_acceleration", "accuracy_mode", "post_processing"]
+        tooltip_keys = ["whisper_model", "gpu_acceleration", "post_processing"]
         
         for key in tooltip_keys:
             if key in self.dynamic_tooltips:
@@ -10432,16 +10441,9 @@ class WayfinderApp(ctk.CTk):
             tooltip_key="gpu_acceleration",
         )
         
-        # Accuracy Mode
-        accuracy_mode = self.config.get("accuracy_mode", "balanced")
-        self.accuracy_mode_var = ctk.StringVar(value=accuracy_mode)
-        self.accuracy_mode_dropdown = self.create_dropdown_row(
-            parent, "Accuracy Mode", ["fast", "balanced", "high"],
-            self.accuracy_mode_var, self.on_accuracy_mode_changed,
-            tooltip=get_dynamic_tooltip("accuracy_mode", self.config), width=140,
-            tooltip_key="accuracy_mode",
-        )
-        
+        # No Accuracy Mode control: beam search never beat greedy decoding in
+        # testing (docs/EVAL-2026-09-24.md), so whisper.cpp always runs greedy.
+
         # Language
         language = self.config.get("language", "en")
         self.language_var = ctk.StringVar(value=language)
@@ -12424,6 +12426,123 @@ class WayfinderApp(ctk.CTk):
             # Don't crash if compatibility check fails
             print(f"[Compatibility] Error checking compatibility: {e}")
     
+    @staticmethod
+    def _socket_tab_ids() -> tuple[str, ...]:
+        """Tabs the control socket may open (tab:/inspect:)."""
+        return ("dictate", "settings", "style", "history") + (("games",) if IS_MACOS else ())
+
+    def _create_games_tab(self) -> None:
+        """Games tab (macOS): Gamer mode switches, how it works, and a searchable
+        list of games with Steam Deck-style verdicts (Verified / Playable /
+        Untested / Not recommended). Aura never restricts a game; the list
+        explains where it works best and where it's a bad idea."""
+        from wayfinder.core import macos_game_chat as game_chat
+
+        frame = ctk.CTkFrame(self.tab_content_container, **_tab_surface_kwargs())
+        self.tab_frames["games"] = frame
+        scroll = SmoothScrollableFrame(
+            frame, **_tab_surface_kwargs(),
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        scroll.pack(fill="both", expand=True)
+        fam, fs = self.font_body[0], self.font_sizes
+
+        def tile(title: str):
+            card = ctk.CTkFrame(
+                scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"],
+                border_width=1, border_color=COLORS["border_rim"],
+            )
+            card.pack(fill="x", pady=(0, SPACING["md"]))
+            ctk.CTkLabel(
+                card, text=title, font=(self.font_header[0], fs["caption"]),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], SPACING["sm"]))
+            return card
+
+        def note(parent, text, *, color=None, top=0, size="small"):
+            label = ctk.CTkLabel(
+                parent, text=text, font=(fam, fs[size]), anchor="w", justify="left",
+                text_color=color or COLORS["text_muted"], wraplength=460,
+            )
+            label.pack(fill="x", padx=SPACING["tile_pad"], pady=(top, 2))
+            return label
+
+        # --- Gamer mode ----------------------------------------------------------
+        mode = tile("GAMER MODE")
+        self._create_game_chat_rows(mode)
+        for line in (
+            "In a supported game, don't press Enter first: tap your shortcut, speak, tap again.",
+            "Aura hears gamer talk (inc, pull, LFG, M+...) and keeps your words as said.",
+            "One message per dictation: if it's too long, the next part waits in chat for your "
+            "Enter. Send it before dictating again.",
+            "In games Aura only pastes, never types keys, so dictation can't trigger a keybind.",
+        ):
+            note(mode, "•  " + line, color=COLORS["text_secondary"])
+        ctk.CTkFrame(mode, fg_color="transparent", height=SPACING["tile_pad_y"]).pack()
+
+        # --- Games list ----------------------------------------------------------
+        games = tile("GAMES")
+        tones = {
+            game_chat.VERIFIED: COLORS["accent_green"],
+            game_chat.PLAYABLE: COLORS["accent"],
+            game_chat.UNTESTED: COLORS["text_secondary"],
+            game_chat.NOT_RECOMMENDED: COLORS["accent_red"],
+        }
+        legend = ctk.CTkFrame(games, fg_color="transparent")
+        legend.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"]))
+        for status, label in game_chat.STATUS_LABELS.items():
+            row = ctk.CTkFrame(legend, fg_color="transparent")
+            row.pack(fill="x", pady=1)
+            ctk.CTkLabel(row, text=label, width=120, anchor="w",
+                         font=(fam, fs["small"], "bold"), text_color=tones[status]).pack(side="left")
+            ctk.CTkLabel(row, text=game_chat.STATUS_MEANINGS[status], anchor="w", justify="left",
+                         font=(fam, fs["small"]), text_color=COLORS["text_muted"],
+                         wraplength=340).pack(side="left", fill="x", expand=True)
+
+        search_var = ctk.StringVar()
+        ctk.CTkEntry(
+            games, textvariable=search_var, placeholder_text="Search games",
+            font=(fam, fs["body"]), height=34, corner_radius=RADIUS["md"],
+            fg_color=COLORS["bg_input"], border_color=COLORS["border_subtle"],
+            text_color=COLORS["text_primary"],
+        ).pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["sm"], SPACING["sm"]))
+        results = ctk.CTkFrame(games, fg_color="transparent")
+        results.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+
+        def render(*_):
+            for child in results.winfo_children():
+                child.destroy()
+            entries = game_chat.search_games(search_var.get())
+            if not entries:
+                ctk.CTkLabel(
+                    results, font=(fam, fs["small"]), anchor="w", justify="left",
+                    text_color=COLORS["text_muted"], wraplength=460,
+                    text="Not on the list. Some games aren't listed because they have no "
+                         "text chat. Anywhere you can type, Aura still pastes normally; it "
+                         "just hasn't been tested there, so check the game's rules on chat tools.",
+                ).pack(fill="x", pady=SPACING["xs"])
+                return
+            for entry in entries:
+                row = ctk.CTkFrame(results, fg_color="transparent")
+                row.pack(fill="x", pady=(SPACING["xs"], 0))
+                head = ctk.CTkFrame(row, fg_color="transparent")
+                head.pack(fill="x")
+                ctk.CTkLabel(head, text=entry.name, anchor="w", font=(fam, fs["body"], "bold"),
+                             text_color=COLORS["text_primary"]).pack(side="left")
+                ctk.CTkLabel(head, text=game_chat.STATUS_LABELS[entry.status], anchor="e",
+                             font=(fam, fs["small"], "bold"),
+                             text_color=tones[entry.status]).pack(side="right")
+                ctk.CTkLabel(row, text=entry.note, anchor="w", justify="left", wraplength=460,
+                             font=(fam, fs["small"]), text_color=COLORS["text_muted"]).pack(fill="x")
+
+        search_var.trace_add("write", render)
+        render()
+
+        note(scroll, "Game names are trademarks of their owners. Wayfinder is not affiliated "
+                     "with or endorsed by any game publisher. Follow each game's rules.",
+             top=SPACING["xs"], size="caption")
+
     def _create_history_tab(self) -> None:
         """Create the History tab content."""
         frame = ctk.CTkFrame(
@@ -12631,30 +12750,6 @@ class WayfinderApp(ctk.CTk):
         if hasattr(self, 'preprocess_desc_label'):
             self.preprocess_desc_label.configure(text=self._get_preprocess_desc(value))
         self.log(f"⚙ Audio processing: {value}")
-    
-    def on_accuracy_mode_changed(self, value: str):
-        """Handle accuracy mode change from dropdown."""
-        self.config["accuracy_mode"] = value
-        # Apply preset settings
-        presets = {
-            "fast": {"beam_size": 1, "best_of": 1},
-            "balanced": {"beam_size": 5, "best_of": 3},
-            "high": {"beam_size": 8, "best_of": 5},
-        }
-        if value in presets:
-            for key, val in presets[value].items():
-                self.config[key] = val
-            # Update beam size dropdown to reflect preset
-            if hasattr(self, 'beam_size_var'):
-                self.beam_size_var.set(str(presets[value]["beam_size"]))
-        save_config(self.config)
-        self.log(f"⚙ Accuracy mode: {value}")
-    
-    def on_beam_size_changed(self, value: str):
-        """Handle beam size change from dropdown."""
-        self.config["beam_size"] = int(value)
-        save_config(self.config)
-        self.log(f"⚙ Beam size: {value}")
     
     def on_language_changed(self, value: str):
         """Handle language change from dropdown."""
@@ -16413,28 +16508,33 @@ class WayfinderApp(ctk.CTk):
     # Ultra benefits are rendered in two places (the upgrade panel and the Settings
     # License tile) — one list so the copy never drifts. Lucide row markers
     # (CLAUDE.md: no decorative emoji as UI chrome).
+    # Claims are measured (docs/EVAL-2026-09-24.md): Turbo Q5 6.6% vs Base 11.5%
+    # WER; Qwen3 4B was the most reliable cleanup model in every style and kept
+    # meaning (Professional/Standard scored C on metrics, fine on reading).
     ULTRA_BENEFITS = [
+        ("check", "Higher Accuracy", "Large v3 Turbo made 43% fewer mistakes than Base in our tests"),
+        ("pen-line", "Writing Styles", "Four styles, tested to keep your meaning"),
+        ("message-circle", "Your Vocabulary", "Names and terms spelled your way, plus your own corrections"),
         ("sparkles", "GPU Acceleration", "Faster transcription and local cleanup on supported GPUs"),
         ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),
-        ("pen-line", "Tone Presets", "Professional, Casual, Dev and Personal styles"),
         ("audio-waveform", "Chunked Recording", "Unlimited length with live feedback"),
-        ("check", "Higher Accuracy", "Large v3 Turbo: about 40% fewer mistakes, plus your own vocabulary"),
     ]
 
-    def _build_ultra_benefit_rows(self, parent) -> None:
+    def _build_ultra_benefit_rows(self, parent, icon_color: str | None = None) -> None:
         """Render the Ultra benefit rows (icon + title + description) into `parent`."""
+        icon_color = icon_color or COLORS["accent"]
         for icon_name, title, desc in self.ULTRA_BENEFITS:
             row = ctk.CTkFrame(parent, fg_color="transparent")
             row.pack(fill="x", pady=3)
             try:
                 ctk.CTkLabel(
-                    row, text="", image=get_icon(icon_name, 16, COLORS["accent"]),
+                    row, text="", image=get_icon(icon_name, 16, icon_color),
                     width=24,
                 ).pack(side="left", anchor="n", padx=(0, 6))
             except Exception:
                 ctk.CTkLabel(
                     row, text="·", font=(self.font_body[0], self.font_sizes["body"]),
-                    text_color=COLORS["accent"], width=24,
+                    text_color=icon_color, width=24,
                 ).pack(side="left", anchor="n")
             txt = ctk.CTkFrame(row, fg_color="transparent")
             txt.pack(side="left", fill="x", expand=True)
@@ -16776,9 +16876,12 @@ class WayfinderApp(ctk.CTk):
         # Content-hugging card (~470px) — the old relwidth=0.82 card stretched absurdly
         # wide on large windows. place() with no explicit size lets pack propagation size
         # the card to its content; the strut below sets the minimum content width.
+        # Ultra is gold everywhere (header glow, activation banner); the panel
+        # that sells it matches.
+        gold = COLORS["accent_yellow"]
         card = ctk.CTkFrame(
             scrim, fg_color=COLORS["bg_card"], corner_radius=RADIUS["xl"],
-            border_width=2, border_color=COLORS["accent"],
+            border_width=2, border_color=gold,
         )
         card.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -16808,11 +16911,25 @@ class WayfinderApp(ctk.CTk):
         inner.pack(fill="both", expand=True, padx=SPACING["2xl"], pady=SPACING["xl"])
         ctk.CTkFrame(inner, fg_color="transparent", width=420, height=1).pack()
 
+        title_row = ctk.CTkFrame(inner, fg_color="transparent")
+        title_row.pack(pady=(SPACING["xs"], 0))
+        try:
+            # The brand arrow with its Ultra gold glow, as in the header.
+            logo_img, logo_size = self._cosmic_header_logo(ICON_PATH, 30, True)
+            self._premium_logo_img = ctk.CTkImage(
+                light_image=logo_img, dark_image=logo_img, size=logo_size)
+            ctk.CTkLabel(title_row, image=self._premium_logo_img, text="").pack(
+                side="left", padx=(0, SPACING["sm"]))
+        except Exception:
+            pass
+        title_font = (self.font_header[0], self.font_sizes["display"], "bold")
         ctk.CTkLabel(
-            inner, text="😇  Wayfinder Ultra",
-            font=(self.font_header[0], self.font_sizes["display"], "bold"),
-            text_color=COLORS["accent"],
-        ).pack(pady=(SPACING["xs"], 0))
+            title_row, text="Wayfinder", font=title_font,
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+        ctk.CTkLabel(
+            title_row, text="Ultra", font=title_font, text_color=gold,
+        ).pack(side="left", padx=(SPACING["sm"], 0))
 
         ctk.CTkLabel(
             inner, text=feature_msg, font=(self.font_body[0], self.font_sizes["body"]),
@@ -16822,18 +16939,18 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkFrame(inner, fg_color=COLORS["border_subtle"], height=1).pack(
             fill="x", pady=(0, SPACING["md"]))
 
-        self._build_ultra_benefit_rows(inner)
+        self._build_ultra_benefit_rows(inner, icon_color=gold)
 
         ctk.CTkFrame(inner, fg_color=COLORS["border_subtle"], height=1).pack(
             fill="x", pady=(SPACING["md"], SPACING["md"]))
 
-        # Price: launch price large in accent, regular price struck through beside it.
+        # Price: launch price large in gold, regular price struck through beside it.
         price_row = ctk.CTkFrame(inner, fg_color="transparent")
         price_row.pack(pady=(0, SPACING["md"]))
         ctk.CTkLabel(
             price_row, text=price,
             font=(self.font_header[0], self.font_sizes["display"], "bold"),
-            text_color=COLORS["accent"],
+            text_color=gold,
         ).pack(side="left")
         ctk.CTkLabel(
             price_row, text=price_reg,
@@ -16849,7 +16966,7 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkButton(
             inner, text=f"Buy Now — {price}",
             font=(self.font_body[0], self.font_sizes["body"], "bold"),
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            fg_color=gold, hover_color=COLORS["accent_yellow_hover"],
             text_color="#000000", height=42, corner_radius=RADIUS["md"],
             command=lambda: [self._open_url(checkout), self._dismiss_premium_prompt()],
         ).pack(fill="x")
@@ -17117,6 +17234,30 @@ class WayfinderApp(ctk.CTk):
                 pass  # app teardown mid-flight — nothing left to update
 
         threading.Thread(target=_worker, daemon=True, name="feedback-post").start()
+
+    def _create_game_chat_rows(self, parent) -> None:
+        """macOS Gamer mode: dictate into World of Warcraft (and other MMO) chat."""
+        self.game_chat_var = ctk.BooleanVar(value=bool(self.config.get("gamer_mode", True)))
+        self.game_chat_send_var = ctk.BooleanVar(value=bool(self.config.get("game_chat_send", True)))
+
+        def _toggled(key, var, on_text, off_text):
+            self.config[key] = bool(var.get())
+            save_config(self.config)
+            self.log("🎮 " + (on_text if var.get() else off_text))
+
+        self.create_toggle_row(
+            parent, "Gamer mode", self.game_chat_var,
+            lambda: _toggled("gamer_mode", self.game_chat_var,
+                             "Gamer mode on", "Gamer mode off: games get a plain paste"),
+            tooltip=SETTING_TOOLTIPS["gamer_mode"],
+        )
+        self.create_toggle_row(
+            parent, "Send game messages", self.game_chat_send_var,
+            lambda: _toggled("game_chat_send", self.game_chat_send_var,
+                             "Game messages send automatically",
+                             "Game messages are left in chat for you to send"),
+            tooltip=SETTING_TOOLTIPS["game_chat_send"],
+        )
 
     def _create_login_item_row(self, parent) -> None:
         """macOS/Windows: "Open at login" (SMAppService / the per-user Run key).
@@ -20306,6 +20447,15 @@ class WayfinderApp(ctk.CTk):
             elif old_state == AppState.PROCESSING:
                 self._cancel_processing_watchdog()
 
+            # PASTING watchdog (macOS): a paste is a single Cmd+V, so one that
+            # hasn't finished in seconds is hung. Linux types keystroke by
+            # keystroke (long text legitimately takes a while), so it is not armed there.
+            if IS_MACOS:
+                if new_state == AppState.PASTING:
+                    self._start_paste_watchdog()
+                elif old_state == AppState.PASTING:
+                    self._cancel_paste_watchdog()
+
             # Optional RECORDING cap (config max_recording_duration; 0 = off).
             if new_state == AppState.RECORDING:
                 self._start_recording_watchdog()
@@ -20449,6 +20599,51 @@ class WayfinderApp(ctk.CTk):
             "post-processing step. Reset to idle; see the activity log for details.",
             self.session_generation,
         )
+
+    # === PASTING watchdog (macOS; recover from a paste that never returns) ===
+
+    PASTE_WATCHDOG_S = 10
+
+    def _start_paste_watchdog(self) -> None:
+        self._cancel_paste_watchdog()
+        gen = self.session_generation
+        # Game chat sends long dictation as several messages (~1 s each), so
+        # the budget grows with the text; a plain paste is still ~10 s.
+        text_len = len(getattr(self, "_pasting_text", "") or "")
+        timeout_s = self.PASTE_WATCHDOG_S + text_len // 100
+        self._paste_watchdog_job = self.after(
+            int(timeout_s * 1000), lambda: self._on_paste_timeout(gen)
+        )
+
+    def _cancel_paste_watchdog(self) -> None:
+        job = getattr(self, "_paste_watchdog_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._paste_watchdog_job = None
+
+    def _on_paste_timeout(self, gen: int) -> None:
+        """PASTING outlived the watchdog: hand the text over and reset to IDLE."""
+        self._paste_watchdog_job = None
+        if self.app_state != AppState.PASTING or gen != self.session_generation:
+            return
+        # The hung worker holds the one-thread injection executor; without a
+        # fresh one every later paste would queue behind it forever.
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.session_generation += 1
+        text = getattr(self, "_pasting_text", "") or ""
+        copied = False
+        if text:
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(text)
+                copied = True
+            except Exception:
+                pass
+        where = "on the clipboard: press ⌘V." if copied else "in History."
+        self.on_error(f"The paste didn't finish. Your text is {where}", self.session_generation)
 
     # === RECORDING cap (optional; max_recording_duration seconds, 0 = off) ===
 
@@ -21239,10 +21434,10 @@ class WayfinderApp(ctk.CTk):
         elif event_type == EventType.QUIT_APP:
             self.quit_app()
         elif event_type == EventType.SWITCH_TAB:
-            if data in ("dictate", "settings", "style", "history"):
+            if data in self._socket_tab_ids():
                 self._switch_tab(data)
         elif event_type == EventType.INSPECT_UI:
-            if data in ("dictate", "settings", "style", "history"):
+            if data in self._socket_tab_ids():
                 self._inspect_ui(data)
         elif event_type == EventType.TRANSCRIPTION_DONE:
             text, gen = self._split_gen(data)
@@ -21335,7 +21530,37 @@ class WayfinderApp(ctk.CTk):
         # UI + overlay-pill sync — identical to the in-app Style tab click (no path drift).
         self._set_output_style(next_style)
 
+    def _gamer_profile_now(self):
+        """macOS Gamer mode: the supported game in front right now, or None."""
+        if not (IS_MACOS and self.config.get("gamer_mode", True)):
+            return None
+        try:
+            from wayfinder.core import macos_game_chat as game_chat
+            _pid, bundle_id, app_name = game_chat.frontmost_app()
+            return game_chat.match_profile(bundle_id, app_name)
+        except Exception:
+            return None
+
+    def _gamer_asr_config(self, config: dict) -> dict:
+        """Gamer mode overlay for this dictation (vocabulary + Normal cleanup)."""
+        profile = getattr(self, "_gamer_profile", None)
+        if profile is None:
+            return config
+        from wayfinder.core.macos_game_chat import gamer_asr_overlay
+        return gamer_asr_overlay(config, profile)
+
     def start_recording(self):
+        # Gamer mode follows the game in front when dictation starts.
+        self._gamer_profile = WayfinderApp._gamer_profile_now(self)
+        if self._gamer_profile is not None:
+            self.log(f"🎮 Gamer mode: {self._gamer_profile.name}")
+        if IS_MACOS:
+            # Pick up a keyboard-layout switch before this dictation's paste.
+            try:
+                from wayfinder.core import macos_paste
+                self.after_idle(macos_paste.refresh_layout_cache)
+            except Exception:
+                pass
         try:
             self.log("🎤 Listening...")
             # A new dictation clears any stale runtime-error banner from the last run.
@@ -21595,9 +21820,9 @@ class WayfinderApp(ctk.CTk):
             # Skip post-processing per-chunk - will be applied to final combined text.
             # Light ASR profile is a runtime overlay only (never written back to disk).
             from wayfinder.core.gm_asr import effective_asr_config
-            asr_cfg = effective_asr_config(
+            asr_cfg = WayfinderApp._gamer_asr_config(self, effective_asr_config(
                 self.config, bool(getattr(self, "_game_mode", False))
-            )
+            ))
             text = transcribe_with_config(
                 chunk_path,
                 asr_cfg,
@@ -21860,7 +22085,8 @@ class WayfinderApp(ctk.CTk):
                     from wayfinder.core.postprocessor import process_with_config
                     self.log("🔧 Post-processing combined text...")
                     original_text = combined_text
-                    combined_text = process_with_config(combined_text, self.config)
+                    combined_text = process_with_config(
+                        combined_text, WayfinderApp._gamer_asr_config(self, self.config))
                     if combined_text != original_text:
                         self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
                 except Exception as e:
@@ -21946,9 +22172,9 @@ class WayfinderApp(ctk.CTk):
             trans_start = time_module.perf_counter()
             # Light ASR profile is a runtime overlay only (never written back to disk).
             from wayfinder.core.gm_asr import effective_asr_config
-            asr_cfg = effective_asr_config(
+            asr_cfg = WayfinderApp._gamer_asr_config(self, effective_asr_config(
                 self.config, bool(getattr(self, "_game_mode", False))
-            )
+            ))
             text = transcribe_with_config(audio_path, asr_cfg)
             trans_elapsed = time_module.perf_counter() - trans_start
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
@@ -22013,6 +22239,7 @@ class WayfinderApp(ctk.CTk):
             self.on_injection_done(g)  # reuse the normal state-reset (no inject_text)
             return
 
+        self._pasting_text = processed_text
         self.update_state(AppState.PASTING)
         g = gen if gen is not None else self.session_generation
         self.executor.submit(self.do_inject, processed_text, g)
@@ -22085,6 +22312,14 @@ class WayfinderApp(ctk.CTk):
             # Final generation gate immediately before keystrokes leave the process.
             if gen is not None and gen != self.session_generation:
                 return
+
+            # macOS game chat: an MMO (World of Warcraft first) is in front, so
+            # open its chat box, paste and send instead of a plain paste.
+            game_chat = getattr(self, "_inject_into_game_chat", None)
+            if IS_MACOS and game_chat is not None and self.config.get("gamer_mode", True):
+                if game_chat(text, gen):
+                    self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
+                    return
 
             # Phase 3.2: optional desktop clipboard paste when focus already drifted
             # and the type backend cannot retarget (Wayland ydotool/wtype). Off by
@@ -22159,6 +22394,55 @@ class WayfinderApp(ctk.CTk):
             self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
+
+    def _inject_into_game_chat(self, text: str, gen=None) -> bool:
+        """macOS: dictate into a supported game's chat. False = not a game.
+
+        Runs on the injection worker. Raises (-> INJECTION_ERROR) if the game
+        left the foreground mid-send; the text stays in History.
+        """
+        from wayfinder.core import macos_game_chat as game_chat
+        from wayfinder.core.injector import inject_text, press_enter
+
+        pid, bundle_id, app_name = game_chat.frontmost_app()
+        profile = game_chat.match_profile(bundle_id, app_name)
+        if profile is None:
+            # Unlisted game: the normal paste, with a note that it's untested.
+            category, bundle_path = game_chat.app_signals(pid)
+            reason = game_chat.unlisted_game_reason(bundle_id, app_name, category, bundle_path)
+            if reason is not None:
+                self.log(f"🎮 {app_name or 'This app'}: {reason} Aura hasn't been tested "
+                         "with; pasting normally. See the Games tab.")
+            return False
+        if profile.caution:
+            # Not recommended, but not restricted: the normal paste, with a heads-up.
+            self.log(f"🎮 Heads-up: {profile.reason} ({profile.name}). Pasting normally; "
+                     "see the Games tab.")
+            return False
+        send = bool(self.config.get("game_chat_send", True)) and profile.auto_send
+        self.log(
+            f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste for you to send'}"
+            f"{'' if profile.open_chat else ' (click into chat first)'}"
+        )
+        from wayfinder.core.macos_paste import hold_keys
+        try:
+            with hold_keys(game_chat.KEY_HOLD_S):
+                result = game_chat.send_to_chat(
+                    text, profile,
+                    game_pid=pid,
+                    send=send,
+                    paste=lambda message: inject_text(message, typing_speed="instant"),
+                    press_return=press_enter,
+                    frontmost_pid=lambda: game_chat.frontmost_app()[0],
+                    still_current=lambda: gen is None or gen == self.session_generation,
+                )
+        except game_chat.GameChatAborted as exc:
+            raise InjectionError(f"Game chat stopped: {exc}. Your text is in History.") from exc
+        if result.waiting:
+            self.log(f"🎮 Sent the first message ({profile.name} chat holds {profile.max_chars} "
+                     "characters). The next part is in chat: press Enter to send it."
+                     + (f" {result.left_over} more part(s) are in History." if result.left_over else ""))
+        return True
 
     def on_injection_done(self, gen=None):
         # Ignore completion of a superseded session (force_reset / newer recording).

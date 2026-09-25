@@ -111,20 +111,20 @@ elif IS_APPIMAGE and APPDIR:
 else:
     ICON_PATH = PROJECT_ROOT / "assets" / "icon.png"
 
-# Preferred local post-processing models, best-first. The June 2026 tone eval
-# found Gemma 3 1B the most consistent "gentle guide" cleaner — it reliably
-# applies per-tone formatting (e.g. professional "oh thats tight bro" ->
-# "Oh, very cool brother.") where Qwen 3.5 2B was inconsistent and LFM2.5 echoed
-# the input verbatim. Keep Qwen 3.5 / 2.5 as fallbacks. New models added here are
-# picked up automatically by _pick_llm (no per-environment edits needed).
+# Preferred local post-processing models, best-first among those INSTALLED.
+# The 2026-09-24 speech x style matrix (docs/EVAL-2026-09-24.md) graded Qwen3
+# 4B A on every style; Gemma 3 1B reworded meaning ("diff" -> "difference")
+# and Qwen 3.5 2B mostly echoed its input, so styles need Qwen3 4B (Ultra).
+# Normal needs no model at all (instant filler removal).
 _LLM_PREFERENCE = [
+    "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
     "google_gemma-3-1b-it-Q4_K_M.gguf",
     "Qwen3.5-2B-Q4_K_M.gguf",
-    # Strong/caricature flagship — preferred over the legacy Qwen 2.5 as a
-    # default, but Gemma/Qwen3.5 stay first (faster for everyday cleanup).
-    "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
     "qwen2.5-1.5b-instruct-q4_k_m.gguf",
 ]
+# When nothing is installed yet, the default target is the free model: a Free
+# install must never default to an Ultra-only download.
+_LLM_DEFAULT_DOWNLOAD = "google_gemma-3-1b-it-Q4_K_M.gguf"
 
 
 def _pick_llm(*dirs: str) -> str:
@@ -135,7 +135,7 @@ def _pick_llm(*dirs: str) -> str:
             p = os.path.join(d, fname)
             if os.path.exists(p):
                 return p
-    return os.path.join(dirs[-1], _LLM_PREFERENCE[0])
+    return os.path.join(dirs[-1], _LLM_DEFAULT_DOWNLOAD)
 
 
 def _windows_bundled_whisper() -> str | None:
@@ -306,8 +306,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "processing_mode": "local",  # local | remote
     
     # Accuracy enhancement settings
-    "beam_size": 5,  # Beam search size (1-5 recommended, higher is slow)
-    "best_of": 3,  # Number of best candidates to consider
+    # beam_size/best_of (and accuracy_mode) now only feed Faster-Whisper.
+    # whisper.cpp decodes greedily: beam 2-8 never beat greedy in testing
+    # (docs/EVAL-2026-09-24.md). Hidden override, clamped to 1-8:
+    "whisper_beam_size": 1,
+    "beam_size": 5,  # Faster-Whisper beam search size
+    "best_of": 3,  # Faster-Whisper candidates for temperature fallback
     "language": "en",  # Language code: "en", "auto" for auto-detect
     "entropy_threshold": 2.6,  # Filter low-confidence outputs (higher = accept more)
     "no_speech_threshold": 0.5,  # Silence detection threshold (lower = more sensitive)
@@ -373,6 +377,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Master switch for the on-screen status pill. Off = no visual overlay; a
     # tray-only overlay subprocess still hosts the Qt StatusNotifier tray on Linux.
     "overlay_enabled": True,
+    # macOS Gamer mode: when World of Warcraft (or another supported MMO) is in
+    # front, prime Whisper with its chat slang, keep cleanup Normal, then open
+    # its chat box, paste and send (src/wayfinder/core/macos_game_chat.py).
+    "gamer_mode": True,
+    "game_chat_send": True,
     # SteamOS Game Mode dictation (audio cues + rumble, no overlay). This module is the
     # single source of DEFAULT_CONFIG — wayfinder_main.py imports it (no mirror to keep in sync).
     "game_mode_dictation": False,

@@ -62,6 +62,9 @@ def test_disabled_setting_hosts_no_tray(platform, has_pystray):
 
 
 def test_microphone_tray_menu_contains_real_devices_and_processing_submenu():
+    import wayfinder_main
+    if wayfinder_main.pystray is None:
+        pytest.skip("pystray unavailable here (headless Linux; the Qt tray is used there)")
     app = SimpleNamespace(
         config={"audio_preprocessing": "light"},
         _get_microphone_dropdown_options=lambda: (

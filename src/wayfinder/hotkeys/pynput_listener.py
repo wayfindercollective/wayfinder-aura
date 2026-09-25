@@ -484,6 +484,7 @@ def pynput_hotkey_listener(
     # Track currently pressed modifiers
     pressed_modifiers = set()
     active_actions: set[str] = set()
+    captured_darwin_vk: int | None = None
 
     # Debounce
     _last_hotkey_time = 0.0
@@ -571,8 +572,10 @@ def pynput_hotkey_listener(
     solo_gesture = SoloModifierGesture(_emit_solo)
 
 
-    def on_press(key):
-        nonlocal pressed_modifiers, _last_hotkey_time, _last_style_time
+    def on_press(key, injected=False):
+        nonlocal pressed_modifiers, _last_hotkey_time, _last_style_time, captured_darwin_vk
+        if sys.platform == "darwin" and injected:
+            return
 
         if sys.platform == "darwin":
             key = _darwin_normalize_key(key)
@@ -602,6 +605,10 @@ def pynput_hotkey_listener(
             # this press with a newer Detect session id.
             cap_gen = capture_state.get("gen")
             capture_state["armed"] = False
+            if sys.platform == "darwin":
+                # pynput dispatches on_press before darwin_intercept for the
+                # same CGEvent. Let the intercept know Detect consumed it.
+                captured_darwin_vk = _darwin_virtual_keycode(code)
             event_queue.put((EventType.HOTKEY_CAPTURED,
                              {"code": code, "modifiers": sorted(pressed_modifiers),
                               "device": "keyboard",
@@ -627,10 +634,14 @@ def pynput_hotkey_listener(
             else:
                 solo_gesture.press_other()
 
-        # Check for main hotkey (with debounce)
-        if (
-            not solo_mode
-            and key == target_key
+        # On macOS, pynput calls this before darwin_intercept and exposes only
+        # a separately polled global Fn state. That state can disagree with the
+        # key's own event, or describe a synthetic event. The intercept below
+        # validates the actual physical CGEvent before any chord-based action.
+        # Bare-modifier tap/hold gestures remain here because they are driven
+        # by macOS modifier flag-change events rather than a key chord.
+        if sys.platform != "darwin" and (
+            key == target_key
             and check_modifiers(required_modifiers)
             and "record" not in active_actions
         ):
@@ -642,7 +653,7 @@ def pynput_hotkey_listener(
                 event_queue.put((EventType.HOTKEY_PRESSED, None))
 
         # Check for style toggle hotkey (with debounce)
-        if (
+        if sys.platform != "darwin" and (
             style_target_key
             and key == style_target_key
             and check_modifiers(style_required_modifiers)
@@ -654,8 +665,10 @@ def pynput_hotkey_listener(
                 log("✎ Style toggle activated!")
                 event_queue.put((EventType.STYLE_TOGGLE, None))
     
-    def on_release(key):
+    def on_release(key, injected=False):
         nonlocal pressed_modifiers
+        if sys.platform == "darwin" and injected:
+            return
 
         if sys.platform == "darwin":
             key = _darwin_normalize_key(key)
@@ -699,6 +712,7 @@ def pynput_hotkey_listener(
             from Quartz import (
                 CGEventGetFlags,
                 CGEventGetIntegerValueField,
+                kCGEventSourceUnixProcessID,
                 kCGEventFlagMaskSecondaryFn,
                 kCGEventFlagMaskAlternate,
                 kCGEventFlagMaskCommand,
@@ -724,10 +738,16 @@ def pynput_hotkey_listener(
                 if target_vk is None or keycode != target_vk:
                     return False
                 required = {str(value).lower() for value in configured_modifiers or ()}
-                return all(flags & modifier_masks[name] for name in required if name in modifier_masks)
+                if not required <= modifier_masks.keys():
+                    return False
+                return all(
+                    bool(flags & mask) == (name in required)
+                    for name, mask in modifier_masks.items()
+                )
 
             def _darwin_intercept(event_type, event):
-                """Track Fn and stop Aura's Fn+Space from typing a space."""
+                """Trigger only from a physical key event carrying the full chord."""
+                nonlocal _last_hotkey_time, _last_style_time, captured_darwin_vk
                 flags = CGEventGetFlags(event)
                 fn_active = bool(flags & kCGEventFlagMaskSecondaryFn)
                 if fn_active:
@@ -736,6 +756,9 @@ def pynput_hotkey_listener(
                     pressed_modifiers.discard("fn")
 
                 keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+                injected = bool(
+                    CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID)
+                )
                 current_key = (
                     config_ref.get("hotkey_key", hotkey_key)
                     if config_ref is not None else hotkey_key
@@ -760,13 +783,34 @@ def pynput_hotkey_listener(
                 if current_style_key and _darwin_virtual_keycode(current_style_key) is None:
                     current_style_key, current_style_modifiers = 28, {"fn"}
 
-                matches = _raw_chord_matches(
+                record_matches = _raw_chord_matches(
                     keycode, current_key, current_modifiers, flags
-                ) or _raw_chord_matches(
+                )
+                style_matches = _raw_chord_matches(
                     keycode, current_style_key, current_style_modifiers, flags
                 )
-                if event_type == kCGEventKeyDown and matches:
+                if event_type == kCGEventKeyDown and captured_darwin_vk is not None:
+                    consumed_by_capture = captured_darwin_vk == keycode
+                    captured_darwin_vk = None
+                    if consumed_by_capture:
+                        return event
+                if injected:
+                    return event
+                if event_type == kCGEventKeyDown and (record_matches or style_matches):
                     suppressed_keycodes.add(int(keycode))
+                    now = time.time()
+                    if record_matches and "record" not in active_actions:
+                        active_actions.add("record")
+                        if now - _last_hotkey_time >= DEBOUNCE_SECONDS:
+                            _last_hotkey_time = now
+                            log("🎯 Hotkey activated! (physical macOS chord)")
+                            event_queue.put((EventType.HOTKEY_PRESSED, None))
+                    if style_matches and "style" not in active_actions:
+                        active_actions.add("style")
+                        if now - _last_style_time >= DEBOUNCE_SECONDS:
+                            _last_style_time = now
+                            log("✎ Style toggle activated! (physical macOS chord)")
+                            event_queue.put((EventType.STYLE_TOGGLE, None))
                     return None
                 if event_type == kCGEventKeyUp and int(keycode) in suppressed_keycodes:
                     suppressed_keycodes.discard(int(keycode))
@@ -775,7 +819,7 @@ def pynput_hotkey_listener(
 
             listener_kwargs["darwin_intercept"] = _darwin_intercept
         except Exception as exc:
-            log(f"⚠️ Fn hotkey support unavailable: {exc}")
+            log(f"⚠️ macOS hotkeys disabled: physical-event verification unavailable ({exc})")
 
     listener = keyboard.Listener(
         on_press=on_press,

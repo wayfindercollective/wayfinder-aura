@@ -161,7 +161,7 @@ PREMIUM_FEATURES = {
     # tigers (never enforced) and are intentionally free — not listed here.
     "custom_vocabulary": ("Custom Vocabulary", "Add your own terms and names"),
     "voice_profiles": ("Voice Profiles", "Learns your speech patterns for better accuracy"),
-    "tone_system": ("Tone Presets", "Professional, Casual, Dev, and Personal writing styles"),
+    "tone_system": ("Writing Styles", "Professional, Casual, Dev and Personal writing styles"),
     "large_cleanup_models": (
         "Large Cleanup Models",
         "3B+ local LLM cleanup (e.g. Qwen3 4B Instruct) via authenticated model CDN",
@@ -620,8 +620,8 @@ class FeatureGate:
             name, desc = PREMIUM_FEATURES[feature_id]
             # macOS shows no emoji as UI chrome (the prompt has its own lock icon).
             lock = "" if platform.system() == "Darwin" else "🔒 "
-            return f"{lock}{name} is a Wayfinder Ultra feature.\n\n{desc}"
-        return "This is a Wayfinder Ultra feature."
+            return f"{lock}Unlock {name} with Wayfinder Ultra.\n\n{desc}"
+        return "Unlock this with Wayfinder Ultra."
 
     def activate(self, key: str) -> LicenseInfo:
         """

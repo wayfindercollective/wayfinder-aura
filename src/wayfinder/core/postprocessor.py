@@ -251,7 +251,7 @@ MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
         "issues": [],  # Improved instruction following over Qwen 2.5
         "tier_override": "small",
         "best_for": ["standard", "strong"],
-        "recommended": True,  # Top recommendation (replaces Qwen 2.5 1.5B)
+        # Not recommended: echoed its input in the 2026-09-24 matrix.
     },
 }
 
@@ -664,8 +664,9 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
 # Matrix 2026-09-24 (M3 Ultra, resident llama-server): Gemma 3 1B rewrote
 # meaning (diff -> "difference", "or nah" -> "Yeah, I'm hungry") and failed
 # Dev/Professional (F) and Casual/Personal (C); Qwen 3.5 2B echoed its input
-# (fillers kept, Professional F). Qwen3 4B graded A on every style (its
-# Professional/Standard C was sentence splitting, fine on reading).
+# (fillers kept, Professional F). Qwen3 4B was the most reliable in every
+# style (A, except Professional/Standard C on metrics - sentence splitting,
+# fine on reading - and Dev B end to end, from speech errors).
 _SMALL_MODEL_STYLE_GAPS = frozenset(
     (tone, intensity)
     for tone in ("professional", "casual", "dev", "personal")
@@ -4234,12 +4235,14 @@ def get_recommended_models() -> list:
         {
             "tier": "recommended",
             # Order and ⭐ must agree with the shipped lineup: the catalog row
-            # flagged `recommended` is gemma3-1b, and components.MODEL_RECOMMENDATIONS
-            # already tells the user "gemma3:1b — ⭐ Best overall". Ratcheted by
+            # flagged `recommended` is qwen3-4b-2507 (most reliable in every style,
+            # docs/EVAL-2026-09-24.md), and components.MODEL_RECOMMENDATIONS says
+            # "qwen3:4b — ⭐ Best overall". Ratcheted by
             # tests/test_catalog_ratchet.py::TestRecommendationsMatchTheLineup.
             "models": [
-                {"name": "gemma3:1b", "description": "⭐ Best overall - fast + most consistent cleanup across tones"},
-                {"name": "qwen3.5:2b", "description": "Roomier alternative - excellent instruction following"},
+                {"name": "qwen3:4b", "description": "⭐ Best overall - most reliable in every style we tested (Ultra)"},
+                {"name": "gemma3:1b", "description": "Fast and free - fine for Normal; styles need Qwen3 4B"},
+                {"name": "qwen3.5:2b", "description": "Leaves text largely unchanged - Normal only"},
             ],
         },
         {
@@ -4288,42 +4291,48 @@ def get_model_recommendation_for_style(style: str, strong_mode: bool = False) ->
         }
 
     # Standard mode - need models that follow "keep exact words" instructions
+    # Graded in docs/EVAL-2026-09-24.md: only Qwen3 4B does the styles well;
+    # Gemma 3 1B rewrites meaning and Qwen 3.5 2B leaves text unchanged.
+    small_gap = ["gemma3:1b", "qwen3.5:2b"]
+    small_reason = "gemma3:1b rewords meaning and qwen3.5:2b leaves text unchanged in testing"
     if style == "minimal":
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": [],
-            "message": "Minimal mode just removes filler. Most models work well.",
+            # Only used when Normal is opted into a model (normal_llm_cleanup).
+            "recommended": ["qwen3:4b"],
+            "also_works": ["qwen3.5:2b"],
+            "avoid": ["gemma3:1b"],
+            "avoid_reason": "gemma3:1b rewords meaning in testing",
+            "message": "Normal needs no model - it removes um/uh instantly.",
         }
     elif style == "dev":
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": ["phi3:mini"],
-            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
-            "message": "Dev mode adds git/code context. qwen3.5:2b recommended.",
+            "recommended": ["qwen3:4b"],
+            "also_works": [],
+            "avoid": small_gap + ["phi3:mini"],
+            "avoid_reason": small_reason,
+            "message": "Dev keeps code and git terms exactly. Qwen3 4B recommended.",
         }
     elif style == "professional":
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": ["phi3:mini"],
-            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
-            "message": "Professional mode fixes punctuation. qwen3.5:2b keeps your words intact.",
+            "recommended": ["qwen3:4b"],
+            "also_works": [],
+            "avoid": small_gap + ["phi3:mini"],
+            "avoid_reason": small_reason,
+            "message": "Professional tidies punctuation and slang. Qwen3 4B recommended.",
         }
     elif style == "casual":
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": ["phi3:mini"],
-            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
-            "message": "Casual mode uses relaxed punctuation. Most small models work well.",
+            "recommended": ["qwen3:4b"],
+            "also_works": [],
+            "avoid": small_gap + ["phi3:mini"],
+            "avoid_reason": small_reason,
+            "message": "Casual keeps your words with a relaxed feel. Qwen3 4B recommended.",
         }
     else:  # personal or unknown
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": ["phi3:mini"],
-            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
-            "message": "Personal mode preserves your speaking style. qwen3.5:2b recommended.",
+            "recommended": ["qwen3:4b"],
+            "also_works": [],
+            "avoid": small_gap + ["phi3:mini"],
+            "avoid_reason": small_reason,
+            "message": "Personal keeps your natural voice. Qwen3 4B recommended.",
         }

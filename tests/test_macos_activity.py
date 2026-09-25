@@ -2,6 +2,7 @@
 import sys
 import types
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -33,6 +34,9 @@ def test_begin_is_idempotent_and_end_is_safe(monkeypatch):
         def endActivity_(self, token):
             calls.append(("end", None))
 
+    foundation = ModuleType("Foundation")
+    foundation.NSActivityUserInitiated = 0x00FFFFFF
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
     monkeypatch.setattr(macos_activity.sys, "platform", "darwin")
     monkeypatch.setattr(macos_activity, "_process_info", lambda: _Info())
     # begin() imports the option constant from PyObjC's Foundation; provide it

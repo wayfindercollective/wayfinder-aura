@@ -35,14 +35,15 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "posix_only: simulates macOS on a POSIX host (os.fchmod, AF_UNIX, "
-        "PyObjC, Tk file handlers, POSIX file modes); auto-skipped on Windows.",
+        "macos_only: needs a real macOS backend (pynput's darwin key codes and "
+        "event tap); auto-skipped elsewhere. Prefer stubbing Quartz/AppKit/"
+        "Foundation so a macOS test runs everywhere.",
     )
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip ``@pytest.mark.linux_only`` tests when not on Linux, and
-    ``@pytest.mark.posix_only`` tests on Windows.
+    """Skip ``@pytest.mark.linux_only`` tests when not on Linux (and
+    ``@pytest.mark.macos_only`` tests when not on macOS).
 
     Those tests cover mechanisms with no macOS/Windows equivalent, so they can
     only run on Linux. They STILL run on Linux — the production regression gate
@@ -50,21 +51,17 @@ def pytest_collection_modifyitems(config, items):
     without ever weakening Linux coverage. It is not a substitute for a proper
     adapter: shared behavior must stay unmarked and pass on every platform.
     """
-    if sys.platform == "win32":
-        posix_skip = pytest.mark.skip(
-            reason="Needs a POSIX host; not applicable on Windows"
-        )
-        for item in items:
-            if "posix_only" in item.keywords:
-                item.add_marker(posix_skip)
-    if sys.platform == "linux":
-        return
-    skip_marker = pytest.mark.skip(
+    skip_linux = pytest.mark.skip(
         reason="Linux-only mechanism; not applicable on this platform"
     )
+    skip_macos = pytest.mark.skip(
+        reason="macOS-only backend; not applicable on this platform"
+    )
     for item in items:
-        if "linux_only" in item.keywords:
-            item.add_marker(skip_marker)
+        if "linux_only" in item.keywords and sys.platform != "linux":
+            item.add_marker(skip_linux)
+        if "macos_only" in item.keywords and sys.platform != "darwin":
+            item.add_marker(skip_macos)
 
 
 # Add src to path for imports
