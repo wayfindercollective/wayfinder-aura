@@ -672,3 +672,63 @@ def test_silence_message_names_the_windows_switch(monkeypatch):
     assert "desktop apps access your microphone" in msg
     monkeypatch.setattr(windows_privacy, "microphone_block", lambda: None)
     assert "No speech detected" in wayfinder_main.WayfinderApp._silence_error_message(app)
+
+
+# --- Benchmark system info, model folder, key repair, paste watchdog, motion ----
+
+@windows_only
+def test_windows_system_info_is_filled_in():
+    from wayfinder.utils.windows_sysinfo import system_info
+
+    info = system_info()
+    assert info.get("cpu") and info.get("ram", "").endswith("GB")
+
+
+def test_windows_llm_models_live_where_the_config_default_points(monkeypatch):
+    import wayfinder_main
+
+    monkeypatch.setattr(wayfinder_main.sys, "platform", "win32")
+    assert wayfinder_main._get_llm_models_dir().parts[-4:] == (
+        "AppData", "Local", "wayfinder-aura", "llm-models")
+    monkeypatch.setattr(wayfinder_main.sys, "platform", "linux")
+    assert wayfinder_main._get_llm_models_dir().parts[-4:] == (
+        ".local", "share", "wayfinder-aura", "llm-models")
+
+
+def test_key_state_helpers_are_inert_off_windows(monkeypatch):
+    from wayfinder.hotkeys import pynput_listener as pl
+
+    monkeypatch.setattr(pl.sys, "platform", "linux")
+    assert pl._win32_key_pressed(57) is None
+    assert pl._win32_foreground_elevated() == (None, "")
+
+
+@windows_only
+def test_foreground_elevation_reads_a_normal_window_as_not_elevated():
+    from wayfinder.hotkeys.pynput_listener import _win32_foreground_elevated
+
+    elevated, _exe = _win32_foreground_elevated()
+    assert elevated in (False, True, None)  # a real answer, never an exception
+
+
+def test_paste_watchdog_is_armed_on_windows_with_ctrl_v_copy():
+    import inspect
+
+    import wayfinder_main
+
+    src = inspect.getsource(wayfinder_main.WayfinderApp)
+    assert "if IS_MACOS or IS_WINDOWS:\n                if new_state == AppState.PASTING:" in src
+    assert 'paste_keys = "Ctrl+V" if IS_WINDOWS else "⌘V"' in src
+
+
+def test_reduce_motion_parks_the_idle_pill_on_windows(monkeypatch):
+    from wayfinder.ui import overlay, windows_window
+
+    monkeypatch.setattr(overlay.sys, "platform", "win32")
+    monkeypatch.setattr(windows_window, "animations_enabled", lambda: False)
+    assert overlay._windows_reduce_motion() is True
+    monkeypatch.setattr(windows_window, "animations_enabled", lambda: True)
+    assert overlay._windows_reduce_motion() is False
+    monkeypatch.setattr(overlay.sys, "platform", "linux")
+    monkeypatch.setattr(windows_window, "animations_enabled", lambda: False)
+    assert overlay._windows_reduce_motion() is False

@@ -205,6 +205,10 @@ def _get_llm_models_dir() -> Path:
     """Get the LLM models directory (platform-aware)."""
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
+    if sys.platform == "win32":
+        # Where config.py's Windows default already points (it was ~/.local/share,
+        # so in-app downloads landed beside, not in, the default model's folder).
+        return Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
     return Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
 
 
@@ -1710,6 +1714,13 @@ class BenchmarkRunner:
                 if result.returncode == 0:
                     mem_bytes = int(result.stdout.strip())
                     info["ram"] = f"{mem_bytes / (1024**3):.0f} GB"
+            except Exception:
+                pass
+        elif sys.platform == "win32":
+            # Windows: registry + kernel32 (there is no /proc or sysctl).
+            try:
+                from wayfinder.utils.windows_sysinfo import system_info
+                info.update(system_info())
             except Exception:
                 pass
         else:
@@ -5984,7 +5995,10 @@ class WayfinderApp(ctk.CTk):
                 )
             except Exception as exc:
                 self.log(f"⚠ macOS lifecycle integration unavailable: {exc}")
-        elif IS_WINDOWS:
+        if IS_MACOS:
+            self.after(1200, self._refresh_macos_permission_banner)
+            self._apply_macos_window_chrome()
+        if IS_WINDOWS and not IS_MACOS:
             # Same sleep/wake/display handling as the Mac, from Windows'
             # WM_POWERBROADCAST / WM_DISPLAYCHANGE (utils/windows_lifecycle.py);
             # its thread only queues, Tk runs the handlers.
@@ -6004,9 +6018,8 @@ class WayfinderApp(ctk.CTk):
                 )
             except Exception as exc:
                 self.log(f"⚠ Windows sleep/wake integration unavailable: {exc}")
-        if IS_MACOS or IS_WINDOWS:
+            # The Mac's blocked-microphone banner, from Windows' privacy switches.
             self.after(1200, self._refresh_macos_permission_banner)
-            self._apply_macos_window_chrome()
         if WINDOWS_MAC_LOOK:
             # Caption bar in the app's ink, rim-coloured border (the Mac's
             # unified title bar). After mapping: DWM needs the real HWND.
@@ -15994,7 +16007,8 @@ class WayfinderApp(ctk.CTk):
         label = getattr(self, "macos_permission_label", None)
         button = getattr(self, "macos_permission_open_btn", None)
         anchor = getattr(self, "_dictate_banner_anchor", None)
-        if IS_WINDOWS and banner is not None and label is not None and button is not None:
+        if (IS_WINDOWS and not IS_MACOS and banner is not None and label is not None
+                and button is not None):
             self._refresh_windows_microphone_banner(banner, label, button, anchor)
             return
         if not IS_MACOS or banner is None or label is None or button is None:
@@ -16091,7 +16105,7 @@ class WayfinderApp(ctk.CTk):
             pass
 
     def _open_missing_macos_permission(self) -> None:
-        if IS_WINDOWS:
+        if IS_WINDOWS and not IS_MACOS:
             from wayfinder.utils.windows_privacy import open_microphone_settings
 
             if not open_microphone_settings():
@@ -20617,10 +20631,12 @@ class WayfinderApp(ctk.CTk):
             elif old_state == AppState.PROCESSING:
                 self._cancel_processing_watchdog()
 
-            # PASTING watchdog (macOS): a paste is a single Cmd+V, so one that
-            # hasn't finished in seconds is hung. Linux types keystroke by
-            # keystroke (long text legitimately takes a while), so it is not armed there.
-            if IS_MACOS:
+            # PASTING watchdog (macOS/Windows): a paste is a single Cmd/Ctrl+V
+            # (Windows' instant path; its SendInput fallback is one batched
+            # call), so one that hasn't finished in seconds is hung. Linux types
+            # keystroke by keystroke (long text legitimately takes a while), so
+            # it is not armed there.
+            if IS_MACOS or IS_WINDOWS:
                 if new_state == AppState.PASTING:
                     self._start_paste_watchdog()
                 elif old_state == AppState.PASTING:
@@ -20812,7 +20828,8 @@ class WayfinderApp(ctk.CTk):
                 copied = True
             except Exception:
                 pass
-        where = "on the clipboard: press ⌘V." if copied else "in History."
+        paste_keys = "Ctrl+V" if IS_WINDOWS else "⌘V"
+        where = f"on the clipboard: press {paste_keys}." if copied else "in History."
         self.on_error(f"The paste didn't finish. Your text is {where}", self.session_generation)
 
     # === RECORDING cap (optional; max_recording_duration seconds, 0 = off) ===
@@ -20957,6 +20974,13 @@ class WayfinderApp(ctk.CTk):
             return
 
         interval = _hero_idle_interval_ms()
+        if IS_WINDOWS:
+            from wayfinder.ui.windows_window import animations_enabled
+
+            if not animations_enabled():
+                # "Animation effects" off (Windows' Reduce Motion): keep this
+                # still frame, as the Mac does; look again in 2 s.
+                interval = 2000
         self._idle_breath_job = (
             self.after(interval, self._animate_idle_breath)
             if interval is not None else None

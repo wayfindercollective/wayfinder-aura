@@ -63,3 +63,24 @@ def apply_window_chrome(root, caption: str, border: str, text: str = "#E6EDF3") 
         return dark
     except Exception:
         return False
+
+
+_SPI_GETCLIENTAREAANIMATION = 0x1042
+
+
+def animations_enabled() -> bool:
+    """Windows "Animation effects" (Settings > Accessibility > Visual effects).
+
+    Off is Windows' Reduce Motion: idle waves then hold still, as on the Mac.
+    True elsewhere or when unknown.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        value = ctypes.c_int(1)
+        if ctypes.windll.user32.SystemParametersInfoW(
+                _SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(value), 0):
+            return bool(value.value)
+    except Exception:
+        pass
+    return True

@@ -1112,7 +1112,11 @@ def download_llm_model(
 
     url = model_info["url"]
     filename = model_info["filename"]
-    model_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
+    if sys.platform == "win32":
+        # The folder config.py's Windows default and the in-app downloader use.
+        model_dir = Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
+    else:
+        model_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
     target = model_dir / filename
 
     def _run():

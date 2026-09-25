@@ -330,6 +330,82 @@ def _darwin_virtual_keycode(evdev_code: object) -> int | None:
     return int(vk) if isinstance(vk, int) else None
 
 
+def _win32_key_pressed(evdev_code: object) -> bool | None:
+    """Windows physical key state (GetAsyncKeyState); None when unknown.
+
+    The Mac's lost-key-up repair: a release swallowed by a UAC prompt, a lock
+    screen or an elevated window must not leave the chord latched.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        key = evdev_code_to_pynput(int(evdev_code))
+        value = getattr(key, "value", key)
+        vk = getattr(value, "vk", None)
+        if not isinstance(vk, int):
+            return None
+        import ctypes
+
+        return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+    except Exception:
+        return None
+
+
+def _win32_foreground_elevated() -> tuple[bool | None, str]:
+    """Whether the window in front runs as administrator (and its exe name).
+
+    Windows (UIPI) hides that window's keystrokes from a normal-rights app
+    and blocks typing into it - the closest thing to the Mac's Secure Input.
+    (None, "") when unknown or when Aura itself runs elevated.
+    """
+    if sys.platform != "win32":
+        return None, ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, kernel32, advapi32 = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.advapi32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+
+        def elevated(process) -> bool | None:
+            token = wintypes.HANDLE()
+            if not advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+                return True if ctypes.GetLastError() == 5 else None  # denied: a higher-rights token
+            try:
+                value, size = wintypes.DWORD(), wintypes.DWORD()
+                if not advapi32.GetTokenInformation(token, 20, ctypes.byref(value),  # TokenElevation
+                                                    ctypes.sizeof(value), ctypes.byref(size)):
+                    return None
+                return bool(value.value)
+            finally:
+                kernel32.CloseHandle(token)
+
+        if elevated(kernel32.GetCurrentProcess()):
+            return None, ""  # Aura is elevated too: nothing is hidden from it
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None, ""
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        process = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+        if not process:
+            return None, ""
+        try:
+            name = ""
+            buf = ctypes.create_unicode_buffer(520)
+            size = wintypes.DWORD(len(buf))
+            if kernel32.QueryFullProcessImageNameW(process, 0, buf, ctypes.byref(size)):
+                name = buf.value.rsplit("\\", 1)[-1]
+            return elevated(process), name
+        finally:
+            kernel32.CloseHandle(process)
+    except Exception:
+        return None, ""
+
+
 def _darwin_key_pressed(evdev_code: object) -> bool:
     """Read physical key state so a missed key-up cannot wedge a latch."""
     if sys.platform != "darwin":
@@ -833,6 +909,7 @@ def pynput_hotkey_listener(
     log("🎧 Cross-platform hotkey listener active (pynput)")
     
     secure_input_on = False
+    win_ticks, elevated_front = 0, False  # Windows: elevated-foreground warning state
     try:
         while not stop_event.is_set() and not (
             restart_event is not None and restart_event.is_set()
@@ -881,6 +958,32 @@ def pynput_hotkey_listener(
                     active_actions.discard("style")
                 if not getattr(listener, "running", True):
                     raise RuntimeError("macOS event tap stopped")
+            elif sys.platform == "win32":
+                win_ticks += 1
+                if win_ticks % 10 == 0:  # once a second: an elevated app in front
+                    elevated, exe = _win32_foreground_elevated()
+                    if elevated is not None and elevated != elevated_front:
+                        elevated_front = elevated
+                        if elevated:
+                            log("⚠ " + (exe or "The app in front") + " runs as administrator — "
+                                "Windows hides its keystrokes from Aura and blocks typing into "
+                                "it, so the hotkey can't work there. Switch to another window, "
+                                "or run Aura as administrator too.")
+                        else:
+                            log("✓ Hotkey active again (the administrator app is no longer in front)")
+                # Lost key-up repair (the Mac reconciles against Quartz state).
+                current_record_code = (
+                    config_ref.get("hotkey_key", hotkey_key)
+                    if config_ref is not None else hotkey_key
+                )
+                current_style_code = (
+                    config_ref.get("style_toggle_key", style_toggle_key or 0)
+                    if config_ref is not None else (style_toggle_key or 0)
+                )
+                if "record" in active_actions and _win32_key_pressed(current_record_code) is False:
+                    active_actions.discard("record")
+                if "style" in active_actions and _win32_key_pressed(current_style_code) is False:
+                    active_actions.discard("style")
             time.sleep(0.1)
     finally:
         # DELIBERATELY no liveness monitoring here. Watching the inner listener

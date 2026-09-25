@@ -446,6 +446,18 @@ from PyQt6.QtWidgets import (
 
 # === State Definitions ===
 
+
+def _windows_reduce_motion() -> bool:
+    """Windows with "Animation effects" off: the idle pill holds still (Mac: Reduce Motion)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        from wayfinder.ui.windows_window import animations_enabled
+        return not animations_enabled()
+    except Exception:
+        return False
+
+
 class OverlayState(Enum):
     HIDDEN = auto()
     READY = auto()
@@ -2102,7 +2114,7 @@ class GlassmorphicOverlay(QWidget):
             # loop — idle CPU falls to ~0. A state change or a quality flip restarts it (see
             # set_state / set_quality). In "high" mode this branch is never taken, so the
             # ambient wave keeps animating exactly as before.
-            if (self._quality == "performance"
+            if ((self._quality == "performance" or _windows_reduce_motion())
                     and self._state == OverlayState.READY
                     and not self._transitions_active()):
                 if not self._idle_frozen:
