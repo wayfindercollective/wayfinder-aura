@@ -8223,7 +8223,11 @@ class WayfinderApp(ctk.CTk):
                 from wayfinder.ui.ui_inspect import write_inspection
 
                 self.update_idletasks()
-                path = Path(SOCKET_PATH).parent / f"ui-inspect-{tab_id}.json"
+                if sys.platform == "win32":
+                    from wayfinder.utils.platform import get_cache_dir
+                    path = get_cache_dir() / f"ui-inspect-{tab_id}.json"
+                else:
+                    path = Path(SOCKET_PATH).parent / f"ui-inspect-{tab_id}.json"
                 summary = write_inspection(self.tab_frames[tab_id], self, path)
                 self.log(f"🔎 Inspected {tab_id}: {len(summary['texts'])} texts, "
                          f"{len(summary['clipped'])} clipped → {path.name}")
@@ -14367,7 +14371,7 @@ class WayfinderApp(ctk.CTk):
             if IS_FLATPAK:
                 text += " Update via your software center, or download from GitHub."
             label.configure(text=text)
-            if IS_MACOS:
+            if IS_MACOS or IS_WINDOWS:
                 # A manual check may have hidden Get Update for a status line.
                 self._set_app_update_button_visible(True)
             if not banner.winfo_manager():
@@ -14592,8 +14596,12 @@ class WayfinderApp(ctk.CTk):
                 # The socket listener can die on a transient bind failure, or wedge after
                 # binding/listening so the thread remains alive but the KDE/tray command
                 # socket refuses clients. Verify a real ping response, not just thread liveness.
-                # (Windows has no AF_UNIX command socket — skip, don't log-spam a restart.)
-                if sys.platform != "win32":
+                # (Windows: the loopback control channel; restart it only if its thread died.)
+                if sys.platform == "win32":
+                    if self._socket_thread is None or not self._socket_thread.is_alive():
+                        self.log("🔄 Control channel not running - restarting...")
+                        self._ensure_socket_listener()
+                else:
                     if self._socket_thread is None or not self._socket_thread.is_alive():
                         self.log("🔄 Socket listener not running - restarting...")
                         self._ensure_socket_listener()
@@ -21011,7 +21019,9 @@ class WayfinderApp(ctk.CTk):
     def _socket_listener_healthy(self, timeout: float = 0.35) -> bool:
         """Return True only when the command socket accepts and answers a ping."""
         if sys.platform == "win32":
-            return False  # No AF_UNIX command socket on Windows.
+            # Loopback control channel (hotkeys/windows_control.py).
+            from wayfinder.hotkeys.windows_control import send_command
+            return send_command("ping", expect_reply=True, timeout=timeout) == b"pong"
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(timeout)
@@ -21031,10 +21041,20 @@ class WayfinderApp(ctk.CTk):
         Always uses the package listener (import here so a local legacy name cannot shadow it).
         """
         if sys.platform == "win32":
-            # The command socket is AF_UNIX (Linux/macOS external triggers such
-            # as trigger_record.py). Windows has no Unix domain socket here and
-            # the pynput hotkey listener already covers dictation, so skip it
-            # rather than crash-looping on socket.AF_UNIX.
+            # CPython on Windows has no AF_UNIX: the same verbs (tray menu,
+            # second launch, CLI, inspect:) arrive on a token-guarded loopback
+            # channel instead (hotkeys/windows_control.py).
+            existing = self._socket_thread
+            if not force_restart and existing is not None and existing.is_alive():
+                return
+            from wayfinder.hotkeys.windows_control import control_listener
+            self._socket_thread = threading.Thread(
+                target=control_listener,
+                args=(self.event_queue, self.stop_event, self.log),
+                daemon=True,
+                name="wayfinder-control",
+            )
+            self._socket_thread.start()
             return
         existing = self._socket_thread
         if not force_restart and existing is not None and existing.is_alive():
@@ -21466,6 +21486,8 @@ class WayfinderApp(ctk.CTk):
         elif event_type == EventType.UI_CALLBACK:
             if callable(data):
                 data()
+        elif event_type == EventType.CHECK_UPDATES:
+            self._check_app_update_now()
 
     def on_hotkey(self):
         # The welcome pane's first step owns the shared production mic while its
@@ -22776,6 +22798,9 @@ def _raise_existing_instance() -> bool:
     /tmp per launch, so ONLY this control-socket probe (xdg-run path, shared
     host<->sandbox) prevents double instances in the store build.
     """
+    if sys.platform == "win32":
+        from wayfinder.hotkeys.windows_control import send_command
+        return send_command("show", expect_reply=True, timeout=1.0) == b"ok"
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(1.0)

@@ -31,3 +31,4 @@ class EventType(Enum):
     INSPECT_UI = auto()  # Dev/verification: dump a tab's widget tree ("inspect:<id>")
     URL_CLIPBOARD_OFFER = auto()  # Failed browser open — copy the link to the clipboard on the Tk thread
     UI_CALLBACK = auto()  # Internal worker completion marshalled onto the Tk thread
+    CHECK_UPDATES = auto()  # Windows tray "Check for Updates…" (control channel "update")

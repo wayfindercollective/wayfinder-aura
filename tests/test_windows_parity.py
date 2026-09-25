@@ -328,3 +328,65 @@ def test_native_children_do_not_inherit_cloud_keys(monkeypatch, platform_name, s
     monkeypatch.setattr(hostexec.sys, "platform", platform_name)
     env = hostexec.bundle_binary_env()
     assert ("GROQ_API_KEY" not in env) is scrubbed
+
+
+# --- Control channel (hotkeys/windows_control.py) ------------------------------
+
+def test_control_channel_accepts_every_unix_socket_verb():
+    """Same verbs as hotkeys/socket.py, so the tray and CLI behave identically."""
+    import re
+    from pathlib import Path
+    from queue import Queue
+
+    from wayfinder.hotkeys import windows_control
+
+    src = (Path(__file__).resolve().parent.parent / "src" / "wayfinder" / "hotkeys"
+           / "socket.py").read_text(encoding="utf-8")
+    exact = set(re.findall(r'data_str == "([a-z]+)"', src))
+    prefixed = set(re.findall(r'data_str\.startswith\("([a-z]+:)"\)', src))
+    assert exact >= {"ping", "toggle", "show", "hide", "quit"}
+    for verb in sorted(exact) + [p + "x" for p in sorted(prefixed)]:
+        q = Queue()
+        reply = windows_control.dispatch(verb, q, lambda m: None)
+        assert verb == "ping" or not q.empty(), verb
+        if verb == "ping":
+            assert reply == b"pong"
+
+
+def test_control_channel_round_trip_and_token_guard(tmp_path, monkeypatch):
+    import threading
+    import socket as _socket
+    from queue import Queue
+
+    from wayfinder.hotkeys import windows_control
+    from wayfinder.hotkeys.types import EventType
+
+    monkeypatch.setattr(windows_control, "endpoint_file", lambda: tmp_path / "control.json")
+    q, stop = Queue(), threading.Event()
+    t = threading.Thread(target=windows_control.control_listener, args=(q, stop), daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "control.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert windows_control.send_command("ping", expect_reply=True) == b"pong"
+        assert windows_control.send_command("show", expect_reply=True) == b"ok"
+        assert q.get(timeout=2) == (EventType.SHOW_WINDOW, None)
+
+        port = json.loads((tmp_path / "control.json").read_text())["port"]
+        with _socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+            s.sendall(b"not-the-token quit")
+            assert s.recv(16) == b""  # dropped, no reply
+        time.sleep(0.2)
+        assert q.empty()  # and nothing was queued
+    finally:
+        stop.set()
+        t.join(timeout=5)
+    assert not (tmp_path / "control.json").exists()  # cleaned up on stop
+
+
+def test_send_command_without_a_running_app_is_none(tmp_path, monkeypatch):
+    from wayfinder.hotkeys import windows_control
+
+    monkeypatch.setattr(windows_control, "endpoint_file", lambda: tmp_path / "missing.json")
+    assert windows_control.send_command("show") is None

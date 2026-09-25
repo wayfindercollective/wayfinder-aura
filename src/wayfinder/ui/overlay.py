@@ -2931,6 +2931,12 @@ def run_overlay():
                     _tray_icon_path = None
 
                 def _tray_send(verb):
+                    if sys.platform == "win32":
+                        # No AF_UNIX on Windows: the app's loopback control channel.
+                        from wayfinder.hotkeys.windows_control import send_command
+                        if send_command(verb) is None:
+                            _debug_log(f"tray: send '{verb}' failed: app unreachable")
+                        return
                     try:
                         _s = _tray_socket.socket(_tray_socket.AF_UNIX, _tray_socket.SOCK_STREAM)
                         _s.connect(_tray_sock_path)
@@ -2972,6 +2978,10 @@ def run_overlay():
                 _tray_menu.addSeparator()
                 _tray_menu.addAction("Open Settings").triggered.connect(lambda: _tray_send("show"))
                 _tray_menu.addAction("Hide to tray").triggered.connect(lambda: _tray_send("hide"))
+                if sys.platform == "win32":
+                    # Mirrors the Mac menu-bar "Check for Updates…" item.
+                    _tray_menu.addAction("Check for Updates…").triggered.connect(
+                        lambda: _tray_send("update"))
                 _tray_menu.addSeparator()
                 _tray_menu.addAction("Quit").triggered.connect(lambda: _tray_send("quit"))
                 tray_icon.setContextMenu(_tray_menu)

@@ -568,10 +568,12 @@ def _control_socket_path() -> str:
 def _try_control_command(verb: bytes, *, expect_reply: bool = False) -> bool:
     """Send a control-socket verb to a live instance. Returns True if connected."""
     if sys.platform == "win32":
-        # AF_UNIX control IPC is Linux/macOS-only. A Windows control channel
-        # (named pipe or localhost socket) is a planned adapter; until then a
-        # second launch simply exits instead of raising the first window.
-        return False
+        # No AF_UNIX on Windows: the running app listens on its token-guarded
+        # loopback control channel instead (hotkeys/windows_control.py).
+        from wayfinder.hotkeys.windows_control import send_command
+
+        reply = send_command(verb.decode("utf-8"), expect_reply=expect_reply)
+        return reply is not None
     import socket
 
     path = _control_socket_path()
