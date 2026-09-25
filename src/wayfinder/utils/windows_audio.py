@@ -90,8 +90,9 @@ class _Com:
         return False
 
 
-def _default_device(flow: int):
-    """IMMDevice* for the default endpoint of *flow* (caller releases), or None."""
+def _default_device(flow: int, device_id: str | None = None):
+    """IMMDevice* for the default endpoint of *flow*, or the endpoint with
+    *device_id* when given (caller releases); None if unavailable."""
     ole32 = ctypes.windll.ole32
     ole32.CoCreateInstance.restype = _HRESULT
     enumerator = ctypes.c_void_p()
@@ -102,9 +103,15 @@ def _default_device(flow: int):
         return None
     try:
         device = ctypes.c_void_p()
-        get_default = _method(enumerator, 4, _HRESULT, ctypes.c_int, ctypes.c_int,
-                              ctypes.POINTER(ctypes.c_void_p))
-        if get_default(flow, _E_CONSOLE, ctypes.byref(device)) != 0 or not device:
+        if device_id:
+            get_device = _method(enumerator, 5, _HRESULT, ctypes.c_wchar_p,
+                                 ctypes.POINTER(ctypes.c_void_p))
+            hr = get_device(device_id, ctypes.byref(device))
+        else:
+            get_default = _method(enumerator, 4, _HRESULT, ctypes.c_int, ctypes.c_int,
+                                  ctypes.POINTER(ctypes.c_void_p))
+            hr = get_default(flow, _E_CONSOLE, ctypes.byref(device))
+        if hr != 0 or not device:
             return None
         return device
     finally:
@@ -121,13 +128,40 @@ def _endpoint_volume(device):
     return volume or None
 
 
-def output_volume() -> float | None:
-    """Default output's master volume, 0.0-1.0."""
+def _device_id(device) -> str | None:
+    out = ctypes.c_void_p()
+    if _method(device, 5, _HRESULT, ctypes.POINTER(ctypes.c_void_p))(ctypes.byref(out)) != 0:
+        return None
+    try:
+        return ctypes.wstring_at(out.value) if out.value else None
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(out)
+
+
+def default_output_id() -> str | None:
+    """Endpoint ID of the current default output (to duck and restore the same device)."""
     if sys.platform != "win32":
         return None
     try:
         with _Com():
             device = _default_device(_E_RENDER)
+            if device is None:
+                return None
+            try:
+                return _device_id(device)
+            finally:
+                _release(device)
+    except Exception:
+        return None
+
+
+def output_volume(device_id: str | None = None) -> float | None:
+    """Master volume (0.0-1.0) of the default output, or of *device_id*."""
+    if sys.platform != "win32":
+        return None
+    try:
+        with _Com():
+            device = _default_device(_E_RENDER, device_id)
             if device is None:
                 return None
             try:
@@ -148,13 +182,13 @@ def output_volume() -> float | None:
         return None
 
 
-def set_output_volume(level: float) -> bool:
-    """Set the default output's master volume (0.0-1.0). True on success."""
+def set_output_volume(level: float, device_id: str | None = None) -> bool:
+    """Set the master volume (0.0-1.0) of the default output, or of *device_id*."""
     if sys.platform != "win32":
         return False
     try:
         with _Com():
-            device = _default_device(_E_RENDER)
+            device = _default_device(_E_RENDER, device_id)
             if device is None:
                 return False
             try:
@@ -240,6 +274,7 @@ def names_match(portaudio_name: str, endpoint_name: str) -> bool:
 
 __all__ = [
     "default_input_device",
+    "default_output_id",
     "names_match",
     "output_volume",
     "output_volume_settable",

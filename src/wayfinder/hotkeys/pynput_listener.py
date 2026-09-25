@@ -994,6 +994,13 @@ def pynput_hotkey_listener(
                 )
                 if "record" in active_actions and _win32_key_pressed(current_record_code) is False:
                     active_actions.discard("record")
+                if solo_gesture.is_down and (
+                    not _solo_target_active()
+                    or _win32_key_pressed(current_record_code) is False
+                ):
+                    # Lost Right Ctrl release (lock screen, UAC) or the hotkey
+                    # changed mid-gesture: end it so push-to-talk can't run on.
+                    solo_gesture.release_target()
                 if "style" in active_actions and _win32_key_pressed(current_style_code) is False:
                     active_actions.discard("style")
             time.sleep(0.1)

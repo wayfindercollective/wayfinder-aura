@@ -522,9 +522,10 @@ def test_windows_ducking_lowers_and_restores_main_volume(monkeypatch, tmp_path):
     level = {"v": 0.8}
     monkeypatch.setattr(audio_ducker.platform, "system", lambda: "Windows")
     monkeypatch.setattr(audio_ducker, "is_pactl_available", lambda: False)
-    monkeypatch.setattr(windows_audio, "output_volume", lambda: level["v"])
+    monkeypatch.setattr(windows_audio, "default_output_id", lambda: "speakers")
+    monkeypatch.setattr(windows_audio, "output_volume", lambda device_id=None: level["v"])
     monkeypatch.setattr(windows_audio, "set_output_volume",
-                        lambda v: level.__setitem__("v", v) or True)
+                        lambda v, device_id=None: level.__setitem__("v", v) or True)
     d = audio_ducker.AudioDucker(duck_percent=50, recovery_path=tmp_path / "duck.json")
     assert d.is_available
     assert d.duck().status == audio_ducker.DuckingStatus.APPLIED
@@ -539,9 +540,10 @@ def test_windows_ducking_never_overwrites_a_user_change(monkeypatch, tmp_path):
     level = {"v": 0.8}
     monkeypatch.setattr(audio_ducker.platform, "system", lambda: "Windows")
     monkeypatch.setattr(audio_ducker, "is_pactl_available", lambda: False)
-    monkeypatch.setattr(windows_audio, "output_volume", lambda: level["v"])
+    monkeypatch.setattr(windows_audio, "default_output_id", lambda: "speakers")
+    monkeypatch.setattr(windows_audio, "output_volume", lambda device_id=None: level["v"])
     monkeypatch.setattr(windows_audio, "set_output_volume",
-                        lambda v: level.__setitem__("v", v) or True)
+                        lambda v, device_id=None: level.__setitem__("v", v) or True)
     d = audio_ducker.AudioDucker(duck_percent=50, recovery_path=tmp_path / "duck.json")
     d.duck()
     level["v"] = 0.9  # the user turned it up mid-dictation
@@ -743,7 +745,9 @@ def test_reduce_motion_parks_the_idle_pill_on_windows(monkeypatch):
     ("exefile.exe", "EVE - Pilot", "eve"),
     ("RuneLite.exe", "RuneLite", "jagex"),
     ("League of Legends.exe", "", "lol"),
-    ("game.exe", "The Elder Scrolls Online", "eso"),   # title fallback
+    (None, "The Elder Scrolls Online", "eso"),   # title only when the exe can't be read
+    ("game.exe", "The Elder Scrolls Online", None),  # a known exe decides
+    ("chrome.exe", "World of Warcraft guide - Google Chrome", None),
     ("Code.exe", "wow.py - Visual Studio Code", None),
 ])
 def test_windows_game_detection(exe, title, key):
@@ -793,6 +797,7 @@ def test_game_keys_are_held_scan_codes(monkeypatch):
 def test_app_picks_the_windows_game_backend(monkeypatch):
     import wayfinder_main
 
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
     assert wayfinder_main._game_chat_module().__name__.endswith("windows_game_chat")
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
@@ -885,3 +890,102 @@ def test_tap_hold_keys_per_platform():
     assert wm.is_tap_hold_hotkey(100, [], platform_name="darwin")
     assert not wm.is_tap_hold_hotkey(97, [], platform_name="linux")
     assert "Right Ctrl" in wm.hotkey_key_options(platform_name="win32", available_pynput_codes={97, 57})
+
+
+
+# --- Review fixes -----------------------------------------------------------------
+
+@windows_only
+def test_duck_journal_liveness_probe_never_kills_a_process():
+    from wayfinder.utils import audio_ducker
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert audio_ducker._pid_is_alive(child.pid) is True
+        time.sleep(0.3)
+        assert child.poll() is None  # os.kill(pid, 0) would have terminated it
+    finally:
+        child.kill()
+        child.wait()
+    assert audio_ducker._pid_is_alive(child.pid) is False
+
+
+def test_windows_ducking_restores_the_device_it_lowered(monkeypatch, tmp_path):
+    from wayfinder.utils import audio_ducker, windows_audio
+
+    levels = {"speakers": 0.8, "headphones": 0.4}
+    default = {"id": "speakers"}
+    monkeypatch.setattr(audio_ducker.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(audio_ducker, "is_pactl_available", lambda: False)
+    monkeypatch.setattr(windows_audio, "default_output_id", lambda: default["id"])
+    monkeypatch.setattr(windows_audio, "output_volume",
+                        lambda device_id=None: levels[device_id or default["id"]])
+    monkeypatch.setattr(windows_audio, "set_output_volume",
+                        lambda v, device_id=None: levels.__setitem__(device_id or default["id"], v) or True)
+    d = audio_ducker.AudioDucker(duck_percent=50, recovery_path=tmp_path / "duck.json")
+    d.duck()
+    assert json.loads((tmp_path / "duck.json").read_text())["macos"]["endpoint"] == "speakers"
+    default["id"] = "headphones"  # the user switched output mid-dictation
+    d.restore()
+    assert levels == {"speakers": pytest.approx(0.8), "headphones": pytest.approx(0.4)}
+
+
+def test_windows_games_never_fall_back_to_typing(monkeypatch):
+    import wayfinder_main
+    from wayfinder.core import injector, windows_game_chat
+    from wayfinder.core import injector_windows
+
+    pasted, typed, logs = [], [], []
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    monkeypatch.setattr(injector_windows, "inject_text_paste_windows", pasted.append)
+    monkeypatch.setattr(injector, "inject_text", lambda *a, **k: typed.append(a))
+    app = SimpleNamespace(config={}, session_generation=1, log=logs.append,
+                          _windows_game_paste_only=lambda text: wayfinder_main.WayfinderApp
+                          ._windows_game_paste_only(app, text))
+    # A caution game (RuneScape) and an unlisted Steam game both paste, never type.
+    monkeypatch.setattr(windows_game_chat, "frontmost_app", lambda: (4, "RuneLite.exe", "RuneLite"))
+    assert wayfinder_main.WayfinderApp._inject_into_game_chat(app, "hi", 1) is True
+    monkeypatch.setattr(windows_game_chat, "frontmost_app", lambda: (5, "valheim.exe", "Valheim"))
+    monkeypatch.setattr(windows_game_chat, "app_signals",
+                        lambda pid: (None, r"D:\Steam\steamapps\common\Valheim\valheim.exe"))
+    assert wayfinder_main.WayfinderApp._inject_into_game_chat(app, "hello", 1) is True
+    assert pasted == ["hi", "hello"] and typed == []
+    # An ordinary app is left to the normal paste path (with its typing fallback).
+    monkeypatch.setattr(windows_game_chat, "frontmost_app", lambda: (6, "notepad.exe", "Untitled"))
+    monkeypatch.setattr(windows_game_chat, "app_signals", lambda pid: (None, r"C:\Windows\notepad.exe"))
+    assert wayfinder_main.WayfinderApp._inject_into_game_chat(app, "x", 1) is False
+
+
+def test_silent_connection_does_not_block_the_control_channel(tmp_path, monkeypatch):
+    import socket as _socket
+    import threading
+
+    from queue import Queue
+
+    from wayfinder.hotkeys import windows_control
+
+    monkeypatch.setattr(windows_control, "endpoint_file", lambda: tmp_path / "control.json")
+    q, stop = Queue(), threading.Event()
+    t = threading.Thread(target=windows_control.control_listener, args=(q, stop), daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "control.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        port = json.loads((tmp_path / "control.json").read_text())["port"]
+        idle = [_socket.create_connection(("127.0.0.1", port)) for _ in range(3)]  # never speak
+        start = time.monotonic()
+        assert windows_control.send_command("ping", expect_reply=True) == b"pong"
+        assert time.monotonic() - start < 1.0
+        for s in idle:
+            s.close()
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+
+def test_child_supervisor_builds_nothing_windows_specific_on_import():
+    import wayfinder.utils.child_supervisor as cs
+
+    assert not hasattr(cs, "ctypes") and not hasattr(cs, "_ExtendedLimits")

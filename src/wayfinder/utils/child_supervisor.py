@@ -11,7 +11,6 @@ included, killing the child with it.
 
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import signal
@@ -61,93 +60,19 @@ def wrap_macos_child_command(
     return supervisor, child_env
 
 
-_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
-_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-_windows_job = None  # the handle stays open for the app's lifetime on purpose
-_windows_job_lock = threading.Lock()
-
-
-class _IoCounters(ctypes.Structure):
-    _fields_ = [(name, ctypes.c_ulonglong) for name in (
-        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-    )]
-
-
-class _BasicLimits(ctypes.Structure):
-    _fields_ = [
-        ("PerProcessUserTimeLimit", ctypes.c_longlong),
-        ("PerJobUserTimeLimit", ctypes.c_longlong),
-        ("LimitFlags", ctypes.c_uint32),
-        ("MinimumWorkingSetSize", ctypes.c_size_t),
-        ("MaximumWorkingSetSize", ctypes.c_size_t),
-        ("ActiveProcessLimit", ctypes.c_uint32),
-        ("Affinity", ctypes.c_size_t),
-        ("PriorityClass", ctypes.c_uint32),
-        ("SchedulingClass", ctypes.c_uint32),
-    ]
-
-
-class _ExtendedLimits(ctypes.Structure):
-    _fields_ = [
-        ("BasicLimitInformation", _BasicLimits),
-        ("IoInfo", _IoCounters),
-        ("ProcessMemoryLimit", ctypes.c_size_t),
-        ("JobMemoryLimit", ctypes.c_size_t),
-        ("PeakProcessMemoryUsed", ctypes.c_size_t),
-        ("PeakJobMemoryUsed", ctypes.c_size_t),
-    ]
-
-
-def _kill_on_close_job():
-    """This process's kill-on-close job object (created once), or None."""
-    global _windows_job
-    with _windows_job_lock:
-        if _windows_job is not None:
-            return _windows_job
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
-        k32.CreateJobObjectW.restype = ctypes.c_void_p
-        k32.SetInformationJobObject.argtypes = [
-            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-        k32.SetInformationJobObject.restype = ctypes.c_int
-        k32.CloseHandle.argtypes = [ctypes.c_void_p]
-        job = k32.CreateJobObjectW(None, None)
-        if not job:
-            return None
-        info = _ExtendedLimits()
-        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not k32.SetInformationJobObject(
-            job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-            ctypes.byref(info), ctypes.sizeof(info),
-        ):
-            k32.CloseHandle(job)
-            return None
-        _windows_job = job
-        return job
-
-
 def bind_to_app_lifetime(proc: subprocess.Popen, *, platform_name: str | None = None) -> bool:
     """Windows: make *proc* die with this app, even if the app crashes.
 
-    The child joins a job object flagged KILL_ON_JOB_CLOSE whose only handle
-    this process holds; when the process ends, Windows closes the handle and
-    terminates every process in the job. Best effort: False (child unbound,
-    as before) if Windows refuses. No-op elsewhere.
+    See utils/windows_job.py. No-op (False) elsewhere; nothing Windows-specific
+    is imported or built on other platforms.
     """
     if (platform_name or sys.platform) != "win32":
         return False
     try:
-        job = _kill_on_close_job()
-        handle = getattr(proc, "_handle", None)
-        if job is None or handle is None:
-            return False
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        k32.AssignProcessToJobObject.restype = ctypes.c_int
-        return bool(k32.AssignProcessToJobObject(job, int(handle)))
+        from wayfinder.utils.windows_job import assign_to_kill_on_close_job
     except Exception:
         return False
+    return assign_to_kill_on_close_job(proc)
 
 
 def _terminate_child(proc: subprocess.Popen, timeout: float = 3.0) -> None:

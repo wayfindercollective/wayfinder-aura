@@ -22699,6 +22699,15 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
 
+    def _windows_game_paste_only(self, text: str) -> bool:
+        """Windows, a game in front: the normal paste, but never its SendInput
+        typing fallback - in a game, typed letters are keybinds. A paste that
+        fails raises (-> INJECTION_ERROR); the text stays in History."""
+        from wayfinder.core.injector_windows import inject_text_paste_windows
+
+        inject_text_paste_windows(text)
+        return True
+
     def _inject_into_game_chat(self, text: str, gen=None) -> bool:
         """macOS/Windows: dictate into a supported game's chat. False = not a game.
 
@@ -22717,11 +22726,15 @@ class WayfinderApp(ctk.CTk):
             if reason is not None:
                 self.log(f"🎮 {app_name or 'This app'}: {reason} Aura hasn't been tested "
                          "with; pasting normally. See the Games tab.")
+                if IS_WINDOWS and not IS_MACOS:
+                    return self._windows_game_paste_only(text)
             return False
         if profile.caution:
             # Not recommended, but not restricted: the normal paste, with a heads-up.
             self.log(f"🎮 Heads-up: {profile.reason} ({profile.name}). Pasting normally; "
                      "see the Games tab.")
+            if IS_WINDOWS and not IS_MACOS:
+                return self._windows_game_paste_only(text)
             return False
         send = bool(self.config.get("game_chat_send", True)) and profile.auto_send
         self.log(

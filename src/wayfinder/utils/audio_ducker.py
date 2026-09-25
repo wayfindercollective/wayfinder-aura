@@ -110,6 +110,11 @@ def is_windows() -> bool:
     return platform.system() == "Windows"
 
 
+# Windows: the output endpoint a duck lowered, so restore (and crash recovery)
+# touch that device even if the default output changes mid-dictation.
+_WINDOWS_ENDPOINT: str | None = None
+
+
 def _system_volume_name() -> str:
     return "Windows" if is_windows() else "macOS"
 
@@ -134,7 +139,7 @@ def _get_macos_volume() -> int | None:
     if is_windows():
         from wayfinder.utils.windows_audio import output_volume
 
-        value = output_volume()
+        value = output_volume(_WINDOWS_ENDPOINT)
         return None if value is None else int(round(value * 100))
     core = _core_audio()
     if core is not None:
@@ -159,7 +164,7 @@ def _set_macos_volume(volume: int) -> bool:
     if is_windows():
         from wayfinder.utils.windows_audio import set_output_volume
 
-        return set_output_volume(max(0, min(100, volume)) / 100.0)
+        return set_output_volume(max(0, min(100, volume)) / 100.0, _WINDOWS_ENDPOINT)
     core = _core_audio()
     if core is not None:
         return core.set_output_volume(max(0, min(100, volume)) / 100.0)
@@ -402,10 +407,34 @@ def _pid_is_alive(pid: object) -> bool:
         numeric_pid = int(pid)
         if numeric_pid <= 0:
             return False
+        if is_windows():
+            # os.kill(pid, 0) on Windows is TerminateProcess, not a probe: ask
+            # whether the process is still running instead.
+            return _windows_pid_is_alive(numeric_pid)
         os.kill(numeric_pid, 0)
         return True
     except (OSError, TypeError, ValueError):
         return False
+
+
+def _windows_pid_is_alive(pid: int) -> bool:
+    """Windows: True while *pid* names a running process (never signals it)."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+    if not handle:
+        # Access denied still means the process exists.
+        return ctypes.GetLastError() == 5
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 class AudioDucker:
@@ -549,6 +578,8 @@ class AudioDucker:
             "pid": os.getpid(),
             "macos": {"original": int(original), "ducked": int(ducked)},
         }
+        if is_windows() and _WINDOWS_ENDPOINT:
+            payload["macos"]["endpoint"] = _WINDOWS_ENDPOINT
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, separators=(",", ":"))
             handle.flush()
@@ -580,6 +611,16 @@ class AudioDucker:
             self._clear_journal()
             return DuckingResult(DuckingStatus.NO_CHANGE)
 
+        if is_windows():
+            global _WINDOWS_ENDPOINT
+            _WINDOWS_ENDPOINT = record.get("endpoint") or None
+        try:
+            return self._recover_macos_volume(original, ducked)
+        finally:
+            if is_windows():
+                _WINDOWS_ENDPOINT = None
+
+    def _recover_macos_volume(self, original: int, ducked: int) -> DuckingResult:
         current = _get_macos_volume()
         if current is None:
             return DuckingResult(
@@ -670,6 +711,11 @@ class AudioDucker:
                                  "(e.g. HDMI/DisplayPort), so music can't be lowered "
                                  "while you dictate."),
                     ))
+                if is_windows():
+                    global _WINDOWS_ENDPOINT
+                    from wayfinder.utils.windows_audio import default_output_id
+
+                    _WINDOWS_ENDPOINT = default_output_id()
                 current = _get_macos_volume()
                 if current is None:
                     return self._remember(DuckingResult(DuckingStatus.ERROR, message="Could not read system volume."))

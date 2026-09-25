@@ -21,6 +21,7 @@ import json
 import os
 import secrets
 import socket
+import threading
 from pathlib import Path
 from queue import Queue
 from threading import Event
@@ -29,6 +30,11 @@ from typing import Callable, Optional
 from .types import EventType
 
 MAX_REQUEST = 512
+# A client that connects and sends nothing must not hold up the tray or a
+# second launch: each connection is served on its own short-lived thread, a
+# few at a time, and must speak within READ_TIMEOUT_S.
+MAX_CONCURRENT = 8
+READ_TIMEOUT_S = 0.5
 
 
 def endpoint_file() -> Path:
@@ -127,30 +133,45 @@ def control_listener(
         log(f"⚠️ Control channel failed: {e}")
         return
     log("📡 Control channel ready (loopback)")
+    slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+
+    def serve(conn) -> None:
+        try:
+            conn.settimeout(READ_TIMEOUT_S)
+            data = conn.recv(MAX_REQUEST)
+            given, _, verb = data.decode("utf-8", "replace").strip().partition(" ")
+            if not hmac.compare_digest(given.encode("utf-8", "replace"), expected):
+                return  # wrong/missing token: drop silently
+            reply = dispatch(verb.strip(), event_queue, log)
+            if reply:
+                conn.sendall(reply)
+        except (socket.timeout, OSError):
+            pass
+        except Exception as e:
+            if not stop_event.is_set():
+                log(f"⚠️ Control channel error: {e}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            slots.release()
+
     try:
         while not stop_event.is_set():
-            conn = None
             try:
                 conn, _ = server.accept()
-                conn.settimeout(2.0)
-                data = conn.recv(MAX_REQUEST)
-                given, _, verb = data.decode("utf-8", "replace").strip().partition(" ")
-                if not hmac.compare_digest(given.encode("utf-8", "replace"), expected):
-                    continue  # wrong/missing token: drop silently
-                reply = dispatch(verb.strip(), event_queue, log)
-                if reply:
-                    conn.sendall(reply)
             except socket.timeout:
                 continue
-            except Exception as e:
+            except OSError as e:
                 if not stop_event.is_set():
                     log(f"⚠️ Control channel error: {e}")
-            finally:
-                if conn is not None:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
+                continue
+            if not slots.acquire(blocking=False):
+                conn.close()  # saturated: shed the connection, keep accepting
+                continue
+            threading.Thread(target=serve, args=(conn,), daemon=True,
+                             name="wayfinder-control-conn").start()
     finally:
         try:
             server.close()

@@ -6,8 +6,8 @@ vocabulary overlay, the Games tab list and verdicts - so both ports behave
 alike. What differs on Windows:
 
 * The game in front is found from the foreground window's process: its exe
-  name first (Wow.exe, ffxiv_dx11.exe, exefile.exe...), its window title as
-  the fallback (the Mac matches bundle ids and app names).
+  name (Wow.exe, ffxiv_dx11.exe, exefile.exe...); the window title only
+  when the exe can't be read (the Mac matches bundle ids and app names).
 * Paste and Enter are Ctrl+V / Enter as held scan codes
   (``injector_windows.hold_keys``), and in games Aura only ever pastes: no
   SendInput typing fallback, because letters are keybinds.
@@ -99,10 +99,18 @@ def search_games(query: str) -> list[GameEntry]:
 
 
 def match_profile(exe_name: Optional[str], window_title: Optional[str]) -> Optional[GameProfile]:
-    """The profile for the foreground program, or None when it isn't a supported game."""
-    key = EXE_PROFILES.get((exe_name or "").strip().lower())
+    """The profile for the foreground program, or None when it isn't a supported game.
+
+    The exe name decides. The window title is only a fallback when the exe
+    can't be read at all: a browser tab titled "World of Warcraft guide"
+    must never get Gamer mode's Enter presses.
+    """
+    exe = (exe_name or "").strip().lower()
+    key = EXE_PROFILES.get(exe)
     if key and key in _BY_KEY:
         return _BY_KEY[key]
+    if exe:
+        return None
     title = (window_title or "").lower()
     if title:
         for profile in PROFILES:
