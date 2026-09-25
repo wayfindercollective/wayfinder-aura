@@ -797,3 +797,91 @@ def test_app_picks_the_windows_game_backend(monkeypatch):
     assert wayfinder_main._game_chat_module().__name__.endswith("windows_game_chat")
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
     assert wayfinder_main._game_chat_module().__name__.endswith("macos_game_chat")
+
+
+# --- Tap / hold with Right Ctrl (the Mac's Right Option gesture) -----------------
+
+def _win_listener(monkeypatch, hotkey_key=97, modifiers=()):
+    from queue import Queue
+    from threading import Event
+
+    from wayfinder.hotkeys import pynput_listener as pl
+
+    if pl.keyboard is None:
+        pytest.skip("pynput unavailable on this host")
+    captured = {}
+
+    class FakeListener:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(pl.sys, "platform", "win32")
+    monkeypatch.setattr(pl.keyboard, "Listener", FakeListener)
+    stop, events = Event(), Queue()
+    stop.set()
+    pl.pynput_hotkey_listener(events, hotkey_key=hotkey_key,
+                              hotkey_modifiers=list(modifiers), stop_event=stop)
+    return pl, captured["on_press"], captured["on_release"], events
+
+
+def _drain(q):
+    out = []
+    while not q.empty():
+        out.append(q.get_nowait())
+    return out
+
+
+def test_right_ctrl_tap_toggles_once(monkeypatch):
+    from wayfinder.hotkeys.types import EventType
+
+    pl, press, release, events = _win_listener(monkeypatch)
+    press(pl.Key.ctrl_r)
+    release(pl.Key.ctrl_r)
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, None)]  # one toggle, no chord double
+
+
+def test_right_ctrl_in_a_shortcut_never_records(monkeypatch):
+    pl, press, release, events = _win_listener(monkeypatch)
+    press(pl.Key.ctrl_r)
+    press(pl.KeyCode.from_char("c"))
+    release(pl.KeyCode.from_char("c"))
+    release(pl.Key.ctrl_r)
+    assert _drain(events) == []
+
+
+def test_right_ctrl_hold_is_push_to_talk(monkeypatch):
+    from wayfinder.hotkeys.types import EventType
+
+    pl, press, release, events = _win_listener(monkeypatch)
+    press(pl.Key.ctrl_r)
+    time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+    release(pl.Key.ctrl_r)
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
+                              (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
+
+
+def test_ctrl_alt_space_chord_is_unchanged_on_windows(monkeypatch):
+    from wayfinder.hotkeys.types import EventType
+
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=57, modifiers=("ctrl", "alt"))
+    press(pl.Key.ctrl_l)
+    press(pl.Key.alt_l)
+    press(pl.Key.space)
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, None)]
+
+
+def test_tap_hold_keys_per_platform():
+    import wayfinder_main as wm
+
+    assert wm.is_tap_hold_hotkey(97, [], platform_name="win32")
+    assert not wm.is_tap_hold_hotkey(97, ["shift"], platform_name="win32")
+    assert not wm.is_tap_hold_hotkey(100, [], platform_name="win32")   # Right Alt = AltGr
+    assert wm.is_tap_hold_hotkey(100, [], platform_name="darwin")
+    assert not wm.is_tap_hold_hotkey(97, [], platform_name="linux")
+    assert "Right Ctrl" in wm.hotkey_key_options(platform_name="win32", available_pynput_codes={97, 57})

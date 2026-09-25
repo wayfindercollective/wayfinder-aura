@@ -3501,15 +3501,23 @@ def _macos_cloud_models(provider: str) -> list[str]:
 # macOS: bare right-hand modifiers usable as a tap/hold record hotkey (evdev
 # KEY_RIGHTALT / KEY_RIGHTMETA). Right Option is the macOS default.
 MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command"}
+# Windows: Right Ctrl (evdev KEY_RIGHTCTRL). Right Alt is AltGr on most
+# non-US keyboards, so it can't be a bare hotkey there.
+WINDOWS_SOLO_HOTKEYS = {97: "Right Ctrl"}
+
+
+def _solo_hotkeys(platform_name: str | None = None) -> dict:
+    active = platform_name or sys.platform
+    if active == "darwin":
+        return MACOS_SOLO_HOTKEYS
+    if active == "win32":
+        return WINDOWS_SOLO_HOTKEYS
+    return {}
 
 
 def is_tap_hold_hotkey(code, modifiers, platform_name: str | None = None) -> bool:
     """True when the record hotkey is a bare modifier (tap to toggle, hold to talk)."""
-    return (
-        (platform_name or sys.platform) == "darwin"
-        and code in MACOS_SOLO_HOTKEYS
-        and not modifiers
-    )
+    return code in _solo_hotkeys(platform_name) and not modifiers
 
 
 def _keycode_display(code: int) -> str:
@@ -3524,8 +3532,8 @@ def _keycode_display(code: int) -> str:
     }
     if code in known:
         return known[code]
-    if sys.platform == "darwin" and code in MACOS_SOLO_HOTKEYS:
-        return MACOS_SOLO_HOTKEYS[code]
+    if code in _solo_hotkeys():
+        return _solo_hotkeys()[code]
     if HAS_EVDEV:
         try:
             name = ecodes.KEY.get(code) or ecodes.BTN.get(code)
@@ -3578,6 +3586,13 @@ def hotkey_key_options(
         _hotkey_key_codes = {
             **{name: code for code, name in MACOS_SOLO_HOTKEYS.items()},
             **_hotkey_key_codes,
+        }
+    elif active_platform == "win32":
+        # The Windows tap/hold key, offered after the chord keys (the default
+        # stays Ctrl+Alt+Space).
+        _hotkey_key_codes = {
+            **_hotkey_key_codes,
+            **{name: code for code, name in WINDOWS_SOLO_HOTKEYS.items()},
         }
     if available_pynput_codes is None:
         try:
@@ -18181,7 +18196,9 @@ class WayfinderApp(ctk.CTk):
         if is_tap_hold_hotkey(code, modifiers):
             text, color = (
                 f"Tap {_keycode_display(code)} to start and stop, or hold it while you "
-                "talk. Typing with it (like ⌥E) never starts a recording."
+                + ("talk. Shortcuts with it (like Ctrl+C) never start a recording."
+                   if sys.platform == "win32" else
+                   "talk. Typing with it (like ⌥E) never starts a recording.")
             ), COLORS["text_secondary"]
         else:
             try:
@@ -18220,9 +18237,9 @@ class WayfinderApp(ctk.CTk):
         """Handle inline hotkey key dropdown change."""
         new_code = self._hotkey_key_codes.get(value, 67)
         self.config["hotkey_key"] = new_code
-        if sys.platform == "darwin" and new_code in MACOS_SOLO_HOTKEYS:
-            # Right Option/Command work alone (tap/hold); a leftover Fn or
-            # Command modifier would turn them back into a chord.
+        if new_code in _solo_hotkeys():
+            # Right Option/Command (Windows: Right Ctrl) work alone (tap/hold);
+            # a leftover modifier would turn them back into a chord.
             self.config["hotkey_modifiers"] = []
             for var in getattr(self, "_hotkey_mod_vars", {}).values():
                 try:

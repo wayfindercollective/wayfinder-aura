@@ -145,6 +145,17 @@ _ALL_MODIFIER_KEYS = {k for ks in MODIFIER_KEYS.values() for k in ks}
 # macOS Detect may bind these alone (tap/hold). Right-hand keys only: the left
 # ones are pressed constantly as part of ordinary shortcuts.
 _SOLO_CAPTURE_KEYS = {k for k in (_k("alt_r"), _k("cmd_r")) if k is not None}
+# Windows: Right Ctrl only. Right Alt is AltGr on most non-US layouts (it types
+# characters), and the Windows keys belong to the Start menu.
+_WIN32_SOLO_CAPTURE_KEYS = {k for k in (_k("ctrl_r"),) if k is not None}
+
+
+def _solo_capture_keys() -> set:
+    if sys.platform == "darwin":
+        return _SOLO_CAPTURE_KEYS
+    if sys.platform == "win32":
+        return _WIN32_SOLO_CAPTURE_KEYS
+    return set()
 
 
 # macOS tap/hold gesture for a hotkey that is one bare modifier (Right Option).
@@ -621,9 +632,9 @@ def pynput_hotkey_listener(
     solo_capture: dict = {"key": None}
 
     def _solo_target_active() -> bool:
-        """macOS: the record hotkey is one bare modifier (e.g. Right Option)."""
+        """macOS/Windows: the record hotkey is one bare modifier (Right Option / Right Ctrl)."""
         return (
-            sys.platform == "darwin"
+            sys.platform in ("darwin", "win32")
             and not required_modifiers
             and target_key in _ALL_MODIFIER_KEYS
         )
@@ -670,7 +681,7 @@ def pynput_hotkey_listener(
         # buttons grabbed by the host trigger daemon never reach here — this is keyboard keys.
         if capture_state is not None and capture_state.get("armed"):
             if key in _ALL_MODIFIER_KEYS:
-                if sys.platform == "darwin" and key in _SOLO_CAPTURE_KEYS:
+                if key in _solo_capture_keys():
                     solo_capture["key"] = key  # captured on release if nothing else is pressed
                 return  # wait for a real (non-modifier) key
             solo_capture["key"] = None
@@ -717,7 +728,8 @@ def pynput_hotkey_listener(
         # validates the actual physical CGEvent before any chord-based action.
         # Bare-modifier tap/hold gestures remain here because they are driven
         # by macOS modifier flag-change events rather than a key chord.
-        if sys.platform != "darwin" and (
+        # (Windows tap/hold: the gesture above owns the key, never the chord path.)
+        if sys.platform != "darwin" and not solo_mode and (
             key == target_key
             and check_modifiers(required_modifiers)
             and "record" not in active_actions
