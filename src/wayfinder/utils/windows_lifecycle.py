@@ -26,7 +26,10 @@ _PBT_APMRESUMEAUTOMATIC = 0x0012
 _SPI_SETWORKAREA = 0x002F
 
 _LRESULT = ctypes.c_ssize_t
-_WNDPROC = ctypes.WINFUNCTYPE(_LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+# WINFUNCTYPE exists only on Windows; CFUNCTYPE keeps the module importable
+# elsewhere (dispatch() is unit-tested on every platform).
+_WNDPROC = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(
+    _LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 
 
 class _WNDCLASSW(ctypes.Structure):
