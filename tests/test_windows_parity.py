@@ -483,3 +483,118 @@ def test_windows_colour_helpers():
     from wayfinder.ui.windows_window import colorref
 
     assert colorref("#0A0D13") == 0x00130D0A
+
+
+# --- Hotkey conflict caption (utils/windows_hotkey_conflicts.py) -------------
+
+@pytest.mark.parametrize("code, mods, fragment", [
+    (57, ["alt"], "window menu"),
+    (57, ["ctrl"], "input method"),
+    (57, ["shift"], "half/full-width"),
+    (28, ["ctrl"], "sends the message"),
+    (63, [], "F5 alone"),
+    (88, [], "F12 alone"),
+])
+def test_windows_hotkey_conflicts(monkeypatch, code, mods, fragment):
+    from wayfinder.utils import windows_hotkey_conflicts as c
+
+    monkeypatch.setattr(c.sys, "platform", "win32")
+    assert fragment in c.conflict_for(code, mods, installed=())
+
+
+def test_windows_hotkey_clear_chords(monkeypatch):
+    from wayfinder.utils import windows_hotkey_conflicts as c
+
+    monkeypatch.setattr(c.sys, "platform", "win32")
+    assert c.conflict_for(57, ["ctrl", "alt"], installed=()) is None  # the default
+    assert c.conflict_for(67, [], installed=()) is None               # bare F9
+    assert "1Password" in c.conflict_for(57, ["ctrl", "shift"], installed={"1Password"})
+    assert c.conflict_for(57, ["ctrl", "shift"], installed=()) is None
+    monkeypatch.setattr(c.sys, "platform", "linux")
+    assert c.conflict_for(57, ["alt"]) is None
+
+
+# --- Audio: ducking the main volume, "Auto" mic follows the Windows default ----
+
+def test_windows_ducking_lowers_and_restores_main_volume(monkeypatch, tmp_path):
+    from wayfinder.utils import audio_ducker, windows_audio
+
+    level = {"v": 0.8}
+    monkeypatch.setattr(audio_ducker.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(audio_ducker, "is_pactl_available", lambda: False)
+    monkeypatch.setattr(windows_audio, "output_volume", lambda: level["v"])
+    monkeypatch.setattr(windows_audio, "set_output_volume",
+                        lambda v: level.__setitem__("v", v) or True)
+    d = audio_ducker.AudioDucker(duck_percent=50, recovery_path=tmp_path / "duck.json")
+    assert d.is_available
+    assert d.duck().status == audio_ducker.DuckingStatus.APPLIED
+    assert level["v"] == pytest.approx(0.40)
+    assert d.restore().status == audio_ducker.DuckingStatus.RESTORED
+    assert level["v"] == pytest.approx(0.80)
+
+
+def test_windows_ducking_never_overwrites_a_user_change(monkeypatch, tmp_path):
+    from wayfinder.utils import audio_ducker, windows_audio
+
+    level = {"v": 0.8}
+    monkeypatch.setattr(audio_ducker.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(audio_ducker, "is_pactl_available", lambda: False)
+    monkeypatch.setattr(windows_audio, "output_volume", lambda: level["v"])
+    monkeypatch.setattr(windows_audio, "set_output_volume",
+                        lambda v: level.__setitem__("v", v) or True)
+    d = audio_ducker.AudioDucker(duck_percent=50, recovery_path=tmp_path / "duck.json")
+    d.duck()
+    level["v"] = 0.9  # the user turned it up mid-dictation
+    assert d.restore().status == audio_ducker.DuckingStatus.NO_CHANGE
+    assert level["v"] == pytest.approx(0.9)
+
+
+def test_linux_ducking_still_needs_pactl(monkeypatch, tmp_path):
+    from wayfinder.utils import audio_ducker
+
+    monkeypatch.setattr(audio_ducker.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(audio_ducker, "is_pactl_available", lambda: False)
+    d = audio_ducker.AudioDucker(duck_percent=50, recovery_path=tmp_path / "duck.json")
+    assert not d.is_available
+
+
+@pytest.mark.parametrize("pa_name, endpoint, same", [
+    ("Microphone (2- Shure MV7+)", "Microphone (2- Shure MV7+)", True),
+    ("Microphone Array (Intel® Smart ", "Microphone Array (Intel® Smart Sound Technology)", True),
+    ("Microphone", "Microphone (2- Shure MV7+)", False),
+    ("", "Mic", False),
+])
+def test_mme_truncated_names_match_their_endpoint(pa_name, endpoint, same):
+    from wayfinder.utils.windows_audio import names_match
+
+    assert names_match(pa_name, endpoint) is same
+
+
+def test_auto_mic_follows_the_windows_default(monkeypatch):
+    import wayfinder_main
+    from wayfinder.utils import windows_audio
+
+    devices = [
+        {"name": "Microsoft Sound Mapper - Input", "max_input_channels": 2, "hostapi": 0},
+        {"name": "Microphone (2- Shure MV7+)", "max_input_channels": 1, "hostapi": 0},
+        {"name": "Headset (Jabra Evolve2 65)", "max_input_channels": 1, "hostapi": 0},
+        {"name": "Headset (Jabra Evolve2 65)", "max_input_channels": 1, "hostapi": 2},
+    ]
+
+    class SD:
+        @staticmethod
+        def query_devices(index=None, kind=None):
+            if kind == "input":
+                return devices[0]
+            return devices if index is None else devices[index]
+
+    monkeypatch.setitem(sys.modules, "sounddevice", SD)
+    monkeypatch.setattr(windows_audio, "default_input_device",
+                        lambda: {"name": "Headset (Jabra Evolve2 65)", "transport": "bluetooth"})
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    assert wayfinder_main._windows_default_input_index() == 2  # same host API as the default
+    assert wayfinder_main.resolve_audio_device({"audio_device_name": ""}) == 2
+    # An explicitly chosen mic still wins.
+    monkeypatch.setattr(wayfinder_main, "get_input_device_by_name", lambda name: 1)
+    assert wayfinder_main.resolve_audio_device({"audio_device_name": "Microphone (2- Shure MV7+)"}) == 1

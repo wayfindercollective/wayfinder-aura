@@ -194,6 +194,9 @@ class FakeApp:
     def _macos_follow_default_input(self):
         """Real behaviour is covered in tests/test_macos_audio_input.py."""
 
+    def _windows_follow_default_input(self):
+        """Real behaviour is covered in tests/test_windows_parity.py."""
+
     def __init__(self, config):
         self.config = config
         self.app_state = AppState.IDLE

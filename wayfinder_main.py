@@ -3140,7 +3140,43 @@ def resolve_audio_device(config: dict) -> int | None:
         # "Auto" means exactly that device, never a keyword score (which, e.g.,
         # vetoed AirPods the user had deliberately chosen).
         return _macos_default_input_index()
+    if IS_WINDOWS:
+        # Same on Windows: "Auto" is the input chosen in Sound settings.
+        found = _windows_default_input_index()
+        if found is not None:
+            return found
     return find_best_input_device()
+
+
+def _windows_default_input_index() -> int | None:
+    """PortAudio index of Windows' current default input, or None.
+
+    Windows lists each mic once per host API (MME names are cut at 31
+    characters); prefer the host API PortAudio uses for its own default input.
+    """
+    try:
+        from wayfinder.utils.windows_audio import default_input_device, names_match
+        import sounddevice as _sd
+
+        current = default_input_device()
+        if current is None:
+            return None
+        devices = list(enumerate(_sd.query_devices()))
+        try:
+            preferred_api = _sd.query_devices(kind="input").get("hostapi")
+        except Exception:
+            preferred_api = None
+        matches = [
+            (index, dev) for index, dev in devices
+            if dev.get("max_input_channels", 0) > 0
+            and names_match(dev.get("name", ""), current["name"])
+        ]
+        for index, dev in matches:
+            if dev.get("hostapi") == preferred_api:
+                return index
+        return matches[0][0] if matches else None
+    except Exception:
+        return None
 
 
 def _macos_default_input_index() -> int | None:
@@ -9068,7 +9104,7 @@ class WayfinderApp(ctk.CTk):
             checkbox.pack(side="right", padx=(8, 0))
             self._hotkey_mod_checks[mod] = checkbox
 
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             # How the chosen hotkey behaves (tap/hold) or what it collides with.
             self._hotkey_mod_shell = _mod_shell
             self._hotkey_hint_label = ctk.CTkLabel(
@@ -9086,8 +9122,8 @@ class WayfinderApp(ctk.CTk):
         # Access UI via tray icon -> "Open Settings"
         
         # Hotkey devices dropdown (inline)
-        # On macOS, pynput listens globally — no per-device filtering
-        if sys.platform == "darwin":
+        # On macOS and Windows, pynput listens globally — no per-device filtering
+        if sys.platform in ("darwin", "win32"):
             all_devices = []
             device_names = []
             device_options = ["All Devices (Global)"]
@@ -18047,6 +18083,9 @@ class WayfinderApp(ctk.CTk):
             # pynput reads the new key live; there is no evdev listener to
             # restart (it would only log "evdev not installed").
             self.log("⚙ Hotkey updated (live)")
+            refresh = getattr(self, "_refresh_macos_hotkey_hint", None)
+            if target == "record" and callable(refresh):
+                refresh()
             return
         try:
             self.restart_evdev_listener("hotkey detected")
@@ -18054,7 +18093,7 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ Hotkey listener restart after Detect failed: {e}")
 
     def _refresh_macos_hotkey_hint(self) -> None:
-        """macOS: explain tap/hold, or warn about a colliding shortcut."""
+        """macOS/Windows: explain tap/hold, or warn about a colliding shortcut."""
         label = getattr(self, "_hotkey_hint_label", None)
         if label is None:
             return
@@ -18067,7 +18106,10 @@ class WayfinderApp(ctk.CTk):
             ), COLORS["text_secondary"]
         else:
             try:
-                from wayfinder.utils.macos_hotkey_conflicts import conflict_for
+                if sys.platform == "win32":
+                    from wayfinder.utils.windows_hotkey_conflicts import conflict_for
+                else:
+                    from wayfinder.utils.macos_hotkey_conflicts import conflict_for
                 text = conflict_for(code, modifiers) or ""
             except Exception:
                 text = ""
@@ -18086,7 +18128,7 @@ class WayfinderApp(ctk.CTk):
         """Apply hotkey config change and update the listener."""
         new_hotkey = self.get_hotkey_display()
         self._refresh_record_hotkey_surfaces()
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             self._refresh_macos_hotkey_hint()
         self.log(f"⚙ Hotkey: {new_hotkey}")
         if sys.platform in ("darwin", "win32"):
@@ -21735,6 +21777,8 @@ class WayfinderApp(ctk.CTk):
             if IS_MACOS or IS_WINDOWS:
                 if IS_MACOS:
                     self._macos_follow_default_input()
+                elif IS_WINDOWS:
+                    self._windows_follow_default_input()
                 # Capture FIRST: the RECORDING overlay waits for the Qt
                 # thread's acknowledgement (~150-300 ms), and every word spoken
                 # in that window used to be lost. The mic is warm, so starting
@@ -21813,6 +21857,55 @@ class WayfinderApp(ctk.CTk):
         warm.set_device(new_index, None)
         self._resolved_audio_device = new_index
         self.log(f"🎤 Following this Mac's input: {current.name}")
+
+    # Windows keeps the 30 s warm window (opening a WASAPI/MME stream costs
+    # 0.25-0.55 s, unlike Core Audio's ~0.1 s) but, like the Mac, lets a
+    # Bluetooth headset leave its call-quality profile right after dictating.
+    _WINDOWS_BLUETOOTH_WARM_MIC_SECS = 1.0
+
+    def _windows_follow_default_input(self) -> None:
+        """Before capture: track the input chosen in Windows Sound settings.
+
+        PortAudio's device table is a startup snapshot on Windows too, so a
+        newly plugged or newly chosen default mic was ignored until a restart.
+        """
+        try:
+            from wayfinder.utils.windows_audio import default_input_device, names_match
+
+            current = default_input_device()
+        except Exception:
+            return
+        warm = getattr(self, "warm_mic", None)
+        if current is None or warm is None:
+            return
+        if current.get("transport") == "bluetooth":
+            try:
+                warm.idle_secs = self._WINDOWS_BLUETOOTH_WARM_MIC_SECS
+            except Exception:
+                pass
+        else:
+            try:
+                warm.idle_secs = float(self.config.get("mic_warm_idle_secs", 30.0) or 30.0)
+            except Exception:
+                pass
+        if self.config.get("audio_device_name") or warm.in_use:
+            return  # an explicitly chosen mic, or mid-recording: leave it
+        try:
+            import sounddevice as _sd
+
+            index = warm.device
+            active = (_sd.query_devices(index) if index is not None
+                      else _sd.query_devices(kind="input"))
+            if names_match(active.get("name", ""), current["name"]):
+                return
+        except Exception:
+            pass
+        if not warm.rescan():
+            return
+        new_index = _windows_default_input_index()
+        warm.set_device(new_index, None)
+        self._resolved_audio_device = new_index
+        self.log(f"🎤 Following this PC's input: {current['name']}")
 
     def _start_chunked_recording(self, gen=None, mode="on"):
         """Start On/Auto chunk capture without switching mic streams mid-session."""
