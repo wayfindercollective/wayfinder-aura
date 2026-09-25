@@ -12459,7 +12459,8 @@ class WayfinderApp(ctk.CTk):
         for line in (
             "In a supported game, don't press Enter first: tap your shortcut, speak, tap again.",
             "Aura hears gamer talk (inc, pull, LFG, M+...) and keeps your words as said.",
-            "One message per dictation: if it's too long, the next part waits in chat for your Enter.",
+            "One message per dictation: if it's too long, the next part waits in chat for your "
+            "Enter. Send it before dictating again.",
             "In games Aura only pastes, never types keys, so dictation can't trigger a keybind.",
         ):
             note(mode, "•  " + line, color=COLORS["text_secondary"])
