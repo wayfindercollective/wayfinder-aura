@@ -12491,14 +12491,33 @@ class WayfinderApp(ctk.CTk):
             font=(fam, fs["body"]), height=34, corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_input"], border_color=COLORS["border_subtle"],
             text_color=COLORS["text_primary"],
-        ).pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["sm"], SPACING["sm"]))
+        ).pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["sm"], SPACING["xs"]))
+        filter_labels = ["All"] + list(game_chat.STATUS_LABELS.values())
+        filter_var = ctk.StringVar(value="All")
+        ctk.CTkSegmentedButton(
+            games, values=filter_labels, variable=filter_var,
+            font=(fam, fs["small"]), command=lambda _v: render(),
+        ).pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["xs"]))
+        count_label = ctk.CTkLabel(games, text="", anchor="w", font=(fam, fs["caption"]),
+                                   text_color=COLORS["text_muted"])
+        count_label.pack(fill="x", padx=SPACING["tile_pad"])
         results = ctk.CTkFrame(games, fg_color="transparent")
         results.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        max_rows = 40  # a hundred-plus rows would make every keystroke lag
+        status_for_label = {v: k for k, v in game_chat.STATUS_LABELS.items()}
 
         def render(*_):
             for child in results.winfo_children():
                 child.destroy()
             entries = game_chat.search_games(search_var.get())
+            wanted = status_for_label.get(filter_var.get())
+            if wanted:
+                entries = [e for e in entries if e.status == wanted]
+            shown = entries[:max_rows]
+            count_label.configure(
+                text=(f"Showing {len(shown)} of {len(entries)} games. Search to narrow it down."
+                      if len(entries) > len(shown) else
+                      f"{len(entries)} game{'s' if len(entries) != 1 else ''}"))
             if not entries:
                 ctk.CTkLabel(
                     results, font=(fam, fs["small"]), anchor="w", justify="left",
@@ -12508,7 +12527,7 @@ class WayfinderApp(ctk.CTk):
                          "just hasn't been tested there, so check the game's rules on chat tools.",
                 ).pack(fill="x", pady=SPACING["xs"])
                 return
-            for entry in entries:
+            for entry in shown:
                 row = ctk.CTkFrame(results, fg_color="transparent")
                 row.pack(fill="x", pady=(SPACING["xs"], 0))
                 head = ctk.CTkFrame(row, fg_color="transparent")
@@ -12521,7 +12540,18 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(row, text=entry.note, anchor="w", justify="left", wraplength=460,
                              font=(fam, fs["small"]), text_color=COLORS["text_muted"]).pack(fill="x")
 
-        search_var.trace_add("write", render)
+        pending = {"job": None}
+
+        def on_type(*_):
+            # Re-filter once typing pauses (one-shot, not a repeating timer).
+            if pending["job"] is not None:
+                try:
+                    self.after_cancel(pending["job"])
+                except Exception:
+                    pass
+            pending["job"] = self.after(180, render)
+
+        search_var.trace_add("write", on_type)
         render()
 
         note(scroll, "Game names are trademarks of their owners. Wayfinder is not affiliated "

@@ -184,8 +184,6 @@ INFO_ONLY: tuple[GameEntry, ...] = (
     GameEntry("Age of Empires II: Definitive Edition", UNTESTED,
               "Chat opens with Enter (check in game); Aura pastes.", ("aoe2", "age of empires")),
     GameEntry("StarCraft II", UNTESTED, "Chat opens with Enter (check in game); Aura pastes.", ("sc2",)),
-    GameEntry("Civilization VI / VII", UNTESTED,
-              "Multiplayer chat: click the chat box, then dictate. Aura pastes.", ("civ",)),
     GameEntry("Among Us", UNTESTED,
               "Mac: the iPad app only. Click the chat bubble first; free chat needs age 13+."),
     GameEntry("Discord", PLAYABLE,
@@ -194,13 +192,25 @@ INFO_ONLY: tuple[GameEntry, ...] = (
     GameEntry("Lost Ark", NOT_RECOMMENDED,
               "Only playable through cloud gaming on a Mac, and its anti-cheat is strict."),
     GameEntry("Hearthstone", NOT_RECOMMENDED, "No text chat in matches (emotes only)."),
-    GameEntry("Baldur's Gate 3", NOT_RECOMMENDED, "No text chat.", ("bg3",)),
 )
 
 
+def _researched() -> list[GameEntry]:
+    """Generated entries (scripts/build_game_list.py); empty if not built yet."""
+    try:
+        from wayfinder.core.game_list_data import RESEARCHED_GAMES
+    except ImportError:
+        return []
+    return [GameEntry(name, status, note, tuple(aliases))
+            for name, status, note, aliases, _sources in RESEARCHED_GAMES]
+
+
 def game_list() -> list[GameEntry]:
-    """Every game the Games tab shows, profiles first, sorted by name."""
+    """Every game the Games tab shows, sorted by name. Profiles and the
+    hand-written entries win over researched ones with the same name."""
     entries = [profile_entry(p) for p in PROFILES] + list(INFO_ONLY)
+    names = {e.name.lower() for e in entries}
+    entries += [e for e in _researched() if e.name.lower() not in names]
     return sorted(entries, key=lambda e: e.name.lower())
 
 

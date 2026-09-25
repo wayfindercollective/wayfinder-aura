@@ -166,6 +166,15 @@ the switches ("Gamer mode", "Send game messages"; `gamer_mode`,
   GeForce NOW) get the normal paste and a note that they're untested.
 - **Games tab list**, Steam Deck-style: Verified (tested in game), Playable
   (works with a step), Untested (from documentation), Not recommended (why).
+  84 games (2026-09-25): profiles + hand-written entries + 57 researched ones
+  from `scripts/data/game_chat_research.json` (132 candidates: Steam top
+  sellers with Mac builds and multiplayer, SteamSpy top 100, non-Steam Mac
+  games; each checked by web research). Games with no text chat or no Mac
+  access are left out, as the tab says. Rebuild with
+  `python3 scripts/build_game_list.py` (writes `core/game_list_data.py`;
+  DLCs fold into their base game; profiles win on name clashes). The tab
+  shows 40 rows at a time with a status filter; search re-filters 180 ms
+  after typing stops.
   Profiles plus info-only entries from the 2026-09-24 compatibility and
   market research (Minecraft: T opens chat; Roblox: /; Guild Wars 2 and
   cloud gaming: Cmd+V doesn't paste under Wine / streaming yet; ...). A
