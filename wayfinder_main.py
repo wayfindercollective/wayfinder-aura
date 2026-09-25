@@ -100,11 +100,13 @@ def _footer_tagline(is_macos: bool | None = None, is_windows: bool | None = None
     return "handcrafted for Windows" if is_windows else "handcrafted for Linux"
 
 
-if IS_MACOS:
+if IS_MACOS or IS_WINDOWS:
     # CustomTkinter polls every window's DPI every 100 ms forever (a Tcl
     # `after`, winfo_exists and `wm state` per window, 10 wakeups/s), but on
     # macOS its DPI check is hard-wired to 1.0 - Aqua scales on its own - so
     # the loop can never find a change. Hourly keeps it alive but idle.
+    # Windows too: the app turns CTk's automatic DPI awareness off (ui_scale
+    # governs scaling), which makes the same check return a constant 1.
     try:
         ctk.ScalingTracker.update_loop_interval = 3_600_000
     except Exception:
@@ -4996,6 +4998,11 @@ class OverlayController:
                     # overlay exe is already windowed). No-op (0) elsewhere.
                     creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
                 )
+                if sys.platform == "win32":
+                    # The pill dies with the app even on a crash (job object);
+                    # Linux uses PR_SET_PDEATHSIG, macOS stdin EOF.
+                    from wayfinder.utils.child_supervisor import bind_to_app_lifetime
+                    bind_to_app_lifetime(self._process)
                 try:
                     from wayfinder.utils.overlay_process import write_overlay_pidfile
                     write_overlay_pidfile(self._process.pid)
@@ -10814,11 +10821,12 @@ class WayfinderApp(ctk.CTk):
         from wayfinder.core.cloud_keys import PROVIDERS, clean_key, format_warning, verify_key
 
         info = PROVIDERS[provider]
+        steps = info.steps.replace("(⌘V)", "(Ctrl+V)") if IS_WINDOWS else info.steps
         box = ctk.CTkFrame(parent, fg_color="transparent")
         box.pack(fill="x", padx=16, pady=(0, 12))
 
         ctk.CTkLabel(
-            box, text=f"Don't have a key yet?\n{info.steps}",
+            box, text=f"Don't have a key yet?\n{steps}",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"], justify="left", anchor="w",
         ).pack(anchor="w", pady=(0, 4))
@@ -17982,6 +17990,11 @@ class WayfinderApp(ctk.CTk):
                 )
         except (OSError, UnicodeDecodeError):
             pass
+        if sys.platform == "win32":
+            # pynput reads the new key live; there is no evdev listener to
+            # restart (it would only log "evdev not installed").
+            self.log("⚙ Hotkey updated (live)")
+            return
         try:
             self.restart_evdev_listener("hotkey detected")
         except Exception as e:
@@ -18023,8 +18036,8 @@ class WayfinderApp(ctk.CTk):
         if sys.platform == "darwin":
             self._refresh_macos_hotkey_hint()
         self.log(f"⚙ Hotkey: {new_hotkey}")
-        if sys.platform == "darwin":
-            # macOS: pynput reads config live — nothing to restart.
+        if sys.platform in ("darwin", "win32"):
+            # macOS/Windows: pynput reads config live — nothing to restart.
             self.log("⚙ Hotkey updated (live)")
         else:
             self.restart_evdev_listener("config change")
@@ -18056,8 +18069,8 @@ class WayfinderApp(ctk.CTk):
         """Apply style hotkey config change and update the listener."""
         new_hotkey = self.get_style_hotkey_display()
         self.log(f"⚙ Style toggle hotkey: {new_hotkey}")
-        if sys.platform == "darwin":
-            # macOS: pynput reads config live — nothing to restart.
+        if sys.platform in ("darwin", "win32"):
+            # macOS/Windows: pynput reads config live — nothing to restart.
             self.log("⚙ Hotkey updated (live)")
         else:
             self.restart_evdev_listener("config change")
@@ -20989,9 +21002,10 @@ class WayfinderApp(ctk.CTk):
                 if self.config.get("whisper_server_mode"):
                     self.log("⏳ Warming up transcription model (first dictation will be instant)…")
                 loaded = warm_up_transcription(self.config)
-                if self.config.get("whisper_server_mode") and (loaded or not IS_MACOS):
-                    # macOS only claims "loaded" when a server really started
-                    # (it used to say so with no model installed at all).
+                if self.config.get("whisper_server_mode") and (
+                        loaded or not (IS_MACOS or IS_WINDOWS)):
+                    # macOS/Windows only claim "loaded" when a server really
+                    # started (it used to say so with no model installed at all).
                     self.log("✅ Transcription model loaded — ready for instant dictation")
             except Exception as e:
                 self.log(f"⚠️ Transcription warm-up skipped: {e}")
@@ -22551,6 +22565,11 @@ class WayfinderApp(ctk.CTk):
             if IS_MACOS:
                 return ("Couldn't paste the text — make sure Accessibility is on "
                         "for Wayfinder Aura (Privacy & Security).")
+            if IS_WINDOWS:
+                # Windows blocks input into apps running as administrator
+                # unless Aura runs elevated too; the text stays on the clipboard.
+                return ("Couldn't type the text — click into a text box and try again. "
+                        "Apps running as administrator can't receive it; press Ctrl+V there.")
             return "Couldn't type the text — check input permissions (Settings) or install ydotool."
         if has("api key", "401", "unauthorized"):
             return "Cloud API key issue — re-check it in Settings."

@@ -844,8 +844,10 @@ class WhisperServerBackend(TranscriptionBackend):
                 # ownership proof and cannot outlive the app. Linux keeps
                 # main's reuse of our own server (no supervisor yet, so a
                 # crash would otherwise stack a second server per launch).
+                # Windows: the server is bound to the app by a job object
+                # (bind_to_app_lifetime), so it never outlives us either.
                 if (
-                    sys.platform != "darwin"
+                    sys.platform not in ("darwin", "win32")
                     and reuse_ok
                     and self._is_our_server(port, timeout=probe_timeout)
                 ):
@@ -1043,7 +1045,7 @@ class WhisperServerBackend(TranscriptionBackend):
             port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
 
             if (
-                sys.platform != "darwin"
+                sys.platform not in ("darwin", "win32")
                 and not force
                 and self._is_our_server(port, timeout=_probe_budget())
             ):

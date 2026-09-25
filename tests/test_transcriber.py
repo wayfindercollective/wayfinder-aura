@@ -2186,7 +2186,8 @@ class TestServerAdoptionPerPlatform:
     (its supervised child cannot outlive the app, and adopting an unowned
     listener would hand it recorded audio)."""
 
-    @pytest.mark.parametrize("platform_name, expected", [("linux", 8178), ("darwin", 8179)])
+    @pytest.mark.parametrize("platform_name, expected", [
+        ("linux", 8178), ("darwin", 8179), ("win32", 8179)])
     def test_occupied_port_reuse(self, monkeypatch, platform_name, expected):
         import socket as socket_module
 

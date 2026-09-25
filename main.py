@@ -80,6 +80,40 @@ def _macos_route_console_to_log() -> None:
 _macos_route_console_to_log()
 
 
+def _windows_route_console_to_log() -> None:
+    """Packaged Windows app: keep stdout/stderr in %LOCALAPPDATA%, not nowhere.
+
+    The installer's exe is windowed (console=False), so sys.stdout/stderr are
+    None and every diagnostic print (whisper-server, mic, overlay, licence)
+    was lost. Same rules as the macOS routing above: main GUI process only,
+    5 MB rotation.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    if any(arg.startswith("--") and arg not in ("--minimized",) for arg in sys.argv[1:]):
+        return  # --overlay-subprocess, self-tests, CLI verbs...
+    if sys.stdout is not None:
+        return  # started from a console: keep it
+    try:
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        log_dir = Path(base) / "wayfinder-aura" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "app.log"
+        if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
+            os.replace(log_path, log_dir / "app.log.1")
+        stream = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+        sys.stdout = stream
+        sys.stderr = stream
+        from datetime import datetime
+
+        print(f"\n===== Wayfinder Aura {datetime.now():%Y-%m-%d %H:%M:%S} =====", flush=True)
+    except OSError:
+        pass
+
+
+_windows_route_console_to_log()
+
+
 # Ensure the src directory is in the path for package imports
 if getattr(sys, 'frozen', False):
     # Running as bundled .app — modules are in the bundle

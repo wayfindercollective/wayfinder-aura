@@ -624,7 +624,8 @@ def pynput_hotkey_listener(
         # recording, the app consumes this event as "discard"; at all other
         # times it is a harmless no-op. Do not suppress the physical Escape —
         # the foreground application should still receive its normal key.
-        if sys.platform == "darwin" and key == _k("esc"):
+        # Windows likewise (pynput's low-level hook sees Esc from any app).
+        if sys.platform in ("darwin", "win32") and key == _k("esc"):
             event_queue.put((EventType.CANCEL_RECORDING, None))
 
         solo_mode = _solo_target_active()

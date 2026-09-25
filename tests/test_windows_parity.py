@@ -390,3 +390,50 @@ def test_send_command_without_a_running_app_is_none(tmp_path, monkeypatch):
 
     monkeypatch.setattr(windows_control, "endpoint_file", lambda: tmp_path / "missing.json")
     assert windows_control.send_command("show") is None
+
+
+# --- Global Escape cancels a recording (hotkeys/pynput_listener.py) -----------
+
+@pytest.mark.parametrize("platform_name, queued", [("win32", True), ("linux", False)])
+def test_escape_cancels_recording_from_any_app(monkeypatch, platform_name, queued):
+    from queue import Empty, Queue
+    from threading import Event
+
+    from wayfinder.hotkeys import pynput_listener
+    from wayfinder.hotkeys.types import EventType
+
+    if pynput_listener.keyboard is None:
+        pytest.skip("pynput unavailable on this host")
+    captured = {}
+
+    class FakeListener:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(pynput_listener.sys, "platform", platform_name)
+    monkeypatch.setattr(pynput_listener.keyboard, "Listener", FakeListener)
+    stop, events = Event(), Queue()
+    stop.set()
+    pynput_listener.pynput_hotkey_listener(
+        events, hotkey_key=57, hotkey_modifiers=["ctrl", "alt"], stop_event=stop)
+    captured["on_press"](pynput_listener.Key.esc)
+    try:
+        got = events.get_nowait()
+    except Empty:
+        got = None
+    assert (got == (EventType.CANCEL_RECORDING, None)) is queued
+
+
+def test_windows_key_help_says_ctrl_v(monkeypatch):
+    import inspect
+
+    import wayfinder_main
+
+    src = inspect.getsource(wayfinder_main.WayfinderApp._build_macos_key_help)
+    assert 'info.steps.replace("(⌘V)", "(Ctrl+V)") if IS_WINDOWS' in src
