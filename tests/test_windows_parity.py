@@ -989,3 +989,46 @@ def test_child_supervisor_builds_nothing_windows_specific_on_import():
     import wayfinder.utils.child_supervisor as cs
 
     assert not hasattr(cs, "ctypes") and not hasattr(cs, "_ExtendedLimits")
+
+
+def test_unplugged_endpoint_recovery_survives_later_dictations(monkeypatch, tmp_path):
+    """Crash while the headset is ducked, restart with it unplugged, dictate on
+    the speakers: the headset's original volume must still come back."""
+    from wayfinder.utils import audio_ducker, windows_audio
+
+    levels = {"speakers": 0.8}                      # the headset is unplugged
+    default = {"id": "speakers"}
+    monkeypatch.setattr(audio_ducker.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(audio_ducker, "is_pactl_available", lambda: False)
+    monkeypatch.setattr(audio_ducker, "_pid_is_alive", lambda pid: False)
+    monkeypatch.setattr(windows_audio, "default_output_id", lambda: default["id"])
+    monkeypatch.setattr(windows_audio, "output_volume",
+                        lambda device_id=None: levels.get(device_id or default["id"]))
+
+    def set_volume(v, device_id=None):
+        key = device_id or default["id"]
+        if key not in levels:
+            return False
+        levels[key] = v
+        return True
+
+    monkeypatch.setattr(windows_audio, "set_output_volume", set_volume)
+    journal = tmp_path / "duck.json"
+    journal.write_text(json.dumps({"version": 2, "pid": 999999, "macos": {
+        "original": 90, "ducked": 45, "endpoint": "headset"}}))
+
+    d = audio_ducker.AudioDucker(duck_percent=50, recovery_path=journal)
+    assert d.recovery_result.status == audio_ducker.DuckingStatus.ERROR
+    assert json.loads(journal.read_text())["windows_pending"][0]["endpoint"] == "headset"
+
+    d.duck()                                        # dictate on the speakers
+    assert levels["speakers"] == pytest.approx(0.4)
+    d.restore()
+    assert levels["speakers"] == pytest.approx(0.8)
+    assert json.loads(journal.read_text())["windows_pending"][0]["original"] == 90  # not lost
+
+    levels["headset"] = 0.45                        # plugged back in, still ducked
+    d.duck()                                        # next dictation retries it first
+    assert levels["headset"] == pytest.approx(0.90)
+    d.restore()
+    assert not journal.exists()                     # nothing left to recover
