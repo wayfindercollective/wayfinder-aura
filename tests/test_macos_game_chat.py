@@ -182,5 +182,56 @@ def test_app_hook_sends_to_wow_through_paste_and_return(monkeypatch):
 
 def test_game_chat_is_on_by_default_in_the_single_config_source():
     from wayfinder.config import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG["macos_game_chat"] is True
+    assert DEFAULT_CONFIG["gamer_mode"] is True
     assert DEFAULT_CONFIG["game_chat_send"] is True
+
+
+# --- Gamer mode: vocabulary and cleanup for this dictation ---------------------------
+
+def test_gamer_vocabulary_puts_shared_slang_first_then_the_game():
+    words = gc.gamer_vocabulary(WOW)
+    assert words[:2] == ["inc", "pull"]          # the words Base misheard in testing
+    assert "M+" in words and "Death Knight" in words
+    assert len(words) == len({w.lower() for w in words})  # no duplicates
+
+
+def test_gamer_overlay_primes_whisper_and_keeps_cleanup_normal():
+    base = {"output_tone": "professional", "model_path": "/m.bin"}
+    out = gc.gamer_asr_overlay(base, WOW)
+    assert out["output_tone"] == "minimal"       # no style rewrite of chat
+    assert out["gamer_vocabulary"][:2] == ["inc", "pull"]
+    assert base["output_tone"] == "professional"  # saved config untouched
+    assert gc.gamer_asr_overlay(base, None) is base
+
+
+def test_transcriber_primes_whisper_with_gamer_vocabulary_without_ultra():
+    from wayfinder.core.transcriber import get_backend
+    cfg = {"transcription_backend": "whisper_cpp", "whisper_server_mode": False,
+           "output_tone": "minimal", "gamer_vocabulary": gc.gamer_vocabulary(WOW)}
+    vocab = get_backend(cfg).custom_vocabulary
+    assert "inc" in vocab and "pull" in vocab and "LFG" in vocab
+    plain = get_backend({"transcription_backend": "whisper_cpp", "whisper_server_mode": False,
+                         "output_tone": "minimal"}).custom_vocabulary
+    assert "inc" not in (plain or [])
+
+
+def test_gamer_profile_is_taken_when_dictation_starts(monkeypatch):
+    import wayfinder_main
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    monkeypatch.setattr(gc, "frontmost_app", lambda: (42, "com.blizzard.worldofwarcraft", "World of Warcraft"))
+    app = SimpleNamespace(config={"gamer_mode": True})
+    assert wayfinder_main.WayfinderApp._gamer_profile_now(app).key == "wow"
+    app.config["gamer_mode"] = False
+    assert wayfinder_main.WayfinderApp._gamer_profile_now(app) is None
+    monkeypatch.setattr(gc, "frontmost_app", lambda: (7, "com.apple.Terminal", "Terminal"))
+    app.config["gamer_mode"] = True
+    assert wayfinder_main.WayfinderApp._gamer_profile_now(app) is None
+
+
+def test_app_overlay_only_applies_during_a_game_dictation():
+    import wayfinder_main
+    cfg = {"output_tone": "dev"}
+    app = SimpleNamespace(_gamer_profile=None)
+    assert wayfinder_main.WayfinderApp._gamer_asr_config(app, cfg) is cfg
+    app._gamer_profile = WOW
+    assert wayfinder_main.WayfinderApp._gamer_asr_config(app, cfg)["output_tone"] == "minimal"

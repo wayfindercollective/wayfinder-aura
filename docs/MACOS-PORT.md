@@ -138,10 +138,20 @@ with no Terminal:
   queue and hung the paste thread. A 10 s PASTING watchdog (longer for long
   game-chat text) hands the text to the clipboard if a paste ever stalls.
 
-### Game chat (World of Warcraft first)
+### Gamer mode (World of Warcraft first)
 
-`core/macos_game_chat.py`, Settings ▸ "Dictate into game chat" and "Send game
-messages" (both on by default; `macos_game_chat`, `game_chat_send`).
+`core/macos_game_chat.py`, Settings ▸ "Gamer mode" and "Send game messages"
+(both on by default; `gamer_mode`, `game_chat_send`).
+
+- When dictation starts with a supported game in front, that dictation gets
+  a runtime overlay (`gamer_asr_overlay`, never saved): Whisper is primed with
+  MMO slang plus the game's words (inc, pull, LFG, OOM, M+, Bloodlust...),
+  and cleanup stays Normal, so chat keeps your words. Free, like game chat.
+  Measured on Base (2 synthetic voices x 8 WoW chat lines): gamer terms
+  heard right 24/42 (57%) -> 35/42 (83%); "Ink 2" -> "Inc", "White Bit N
+  Wheel Resit" -> "wipe it and we'll...", "blood lost" -> "Bloodlust".
+  Still missed sometimes: "battle rez", "ilvl". Small sample, synthetic
+  voices; Turbo and the user's own Vocabulary (Ultra) cover more.
 
 - When the app in front at paste time matches a game profile (WoW retail,
   Classic and Classic Era by bundle id `com.blizzard.worldofwarcraft*` or
@@ -158,9 +168,13 @@ messages" (both on by default; `macos_game_chat`, `game_chat_send`).
   Online, Albion Online: Return opens chat; RuneScape and EVE Online: chat
   input is live) use each game's known convention with a conservative
   200-character split; none has been tried in the game yet.
-- Status: unit-tested with recorded key sequences. Needs an in-game check in
-  WoW (paste into the chat box, the 255 split, Classic); a guarded live
-  harness is in the session notes.
+- Status: unit-tested with recorded key sequences, and live-checked against
+  a native stand-in for WoW's chat (Return opens, Cmd+V pastes, Return sends,
+  255 cap): a short message, a 3-message split, review mode, no stray keys,
+  clipboard restored - both scripted and by voice through the installed app.
+  Still needs an in-game WoW check (real chat box, IM-style chat, Classic).
+  macOS 14+ won't let a background process raise a window, so the check
+  needs the player to click the game - as in real use.
 
 ## 6. Speech and cleanup pipeline
 

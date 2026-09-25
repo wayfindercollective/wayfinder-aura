@@ -1360,10 +1360,11 @@ SETTING_TOOLTIPS = {
         "Turn it off if your menu bar is crowded."
     ),
     "ui_scale": "Size of Aura's window and text.",
-    "macos_game_chat": (
-        "In World of Warcraft, don't press Enter first: tap your shortcut, speak, "
-        "tap again. Aura opens chat, pastes and sends. Long messages are split to "
-        "fit WoW's 255-character limit.\n"
+    "gamer_mode": (
+        "When World of Warcraft is in front, Aura hears gamer talk (inc, pull, LFG, "
+        "M+...), keeps your words as said, and sends them to chat: don't press "
+        "Enter first, just tap your shortcut, speak, tap again. Long messages are "
+        "split to fit WoW's 255-character limit.\n"
         "Also set up for Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings "
         "Online, Albion Online, RuneScape and EVE Online. In games Aura only pastes, "
         "never types keys, so dictation can't trigger a keybind."
@@ -17099,8 +17100,8 @@ class WayfinderApp(ctk.CTk):
         threading.Thread(target=_worker, daemon=True, name="feedback-post").start()
 
     def _create_game_chat_rows(self, parent) -> None:
-        """macOS: dictate into World of Warcraft (and other MMO) chat."""
-        self.game_chat_var = ctk.BooleanVar(value=bool(self.config.get("macos_game_chat", True)))
+        """macOS Gamer mode: dictate into World of Warcraft (and other MMO) chat."""
+        self.game_chat_var = ctk.BooleanVar(value=bool(self.config.get("gamer_mode", True)))
         self.game_chat_send_var = ctk.BooleanVar(value=bool(self.config.get("game_chat_send", True)))
 
         def _toggled(key, var, on_text, off_text):
@@ -17109,10 +17110,10 @@ class WayfinderApp(ctk.CTk):
             self.log("🎮 " + (on_text if var.get() else off_text))
 
         self.create_toggle_row(
-            parent, "Dictate into game chat", self.game_chat_var,
-            lambda: _toggled("macos_game_chat", self.game_chat_var,
-                             "Game chat on", "Game chat off: games get a plain paste"),
-            tooltip=SETTING_TOOLTIPS["macos_game_chat"],
+            parent, "Gamer mode", self.game_chat_var,
+            lambda: _toggled("gamer_mode", self.game_chat_var,
+                             "Gamer mode on", "Gamer mode off: games get a plain paste"),
+            tooltip=SETTING_TOOLTIPS["gamer_mode"],
         )
         self.create_toggle_row(
             parent, "Send game messages", self.game_chat_send_var,
@@ -21386,7 +21387,30 @@ class WayfinderApp(ctk.CTk):
         # UI + overlay-pill sync — identical to the in-app Style tab click (no path drift).
         self._set_output_style(next_style)
 
+    def _gamer_profile_now(self):
+        """macOS Gamer mode: the supported game in front right now, or None."""
+        if not (IS_MACOS and self.config.get("gamer_mode", True)):
+            return None
+        try:
+            from wayfinder.core import macos_game_chat as game_chat
+            _pid, bundle_id, app_name = game_chat.frontmost_app()
+            return game_chat.match_profile(bundle_id, app_name)
+        except Exception:
+            return None
+
+    def _gamer_asr_config(self, config: dict) -> dict:
+        """Gamer mode overlay for this dictation (vocabulary + Normal cleanup)."""
+        profile = getattr(self, "_gamer_profile", None)
+        if profile is None:
+            return config
+        from wayfinder.core.macos_game_chat import gamer_asr_overlay
+        return gamer_asr_overlay(config, profile)
+
     def start_recording(self):
+        # Gamer mode follows the game in front when dictation starts.
+        self._gamer_profile = WayfinderApp._gamer_profile_now(self)
+        if self._gamer_profile is not None:
+            self.log(f"🎮 Gamer mode: {self._gamer_profile.name}")
         if IS_MACOS:
             # Pick up a keyboard-layout switch before this dictation's paste.
             try:
@@ -21651,9 +21675,9 @@ class WayfinderApp(ctk.CTk):
             # Skip post-processing per-chunk - will be applied to final combined text.
             # Light ASR profile is a runtime overlay only (never written back to disk).
             from wayfinder.core.gm_asr import effective_asr_config
-            asr_cfg = effective_asr_config(
+            asr_cfg = WayfinderApp._gamer_asr_config(self, effective_asr_config(
                 self.config, bool(getattr(self, "_game_mode", False))
-            )
+            ))
             text = transcribe_with_config(
                 chunk_path,
                 asr_cfg,
@@ -21916,7 +21940,8 @@ class WayfinderApp(ctk.CTk):
                     from wayfinder.core.postprocessor import process_with_config
                     self.log("🔧 Post-processing combined text...")
                     original_text = combined_text
-                    combined_text = process_with_config(combined_text, self.config)
+                    combined_text = process_with_config(
+                        combined_text, WayfinderApp._gamer_asr_config(self, self.config))
                     if combined_text != original_text:
                         self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
                 except Exception as e:
@@ -22002,9 +22027,9 @@ class WayfinderApp(ctk.CTk):
             trans_start = time_module.perf_counter()
             # Light ASR profile is a runtime overlay only (never written back to disk).
             from wayfinder.core.gm_asr import effective_asr_config
-            asr_cfg = effective_asr_config(
+            asr_cfg = WayfinderApp._gamer_asr_config(self, effective_asr_config(
                 self.config, bool(getattr(self, "_game_mode", False))
-            )
+            ))
             text = transcribe_with_config(audio_path, asr_cfg)
             trans_elapsed = time_module.perf_counter() - trans_start
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
@@ -22146,7 +22171,7 @@ class WayfinderApp(ctk.CTk):
             # macOS game chat: an MMO (World of Warcraft first) is in front, so
             # open its chat box, paste and send instead of a plain paste.
             game_chat = getattr(self, "_inject_into_game_chat", None)
-            if IS_MACOS and game_chat is not None and self.config.get("macos_game_chat", True):
+            if IS_MACOS and game_chat is not None and self.config.get("gamer_mode", True):
                 if game_chat(text, gen):
                     self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
                     return

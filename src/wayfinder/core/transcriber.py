@@ -2238,6 +2238,11 @@ def get_backend(config: dict) -> TranscriptionBackend:
     _builtin_vocabulary: list[str] = []
     if _has_feature("tone_system") and _effective_tone in ("dev", "casual"):
         _builtin_vocabulary = DEV_VOCABULARY if _effective_tone == "dev" else CASUAL_VOCABULARY
+    # Gamer mode (macOS game chat): the game in front primes Whisper with its
+    # chat slang. Free, like game chat itself; set per dictation by the app.
+    _gamer_vocabulary = [str(w) for w in (config.get("gamer_vocabulary") or []) if str(w).strip()]
+    if _gamer_vocabulary:
+        _builtin_vocabulary = _gamer_vocabulary
     # User terms last and first in the budget: Whisper keeps the prompt's tail.
     _effective_custom_vocabulary = vocabulary_prompt_terms(_user_vocabulary, _builtin_vocabulary)
 

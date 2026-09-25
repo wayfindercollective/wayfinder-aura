@@ -1,4 +1,4 @@
-"""Game chat on macOS: dictate straight into an MMO's chat box.
+"""Gamer mode on macOS: dictate straight into an MMO's chat box.
 
 World of Warcraft first. In WoW the chat box opens with Return, holds 255
 characters, and sends with Return. So when WoW is in front at paste time,
@@ -39,6 +39,19 @@ class GameProfile:
     open_chat: bool = True     # Return opens the chat box before the paste
     max_chars: int = 200       # per message; longer dictation is split
     verified: bool = False     # checked in the game itself
+    # Game-specific words for Whisper's prompt, after MMO_VOCABULARY.
+    vocabulary: tuple[str, ...] = ()
+
+
+# Gamer mode primes Whisper with these while a supported game is in front:
+# the Base model heard "inc" as "Ink" and "pull" as "pole" in WoW chat. Most
+# mis-heard short slang first (the prompt budget keeps the front).
+MMO_VOCABULARY: tuple[str, ...] = (
+    "inc", "pull", "LFG", "LFM", "DPS", "tank", "healer", "OOM", "AFK", "BRB",
+    "GG", "wipe", "adds", "aggro", "trash", "res", "battle rez", "CC",
+    "interrupt", "kite", "buff", "debuff", "AoE", "proc", "cooldowns", "ilvl",
+    "loot", "raid", "dungeon", "boss", "PvP", "PvE", "gank", "guild", "party",
+)
 
 
 PROFILES: tuple[GameProfile, ...] = (
@@ -48,6 +61,10 @@ PROFILES: tuple[GameProfile, ...] = (
         bundle_prefixes=("com.blizzard.worldofwarcraft",),
         name_markers=("world of warcraft",),
         open_chat=True, max_chars=255,
+        vocabulary=("M+", "Mythic+", "heroic", "LFR", "Bloodlust", "Heroism",
+                    "Hearthstone", "Horde", "Alliance", "Azeroth", "Stormwind",
+                    "Orgrimmar", "Dornogal", "Death Knight", "Demon Hunter",
+                    "Evoker", "Paladin", "Warlock", "Druid", "Shaman"),
     ),
     GameProfile("ffxiv", "Final Fantasy XIV", name_markers=("final fantasy xiv",)),
     GameProfile("eso", "The Elder Scrolls Online", name_markers=("elder scrolls online",)),
@@ -75,6 +92,30 @@ def match_profile(bundle_id: Optional[str], app_name: Optional[str]) -> Optional
         if name and any(marker in name for marker in profile.name_markers):
             return profile
     return None
+
+
+def gamer_vocabulary(profile: GameProfile) -> list[str]:
+    """Words to prime Whisper with for this game (shared MMO slang first)."""
+    seen, words = set(), []
+    for word in MMO_VOCABULARY + profile.vocabulary:
+        if word.lower() not in seen:
+            seen.add(word.lower())
+            words.append(word)
+    return words
+
+
+def gamer_asr_overlay(config: dict, profile: Optional[GameProfile]) -> dict:
+    """Per-dictation config for Gamer mode (never written back to disk).
+
+    Whisper gets the game's vocabulary, and cleanup stays Normal: chat keeps
+    your words (fillers removed), no style rewrite.
+    """
+    if profile is None:
+        return config
+    overlay = dict(config)
+    overlay["gamer_vocabulary"] = gamer_vocabulary(profile)
+    overlay["output_tone"] = "minimal"
+    return overlay
 
 
 def frontmost_app() -> tuple[Optional[int], Optional[str], Optional[str]]:
