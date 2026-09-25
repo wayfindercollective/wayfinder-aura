@@ -598,3 +598,77 @@ def test_auto_mic_follows_the_windows_default(monkeypatch):
     # An explicitly chosen mic still wins.
     monkeypatch.setattr(wayfinder_main, "get_input_device_by_name", lambda name: 1)
     assert wayfinder_main.resolve_audio_device({"audio_device_name": "Microphone (2- Shure MV7+)"}) == 1
+
+
+# --- Sleep/wake + display changes; microphone privacy ---------------------------
+
+def test_lifecycle_messages_map_to_the_mac_callbacks():
+    from wayfinder.utils.windows_lifecycle import dispatch
+
+    seen = []
+    cb = dict(on_sleep=lambda: seen.append("sleep"), on_wake=lambda: seen.append("wake"),
+              on_screens_changed=lambda: seen.append("screens"))
+    dispatch(0x0218, 0x4, 0, **cb)    # WM_POWERBROADCAST / PBT_APMSUSPEND
+    dispatch(0x0218, 0x7, 0, **cb)    # PBT_APMRESUMESUSPEND: ignored (0x12 always follows)
+    dispatch(0x0218, 0x12, 0, **cb)   # PBT_APMRESUMEAUTOMATIC
+    dispatch(0x007E, 32, 0, **cb)     # WM_DISPLAYCHANGE
+    dispatch(0x001A, 0x2F, 0, **cb)   # WM_SETTINGCHANGE / SPI_SETWORKAREA (taskbar moved)
+    dispatch(0x001A, 0x44, 0, **cb)   # other setting changes: ignored
+    assert seen == ["sleep", "wake", "screens", "screens"]
+
+
+@windows_only
+def test_lifecycle_window_receives_power_messages():
+    import ctypes
+
+    from wayfinder.utils.windows_lifecycle import WindowsLifecycleObserver
+
+    seen = []
+    observer = WindowsLifecycleObserver.start(on_sleep=lambda: seen.append("sleep"))
+    try:
+        assert observer is not None
+        ctypes.windll.user32.SendMessageW(observer._hwnd, 0x0218, 0x4, 0)
+        assert seen == ["sleep"]
+    finally:
+        observer.stop()
+
+
+@pytest.mark.parametrize("values, expected", [
+    ({}, None),
+    ({"hklm": "Deny"}, "device"),
+    ({"hkcu": "Deny"}, "apps"),
+    ({"np": "Deny"}, "desktop_apps"),
+    ({"hkcu": "Allow", "np": "Allow"}, None),
+])
+def test_microphone_privacy_switches(monkeypatch, values, expected):
+    from wayfinder.utils import windows_privacy as p
+
+    if sys.platform != "win32":
+        pytest.skip("winreg")
+    import winreg
+
+    def fake(root, path):
+        if root == winreg.HKEY_LOCAL_MACHINE:
+            return values.get("hklm")
+        return values.get("np") if path.endswith("NonPackaged") else values.get("hkcu")
+
+    monkeypatch.setattr(p, "_value", fake)
+    assert p.microphone_block() == expected
+    assert (p.blocked_message(expected) is None) is (expected is None)
+
+
+def test_silence_message_names_the_windows_switch(monkeypatch):
+    from queue import Queue
+
+    import wayfinder_main
+    from wayfinder.utils import windows_privacy
+
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    monkeypatch.setattr(windows_privacy, "microphone_block", lambda: "desktop_apps")
+    app = SimpleNamespace(config={}, event_queue=Queue(),
+                          _refresh_macos_permission_banner=lambda: None)
+    msg = wayfinder_main.WayfinderApp._silence_error_message(app)
+    assert "desktop apps access your microphone" in msg
+    monkeypatch.setattr(windows_privacy, "microphone_block", lambda: None)
+    assert "No speech detected" in wayfinder_main.WayfinderApp._silence_error_message(app)

@@ -5984,7 +5984,27 @@ class WayfinderApp(ctk.CTk):
                 )
             except Exception as exc:
                 self.log(f"⚠ macOS lifecycle integration unavailable: {exc}")
-        if IS_MACOS:
+        elif IS_WINDOWS:
+            # Same sleep/wake/display handling as the Mac, from Windows'
+            # WM_POWERBROADCAST / WM_DISPLAYCHANGE (utils/windows_lifecycle.py);
+            # its thread only queues, Tk runs the handlers.
+            try:
+                from wayfinder.utils.windows_lifecycle import WindowsLifecycleObserver
+
+                self._macos_lifecycle_observer = WindowsLifecycleObserver.start(
+                    on_sleep=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._on_macos_will_sleep)
+                    ),
+                    on_wake=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._on_macos_did_wake)
+                    ),
+                    on_screens_changed=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._on_macos_screens_changed)
+                    ),
+                )
+            except Exception as exc:
+                self.log(f"⚠ Windows sleep/wake integration unavailable: {exc}")
+        if IS_MACOS or IS_WINDOWS:
             self.after(1200, self._refresh_macos_permission_banner)
             self._apply_macos_window_chrome()
         if WINDOWS_MAC_LOOK:
@@ -6179,7 +6199,7 @@ class WayfinderApp(ctk.CTk):
         except Exception as exc:
             self.log(f"⚠ Microphone refresh after wake failed: {exc}")
         self._on_macos_screens_changed()
-        self.log("🌅 macOS wake recovery complete")
+        self.log(f"🌅 {'Windows' if IS_WINDOWS else 'macOS'} wake recovery complete")
 
     def _on_macos_screens_changed(self) -> None:
         controller = getattr(self, "overlay_controller", None)
@@ -15974,6 +15994,9 @@ class WayfinderApp(ctk.CTk):
         label = getattr(self, "macos_permission_label", None)
         button = getattr(self, "macos_permission_open_btn", None)
         anchor = getattr(self, "_dictate_banner_anchor", None)
+        if IS_WINDOWS and banner is not None and label is not None and button is not None:
+            self._refresh_windows_microphone_banner(banner, label, button, anchor)
+            return
         if not IS_MACOS or banner is None or label is None or button is None:
             return
         try:
@@ -16042,7 +16065,38 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
+    def _refresh_windows_microphone_banner(self, banner, label, button, anchor) -> None:
+        """Windows: the Mac's "microphone is blocked" banner, from the privacy switches."""
+        try:
+            from wayfinder.utils.windows_privacy import microphone_block
+
+            block = microphone_block()
+        except Exception:
+            block = None
+        self._missing_macos_permission = "microphone" if block else None
+        try:
+            if block is None:
+                banner.pack_forget()
+                return
+            label.configure(text=(
+                "Wayfinder Aura can't hear you: Windows is blocking the microphone. "
+                "Turn on microphone access for desktop apps, then try a dictation."))
+            button.configure(text="Open Microphone")
+            if not banner.winfo_manager():
+                if anchor is not None:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+                else:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
     def _open_missing_macos_permission(self) -> None:
+        if IS_WINDOWS:
+            from wayfinder.utils.windows_privacy import open_microphone_settings
+
+            if not open_microphone_settings():
+                self.log("⚠ Could not open Windows microphone privacy settings")
+            return
         permission = getattr(self, "_missing_macos_permission", None)
         if permission is None:
             self._refresh_macos_permission_banner()
@@ -22140,6 +22194,21 @@ class WayfinderApp(ctk.CTk):
             if status == MIC_RESTRICTED:
                 return ("Microphone access is restricted on this Mac (Screen Time or a device "
                         "profile) — ask the Mac's administrator to allow Wayfinder Aura")
+        if IS_WINDOWS:
+            try:
+                from wayfinder.utils.windows_privacy import blocked_message, microphone_block
+
+                message = blocked_message(microphone_block())
+            except Exception:
+                message = None
+            if message:
+                try:
+                    self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._refresh_macos_permission_banner)
+                    )
+                except Exception:
+                    pass
+                return message
         name = self.config.get("audio_device_name")
         if name:
             return (f"No speech detected from “{name}” — check the mic's mute/gain, "
