@@ -400,3 +400,18 @@ def test_researched_games_are_searchable():
     data = pytest.importorskip("wayfinder.core.game_list_data")
     name = data.RESEARCHED_GAMES[0][0]
     assert name in [e.name for e in gc.search_games(name.split()[0])]
+
+
+def test_generated_list_matches_a_rebuild_from_the_saved_research():
+    """game_list_data.py must be what scripts/build_game_list.py makes from
+    scripts/data/game_chat_research.json (no hand edits drifting in)."""
+    import importlib.util
+    import json
+    from pathlib import Path
+    data = pytest.importorskip("wayfinder.core.game_list_data")
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("build_game_list", root / "scripts" / "build_game_list.py")
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    rows = json.loads((root / "scripts" / "data" / "game_chat_research.json").read_text())["games"]
+    assert tuple(builder.build(rows)) == tuple(tuple(e) for e in data.RESEARCHED_GAMES)
