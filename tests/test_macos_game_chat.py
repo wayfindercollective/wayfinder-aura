@@ -17,7 +17,7 @@ from wayfinder.core import macos_game_chat as gc
     ("com.blizzard.worldofwarcraft.classic", "World of Warcraft Classic", "wow"),
     (None, "World of Warcraft Classic Era", "wow"),
     ("com.square-enix.ffxiv", "FINAL FANTASY XIV ONLINE", "ffxiv"),
-    ("com.jagex.osrs", "Old School RuneScape", "runescape"),
+    ("com.jagex.osrs", "Old School RuneScape", "jagex"),
     (None, "EVE Online", "eve"),
 ])
 def test_supported_games_are_recognised(bundle, name, key):
@@ -102,36 +102,42 @@ WOW = gc.match_profile(None, "World of Warcraft")
 
 def test_wow_opens_chat_pastes_and_sends():
     game = Game()
-    assert _send(game, "inc two from the left", WOW) == 1
+    assert _send(game, "inc two from the left", WOW) == gc.ChatResult(1, False, 0)
     assert game.calls == [("return",), ("paste", "inc two from the left"), ("return",)]
 
 
-def test_long_wow_dictation_goes_out_as_several_messages():
+def test_long_dictation_sends_one_message_and_leaves_the_next_part_for_enter():
+    """One message per keypress: the second part waits in chat, unsent."""
     game = Game()
     text = " ".join(["Stack on the tank for the next mechanic please."] * 8)
-    sent = _send(game, text, WOW)
-    assert sent > 1
-    pasted = [c[1] for c in game.calls if c[0] == "paste"]
-    # Each message: open chat, paste, send - in that order.
-    expected = []
-    for message in pasted:
-        expected += [("return",), ("paste", message), ("return",)]
-    assert game.calls == expected and len(pasted) == sent
-    assert all(len(m) <= 255 for m in pasted) and " ".join(pasted).split() == text.split()
+    parts = gc.split_for_chat(text, 255)
+    assert len(parts) >= 2
+    result = _send(game, text, WOW)
+    assert result == gc.ChatResult(1, True, len(parts) - 2)
+    assert game.calls == [("return",), ("paste", parts[0]), ("return",),   # sent
+                          ("return",), ("paste", parts[1])]                # waiting
+    assert sum(1 for c in game.calls if c == ("return",)) == 3  # never a 2nd send
+
+
+def test_three_or_more_parts_leave_the_rest_in_history():
+    game = Game()
+    text = " ".join(["Tanks stack left and swap at three stacks of the debuff."] * 16)
+    result = _send(game, text, WOW)
+    assert result.sent == 1 and result.waiting and result.left_over >= 1
 
 
 def test_send_off_pastes_once_into_the_opened_chat_for_review():
     game = Game()
     long_text = "a " * 300
-    assert _send(game, long_text, WOW, send=False) == 1
+    assert _send(game, long_text, WOW, send=False) == gc.ChatResult(0, False, 0)
     assert game.calls == [("return",), ("paste", " ".join(long_text.split()))]
 
 
-def test_games_with_live_chat_input_get_no_return_first():
+def test_eve_is_paste_only_return_is_its_confirm_key():
     game = Game()
-    runescape = gc.match_profile(None, "Old School RuneScape")
-    _send(game, "gf", runescape)
-    assert game.calls == [("paste", "gf"), ("return",)]
+    eve = gc.match_profile(None, "EVE Online")
+    _send(game, "o7 fleet", eve)
+    assert game.calls == [("paste", "o7 fleet")]  # no Return, ever
 
 
 def test_alt_tab_mid_send_never_presses_return_elsewhere():
@@ -235,3 +241,136 @@ def test_app_overlay_only_applies_during_a_game_dictation():
     assert wayfinder_main.WayfinderApp._gamer_asr_config(app, cfg) is cfg
     app._gamer_profile = WOW
     assert wayfinder_main.WayfinderApp._gamer_asr_config(app, cfg)["output_tone"] == "minimal"
+
+
+
+# --- research-driven rules (2026-09-24 compatibility review) ---------------------------
+
+def test_untested_games_open_and_paste_but_the_player_sends():
+    ffxiv = gc.match_profile(None, "FINAL FANTASY XIV ONLINE")
+    assert not ffxiv.auto_send and ffxiv.max_chars == 400
+    game = Game()
+    _send(game, "looking for group", ffxiv, send=True)
+    assert game.calls == [("return",), ("paste", "looking for group")]
+
+
+def test_only_wow_sends_on_its_own():
+    assert [p.key for p in gc.PROFILES if p.auto_send] == ["wow"]
+
+
+def test_keys_are_held_only_inside_hold_keys(monkeypatch):
+    import importlib
+    from types import ModuleType
+    from wayfinder.core import macos_paste
+
+    real = importlib.reload(macos_paste)  # the conftest stub replaces post_return
+    quartz = ModuleType("Quartz")
+    quartz.kCGHIDEventTap = 0
+    quartz.CGEventCreateKeyboardEvent = lambda _s, code, down: {"code": code, "down": down}
+    quartz.CGEventSetFlags = lambda e, f: None
+    quartz.CGEventPost = lambda _t, e: None
+    monkeypatch.setitem(__import__("sys").modules, "Quartz", quartz)
+    slept = []
+    monkeypatch.setattr("time.sleep", slept.append)
+    real.post_return()
+    assert slept == []                      # desktop pastes: no delay
+    with real.hold_keys(0.035):
+        real.post_return()
+    assert slept == [0.035]                 # one hold, on key-down
+    real.post_return()
+    assert slept == [0.035]                 # restored after the block
+
+
+# --- unlisted games are detected and protected ---------------------------------------
+
+@pytest.mark.parametrize("bundle,name,category,path,expect", [
+    ("com.mojang.minecraftlauncher", "Minecraft", "public.app-category.games", None, "listed as a game"),
+    ("com.x.rpg", "Some RPG", "public.app-category.role-playing-games", None, "listed as a game"),
+    (None, "wine64-preloader", None, None, "Wine"),
+    ("com.nvidia.gfnpc.mall", "GeForce NOW", None, None, "cloud-gaming"),
+    ("com.x.y", "Game", None, "/Users/a/Library/Application Support/Steam/steamapps/common/Game/Game.app", "Steam"),
+])
+def test_unlisted_games_are_recognised(bundle, name, category, path, expect):
+    assert expect in gc.unlisted_game_reason(bundle, name, category, path)
+
+
+@pytest.mark.parametrize("bundle,name,category", [
+    ("com.apple.Terminal", "Terminal", "public.app-category.developer-tools"),
+    ("com.tinyspeck.slackmacgap", "Slack", "public.app-category.business"),
+    ("net.battle.app", "Battle.net", None),             # launchers are not games
+    ("com.valvesoftware.steam", "Steam", None),
+])
+def test_ordinary_apps_are_not_games(bundle, name, category):
+    assert gc.unlisted_game_reason(bundle, name, category, "/Applications/X.app") is None
+
+
+def _hook(monkeypatch, frontmost, signals, config):
+    import wayfinder_main
+    from wayfinder.core import injector
+    keys, clip = [], []
+    monkeypatch.setattr(gc, "frontmost_app", lambda: frontmost)
+    monkeypatch.setattr(gc, "app_signals", lambda pid: signals)
+    monkeypatch.setattr(injector, "inject_text", lambda text, **k: keys.append(text))
+    monkeypatch.setattr(injector, "press_enter", lambda: keys.append("return"))
+    app, logs = _app(config)
+    handled = wayfinder_main.WayfinderApp._inject_into_game_chat(app, "hello there", 3)
+    return handled, keys, clip, logs
+
+
+def test_unlisted_game_pastes_normally_with_a_note(monkeypatch):
+    handled, keys, clip, logs = _hook(
+        monkeypatch, (5, "com.mojang.minecraftlauncher", "Minecraft"),
+        ("public.app-category.games", "/Applications/Minecraft.app"), {})
+    assert handled is False  # the normal paste path takes over: no restriction
+    assert any("hasn't been tested" in line for line in logs)
+
+
+def test_ordinary_app_keeps_the_normal_paste_silently(monkeypatch):
+    handled, keys, clip, logs = _hook(
+        monkeypatch, (7, "com.apple.Terminal", "Terminal"),
+        ("public.app-category.developer-tools", "/System/Applications/Utilities/Terminal.app"), {})
+    assert handled is False and keys == [] and logs == []
+
+
+@pytest.mark.parametrize("name", ["Old School RuneScape", "RuneLite", "League of Legends", "Black Desert"])
+def test_not_recommended_games_are_not_restricted_just_explained(monkeypatch, name):
+    handled, keys, clip, logs = _hook(monkeypatch, (9, None, name), (None, None), {})
+    assert handled is False and keys == []          # normal paste, no Gamer mode keys
+    assert any("Heads-up" in line for line in logs)
+
+
+# --- Games tab: Steam Deck-style list ------------------------------------------------
+
+def test_every_game_has_a_known_status_and_an_explanation():
+    for entry in gc.game_list():
+        assert entry.status in gc.STATUS_LABELS and entry.note.strip()
+
+
+def test_wow_stays_untested_until_someone_tries_it_in_game():
+    wow = next(e for e in gc.game_list() if e.name == "World of Warcraft")
+    assert wow.status == gc.UNTESTED and "Don't press Enter first" in wow.note
+
+
+def test_tested_profiles_become_verified():
+    from dataclasses import replace
+    assert gc.profile_entry(replace(WOW, tested=True)).status == gc.VERIFIED
+
+
+def test_not_recommended_entries_say_why():
+    lol = next(e for e in gc.game_list() if e.name == "League of Legends")
+    assert lol.status == gc.NOT_RECOMMENDED and "paste" in lol.note
+
+
+@pytest.mark.parametrize("query,expect", [
+    ("warcraft", "World of Warcraft"),
+    ("MINE", "Minecraft: Java Edition"),
+    ("gw2", "Guild Wars 2"),
+    ("geforce now", "Cloud gaming (GeForce NOW, Xbox Cloud, Boosteroid)"),
+])
+def test_search_finds_games_by_name_or_alias(query, expect):
+    assert expect in [e.name for e in gc.search_games(query)]
+
+
+def test_empty_search_lists_everything_and_nonsense_lists_nothing():
+    assert len(gc.search_games("  ")) == len(gc.game_list())
+    assert gc.search_games("zzz-not-a-game") == []

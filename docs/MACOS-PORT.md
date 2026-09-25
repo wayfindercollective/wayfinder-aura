@@ -140,41 +140,43 @@ with no Terminal:
 
 ### Gamer mode (World of Warcraft first)
 
-`core/macos_game_chat.py`, Settings ▸ "Gamer mode" and "Send game messages"
-(both on by default; `gamer_mode`, `game_chat_send`).
+`core/macos_game_chat.py`; its own **Games** tab (sidebar, gamepad icon) holds
+the switches ("Gamer mode", "Send game messages"; `gamer_mode`,
+`game_chat_send`), how it works, and a searchable game list.
 
-- When dictation starts with a supported game in front, that dictation gets
-  a runtime overlay (`gamer_asr_overlay`, never saved): Whisper is primed with
-  MMO slang plus the game's words (inc, pull, LFG, OOM, M+, Bloodlust...),
-  and cleanup stays Normal, so chat keeps your words. Free, like game chat.
-  Measured on Base (2 synthetic voices x 8 WoW chat lines): gamer terms
-  heard right 24/42 (57%) -> 35/42 (83%); "Ink 2" -> "Inc", "White Bit N
-  Wheel Resit" -> "wipe it and we'll...", "blood lost" -> "Bloodlust".
-  Still missed sometimes: "battle rez", "ilvl". Small sample, synthetic
-  voices; Turbo and the user's own Vocabulary (Ultra) cover more.
-
-- When the app in front at paste time matches a game profile (WoW retail,
-  Classic and Classic Era by bundle id `com.blizzard.worldofwarcraft*` or
-  name), Aura presses Return to open chat, pastes, and presses Return to
-  send. Dictation longer than WoW's 255-character limit goes out as several
-  messages split at sentence, then word, breaks, 0.45 s apart.
-- In games Aura only pastes, never types keys: letters are keybinds there,
-  and a paste that misses the chat box does nothing.
-- Return is only pressed while the matched game is still frontmost (an
-  alt-tab mid-send stops the sequence); modifiers are released first
-  (Option+Return toggles WoW's window mode).
-- The player does not press Enter first: tap the shortcut, speak, tap again.
-- Other profiles (Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings
-  Online, Albion Online: Return opens chat; RuneScape and EVE Online: chat
-  input is live) use each game's known convention with a conservative
-  200-character split; none has been tried in the game yet.
-- Status: unit-tested with recorded key sequences, and live-checked against
-  a native stand-in for WoW's chat (Return opens, Cmd+V pastes, Return sends,
-  255 cap): a short message, a 3-message split, review mode, no stray keys,
-  clipboard restored - both scripted and by voice through the installed app.
-  Still needs an in-game WoW check (real chat box, IM-style chat, Classic).
-  macOS 14+ won't let a background process raise a window, so the check
-  needs the player to click the game - as in real use.
+- **Per dictation**, when a profiled game is in front: Whisper is primed with
+  MMO slang plus the game's words (`gamer_asr_overlay`, never saved) and
+  cleanup stays Normal. Measured on Base (2 synthetic voices x 8 WoW chat
+  lines): gamer terms heard right 24/42 (57%) -> 35/42 (83%).
+- **One message per dictation** (owner decision, 2026-09-24): game rules draw
+  the line at one message per keypress (Path of Exile's tool policy; the
+  Blizzard players' rule of thumb). WoW: open chat, paste, send. Past the
+  255-character limit the next part is pasted into a fresh chat box for the
+  player's Enter; anything beyond stays in History.
+- **Only pastes, never types keys** (letters are keybinds). Return only while
+  the matched game is still frontmost; keys are held 35 ms in games (some
+  engines miss an instant down+up); modifiers released first.
+- **Educate, don't restrict** (owner decision): every game still gets at
+  least the normal paste. Profiles: WoW auto-sends; FFXIV, ESO, LOTRO,
+  Albion, Path of Exile open chat and paste, the player sends; EVE pastes
+  only (Return is its Confirm key). "Not recommended" (RuneScape - Jagex bans
+  software key presses and chat takes no paste; League of Legends - no paste;
+  Black Desert - first-offence macro bans) get the normal paste plus a
+  heads-up. Unlisted games (App Store games category, Steam library, Wine,
+  GeForce NOW) get the normal paste and a note that they're untested.
+- **Games tab list**, Steam Deck-style: Verified (tested in game), Playable
+  (works with a step), Untested (from documentation), Not recommended (why).
+  Profiles plus info-only entries from the 2026-09-24 compatibility and
+  market research (Minecraft: T opens chat; Roblox: /; Guild Wars 2 and
+  cloud gaming: Cmd+V doesn't paste under Wine / streaming yet; ...). A
+  profile becomes Verified only when `tested=True` after an in-game check.
+  Trademark note: "not affiliated with or endorsed by any game publisher";
+  market as "Works with World of Warcraft on Mac", never "Built for WoW".
+- **Open work:** in-game WoW check (Starter Edition covers /say), Wine
+  games (Ctrl+V, detect via window title, 2 s clipboard pacing), per-game
+  open keys (T, /, Y), sound cues for fullscreen, Windows/Linux adapters.
+- Live-checked against a native stand-in for WoW's chat, by script and by
+  voice through the installed app (before one-message-per-dictation).
 
 ## 6. Speech and cleanup pipeline
 

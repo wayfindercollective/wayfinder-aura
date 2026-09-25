@@ -38,6 +38,31 @@ RESTORE_DELAY_S = 0.8
 # Layout-aware V keycode, read on the main thread (see refresh_layout_cache).
 _v_keycode: int | None = None
 
+# Seconds each posted key stays down. 0 for normal pastes; Gamer mode holds
+# keys briefly because some game engines miss an instant down+up.
+_key_hold_s = 0.0
+
+
+class hold_keys:
+    """``with hold_keys(0.035):`` - hold each posted key for that long."""
+
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+
+    def __enter__(self):
+        global _key_hold_s
+        self._prev, _key_hold_s = _key_hold_s, self.seconds
+
+    def __exit__(self, *exc):
+        global _key_hold_s
+        _key_hold_s = self._prev
+
+
+def _hold() -> None:
+    if _key_hold_s > 0:
+        import time
+        time.sleep(_key_hold_s)
+
 
 def _on_main_thread() -> bool:
     return threading.current_thread() is threading.main_thread()
@@ -154,6 +179,8 @@ def post_command_v() -> None:
             raise RuntimeError("could not create the Cmd+V key event")
         CGEventSetFlags(event, flags)
         CGEventPost(kCGHIDEventTap, event)
+        if keycode == code and pressed:
+            _hold()
 
 
 def post_return() -> None:
@@ -166,6 +193,8 @@ def post_return() -> None:
             raise RuntimeError("could not create the Return key event")
         CGEventSetFlags(event, 0)
         CGEventPost(kCGHIDEventTap, event)
+        if pressed:
+            _hold()
 
 
 def frontmost_window_id() -> str | None:

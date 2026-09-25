@@ -1363,8 +1363,9 @@ SETTING_TOOLTIPS = {
     "gamer_mode": (
         "When World of Warcraft is in front, Aura hears gamer talk (inc, pull, LFG, "
         "M+...), keeps your words as said, and sends them to chat: don't press "
-        "Enter first, just tap your shortcut, speak, tap again. Long messages are "
-        "split to fit WoW's 255-character limit.\n"
+        "Enter first, just tap your shortcut, speak, tap again. One message per "
+        "dictation: past WoW's 255-character limit, the next part waits in chat "
+        "for your Enter.\n"
         "Also set up for Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings "
         "Online, Albion Online, RuneScape and EVE Online. In games Aura only pastes, "
         "never types keys, so dictation can't trigger a keybind."
@@ -7997,8 +7998,10 @@ class WayfinderApp(ctk.CTk):
             ("dictate", "audio-waveform", "Dictate"),
             ("settings", "settings-2", "Settings"),
             ("style", style_icon, style_label),
-            ("history", "history", "History"),
         ]
+        if IS_MACOS:
+            tabs.append(("games", "gamepad-2", "Games"))
+        tabs.append(("history", "history", "History"))
 
         for tab_id, icon_name, label in tabs:
             # Fixed-height nav rows (the old expand-to-fill made four huge
@@ -8055,12 +8058,13 @@ class WayfinderApp(ctk.CTk):
         ):
             return
         builders = {
-            "dictate": self._create_dictate_tab,
-            "settings": self._create_settings_tab,
-            "style": self._create_style_tab,
-            "history": self._create_history_tab,
+            "dictate": "_create_dictate_tab",
+            "settings": "_create_settings_tab",
+            "style": "_create_style_tab",
+            "history": "_create_history_tab",
+            "games": "_create_games_tab",
         }
-        builder = builders.get(tab_id)
+        builder = getattr(self, builders[tab_id], None) if tab_id in builders else None
         if builder is None:
             raise ValueError(f"Unknown tab: {tab_id}")
 
@@ -9082,7 +9086,6 @@ class WayfinderApp(ctk.CTk):
         )
 
         if IS_MACOS:
-            self._create_game_chat_rows(system_content)
             self._create_login_item_row(system_content)
 
         yield "system"
@@ -12408,6 +12411,122 @@ class WayfinderApp(ctk.CTk):
             # Don't crash if compatibility check fails
             print(f"[Compatibility] Error checking compatibility: {e}")
     
+    @staticmethod
+    def _socket_tab_ids() -> tuple[str, ...]:
+        """Tabs the control socket may open (tab:/inspect:)."""
+        return ("dictate", "settings", "style", "history") + (("games",) if IS_MACOS else ())
+
+    def _create_games_tab(self) -> None:
+        """Games tab (macOS): Gamer mode switches, how it works, and a searchable
+        list of games with Steam Deck-style verdicts (Verified / Playable /
+        Untested / Not recommended). Aura never restricts a game; the list
+        explains where it works best and where it's a bad idea."""
+        from wayfinder.core import macos_game_chat as game_chat
+
+        frame = ctk.CTkFrame(self.tab_content_container, **_tab_surface_kwargs())
+        self.tab_frames["games"] = frame
+        scroll = SmoothScrollableFrame(
+            frame, **_tab_surface_kwargs(),
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        scroll.pack(fill="both", expand=True)
+        fam, fs = self.font_body[0], self.font_sizes
+
+        def tile(title: str):
+            card = ctk.CTkFrame(
+                scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"],
+                border_width=1, border_color=COLORS["border_rim"],
+            )
+            card.pack(fill="x", pady=(0, SPACING["md"]))
+            ctk.CTkLabel(
+                card, text=title, font=(self.font_header[0], fs["caption"]),
+                text_color=COLORS["text_secondary"],
+            ).pack(anchor="w", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], SPACING["sm"]))
+            return card
+
+        def note(parent, text, *, color=None, top=0, size="small"):
+            label = ctk.CTkLabel(
+                parent, text=text, font=(fam, fs[size]), anchor="w", justify="left",
+                text_color=color or COLORS["text_muted"], wraplength=460,
+            )
+            label.pack(fill="x", padx=SPACING["tile_pad"], pady=(top, 2))
+            return label
+
+        # --- Gamer mode ----------------------------------------------------------
+        mode = tile("GAMER MODE")
+        self._create_game_chat_rows(mode)
+        for line in (
+            "In a supported game, don't press Enter first: tap your shortcut, speak, tap again.",
+            "Aura hears gamer talk (inc, pull, LFG, M+...) and keeps your words as said.",
+            "One message per dictation: if it's too long, the next part waits in chat for your Enter.",
+            "In games Aura only pastes, never types keys, so dictation can't trigger a keybind.",
+        ):
+            note(mode, "•  " + line, color=COLORS["text_secondary"])
+        ctk.CTkFrame(mode, fg_color="transparent", height=SPACING["tile_pad_y"]).pack()
+
+        # --- Games list ----------------------------------------------------------
+        games = tile("GAMES")
+        tones = {
+            game_chat.VERIFIED: COLORS["accent_green"],
+            game_chat.PLAYABLE: COLORS["accent"],
+            game_chat.UNTESTED: COLORS["text_secondary"],
+            game_chat.NOT_RECOMMENDED: COLORS["accent_red"],
+        }
+        legend = ctk.CTkFrame(games, fg_color="transparent")
+        legend.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"]))
+        for status, label in game_chat.STATUS_LABELS.items():
+            row = ctk.CTkFrame(legend, fg_color="transparent")
+            row.pack(fill="x", pady=1)
+            ctk.CTkLabel(row, text=label, width=120, anchor="w",
+                         font=(fam, fs["small"], "bold"), text_color=tones[status]).pack(side="left")
+            ctk.CTkLabel(row, text=game_chat.STATUS_MEANINGS[status], anchor="w", justify="left",
+                         font=(fam, fs["small"]), text_color=COLORS["text_muted"],
+                         wraplength=340).pack(side="left", fill="x", expand=True)
+
+        search_var = ctk.StringVar()
+        ctk.CTkEntry(
+            games, textvariable=search_var, placeholder_text="Search games",
+            font=(fam, fs["body"]), height=34, corner_radius=RADIUS["md"],
+            fg_color=COLORS["bg_input"], border_color=COLORS["border_subtle"],
+            text_color=COLORS["text_primary"],
+        ).pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["sm"], SPACING["sm"]))
+        results = ctk.CTkFrame(games, fg_color="transparent")
+        results.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+
+        def render(*_):
+            for child in results.winfo_children():
+                child.destroy()
+            entries = game_chat.search_games(search_var.get())
+            if not entries:
+                ctk.CTkLabel(
+                    results, font=(fam, fs["small"]), anchor="w", justify="left",
+                    text_color=COLORS["text_muted"], wraplength=460,
+                    text="Not on the list. Some games aren't listed because they have no "
+                         "text chat. Anywhere you can type, Aura still pastes normally; it "
+                         "just hasn't been tested there, so check the game's rules on chat tools.",
+                ).pack(fill="x", pady=SPACING["xs"])
+                return
+            for entry in entries:
+                row = ctk.CTkFrame(results, fg_color="transparent")
+                row.pack(fill="x", pady=(SPACING["xs"], 0))
+                head = ctk.CTkFrame(row, fg_color="transparent")
+                head.pack(fill="x")
+                ctk.CTkLabel(head, text=entry.name, anchor="w", font=(fam, fs["body"], "bold"),
+                             text_color=COLORS["text_primary"]).pack(side="left")
+                ctk.CTkLabel(head, text=game_chat.STATUS_LABELS[entry.status], anchor="e",
+                             font=(fam, fs["small"], "bold"),
+                             text_color=tones[entry.status]).pack(side="right")
+                ctk.CTkLabel(row, text=entry.note, anchor="w", justify="left", wraplength=460,
+                             font=(fam, fs["small"]), text_color=COLORS["text_muted"]).pack(fill="x")
+
+        search_var.trace_add("write", render)
+        render()
+
+        note(scroll, "Game names are trademarks of their owners. Wayfinder is not affiliated "
+                     "with or endorsed by any game publisher. Follow each game's rules.",
+             top=SPACING["xs"], size="caption")
+
     def _create_history_tab(self) -> None:
         """Create the History tab content."""
         frame = ctk.CTkFrame(
@@ -21291,10 +21410,10 @@ class WayfinderApp(ctk.CTk):
         elif event_type == EventType.QUIT_APP:
             self.quit_app()
         elif event_type == EventType.SWITCH_TAB:
-            if data in ("dictate", "settings", "style", "history"):
+            if data in self._socket_tab_ids():
                 self._switch_tab(data)
         elif event_type == EventType.INSPECT_UI:
-            if data in ("dictate", "settings", "style", "history"):
+            if data in self._socket_tab_ids():
                 self._inspect_ui(data)
         elif event_type == EventType.TRANSCRIPTION_DONE:
             text, gen = self._split_gen(data)
@@ -22262,26 +22381,41 @@ class WayfinderApp(ctk.CTk):
         pid, bundle_id, app_name = game_chat.frontmost_app()
         profile = game_chat.match_profile(bundle_id, app_name)
         if profile is None:
+            # Unlisted game: the normal paste, with a note that it's untested.
+            category, bundle_path = game_chat.app_signals(pid)
+            reason = game_chat.unlisted_game_reason(bundle_id, app_name, category, bundle_path)
+            if reason is not None:
+                self.log(f"🎮 {app_name or 'This app'}: {reason} Aura hasn't been tested "
+                         "with; pasting normally. See the Games tab.")
             return False
-        send = bool(self.config.get("game_chat_send", True))
+        if profile.caution:
+            # Not recommended, but not restricted: the normal paste, with a heads-up.
+            self.log(f"🎮 Heads-up: {profile.reason} ({profile.name}). Pasting normally; "
+                     "see the Games tab.")
+            return False
+        send = bool(self.config.get("game_chat_send", True)) and profile.auto_send
         self.log(
-            f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste'}"
-            f"{'' if profile.open_chat else ' (chat already live)'}"
+            f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste for you to send'}"
+            f"{'' if profile.open_chat else ' (click into chat first)'}"
         )
+        from wayfinder.core.macos_paste import hold_keys
         try:
-            count = game_chat.send_to_chat(
-                text, profile,
-                game_pid=pid,
-                send=send,
-                paste=lambda message: inject_text(message, typing_speed="instant"),
-                press_return=press_enter,
-                frontmost_pid=lambda: game_chat.frontmost_app()[0],
-                still_current=lambda: gen is None or gen == self.session_generation,
-            )
+            with hold_keys(game_chat.KEY_HOLD_S):
+                result = game_chat.send_to_chat(
+                    text, profile,
+                    game_pid=pid,
+                    send=send,
+                    paste=lambda message: inject_text(message, typing_speed="instant"),
+                    press_return=press_enter,
+                    frontmost_pid=lambda: game_chat.frontmost_app()[0],
+                    still_current=lambda: gen is None or gen == self.session_generation,
+                )
         except game_chat.GameChatAborted as exc:
             raise InjectionError(f"Game chat stopped: {exc}. Your text is in History.") from exc
-        if count > 1:
-            self.log(f"🎮 Sent as {count} messages ({profile.name} chat limit {profile.max_chars})")
+        if result.waiting:
+            self.log(f"🎮 Sent the first message ({profile.name} chat holds {profile.max_chars} "
+                     "characters). The next part is in chat: press Enter to send it."
+                     + (f" {result.left_over} more part(s) are in History." if result.left_over else ""))
         return True
 
     def on_injection_done(self, gen=None):
