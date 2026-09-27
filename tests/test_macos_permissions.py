@@ -235,3 +235,21 @@ def test_allow_never_resets_from_a_source_run(monkeypatch):
     calls, _ = _ask_env(monkeypatch, trusted=False, bundle="org.python.python")
     macos_permissions.ask_for_permission("accessibility")
     assert not any("tccutil" in str(c) for c in calls)
+
+
+def test_input_monitoring_request_waits_for_accessibility(monkeypatch):
+    calls = []
+    monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_permissions, "request_accessibility_permission",
+        lambda *, prompt: calls.append(("accessibility", prompt)) or False)
+    monkeypatch.setattr(
+        macos_permissions, "request_input_monitoring_permission",
+        lambda *, prompt: calls.append(("input", prompt)) or False)
+    monkeypatch.setattr(
+        macos_permissions, "open_macos_privacy_settings",
+        lambda name: calls.append(("settings", name)) or True)
+
+    assert macos_permissions.ask_for_permission("input_monitoring") is True
+    assert calls == [("accessibility", False), ("accessibility", True),
+                     ("settings", "accessibility")]

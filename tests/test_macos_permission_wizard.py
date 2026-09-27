@@ -38,6 +38,18 @@ class TestShowPermissionsSetup:
             "microphone": True, "accessibility": True, "input_monitoring": True})
         assert WayfinderApp.show_permissions_setup(_ns()) is False
 
+    def test_mac_forced_menu_entry_opens_checklist_even_when_ready(self, monkeypatch):
+        import wayfinder.utils.macos_permissions as mp
+
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        monkeypatch.setattr(mp, "permission_snapshot", lambda: {
+            "microphone": True, "accessibility": True, "input_monitoring": True})
+        shown = []
+        pane = SimpleNamespace(show_permissions_step=lambda: shown.append(True))
+        ns = _ns(_welcome_active=True, _welcome_pane=pane)
+        assert WayfinderApp.show_permissions_setup(ns, force=True) is True
+        assert shown == [True]
+
     def test_mac_routes_into_the_running_setup_guide(self, monkeypatch):
         import wayfinder.utils.macos_permissions as mp
 
@@ -71,12 +83,21 @@ class TestPermissionGrantRestartsHotkeys:
         WayfinderApp._macos_permissions_granted(ns, ["accessibility"])
         assert restarted == []
 
-    def test_mac_input_grant_restarts_listener_and_refreshes_banner(self, monkeypatch):
+    def test_mac_input_grant_requires_relaunch_and_refreshes_banner(self, monkeypatch):
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
         calls = []
         ns = _ns(_restart_pynput_listener=lambda: calls.append("restart"),
                  _refresh_macos_permission_banner=lambda: calls.append("banner"))
         WayfinderApp._macos_permissions_granted(ns, ["input_monitoring"])
+        assert calls == ["banner"]
+        assert ns._macos_input_relaunch_required is True
+
+    def test_mac_accessibility_grant_restarts_listener(self, monkeypatch):
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        calls = []
+        ns = _ns(_restart_pynput_listener=lambda: calls.append("restart"),
+                 _refresh_macos_permission_banner=lambda: calls.append("banner"))
+        WayfinderApp._macos_permissions_granted(ns, ["accessibility"])
         assert calls == ["restart", "banner"]
 
     def test_mac_microphone_grant_only_refreshes_banner(self, monkeypatch):
@@ -112,6 +133,34 @@ class TestPermissionGrantRestartsHotkeys:
         ns.stop_event.set()
         WayfinderApp._restart_pynput_listener(ns)
         assert started == []
+
+
+def test_permissions_menu_action_opens_window_and_checklist_on_ui_thread():
+    actions, shown = [], []
+    ns = _ns(
+        _dispatch_tray_action=actions.append,
+        _show_window=lambda: shown.append("window"),
+        show_permissions_setup=lambda *, force: shown.append(("permissions", force)),
+    )
+
+    WayfinderApp.permissions_from_tray(ns)
+    assert shown == []
+    actions.pop()()
+    assert shown == ["window", ("permissions", True)]
+
+
+def test_permissions_menu_opens_input_monitoring_settings_after_menu_closes(monkeypatch):
+    from wayfinder.utils import macos_permissions as mp
+
+    actions, opened = [], []
+    monkeypatch.setattr(mp, "open_macos_privacy_settings",
+                        lambda name: opened.append(name) or True)
+    ns = _ns(_dispatch_tray_action=actions.append)
+
+    WayfinderApp._open_permission_from_tray(ns, "input_monitoring")
+    assert opened == []
+    actions.pop()()
+    assert opened == ["input_monitoring"]
 
 
 class TestListenerRestartEventWiring:

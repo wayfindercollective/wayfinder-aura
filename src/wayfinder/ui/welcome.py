@@ -28,6 +28,31 @@ from wayfinder.config import save_config
 from wayfinder.ui.theme import COLORS, FONT_SIZES, FONTS, RADIUS, SPACING
 
 
+def permission_row_plan(name: str, hint: str, snapshot: dict, requested: set[str],
+                        *, always_open_settings: bool = False):
+    """Keep the macOS recovery actions available until a new process has access."""
+    granted = snapshot.get(name) is True
+    if name == "input_monitoring":
+        if snapshot.get("accessibility") is not True:
+            return "enable Accessibility first", ()
+        if name in requested:
+            if granted:
+                return "permission is on; relaunch to use Right Option", ("relaunch",)
+            return "if absent, use + to add Aura from Applications; then relaunch", ("settings",)
+    if name in requested and not granted:
+        return ("if absent, use + to add Aura from Applications"
+                if name == "accessibility" else hint), ("settings",)
+    if granted and always_open_settings:
+        return hint, ("settings",)
+    return (hint, ()) if granted else (hint, ("allow",))
+
+
+def needs_permissions_shortcut(snapshot: dict, requested: set[str]) -> bool:
+    """A tour detour stays reachable after the user leaves its first step."""
+    return (any(value is not True for value in snapshot.values())
+            or "input_monitoring" in requested)
+
+
 class WelcomeFlow:
     """Pure state machine for the first-run welcome tour.
 
@@ -318,7 +343,9 @@ class WelcomePane:
         self._perm_poll_id = None
         self._perm_snapshot = None
         self._perm_done_scheduled = False
-        self._perm_requested: set[str] = set()  # rows whose "allow" was clicked
+        self._perm_requested: set[str] = set()  # native requests made in this process
+        if getattr(app, "_macos_input_relaunch_required", False):
+            self._perm_requested.add("input_monitoring")
         # macOS Welcome owns the free Base-model download ("runs entirely on this
         # Mac"). Linux keeps its separate setup flow and cue banner.
         needs_model = False
@@ -549,21 +576,22 @@ class WelcomePane:
             self._render_dictate(body)
 
     def _render_permissions(self, body) -> None:
-        """Three live rows; Allow/Repair trigger macOS's own prompts."""
+        """Three live rows with a persistent route back to macOS Settings."""
         ctk = self._ctk
         from wayfinder.utils.macos_permissions import permission_snapshot
 
         snapshot = permission_snapshot()
         self._perm_snapshot = snapshot
-        self._remember_granted_permissions(snapshot)
-        all_on = all(v is True for v in snapshot.values())
+        # Input Monitoring may preflight as granted before its event tap can
+        # receive keys. A request made in this process always needs a relaunch.
+        all_on = (all(v is True for v in snapshot.values())
+                  and "input_monitoring" not in self._perm_requested)
         self._body_label(
             body,
             "all set — Aura can hear you and type for you."
             if all_on
-            else "turn these on once. each opens a mac prompt, and aura picks it up right away.",
+            else "turn these on once. Accessibility applies now; Input Monitoring needs a relaunch.",
         )
-        seen = set(self.app.config.get("macos_permissions_seen", []) or [])
         try:
             from wayfinder.ui.icons import get_icon
         except Exception:
@@ -572,12 +600,10 @@ class WelcomePane:
         rows.pack(fill="x", pady=(SPACING["md"], 0))
         for name, title, why, icon in self._PERMISSION_ROWS:
             granted = snapshot.get(name) is True
-            # macOS hands an Input Monitoring grant to new processes only (its
-            # own Settings offers "Quit & Reopen"): once asked, offer that here.
-            relaunch = (not granted and name == "input_monitoring"
-                        and name in self._perm_requested)
-            if relaunch:
-                why = "switched it on? relaunch aura to finish"
+            why, actions = permission_row_plan(
+                name, why, snapshot, self._perm_requested,
+                always_open_settings=self._only_permissions,
+            )
             row = ctk.CTkFrame(rows, fg_color="transparent")
             row.pack(fill="x", pady=(0, SPACING["sm"]))
             if get_icon is not None:
@@ -591,42 +617,45 @@ class WelcomePane:
             ctk.CTkLabel(text, text=title, anchor="w", height=FONT_SIZES["body"] + 6,
                          font=(FONTS["body"][0], FONT_SIZES["body"], "bold"),
                          text_color=COLORS["text_primary"]).pack(anchor="w")
-            ctk.CTkLabel(text, text=why, anchor="w", height=FONT_SIZES["small"] + 5,
+            ctk.CTkLabel(text, text=why, anchor="w",
+                         height=(FONT_SIZES["small"] * 2 + 5 if name in ("accessibility", "input_monitoring")
+                                 and name in self._perm_requested else FONT_SIZES["small"] + 5),
+                         wraplength=240,
                          font=(FONTS["body"][0], FONT_SIZES["small"]),
                          text_color=COLORS["text_muted"]).pack(anchor="w")
-            if granted:
+            if granted and not actions:
                 ctk.CTkLabel(row, text="on", font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
                              text_color=COLORS["accent_green"]).pack(side="right")
-            elif relaunch:
+            elif not actions:
+                ctk.CTkLabel(row, text="first", font=(FONTS["body"][0], FONT_SIZES["small"]),
+                             text_color=COLORS["text_muted"]).pack(side="right")
+            for action in actions:
+                if action == "relaunch":
+                    command = self._relaunch_for_permissions
+                elif action == "settings":
+                    command = lambda n=name: self._open_permission_settings(n)
+                else:
+                    command = lambda n=name: self._request_permission(n)
                 ctk.CTkButton(
-                    row, text="relaunch", width=86, height=30,
+                    row, text=action, width=86, height=30,
                     corner_radius=RADIUS["sm"],
                     fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
                     text_color=COLORS["bg_base"],
                     font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
-                    command=self._relaunch_for_permissions,
+                    command=command,
                 ).pack(side="right")
-            else:
-                repair = name in seen and name != "microphone"
-                ctk.CTkButton(
-                    row, text="repair" if repair else "allow", width=86, height=30,
-                    corner_radius=RADIUS["sm"],
-                    fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-                    text_color=COLORS["bg_base"],
-                    font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
-                    command=lambda n=name, r=repair: self._request_permission(n, r),
-                ).pack(side="right")
-        if all_on:
+        if all_on and not self._only_permissions:
             if not self._perm_done_scheduled:
                 # Let the green checks register, then move on by themselves.
                 self._perm_done_scheduled = True
                 self.card.after(900, self._permissions_complete)
             return
-        later = ctk.CTkLabel(body, text="not now", height=FONT_SIZES["small"] + 5,
-                             font=(FONTS["body"][0], FONT_SIZES["small"]),
-                             text_color=COLORS["text_muted"], cursor="hand2")
-        later.pack(anchor="w", pady=(SPACING["xs"], 0))
-        later.bind("<Button-1>", lambda _e: self._permissions_complete())
+        if not self._only_permissions and not all_on:
+            later = ctk.CTkLabel(body, text="not now", height=FONT_SIZES["small"] + 5,
+                                 font=(FONTS["body"][0], FONT_SIZES["small"]),
+                                 text_color=COLORS["text_muted"], cursor="hand2")
+            later.pack(anchor="w", pady=(SPACING["xs"], 0))
+            later.bind("<Button-1>", lambda _e: self._permissions_complete())
         self._perm_poll_id = self.card.after(self._PERMISSION_POLL_MS, self._poll_permissions)
 
     def _relaunch_for_permissions(self) -> None:
@@ -635,32 +664,28 @@ class WelcomePane:
                 return
         except Exception:
             pass
-        # No bundle to reopen (source run): the Settings pane is the fallback.
-        self._request_permission("input_monitoring")
+        # No bundle to reopen (source run): leave the existing grant alone.
+        self._open_permission_settings("input_monitoring")
 
-    def _request_permission(self, name: str, repair: bool = False) -> None:
-        first_ask = name not in self._perm_requested
+    def _request_permission(self, name: str) -> None:
         self._perm_requested.add(name)
-        if first_ask and name == "input_monitoring":
-            self._render_step()  # show the relaunch hint beside "allow"
+        if name == "input_monitoring":
+            self.app._macos_input_relaunch_required = True
         try:
             from wayfinder.utils import macos_permissions as perms
 
-            if repair:
-                perms.repair_permission(name)
-            else:
-                perms.ask_for_permission(name)
+            perms.ask_for_permission(name)
         except Exception:
             pass
+        if not self._destroyed and self.flow.current == "permissions":
+            self._render_step()
 
-    def _remember_granted_permissions(self, snapshot) -> None:
-        """Remember grants once seen, so a later loss shows Repair, not Allow."""
+    def _open_permission_settings(self, name: str) -> None:
+        """Reopen Settings without resetting a grant made since the first ask."""
         try:
-            seen = list(self.app.config.get("macos_permissions_seen", []) or [])
-            added = [n for n, v in snapshot.items() if v is True and n not in seen]
-            if added:
-                self.app.config["macos_permissions_seen"] = seen + added
-                save_config(self.app.config)
+            from wayfinder.utils.macos_permissions import open_macos_privacy_settings
+
+            open_macos_privacy_settings(name)
         except Exception:
             pass
 
@@ -945,7 +970,7 @@ class WelcomePane:
                         command=self.app._open_missing_macos_permission,
                     )
                     return
-                # Aura picks new grants up live - no quit and reopen.
+                # Input Monitoring needs a relaunch after the grant is made.
                 self._continue_button(
                     body,
                     "turn on permissions",
@@ -1089,10 +1114,10 @@ class WelcomePane:
             dot.pack(side="left", padx=(0, SPACING["sm"]))
             dot.pack_propagate(False)
 
-        # Skip link (bottom-right), always visible.
+        # Skip/close link (bottom-right), always visible.
         skip = ctk.CTkLabel(
             footer,
-            text="skip",
+            text="close" if self._only_permissions else "skip",
             font=(FONTS["body"][0], FONT_SIZES["small"]),
             text_color=COLORS["accent"],
         )
@@ -1103,6 +1128,23 @@ class WelcomePane:
                 self.app._bind_link_hover(skip, FONT_SIZES["small"])
             except Exception:
                 pass
+        if sys.platform == "darwin" and self.flow.current != "permissions":
+            try:
+                from wayfinder.utils.macos_permissions import permission_snapshot
+
+                show_permissions = needs_permissions_shortcut(
+                    permission_snapshot(), self._perm_requested
+                )
+            except Exception:
+                show_permissions = False
+            if show_permissions:
+                link = ctk.CTkLabel(
+                    footer, text="permissions…",
+                    font=(FONTS["body"][0], FONT_SIZES["small"]),
+                    text_color=COLORS["accent"],
+                )
+                link.pack(side="right", padx=(0, SPACING["md"]))
+                link.bind("<Button-1>", lambda _e: self.show_permissions_step())
 
     # --- events --------------------------------------------------------------
 

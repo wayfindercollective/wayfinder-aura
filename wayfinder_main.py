@@ -8912,6 +8912,15 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
+        if IS_MACOS:
+            ctk.CTkButton(
+                system_header, text="Permissions…", width=112, height=28,
+                corner_radius=RADIUS["xs"],
+                fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_secondary"],
+                font=(self.font_body[0], self.font_sizes["small"]),
+                command=lambda: self.show_permissions_setup(force=True),
+            ).pack(side="right")
         
         system_content = ctk.CTkFrame(system_tile, fg_color="transparent")
         system_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
@@ -15892,6 +15901,9 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             install_ready = True
         accessibility, input_monitoring = self._macos_permission_state()
+        input_relaunch_required = bool(
+            getattr(self, "_macos_input_relaunch_required", False)
+        )
         try:
             from wayfinder.utils.macos_permissions import (
                 MIC_DENIED, MIC_RESTRICTED, microphone_authorization,
@@ -15903,7 +15915,7 @@ class WayfinderApp(ctk.CTk):
             "install_location" if not install_ready
             else "microphone" if mic_blocked
             else "accessibility" if accessibility is not True
-            else "input_monitoring" if input_monitoring is not True
+            else "input_monitoring" if input_monitoring is not True or input_relaunch_required
             else None
         )
         if self._missing_macos_permission is None:
@@ -15935,11 +15947,15 @@ class WayfinderApp(ctk.CTk):
             )
             button_text = "Open Accessibility"
         else:
-            text = (
-                f"{hotkey} also needs Input Monitoring: click +, add Wayfinder Aura "
-                "from Applications, turn it on, then quit and reopen it."
-            )
-            button_text = "Open Input Monitoring"
+            if input_monitoring is True and input_relaunch_required:
+                text = "Input Monitoring is on. Relaunch Wayfinder Aura to activate the hotkey."
+                button_text = "Relaunch Aura"
+            else:
+                text = (
+                    f"{hotkey} needs Input Monitoring. If Aura is absent, click + "
+                    "and add /Applications/Wayfinder Aura.app; then relaunch."
+                )
+                button_text = "Permissions…"
         try:
             label.configure(text=text)
             button.configure(text=button_text)
@@ -15958,6 +15974,11 @@ class WayfinderApp(ctk.CTk):
             permission = getattr(self, "_missing_macos_permission", None)
         if permission is None:
             return
+        if (permission == "input_monitoring"
+                and getattr(self, "_macos_input_relaunch_required", False)):
+            _, input_monitoring = self._macos_permission_state()
+            if input_monitoring is True and self.relaunch_app():
+                return
         # Grants go through the in-app checklist (native prompts + live status);
         # moving the app into Applications is the one step it can't do.
         if permission != "install_location" and self.show_permissions_setup(force=True):
@@ -15982,7 +16003,8 @@ class WayfinderApp(ctk.CTk):
         try:
             from wayfinder.utils.macos_permissions import permission_snapshot
 
-            missing = any(v is not True for v in permission_snapshot().values())
+            missing = (any(v is not True for v in permission_snapshot().values())
+                       or bool(getattr(self, "_macos_input_relaunch_required", False)))
         except Exception:
             return False
         if not missing and not force:
@@ -16012,14 +16034,15 @@ class WayfinderApp(ctk.CTk):
             return False
 
     def _macos_permissions_granted(self, names) -> None:
-        """Checklist callback: a grant just landed. A new event tap picks up
-        Accessibility / Input Monitoring immediately, so re-create the hotkey
-        listener instead of asking the user to quit and reopen."""
+        """Pick up Accessibility live; require a process relaunch for Input Monitoring."""
         if not IS_MACOS:
             return
-        if any(n in ("accessibility", "input_monitoring") for n in names):
-            self.log("✓ macOS permission granted — restarting the hotkey listener")
+        if "accessibility" in names:
+            self.log("✓ Accessibility granted — restarting the hotkey listener")
             self._restart_pynput_listener()
+        if "input_monitoring" in names:
+            self._macos_input_relaunch_required = True
+            self.log("✓ Input Monitoring granted — relaunch Aura to activate it")
         self._refresh_macos_permission_banner()
 
     def _restart_pynput_listener(self) -> None:
@@ -19827,6 +19850,25 @@ class WayfinderApp(ctk.CTk):
             pystray.MenuItem("Reset (unstick overlay)", self.tray_reset),
             pystray.Menu.SEPARATOR,
             *window_items,
+            *([pystray.MenuItem(
+                "Permissions",
+                pystray.Menu(
+                    pystray.MenuItem("Status in Aura…", self.permissions_from_tray),
+                    pystray.Menu.SEPARATOR,
+                    pystray.MenuItem(
+                        "Microphone…",
+                        lambda _i, _m: self._open_permission_from_tray("microphone"),
+                    ),
+                    pystray.MenuItem(
+                        "Accessibility…",
+                        lambda _i, _m: self._open_permission_from_tray("accessibility"),
+                    ),
+                    pystray.MenuItem(
+                        "Input Monitoring…",
+                        lambda _i, _m: self._open_permission_from_tray("input_monitoring"),
+                    ),
+                ),
+            )] if sys.platform == "darwin" else []),
             pystray.MenuItem(
                 "Model",
                 pystray.Menu(
@@ -20112,6 +20154,23 @@ class WayfinderApp(ctk.CTk):
 
     def hide_from_tray(self, icon=None, item=None):
         self._dispatch_tray_action(self.hide_to_tray)
+
+    def permissions_from_tray(self, icon=None, item=None):
+        """Open the live checklist after the native status menu closes."""
+        def show():
+            self._show_window()
+            self.show_permissions_setup(force=True)
+
+        self._dispatch_tray_action(show)
+
+    def _open_permission_from_tray(self, permission: str) -> None:
+        """Open a macOS privacy pane after the native status menu closes."""
+        def open_pane():
+            from wayfinder.utils.macos_permissions import open_macos_privacy_settings
+
+            open_macos_privacy_settings(permission)
+
+        self._dispatch_tray_action(open_pane)
 
     def _tray_window_action_text(self, item=None) -> str:
         """Contextual macOS window action shown in the status menu."""

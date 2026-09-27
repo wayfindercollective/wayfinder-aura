@@ -272,6 +272,12 @@ def ask_for_permission(permission: str) -> bool:
             _reset_own_entry("accessibility")
         request_accessibility_permission(prompt=True)
     elif permission == "input_monitoring":
+        # macOS can ignore a ListenEvent request while Accessibility is still
+        # missing. Send the user to that prerequisite instead of showing an
+        # empty Input Monitoring list and implying the request succeeded.
+        if request_accessibility_permission(prompt=False) is not True:
+            request_accessibility_permission(prompt=True)
+            return open_macos_privacy_settings("accessibility")
         if request_input_monitoring_permission(prompt=False) is not True:
             _reset_own_entry("input_monitoring")
         request_input_monitoring_permission(prompt=True)

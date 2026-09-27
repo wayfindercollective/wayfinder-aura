@@ -102,10 +102,15 @@ with no Terminal:
   already works.
 - **Live grants:** Accessibility applies immediately — the hotkey listener is
   re-created on its own restart event (`_restart_pynput_listener`). Input
-  Monitoring reaches new processes only, so after "allow" that row offers
-  **relaunch**, which reopens the bundle through LaunchServices.
-- **Everywhere else:** the Dictate banner, the hotkey step and a successful
-  Ultra activation open the same checklist when something is missing. Startup
+  Monitoring reaches new processes only. After its request, **settings** stays
+  available while the grant is missing; once granted, **relaunch** reopens the
+  bundle through LaunchServices. If Aura is absent in macOS Settings, use **+**
+  to add the copy from Applications.
+- **Everywhere else:** the first-run guide offers a permissions link after its
+  first step; the macOS status menu has a Permissions submenu with direct
+  privacy-pane links and a status checklist. The Settings header opens that
+  checklist at any time, including when everything is granted. The Dictate
+  banner and hotkey step also link to it when something is missing. Startup
   never shows system prompts before the window is up.
 - **Install location:** permissions are requested only for the copy in
   /Applications; running from the DMG shows "Open Applications" instead.
