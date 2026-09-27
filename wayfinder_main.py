@@ -20166,8 +20166,13 @@ class WayfinderApp(ctk.CTk):
     def _open_permission_from_tray(self, permission: str) -> None:
         """Open a macOS privacy pane after the native status menu closes."""
         def open_pane():
-            from wayfinder.utils.macos_permissions import open_macos_privacy_settings
+            from wayfinder.utils.macos_permissions import (
+                open_macos_privacy_settings,
+                request_input_monitoring_registration,
+            )
 
+            if permission == "input_monitoring":
+                request_input_monitoring_registration()
             open_macos_privacy_settings(permission)
 
         self._dispatch_tray_action(open_pane)
@@ -22589,6 +22594,8 @@ class WayfinderApp(ctk.CTk):
         def has(*needles: str) -> bool:
             return any(n in m for n in needles)
 
+        if has("wayfinder aura was frontmost"):
+            return message.split("Injection: ", 1)[-1]
         if has("inject", "ydotool", "wtype", "type"):
             if IS_MACOS:
                 return ("Couldn't paste the text — make sure Accessibility is on "

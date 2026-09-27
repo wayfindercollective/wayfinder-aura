@@ -153,6 +153,8 @@ def test_permissions_menu_opens_input_monitoring_settings_after_menu_closes(monk
     from wayfinder.utils import macos_permissions as mp
 
     actions, opened = [], []
+    monkeypatch.setattr(mp, "request_input_monitoring_registration",
+                        lambda: opened.append("register") or True)
     monkeypatch.setattr(mp, "open_macos_privacy_settings",
                         lambda name: opened.append(name) or True)
     ns = _ns(_dispatch_tray_action=actions.append)
@@ -160,7 +162,7 @@ def test_permissions_menu_opens_input_monitoring_settings_after_menu_closes(monk
     WayfinderApp._open_permission_from_tray(ns, "input_monitoring")
     assert opened == []
     actions.pop()()
-    assert opened == ["input_monitoring"]
+    assert opened == ["register", "input_monitoring"]
 
 
 class TestListenerRestartEventWiring:

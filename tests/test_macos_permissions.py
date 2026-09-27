@@ -1,5 +1,5 @@
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -79,6 +79,25 @@ def test_input_monitoring_can_request_access(monkeypatch):
 
     assert macos_permissions.request_input_monitoring_permission(prompt=True) is False
     assert calls == ["request"]
+
+
+def test_iohid_request_registers_current_app_for_input_monitoring(monkeypatch):
+    calls = []
+
+    class Request:
+        def __call__(self, kind):
+            calls.append(kind)
+            return True
+
+    request = Request()
+    monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_permissions.ctypes, "CDLL",
+                        lambda path: SimpleNamespace(IOHIDRequestAccess=request))
+
+    assert macos_permissions.request_input_monitoring_registration() is True
+    assert calls == [1]  # kIOHIDRequestTypeListenEvent
+    assert request.argtypes == [macos_permissions.ctypes.c_int]
+    assert request.restype == macos_permissions.ctypes.c_bool
 
 
 def test_startup_does_not_stack_input_prompt_behind_accessibility(monkeypatch):
@@ -253,3 +272,22 @@ def test_input_monitoring_request_waits_for_accessibility(monkeypatch):
     assert macos_permissions.ask_for_permission("input_monitoring") is True
     assert calls == [("accessibility", False), ("accessibility", True),
                      ("settings", "accessibility")]
+
+
+def test_input_monitoring_allow_registers_without_resetting_a_working_grant(monkeypatch):
+    calls = []
+    monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_permissions, "request_accessibility_permission",
+                        lambda *, prompt: True)
+    monkeypatch.setattr(macos_permissions, "request_input_monitoring_permission",
+                        lambda *, prompt: calls.append(("preflight", prompt)) or True)
+    monkeypatch.setattr(macos_permissions, "request_input_monitoring_registration",
+                        lambda: calls.append("register") or True)
+    monkeypatch.setattr(macos_permissions, "_reset_own_entry",
+                        lambda name: calls.append(("reset", name)))
+    monkeypatch.setattr(macos_permissions, "open_macos_privacy_settings",
+                        lambda name: calls.append(("settings", name)) or True)
+
+    assert macos_permissions.ask_for_permission("input_monitoring") is True
+    assert calls == [("preflight", False), "register",
+                     ("settings", "input_monitoring")]

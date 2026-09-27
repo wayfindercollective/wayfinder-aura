@@ -226,6 +226,16 @@ def test_pointer_release_containment_uses_geometry_not_hover_state():
     assert wayfinder_main._pointer_event_inside_widget(Widget(), outside) is False
 
 
+def test_self_focus_injection_error_keeps_its_actionable_guidance(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    message = ("Injection: Wayfinder Aura was frontmost, so there was no external "
+               "paste target. Your text is on the clipboard.")
+    guidance = wayfinder_main.WayfinderApp._error_guidance(None, message)
+    assert "frontmost" in guidance
+    assert "clipboard" in guidance
+    assert "Accessibility" not in guidance
+
+
 def test_missing_input_monitoring_stays_visible_with_manual_add_guidance(monkeypatch):
     class Widget:
         def __init__(self, managed=""):

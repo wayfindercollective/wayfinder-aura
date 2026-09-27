@@ -105,7 +105,11 @@ with no Terminal:
   Monitoring reaches new processes only. After its request, **settings** stays
   available while the grant is missing; once granted, **relaunch** reopens the
   bundle through LaunchServices. If Aura is absent in macOS Settings, use **+**
-  to add the copy from Applications.
+  to add the copy from Applications. Accessibility may itself cover the input
+  listening needed for the hotkey, so a working Right Option key does not need
+  a separate Input Monitoring entry. An explicit Input Monitoring action calls
+  IOKit's `IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)` to register Aura
+  in that privacy list; if the API is unavailable, it falls back to Core Graphics.
 - **Everywhere else:** the first-run guide offers a permissions link after its
   first step; the macOS status menu has a Permissions submenu with direct
   privacy-pane links and a status checklist. The Settings header opens that

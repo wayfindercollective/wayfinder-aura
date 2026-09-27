@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -71,6 +72,26 @@ def request_input_monitoring_permission(*, prompt: bool = True) -> bool | None:
         if not trusted and prompt:
             trusted = bool(CGRequestListenEventAccess())
         return trusted
+    except Exception:
+        return None
+
+
+def request_input_monitoring_registration() -> bool | None:
+    """Ask macOS to register this app in the Input Monitoring privacy list.
+
+    IOHIDRequestAccess(kIOHIDRequestTypeListenEvent) is the IOKit request for
+    that list. CGRequestListenEventAccess can allow an event tap through an
+    existing Accessibility grant without adding a separate visible entry.
+    Call this only after the user explicitly asks for Input Monitoring setup.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        iokit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+        request = iokit.IOHIDRequestAccess
+        request.argtypes = [ctypes.c_int]
+        request.restype = ctypes.c_bool
+        return bool(request(1))  # kIOHIDRequestTypeListenEvent
     except Exception:
         return None
 
@@ -280,7 +301,8 @@ def ask_for_permission(permission: str) -> bool:
             return open_macos_privacy_settings("accessibility")
         if request_input_monitoring_permission(prompt=False) is not True:
             _reset_own_entry("input_monitoring")
-        request_input_monitoring_permission(prompt=True)
+        if request_input_monitoring_registration() is None:
+            request_input_monitoring_permission(prompt=True)
     else:
         return False
     return open_macos_privacy_settings(permission)

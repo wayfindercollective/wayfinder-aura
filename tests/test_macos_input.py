@@ -372,6 +372,26 @@ def test_macos_injection_defers_restore_and_keeps_text_without_accessibility(mon
     assert written[-1] == "second" and restored == []
 
 
+def test_macos_injection_refuses_auras_own_window(monkeypatch):
+    import os
+    from wayfinder.core import macos_paste
+
+    written, posted = [], []
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
+    monkeypatch.setattr(macos_paste, "frontmost_window_id",
+                        lambda: f"{os.getpid()}:123")
+    monkeypatch.setattr(macos_paste, "post_command_v", lambda: posted.append(True))
+    monkeypatch.setattr(injector, "_snapshot_macos_pasteboard",
+                        lambda: (object(), []))
+    monkeypatch.setattr(injector, "_write_macos_pasteboard_text",
+                        lambda _pb, text: written.append(text) or 1)
+
+    with pytest.raises(injector.InjectionError, match="frontmost"):
+        injector._inject_text_pyautogui("hello")
+    assert written == ["hello"]
+    assert posted == []
+
+
 def test_aqua_wheel_click_scrolls_a_full_notch_but_trackpad_stream_stays_smooth():
     from wayfinder_main import _aqua_wheel_notches
 

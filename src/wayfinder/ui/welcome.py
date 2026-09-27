@@ -683,8 +683,13 @@ class WelcomePane:
     def _open_permission_settings(self, name: str) -> None:
         """Reopen Settings without resetting a grant made since the first ask."""
         try:
-            from wayfinder.utils.macos_permissions import open_macos_privacy_settings
+            from wayfinder.utils.macos_permissions import (
+                open_macos_privacy_settings,
+                request_input_monitoring_registration,
+            )
 
+            if name == "input_monitoring":
+                request_input_monitoring_registration()
             open_macos_privacy_settings(name)
         except Exception:
             pass
