@@ -225,10 +225,13 @@ simply aren't ducked.
 
 ## 8. Look, feel and performance
 
-- **Waves at rest cost nothing.** The main-window hero and the pill hand their
-  calm wave to Core Animation vector strands (`CAKeyframeAnimation` of paths,
-  seamless loops of 13.1 s and 10.5 s): the render server animates them at the
-  display's refresh with no app wakeups and no Metal memory.
+- **Waves at rest stay live.** On Dictate, the main-window hero and the pill
+  hand their calm wave to Core Animation vector strands (`CAKeyframeAnimation`
+  of paths, seamless loops of 13.1 s and 10.5 s): the render server animates
+  them at the display's refresh with no app wakeups and no Metal memory. The
+  hero card is also visible above Settings and other tabs. There its native
+  layer stays hidden behind tab controls, while the Tk canvas animates the
+  ribbon at 15 fps instead of leaving a frozen frame.
 - **Waves while speaking are Metal**, drawn on a private display-synced render
   thread (`wf_render_clock.m`: `CADisplayLink` from the layer's view, 60 fps,
   animated to each frame's display timestamp). A busy main thread can't skip
@@ -247,9 +250,11 @@ simply aren't ducked.
 - **Pill placement:** inside the screen's visible frame, clear of the Dock
   at its real size.
 - **Idle budget:** CustomTkinter's 100 ms DPI poll is stretched to hourly
-  (Aqua scales on its own); the hero doesn't poll while hidden or occluded.
+  (Aqua scales on its own); the hero doesn't poll while the window is hidden.
+  On non-Dictate tabs its visible canvas updates at 15 fps.
 
-Measured (M3 Ultra, macOS 27, window open, calm):
+Measured (M3 Ultra, macOS 27, Dictate tab open, calm). The Settings canvas
+fallback has not yet been profiled on the packaged build:
 
 | | Before | After |
 |---|---|---|

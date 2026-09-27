@@ -7808,15 +7808,15 @@ class WayfinderApp(ctk.CTk):
         )
 
     def _sync_macos_hero_visibility(self) -> None:
-        """Keep the independent CALayer behind tabs and full-window scrims."""
+        """Keep the native layer behind tabs and animate its visible Tk fallback."""
         native_layer = getattr(self, "_macos_hero_layer", None)
         if native_layer is not None:
             occluded = WayfinderApp._macos_hero_is_occluded(self)
             native_layer.set_hidden(occluded)
             if occluded:
-                # Tk may draw over the hero here (dropdowns, scrims), so the
-                # Metal layer hides; keep a still ribbon on the canvas below
-                # instead of an empty card.
+                # Tabs and scrims can draw over the independent Metal layer.
+                # Seed the Tk canvas now; the idle/active loop advances it on
+                # other tabs, since the hero card itself remains visible.
                 try:
                     self._draw_hero_waveform(force_canvas=True)
                 except Exception:
@@ -7855,6 +7855,11 @@ class WayfinderApp(ctk.CTk):
         """
         if not self.hero_canvas:
             return
+
+        # The hero card sits above every tab. On macOS the native layer must
+        # stay below tab surfaces, so keep its Tk fallback moving there.
+        if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate":
+            force_canvas = True
 
         # Initialize on first call
         if not self._hero_wave_items_created:
@@ -8300,6 +8305,11 @@ class WayfinderApp(ctk.CTk):
         WayfinderApp._sync_macos_hero_visibility(self)
         
         self._write_status_breadcrumb()
+        if IS_MACOS and getattr(self, "app_state", None) == AppState.IDLE:
+            # The native renderer owns Dictate's idle frames and leaves no
+            # Python timer behind. Re-seed the Tk timer for the always-visible
+            # hero when switching to another tab.
+            self._start_idle_breath()
 
     def show_setup_pane(self, on_done=None) -> None:
         """Show the first-run dependency setup as an inline pane over the tab
@@ -20851,13 +20861,20 @@ class WayfinderApp(ctk.CTk):
         self._draw_hero_waveform()
 
         native_layer = getattr(self, "_macos_hero_layer", None)
-        if native_layer is not None and native_layer.native_renderer is not None:
+        if (
+            native_layer is not None
+            and native_layer.native_renderer is not None
+            and (not IS_MACOS or getattr(self, "active_tab", "dictate") == "dictate")
+        ):
             # The native Objective-C timer owns all 30 fps idle frames. Python
             # wakes again only on a state/tab/window event.
             self._idle_breath_job = None
             return
 
-        interval = _hero_idle_interval_ms()
+        interval = (
+            66 if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate"
+            else _hero_idle_interval_ms()
+        )
         self._idle_breath_job = (
             self.after(interval, self._animate_idle_breath)
             if interval is not None else None

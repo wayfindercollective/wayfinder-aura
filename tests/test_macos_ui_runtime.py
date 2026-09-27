@@ -167,6 +167,132 @@ def test_macos_native_hero_is_suspended_below_tabs_and_ultra_scrim():
     assert wayfinder_main.WayfinderApp._macos_hero_is_occluded(app) is True
 
 
+def test_settings_wave_animates_on_canvas_while_native_layer_is_hidden(monkeypatch):
+    """The always-visible hero must not become a still image on Settings."""
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    _stub_appkit(monkeypatch)
+    drawn = []
+    scheduled = []
+    hidden = []
+
+    class Native:
+        native_renderer = object()
+
+        def set_hidden(self, value):
+            hidden.append(value)
+
+    class Canvas:
+        @staticmethod
+        def winfo_viewable():
+            return True
+
+    app = type("App", (), {
+        "active_tab": "settings",
+        "app_state": wayfinder_main.AppState.IDLE,
+        "hero_canvas": Canvas(),
+        "_macos_hero_layer": Native(),
+        "_hero_last_frame_ts": wayfinder_main.time.monotonic(),
+        "_hero_morph": 0.0,
+        "_hero_wave_time": 0.0,
+        "_idle_breath_job": None,
+        "state": lambda self: "normal",
+        "after": lambda self, ms, fn: scheduled.append(ms) or "job",
+        "_animate_idle_breath": lambda self: None,
+        "_draw_hero_waveform": lambda self, **kwargs: drawn.append(kwargs),
+    })()
+
+    wayfinder_main.WayfinderApp._sync_macos_hero_visibility(app)
+    wayfinder_main.WayfinderApp._animate_idle_breath(app)
+    assert hidden == [True]
+    assert drawn == [{"force_canvas": True}, {}]
+    assert scheduled == [66]
+
+    app.active_tab = "dictate"
+    wayfinder_main.WayfinderApp._animate_idle_breath(app)
+    assert app._idle_breath_job is None
+    assert scheduled == [66]
+
+
+def test_settings_wave_does_not_reactivate_native_layer(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    monkeypatch.setattr(wayfinder_main, "get_hero_caches", lambda *args: None)
+    frame = object()
+    monkeypatch.setattr(wayfinder_main, "render_hero_wave", lambda *args, **kwargs: frame)
+    pasted = []
+
+    class Photo:
+        def width(self):
+            return 240
+
+        def height(self):
+            return 64
+
+        def paste(self, image):
+            pasted.append(image)
+
+    class Canvas:
+        def winfo_width(self):
+            return 240
+
+        def winfo_height(self):
+            return 64
+
+        def itemconfigure(self, *args, **kwargs):
+            pass
+
+    class Native:
+        def render_wave(self, **kwargs):
+            pytest.fail("Native renderer covered Settings")
+
+        def set_image(self, image):
+            pytest.fail("Native layer covered Settings")
+
+    app = type("App", (), {
+        "active_tab": "settings",
+        "hero_canvas": Canvas(),
+        "_hero_wave_items_created": True,
+        "_hero_wave_image_id": 1,
+        "_hero_wave_photo": Photo(),
+        "_hero_wave_time": 1.0,
+        "_hero_audio_level": 0.0,
+        "_hero_morph": 0.0,
+        "_macos_hero_layer": Native(),
+        "app_state": wayfinder_main.AppState.IDLE,
+        "ui_scale": 1.0,
+    })()
+
+    wayfinder_main.WayfinderApp._draw_hero_waveform(app)
+    assert pasted == [frame]
+
+
+def test_switching_to_settings_restarts_idle_wave_after_native_handoff(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    events = []
+
+    class Frame:
+        def winfo_manager(self):
+            return "place"
+
+        def lift(self):
+            events.append("lift")
+
+    app = type("App", (), {
+        "active_tab": "dictate",
+        "app_state": wayfinder_main.AppState.IDLE,
+        "_macos_hero_layer": None,
+        "tab_buttons": {},
+        "tab_colors": {},
+        "tab_frames": {"settings": Frame()},
+        "_ensure_tab_created": lambda self, tab: events.append("build"),
+        "_write_status_breadcrumb": lambda self: None,
+        "_start_idle_breath": lambda self: events.append("idle"),
+    })()
+
+    wayfinder_main.WayfinderApp._switch_tab(app, "settings")
+    assert app.active_tab == "settings"
+    assert events == ["build", "lift", "idle"]
+
+
 def test_tab_switch_raises_persistent_opaque_pages_instead_of_unmapping_them():
     import inspect
 
