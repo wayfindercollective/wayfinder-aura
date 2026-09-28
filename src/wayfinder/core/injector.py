@@ -791,6 +791,30 @@ class _XcbQueryExtensionReply(ctypes.Structure):
     ]
 
 
+class _XcbCookie(ctypes.Structure):
+    _fields_ = [("sequence", ctypes.c_uint)]
+
+
+class _XcbQueryKeymapReply(ctypes.Structure):
+    _fields_ = [
+        ("response_type", ctypes.c_uint8),
+        ("pad0", ctypes.c_uint8),
+        ("sequence", ctypes.c_uint16),
+        ("length", ctypes.c_uint32),
+        ("keys", ctypes.c_uint8 * 32),
+    ]
+
+
+class _XcbGetModifierMappingReply(ctypes.Structure):
+    _fields_ = [
+        ("response_type", ctypes.c_uint8),
+        ("keycodes_per_modifier", ctypes.c_uint8),
+        ("sequence", ctypes.c_uint16),
+        ("length", ctypes.c_uint32),
+        ("pad0", ctypes.c_uint8 * 24),
+    ]
+
+
 # Lazy singleton: (libxcb, libc) or None. Loaded at most once per process —
 # repeated CDLL() would leak dlopen refs and find_library() shells out to
 # ldconfig (~2ms) on every call (Codex review).
@@ -841,6 +865,26 @@ def _load_xcb():
         ]
         libc.free.restype = None
         libc.free.argtypes = [ctypes.c_void_p]
+        # Keys actually down + which keycodes are modifiers (see
+        # _ModifierProbe.query); optional, the mask alone is the fallback.
+        try:
+            lib.xcb_query_keymap.restype = _XcbCookie
+            lib.xcb_query_keymap.argtypes = [ctypes.c_void_p]
+            lib.xcb_query_keymap_reply.restype = ctypes.POINTER(_XcbQueryKeymapReply)
+            lib.xcb_query_keymap_reply.argtypes = [ctypes.c_void_p, _XcbCookie, ctypes.c_void_p]
+            lib.xcb_get_modifier_mapping.restype = _XcbCookie
+            lib.xcb_get_modifier_mapping.argtypes = [ctypes.c_void_p]
+            lib.xcb_get_modifier_mapping_reply.restype = ctypes.POINTER(_XcbGetModifierMappingReply)
+            lib.xcb_get_modifier_mapping_reply.argtypes = [
+                ctypes.c_void_p, _XcbCookie, ctypes.c_void_p,
+            ]
+            lib.xcb_get_modifier_mapping_keycodes.restype = ctypes.POINTER(ctypes.c_uint8)
+            lib.xcb_get_modifier_mapping_keycodes.argtypes = [
+                ctypes.POINTER(_XcbGetModifierMappingReply),
+            ]
+            lib._wf_keymap = True
+        except AttributeError:
+            lib._wf_keymap = False
         _XCB_HANDLES = (lib, libc)
     except Exception:
         _XCB_HANDLES = None
@@ -857,16 +901,60 @@ class _ModifierProbe:
         self._root = root
 
     def query(self) -> "int | None":
-        """Held-modifier bits right now, or None when the query fails."""
+        """Held-modifier bits right now, or None when the query fails.
+
+        The pointer mask is XKB's modifier state, which under XWayland can keep
+        a bit with no key down: after Alt+Tab to a Wayland window the Mod1 bit
+        stayed set indefinitely (measured 2026-09-28, keys up, mask Mod1), and
+        every dictation was refused as "Alt still held". A mask bit only counts
+        when one of that modifier's keys is actually down (QueryKeymap).
+        """
         try:
             cookie = self._lib.xcb_query_pointer(self._conn, self._root)
             reply = self._lib.xcb_query_pointer_reply(self._conn, cookie, None)
             if not reply:
                 return None
             try:
-                return reply.contents.mask & _X_HELD_MODIFIER_BITS
+                mask = reply.contents.mask & _X_HELD_MODIFIER_BITS
             finally:
                 self._libc.free(reply)
+        except Exception:
+            return None
+        if not mask:
+            return mask
+        down = self._modifier_bits_with_a_key_down()
+        return mask if down is None else mask & down
+
+    def _modifier_bits_with_a_key_down(self) -> "int | None":
+        """Modifier bits (Shift=0x01 ... Mod5=0x80) with a key physically down, or None."""
+        lib = self._lib
+        if not getattr(lib, "_wf_keymap", False):
+            return None
+        try:
+            keymap = lib.xcb_query_keymap_reply(self._conn, lib.xcb_query_keymap(self._conn), None)
+            if not keymap:
+                return None
+            try:
+                keys = bytes(keymap.contents.keys)
+            finally:
+                self._libc.free(keymap)
+            mapping = lib.xcb_get_modifier_mapping_reply(
+                self._conn, lib.xcb_get_modifier_mapping(self._conn), None)
+            if not mapping:
+                return None
+            try:
+                per = mapping.contents.keycodes_per_modifier
+                codes = lib.xcb_get_modifier_mapping_keycodes(mapping)
+                bits = 0
+                for index in range(8):
+                    for j in range(per):
+                        kc = codes[index * per + j]
+                        if kc and keys[kc // 8] & (1 << (kc % 8)):
+                            bits |= 1 << index
+                            break
+                return bits
+            finally:
+                self._libc.free(mapping)
         except Exception:
             return None
 

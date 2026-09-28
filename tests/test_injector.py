@@ -1119,3 +1119,70 @@ class TestXdotoolFirstKeyWarmup:
         type_cmd = next(c.args[0] for c in mock_run.call_args_list if c.args[0][1] == "type")
         assert "key" not in type_cmd
         assert "".join(_type_runs(type_cmd)) == "Yeah"
+
+
+class TestModifierProbeStaleMask:
+    """XWayland can keep a modifier bit in the pointer mask with no key down
+    (Alt after Alt+Tab to a Wayland window, measured 2026-09-28); that bit
+    must not block dictation. A key actually down still does."""
+
+    ALT_KEYCODE = 64
+
+    class _Ptr:
+        def __init__(self, obj):
+            self.contents = obj
+
+        def __bool__(self):
+            return True
+
+    def _lib(self, mask, keys_down=(), keymap_calls=True):
+        from types import SimpleNamespace
+
+        Ptr = self._Ptr
+        alt = self.ALT_KEYCODE
+
+        class Lib:
+            _wf_keymap = keymap_calls
+
+            def xcb_query_pointer(self, conn, root):
+                return None
+
+            def xcb_query_pointer_reply(self, conn, cookie, err):
+                return Ptr(SimpleNamespace(mask=mask))
+
+            def xcb_query_keymap(self, conn):
+                return None
+
+            def xcb_query_keymap_reply(self, conn, cookie, err):
+                keys = bytearray(32)
+                for kc in keys_down:
+                    keys[kc // 8] |= 1 << (kc % 8)
+                return Ptr(SimpleNamespace(keys=bytes(keys)))
+
+            def xcb_get_modifier_mapping(self, conn):
+                return None
+
+            def xcb_get_modifier_mapping_reply(self, conn, cookie, err):
+                return Ptr(SimpleNamespace(keycodes_per_modifier=2))
+
+            def xcb_get_modifier_mapping_keycodes(self, reply):
+                # Shift, Lock, Control, Mod1 (Alt_L=64), Mod2..Mod5; 2 slots each.
+                flat = [50, 62, 66, 0, 37, 105, alt, 108] + [0] * 8
+                return flat
+
+        return Lib()
+
+    def _probe(self, lib):
+        from types import SimpleNamespace
+        from wayfinder.core.injector import _ModifierProbe
+
+        return _ModifierProbe(lib, SimpleNamespace(free=lambda p: None), object(), 1)
+
+    def test_stale_alt_bit_with_no_key_down_is_not_held(self):
+        assert self._probe(self._lib(mask=0x08)).query() == 0
+
+    def test_alt_really_held_still_blocks(self):
+        assert self._probe(self._lib(mask=0x08, keys_down=(self.ALT_KEYCODE,))).query() == 0x08
+
+    def test_without_keymap_calls_the_mask_decides(self):
+        assert self._probe(self._lib(mask=0x01, keymap_calls=False)).query() == 0x01
