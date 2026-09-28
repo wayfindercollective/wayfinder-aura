@@ -882,8 +882,8 @@ def main():
                 if _accessibility_trusted is False or _input_monitoring_trusted is False:
                     print(
                         "[Permissions] Waiting for Accessibility / Input Monitoring: "
-                        "use the checklist in the Aura window (the hotkey starts "
-                        "working as soon as both are on - no restart needed).",
+                        "use the checklist in the Aura window. Input Monitoring "
+                        "needs a relaunch before the hotkey works.",
                         flush=True,
                     )
                 elif _accessibility_trusted is None or _input_monitoring_trusted is None:

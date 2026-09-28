@@ -309,3 +309,49 @@ class TestWelcomePermissionsDetour:
         flow.skip()
         flow.detour_to("permissions")
         assert flow.current is None
+
+
+class TestMacPermissionRecovery:
+    def test_input_monitoring_stays_reachable_until_granted(self):
+        from wayfinder.ui.welcome import permission_row_plan
+
+        missing = {"microphone": True, "accessibility": True,
+                   "input_monitoring": False}
+        hint, actions = permission_row_plan(
+            "input_monitoring", "to hear your hotkey anywhere", missing,
+            {"input_monitoring"})
+        assert "use +" in hint
+        assert actions == ("settings",)
+
+        granted = {**missing, "input_monitoring": True}
+        _, actions = permission_row_plan(
+            "input_monitoring", "to hear your hotkey anywhere", granted,
+            {"input_monitoring"})
+        assert actions == ("relaunch",)
+
+    def test_accessibility_is_requested_before_input_monitoring(self):
+        from wayfinder.ui.welcome import permission_row_plan
+
+        _, actions = permission_row_plan(
+            "input_monitoring", "to hear your hotkey anywhere",
+            {"accessibility": False, "input_monitoring": False}, set())
+        assert actions == ()
+
+    def test_permissions_shortcut_survives_continue(self):
+        from wayfinder.ui.welcome import needs_permissions_shortcut
+
+        ready = {"microphone": True, "accessibility": True,
+                 "input_monitoring": True}
+        assert needs_permissions_shortcut(ready, set()) is False
+        assert needs_permissions_shortcut(ready, {"input_monitoring"}) is True
+        assert needs_permissions_shortcut({**ready, "input_monitoring": False}, set()) is True
+
+    def test_settings_view_can_reopen_every_granted_permission(self):
+        from wayfinder.ui.welcome import permission_row_plan
+
+        ready = {"microphone": True, "accessibility": True,
+                 "input_monitoring": True}
+        for name in ready:
+            _, actions = permission_row_plan(
+                name, "why", ready, set(), always_open_settings=True)
+            assert actions == ("settings",)

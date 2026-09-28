@@ -497,6 +497,29 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
             "enable Wayfinder Aura in System Settings → Privacy & Security → Accessibility."
         )
 
+    # A global hotkey can be pressed while Aura itself is frontmost. Quartz
+    # would post Cmd+V back into Aura, then report success even though no text
+    # reached the app the user intended. Keep the transcript for manual paste
+    # and surface the focus mistake instead of a false "Text inserted" result.
+    try:
+        focused = macos_paste.frontmost_window_id()
+    except Exception:
+        focused = None
+    if focused and focused.partition(":")[0] == str(os.getpid()):
+        copied = False
+        try:
+            pasteboard, _snapshot = _snapshot_macos_pasteboard()
+            _write_macos_pasteboard_text(pasteboard, text)
+            copied = True
+        except Exception:
+            pass
+        where = ("on the clipboard — click a text field in another app and press ⌘V"
+                 if copied else "in Aura History")
+        raise InjectionError(
+            f"Wayfinder Aura was frontmost, so there was no external paste target. "
+            f"Your text is {where}."
+        )
+
     pasteboard = None
     snapshot = None
     injected_change = None

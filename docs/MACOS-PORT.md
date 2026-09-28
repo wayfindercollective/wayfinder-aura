@@ -102,10 +102,19 @@ with no Terminal:
   already works.
 - **Live grants:** Accessibility applies immediately — the hotkey listener is
   re-created on its own restart event (`_restart_pynput_listener`). Input
-  Monitoring reaches new processes only, so after "allow" that row offers
-  **relaunch**, which reopens the bundle through LaunchServices.
-- **Everywhere else:** the Dictate banner, the hotkey step and a successful
-  Ultra activation open the same checklist when something is missing. Startup
+  Monitoring reaches new processes only. After its request, **settings** stays
+  available while the grant is missing; once granted, **relaunch** reopens the
+  bundle through LaunchServices. If Aura is absent in macOS Settings, use **+**
+  to add the copy from Applications. Accessibility may itself cover the input
+  listening needed for the hotkey, so a working Right Option key does not need
+  a separate Input Monitoring entry. An explicit Input Monitoring action calls
+  IOKit's `IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)` to register Aura
+  in that privacy list; if the API is unavailable, it falls back to Core Graphics.
+- **Everywhere else:** the first-run guide offers a permissions link after its
+  first step; the macOS status menu has a Permissions submenu with direct
+  privacy-pane links and a status checklist. The Settings header opens that
+  checklist at any time, including when everything is granted. The Dictate
+  banner and hotkey step also link to it when something is missing. Startup
   never shows system prompts before the window is up.
 - **Install location:** permissions are requested only for the copy in
   /Applications; running from the DMG shows "Open Applications" instead.
@@ -166,6 +175,15 @@ the switches ("Gamer mode", "Send game messages"; `gamer_mode`,
   GeForce NOW) get the normal paste and a note that they're untested.
 - **Games tab list**, Steam Deck-style: Verified (tested in game), Playable
   (works with a step), Untested (from documentation), Not recommended (why).
+  84 games (2026-09-25): profiles + hand-written entries + 57 researched ones
+  from `scripts/data/game_chat_research.json` (132 candidates: Steam top
+  sellers with Mac builds and multiplayer, SteamSpy top 100, non-Steam Mac
+  games; each checked by web research). Games with no text chat or no Mac
+  access are left out, as the tab says. Rebuild with
+  `python3 scripts/build_game_list.py` (writes `core/game_list_data.py`;
+  DLCs fold into their base game; profiles win on name clashes). The tab
+  shows 40 rows at a time with a status filter; search re-filters 180 ms
+  after typing stops.
   Profiles plus info-only entries from the 2026-09-24 compatibility and
   market research (Minecraft: T opens chat; Roblox: /; Guild Wars 2 and
   cloud gaming: Cmd+V doesn't paste under Wine / streaming yet; ...). A
@@ -207,10 +225,13 @@ simply aren't ducked.
 
 ## 8. Look, feel and performance
 
-- **Waves at rest cost nothing.** The main-window hero and the pill hand their
-  calm wave to Core Animation vector strands (`CAKeyframeAnimation` of paths,
-  seamless loops of 13.1 s and 10.5 s): the render server animates them at the
-  display's refresh with no app wakeups and no Metal memory.
+- **Waves at rest stay live.** On Dictate, the main-window hero and the pill
+  hand their calm wave to Core Animation vector strands (`CAKeyframeAnimation`
+  of paths, seamless loops of 13.1 s and 10.5 s): the render server animates
+  them at the display's refresh with no app wakeups and no Metal memory. The
+  hero card is also visible above Settings and other tabs. There its native
+  layer stays hidden behind tab controls, while the Tk canvas animates the
+  ribbon at 15 fps instead of leaving a frozen frame.
 - **Waves while speaking are Metal**, drawn on a private display-synced render
   thread (`wf_render_clock.m`: `CADisplayLink` from the layer's view, 60 fps,
   animated to each frame's display timestamp). A busy main thread can't skip
@@ -229,9 +250,11 @@ simply aren't ducked.
 - **Pill placement:** inside the screen's visible frame, clear of the Dock
   at its real size.
 - **Idle budget:** CustomTkinter's 100 ms DPI poll is stretched to hourly
-  (Aqua scales on its own); the hero doesn't poll while hidden or occluded.
+  (Aqua scales on its own); the hero doesn't poll while the window is hidden.
+  On non-Dictate tabs its visible canvas updates at 15 fps.
 
-Measured (M3 Ultra, macOS 27, window open, calm):
+Measured (M3 Ultra, macOS 27, Dictate tab open, calm). The Settings canvas
+fallback has not yet been profiled on the packaged build:
 
 | | Before | After |
 |---|---|---|

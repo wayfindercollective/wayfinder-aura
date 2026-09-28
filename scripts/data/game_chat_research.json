@@ -1,0 +1,2549 @@
+{
+ "researched": "2026-09-25",
+ "method": "Steam top sellers with Mac builds + multiplayer (store API), SteamSpy top 100, plus non-Steam Mac games; each checked by web research (wikis, official pages, Steam/AppleGamingWiki). Unconfirmed details are marked '(check in game)'.",
+ "games": [
+  {
+   "name": "Total War: WARHAMMER III",
+   "steam_appid": "1142710",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No in-game text chat; Creative Assembly removed it in this game. Use Steam chat instead.",
+   "aliases": [
+    "tww3",
+    "wh3",
+    "warhammer 3",
+    "total war warhammer 3"
+   ],
+   "sources": [
+    "https://progameguides.com/total-war-warhammer-iii/does-total-war-warhammer-3-multiplayer-have-in-game-chat/"
+   ]
+  },
+  {
+   "name": "Magic: The Gathering Arena",
+   "steam_appid": "2141910",
+   "mac": "rosetta",
+   "text_chat": "limited",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Opponents can only be sent emotes. Free text works only in direct messages with friends, opened by clicking the social panel (check in game).",
+   "aliases": [
+    "mtga",
+    "mtg arena",
+    "magic arena",
+    "arena"
+   ],
+   "sources": [
+    "https://draftsim.com/mtg-arena-emotes/",
+    "https://www.destructoid.com/update-magic-arena-is-finally-getting-direct-messaging-with-friends/"
+   ]
+  },
+  {
+   "name": "Dota 2",
+   "steam_appid": "570",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "not_recommended",
+   "note": "Chat opens with Enter (Shift+Enter for all chat). On Mac, Dota 2 chat has ignored Cmd+V and only pasted with Ctrl+V, so Aura's paste may not land (check in game).",
+   "aliases": [
+    "dota",
+    "dota2"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/570/discussions/0/35221584553444001",
+    "https://www.applegamingwiki.com/wiki/Dota_2"
+   ]
+  },
+  {
+   "name": "MapleStory",
+   "steam_appid": "216150",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Nexon's rules ban macro and third-party input programs (check in game)",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. The Mac version is a beta for Apple Silicon, and paste support is unconfirmed (check in game).",
+   "aliases": [
+    "maple",
+    "gms"
+   ],
+   "sources": [
+    "https://www.nexon.com/maplestory/news/general/40921/mac-os-beta-steam-support-notice",
+    "https://support-maplestory.nexon.com/hc/en-us/articles/23610205021460-Can-I-play-MapleStory-on-a-Mac"
+   ]
+  },
+  {
+   "name": "Crusader Kings III",
+   "steam_appid": "1158310",
+   "mac": "rosetta",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No built-in multiplayer text chat; players use Steam chat or a Workshop chat mod.",
+   "aliases": [
+    "ck3",
+    "crusader kings 3"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/1158310/discussions/0/2840039920180187097",
+    "https://www.applegamingwiki.com/wiki/Crusader_Kings_III"
+   ]
+  },
+  {
+   "name": "Call of Duty: Black Ops III",
+   "steam_appid": "311210",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "The Mac version has not been able to connect to online play on macOS 14 and later, and it no longer matches with Windows players (check in game).",
+   "aliases": [
+    "bo3",
+    "black ops 3",
+    "cod bo3"
+   ],
+   "sources": [
+    "https://support.aspyr.com/hc/en-us/articles/360026211071-Call-of-Duty-Black-Ops-III-Mac-FAQ",
+    "https://steamcommunity.com/app/311210/discussions/0/3791505882408796086"
+   ]
+  },
+  {
+   "name": "Euro Truck Simulator 2",
+   "steam_appid": "227300",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Y",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "In Convoy mode, chat opens with Y; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "ets2",
+    "euro truck"
+   ],
+   "sources": [
+    "https://trucksimulator.wiki.gg/wiki/Convoy_(game_mode)",
+    "https://www.applegamingwiki.com/wiki/Euro_Truck_Simulator_2"
+   ]
+  },
+  {
+   "name": "Supermarket Simulator",
+   "steam_appid": "2670630",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op uses proximity voice chat only; there is no text chat.",
+   "aliases": [
+    "supermarket sim"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/2670630/discussions/0/591784592221168103/",
+    "https://store.steampowered.com/news/app/2670630/view/510719798925066303"
+   ]
+  },
+  {
+   "name": "The Binding of Isaac: Rebirth",
+   "steam_appid": "250900",
+   "mac": "wine_or_cloud",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Text chat is only in the Repentance+ online co-op, which has no Mac version, so on a Mac it needs CrossOver (check in game). Chat opens with Enter.",
+   "aliases": [
+    "isaac",
+    "tboi",
+    "boi",
+    "repentance"
+   ],
+   "sources": [
+    "https://bindingofisaacrebirth.wiki.gg/wiki/Online_(open_beta)",
+    "https://steamcommunity.com/app/250900/discussions/0/4631483020295018465/"
+   ]
+  },
+  {
+   "name": "7 Days to Die",
+   "steam_appid": "251570",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with T; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "7dtd",
+    "7 days"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/251570/discussions/0/46476145180264955/",
+    "https://www.applegamingwiki.com/wiki/7_Days_to_Die"
+   ]
+  },
+  {
+   "name": "RuneScape",
+   "steam_appid": "1343400",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "always live",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Jagex rules forbid software that does things for you",
+   "verdict": "not_recommended",
+   "note": "Typing goes straight to chat unless you use WASD movement, where Enter opens it. Jagex's rules forbid software doing things for you, so software key presses are a risk.",
+   "aliases": [
+    "rs3",
+    "rs"
+   ],
+   "sources": [
+    "https://runescape.wiki/w/Chat",
+    "https://www.applegamingwiki.com/wiki/RuneScape"
+   ]
+  },
+  {
+   "name": "Cult of the Lamb",
+   "steam_appid": "1313140",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op is local only (online needs Steam Remote Play), and there is no text chat.",
+   "aliases": [
+    "cotl"
+   ],
+   "sources": [
+    "https://game8.co/games/Cult-of-the-Lamb/archives/576283"
+   ]
+  },
+  {
+   "name": "Barotrauma",
+   "steam_appid": "602960",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with T for nearby crew, or R for radio with a headset; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "baro"
+   ],
+   "sources": [
+    "https://barotraumagame.com/wiki/Controls_Menu",
+    "https://www.applegamingwiki.com/wiki/Barotrauma"
+   ]
+  },
+  {
+   "name": "Spiral Knights",
+   "steam_appid": "99900",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter or /; press it, then dictate. The Java Mac client has had launch problems on Apple Silicon since 2025 (check in game).",
+   "aliases": [
+    "sk"
+   ],
+   "sources": [
+    "https://wiki.spiralknights.com/Chat",
+    "https://forums.spiralknights.com/en/node/124890"
+   ]
+  },
+  {
+   "name": "Stellaris: The Machine Age",
+   "steam_appid": "2840100",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "L",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "This is Stellaris DLC. Multiplayer chat opens with L or the Multiplayer Chat button; open it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "stellaris"
+   ],
+   "sources": [
+    "https://stellaris.paradoxwikis.com/Hotkeys",
+    "https://www.applegamingwiki.com/wiki/Stellaris"
+   ]
+  },
+  {
+   "name": "Old School RuneScape",
+   "steam_appid": "1343370",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "always live",
+   "limit": 80,
+   "paste": "unknown",
+   "rules_risk": "Jagex rules forbid software that does things for you",
+   "verdict": "not_recommended",
+   "note": "Typing goes straight to chat in the official client. Jagex's rules forbid software doing things for you, so software key presses are a risk.",
+   "aliases": [
+    "osrs",
+    "rs07",
+    "old school"
+   ],
+   "sources": [
+    "https://legal.jagex.com/docs/rules/rules-of-old-school-runescape",
+    "https://github.com/runelite/launcher/releases/latest"
+   ]
+  },
+  {
+   "name": "Backyard Baseball",
+   "steam_appid": "3935020",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Online multiplayer was delayed past launch and has not arrived yet, so there is no text chat (check in game).",
+   "aliases": [
+    "backyard"
+   ],
+   "sources": [
+    "https://store.steampowered.com/news/app/3935020/view/687509549434803653",
+    "https://en.wikipedia.org/wiki/Backyard_Baseball_(2026_video_game)"
+   ]
+  },
+  {
+   "name": "Pathogenic",
+   "steam_appid": "3808690",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Local co-op only (online through Steam Remote Play Together), with no text chat.",
+   "aliases": [],
+   "sources": [
+    "https://steamcommunity.com/app/3808690/discussions/0/574921762383368308/",
+    "https://store.steampowered.com/app/3808690/Pathogenic/"
+   ]
+  },
+  {
+   "name": "Overcooked! 2",
+   "steam_appid": "728880",
+   "mac": "native",
+   "text_chat": "limited",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Online play has emotes only; on Steam there is no in-game text chat.",
+   "aliases": [
+    "overcooked",
+    "oc2"
+   ],
+   "sources": [
+    "https://www.team17.com/news/overcooked-2-faq",
+    "https://steamcommunity.com/app/728880/discussions/0/1742216642528308871/"
+   ]
+  },
+  {
+   "name": "Out of the Park Baseball 27",
+   "steam_appid": "4045750",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No in-game text chat found; online leagues are coordinated outside the game (check in game).",
+   "aliases": [
+    "ootp",
+    "ootp27",
+    "ootp 27"
+   ],
+   "sources": [
+    "https://www.ootpdevelopments.com/out-of-the-park-baseball-home/"
+   ]
+  },
+  {
+   "name": "Root",
+   "steam_appid": "965580",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Click the chat panel in an online match, then dictate. Aura pastes (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://www.direwolfdigital.com/game-room-app/",
+    "https://store.steampowered.com/app/965580/Root/"
+   ]
+  },
+  {
+   "name": "Necesse",
+   "steam_appid": "1169040",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://necessewiki.com/Multiplayer",
+    "https://www.applegamingwiki.com/wiki/Necesse"
+   ]
+  },
+  {
+   "name": "Infinity Kingdom",
+   "steam_appid": "1573360",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Click the chat box (World, Kingdom or Alliance), then dictate. On a Mac, play the App Store version, since the Steam Mac build reportedly won't launch (check in game).",
+   "aliases": [
+    "ik"
+   ],
+   "sources": [
+    "https://www.mguwp.com/InfinityKingdom/news/3584",
+    "https://steamcommunity.com/app/1573360/discussions/0/3056240606699164798"
+   ]
+  },
+  {
+   "name": "Human Fall Flat",
+   "steam_appid": "477160",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with T; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "hff"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/477160/discussions/0/1488866180595566042/",
+    "https://www.applegamingwiki.com/wiki/Human:_Fall_Flat"
+   ]
+  },
+  {
+   "name": "Albion Online",
+   "steam_appid": "761890",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "yes",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Aura pastes.",
+   "aliases": [
+    "albion"
+   ],
+   "sources": [
+    "https://forum.albiononline.com/index.php/Thread/207713-Text-Spam-Say-for-Caller-ZVZ-Guild/",
+    "https://www.applegamingwiki.com/wiki/Albion_Online"
+   ]
+  },
+  {
+   "name": "Total War: THREE KINGDOMS",
+   "steam_appid": "779340",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Y",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Y; press it, then dictate. The Mac version stopped updating in 2020 and only plays online with other Mac players (check in game).",
+   "aliases": [
+    "3k",
+    "tw3k",
+    "three kingdoms"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/779340/discussions/0/1639787494957229948/",
+    "https://steamcommunity.com/app/779340/discussions/0/4070650515257222886/"
+   ]
+  },
+  {
+   "name": "Stellaris: Overlord",
+   "steam_appid": "1889490",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "L",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "This is Stellaris DLC. Multiplayer chat opens with L or the Multiplayer Chat button; open it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "stellaris"
+   ],
+   "sources": [
+    "https://stellaris.paradoxwikis.com/Hotkeys",
+    "https://www.applegamingwiki.com/wiki/Stellaris"
+   ]
+  },
+  {
+   "name": "Wurm Online",
+   "steam_appid": "1179680",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Click into the chat input (Local, Kingdom or Village tab), then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "wurm"
+   ],
+   "sources": [
+    "https://www.wurmpedia.com/index.php/Chat",
+    "https://www.wurmonline.com/download/"
+   ]
+  },
+  {
+   "name": "Gang Beasts",
+   "steam_appid": "285900",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No in-game text chat; it uses push-to-talk voice.",
+   "aliases": [],
+   "sources": [
+    "https://steamcommunity.com/app/285900/discussions/0/217691032445589134",
+    "https://www.applegamingwiki.com/wiki/Gang_Beasts"
+   ]
+  },
+  {
+   "name": "Roblox",
+   "steam_appid": null,
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "/",
+   "limit": 200,
+   "paste": "yes",
+   "rules_risk": "Chat requires a Roblox age check, and you can only chat with similar age groups",
+   "verdict": "include",
+   "note": "Chat opens with /; press it, then dictate. Aura pastes, but Roblox only lets you chat after an age check.",
+   "aliases": [
+    "rblx"
+   ],
+   "sources": [
+    "https://about.roblox.com/newsroom/2026/01/roblox-age-checks-required-to-chat",
+    "https://devforum.roblox.com/t/update-on-legacy-chat-deprecation-and-textchatservice-migration/3376880/162"
+   ]
+  },
+  {
+   "name": "League of Legends",
+   "steam_appid": null,
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "Riot bans macro and scripting tools",
+   "verdict": "not_recommended",
+   "note": "In-game chat ignores the system clipboard, so Aura's paste won't land in a match. Chat opens with Enter (Shift+Enter for all chat).",
+   "aliases": [
+    "lol",
+    "league"
+   ],
+   "sources": [
+    "https://github.com/Zeunig/lol_clipboard",
+    "https://leaguefeed.net/copy-paste-league-of-legends/"
+   ]
+  },
+  {
+   "name": "World of Warcraft Classic",
+   "steam_appid": null,
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": 255,
+   "paste": "yes",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Aura pastes.",
+   "aliases": [
+    "wow classic",
+    "classic wow",
+    "wow",
+    "wowc"
+   ],
+   "sources": [
+    "https://warcraft.wiki.gg/wiki/Chat",
+    "https://www.applegamingwiki.com/wiki/World_of_Warcraft"
+   ]
+  },
+  {
+   "name": "Sea of Thieves",
+   "steam_appid": null,
+   "mac": "wine_or_cloud",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "not_recommended",
+   "note": "On a Mac it only runs through cloud streaming, and GeForce NOW on Mac pastes with Ctrl+V, not Cmd+V, so Aura's paste may not land (check in game). Chat opens with Enter.",
+   "aliases": [
+    "sot"
+   ],
+   "sources": [
+    "https://www.seaofthieves.com/community/forums/topic/97728/text-chat-binding",
+    "https://nvidia.custhelp.com/app/answers/detail/a_id/5364/~/how-is-copy-and-paste-supported-on-geforce-now"
+   ]
+  },
+  {
+   "name": "American Truck Simulator",
+   "steam_appid": "270880",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Y",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Text chat is in Convoy multiplayer and opens with Y; press it, then dictate. Pasting is unconfirmed (check in game).",
+   "aliases": [
+    "ats"
+   ],
+   "sources": [
+    "https://trucksimulator.wiki.gg/wiki/Convoy_(game_mode)",
+    "https://www.applegamingwiki.com/wiki/American_Truck_Simulator"
+   ]
+  },
+  {
+   "name": "War Thunder",
+   "steam_appid": "236390",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "30-second cooldown between battle chat messages",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. You can send one battle chat message every 30 seconds, and pasting is unconfirmed (check in game).",
+   "aliases": [
+    "wt"
+   ],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/War_Thunder",
+    "https://steamcommunity.com/app/236390/discussions/0/5019836142101277624/"
+   ]
+  },
+  {
+   "name": "Baldur's Gate 3",
+   "steam_appid": "1086940",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No in-game text chat; co-op players talk over voice or Discord.",
+   "aliases": [
+    "bg3",
+    "baldurs gate 3"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/1086940/Baldurs_Gate_3/"
+   ]
+  },
+  {
+   "name": "Slay the Spire 2",
+   "steam_appid": "2868840",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No built-in text chat in co-op, only pings, emotes and map drawing.",
+   "aliases": [
+    "sts2",
+    "slay the spire"
+   ],
+   "sources": [
+    "https://www.pcgamesn.com/slay-the-spire-2/co-op-impressions",
+    "https://steamcommunity.com/app/2868840/discussions/0/798965575663554248/"
+   ]
+  },
+  {
+   "name": "Sid Meier's Civilization VII",
+   "steam_appid": "1295660",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Chat has an always-on language filter",
+   "verdict": "include",
+   "note": "Open chat with the chat icon above the minimap, click the text box, then dictate. Pasting is unconfirmed (check in game).",
+   "aliases": [
+    "civ 7",
+    "civ7",
+    "civ vii",
+    "civilization 7",
+    "civilization vii"
+   ],
+   "sources": [
+    "https://support.civilization.com/hc/en-us/articles/37314455208339-Civilization-VII-Using-Group-Chats",
+    "https://support.civilization.com/hc/en-us/articles/37319705105427-Civilization-VII-Dealing-With-Bad-Behavior"
+   ]
+  },
+  {
+   "name": "Age of Empires II: DE - The Viking Sagas",
+   "steam_appid": "4376980",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. The Mac version needs Apple Silicon and only plays online with other Mac players; pasting is unconfirmed (check in game).",
+   "aliases": [
+    "aoe2",
+    "aoe2de",
+    "aoe 2",
+    "age of empires 2",
+    "viking sagas"
+   ],
+   "sources": [
+    "https://www.gamespress.com/en-US/Age-of-Empires-II-Definitive-Edition-The-Viking-Sagas-expansion-Coming",
+    "https://steamcommunity.com/app/813780/discussions/0/655981814410878067/"
+   ]
+  },
+  {
+   "name": "Stardew Valley",
+   "steam_appid": "413150",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with T; press it, then dictate. Pasting into chat is unconfirmed (check in game).",
+   "aliases": [
+    "sdv",
+    "stardew"
+   ],
+   "sources": [
+    "https://stardewvalleywiki.com/Multiplayer",
+    "https://www.applegamingwiki.com/wiki/Stardew_Valley"
+   ]
+  },
+  {
+   "name": "Stick It to the Stickman",
+   "steam_appid": "2085540",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op is local only, with no online play or text chat.",
+   "aliases": [],
+   "sources": [
+    "https://playco-opgame.com/stick-it-to-the-stickman/",
+    "https://steamcommunity.com/app/2085540/discussions/0/600790905291613214/"
+   ]
+  },
+  {
+   "name": "Total War: WARHAMMER II",
+   "steam_appid": "594570",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Multiplayer chat exists, but the Mac version only plays online with Mac and Linux players. Click the chat box to type, then dictate (check in game).",
+   "aliases": [
+    "twwh2",
+    "tww2",
+    "warhammer 2",
+    "wh2"
+   ],
+   "sources": [
+    "https://community.creative-assembly.com/total-war/total-war-warhammer/forums/15-multiplayer-battles/threads/10325-are-we-ever-going-to-get-the-chat-function-back",
+    "https://steamcommunity.com/app/594570/discussions/0/2999920878452945990/"
+   ]
+  },
+  {
+   "name": "Terraria",
+   "steam_appid": "105600",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Paste works with Ctrl+V on PC, but Aura's Cmd+V on Mac is unconfirmed (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://terraria.wiki.gg/wiki/Chat",
+    "https://terraria.wiki.gg/wiki/1.4.5.0"
+   ]
+  },
+  {
+   "name": "Total War: WARHAMMER",
+   "steam_appid": "364360",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Multiplayer chat exists, but the Mac version only plays online with Mac and Linux players. Click the chat box to type, then dictate (check in game).",
+   "aliases": [
+    "twwh",
+    "twwh1",
+    "tww1",
+    "warhammer 1",
+    "wh1"
+   ],
+   "sources": [
+    "https://community.creative-assembly.com/total-war/total-war-warhammer/forums/15-multiplayer-battles/threads/10325-are-we-ever-going-to-get-the-chat-function-back",
+    "https://steamcommunity.com/app/594570/discussions/0/2999920878452945990/"
+   ]
+  },
+  {
+   "name": "Stellaris: BioGenesis",
+   "steam_appid": "3417840",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "This is a Stellaris expansion; text chat is in the base game's multiplayer. The key that opens chat and whether paste works are unconfirmed (check in game).",
+   "aliases": [
+    "stellaris",
+    "biogenesis"
+   ],
+   "sources": [
+    "https://www.macgadget.de/index.php/News/2026/09/21/Paradox-Interactive-Stellaris-erhaelt-native-Apple-Silicon-Unterstuetzung",
+    "https://steamcommunity.com/app/281990/discussions/0/2733047810429199140/"
+   ]
+  },
+  {
+   "name": "Vampire Survivors",
+   "steam_appid": "1794680",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op is local only (online through Steam Remote Play Together), with no text chat.",
+   "aliases": [],
+   "sources": [
+    "https://store.steampowered.com/app/1794680/Vampire_Survivors/"
+   ]
+  },
+  {
+   "name": "Demeo x Dungeons & Dragons: Battlemarked",
+   "steam_appid": "3124340",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No text chat; players use voice chat, pings and emotes.",
+   "aliases": [
+    "battlemarked",
+    "demeo",
+    "demeo dnd"
+   ],
+   "sources": [
+    "https://www.resolutiongames.com/battlemarked",
+    "https://steamcommunity.com/app/1837750/discussions/0/3735205790462717354/"
+   ]
+  },
+  {
+   "name": "World of Tanks Blitz",
+   "steam_appid": "444200",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "EU server shows only platoon chat in battle",
+   "verdict": "include",
+   "note": "Battle chat opens with Enter and Tab switches channels; press Enter, then dictate. On the EU server only platoon chat works in battle, and pasting is unconfirmed (check in game).",
+   "aliases": [
+    "wotb",
+    "wot blitz",
+    "tanks blitz"
+   ],
+   "sources": [
+    "https://wargaming.net/support/en/products/wotb/article/15399/",
+    "https://steamcommunity.com/app/444200/discussions/3/3773490849745367409/"
+   ]
+  },
+  {
+   "name": "Pixel Gun 3D: PC Edition",
+   "steam_appid": "2524890",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Click the keyboard button at the bottom right to open chat, then dictate. The Mac version needs Apple Silicon, and pasting is unconfirmed (check in game).",
+   "aliases": [
+    "pg3d",
+    "pixel gun"
+   ],
+   "sources": [
+    "https://store.steampowered.com/news/app/2524890/view/4699034475092602520",
+    "https://pixelgun.fandom.com/wiki/Chat_Mode_(PG3D)"
+   ]
+  },
+  {
+   "name": "Stellaris: Shadows of the Shroud",
+   "steam_appid": "3417850",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "This is a Stellaris expansion; text chat is in the base game's multiplayer. The key that opens chat and whether paste works are unconfirmed (check in game).",
+   "aliases": [
+    "stellaris",
+    "shadows of the shroud"
+   ],
+   "sources": [
+    "https://www.macgadget.de/index.php/News/2026/09/21/Paradox-Interactive-Stellaris-erhaelt-native-Apple-Silicon-Unterstuetzung",
+    "https://steamcommunity.com/app/281990/discussions/0/2733047810429199140/"
+   ]
+  },
+  {
+   "name": "Easy Red 2",
+   "steam_appid": "1324780",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Pasting is unconfirmed (check in game).",
+   "aliases": [
+    "er2",
+    "easy red"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/1324780/Easy_Red_2/",
+    "https://steamcommunity.com/app/1324780/discussions/0/595142571487959861/"
+   ]
+  },
+  {
+   "name": "Borderlands: The Pre-Sequel",
+   "steam_appid": "261640",
+   "mac": "wine_or_cloud",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "The Mac version is 32-bit and will not run on macOS 10.15 or later, and the game appears to have no text chat, only voice (check in game).",
+   "aliases": [
+    "bltps",
+    "tps",
+    "borderlands tps",
+    "pre-sequel"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/261640/discussions/0/1628539910026666272/",
+    "https://www.pcgamingwiki.com/wiki/Borderlands:_The_Pre-Sequel"
+   ]
+  },
+  {
+   "name": "Sun Haven",
+   "steam_appid": "1432860",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Pasting is unconfirmed (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://sun-haven.fandom.com/wiki/Controls",
+    "https://steamcommunity.com/app/1432860/discussions/0/3818528846679649577/"
+   ]
+  },
+  {
+   "name": "Operation: New Earth",
+   "steam_appid": "528740",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Click the chat panel and its text box, then dictate. Pasting is unconfirmed (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://huntedcow.com/games/operation-new-earth",
+    "https://apps.apple.com/us/app/operation-new-earth/id1493578569?mt=12"
+   ]
+  },
+  {
+   "name": "ARK: Survival Evolved",
+   "steam_appid": "346110",
+   "mac": "wine_or_cloud",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "BattlEye anti-cheat blocks servers under CrossOver",
+   "verdict": "include",
+   "note": "The Mac version crashes on Apple Silicon, so play through cloud streaming such as GeForce Now (check in game). Global chat opens with Enter; pasting through the stream is unconfirmed (check in game).",
+   "aliases": [
+    "ark",
+    "ase",
+    "ark se"
+   ],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/ARK:_Survival_Evolved",
+    "https://ark.fandom.com/wiki/Chat"
+   ]
+  },
+  {
+   "name": "Firestone – Idle Clicker Online RPG",
+   "steam_appid": "1013320",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Click the chat icon at the lower left (it unlocks at level 3), click the text box, then dictate. Pasting is unconfirmed (check in game).",
+   "aliases": [
+    "firestone",
+    "firestone idle"
+   ],
+   "sources": [
+    "https://firestone-idle-rpg.fandom.com/wiki/Game_Chat",
+    "https://store.steampowered.com/app/1013320/Firestone__Idle_Clicker_Online_RPG/"
+   ]
+  },
+  {
+   "name": "Don't Starve Together",
+   "steam_appid": "322330",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Y",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Y (U whispers to nearby players); press it, then dictate. Pasting on Mac is unconfirmed (check in game).",
+   "aliases": [
+    "dst",
+    "dont starve"
+   ],
+   "sources": [
+    "https://dontstarve.fandom.com/wiki/Don't_Starve_Together",
+    "https://www.applegamingwiki.com/wiki/Don't_Starve_Together"
+   ]
+  },
+  {
+   "name": "SUPREMACY: WORLD WAR 3",
+   "steam_appid": "784950",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Open the chat panel and click its text box, then dictate. It also runs in a browser; pasting is unconfirmed (check in game).",
+   "aliases": [
+    "supremacy",
+    "sww3",
+    "supremacy ww3"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/784950/SUPREMACY_WORLD_WAR_3/",
+    "https://www.playsupremacy.com/en/games/world-war-3"
+   ]
+  },
+  {
+   "name": "WolfQuest: Anniversary Edition",
+   "steam_appid": "926990",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Players under 13 get no chat in public games; word filter",
+   "verdict": "include",
+   "note": "Chat opens with Enter or C (check in game); press it, then dictate. Players under 13 have no chat in public games, and pasting is unconfirmed (check in game).",
+   "aliases": [
+    "wq",
+    "wqae",
+    "wolfquest"
+   ],
+   "sources": [
+    "https://support.wolfquest.org/help/multiplayer-gameplay-and-features",
+    "https://wolfquest.fandom.com/wiki/Multiplayer/Chat_Types"
+   ]
+  },
+  {
+   "name": "Cult of the Lamb: Woolhaven",
+   "steam_appid": "3840050",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op is local only (online through Steam Remote Play Together), with no text chat.",
+   "aliases": [
+    "cotl",
+    "cult of the lamb",
+    "woolhaven"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/3840050/"
+   ]
+  },
+  {
+   "name": "Untitled Goose Game",
+   "steam_appid": "837470",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Two-player mode is local only, with no text chat.",
+   "aliases": [
+    "goose game",
+    "ugg"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/837470/Untitled_Goose_Game/"
+   ]
+  },
+  {
+   "name": "Stellaris: MegaCorp",
+   "steam_appid": "944290",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "This is a Stellaris expansion; text chat is in the base game's multiplayer. The key that opens chat and whether paste works are unconfirmed (check in game).",
+   "aliases": [
+    "stellaris",
+    "megacorp"
+   ],
+   "sources": [
+    "https://www.macgadget.de/index.php/News/2026/09/21/Paradox-Interactive-Stellaris-erhaelt-native-Apple-Silicon-Unterstuetzung",
+    "https://steamcommunity.com/app/281990/discussions/0/2733047810429199140/"
+   ]
+  },
+  {
+   "name": "StarCraft II",
+   "steam_appid": null,
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Pasting on Mac is unconfirmed (check in game).",
+   "aliases": [
+    "sc2",
+    "starcraft 2",
+    "sc 2"
+   ],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/StarCraft_II"
+   ]
+  },
+  {
+   "name": "Among Us",
+   "steam_appid": null,
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": 100,
+   "paste": "unknown",
+   "rules_risk": "Free Chat needs an account; under-13 and guest players get Quick Chat only",
+   "verdict": "include",
+   "note": "On Apple Silicon Macs, play the App Store version. Click the chat bubble and the text box, then dictate; messages max out at 100 characters, and pasting is unconfirmed (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/Among_Us",
+    "https://among-us.fandom.com/wiki/Quick_Chat"
+   ]
+  },
+  {
+   "name": "Guild Wars 2",
+   "steam_appid": null,
+   "mac": "wine_or_cloud",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": 199,
+   "paste": "yes",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "No Mac client since 2021; play through GeForce Now or CrossOver. Chat opens with Enter, holds 199 characters, and accepts pasted text (check paste through GeForce Now in game).",
+   "aliases": [
+    "gw2"
+   ],
+   "sources": [
+    "https://help.guildwars2.com/hc/en-us/articles/360060329334-Discontinuation-of-Mac-OS-Client",
+    "https://wiki.guildwars2.com/wiki/Chat_panel"
+   ]
+  },
+  {
+   "name": "Valorant",
+   "steam_appid": null,
+   "mac": "none",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Vanguard anti-cheat blocks Macs, virtual machines and cloud streaming",
+   "verdict": "exclude",
+   "note": "No way to play on a Mac; Riot's Vanguard anti-cheat blocks Macs, virtual machines and cloud streaming.",
+   "aliases": [
+    "val",
+    "valo"
+   ],
+   "sources": [
+    "https://www.eneba.com/hub/games/game-guides/can-you-play-valorant-on-mac/"
+   ]
+  },
+  {
+   "name": "Warhammer 40,000: Rogue Trader",
+   "steam_appid": "2186680",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op has no in-game text chat, so there is nowhere for Aura to paste. Use Steam chat or Discord.",
+   "aliases": [
+    "rogue trader",
+    "wh40k rogue trader",
+    "40k rogue trader"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/2186680/discussions/0/4298194722195539901/",
+    "https://store.steampowered.com/news/app/2186680/view/3905246507039783842"
+   ]
+  },
+  {
+   "name": "Stellaris",
+   "steam_appid": "281990",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "L",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Multiplayer chat opens with L (or the chat button in the top-right menu); open it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://stellaris.paradoxwikis.com/Hotkeys",
+    "https://steamcommunity.com/app/281990/discussions/0/2733047810429199140/"
+   ]
+  },
+  {
+   "name": "Big Walk",
+   "steam_appid": "1478500",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Text is proximity-based: only nearby players or walkie-talkie partners see it",
+   "verdict": "include",
+   "note": "Text chat opens with Enter (check in game) and works by proximity, so only nearby players or walkie-talkie partners read it. Paste is not confirmed (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://bigwalk.game/faq/",
+    "https://store.steampowered.com/app/1478500/Big_Walk/"
+   ]
+  },
+  {
+   "name": "Age of Empires II: Definitive Edition",
+   "steam_appid": "813780",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter and goes to your team; start a message with * to reach everyone. The Mac version (Apple silicon, since May 2026) plays online only with other Mac players; paste is not confirmed (check in game).",
+   "aliases": [
+    "aoe2",
+    "aoe2de",
+    "aoe 2",
+    "age of empires 2"
+   ],
+   "sources": [
+    "https://www.ageofempires.com/news/age-of-empires-ii-definitive-edition-available-now-on-mac/",
+    "https://steamcommunity.com/app/813780/discussions/0/7093810789008271078/"
+   ]
+  },
+  {
+   "name": "BOMBANANA!",
+   "steam_appid": "4656000",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Built around role-limited voice chat and emotes; no text chat found (check in game).",
+   "aliases": [
+    "bombanana"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/4656000/BOMBANANA/",
+    "https://www.thegamer.com/bombanana-multiplayer-friends-co-op-guide/"
+   ]
+  },
+  {
+   "name": "Hearts of Iron IV",
+   "steam_appid": "394360",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Tab",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Multiplayer chat opens with Tab (or click the chat box at the bottom left); open it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [
+    "hoi4",
+    "hoi 4",
+    "hearts of iron 4"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/394360/discussions/0/1643168364648741103/"
+   ]
+  },
+  {
+   "name": "Brawlhalla",
+   "steam_appid": "291550",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Chat only in online lobbies and custom rooms; profanity filtered",
+   "verdict": "include",
+   "note": "Chat opens with Enter in online lobbies and custom rooms; press it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [
+    "bhal"
+   ],
+   "sources": [
+    "https://brawlhalla.wiki.gg/wiki/Chat"
+   ]
+  },
+  {
+   "name": "No Man's Sky",
+   "steam_appid": "275850",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [
+    "nms"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/275850/discussions/4/1743342466031168718/"
+   ]
+  },
+  {
+   "name": "Tabletop Simulator",
+   "steam_appid": "286160",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Short chat length limit",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Messages have a short length limit, and paste on Mac is not confirmed (check in game).",
+   "aliases": [
+    "tts"
+   ],
+   "sources": [
+    "https://kb.tabletopsimulator.com/getting-started/in-game-communication/",
+    "https://steamcommunity.com/app/286160/discussions/0/412448158154804473/"
+   ]
+  },
+  {
+   "name": "Cat Mail Co.",
+   "steam_appid": "4380490",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op has no built-in text or voice chat, so there is nowhere for Aura to paste.",
+   "aliases": [
+    "cat mail"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/4380490/discussions/0/570417408021555017/"
+   ]
+  },
+  {
+   "name": "BlazBlue Entropy Effect",
+   "steam_appid": "2273430",
+   "mac": "native",
+   "text_chat": "limited",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Online co-op has lobby and combat emotes only, no free text chat (check in game).",
+   "aliases": [
+    "bbee",
+    "entropy effect"
+   ],
+   "sources": [
+    "https://steamcommunity.com/games/2273430/announcements/detail/523097343366529104"
+   ]
+  },
+  {
+   "name": "Flamecraft",
+   "steam_appid": "3201730",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No in-game text chat found; players are pointed to Discord instead (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://store.steampowered.com/app/3201730/Flamecraft/"
+   ]
+  },
+  {
+   "name": "Victoria 3",
+   "steam_appid": "529340",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Multiplayer shipped without in-game text chat, so there is nowhere for Aura to paste (check in game).",
+   "aliases": [
+    "vic3",
+    "vicky 3",
+    "victoria 3"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/529340/discussions/0/5230393378265248577/"
+   ]
+  },
+  {
+   "name": "Factorio: Space Age",
+   "steam_appid": "645390",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "`",
+   "limit": null,
+   "paste": "yes",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with the ` key (left of 1; rebind it under Toggle chat); press it, then dictate. Aura pastes (check in game); do not start messages with /c, which runs a command.",
+   "aliases": [
+    "factorio",
+    "space age"
+   ],
+   "sources": [
+    "https://wiki.factorio.com/console"
+   ]
+  },
+  {
+   "name": "Europa Universalis IV",
+   "steam_appid": "236850",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Tab",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Multiplayer chat opens with Tab; press it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [
+    "eu4",
+    "eu 4",
+    "europa universalis 4"
+   ],
+   "sources": [
+    "https://eu4.paradoxwikis.com/Multiplayer",
+    "https://steamcommunity.com/app/236850/discussions/0/350541595108489476/"
+   ]
+  },
+  {
+   "name": "Barony",
+   "steam_appid": "371970",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://barony.wiki.gg/wiki/Console_Commands",
+    "https://www.baronygame.com/blog/432-voice-chat-guide"
+   ]
+  },
+  {
+   "name": "OpenFront",
+   "steam_appid": "3560670",
+   "mac": "native",
+   "text_chat": "limited",
+   "open_key": "",
+   "limit": null,
+   "paste": "no",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Only emojis and preset quick-chat messages, no free text, so Aura has nowhere to paste.",
+   "aliases": [
+    "openfront.io",
+    "openfront io"
+   ],
+   "sources": [
+    "https://openfront.wiki/Communication/",
+    "https://github.com/openfrontio/OpenFrontIO/issues/2220"
+   ]
+  },
+  {
+   "name": "Fishing Planet",
+   "steam_appid": "380600",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Tab",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Tab; press it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://steamcommunity.com/app/380600/discussions/0/537405286652024677/",
+    "https://store.steampowered.com/app/380600/Fishing_Planet/"
+   ]
+  },
+  {
+   "name": "MapleStory Classic World - Zakum Package",
+   "steam_appid": "5142560",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Nexon bans macro and unauthorized third-party programs (check rules)",
+   "verdict": "include",
+   "note": "Classic World opens October 2026 with a Mac client announced; chat should open with Enter (check in game). Paste is not confirmed (check in game).",
+   "aliases": [
+    "maplestory classic",
+    "ms classic",
+    "msclassic",
+    "classic world",
+    "maplestory"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/5142560/MapleStory_Classic_World__Zakum_Package/",
+    "https://www.nexon.com/mscw/pre-launch-sales"
+   ]
+  },
+  {
+   "name": "Stellaris: Nomads",
+   "steam_appid": "4241420",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "L",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Stellaris expansion. Multiplayer chat opens with L (or the chat button in the top-right menu); open it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [
+    "stellaris"
+   ],
+   "sources": [
+    "https://stellaris.paradoxwikis.com/Hotkeys",
+    "https://steamcommunity.com/app/281990/discussions/0/2733047810429199140/"
+   ]
+  },
+  {
+   "name": "Cuphead",
+   "steam_appid": "268910",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op is local or Steam Remote Play only, with no in-game text chat.",
+   "aliases": [],
+   "sources": [
+    "https://store.steampowered.com/app/268910/Cuphead/"
+   ]
+  },
+  {
+   "name": "Castle Crashers",
+   "steam_appid": "204360",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No in-game text chat, only push-to-talk voice; the developers point players to Steam chat or Discord.",
+   "aliases": [],
+   "sources": [
+    "https://steamcommunity.com/app/204360/discussions/0/152393186500952770/"
+   ]
+  },
+  {
+   "name": "The Binding of Isaac: Afterbirth",
+   "steam_appid": "401920",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op is local (or Steam Remote Play), with no in-game text chat.",
+   "aliases": [
+    "tboi",
+    "isaac",
+    "afterbirth"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/401920/"
+   ]
+  },
+  {
+   "name": "The Binding of Isaac: Afterbirth+",
+   "steam_appid": "570660",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op is local (or Steam Remote Play), with no in-game text chat.",
+   "aliases": [
+    "tboi",
+    "isaac",
+    "afterbirth plus",
+    "ab+"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/570660/"
+   ]
+  },
+  {
+   "name": "Stormworks: Build and Rescue",
+   "steam_appid": "573090",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "The Mac build is Intel-only and runs through Rosetta. Chat opens with Enter; paste is not confirmed (check in game).",
+   "aliases": [
+    "stormworks"
+   ],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/Stormworks:_Build_and_Rescue",
+    "https://stormworks.fandom.com/wiki/Gameplay/Multiplayer"
+   ]
+  },
+  {
+   "name": "Totally Accurate Battle Simulator",
+   "steam_appid": "508440",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Online battles have no in-game text chat; use Steam chat instead.",
+   "aliases": [
+    "tabs"
+   ],
+   "sources": [
+    "https://totally-accurate-battle-simulator.fandom.com/wiki/Multiplayer"
+   ]
+  },
+  {
+   "name": "The Escapists 2",
+   "steam_appid": "641990",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter (some setups use F); press it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [
+    "escapists 2",
+    "escapists"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/641990/discussions/0/3069747783693033124/"
+   ]
+  },
+  {
+   "name": "Crusader Kings III: Roads to Power",
+   "steam_appid": "2671070",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Crusader Kings III multiplayer has no in-game text chat, so there is nowhere for Aura to paste (check in game).",
+   "aliases": [
+    "ck3",
+    "crusader kings 3",
+    "roads to power"
+   ],
+   "sources": [
+    "https://forum.paradoxplaza.com/forum/threads/why-is-there-no-multiplayer-chat.1436426/"
+   ]
+  },
+  {
+   "name": "Stellaris: Apocalypse",
+   "steam_appid": "716670",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "L",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Stellaris expansion. Multiplayer chat opens with L (or the chat button in the top-right menu); open it, then dictate. Paste is not confirmed (check in game).",
+   "aliases": [
+    "stellaris"
+   ],
+   "sources": [
+    "https://stellaris.paradoxwikis.com/Hotkeys",
+    "https://steamcommunity.com/app/281990/discussions/0/2733047810429199140/"
+   ]
+  },
+  {
+   "name": "Tibia",
+   "steam_appid": null,
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "always live",
+   "limit": null,
+   "paste": "yes",
+   "rules_risk": "Rules ban macro programs that act for you; plain paste should be fine (check rules)",
+   "verdict": "include",
+   "note": "The Mac client is Intel-only and unsupported, so it runs through Rosetta. In Chat On mode typing goes straight to chat (in Chat Off mode press Enter first); the Mac paste shortcut is not confirmed (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://www.tibia.com/common/help.php?subtopic=macosinformation",
+    "https://www.tibia.com/support/?subtopic=tibiarules&rule=3b"
+   ]
+  },
+  {
+   "name": "Final Fantasy XIV",
+   "steam_appid": null,
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": 500,
+   "paste": "yes",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Messages cap at 500 characters, and Cmd+V in the Mac client is not confirmed (check in game).",
+   "aliases": [
+    "ffxiv",
+    "ff14",
+    "ff xiv",
+    "final fantasy 14"
+   ],
+   "sources": [
+    "https://forum.square-enix.com/ffxiv/threads/98510-Chat-box-character-invisible-limit-eats-chat-posts",
+    "https://na.finalfantasyxiv.com/system_requirements/"
+   ]
+  },
+  {
+   "name": "The Lord of the Rings Online",
+   "steam_appid": null,
+   "mac": "wine_or_cloud",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "The Mac client ended in 2022, but the game runs well in CrossOver. Chat opens with Enter; paste is not confirmed (check in game).",
+   "aliases": [
+    "lotro"
+   ],
+   "sources": [
+    "https://www.lotro.com/news/lotro-macos-deprecation-en",
+    "https://www.applegamingwiki.com/wiki/Lord_of_the_Rings_Online"
+   ]
+  },
+  {
+   "name": "Fortnite",
+   "steam_appid": null,
+   "mac": "wine_or_cloud",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Chat is filtered for under-13 accounts and parental controls can turn it off",
+   "verdict": "include",
+   "note": "No Mac version; play through GeForce NOW or Xbox Cloud Gaming. Chat opens with Enter, but paste into the cloud stream is not confirmed (check in game).",
+   "aliases": [
+    "fn",
+    "fortnite br"
+   ],
+   "sources": [
+    "https://x.com/FortniteStatus/status/1866595132247773231",
+    "https://www.fortnite.com/news/introducing-a-new-text-chat-experience-in-fortnite?lang=en-US"
+   ]
+  },
+  {
+   "name": "Rust",
+   "steam_appid": "252490",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": null,
+   "paste": "yes",
+   "rules_risk": "Easy Anti-Cheat; gameplay macros are bannable",
+   "verdict": "include",
+   "note": "Chat opens with T (Tab switches to team chat); press it, then dictate. Aura pastes.",
+   "aliases": [],
+   "sources": [
+    "https://wiki.facepunch.com/rust/global_text_chat",
+    "https://www.applegamingwiki.com/wiki/Rust"
+   ]
+  },
+  {
+   "name": "Valheim",
+   "steam_appid": "892970",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; start with /s to shout to the whole server. Aura pastes (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://store.steampowered.com/news/app/892970/view/4182235001969409117",
+    "https://www.setreadygame.com/games/how-to-chat-and-use-emotes-in-valheim/"
+   ]
+  },
+  {
+   "name": "The Elder Scrolls Online",
+   "steam_appid": "306130",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": 350,
+   "paste": "yes",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter and pastes normally, up to 350 characters. The Mac client runs under Rosetta and Bethesda does not officially support Apple silicon Macs.",
+   "aliases": [
+    "eso",
+    "elder scrolls online"
+   ],
+   "sources": [
+    "https://help.bethesda.net/app/answers/detail/a_id/52307/~/can-i-run-eso-on-an-arm-based-mac",
+    "https://forums.elderscrollsonline.com/en/discussion/261881/chat-copy-paste"
+   ]
+  },
+  {
+   "name": "Project Zomboid",
+   "steam_appid": "108600",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with T in multiplayer; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "pz",
+    "zomboid"
+   ],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/Project_Zomboid",
+    "https://steamcommunity.com/app/108600/discussions/0/1473095965305598382/"
+   ]
+  },
+  {
+   "name": "Farming Simulator 25",
+   "steam_appid": "2300320",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with T in multiplayer; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "fs25",
+    "farming sim 25",
+    "ls25"
+   ],
+   "sources": [
+    "https://farmingsimulator.wiki.gg/wiki/Controls/Farming_Simulator_25"
+   ]
+  },
+  {
+   "name": "Escape Simulator 2",
+   "steam_appid": "2879840",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Text chat opens with Enter in online co-op (check in game). Aura pastes (check in game).",
+   "aliases": [
+    "es2",
+    "escape sim 2"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/2879840/Escape_Simulator_2/",
+    "https://steamcommunity.com/app/2879840/discussions/0/845114064658168480/"
+   ]
+  },
+  {
+   "name": "Factorio",
+   "steam_appid": "427520",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "`",
+   "limit": null,
+   "paste": "yes",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with the ` (grave) key; press it, then dictate. Aura pastes with Cmd+V.",
+   "aliases": [],
+   "sources": [
+    "https://wiki.factorio.com/Console",
+    "https://forums.factorio.com/viewtopic.php?t=52369"
+   ]
+  },
+  {
+   "name": "Borderlands 2",
+   "steam_appid": "49520",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Y",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Y; press it, then dictate. Aura pastes (check in game). The Mac version is no longer updated and only plays with other Mac players.",
+   "aliases": [
+    "bl2"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/49520/discussions/0/882962960790003542/",
+    "https://support.aspyr.com/hc/en-us/articles/203396134-Borderlands-2-Mac-FAQ"
+   ]
+  },
+  {
+   "name": "Bloons TD 6",
+   "steam_appid": "960090",
+   "mac": "native",
+   "text_chat": "limited",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Co-op has emotes only, no text chat.",
+   "aliases": [
+    "btd6",
+    "bloons"
+   ],
+   "sources": [
+    "https://www.bloonswiki.com/Emote",
+    "https://steamcommunity.com/app/960090/discussions/0/596281569374668868/"
+   ]
+  },
+  {
+   "name": "Dying Light",
+   "steam_appid": "239140",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter (not the numpad Enter); press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "dying light 1"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/239140/discussions/0/604941528473974251/",
+    "https://www.applegamingwiki.com/wiki/Dying_Light"
+   ]
+  },
+  {
+   "name": "Garry's Mod",
+   "steam_appid": "4000",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Y",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Y (U for team chat); press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "gmod",
+    "garrys mod"
+   ],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/Garry%27s_Mod",
+    "https://www.ludo.guide/guide/garrys-mod/gamemodes-multiplayer/multiplayer-and-community/voice-chat-and-text-chat"
+   ]
+  },
+  {
+   "name": "Escape Simulator",
+   "steam_appid": "1435790",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Text chat opens with Enter in online co-op; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "escape sim",
+    "es1"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/1435790/discussions/0/3112542578516642616/"
+   ]
+  },
+  {
+   "name": "Sid Meier’s Civilization VI",
+   "steam_appid": "289070",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "In multiplayer, click the chat panel first, then dictate. Aura pastes (check in game). Online play on Mac needs the Steam version.",
+   "aliases": [
+    "civ 6",
+    "civ vi",
+    "civ6",
+    "civilization 6"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/289070/discussions/4/154644349170078000/",
+    "https://www.applegamingwiki.com/wiki/Civilization_VI"
+   ]
+  },
+  {
+   "name": "Sephiria",
+   "steam_appid": "2436940",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No in-game text chat found for co-op; players use voice or Discord (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://sephiria.net/guides/coop/",
+    "https://store.steampowered.com/app/2436940/Sephiria/"
+   ]
+  },
+  {
+   "name": "SnowRunner",
+   "steam_appid": "1465360",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No text or voice chat in multiplayer. The Mac version is no longer updated and only plays with other Mac players.",
+   "aliases": [
+    "snow runner"
+   ],
+   "sources": [
+    "https://support.saber.games/hc/en/snowrunner/articles/snow-runner-faq-1"
+   ]
+  },
+  {
+   "name": "Realm of the Mad God Exalt",
+   "steam_appid": "200210",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "Deca bans third-party tools that automate play",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "rotmg",
+    "realm",
+    "exalt"
+   ],
+   "sources": [
+    "https://gamefaqs.gamespot.com/mac/661874-realm-of-the-mad-god/answers/369979-how-to-chat"
+   ]
+  },
+  {
+   "name": "Golf With Your Friends",
+   "steam_appid": "431240",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with T; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "gwyf",
+    "golf with friends"
+   ],
+   "sources": [
+    "https://defkey.com/golf-with-your-friends-shortcuts"
+   ]
+  },
+  {
+   "name": "Arma 3",
+   "steam_appid": "107410",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "/",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with /; press it, then dictate. Aura pastes (check in game). The Mac port can lag behind Windows, so servers must run the same version.",
+   "aliases": [
+    "arma",
+    "a3"
+   ],
+   "sources": [
+    "https://dev.arma3.com/ports",
+    "https://community.bistudio.com/wiki/Arma_3:_Field_Manual_-_Multiplayer"
+   ]
+  },
+  {
+   "name": "Path of Exile",
+   "steam_appid": "238960",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "yes",
+   "rules_risk": "GGG allows only one server action per key press",
+   "verdict": "include",
+   "note": "Chat opens with Enter and pastes normally, like trade whispers.",
+   "aliases": [
+    "poe",
+    "poe1"
+   ],
+   "sources": [
+    "https://www.pathofexile.com/forum/view-thread/3870701"
+   ]
+  },
+  {
+   "name": "Terrinoth: Heroes of Descent",
+   "steam_appid": "3929630",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No in-game text chat found; co-op players use voice (check in game).",
+   "aliases": [
+    "terrinoth"
+   ],
+   "sources": [
+    "https://store.steampowered.com/app/3929630/Terrinoth_Heroes_of_Descent/",
+    "https://steamcommunity.com/app/3929630/discussions/0/573792389465109654/"
+   ]
+  },
+  {
+   "name": "Liftoff: FPV Drone Racing",
+   "steam_appid": "410340",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "In multiplayer rooms, click the chat box first, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "liftoff"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/410340/discussions/0/360670708789577782/",
+    "https://steamcommunity.com/app/410340/discussions/0/1839063537798835871/"
+   ]
+  },
+  {
+   "name": "YAPYAP",
+   "steam_appid": "3834090",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter; press it, then dictate. Typed incantations also cast spells, so spelling must be exact (check in game).",
+   "aliases": [
+    "yap yap"
+   ],
+   "sources": [
+    "https://games.gg/yapyap/guides/yapyap-secret-spells-guide/",
+    "https://store.steampowered.com/app/3834090/YAPYAP/"
+   ]
+  },
+  {
+   "name": "Wingspan",
+   "steam_appid": "1054490",
+   "mac": "native",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "Online games have no in-game chat.",
+   "aliases": [],
+   "sources": [
+    "https://steamcommunity.com/app/1054490/discussions/search/?q=chat"
+   ]
+  },
+  {
+   "name": "Mechabellum",
+   "steam_appid": "669330",
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Click the chat bar at the bottom of the screen, pick All or Team, then dictate. Aura pastes (check in game).",
+   "aliases": [],
+   "sources": [
+    "https://steamcommunity.com/app/669330/discussions/0/3958161899240785018/",
+    "https://steamcommunity.com/app/669330/discussions/2/600777204942510747/"
+   ]
+  },
+  {
+   "name": "Divinity: Original Sin 2 - Definitive Edition",
+   "steam_appid": "435150",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter in multiplayer; press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "dos2",
+    "divinity 2",
+    "dos2de"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/435150/discussions/0/1473096694444611136/",
+    "https://www.applegamingwiki.com/wiki/Divinity:_Original_Sin_II"
+   ]
+  },
+  {
+   "name": "Stellaris: Astral Planes",
+   "steam_appid": "2534090",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "L",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Stellaris DLC. Multiplayer chat opens with L or the Multiplayer Chat button; open it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "stellaris"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/281990/discussions/0/2733047810429199140/",
+    "https://www.applegamingwiki.com/wiki/Stellaris"
+   ]
+  },
+  {
+   "name": "Gloomhaven",
+   "steam_appid": "780290",
+   "mac": "rosetta",
+   "text_chat": "no",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "exclude",
+   "note": "No in-game text chat; co-op players use Steam or Discord.",
+   "aliases": [],
+   "sources": [
+    "https://steamcommunity.com/app/780290/discussions/0/3104637814591151689/"
+   ]
+  },
+  {
+   "name": "Stellaris: Nemesis",
+   "steam_appid": "1522090",
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "L",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Stellaris DLC. Multiplayer chat opens with L or the Multiplayer Chat button; open it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "stellaris"
+   ],
+   "sources": [
+    "https://steamcommunity.com/app/281990/discussions/0/2733047810429199140/",
+    "https://www.applegamingwiki.com/wiki/Stellaris"
+   ]
+  },
+  {
+   "name": "Minecraft: Java Edition",
+   "steam_appid": null,
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "T",
+   "limit": 256,
+   "paste": "yes",
+   "rules_risk": "UK players need age verification for multiplayer chat",
+   "verdict": "include",
+   "note": "Chat opens with T; press it, then dictate. Aura pastes, up to 256 characters.",
+   "aliases": [
+    "minecraft",
+    "mc",
+    "mc java"
+   ],
+   "sources": [
+    "https://minecraft.wiki/w/Chat"
+   ]
+  },
+  {
+   "name": "Hearthstone",
+   "steam_appid": null,
+   "mac": "native",
+   "text_chat": "limited",
+   "open_key": "",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "not_recommended",
+   "note": "Opponents get emotes only. Free text works only in chats with Battle.net friends (check in game).",
+   "aliases": [
+    "hs"
+   ],
+   "sources": [
+    "https://hearthstone.blizzard.com/"
+   ]
+  },
+  {
+   "name": "EVE Online",
+   "steam_appid": null,
+   "mac": "native",
+   "text_chat": "yes",
+   "open_key": "click",
+   "limit": null,
+   "paste": "yes",
+   "rules_risk": "EULA bans input automation and broadcasting",
+   "verdict": "include",
+   "note": "Click the input line of a chat channel window, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "eve"
+   ],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/EVE_Online"
+   ]
+  },
+  {
+   "name": "Heroes of the Storm",
+   "steam_appid": null,
+   "mac": "rosetta",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "",
+   "verdict": "include",
+   "note": "Chat opens with Enter for team chat (Shift+Enter for all chat); press it, then dictate. Aura pastes (check in game).",
+   "aliases": [
+    "hots"
+   ],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/Heroes_of_the_Storm"
+   ]
+  },
+  {
+   "name": "Genshin Impact",
+   "steam_appid": null,
+   "mac": "wine_or_cloud",
+   "text_chat": "yes",
+   "open_key": "Enter",
+   "limit": null,
+   "paste": "unknown",
+   "rules_risk": "No Mac client; the usual workarounds (anti-cheat patch, sideloading) may break HoYoverse terms",
+   "verdict": "not_recommended",
+   "note": "No Mac version; Mac players rely on unofficial workarounds. Co-op chat opens with Enter (check in game).",
+   "aliases": [
+    "genshin"
+   ],
+   "sources": [
+    "https://www.applegamingwiki.com/wiki/Genshin_Impact"
+   ]
+  }
+ ]
+}

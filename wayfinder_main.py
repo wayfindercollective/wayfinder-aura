@@ -7964,15 +7964,15 @@ class WayfinderApp(ctk.CTk):
         )
 
     def _sync_macos_hero_visibility(self) -> None:
-        """Keep the independent CALayer behind tabs and full-window scrims."""
+        """Keep the native layer behind tabs and animate its visible Tk fallback."""
         native_layer = getattr(self, "_macos_hero_layer", None)
         if native_layer is not None:
             occluded = WayfinderApp._macos_hero_is_occluded(self)
             native_layer.set_hidden(occluded)
             if occluded:
-                # Tk may draw over the hero here (dropdowns, scrims), so the
-                # Metal layer hides; keep a still ribbon on the canvas below
-                # instead of an empty card.
+                # Tabs and scrims can draw over the independent Metal layer.
+                # Seed the Tk canvas now; the idle/active loop advances it on
+                # other tabs, since the hero card itself remains visible.
                 try:
                     self._draw_hero_waveform(force_canvas=True)
                 except Exception:
@@ -8011,6 +8011,11 @@ class WayfinderApp(ctk.CTk):
         """
         if not self.hero_canvas:
             return
+
+        # The hero card sits above every tab. On macOS the native layer must
+        # stay below tab surfaces, so keep its Tk fallback moving there.
+        if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate":
+            force_canvas = True
 
         # Initialize on first call
         if not self._hero_wave_items_created:
@@ -8460,6 +8465,11 @@ class WayfinderApp(ctk.CTk):
         WayfinderApp._sync_macos_hero_visibility(self)
         
         self._write_status_breadcrumb()
+        if IS_MACOS and getattr(self, "app_state", None) == AppState.IDLE:
+            # The native renderer owns Dictate's idle frames and leaves no
+            # Python timer behind. Re-seed the Tk timer for the always-visible
+            # hero when switching to another tab.
+            self._start_idle_breath()
 
     def show_setup_pane(self, on_done=None) -> None:
         """Show the first-run dependency setup as an inline pane over the tab
@@ -9072,6 +9082,15 @@ class WayfinderApp(ctk.CTk):
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
+        if IS_MACOS:
+            ctk.CTkButton(
+                system_header, text="Permissions…", width=112, height=28,
+                corner_radius=RADIUS["xs"],
+                fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["text_secondary"],
+                font=(self.font_body[0], self.font_sizes["small"]),
+                command=lambda: self.show_permissions_setup(force=True),
+            ).pack(side="right")
         
         system_content = ctk.CTkFrame(system_tile, fg_color="transparent")
         system_content.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
@@ -12659,14 +12678,33 @@ class WayfinderApp(ctk.CTk):
             font=(fam, fs["body"]), height=34, corner_radius=RADIUS["md"],
             fg_color=COLORS["bg_input"], border_color=COLORS["border_subtle"],
             text_color=COLORS["text_primary"],
-        ).pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["sm"], SPACING["sm"]))
+        ).pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["sm"], SPACING["xs"]))
+        filter_labels = ["All"] + list(game_chat.STATUS_LABELS.values())
+        filter_var = ctk.StringVar(value="All")
+        ctk.CTkSegmentedButton(
+            games, values=filter_labels, variable=filter_var,
+            font=(fam, fs["small"]), command=lambda _v: render(),
+        ).pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["xs"]))
+        count_label = ctk.CTkLabel(games, text="", anchor="w", font=(fam, fs["caption"]),
+                                   text_color=COLORS["text_muted"])
+        count_label.pack(fill="x", padx=SPACING["tile_pad"])
         results = ctk.CTkFrame(games, fg_color="transparent")
         results.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        max_rows = 40  # a hundred-plus rows would make every keystroke lag
+        status_for_label = {v: k for k, v in game_chat.STATUS_LABELS.items()}
 
         def render(*_):
             for child in results.winfo_children():
                 child.destroy()
             entries = game_chat.search_games(search_var.get())
+            wanted = status_for_label.get(filter_var.get())
+            if wanted:
+                entries = [e for e in entries if e.status == wanted]
+            shown = entries[:max_rows]
+            count_label.configure(
+                text=(f"Showing {len(shown)} of {len(entries)} games. Search to narrow it down."
+                      if len(entries) > len(shown) else
+                      f"{len(entries)} game{'s' if len(entries) != 1 else ''}"))
             if not entries:
                 ctk.CTkLabel(
                     results, font=(fam, fs["small"]), anchor="w", justify="left",
@@ -12676,7 +12714,7 @@ class WayfinderApp(ctk.CTk):
                          "just hasn't been tested there, so check the game's rules on chat tools.",
                 ).pack(fill="x", pady=SPACING["xs"])
                 return
-            for entry in entries:
+            for entry in shown:
                 row = ctk.CTkFrame(results, fg_color="transparent")
                 row.pack(fill="x", pady=(SPACING["xs"], 0))
                 head = ctk.CTkFrame(row, fg_color="transparent")
@@ -12689,7 +12727,18 @@ class WayfinderApp(ctk.CTk):
                 ctk.CTkLabel(row, text=entry.note, anchor="w", justify="left", wraplength=460,
                              font=(fam, fs["small"]), text_color=COLORS["text_muted"]).pack(fill="x")
 
-        search_var.trace_add("write", render)
+        pending = {"job": None}
+
+        def on_type(*_):
+            # Re-filter once typing pauses (one-shot, not a repeating timer).
+            if pending["job"] is not None:
+                try:
+                    self.after_cancel(pending["job"])
+                except Exception:
+                    pass
+            pending["job"] = self.after(180, render)
+
+        search_var.trace_add("write", on_type)
         render()
 
         note(scroll, "Game names are trademarks of their owners. Wayfinder is not affiliated "
@@ -16046,6 +16095,9 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             install_ready = True
         accessibility, input_monitoring = self._macos_permission_state()
+        input_relaunch_required = bool(
+            getattr(self, "_macos_input_relaunch_required", False)
+        )
         try:
             from wayfinder.utils.macos_permissions import (
                 MIC_DENIED, MIC_RESTRICTED, microphone_authorization,
@@ -16057,7 +16109,7 @@ class WayfinderApp(ctk.CTk):
             "install_location" if not install_ready
             else "microphone" if mic_blocked
             else "accessibility" if accessibility is not True
-            else "input_monitoring" if input_monitoring is not True
+            else "input_monitoring" if input_monitoring is not True or input_relaunch_required
             else None
         )
         if self._missing_macos_permission is None:
@@ -16089,11 +16141,15 @@ class WayfinderApp(ctk.CTk):
             )
             button_text = "Open Accessibility"
         else:
-            text = (
-                f"{hotkey} also needs Input Monitoring: click +, add Wayfinder Aura "
-                "from Applications, turn it on, then quit and reopen it."
-            )
-            button_text = "Open Input Monitoring"
+            if input_monitoring is True and input_relaunch_required:
+                text = "Input Monitoring is on. Relaunch Wayfinder Aura to activate the hotkey."
+                button_text = "Relaunch Aura"
+            else:
+                text = (
+                    f"{hotkey} needs Input Monitoring. If Aura is absent, click + "
+                    "and add /Applications/Wayfinder Aura.app; then relaunch."
+                )
+                button_text = "Permissions…"
         try:
             label.configure(text=text)
             button.configure(text=button_text)
@@ -16143,6 +16199,11 @@ class WayfinderApp(ctk.CTk):
             permission = getattr(self, "_missing_macos_permission", None)
         if permission is None:
             return
+        if (permission == "input_monitoring"
+                and getattr(self, "_macos_input_relaunch_required", False)):
+            _, input_monitoring = self._macos_permission_state()
+            if input_monitoring is True and self.relaunch_app():
+                return
         # Grants go through the in-app checklist (native prompts + live status);
         # moving the app into Applications is the one step it can't do.
         if permission != "install_location" and self.show_permissions_setup(force=True):
@@ -16167,7 +16228,8 @@ class WayfinderApp(ctk.CTk):
         try:
             from wayfinder.utils.macos_permissions import permission_snapshot
 
-            missing = any(v is not True for v in permission_snapshot().values())
+            missing = (any(v is not True for v in permission_snapshot().values())
+                       or bool(getattr(self, "_macos_input_relaunch_required", False)))
         except Exception:
             return False
         if not missing and not force:
@@ -16197,14 +16259,15 @@ class WayfinderApp(ctk.CTk):
             return False
 
     def _macos_permissions_granted(self, names) -> None:
-        """Checklist callback: a grant just landed. A new event tap picks up
-        Accessibility / Input Monitoring immediately, so re-create the hotkey
-        listener instead of asking the user to quit and reopen."""
+        """Pick up Accessibility live; require a process relaunch for Input Monitoring."""
         if not IS_MACOS:
             return
-        if any(n in ("accessibility", "input_monitoring") for n in names):
-            self.log("✓ macOS permission granted — restarting the hotkey listener")
+        if "accessibility" in names:
+            self.log("✓ Accessibility granted — restarting the hotkey listener")
             self._restart_pynput_listener()
+        if "input_monitoring" in names:
+            self._macos_input_relaunch_required = True
+            self.log("✓ Input Monitoring granted — relaunch Aura to activate it")
         self._refresh_macos_permission_banner()
 
     def _restart_pynput_listener(self) -> None:
@@ -20031,6 +20094,25 @@ class WayfinderApp(ctk.CTk):
             pystray.MenuItem("Reset (unstick overlay)", self.tray_reset),
             pystray.Menu.SEPARATOR,
             *window_items,
+            *([pystray.MenuItem(
+                "Permissions",
+                pystray.Menu(
+                    pystray.MenuItem("Status in Aura…", self.permissions_from_tray),
+                    pystray.Menu.SEPARATOR,
+                    pystray.MenuItem(
+                        "Microphone…",
+                        lambda _i, _m: self._open_permission_from_tray("microphone"),
+                    ),
+                    pystray.MenuItem(
+                        "Accessibility…",
+                        lambda _i, _m: self._open_permission_from_tray("accessibility"),
+                    ),
+                    pystray.MenuItem(
+                        "Input Monitoring…",
+                        lambda _i, _m: self._open_permission_from_tray("input_monitoring"),
+                    ),
+                ),
+            )] if sys.platform == "darwin" else []),
             pystray.MenuItem(
                 "Model",
                 pystray.Menu(
@@ -20316,6 +20398,28 @@ class WayfinderApp(ctk.CTk):
 
     def hide_from_tray(self, icon=None, item=None):
         self._dispatch_tray_action(self.hide_to_tray)
+
+    def permissions_from_tray(self, icon=None, item=None):
+        """Open the live checklist after the native status menu closes."""
+        def show():
+            self._show_window()
+            self.show_permissions_setup(force=True)
+
+        self._dispatch_tray_action(show)
+
+    def _open_permission_from_tray(self, permission: str) -> None:
+        """Open a macOS privacy pane after the native status menu closes."""
+        def open_pane():
+            from wayfinder.utils.macos_permissions import (
+                open_macos_privacy_settings,
+                request_input_monitoring_registration,
+            )
+
+            if permission == "input_monitoring":
+                request_input_monitoring_registration()
+            open_macos_privacy_settings(permission)
+
+        self._dispatch_tray_action(open_pane)
 
     def _tray_window_action_text(self, item=None) -> str:
         """Contextual macOS window action shown in the status menu."""
@@ -20995,13 +21099,20 @@ class WayfinderApp(ctk.CTk):
         self._draw_hero_waveform()
 
         native_layer = getattr(self, "_macos_hero_layer", None)
-        if native_layer is not None and native_layer.native_renderer is not None:
+        if (
+            native_layer is not None
+            and native_layer.native_renderer is not None
+            and (not IS_MACOS or getattr(self, "active_tab", "dictate") == "dictate")
+        ):
             # The native Objective-C timer owns all 30 fps idle frames. Python
             # wakes again only on a state/tab/window event.
             self._idle_breath_job = None
             return
 
-        interval = _hero_idle_interval_ms()
+        interval = (
+            66 if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate"
+            else _hero_idle_interval_ms()
+        )
         if IS_WINDOWS:
             from wayfinder.ui.windows_window import animations_enabled
 
@@ -22853,6 +22964,8 @@ class WayfinderApp(ctk.CTk):
         def has(*needles: str) -> bool:
             return any(n in m for n in needles)
 
+        if has("wayfinder aura was frontmost"):
+            return message.split("Injection: ", 1)[-1]
         if has("inject", "ydotool", "wtype", "type"):
             if IS_MACOS:
                 return ("Couldn't paste the text — make sure Accessibility is on "
