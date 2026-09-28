@@ -41,9 +41,12 @@ class _Disp:
     """keysym_to_keycodes for a US layout: (X keycode, index) pairs."""
     US = {0x61: 38, 0x62: 56, 0x68: 43, 0x69: 31, 0x31: 10, 0x3B: 47, 0x76: 55,
           0x20: 65, 0xFF0D: 36, 0xFFE1: 50, 0xFFE3: 37}
-    SHIFTED = {0x41: 38, 0x48: 43, 0x21: 10, 0x3A: 47}
+    SHIFTED = {0x41: 38, 0x48: 43, 0x21: 10, 0x3A: 47, 0x28: 18}
+    EXOTIC = {0x28: 187}   # "(" also sits unshifted on KEY_KPLEFTPAREN
 
     def keysym_to_keycodes(self, keysym):
+        if keysym in self.EXOTIC:
+            yield self.EXOTIC[keysym], 0
         if keysym in self.US:
             yield self.US[keysym], 0
         if keysym in self.SHIFTED:
@@ -62,6 +65,7 @@ def test_layout_gives_evdev_codes_and_the_shift_level():
     assert layout.key_for(0x41) == (30, True)        # A: same key, Shift
     assert layout.key_for(0x21) == (2, True)         # ! is Shift+1
     assert layout.key_for(0xE9) is None              # AltGr level: pasted instead
+    assert layout.key_for(0x28) == (10, True)        # Shift+9, not the keypad "(" Wine drops
     assert pk.untypeable_chars("Hi! é", layout) == {"é"}
 
 

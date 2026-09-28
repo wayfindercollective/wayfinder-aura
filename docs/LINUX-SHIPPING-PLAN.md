@@ -95,6 +95,6 @@ Manual: a short pass on real hardware and games.
 | KDE X11 | nested X server harness (xdotool path) | covered by harness |
 | SteamOS Game Mode | gamescope harness; Steam machine | pending |
 | Proton game | Path of Exile 2 (Steam) | pending |
-| Lutris / Wine game | Dark Age of Camelot (Eden) | typing verified 2026-09-28 |
+| Lutris / Wine game | Wine console (wine-ge 8-26, throwaway prefix) in the KWin rig; Dark Age of Camelot (Eden) live | rig: every character arrives through the portal (after preferring main-block keys: the keypad "(" key Wine drops); DAoC xdotool typing verified 2026-09-28, portal live pending |
 | Native Linux game | stand-in Tk game | harness |
 | Windowed / borderless / fullscreen | stand-in game in each mode; DAoC | pending |

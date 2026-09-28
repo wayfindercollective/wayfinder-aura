@@ -53,6 +53,7 @@ _REMOTE_IFACE = "org.freedesktop.portal.RemoteDesktop"
 
 DEVICE_KEYBOARD = 1
 KEY_LEFTSHIFT = 42  # evdev; used when the layout has no Shift_L
+_MAIN_BLOCK_LAST = 88  # evdev KEY_F12: Esc..F12 incl. letters, digits, keypad
 PERSIST_UNTIL_REVOKED = 2
 _RESPONSE_OK = 0
 _RESPONSE_CANCELLED = 1
@@ -145,12 +146,18 @@ class X11Layout:
         except Exception:
             return None
         # Core keymap index: 0 = plain, 1 = Shift (2, 3 = second group,
-        # 4, 5 = AltGr levels: not typed, pasted instead).
-        for level in (0, 1):
-            for code, index in codes:
-                if index == level and code >= 8:
-                    return code - 8, level == 1
-        return None
+        # 4, 5 = AltGr levels: not typed, pasted instead). A key on the main
+        # block wins over an exotic one even when it needs Shift: evdev
+        # layouts also put "(" and ")" unshifted on KEY_KPLEFTPAREN/
+        # KEY_KPRIGHTPAREN (179/180), which GTK reads but Wine drops.
+        best = None
+        for code, index in codes:
+            if index not in (0, 1) or code < 8:
+                continue
+            rank = (code - 8 > _MAIN_BLOCK_LAST, index, code)
+            if best is None or rank < best[0]:
+                best = (rank, code - 8, index == 1)
+        return (best[1], best[2]) if best else None
 
     __call__ = key_for
 
