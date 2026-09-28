@@ -49,8 +49,12 @@ def macos_visible_frame(screen_w: int, screen_h: int) -> tuple[int, int, int, in
         return 0, MACOS_MENU_BAR_H, screen_w, max(0, screen_h - MACOS_MENU_BAR_H)
 
 
-def windows_work_area(screen_w: int, screen_h: int) -> tuple[int, int, int, int]:
-    """Primary monitor's work area (taskbar excluded) as (x, y, w, h)."""
+def windows_work_area(
+    screen_w: int, screen_h: int, *, physical: bool = False
+) -> tuple[int, int, int, int]:
+    """Primary monitor's work area (taskbar excluded) as (x, y, w, h), in the
+    app's logical pixels, or in real pixels (what Tk's winfo_* report) with
+    ``physical=True``."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -60,7 +64,7 @@ def windows_work_area(screen_w: int, screen_h: int) -> tuple[int, int, int, int]
             # Real pixels once the app is DPI aware: back to logical ones.
             from wayfinder.utils import windows_dpi
 
-            s = windows_dpi.scale()
+            s = 1.0 if physical else windows_dpi.scale()
             return (int(rect.left / s), int(rect.top / s),
                     int((rect.right - rect.left) / s), int((rect.bottom - rect.top) / s))
     except Exception:

@@ -670,7 +670,7 @@ class ToolTip:
         anchor = (self.widget.winfo_rootx(), self.widget.winfo_rooty(),
                   self.widget.winfo_width(), self.widget.winfo_height())
         area = (macos_visible_frame(screen_w, screen_h) if IS_MACOS
-                else windows_work_area(screen_w, screen_h) if IS_WINDOWS
+                else windows_work_area(screen_w, screen_h, physical=True) if IS_WINDOWS
                 else (0, 0, screen_w, screen_h))
         if anchor_in_area(anchor, area):
             x, y = tooltip_position(anchor, size, area)
@@ -4292,7 +4292,11 @@ class FloatingIndicator:
         self._visible = False
         self._window_width = 0
         self._window_height = 0
-        
+        # Raw canvases draw in real pixels: Windows' display scale (1.0 elsewhere).
+        self._px = _windows_dpi_scale()
+        if self._px == 1.0:
+            self._px = 1  # integer: Linux/macOS coordinates stay exactly as they were
+
         # Callback to get audio level for voice-reactive waveform
         self._audio_level_callback = audio_level_callback
         self._current_audio_level = 0.0  # Smoothed audio level
@@ -4431,8 +4435,8 @@ class FloatingIndicator:
         # Glowing status indicator dot - bigger for visibility
         self.dot_canvas = ctk.CTkCanvas(
             row,
-            width=28,
-            height=28,
+            width=_windows_px(28),
+            height=_windows_px(28),
             bg=inner_glow_color,  # Match glassmorphism background
             highlightthickness=0,
         )
@@ -4451,8 +4455,8 @@ class FloatingIndicator:
         # Voice-reactive waveform - right next to text, fills remaining space
         self.wave_canvas = ctk.CTkCanvas(
             row,
-            width=200,  # Much wider for dramatic effect
-            height=32,  # Taller for bigger waves
+            width=_windows_px(200),  # Much wider for dramatic effect
+            height=_windows_px(32),  # Taller for bigger waves
             bg=inner_glow_color,  # Match glassmorphism background
             highlightthickness=0,
         )
@@ -4577,6 +4581,11 @@ class FloatingIndicator:
         # Center horizontally, position just above taskbar
         pos_x = (screen_w - self._window_width) // 2
         pos_y = screen_h - self._window_height - 52  # Resting just on top of taskbar (~48px)
+        if IS_WINDOWS and not IS_MACOS:
+            # The real taskbar, in real pixels (its height grows with the scale).
+            area_x, area_y, area_w, area_h = windows_work_area(screen_w, screen_h, physical=True)
+            pos_x = area_x + (area_w - self._window_width) // 2
+            pos_y = area_y + area_h - self._window_height - _windows_px(4)
         
         self.window.geometry(f"+{pos_x}+{pos_y}")
         self._is_centered = True
@@ -4591,9 +4600,10 @@ class FloatingIndicator:
 
         try:
             # Create ring (initially hidden) - larger for dramatic effect
+            k = self._px
             self._dot_ring_id = self.dot_canvas.create_oval(
-                cx - 6, cy - 6, cx + 6, cy + 6,
-                outline=color, width=2, fill="", state="hidden"
+                (cx - 6) * k, (cy - 6) * k, (cx + 6) * k, (cy + 6) * k,
+                outline=color, width=2 * k, fill="", state="hidden"
             )
 
             # Create 3 glow layers - larger radii for bigger dot
@@ -4601,14 +4611,14 @@ class FloatingIndicator:
             self._dot_glow_ids = []
             for radius in glow_radii:
                 item_id = self.dot_canvas.create_oval(
-                    cx - radius, cy - radius, cx + radius, cy + radius,
+                    (cx - radius) * k, (cy - radius) * k, (cx + radius) * k, (cy + radius) * k,
                     fill=color, outline=""
                 )
                 self._dot_glow_ids.append(item_id)
 
             # Create core dot - bigger
             self._dot_core_id = self.dot_canvas.create_oval(
-                cx - 4, cy - 4, cx + 4, cy + 4,
+                (cx - 4) * k, (cy - 4) * k, (cx + 4) * k, (cy + 4) * k,
                 fill=color, outline=""
             )
         except tk.TclError:
@@ -4651,8 +4661,10 @@ class FloatingIndicator:
                 ring_b = int(b * ring_alpha + bg_b * (1 - ring_alpha))
                 ring_color = f"#{ring_r:02x}{ring_g:02x}{ring_b:02x}"
                 
+                k = self._px
                 self.dot_canvas.coords(self._dot_ring_id,
-                    cx - ring_radius, cy - ring_radius, cx + ring_radius, cy + ring_radius)
+                    (cx - ring_radius) * k, (cy - ring_radius) * k,
+                    (cx + ring_radius) * k, (cy + ring_radius) * k)
                 self.dot_canvas.itemconfig(self._dot_ring_id, outline=ring_color, state="normal")
             else:
                 self.dot_canvas.itemconfig(self._dot_ring_id, state="hidden")
@@ -4667,14 +4679,18 @@ class FloatingIndicator:
                     gb = int(b * alpha + bg_b * (1 - alpha))
                     glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
                     
+                    k = self._px
                     self.dot_canvas.coords(self._dot_glow_ids[i],
-                        cx - glow_radius, cy - glow_radius, cx + glow_radius, cy + glow_radius)
+                        (cx - glow_radius) * k, (cy - glow_radius) * k,
+                        (cx + glow_radius) * k, (cy + glow_radius) * k)
                     self.dot_canvas.itemconfig(self._dot_glow_ids[i], fill=glow_color)
             
             # Update core - bigger for visibility
             core_radius = 4 * scale
+            k = self._px
             self.dot_canvas.coords(self._dot_core_id,
-                cx - core_radius, cy - core_radius, cx + core_radius, cy + core_radius)
+                (cx - core_radius) * k, (cy - core_radius) * k,
+                (cx + core_radius) * k, (cy + core_radius) * k)
             self.dot_canvas.itemconfig(self._dot_core_id, fill=color)
         except Exception:
             pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
@@ -4697,8 +4713,9 @@ class FloatingIndicator:
             for i in range(num_bars):
                 x = i * (bar_width + bar_gap) + bar_gap // 2
                 # Create bar centered vertically (will be updated in _draw_waveform)
+                k = self._px
                 bar_id = self.wave_canvas.create_rectangle(
-                    x, center_y - 1, x + bar_width, center_y + 1,
+                    x * k, (center_y - 1) * k, (x + bar_width) * k, (center_y + 1) * k,
                     fill=color, outline=""
                 )
                 self._wave_bar_ids.append(bar_id)
@@ -4763,8 +4780,10 @@ class FloatingIndicator:
                 bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
                 
                 # Update bar position and color
+                k = self._px
                 self.wave_canvas.coords(bar_id,
-                    x, center_y - bar_height, x + bar_width, center_y + bar_height)
+                    x * k, (center_y - bar_height) * k,
+                    (x + bar_width) * k, (center_y + bar_height) * k)
                 self.wave_canvas.itemconfig(bar_id, fill=bar_color)
         except Exception:
             pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
@@ -18936,6 +18955,12 @@ class WayfinderApp(ctk.CTk):
         # Calculate meter width
         self._mic_meter_bg.update_idletasks()
         bg_width = self._mic_meter_bg.winfo_width()
+        if IS_WINDOWS and not IS_MACOS:
+            # Real pixels back to CTk's units (configure(width=) scales again).
+            try:
+                bg_width = bg_width / float(self._get_widget_scaling())
+            except Exception:
+                pass
         if bg_width < 10:
             bg_width = 200
         meter_width = max(2, int(level * (bg_width - 4)))

@@ -187,7 +187,10 @@ def render_hero_wave_windows(w, h, t, level, morph, state_color_rgb, bg_rgb, *, 
         y_at = y0 + slope * seg_x
         stretch = np.sqrt(np.float32(1.0) + slope * slope)
         visible = np.nonzero((g_lut > faint) | (c_lut < 1.0 - faint))[0]
-        reach = (int(visible[-1]) + 1) / _LUT_PER_PX if visible.size else 0.0
+        if visible.size and visible[-1] == _LUT_SIZE - 1:
+            reach = float(h)          # still visible at the table's end: every row
+        else:
+            reach = (int(visible[-1]) + 1) / _LUT_PER_PX if visible.size else 0.0
         top = min(top, float(np.min(y_at - reach * stretch)))
         bottom = max(bottom, float(np.max(y_at + reach * stretch)))
         geometry.append((y_at, np.float32(_LUT_PER_PX) / stretch, g_lut, c_lut))

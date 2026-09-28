@@ -1373,3 +1373,17 @@ def test_old_saved_geometry_keeps_its_size_after_the_upgrade(monkeypatch):
     real = {k: wayfinder_main._windows_px(v) for k, v in saved.items()}
     assert real == {"width": 1400, "height": 1365, "x": 175, "y": 105}
     assert {k: wayfinder_main._windows_logical(v) for k, v in real.items()} == saved
+
+
+def test_tooltips_and_fallback_pill_use_the_real_work_area(monkeypatch):
+    """Tk measures tooltips and the fallback pill in real pixels, so they must
+    be placed against the work area in real pixels, not the logical one."""
+    from wayfinder.ui import window_geometry
+    from wayfinder.utils import windows_dpi
+
+    if sys.platform != "win32":
+        pytest.skip("real SPI_GETWORKAREA")
+    monkeypatch.setattr(windows_dpi, "_scale", 2.0)
+    real = window_geometry.windows_work_area(0, 0, physical=True)
+    logical = window_geometry.windows_work_area(0, 0)
+    assert logical[2] == int(real[2] / 2.0) and logical[3] == int(real[3] / 2.0)
