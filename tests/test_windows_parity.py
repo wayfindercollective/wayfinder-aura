@@ -1205,3 +1205,103 @@ def test_installer_asks_aura_to_quit_before_forcing_it():
     assert "SendMessage(Wnd" not in iss  # never an unbounded send
     force = iss.index("taskkill.exe")
     assert "FindWindowByClassName('WayfinderAuraLifecycle')" in iss and ask < force
+
+
+# --- Hero ribbon (ui/windows_hero_render.py: the Mac Metal shader) -----------
+
+def _shader_reference(w, h, t, level, morph, colour, bg):
+    """The Metal hero_wave shader evaluated literally (exact segment distances,
+    exp glow, smoothstep cores), to check the fast port against."""
+    import math
+
+    import numpy as np
+
+    from wayfinder.ui import windows_hero_render as m
+
+    px, py, edge, band = m._grid(w, h)
+    width, height = float(w), float(h)
+    breath = 0.26 + 0.09 * (0.5 + 0.5 * math.sin(t * 0.8))
+    amp = height * 0.42 * min(0.8, breath + 0.2 * morph + (level ** 0.6) * 0.62 * morph)
+    bright, hi_bright = 0.55 + 0.45 * morph, 0.40 + 0.60 * morph
+    count = 109 if morph < 0.3 else int(min(240, max(109, round(width / 9))))
+    vx = (width / (count - 1) * np.arange(count)).astype(np.float32)
+    col = np.array(colour, np.float32)
+    res = np.zeros((h, w, 3), np.float32) + np.array(bg, np.float32)
+    dists, glow = [], np.zeros((h, w), np.float32)
+    for f, ph, a, th in zip(m._FREQS, m._PHASES, m._ALPHAS, m._THICKNESS):
+        ys = m._wave_y(vx, width, height, t, amp, f, ph, 1.0).astype(np.float32)
+        d = m._polyline_distance(px, py, width, count, ys)
+        dists.append(d)
+        o = np.maximum(0, d - (th + 4) / 2)
+        glow = np.maximum(glow, a * 0.3 * bright * np.exp(-o * o / 8))
+    hd = m._polyline_distance(px, py, width, count,
+                              m._highlight_y(vx, width, height, t, amp, 1.0).astype(np.float32))
+    o = np.maximum(0, hd - 2)
+    glow = np.maximum(glow, 0.4 * hi_bright * np.exp(-o * o / 8)) * band
+
+    def mix(r, alpha):
+        return r + (col - r) * alpha[..., None]
+
+    res = mix(res, glow * edge)
+    for d, a, th in zip(dists, m._ALPHAS, m._THICKNESS):
+        res = mix(res, a * bright * m._coverage(d, th) * edge)
+    res = mix(res, 0.95 * hi_bright * m._coverage(hd, 2.0) * edge)
+    return np.clip(res + 0.5, 0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize("level,morph", [(0.0, 0.0), (0.6, 1.0)])
+def test_windows_hero_matches_the_mac_shader(level, morph):
+    import numpy as np
+
+    from wayfinder.ui.windows_hero_render import render_hero_wave_windows
+
+    colour, bg = (74, 130, 220), (21, 27, 37)
+    img = render_hero_wave_windows(700, 64, 3.0, level, morph, colour, bg)
+    assert img.mode == "RGB" and img.size == (700, 64)
+    diff = np.abs(np.asarray(img, int) - _shader_reference(700, 64, 3.0, level, morph, colour, bg))
+    assert diff.mean() < 2.5                      # same picture, not just similar
+    assert (diff.max(axis=2) > 12).mean() < 0.05  # only a few near-vertical edge pixels
+
+
+def test_windows_hero_is_background_at_the_ends_and_survives_bad_input():
+    import numpy as np
+
+    from wayfinder.ui.windows_hero_render import render_hero_wave_windows
+
+    bg = (21, 27, 37)
+    img = np.asarray(render_hero_wave_windows(400, 64, 1.0, 1.0, 1.0, (200, 80, 90), bg))
+    assert (img[:, 0] == bg).all() and (img[:, -1] == bg).all()   # edge fade
+    assert (img[:, 200] != bg).any()
+    for value in (float("nan"), float("inf")):
+        assert render_hero_wave_windows(50, 20, value, value, value, (1, 2, 3), bg).size == (50, 20)
+
+
+def test_hero_dispatch_windows_shader_only_on_windows(monkeypatch):
+    from wayfinder.ui import hero_render, windows_hero_render
+
+    calls = []
+    monkeypatch.setattr(windows_hero_render, "render_hero_wave_windows",
+                        lambda *a, **k: calls.append(k) or "windows")
+    monkeypatch.setattr(hero_render, "_render_hero_wave_aqua", lambda *a, **k: "aqua")
+    monkeypatch.setattr(hero_render, "_render_hero_wave_reference", lambda *a, **k: "reference")
+    args = (100, 64, 0.0, 0.0, 0.0, (1, 2, 3))
+
+    monkeypatch.setattr(hero_render.sys, "platform", "win32")
+    assert hero_render.render_hero_wave(*args, stroke_scale=1.5) == "windows"
+    assert calls == [{"stroke_scale": 1.5}]
+    monkeypatch.setattr(windows_hero_render, "render_hero_wave_windows",
+                        lambda *a, **k: 1 / 0)
+    assert hero_render.render_hero_wave(*args) == "aqua"         # safe fallback
+    monkeypatch.setattr(hero_render.sys, "platform", "darwin")
+    assert hero_render.render_hero_wave(*args) == "aqua"
+    monkeypatch.setattr(hero_render.sys, "platform", "linux")
+    assert hero_render.render_hero_wave(*args) == "reference"    # Linux unchanged
+
+
+def test_hero_canvas_layout_windows_matches_mac_linux_unchanged():
+    import wayfinder_main
+
+    assert wayfinder_main._hero_visual_scale(1.25, "win32") == 1.25
+    assert wayfinder_main._hero_canvas_pady("win32") == wayfinder_main._hero_canvas_pady("darwin")
+    assert wayfinder_main._hero_visual_scale(1.25, "linux") == 1.0
+    assert wayfinder_main._hero_canvas_pady("linux") == (0, 8)

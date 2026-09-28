@@ -1232,17 +1232,18 @@ def _hero_active_interval_ms(platform_name: str | None = None) -> int:
 def _hero_visual_scale(
     ui_scale: float, platform_name: str | None = None
 ) -> float:
-    """Scale the raw Tk hero canvas on Aqua alongside CTk widgets."""
+    """Scale the raw Tk hero canvas on Aqua (and Windows, which draws the same
+    ribbon) alongside CTk widgets."""
     active_platform = platform_name or sys.platform
-    if active_platform != "darwin":
+    if active_platform not in ("darwin", "win32"):
         return 1.0
     return max(0.7, min(2.5, float(ui_scale)))
 
 
 def _hero_canvas_pady(platform_name: str | None = None):
-    """Lower the Aqua ribbon without moving the controls or changing Linux."""
+    """Lower the Aqua (and Windows) ribbon without moving the controls or changing Linux."""
     active_platform = platform_name or sys.platform
-    return (10, 0) if active_platform == "darwin" else (0, 8)
+    return (10, 0) if active_platform in ("darwin", "win32") else (0, 8)
 
 
 def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
