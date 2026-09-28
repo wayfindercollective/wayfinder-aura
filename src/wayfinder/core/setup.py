@@ -962,8 +962,8 @@ def download_whisper_model(
 
 
 def _download_model_file(*args, **kwargs) -> None:
-    """Keep the Mac awake for the download (no-op elsewhere); see _impl."""
-    if sys.platform != "darwin":
+    """Keep the Mac/PC awake for the download (no-op on Linux); see _impl."""
+    if sys.platform not in ("darwin", "win32"):
         return _download_model_file_impl(*args, **kwargs)
     from wayfinder.utils import macos_activity
 
@@ -1114,10 +1114,13 @@ def download_llm_model(
 
     url = model_info["url"]
     filename = model_info["filename"]
-    # Flatpak: persistent XDG_DATA_HOME. Everywhere else (macOS included) the
-    # wizard keeps the dir it has always used.
+    # Flatpak: persistent XDG_DATA_HOME. Windows: the folder config.py's Windows
+    # default and the in-app downloader use. Everywhere else (macOS included)
+    # the wizard keeps the dir it has always used.
     if IS_FLATPAK:
         model_dir = get_user_llm_models_dir(flatpak=True)
+    elif sys.platform == "win32":
+        model_dir = Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
     else:
         model_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
     target = model_dir / filename

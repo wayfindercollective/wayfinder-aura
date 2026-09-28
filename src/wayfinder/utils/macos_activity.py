@@ -6,7 +6,8 @@ when the Mac slept and restarted from zero. NSProcessInfo activities are the
 supported way to hold that off for exactly as long as the work runs; they
 show up in ``pmset -g assertions`` and end automatically if the app exits.
 
-No-ops off macOS.
+Windows delegates to ``windows_power`` (power requests, same begin/end
+contract). No-ops on Linux.
 """
 
 from __future__ import annotations
@@ -27,6 +28,10 @@ def _process_info():
 
 def begin(key: str, reason: str) -> bool:
     """Start (once) the named activity. True if one is now held."""
+    if sys.platform == "win32":
+        from wayfinder.utils import windows_power
+
+        return windows_power.begin(key, reason)
     if sys.platform != "darwin":
         return False
     with _lock:
@@ -43,6 +48,11 @@ def begin(key: str, reason: str) -> bool:
 
 
 def end(key: str) -> None:
+    if sys.platform == "win32":
+        from wayfinder.utils import windows_power
+
+        windows_power.end(key)
+        return
     if sys.platform != "darwin":
         return
     with _lock:
@@ -55,6 +65,10 @@ def end(key: str) -> None:
 
 
 def is_held(key: str) -> bool:
+    if sys.platform == "win32":
+        from wayfinder.utils import windows_power
+
+        return windows_power.is_held(key)
     with _lock:
         return key in _active
 

@@ -56,6 +56,7 @@ def test_setup_guide_applies_the_login_choice_only_when_ticked(monkeypatch):
 
     calls = []
     monkeypatch.setattr(L, "set_enabled", lambda on: calls.append(on) or (True, None))
+    monkeypatch.setattr("wayfinder.ui.welcome._login_item_module", lambda: L)
     pane = WelcomePane.__new__(WelcomePane)
     pane.app = SimpleNamespace(log=lambda m: None)
     pane._login_item_var = SimpleNamespace(get=lambda: False)

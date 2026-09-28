@@ -70,6 +70,16 @@ def test_no_proxy_configured_uses_plain_urlopen(monkeypatch):
     assert calls == [("http://127.0.0.1:1/", 2)]
 
 
+def test_windows_bypasses_a_configured_proxy(servers, monkeypatch):
+    origin, proxy, origin_hits, proxy_hits = servers
+    monkeypatch.setattr(loopback_http.urllib.request, "getproxies",
+                        lambda: {"http": f"http://127.0.0.1:{proxy.server_port}"})
+    url = f"http://127.0.0.1:{origin.server_port}/inference"
+    with patch.object(loopback_http.sys, "platform", "win32"):
+        assert loopback_http.urlopen_loopback(url, timeout=5).read() == b"origin"
+    assert proxy_hits == [] and origin_hits == ["/inference"]
+
+
 def test_linux_is_unchanged(monkeypatch):
     calls = []
     monkeypatch.setattr(loopback_http.urllib.request, "getproxies",

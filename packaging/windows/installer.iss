@@ -52,8 +52,69 @@ Source: "..\..\dist\Wayfinder Aura\*"; DestDir: "{app}"; Flags: recursesubdirs c
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
+[Registry]
+; Settings > System > "Open at login" writes this per-user Run value
+; (src/wayfinder/utils/windows_login_item.py). Nothing is created at install;
+; uninstall removes it so Windows never tries to start a missing exe.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "{#MyAppName}"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: none; ValueName: "{#MyAppName}"; Flags: uninsdeletevalue dontcreatekey
+
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+{ Aura's window close button hides it to the tray (as on the Mac), so the
+  installer's Restart Manager could not close it and an upgrade stopped at
+  "Setup was unable to automatically close all applications".
+  First ask a running Aura to quit the way Windows does at sign-out: its hidden
+  lifecycle window gets WM_ENDSESSION, puts ducked audio back, and quits. Wait
+  at most 5 s in all (bounded send, then exit polling). Only a copy that doesn't answer (builds from before
+  this handler) is then ended with its helpers; its ducked audio, if any, is
+  restored by the app's crash recovery the next time it starts. }
+const
+  WM_ENDSESSION = $0016;
+  ENDSESSION_CLOSEAPP = 1;
+  SMTO_ABORTIFHUNG = 2;
+
+{ Bounded send: a hung Aura must never hang the installer before the fallback. }
+function SendMessageTimeout(hWnd: HWND; Msg: Cardinal; wParam: Longint; lParam: Longint;
+  fuFlags: Cardinal; uTimeout: Cardinal; var lpdwResult: Cardinal): Longint;
+  external 'SendMessageTimeoutW@user32.dll stdcall';
+
+procedure StopRunningAura();
+var
+  ResultCode, Waited: Integer;
+  Wnd: HWND;
+  Answer: Cardinal;
+begin
+  Wnd := FindWindowByClassName('WayfinderAuraLifecycle');
+  if Wnd <> 0 then
+  begin
+    { At most 3 s for Aura to take the request, then up to 2 s to exit. }
+    SendMessageTimeout(Wnd, WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP,
+                       SMTO_ABORTIFHUNG, 3000, Answer);
+    Waited := 0;
+    while (FindWindowByClassName('WayfinderAuraLifecycle') <> 0) and (Waited < 20) do
+    begin
+      Sleep(100);
+      Waited := Waited + 1;
+    end;
+  end;
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM "{#MyAppExeName}"', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopRunningAura();
+  Result := '';
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    StopRunningAura();
+end;
 
 [UninstallDelete]
 ; Remove the whole install tree (incl. PyInstaller's _internal folder) so an

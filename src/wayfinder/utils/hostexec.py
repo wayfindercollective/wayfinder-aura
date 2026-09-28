@@ -121,7 +121,7 @@ def bundle_binary_env(overrides: dict | None = None) -> dict:
                 env["LD_LIBRARY_PATH"] = os.pathsep.join(kept)
             else:
                 env.pop("LD_LIBRARY_PATH", None)
-    if sys.platform == "darwin":
+    if sys.platform in ("darwin", "win32"):
         # Native helpers (whisper/llama servers) never need cloud credentials;
         # keep the user's API keys out of their environment.
         for name in _CLOUD_KEY_ENV_VARS:

@@ -425,13 +425,16 @@ def test_macos_docs_do_not_claim_python_311_is_supported():
     assert "pinned to the 3.12 line" in text
 
 
-@pytest.mark.parametrize("is_macos, expected", [(True, False), (False, True)])
-def test_gated_developer_model_does_not_count_as_usable_on_macos(monkeypatch, is_macos, expected):
-    """A Free Mac with only small.en (Ultra) on disk must still be offered Base."""
+@pytest.mark.parametrize("is_macos, is_windows, expected", [
+    (True, False, False), (False, True, False), (False, False, True)])
+def test_gated_developer_model_does_not_count_as_usable_on_macos(
+        monkeypatch, is_macos, is_windows, expected):
+    """A Free Mac/PC with only small.en (Ultra) on disk must still be offered Base."""
     from pathlib import Path
     from types import SimpleNamespace
 
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", is_macos)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", is_windows)
     monkeypatch.setattr(
         wayfinder_main,
         "_resolve_whisper_model",
@@ -558,8 +561,9 @@ def test_ctk_dpi_poll_is_idle_on_macos():
 
 def test_settings_footer_names_the_platform():
     assert wayfinder_main._footer_tagline(is_macos=True) == "handcrafted for Mac"
-    # Linux (and every non-Mac build) keeps its original line.
-    assert wayfinder_main._footer_tagline(is_macos=False) == "handcrafted for Linux"
+    # Linux keeps its original line; Windows names itself.
+    assert wayfinder_main._footer_tagline(is_macos=False, is_windows=False) == "handcrafted for Linux"
+    assert wayfinder_main._footer_tagline(is_macos=False, is_windows=True) == "handcrafted for Windows"
 
 
 def test_paste_failure_guidance_is_platform_specific(monkeypatch):
@@ -568,6 +572,10 @@ def test_paste_failure_guidance_is_platform_specific(monkeypatch):
     mac = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
     assert "Accessibility" in mac and "ydotool" not in mac
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    windows = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
+    assert "administrator" in windows and "ydotool" not in windows
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
     linux = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
     assert linux == ("Couldn't type the text — check input permissions (Settings) "
                      "or install ydotool.")

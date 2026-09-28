@@ -2186,7 +2186,8 @@ class TestServerAdoptionPerPlatform:
     (its supervised child cannot outlive the app, and adopting an unowned
     listener would hand it recorded audio)."""
 
-    @pytest.mark.parametrize("platform_name, expected", [("linux", 8178), ("darwin", 8179)])
+    @pytest.mark.parametrize("platform_name, expected", [
+        ("linux", 8178), ("darwin", 8179), ("win32", 8179)])
     def test_occupied_port_reuse(self, monkeypatch, platform_name, expected):
         import socket as socket_module
 
@@ -2214,7 +2215,8 @@ class TestServerAdoptionPerPlatform:
 class TestServerReuseThreadsOnMacOS:
     """The resident server's -t is fixed at spawn; macOS respawns when it changes."""
 
-    @pytest.mark.parametrize("platform_name, expected", [("darwin", False), ("linux", True)])
+    @pytest.mark.parametrize("platform_name, expected", [
+        ("darwin", False), ("win32", False), ("linux", True)])
     def test_thread_change_breaks_reuse_only_on_macos(self, monkeypatch, platform_name, expected):
         import wayfinder.core.transcriber as transcriber
 
@@ -2262,6 +2264,10 @@ class TestMacServerRequestFields:
 
     def test_macos_disables_timestamps(self, sample_audio_file, monkeypatch):
         body = self._body_for("darwin", sample_audio_file, monkeypatch)
+        assert b'name="no_timestamps"\r\n\r\ntrue' in body
+
+    def test_windows_disables_timestamps(self, sample_audio_file, monkeypatch):
+        body = self._body_for("win32", sample_audio_file, monkeypatch)
         assert b'name="no_timestamps"\r\n\r\ntrue' in body
 
     def test_linux_request_is_unchanged(self, sample_audio_file, monkeypatch):

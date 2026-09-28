@@ -17,7 +17,12 @@ macOS only: a release counts as an update only when it carries a Mac DMG
 (named as packaging/macos/build.py names it) for this machine, so a Linux-only
 release never nags a Mac user towards a page with nothing to install. The
 DMG's direct URL is returned as ``download_url`` for a one-click download.
-Linux and Windows results are unchanged.
+
+Windows likewise: only a release carrying ``WayfinderAura-Setup-<version>.exe``
+(packaging/windows/installer.iss) is an update, and that installer is the
+``download_url``. Releases without one (Windows is internal until sign-off, so
+tags currently carry no Setup exe) never nag a Windows user.
+Linux results are unchanged.
 """
 
 import json
@@ -64,6 +69,9 @@ _VERSION_RE = re.compile(
 #   Wayfinder_Aura-<CFBundleShortVersionString>-macOS-<platform.machine()>.dmg
 # (tests/test_app_updates.py pins the two together).
 _MAC_DMG_RE = re.compile(r"^Wayfinder_Aura-(.+)-macOS-(arm64|x86_64)\.dmg$")
+# Windows installer naming — must match OutputBaseFilename in
+# packaging/windows/installer.iss: WayfinderAura-Setup-<version>.exe (x64 only).
+_WIN_SETUP_RE = re.compile(r"^WayfinderAura-Setup-(.+)\.exe$")
 # Release assets are only ever served from GitHub; anything else is not a
 # download this module will hand to the browser.
 _DOWNLOAD_URL_PREFIX = "https://github.com/"
@@ -143,6 +151,10 @@ def _is_macos() -> bool:
     return sys.platform == "darwin"
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
 def _mac_architectures() -> Tuple[str, ...]:
     """DMG architectures this Mac accepts, most preferred first.
 
@@ -157,12 +169,15 @@ def _mac_architectures() -> Tuple[str, ...]:
 
 
 def _platform_cache_key() -> Optional[str]:
-    """Which download filter produced a cached verdict (macOS only).
+    """Which download filter produced a cached verdict (macOS/Windows only).
 
-    None on Linux/Windows, whose cache format is unchanged. On macOS a cache
-    written without the DMG filter (an older build) or for a different
-    architecture set is refetched rather than trusted.
+    None on Linux, whose cache format is unchanged. On macOS a cache written
+    without the DMG filter (an older build) or for a different architecture
+    set is refetched rather than trusted; Windows the same for its installer
+    filter.
     """
+    if _is_windows():
+        return "win32-x64"
     if not _is_macos():
         return None
     return "darwin-" + "+".join(_mac_architectures())
@@ -202,11 +217,39 @@ def _mac_dmg_url(release: Dict[str, Any], tag: str) -> Optional[str]:
     return None
 
 
+def _windows_setup_url(release: Dict[str, Any], tag: str) -> Optional[str]:
+    """browser_download_url of the release's Windows installer, or None.
+
+    Same rules as the DMG: the installer's version must equal the tag, the
+    upload must be complete, and the URL must be a GitHub download.
+    """
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return None
+    tag_version = parse_version(tag)
+    if tag_version is None:
+        return None
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("state") != "uploaded":
+            continue
+        name = asset.get("name")
+        url = asset.get("browser_download_url")
+        if not isinstance(name, str) or not isinstance(url, str):
+            continue
+        if not url.startswith(_DOWNLOAD_URL_PREFIX):
+            continue
+        match = _WIN_SETUP_RE.match(name)
+        if match is not None and parse_version(match.group(1)) == tag_version:
+            return url
+    return None
+
+
 def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
     """Select the newest release allowed by the running version's channel.
 
     On macOS, releases without a DMG for this Mac are skipped (the newest
     release that HAS one wins) and the DMG's URL is returned as download_url.
+    Windows does the same with the Setup exe.
     """
     channel = _release_channel(current_version)
     if channel is None:
@@ -215,6 +258,7 @@ def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
         raise ValueError("GitHub releases response is not a list")
 
     mac = _is_macos()
+    win = _is_windows()
     selected: Dict[str, str] = {}
     for release in payload:
         if not isinstance(release, dict) or release.get("draft") is True:
@@ -235,13 +279,17 @@ def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
             download_url = _mac_dmg_url(release, tag)
             if download_url is None:
                 continue  # nothing this Mac can install: not an update here
+        elif win:
+            download_url = _windows_setup_url(release, tag)
+            if download_url is None:
+                continue  # no Windows installer on this release
 
         if not selected or is_newer(tag, selected["tag_name"]):
             selected = {
                 "tag_name": tag,
                 "html_url": str(release.get("html_url", "") or RELEASES_PAGE),
             }
-            if mac:
+            if mac or win:
                 selected["download_url"] = download_url
     return selected
 
@@ -258,12 +306,12 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
         - update_available: bool
         - latest_version: str (tag as published, e.g. "v1.1.9")
         - release_url: str (page to send the user to)
-        - download_url: str (macOS only: the release's DMG, "" if none)
+        - download_url: str (macOS/Windows only: the DMG / Setup exe, "" if none)
         - last_checked: ISO timestamp
         - error: optional error message
     """
     channel = _release_channel(current_version)
-    platform_key = _platform_cache_key()  # None off macOS
+    platform_key = _platform_cache_key()  # None on Linux
     if not force:
         cached = _load_cache()
         if (

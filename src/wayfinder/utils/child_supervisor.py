@@ -3,6 +3,10 @@
 Linux uses ``PR_SET_PDEATHSIG`` for its overlay. macOS has no equivalent, so a
 small Python supervisor watches the owning PID and terminates the native child
 if the app crashes. Normal shutdown signals are forwarded through the same path.
+
+Windows needs no supervisor process: ``bind_to_app_lifetime`` puts the child in
+a job object that the kernel closes when the app exits for any reason, crash
+included, killing the child with it.
 """
 
 from __future__ import annotations
@@ -54,6 +58,21 @@ def wrap_macos_child_command(
     else:
         supervisor = [sys.executable, str(Path(__file__).resolve())]
     return supervisor, child_env
+
+
+def bind_to_app_lifetime(proc: subprocess.Popen, *, platform_name: str | None = None) -> bool:
+    """Windows: make *proc* die with this app, even if the app crashes.
+
+    See utils/windows_job.py. No-op (False) elsewhere; nothing Windows-specific
+    is imported or built on other platforms.
+    """
+    if (platform_name or sys.platform) != "win32":
+        return False
+    try:
+        from wayfinder.utils.windows_job import assign_to_kill_on_close_job
+    except Exception:
+        return False
+    return assign_to_kill_on_close_job(proc)
 
 
 def _terminate_child(proc: subprocess.Popen, timeout: float = 3.0) -> None:

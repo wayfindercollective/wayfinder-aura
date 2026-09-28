@@ -511,13 +511,16 @@ def get_user_llm_models_dir(flatpak: bool | None = None) -> Path:
 
     - Flatpak: $XDG_DATA_HOME/wayfinder-aura/llm-models (persistent)
     - macOS: ~/Library/Application Support/wayfinder-aura/llm-models
-    - Linux (source/AppImage) and Windows: ~/.local/share/wayfinder-aura/llm-models
-      (the in-app download location those platforms have always used)
+    - Windows: ~/AppData/Local/wayfinder-aura/llm-models, where config.py's
+      Windows default points (downloads used to land in ~/.local/share beside it)
+    - Linux (source/AppImage): ~/.local/share/wayfinder-aura/llm-models
     """
     if _in_wayfinder_flatpak(flatpak):
         return _flatpak_data_home() / "wayfinder-aura" / "llm-models"
     if is_macos():
         return Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
+    if is_windows():
+        return Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
     return Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
 
 

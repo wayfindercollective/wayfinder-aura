@@ -80,6 +80,40 @@ def _macos_route_console_to_log() -> None:
 _macos_route_console_to_log()
 
 
+def _windows_route_console_to_log() -> None:
+    """Packaged Windows app: keep stdout/stderr in %LOCALAPPDATA%, not nowhere.
+
+    The installer's exe is windowed (console=False), so sys.stdout/stderr are
+    None and every diagnostic print (whisper-server, mic, overlay, licence)
+    was lost. Same rules as the macOS routing above: main GUI process only,
+    5 MB rotation.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    if any(arg.startswith("--") and arg not in ("--minimized",) for arg in sys.argv[1:]):
+        return  # --overlay-subprocess, self-tests, CLI verbs...
+    if sys.stdout is not None:
+        return  # started from a console: keep it
+    try:
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        log_dir = Path(base) / "wayfinder-aura" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "app.log"
+        if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
+            os.replace(log_path, log_dir / "app.log.1")
+        stream = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+        sys.stdout = stream
+        sys.stderr = stream
+        from datetime import datetime
+
+        print(f"\n===== Wayfinder Aura {datetime.now():%Y-%m-%d %H:%M:%S} =====", flush=True)
+    except OSError:
+        pass
+
+
+_windows_route_console_to_log()
+
+
 # Ensure the src directory is in the path for package imports
 if getattr(sys, 'frozen', False):
     # Running as bundled .app — modules are in the bundle
@@ -104,7 +138,8 @@ if "--child-supervisor" in sys.argv:
 from wayfinder.tls import configure_tls_ca_bundle
 
 _TLS_CA_BUNDLE = configure_tls_ca_bundle()
-if sys.platform == "darwin":
+if sys.platform in ("darwin", "win32"):
+    # Windows too: corporate TLS-inspection roots live in the Windows store.
     from wayfinder.tls import use_macos_trust_store
 
     _MACOS_TRUST_STORE = use_macos_trust_store()
@@ -567,10 +602,12 @@ def _control_socket_path() -> str:
 def _try_control_command(verb: bytes, *, expect_reply: bool = False) -> bool:
     """Send a control-socket verb to a live instance. Returns True if connected."""
     if sys.platform == "win32":
-        # AF_UNIX control IPC is Linux/macOS-only. A Windows control channel
-        # (named pipe or localhost socket) is a planned adapter; until then a
-        # second launch simply exits instead of raising the first window.
-        return False
+        # No AF_UNIX on Windows: the running app listens on its token-guarded
+        # loopback control channel instead (hotkeys/windows_control.py).
+        from wayfinder.hotkeys.windows_control import send_command
+
+        reply = send_command(verb.decode("utf-8"), expect_reply=expect_reply)
+        return reply is not None
     import socket
 
     path = _control_socket_path()
@@ -926,10 +963,11 @@ def main():
 
             frozen = getattr(sys, 'frozen', False)
             frozen_runtime_ready = True
-            if frozen and sys.platform == "darwin":
+            if frozen and sys.platform in ("darwin", "win32"):
                 # Native dependencies are bundled, but speech-model weights are
                 # intentionally downloaded after install. Do not send a clean
-                # Mac into the live-dictation Welcome step until one exists.
+                # Mac (or PC: the Windows installer bundles no model either)
+                # into the live-dictation Welcome step until one exists.
                 frozen_runtime_ready = app._has_usable_whisper_model()
                 # Keep a genuinely clean install marked incomplete until the
                 # required model exists. Existing packaged users who already
@@ -938,7 +976,7 @@ def main():
                     app.config["setup_completed"] = True
                 save_config(app.config)
             elif frozen:
-                # Linux/Windows frozen builds (as on main): keep the flag in
+                # Linux frozen builds (as on main): keep the flag in
                 # WayfinderApp's live config so later save_config() calls persist
                 # it (frozen builds never run the setup pane).
                 app.config["setup_completed"] = True

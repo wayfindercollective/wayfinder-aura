@@ -349,12 +349,13 @@ class TestUserModelDirs:
                 host / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
             )
 
-    def test_windows_dirs_unchanged(self, host):
-        # The in-app downloader has always used these on Windows.
+    def test_windows_dirs(self, host):
+        # Whisper keeps the long-standing dir; GGUF downloads go where config.py's
+        # Windows default points (origin/windows: they used to land in ~/.local/share).
         with patch.object(sys, "platform", "win32"):
             assert platform_mod.get_user_whisper_models_dir() == host / "whisper.cpp" / "models"
             assert platform_mod.get_user_llm_models_dir() == (
-                host / ".local" / "share" / "wayfinder-aura" / "llm-models"
+                host / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
             )
 
     @pytest.mark.linux_only

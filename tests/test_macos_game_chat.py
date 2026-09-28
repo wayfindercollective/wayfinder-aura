@@ -10,6 +10,14 @@ import pytest
 from wayfinder.core import macos_game_chat as gc
 
 
+@pytest.fixture(autouse=True)
+def _mac_game_backend(monkeypatch):
+    """These exercise macos_game_chat; on a Windows host the app would pick its
+    Windows twin (covered in tests/test_windows_parity.py)."""
+    import wayfinder_main
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+
+
 # --- which apps are games -----------------------------------------------------
 
 @pytest.mark.parametrize("bundle,name,key", [

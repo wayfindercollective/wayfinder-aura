@@ -3,8 +3,10 @@ selected model that vanished (or was moved there) must be reported to the user,
 never swapped for Base.en silently.
 
 Flatpak/XDG tests are ``linux_only``. Outside the Flatpak (Linux host, macOS,
-Windows) every download/lookup dir must stay exactly what it was before the
-fix; those guards run on every platform and simulate the others through
+Windows) the Flatpak fix must not move any download/lookup dir; the only
+host changes are the ones the macOS and Windows branches made on purpose
+(Application Support on macOS, AppData\\Local for Windows GGUF downloads).
+Those guards run on every platform and simulate the others through
 ``sys.platform``.
 """
 
@@ -221,7 +223,10 @@ def test_host_app_model_dirs_are_unchanged(host_home, monkeypatch, platform):
         assert search_dirs == [app_support / "whisper-models", *host_dirs]
     else:
         assert whisper_dir == home / "whisper.cpp" / "models"
-        assert llm_dir == home / ".local" / "share" / "wayfinder-aura" / "llm-models"
+        if platform == "win32":
+            assert llm_dir == home / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
+        else:
+            assert llm_dir == home / ".local" / "share" / "wayfinder-aura" / "llm-models"
         assert search_dirs == host_dirs
 
 
@@ -250,8 +255,10 @@ def test_host_setup_wizard_dirs_are_unchanged(host_home, monkeypatch, platform):
 
     assert targets == [
         home / "whisper.cpp" / "models" / "ggml-base.en.bin",
-        # The wizard's GGUF dir has always been ~/.local/share, macOS included.
-        home / ".local" / "share" / "wayfinder-aura" / "llm-models"
+        # The wizard's GGUF dir: ~/.local/share (macOS included); Windows uses
+        # AppData\\Local like its config default and the in-app downloader.
+        (home / "AppData" / "Local" if platform == "win32" else home / ".local" / "share")
+        / "wayfinder-aura" / "llm-models"
         / setup.LLM_MODELS[gemma_key]["filename"],
     ]
     assert status.installed and "ggml-base.en.bin" in status.detail
