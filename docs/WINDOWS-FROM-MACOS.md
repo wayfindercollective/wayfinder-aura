@@ -2,7 +2,7 @@
 
 The `windows` branch is `macos` plus the Windows side of everything the Mac
 port built, so the two apps look, feel and behave the same wherever Windows
-allows it. Kept in step with `macos` by merging it (latest: 89c8942).
+allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
 
 **Ground rules** (the platform contract, as for the Mac port):
 
@@ -28,6 +28,7 @@ allows it. Kept in step with `macos` by merging it (latest: 89c8942).
 | No duplicate close/hide in the header | Same (Windows has caption buttons) | |
 | Welcome card fits the window | Same | `ui/welcome.py` |
 | Pill wave as one path, on the display under the pointer | Same | `ui/overlay.py` |
+| Hero ribbon drawn by the Metal shader (smooth glowing strands) | The same shader, evaluated in NumPy (~5.6 ms for a 1400 px strip; Aqua renderer as fallback). The Linux polyline ribbon rendered faceted on Windows | `ui/windows_hero_render.py` |
 | Hero 30 fps while recording | Same | |
 | Footer "handcrafted for Mac" | "handcrafted for Windows" | |
 
@@ -36,12 +37,13 @@ allows it. Kept in step with `macos` by merging it (latest: 89c8942).
 | Mac | Windows |
 |---|---|
 | Close hides to the menu bar; Quit from its menu | Close hides to the tray; Quit from the tray menu. Ctrl+, opens Settings (⌘,) |
+| Quits when macOS asks (logout, updater) | Quits on WM_ENDSESSION (sign-out, shutdown, the installer), restoring ducked audio first. The installer asks a running Aura to quit that way, then ends a copy that doesn't answer |
 | Menu bar: Check for Updates… | Tray: Check for Updates… |
 | Control socket (tray, second launch, CLI, `tab:`/`inspect:`) | Token-guarded loopback channel with the same verbs (`hotkeys/windows_control.py`). **This also fixes the Windows tray menu, which never reached the app (no AF_UNIX on Windows)** |
 | First run: the tour downloads the free Base model, then resumes | Same (the installer bundles no model either); "this PC" copy |
 | After the first dictation: "open aura when I log in" | Same, via the per-user Run key; Settings ▸ System ▸ Open at login; removed on uninstall |
-| Right Option tap/hold hotkey | Right Ctrl tap/hold (Right Alt is AltGr on most layouts). Default stays Ctrl+Alt+Space |
-| Hotkey conflict caption | Windows collisions: Alt+Space, Ctrl/Shift+Space (IME), Alt/Ctrl+Enter, bare F-keys, 1Password (`utils/windows_hotkey_conflicts.py`) |
+| Right Option tap/hold hotkey | Right Ctrl or Right Alt / Alt Gr tap/hold (many laptops have no Right Ctrl). Alt Gr alone types nothing; Alt Gr + a key cancels the gesture. Default stays Ctrl+Alt+Space |
+| Hotkey conflict caption | Windows collisions: Alt+Space, Ctrl/Shift+Space (IME), Alt/Ctrl+Enter, bare F-keys, 1Password, Magnifier's Ctrl+Alt+Space (`utils/windows_hotkey_conflicts.py`) |
 | Hotkey changes apply live | Same (no evdev restart and its "evdev not installed" warning) |
 | Escape cancels a recording from any app | Same |
 | Secure Input warning | Administrator-app warning: Windows (UIPI) hides an elevated window's keys and blocks typing into it |
@@ -79,7 +81,8 @@ allows it. Kept in step with `macos` by merging it (latest: 89c8942).
   notifications (the Mac shows them top-right).
 - **30 s warm mic** (the Mac uses 5-10 s). Opening a WASAPI/MME stream costs
   0.25-0.55 s (measured), not Core Audio's ~0.1 s.
-- **Ctrl+Alt+Space stays the default hotkey**; Right Ctrl tap/hold is offered.
+- **Ctrl+Alt+Space stays the default hotkey**; Right Ctrl and Right Alt / Alt Gr
+  tap/hold are offered.
 
 ## Not ported, with reasons
 
