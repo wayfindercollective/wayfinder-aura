@@ -21,11 +21,15 @@ def test_aqua_active_hero_uses_thirty_fps_for_fast_audio_motion():
     assert wayfinder_main._hero_active_interval_ms("darwin") == 33
 
 
-def test_aqua_raw_hero_canvas_tracks_ui_scale_without_changing_linux():
-    assert wayfinder_main._hero_visual_scale(1.25, "darwin") == 1.25
+def test_aqua_raw_hero_canvas_tracks_ui_scale_without_changing_linux(monkeypatch):
     assert wayfinder_main._hero_visual_scale(2.0, "darwin") == 2.0
+    assert wayfinder_main._hero_visual_scale(1.25, "darwin") == 1.25
     assert wayfinder_main._hero_visual_scale(1.25, "linux") == 1.0
     assert wayfinder_main._hero_canvas_pady("darwin") == (10, 0)
+    # Linux draws the same shader ribbon, placed like the Mac's...
+    assert wayfinder_main._hero_canvas_pady("linux") == (10, 0)
+    # ...unless the old look is restored.
+    monkeypatch.setenv("WAYFINDER_LINUX_MAC_LOOK", "0")
     assert wayfinder_main._hero_canvas_pady("linux") == (0, 8)
 
 

@@ -602,8 +602,8 @@ class TestLiquidWaveRenderer:
         assert len(painter.paths) == 10
         assert len(painter.pens) == 10
 
-    def test_linux_render_keeps_main_segment_strokes(self, overlay_module, monkeypatch):
-        """Linux keeps main's per-segment strokes (the production overlay look)."""
+    def test_linux_old_look_keeps_main_segment_strokes(self, overlay_module, monkeypatch):
+        """WAYFINDER_LINUX_MAC_LOOK=0 keeps main's per-segment strokes on Linux."""
         from PyQt6.QtCore import QRectF
         from PyQt6.QtGui import QColor
 
@@ -631,6 +631,7 @@ class TestLiquidWaveRenderer:
                 self.paths += 1
 
         monkeypatch.setattr(overlay_module.sys, "platform", "linux")
+        monkeypatch.setenv("WAYFINDER_LINUX_MAC_LOOK", "0")
         painter = Painter()
         overlay_module.LiquidWaveRenderer().render(
             painter, QRectF(0, 0, 90, 32), QColor("#5B8FD4")
@@ -639,6 +640,15 @@ class TestLiquidWaveRenderer:
         # x = 0..90 step 2 -> 46 samples, 45 segments; (4 waves + highlight) x (glow + core).
         assert painter.lines == 45 * 10
         assert painter.paths == 0
+
+        # Default Linux look: one path per strand, like macOS and Windows.
+        monkeypatch.delenv("WAYFINDER_LINUX_MAC_LOOK")
+        painter = Painter()
+        overlay_module.LiquidWaveRenderer().render(
+            painter, QRectF(0, 0, 90, 32), QColor("#5B8FD4")
+        )
+        assert painter.lines == 0
+        assert painter.paths > 0
 
 
 # =============================================================================

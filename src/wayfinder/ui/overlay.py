@@ -681,19 +681,23 @@ class LiquidWaveRenderer:
         """
         Render the liquid wave within the given rectangle.
 
-        Linux/Windows keep main's per-segment strokes (the production look).
-        macOS draws each strand as one continuous path with a gradient edge
-        fade: per-segment round caps overlap at every joint on Retina.
+        Each strand is one continuous path with a gradient edge fade (the
+        macOS design, also on Windows and Linux): per-segment round caps
+        overlapped at every joint. Linux keeps the old per-segment strokes
+        behind WAYFINDER_LINUX_MAC_LOOK=0.
 
         Args:
             painter: QPainter to draw with
             rect: Bounding rectangle for the wave
             color: Base color for the wave
         """
-        if sys.platform in ("darwin", "win32"):
-            self._render_paths(painter, rect, color)
-        else:
+        # Linux too (its Mac look): per-segment round caps also pile up at every
+        # joint there. WAYFINDER_LINUX_MAC_LOOK=0 restores the segment renderer.
+        if (sys.platform.startswith("linux")
+                and os.environ.get("WAYFINDER_LINUX_MAC_LOOK", "1") == "0"):
             self._render_segments(painter, rect, color)
+        else:
+            self._render_paths(painter, rect, color)
 
     def _render_segments(self, painter: QPainter, rect: QRectF, color: QColor):
         """

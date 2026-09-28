@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import random
+import os
 import sys
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -150,7 +151,7 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
     (``windows_hero_render``), so its ribbon matches the Mac; the reference
     strokes don't render correctly there. Aqua is its fallback.
     """
-    if sys.platform == "win32" and not stardust:
+    if (sys.platform == "win32" or _linux_mac_look()) and not stardust:
         try:
             from wayfinder.ui.windows_hero_render import render_hero_wave_windows
 
@@ -169,6 +170,12 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
         w, h, t, level, morph, state_color_rgb, bg_rgb,
         caches=caches, stardust=stardust,
     )
+
+
+def _linux_mac_look() -> bool:
+    """Linux draws the Mac's shader ribbon too (WAYFINDER_LINUX_MAC_LOOK=0: polylines)."""
+    return (sys.platform.startswith("linux")
+            and os.environ.get("WAYFINDER_LINUX_MAC_LOOK", "1") != "0")
 
 
 def _render_hero_wave_reference(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,

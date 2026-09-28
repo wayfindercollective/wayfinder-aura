@@ -1276,7 +1276,7 @@ def test_windows_hero_is_background_at_the_ends_and_survives_bad_input():
         assert render_hero_wave_windows(50, 20, value, value, value, (1, 2, 3), bg).size == (50, 20)
 
 
-def test_hero_dispatch_windows_shader_only_on_windows(monkeypatch):
+def test_hero_dispatch_shader_on_windows_and_linux(monkeypatch):
     from wayfinder.ui import hero_render, windows_hero_render
 
     calls = []
@@ -1295,15 +1295,22 @@ def test_hero_dispatch_windows_shader_only_on_windows(monkeypatch):
     monkeypatch.setattr(hero_render.sys, "platform", "darwin")
     assert hero_render.render_hero_wave(*args) == "aqua"
     monkeypatch.setattr(hero_render.sys, "platform", "linux")
-    assert hero_render.render_hero_wave(*args) == "reference"    # Linux unchanged
+    assert hero_render.render_hero_wave(*args) == "reference"    # Linux fallback
+    monkeypatch.setattr(windows_hero_render, "render_hero_wave_windows",
+                        lambda *a, **k: "windows")
+    assert hero_render.render_hero_wave(*args) == "windows"      # Linux: the Mac look
+    monkeypatch.setenv("WAYFINDER_LINUX_MAC_LOOK", "0")
+    assert hero_render.render_hero_wave(*args) == "reference"    # old look restored
 
 
-def test_hero_canvas_layout_windows_matches_mac_linux_unchanged():
+def test_hero_canvas_layout_windows_and_linux_match_mac(monkeypatch):
     import wayfinder_main
 
     assert wayfinder_main._hero_visual_scale(1.25, "win32") == 1.25
     assert wayfinder_main._hero_canvas_pady("win32") == wayfinder_main._hero_canvas_pady("darwin")
     assert wayfinder_main._hero_visual_scale(1.25, "linux") == 1.0
+    assert wayfinder_main._hero_canvas_pady("linux") == wayfinder_main._hero_canvas_pady("darwin")
+    monkeypatch.setenv("WAYFINDER_LINUX_MAC_LOOK", "0")
     assert wayfinder_main._hero_canvas_pady("linux") == (0, 8)
 
 

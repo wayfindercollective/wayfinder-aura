@@ -87,6 +87,15 @@ IS_WINDOWS = _sys.platform == 'win32'
 # vibrancy), a rounded content pane, no gradient, a dark caption bar.
 # WAYFINDER_WINDOWS_MAC_LOOK=0 restores the previous (Linux) look.
 WINDOWS_MAC_LOOK = IS_WINDOWS and os.environ.get("WAYFINDER_WINDOWS_MAC_LOOK", "1") != "0"
+# Linux wears the same design (the palette, rims, rounded content pane, flat
+# surface and the Mac's shader-drawn hero ribbon; no Windows caption bar).
+# WAYFINDER_LINUX_MAC_LOOK=0 restores the gradient look and polyline ribbon.
+LINUX_MAC_LOOK = (
+    _sys.platform.startswith("linux")
+    and os.environ.get("WAYFINDER_LINUX_MAC_LOOK", "1") != "0"
+)
+# The Mac's design on a platform without vibrancy (Windows or Linux).
+MAC_LOOK = WINDOWS_MAC_LOOK or LINUX_MAC_LOOK
 # What shows between panes where the Mac shows its dark glass.
 WINDOWS_GLASS_SURFACE = "#07090D"
 
@@ -116,22 +125,20 @@ def _footer_tagline(is_macos: bool | None = None, is_windows: bool | None = None
     return "handcrafted for Windows" if is_windows else "handcrafted for Linux"
 
 
-if IS_MACOS or IS_WINDOWS:
-    # CustomTkinter polls every window's DPI every 100 ms forever (a Tcl
-    # `after`, winfo_exists and `wm state` per window, 10 wakeups/s), but on
-    # macOS its DPI check is hard-wired to 1.0 - Aqua scales on its own - so
-    # the loop can never find a change. Hourly keeps it alive but idle.
-    # Windows too: the app turns CTk's automatic DPI awareness off (ui_scale
-    # governs scaling), which makes the same check return a constant 1.
-    try:
-        ctk.ScalingTracker.update_loop_interval = 3_600_000
-    except Exception:
-        pass
+# CustomTkinter polls every window's DPI every 100 ms forever (a Tcl
+# `after`, winfo_exists and `wm state` per window, 10 wakeups/s), but on
+# macOS its DPI check is hard-wired to 1.0 - Aqua scales on its own - so
+# the loop can never find a change. Hourly keeps it alive but idle.
+# Windows too: the app turns CTk's automatic DPI awareness off (ui_scale
+# governs scaling), which makes the same check return a constant 1.
+# Linux: CTk's DPI query is not implemented there and also returns 1.
+try:
+    ctk.ScalingTracker.update_loop_interval = 3_600_000
+except Exception:
+    pass
 # Microphone picker's first option (matched by the "Auto-detect" substring).
-# macOS and Windows drop the emoji prefix: no emoji as UI chrome (rule 11).
-AUTO_DETECT_MIC_LABEL = (
-    "Auto-detect (Recommended)" if (IS_MACOS or IS_WINDOWS) else "🎤 Auto-detect (Recommended)"
-)
+# No emoji prefix: no emoji as UI chrome (rule 11).
+AUTO_DETECT_MIC_LABEL = "Auto-detect (Recommended)"
 
 # SOCKET_PATH is the single source of truth in wayfinder.config (Rule #3) — it resolves
 # to $XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock (host<->sandbox shared) or /tmp.
@@ -516,7 +523,7 @@ if IS_MACOS:
     # macOS glass: deeper ink panes (both token mirrors). No-op without glass.
     apply_macos_glass_palette(COLORS, _theme.COLORS)
 
-if WINDOWS_MAC_LOOK:
+if MAC_LOOK:
     from wayfinder.ui import theme as _theme
     from wayfinder.ui.macos_window import GLASS_PALETTE as _GLASS_PALETTE
 
@@ -1309,9 +1316,12 @@ def _hero_visual_scale(
 
 
 def _hero_canvas_pady(platform_name: str | None = None):
-    """Lower the Aqua (and Windows) ribbon without moving the controls or changing Linux."""
+    """Lower the Aqua/shader ribbon (macOS, Windows, Linux Mac look) without moving the controls."""
     active_platform = platform_name or sys.platform
-    return (10, 0) if active_platform in ("darwin", "win32") else (0, 8)
+    if active_platform in ("darwin", "win32"):
+        return (10, 0)
+    # Linux: the shader ribbon unless WAYFINDER_LINUX_MAC_LOOK=0 (matches hero_render).
+    return (0, 8) if os.environ.get("WAYFINDER_LINUX_MAC_LOOK", "1") == "0" else (10, 0)
 
 
 def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
@@ -6433,7 +6443,7 @@ class WayfinderApp(ctk.CTk):
             # Frosted glass shows through wherever Tk paints nothing.
             prepare_macos_tk_root(self)
             self.configure(fg_color=MACOS_TRANSPARENT)
-        elif WINDOWS_MAC_LOOK:
+        elif MAC_LOOK:
             self.configure(fg_color=WINDOWS_GLASS_SURFACE)
         else:
             self.configure(fg_color=COLORS["bg_dark"])
@@ -7205,7 +7215,7 @@ class WayfinderApp(ctk.CTk):
         # macOS glass: the window surface is transparent over native vibrancy.
         window_surface = (
             MACOS_TRANSPARENT if IS_MACOS and macos_glass_enabled()
-            else WINDOWS_GLASS_SURFACE if WINDOWS_MAC_LOOK
+            else WINDOWS_GLASS_SURFACE if MAC_LOOK
             else COLORS["bg_base"]
         )
         self.main_container = ctk.CTkFrame(self, fg_color=window_surface)
@@ -7251,7 +7261,7 @@ class WayfinderApp(ctk.CTk):
             **self._content_pane_kwargs(),
         )
         self.tab_content_container.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
-        if WINDOWS_MAC_LOOK:
+        if MAC_LOOK:
             # Pages live in an inset host so the pane's rounded corners and rim
             # stay visible (the Mac insets its placed pages the same way).
             from wayfinder.ui.macos_window import CONTENT_PANE_INSET
@@ -8231,9 +8241,7 @@ class WayfinderApp(ctk.CTk):
         pen instead of an emoji suffix (rule 11: no emoji as UI chrome)."""
         if unlocked:
             return "pen-line", "Style"
-        if IS_MACOS or IS_WINDOWS:
-            return "lock", "Style"
-        return "pen-line", "Style  🔒"
+        return "lock", "Style"
 
     def _create_sidebar(self, parent) -> None:
         """Create the vertical sidebar navigation."""
@@ -10711,9 +10719,8 @@ class WayfinderApp(ctk.CTk):
         self.gpu_var = ctk.BooleanVar(value=_want_gpu and _gpu_unlocked)
         _gpu_label = (
             "GPU Acceleration" if _gpu_unlocked
-            # macOS: no emoji chrome (rule 11) — same "(Ultra)" as Chunk Processing.
-            else "GPU Acceleration (Ultra)" if (IS_MACOS or IS_WINDOWS)
-            else "GPU Acceleration  🔒 Ultra"
+            # No emoji chrome (rule 11) — same "(Ultra)" as Chunk Processing.
+            else "GPU Acceleration (Ultra)"
         )
         self.create_toggle_row(
             parent, _gpu_label,
@@ -12942,7 +12949,7 @@ class WayfinderApp(ctk.CTk):
     
     def _macos_glass_rim_kwargs(self) -> dict:
         """Lifted edge that defines a pane against the macOS glass (and the Windows surface)."""
-        if (IS_MACOS and macos_glass_enabled()) or WINDOWS_MAC_LOOK:
+        if (IS_MACOS and macos_glass_enabled()) or MAC_LOOK:
             return {"border_width": 1, "border_color": COLORS["border_rim"]}
         return {}
 
@@ -12955,7 +12962,7 @@ class WayfinderApp(ctk.CTk):
                 "corner_radius": RADIUS["lg"],
                 **self._macos_glass_rim_kwargs(),
             }
-        if WINDOWS_MAC_LOOK:
+        if MAC_LOOK:
             return {
                 "fg_color": COLORS["bg_base"],
                 "bg_color": WINDOWS_GLASS_SURFACE,
@@ -12988,8 +12995,8 @@ class WayfinderApp(ctk.CTk):
 
     def _draw_gradient_bg(self, event=None):
         """Draw ambient gradient - GitHub Dark base with blue warmth."""
-        if (IS_MACOS and macos_glass_enabled()) or WINDOWS_MAC_LOOK:
-            return  # native vibrancy (Windows: the flat glass surface) is the backdrop
+        if (IS_MACOS and macos_glass_enabled()) or MAC_LOOK:
+            return  # native vibrancy (Windows/Linux: the flat glass surface) is the backdrop
         # Skip when window is not visible
         try:
             if self.state() in ("iconic", "withdrawn"):
