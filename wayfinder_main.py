@@ -16171,12 +16171,14 @@ class WayfinderApp(ctk.CTk):
     def _on_windows_end_session(self) -> None:
         """Lifecycle thread: Windows is ending the session, or an installer is
         closing Aura. Windows may end the process as soon as this returns, so
-        put ducked audio back first (the ducker is lock-protected and makes its
-        own COM calls), then quit on the Tk thread."""
+        put ducked audio back first, then quit on the Tk thread. close() takes
+        the ducker's lock (waiting out a duck in progress), restores the volume
+        and makes any queued duck a no-op, so nothing can lower it again before
+        the process ends."""
         try:
             ducker = getattr(self, "audio_ducker", None)
-            if ducker is not None and ducker.is_ducked:
-                ducker.restore()
+            if ducker is not None:
+                ducker.close()
         except Exception:
             pass
         self.event_queue.put((EventType.QUIT_APP, None))

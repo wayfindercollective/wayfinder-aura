@@ -1161,13 +1161,39 @@ def test_end_session_restores_ducked_audio_before_quitting():
     from wayfinder.hotkeys.types import EventType
 
     order = []
-    ducker = SimpleNamespace(is_ducked=True, restore=lambda: order.append("restore"))
+    ducker = SimpleNamespace(close=lambda: order.append("close"))
     q = Queue()
     app = SimpleNamespace(audio_ducker=ducker, event_queue=SimpleNamespace(
         put=lambda item: order.append(item)))
     wayfinder_main.WayfinderApp._on_windows_end_session(app)
-    assert order == ["restore", (EventType.QUIT_APP, None)]
+    assert order == ["close", (EventType.QUIT_APP, None)]
     assert q.empty()
+
+
+def test_end_session_leaves_no_duck_behind(monkeypatch, tmp_path):
+    """A duck in flight or still queued when Windows ends the session must not
+    lower the volume after the handler returns."""
+    import threading
+    import wayfinder_main
+    from wayfinder.utils import audio_ducker, windows_audio
+
+    level = {"v": 0.8}
+    monkeypatch.setattr(audio_ducker.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(audio_ducker, "is_pactl_available", lambda: False)
+    monkeypatch.setattr(windows_audio, "default_output_id", lambda: "speakers")
+    monkeypatch.setattr(windows_audio, "output_volume", lambda device_id=None: level["v"])
+    monkeypatch.setattr(windows_audio, "set_output_volume",
+                        lambda v, device_id=None: level.__setitem__("v", v) or True)
+    d = audio_ducker.AudioDucker(duck_percent=50, recovery_path=tmp_path / "duck.json")
+    app = SimpleNamespace(audio_ducker=d, event_queue=SimpleNamespace(put=lambda item: None))
+
+    d.duck()                                              # in flight: ducked now
+    wayfinder_main.WayfinderApp._on_windows_end_session(app)
+    assert level["v"] == pytest.approx(0.8)
+    worker = threading.Thread(target=d.duck)              # a queued duck runs late
+    worker.start()
+    worker.join()
+    assert level["v"] == pytest.approx(0.8)               # closed: it did nothing
 
 
 def test_installer_asks_aura_to_quit_before_forcing_it():
