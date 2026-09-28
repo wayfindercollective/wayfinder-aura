@@ -6040,6 +6040,11 @@ class WayfinderApp(ctk.CTk):
                     on_screens_changed=lambda: self.event_queue.put(
                         (EventType.UI_CALLBACK, self._on_macos_screens_changed)
                     ),
+                    # Sign-out/shutdown or an installer closing Aura: quit for
+                    # real (closing the window only hides it to the tray).
+                    on_end_session=lambda: self.event_queue.put(
+                        (EventType.QUIT_APP, None)
+                    ),
                 )
             except Exception as exc:
                 self.log(f"⚠ Windows sleep/wake integration unavailable: {exc}")

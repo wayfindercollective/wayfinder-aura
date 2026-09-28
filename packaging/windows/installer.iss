@@ -62,6 +62,34 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupA
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
+[Code]
+{ Aura's window close button hides it to the tray (as on the Mac), so older
+  builds could not be closed by the installer's Restart Manager and an upgrade
+  stopped at "Setup was unable to automatically close all applications".
+  Current builds quit when Windows asks (WM_ENDSESSION); this is the safety
+  net for older ones: end any running copy and its helpers before files are
+  replaced. Settings are saved as they change, ducked audio is restored by the
+  app's crash recovery on next launch, and the helpers die with the app. }
+procedure StopRunningAura();
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM "{#MyAppExeName}"', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopRunningAura();
+  Result := '';
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    StopRunningAura();
+end;
+
 [UninstallDelete]
 ; Remove the whole install tree (incl. PyInstaller's _internal folder) so an
 ; uninstall leaves nothing behind. User data (models, config, license) lives in

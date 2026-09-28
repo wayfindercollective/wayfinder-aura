@@ -16,6 +16,8 @@ import sys
 import threading
 from ctypes import wintypes
 
+_WM_QUERYENDSESSION = 0x0011
+_WM_ENDSESSION = 0x0016
 _WM_DESTROY = 0x0002
 _WM_CLOSE = 0x0010
 _WM_DISPLAYCHANGE = 0x007E
@@ -42,9 +44,15 @@ class _WNDCLASSW(ctypes.Structure):
 
 
 def dispatch(msg: int, wparam: int, lparam: int, *, on_sleep=None, on_wake=None,
-             on_screens_changed=None) -> None:
+             on_screens_changed=None, on_end_session=None) -> None:
     """Map one window message to a callback (pure; unit-tested)."""
-    if msg == _WM_POWERBROADCAST:
+    if msg == _WM_ENDSESSION:
+        # Sign-out, shutdown, or an installer's Restart Manager closing Aura
+        # (ENDSESSION_CLOSEAPP). The window's X only hides to the tray, so this
+        # is how Windows asks Aura to really quit (the Mac's Quit Apple event).
+        if wparam and on_end_session:
+            on_end_session()
+    elif msg == _WM_POWERBROADCAST:
         if wparam == _PBT_APMSUSPEND and on_sleep:
             on_sleep()
         elif wparam == _PBT_APMRESUMEAUTOMATIC and on_wake:
@@ -67,11 +75,13 @@ class WindowsLifecycleObserver:
         self._thread = threading.Thread(target=self._run, daemon=True, name="wayfinder-lifecycle")
 
     @classmethod
-    def start(cls, *, on_sleep=None, on_wake=None, on_screens_changed=None):
+    def start(cls, *, on_sleep=None, on_wake=None, on_screens_changed=None,
+              on_end_session=None):
         if sys.platform != "win32":
             return None
         observer = cls({"on_sleep": on_sleep, "on_wake": on_wake,
-                        "on_screens_changed": on_screens_changed})
+                        "on_screens_changed": on_screens_changed,
+                        "on_end_session": on_end_session})
         observer._thread.start()
         observer._ready.wait(timeout=2.0)
         return observer if observer._hwnd else None
@@ -88,8 +98,10 @@ class WindowsLifecycleObserver:
         if msg == _WM_DESTROY:
             user32.PostQuitMessage(0)
             return 0
-        if msg == _WM_POWERBROADCAST:
-            return 1  # TRUE: never veto a suspend
+        if msg in (_WM_POWERBROADCAST, _WM_QUERYENDSESSION):
+            return 1  # TRUE: never veto a suspend, sign-out or app close
+        if msg == _WM_ENDSESSION:
+            return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _run(self) -> None:

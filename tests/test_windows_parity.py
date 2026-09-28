@@ -1113,3 +1113,42 @@ def test_alt_gr_taps_and_holds_like_right_alt(monkeypatch):
     release(pl.Key.ctrl_l)
     release(pl.Key.alt_gr)
     assert _drain(events) == []
+
+
+# --- Upgrades: Windows asks Aura to close (installer / sign-out) ------------------
+
+def test_end_session_quits_aura_for_real():
+    from wayfinder.utils.windows_lifecycle import dispatch
+
+    seen = []
+    cb = dict(on_end_session=lambda: seen.append("quit"))
+    dispatch(0x0011, 0, 1, **cb)   # WM_QUERYENDSESSION: only asks, nothing yet
+    dispatch(0x0016, 0, 1, **cb)   # WM_ENDSESSION, cancelled (wParam FALSE)
+    dispatch(0x0016, 1, 1, **cb)   # WM_ENDSESSION + ENDSESSION_CLOSEAPP: quit
+    assert seen == ["quit"]
+
+
+@windows_only
+def test_lifecycle_window_turns_end_session_into_quit():
+    import ctypes
+
+    from wayfinder.utils.windows_lifecycle import WindowsLifecycleObserver
+
+    seen = []
+    observer = WindowsLifecycleObserver.start(on_end_session=lambda: seen.append("quit"))
+    try:
+        user32 = ctypes.windll.user32
+        assert user32.SendMessageW(observer._hwnd, 0x0011, 0, 1) == 1  # never vetoes
+        user32.SendMessageW(observer._hwnd, 0x0016, 1, 1)
+        assert seen == ["quit"]
+    finally:
+        observer.stop()
+
+
+def test_installer_ends_a_running_aura_before_replacing_files():
+    from pathlib import Path
+
+    iss = (Path(__file__).resolve().parent.parent / "packaging" / "windows"
+           / "installer.iss").read_text(encoding="utf-8")
+    assert "function PrepareToInstall" in iss and "usUninstall" in iss
+    assert "taskkill.exe'), '/F /T /IM \"{#MyAppExeName}\"'" in iss
