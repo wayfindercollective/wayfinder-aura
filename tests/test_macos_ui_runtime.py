@@ -318,9 +318,12 @@ def test_tab_switch_raises_persistent_opaque_pages_instead_of_unmapping_them():
     }
 
 
-def test_linux_animation_cadence_is_unchanged():
+def test_linux_animation_cadence():
     assert wayfinder_main._hero_idle_interval_ms("linux") == 33
-    assert wayfinder_main._hero_active_interval_ms("linux") == 66
+    # Recording: 30 fps on desktops like macOS/Windows; Steam hardware keeps
+    # 15 fps so the ribbon doesn't compete with transcription for the CPU.
+    assert wayfinder_main._hero_active_interval_ms("linux", steam_platform=None) == 33
+    assert wayfinder_main._hero_active_interval_ms("linux", steam_platform="deck") == 66
     assert wayfinder_main._tray_pulse_interval_ms("linux") == 50
     assert wayfinder_main._settings_preload_interval_ms("linux") == 25
 

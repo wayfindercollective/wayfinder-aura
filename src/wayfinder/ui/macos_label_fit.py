@@ -1,9 +1,15 @@
-"""macOS: keep stacked text labels inside the width they actually get.
+"""Keep stacked text labels inside the width they actually get (every platform).
 
 Many labels carry a fixed ``wraplength`` sized for the Linux 800 px window
 (430-560 px). The Mac window's cards are narrower, so the label asks for more
 width than its card has; Tk centres the overflow and the text is clipped on
-both edges. Long single-line labels (status lines) overflow the same way.
+both edges. Long single-line labels (status lines) overflow the same way. Linux
+hits it too: a Steam Deck right-half window is 640 px, and UI zoom above 100%
+narrows every card.
+
+Widths are compared in CustomTkinter's logical units: ``wraplength`` is scaled
+by CTk when applied, while the container width and pack padding Tk reports are
+real pixels, so those are divided by the label's widget scaling first.
 
 One class-level ``<Map>`` hook covers every label, including ones created
 later (benchmark results, panels): a label stacked in its container (pack
@@ -65,9 +71,17 @@ def fit_label(label) -> None:
         except Exception:
             designed = 0
         label._wf_designed_wrap = designed
+    scale = 1.0
+    get_scaling = getattr(label, "_get_widget_scaling", None)
+    if callable(get_scaling):
+        try:
+            scale = float(get_scaling()) or 1.0
+        except Exception:
+            scale = 1.0
+    pad = _pad_total(info.get("padx", 0)) + _pad_total(info.get("ipadx", 0))
     target = fitted_wraplength(
-        label.cget("text"), designed, container.winfo_width(),
-        _pad_total(info.get("padx", 0)) + _pad_total(info.get("ipadx", 0)),
+        label.cget("text"), designed,
+        int(container.winfo_width() / scale), int(pad / scale),
     )
     if target is None:
         return

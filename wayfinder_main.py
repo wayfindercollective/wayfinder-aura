@@ -1270,10 +1270,19 @@ def _hero_idle_interval_ms(platform_name: str | None = None) -> int | None:
     return 33
 
 
-def _hero_active_interval_ms(platform_name: str | None = None) -> int:
-    """Recording cadence: 30 fps on Aqua and Windows, established 15 fps on Linux."""
+_UNSET = object()
+
+
+def _hero_active_interval_ms(platform_name: str | None = None, steam_platform=_UNSET) -> int:
+    """Recording cadence: 30 fps on Aqua, Windows and Linux desktops; 15 fps on
+    Steam hardware, where the ribbon shares the CPU with transcription."""
     active_platform = platform_name or sys.platform
-    return 33 if active_platform in ("darwin", "win32") else 66
+    if active_platform in ("darwin", "win32"):
+        return 33
+    if steam_platform is _UNSET:
+        from wayfinder.utils.platform import get_steam_platform
+        steam_platform = get_steam_platform()
+    return 66 if steam_platform else 33
 
 
 def _windows_dpi_scale() -> float:
@@ -7280,15 +7289,15 @@ class WayfinderApp(ctk.CTk):
         _welcome_done = bool(self.config.get("welcome_completed", False))
         self.active_tab = "dictate" if (_setup_done and _welcome_done) else "settings"
         
-        if IS_MACOS:
-            # Fixed wraplengths sized for the Linux window overflow the Mac's
-            # narrower cards (text clipped on both edges); fit them on map.
-            try:
-                from wayfinder.ui import macos_label_fit
+        # Fixed wraplengths sized for the 800 px window overflow narrower cards
+        # (the Mac's, a 640 px Steam Deck half, UI zoom above 100%), clipping
+        # text on both edges; fit them on map.
+        try:
+            from wayfinder.ui import macos_label_fit
 
-                macos_label_fit.install(self, ctk.CTkLabel)
-            except Exception as exc:
-                self.log(f"⚠ Label fitting unavailable: {exc}")
+            macos_label_fit.install(self, ctk.CTkLabel)
+        except Exception as exc:
+            self.log(f"⚠ Label fitting unavailable: {exc}")
 
         # Dictate is the returning-user landing page and remains eager. The other tabs contain
         # hundreds of widgets and cost seconds on Deck-class CPUs, so create them on first use.
@@ -16583,10 +16592,9 @@ class WayfinderApp(ctk.CTk):
         try:
             self._switch_tab("settings")
             self.open_model_settings()
-            if IS_MACOS or IS_WINDOWS:
-                # The panel opens mid-page; without this the user lands on the
-                # Audio section at the top and the button seems to do nothing.
-                self._scroll_settings_to(getattr(self, "mode_settings_container", None))
+            # The panel opens mid-page; without this the user lands on the
+            # Audio section at the top and the button seems to do nothing.
+            self._scroll_settings_to(getattr(self, "mode_settings_container", None))
         except Exception as e:
             self.log(f"⚠ Could not open model settings: {e}")
 
@@ -21481,7 +21489,8 @@ class WayfinderApp(ctk.CTk):
         )
     
     def _animate_hero(self):
-        """Animation frame for hero waveform - STABLE at 15fps."""
+        """Animation frame for the hero waveform while recording/processing
+        (30 fps; 15 fps on Steam hardware, see _hero_active_interval_ms)."""
         # Guard: Stop if in IDLE state (idle breath handles that)
         if self.app_state == AppState.IDLE:
             self._hero_animation_job = None
@@ -21509,7 +21518,6 @@ class WayfinderApp(ctk.CTk):
             pass
         
         import math
-        hero_fps_scale = 4.0  # 60/15
 
         # Ease the morph toward 1 (energetic bright) and advance wave time
         # delta-based (same clock as idle) so the ribbon phase is continuous
@@ -21517,7 +21525,11 @@ class WayfinderApp(ctk.CTk):
         now = time.monotonic()
         dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.1)
         self._hero_last_frame_ts = now
-        self._hero_morph += (1.0 - self._hero_morph) * 0.25
+        # Per-second easing (LINUX-FOLLOWUPS 3.4), calibrated to the 30 fps
+        # cadence macOS and Windows were tuned at: a late or uneven frame lands
+        # on the right value, and 15 fps and 30 fps feel the same.
+        frames = dt * 30.0
+        self._hero_morph += (1.0 - self._hero_morph) * (1.0 - 0.75 ** frames)
         speed = 2.4 + (9.0 - 2.4) * self._hero_morph
         self._hero_wave_time += dt * speed
 
@@ -21532,7 +21544,7 @@ class WayfinderApp(ctk.CTk):
             pass
         
         # Smooth the audio level
-        smooth_factor = 0.7 ** hero_fps_scale
+        smooth_factor = 0.7 ** (4.0 * frames)
         self._hero_audio_level = self._hero_audio_level * smooth_factor + target_level * (1 - smooth_factor)
         
         # Redraw waveform (uses stable pre-created items)
@@ -21543,8 +21555,8 @@ class WayfinderApp(ctk.CTk):
             pulse = 0.9 + 0.1 * math.sin(self._hero_wave_time * 2)
             self._draw_mic_button_with_pulse(STATE_COLORS[self.app_state], pulse)
         
-        # Aqua needs 30 fps so fast audio peaks do not alias into visible jumps.
-        # Linux keeps its established 15 fps active cadence.
+        # 30 fps so fast audio peaks do not alias into visible jumps
+        # (15 fps on Steam hardware, where transcription needs the CPU).
         self._hero_animation_job = self.after(
             _hero_active_interval_ms(), self._animate_hero
         )

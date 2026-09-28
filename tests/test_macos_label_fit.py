@@ -67,3 +67,13 @@ def test_refit_follows_a_wider_card_back_up_to_the_design():
     label.master = SimpleNamespace(winfo_width=lambda: 1000)
     fit_label(label)
     assert label.options["wraplength"] == 520  # designed value, not the first clamp
+
+
+def test_fit_works_in_logical_units_at_ui_zoom():
+    """CTk scales wraplength when applied; Tk reports the card and padding in
+    real pixels. At 125 % a 500 px card with 2 x 15 px padding is 400 / 24
+    logical px."""
+    label = _Label(width=500, padx=15)  # pack_info reports scaled (real) padding
+    label._get_widget_scaling = lambda: 1.25
+    fit_label(label)
+    assert label.options["wraplength"] == 400 - 24 - 4
