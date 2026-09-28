@@ -14933,8 +14933,13 @@ class WayfinderApp(ctk.CTk):
             latest = info.get("latest_version", "")
             self._app_update_info = dict(info)
             text = f"Update available: {latest} (you have {current_version})."
-            if IS_FLATPAK:
-                text += " Update via your software center, or download from GitHub."
+            if _IS_LINUX and info.get("download_url"):
+                # The GitHub bundle has no update channel (not on Flathub yet):
+                # the new file is downloaded and opened by the user.
+                if IS_FLATPAK:
+                    text += " Get Update downloads it; open the file to install it."
+                else:
+                    text += " Get Update downloads the new AppImage; run it instead of this one."
             label.configure(text=text)
             if IS_MACOS or IS_WINDOWS:
                 # A manual check may have hidden Get Update for a status line.
@@ -14977,10 +14982,10 @@ class WayfinderApp(ctk.CTk):
         from wayfinder.core.app_updates import RELEASES_PAGE
         info = getattr(self, "_app_update_info", {})
         url = info.get("release_url") or RELEASES_PAGE
-        if IS_MACOS or IS_WINDOWS:
-            # Mac/Windows updates always carry a DMG / Setup exe
-            # (core/app_updates): download it in one click, falling back to
-            # the release page.
+        if IS_MACOS or IS_WINDOWS or _IS_LINUX:
+            # Mac/Windows updates always carry a DMG / Setup exe, Linux
+            # packages their Flatpak bundle / AppImage (core/app_updates):
+            # download it in one click, falling back to the release page.
             url = info.get("download_url") or url
         self._open_url(url)
 

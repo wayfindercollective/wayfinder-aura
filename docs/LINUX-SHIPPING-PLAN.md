@@ -51,9 +51,14 @@ behaves the same everywhere.
    handed focus to a hidden launcher window), the game window gets it back
    (`linux_game_chat.ensure_game_focus`). The DAoC note in the Games tab names
    the permanent fix (Wine `UseTakeFocus=N`).
-5. **Update banner on Linux**: the `.flatpak` from GitHub has no update
-   channel; the banner offers a one-click download of the release's
-   `.flatpak` instead of pointing at a software center. Flathub later.
+5. **Update banner on Linux (done 2026-09-28)**: the `.flatpak` from GitHub
+   has no update channel (built without `--repo-url`), so "update via your
+   software center" was wrong. Get Update now downloads the release's
+   `.flatpak` (or the AppImage for AppImage installs) and the banner says to
+   open the file; installing a newer bundle over a bundle install updates it
+   in place (checked with a throwaway app in an isolated FLATPAK_USER_DIR).
+   `.flatpak` files open in Discover, GNOME Software or (Bazzite) Warehouse.
+   Real automatic updates need Flathub or a hosted repo + `--repo-url`.
 6. **Release candidate**: version bump, release notes, bundle built and
    installed from the bundle, smoke-tested.
 

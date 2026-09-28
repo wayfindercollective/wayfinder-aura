@@ -454,8 +454,66 @@ class TestWindowsDownloads:
         assert app_updates._WIN_SETUP_RE.match("WayfinderAura-Setup-1.1.9.exe")
 
 
+class TestLinuxPackages:
+    """Flatpak and AppImage installs get their package as a one-click download."""
+
+    def _as(self, monkeypatch, package):
+        monkeypatch.setattr(app_updates, "_linux_package", lambda: package)
+
+    def test_flatpak_gets_the_bundle(self, monkeypatch):
+        self._as(monkeypatch, "flatpak")
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            info = check_for_app_update("1.1.8")
+        assert info["update_available"] is True and info["latest_version"] == "v1.1.9"
+        assert info["download_url"].endswith("/io.wayfindercollective.WayfinderAura.flatpak")
+        cache = json.loads(app_updates.APP_UPDATE_CACHE_FILE.read_text())
+        assert cache["platform"] == "linux-flatpak"
+
+    def test_appimage_gets_its_own_version(self, monkeypatch):
+        self._as(monkeypatch, "appimage")
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            info = check_for_app_update("1.1.8")
+        assert info["download_url"].endswith("/Wayfinder_Aura-1.1.9-x86_64.AppImage")
+
+    def test_a_release_without_this_package_is_not_an_update(self, monkeypatch):
+        self._as(monkeypatch, "flatpak")
+        mac_only = _release("v1.2.0", assets=[_dmg("1.2.0")])
+        with patch("requests.get", return_value=_github_response(mac_only, *MIXED_PAYLOAD)):
+            info = check_for_app_update("1.1.8")
+        assert info["latest_version"] == "v1.1.9"
+
+    def test_stale_appimage_or_partial_upload_does_not_count(self, monkeypatch):
+        self._as(monkeypatch, "appimage")
+        stale = _release("v1.2.0", assets=[_asset("Wayfinder_Aura-1.1.9-x86_64.AppImage"),
+                                           _asset("Wayfinder_Aura-1.2.0-x86_64.AppImage",
+                                                  state="starter")])
+        with patch("requests.get", return_value=_github_response(stale, *MIXED_PAYLOAD)):
+            info = check_for_app_update("1.1.8")
+        assert info["latest_version"] == "v1.1.9"
+
+    def test_non_github_download_is_refused(self, monkeypatch):
+        self._as(monkeypatch, "flatpak")
+        evil = _release("v1.2.0", assets=[_asset("io.wayfindercollective.WayfinderAura.flatpak",
+                                                 url="https://evil.example/x.flatpak")])
+        with patch("requests.get", return_value=_github_response(evil)):
+            info = check_for_app_update("1.1.8")
+        assert info["update_available"] is False
+
+    def test_a_cache_from_a_source_install_is_refetched(self, monkeypatch):
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
+            check_for_app_update("1.1.8")               # source install: no platform key
+        self._as(monkeypatch, "flatpak")
+        with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)) as get:
+            info = check_for_app_update("1.1.8")
+        assert get.call_count == 1 and info["download_url"]
+
+
 class TestLinuxUnchanged:
-    """The same payload on Linux behaves exactly as before the Mac filter."""
+    """A source install on Linux behaves exactly as before the Mac filter."""
+
+    @pytest.fixture(autouse=True)
+    def _source_install(self, monkeypatch):
+        monkeypatch.setattr(app_updates, "_linux_package", lambda: None)
 
     def test_linux_takes_the_newest_release_regardless_of_assets(self):
         with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
@@ -544,11 +602,20 @@ class TestMacUpdateActions:
         wm.WayfinderApp._open_app_update_page(app)
         assert opened == ["https://r.invalid"]
 
-    def test_get_update_off_mac_still_opens_the_release_page(self, wm, monkeypatch):
+    def test_get_update_downloads_the_linux_package(self, wm, monkeypatch):
         monkeypatch.setattr(wm, "IS_MACOS", False)
         monkeypatch.setattr(wm, "IS_WINDOWS", False)
-        app, opened = self._opener(
-            {"release_url": "https://r.invalid", "download_url": "https://d.invalid/a.dmg"})
+        monkeypatch.setattr(wm, "_IS_LINUX", True)
+        app, opened = self._opener({"release_url": "https://r.invalid",
+                                    "download_url": "https://d.invalid/a.flatpak"})
+        wm.WayfinderApp._open_app_update_page(app)
+        assert opened == ["https://d.invalid/a.flatpak"]
+
+    def test_get_update_from_source_opens_the_release_page(self, wm, monkeypatch):
+        monkeypatch.setattr(wm, "IS_MACOS", False)
+        monkeypatch.setattr(wm, "IS_WINDOWS", False)
+        monkeypatch.setattr(wm, "_IS_LINUX", True)
+        app, opened = self._opener({"release_url": "https://r.invalid"})
         wm.WayfinderApp._open_app_update_page(app)
         assert opened == ["https://r.invalid"]
 

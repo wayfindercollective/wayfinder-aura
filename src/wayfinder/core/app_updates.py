@@ -22,7 +22,12 @@ Windows likewise: only a release carrying ``WayfinderAura-Setup-<version>.exe``
 (packaging/windows/installer.iss) is an update, and that installer is the
 ``download_url``. Releases without one (Windows is internal until sign-off, so
 tags currently carry no Setup exe) never nag a Windows user.
-Linux results are unchanged.
+
+Linux packages likewise: the Flatpak gets the release's
+``io.wayfindercollective.WayfinderAura.flatpak`` bundle and the AppImage its
+``Wayfinder_Aura-<version>-x86_64.AppImage`` as ``download_url``; a release
+without one for this package is not an update. Installs from source keep the
+release page only.
 """
 
 import json
@@ -72,6 +77,10 @@ _MAC_DMG_RE = re.compile(r"^Wayfinder_Aura-(.+)-macOS-(arm64|x86_64)\.dmg$")
 # Windows installer naming — must match OutputBaseFilename in
 # packaging/windows/installer.iss: WayfinderAura-Setup-<version>.exe (x64 only).
 _WIN_SETUP_RE = re.compile(r"^WayfinderAura-Setup-(.+)\.exe$")
+# Linux release assets - must match scripts/ci/build-flatpak-candidate.sh (the
+# bundle name carries no version) and the AppImage build.
+_FLATPAK_BUNDLE_NAME = "io.wayfindercollective.WayfinderAura.flatpak"
+_APPIMAGE_RE = re.compile(r"^Wayfinder_Aura-(.+)-x86_64\.AppImage$")
 # Release assets are only ever served from GitHub; anything else is not a
 # download this module will hand to the browser.
 _DOWNLOAD_URL_PREFIX = "https://github.com/"
@@ -155,6 +164,19 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
+def _linux_package() -> Optional[str]:
+    """"flatpak" or "appimage" for packaged Linux installs, else None."""
+    if not sys.platform.startswith("linux"):
+        return None
+    from ..utils.platform import is_appimage, is_flatpak
+
+    if is_flatpak():
+        return "flatpak"
+    if is_appimage():
+        return "appimage"
+    return None
+
+
 def _mac_architectures() -> Tuple[str, ...]:
     """DMG architectures this Mac accepts, most preferred first.
 
@@ -179,7 +201,8 @@ def _platform_cache_key() -> Optional[str]:
     if _is_windows():
         return "win32-x64"
     if not _is_macos():
-        return None
+        package = _linux_package()
+        return f"linux-{package}" if package else None
     return "darwin-" + "+".join(_mac_architectures())
 
 
@@ -244,6 +267,37 @@ def _windows_setup_url(release: Dict[str, Any], tag: str) -> Optional[str]:
     return None
 
 
+def _linux_download_url(release: Dict[str, Any], tag: str, package: str) -> Optional[str]:
+    """browser_download_url of the release's Flatpak bundle or AppImage.
+
+    The AppImage's version must equal the tag (same rule as the DMG); the
+    bundle's name carries no version, so the release it is attached to
+    decides. Incomplete uploads and non-GitHub URLs never count.
+    """
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return None
+    tag_version = parse_version(tag)
+    if tag_version is None:
+        return None
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("state") != "uploaded":
+            continue
+        name = asset.get("name")
+        url = asset.get("browser_download_url")
+        if not isinstance(name, str) or not isinstance(url, str):
+            continue
+        if not url.startswith(_DOWNLOAD_URL_PREFIX):
+            continue
+        if package == "flatpak" and name == _FLATPAK_BUNDLE_NAME:
+            return url
+        if package == "appimage":
+            match = _APPIMAGE_RE.match(name)
+            if match is not None and parse_version(match.group(1)) == tag_version:
+                return url
+    return None
+
+
 def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
     """Select the newest release allowed by the running version's channel.
 
@@ -259,6 +313,7 @@ def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
 
     mac = _is_macos()
     win = _is_windows()
+    linux_package = None if (mac or win) else _linux_package()
     selected: Dict[str, str] = {}
     for release in payload:
         if not isinstance(release, dict) or release.get("draft") is True:
@@ -283,13 +338,17 @@ def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
             download_url = _windows_setup_url(release, tag)
             if download_url is None:
                 continue  # no Windows installer on this release
+        elif linux_package:
+            download_url = _linux_download_url(release, tag, linux_package)
+            if download_url is None:
+                continue  # nothing this package can install (e.g. a Mac-only release)
 
         if not selected or is_newer(tag, selected["tag_name"]):
             selected = {
                 "tag_name": tag,
                 "html_url": str(release.get("html_url", "") or RELEASES_PAGE),
             }
-            if mac or win:
+            if mac or win or linux_package:
                 selected["download_url"] = download_url
     return selected
 
@@ -306,7 +365,8 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
         - update_available: bool
         - latest_version: str (tag as published, e.g. "v1.1.9")
         - release_url: str (page to send the user to)
-        - download_url: str (macOS/Windows only: the DMG / Setup exe, "" if none)
+        - download_url: str (macOS/Windows/Linux packages: the DMG / Setup exe /
+          Flatpak bundle / AppImage, "" if none)
         - last_checked: ISO timestamp
         - error: optional error message
     """
