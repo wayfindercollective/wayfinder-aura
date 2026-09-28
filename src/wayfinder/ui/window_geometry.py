@@ -23,8 +23,8 @@ MACOS_TITLEBAR_H = 28
 MACOS_EDGE_MARGIN = 24
 MACOS_MENU_BAR_H = 25  # fallback when AppKit is unavailable
 
-# Windows: the Mac's content size, in the same logical pixels (the Tk process
-# is not per-monitor DPI aware, so Windows scales it like macOS points).
+# Windows: the Mac's content size, in the same logical pixels (the app converts
+# to real pixels at the display scale, like macOS points; utils/windows_dpi.py).
 WINDOWS_TITLEBAR_H = 32
 WINDOWS_EDGE_MARGIN = 24
 
@@ -57,7 +57,12 @@ def windows_work_area(screen_w: int, screen_h: int) -> tuple[int, int, int, int]
 
         rect = wintypes.RECT()
         if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
-            return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+            # Real pixels once the app is DPI aware: back to logical ones.
+            from wayfinder.utils import windows_dpi
+
+            s = windows_dpi.scale()
+            return (int(rect.left / s), int(rect.top / s),
+                    int((rect.right - rect.left) / s), int((rect.bottom - rect.top) / s))
     except Exception:
         pass
     return 0, 0, screen_w, max(0, screen_h - 48)

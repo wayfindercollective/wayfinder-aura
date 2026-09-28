@@ -22,6 +22,7 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
 | Mac | Windows | Where |
 |---|---|---|
 | Frosted glass window, deeper ink panes, lifted rim on every pane, rounded content pane | Same palette and rims on a flat deep-ink surface (Tk can't show real vibrancy), rounded rimmed content pane with inset pages, no gradient. `WAYFINDER_WINDOWS_MAC_LOOK=0` restores the old look | `WINDOWS_MAC_LOOK` in `wayfinder_main.py` |
+| Retina-sharp at any display scale | Sharp at 125-175% too: the app is system-DPI aware and scales itself (it was bitmap-stretched, so soft). Same on-screen size; old saved window sizes carry over. A second monitor at a different scale is stretched as before. `WAYFINDER_WINDOWS_DPI_AWARE=0` reverts | `utils/windows_dpi.py` |
 | Unified title bar | Dark caption bar in the app's ink, rim-coloured border, rounded corners (DWM) | `ui/windows_window.py` |
 | Opens content-sized (800x780), centred | Same size, centred in the work area (taskbar excluded) | `ui/window_geometry.py` |
 | No emoji as UI chrome | Same: lock icon on a locked Style tab, "Auto-detect", "GPU Acceleration (Ultra)" | |

@@ -1229,15 +1229,43 @@ def _hero_active_interval_ms(platform_name: str | None = None) -> int:
     return 33 if active_platform in ("darwin", "win32") else 66
 
 
+def _windows_dpi_scale() -> float:
+    """Windows' display scale (1.75 at 175%) once the app is DPI aware, else 1.0.
+
+    Windows draws Aura at the display's real resolution (utils/windows_dpi.py),
+    so sizes that reach Tk in real pixels (CTk widget scaling, window geometry,
+    raw canvases) are multiplied by it. Always 1.0 on Linux and macOS.
+    """
+    if not IS_WINDOWS or IS_MACOS:
+        return 1.0
+    from wayfinder.utils import windows_dpi
+
+    return windows_dpi.scale()
+
+
+def _windows_px(value: float) -> int:
+    """App logical pixels to real pixels (unchanged off Windows)."""
+    factor = _windows_dpi_scale()
+    return value if factor == 1.0 else int(round(value * factor))
+
+
+def _windows_logical(value: float) -> int:
+    """Real pixels from Tk back to app logical pixels (unchanged off Windows)."""
+    factor = _windows_dpi_scale()
+    return value if factor == 1.0 else int(round(value / factor))
+
+
 def _hero_visual_scale(
     ui_scale: float, platform_name: str | None = None
 ) -> float:
     """Scale the raw Tk hero canvas on Aqua (and Windows, which draws the same
-    ribbon) alongside CTk widgets."""
+    ribbon) alongside CTk widgets. Windows also carries its display scale: the
+    canvas is sized in real pixels there."""
     active_platform = platform_name or sys.platform
     if active_platform not in ("darwin", "win32"):
         return 1.0
-    return max(0.7, min(2.5, float(ui_scale)))
+    scale = max(0.7, min(2.5, float(ui_scale)))
+    return scale * _windows_dpi_scale() if active_platform == "win32" else scale
 
 
 def _hero_canvas_pady(platform_name: str | None = None):
@@ -5669,6 +5697,12 @@ class WayfinderApp(ctk.CTk):
                 ctk.deactivate_automatic_dpi_awareness()
             except Exception:
                 pass  # older CustomTkinter without the API — harmless
+        if IS_WINDOWS and not IS_MACOS:
+            # Draw at the display's real resolution, like Aqua, instead of being
+            # bitmap-stretched (soft) at 125-175%. Must precede the Tk root.
+            from wayfinder.utils import windows_dpi
+
+            windows_dpi.enable()
         # className sets the WM_CLASS *class* part. Plasma matches StartupWMClass
         # against it to merge the window into the pinned launcher. Source and
         # Flatpak MUST use different classes (see get_wm_class) — both desktops
@@ -6274,10 +6308,11 @@ class WayfinderApp(ctk.CTk):
             self.config["ui_scale"] = self.ui_scale
             save_config(self.config)
         
-        # Get screen dimensions
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
-        
+        # Get screen dimensions (Windows: in the app's logical pixels, which is
+        # also what saved geometry holds)
+        screen_w = _windows_logical(self.winfo_screenwidth())
+        screen_h = _windows_logical(self.winfo_screenheight())
+
         # Account for taskbar and panels
         taskbar_height = 56
         top_panel = 32
@@ -6328,10 +6363,13 @@ class WayfinderApp(ctk.CTk):
             window_y = max(0, min(window_y if window_y is not None else top_panel, screen_h - 80))
 
         # Apply geometry
-        self.geometry(f"{window_w}x{window_h}+{window_x}+{window_y}")
-        
+        self.geometry(
+            f"{_windows_px(window_w)}x{_windows_px(window_h)}"
+            f"+{_windows_px(window_x)}+{_windows_px(window_y)}"
+        )
+
         # Set reasonable minimum size
-        self.minsize(360, 500)
+        self.minsize(_windows_px(360), _windows_px(500))
         if IS_MACOS and macos_glass_enabled():
             # Frosted glass shows through wherever Tk paints nothing.
             prepare_macos_tk_root(self)
@@ -6343,7 +6381,7 @@ class WayfinderApp(ctk.CTk):
         
         # Apply widget scaling only - this controls content size
         # NOT window scaling - that would fight with manual window resizing
-        ctk.set_widget_scaling(self.ui_scale)
+        ctk.set_widget_scaling(self.ui_scale * _windows_dpi_scale())
 
         # CTkCanvas subclasses raw tkinter.Canvas and is not tracked by CTk's
         # widget scaler. Keep the waveform's height/strokes proportional to the
@@ -6414,10 +6452,10 @@ class WayfinderApp(ctk.CTk):
         
         try:
             geometry = {
-                "width": self.winfo_width(),
-                "height": self.winfo_height(),
-                "x": self.winfo_x(),
-                "y": self.winfo_y(),
+                "width": _windows_logical(self.winfo_width()),
+                "height": _windows_logical(self.winfo_height()),
+                "x": _windows_logical(self.winfo_x()),
+                "y": _windows_logical(self.winfo_y()),
             }
             
             # Only save if values are reasonable (window is visible)
@@ -6902,8 +6940,9 @@ class WayfinderApp(ctk.CTk):
         - 1080p (1920x1080): 100% - baseline
         - Lower: 100% minimum
         """
-        screen_h = self.winfo_screenheight()
-        
+        # Windows: logical height, since the display scale is applied separately
+        screen_h = _windows_logical(self.winfo_screenheight())
+
         # Scale based on vertical resolution (most reliable metric)
         # These are optimized for readability, not for "fitting" 
         if screen_h >= 2160:  # 4K
@@ -6932,16 +6971,19 @@ class WayfinderApp(ctk.CTk):
         self.config["ui_scale"] = optimal_scale
         save_config(self.config)
         
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
+        screen_w = _windows_logical(self.winfo_screenwidth())
+        screen_h = _windows_logical(self.winfo_screenheight())
         new_w, new_h, new_x, new_y = default_window_geometry(screen_w, screen_h)
 
         # Update widget scaling only (not window scaling)
-        ctk.set_widget_scaling(optimal_scale)
-        
+        ctk.set_widget_scaling(optimal_scale * _windows_dpi_scale())
+
         # Apply geometry
-        self.geometry(f"{new_w}x{new_h}+{new_x}+{new_y}")
-        self.minsize(360, 500)
+        self.geometry(
+            f"{_windows_px(new_w)}x{_windows_px(new_h)}"
+            f"+{_windows_px(new_x)}+{_windows_px(new_y)}"
+        )
+        self.minsize(_windows_px(360), _windows_px(500))
         self.update_idletasks()
         
         # Update UI indicators
@@ -7002,7 +7044,7 @@ class WayfinderApp(ctk.CTk):
             self._apply_scale_staged_macos()
             return
 
-        ctk.set_widget_scaling(self.ui_scale)
+        ctk.set_widget_scaling(self.ui_scale * _windows_dpi_scale())
         self._finish_scale_layout(force_idle_flush=True)
 
     def _apply_scale_staged_macos(self) -> None:
@@ -7698,8 +7740,8 @@ class WayfinderApp(ctk.CTk):
         # Glowing mic button canvas
         self.mic_button_canvas = ctk.CTkCanvas(
             mic_container,
-            width=80,
-            height=80,
+            width=_windows_px(80),   # raw canvas: real pixels on Windows
+            height=_windows_px(80),
             bg=COLORS["bg_card"],
             highlightthickness=0,
             cursor="hand2",
@@ -7766,8 +7808,8 @@ class WayfinderApp(ctk.CTk):
             phys = max(self.mic_button_canvas.winfo_width(),
                        self.mic_button_canvas.winfo_height())
         except Exception:
-            phys = 80
-        return phys if phys >= 10 else 80
+            phys = _windows_px(80)
+        return phys if phys >= 10 else _windows_px(80)
 
     def _render_mic_button_photo(self, color: str, pressed: bool = False,
                                  is_active: bool = False, pulse: float | None = None):

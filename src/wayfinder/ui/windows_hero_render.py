@@ -170,21 +170,44 @@ def render_hero_wave_windows(w, h, t, level, morph, state_color_rgb, bg_rgb, *, 
     strands.append((hys, glow_lut(0.4 * hi_brightness, max(2.0, round(4.0 * stroke_scale))),
                     core_lut(0.95 * hi_brightness, max(1.0, round(2.0 * stroke_scale)))))
 
+    # Each strand's curve at every column, and the rows it can touch: past the
+    # last LUT slot where its glow or core still moves the 8-bit result, a
+    # pixel is exactly background. Rows no strand reaches are skipped, which
+    # is most of the strip at idle and on tall (high-DPI) strips.
+    step32 = np.float32(step)
+    xs = px[0]
+    seg = np.clip((xs / step32).astype(np.intp), 0, count - 2)
+    seg_x = xs - step32 * seg.astype(np.float32)
+    faint = 0.4 / 255.0
+    geometry = []
+    top, bottom = float(h), 0.0
+    for ys, g_lut, c_lut in strands:
+        y0 = ys[seg]
+        slope = (ys[seg + 1] - y0) / step32
+        y_at = y0 + slope * seg_x
+        stretch = np.sqrt(np.float32(1.0) + slope * slope)
+        visible = np.nonzero((g_lut > faint) | (c_lut < 1.0 - faint))[0]
+        reach = (int(visible[-1]) + 1) / _LUT_PER_PX if visible.size else 0.0
+        top = min(top, float(np.min(y_at - reach * stretch)))
+        bottom = max(bottom, float(np.max(y_at + reach * stretch)))
+        geometry.append((y_at, np.float32(_LUT_PER_PX) / stretch, g_lut, c_lut))
+    r0 = max(0, int(math.floor(top)))
+    r1 = min(h, int(math.ceil(bottom)) + 1)
+    levels = np.full((h, w), 255, dtype=np.uint8)
+    if r1 <= r0:
+        return _to_image(levels, state_color_rgb, bg_rgb)
+    rows = r1 - r0
+    py = py[r0:r1]
+    band = band[r0:r1]
+
     # result = mix(result, colour, a) for the glow, then each core dim-to-bright,
     # then the highlight: track the background's remaining weight ("keep").
     # Preallocated buffers and in-place ops: the strip is re-rendered 30x/s.
-    step32 = np.float32(step)
-    xs = px[0]
-    glow = np.zeros((h, w), dtype=np.float32)
-    keep = np.ones((h, w), dtype=np.float32)
-    dist = np.empty((h, w), dtype=np.float32)
-    idx = np.empty((h, w), dtype=np.intp)
-    for ys, g_lut, c_lut in strands:
-        seg = np.clip((xs / step32).astype(np.intp), 0, count - 2)
-        y0 = ys[seg]
-        slope = (ys[seg + 1] - y0) / step32
-        y_at = y0 + slope * (xs - step32 * seg.astype(np.float32))
-        scale = np.float32(_LUT_PER_PX) / np.sqrt(np.float32(1.0) + slope * slope)
+    glow = np.zeros((rows, w), dtype=np.float32)
+    keep = np.ones((rows, w), dtype=np.float32)
+    dist = np.empty((rows, w), dtype=np.float32)
+    idx = np.empty((rows, w), dtype=np.intp)
+    for y_at, scale, g_lut, c_lut in geometry:
         # distance (in LUT slots) = |row - y(x)| / sqrt(1 + y'(x)^2)
         np.subtract(py, y_at[None, :], out=dist)
         np.abs(dist, out=dist)
@@ -206,7 +229,12 @@ def render_hero_wave_windows(w, h, t, level, morph, state_color_rgb, bg_rgb, *, 
     np.multiply(keep, 255.0, out=keep)
     np.add(keep, 0.5, out=keep)
     np.clip(keep, 0.0, 255.0, out=keep)
-    level_img = Image.fromarray(keep.astype(np.uint8), "L")
+    levels[r0:r1] = keep
+    return _to_image(levels, state_color_rgb, bg_rgb)
+
+
+def _to_image(levels, state_color_rgb, bg_rgb):
+    level_img = Image.fromarray(levels, "L")
     level_img.putpalette(_palette(tuple(state_color_rgb), tuple(bg_rgb)))
     return level_img.convert("RGB")
 

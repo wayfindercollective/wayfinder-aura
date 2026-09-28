@@ -1305,3 +1305,71 @@ def test_hero_canvas_layout_windows_matches_mac_linux_unchanged():
     assert wayfinder_main._hero_canvas_pady("win32") == wayfinder_main._hero_canvas_pady("darwin")
     assert wayfinder_main._hero_visual_scale(1.25, "linux") == 1.0
     assert wayfinder_main._hero_canvas_pady("linux") == (0, 8)
+
+
+# --- Sharp rendering on scaled displays (utils/windows_dpi.py) ---------------
+
+def test_dpi_awareness_is_a_no_op_off_windows_or_when_disabled(monkeypatch):
+    from wayfinder.utils import windows_dpi
+
+    monkeypatch.setattr(windows_dpi, "_scale", 1.0)
+    monkeypatch.setattr(windows_dpi.sys, "platform", "linux")
+    assert windows_dpi.enable() == 1.0
+    monkeypatch.setattr(windows_dpi.sys, "platform", "win32")
+    monkeypatch.setenv("WAYFINDER_WINDOWS_DPI_AWARE", "0")
+    assert windows_dpi.enable() == 1.0
+    assert windows_dpi.to_px(80) == 80 and windows_dpi.to_logical(80) == 80
+
+
+@windows_only
+def test_dpi_awareness_really_declared_on_windows():
+    import os
+
+    # A fresh process: awareness is process-wide and can be set only once.
+    code = textwrap.dedent("""
+        import ctypes, sys
+        sys.path.insert(0, "src")
+        from wayfinder.utils import windows_dpi
+        s = windows_dpi.enable()
+        v = ctypes.c_int(-1)
+        ctypes.windll.shcore.GetProcessDpiAwareness(None, ctypes.byref(v))
+        print(s, v.value)
+    """)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         timeout=60, env={**os.environ, "WAYFINDER_WINDOWS_DPI_AWARE": "1"})
+    scale, awareness = out.stdout.split()
+    assert float(scale) >= 1.0 and awareness == "1"   # PROCESS_SYSTEM_DPI_AWARE
+
+
+def test_window_maths_stays_logical_and_converts_at_the_edges(monkeypatch):
+    import wayfinder_main
+    from wayfinder.utils import windows_dpi
+
+    monkeypatch.setattr(windows_dpi, "_scale", 1.75)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    assert wayfinder_main._windows_px(800) == 1400
+    assert wayfinder_main._windows_logical(1400) == 800
+    assert wayfinder_main._hero_visual_scale(1.0, "win32") == pytest.approx(1.75)
+    assert wayfinder_main._hero_visual_scale(1.0, "darwin") == 1.0
+
+    # Linux and macOS never scale, whatever the module holds.
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+    assert wayfinder_main._windows_px(800) == 800
+    assert wayfinder_main._windows_logical(1400) == 1400
+    assert wayfinder_main._windows_dpi_scale() == 1.0
+
+
+def test_old_saved_geometry_keeps_its_size_after_the_upgrade(monkeypatch):
+    """Configs saved while Windows stretched the app hold logical pixels; the
+    app keeps saving logical pixels, so a window reopens at the same size."""
+    import wayfinder_main
+    from wayfinder.utils import windows_dpi
+
+    monkeypatch.setattr(windows_dpi, "_scale", 1.75)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    saved = {"width": 800, "height": 780, "x": 100, "y": 60}
+    real = {k: wayfinder_main._windows_px(v) for k, v in saved.items()}
+    assert real == {"width": 1400, "height": 1365, "x": 175, "y": 105}
+    assert {k: wayfinder_main._windows_logical(v) for k, v in real.items()} == saved
