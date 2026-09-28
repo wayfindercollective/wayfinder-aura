@@ -204,7 +204,7 @@ def test_settings_wave_animates_on_canvas_while_native_layer_is_hidden(monkeypat
         "state": lambda self: "normal",
         "after": lambda self, ms, fn: scheduled.append(ms) or "job",
         "_animate_idle_breath": lambda self: None,
-        "_hero_idle_paused": lambda self: False,
+        "_hero_idle_backgrounded": lambda self: False,
         "_draw_hero_waveform": lambda self, **kwargs: drawn.append(kwargs),
     })()
 

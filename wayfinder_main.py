@@ -1265,6 +1265,12 @@ def _aqua_wheel_notches(delta: object, seconds_since_last: float) -> float:
     return -numeric / 4.0
 
 
+# Linux idle ribbon while another app has focus: a third of the speed at
+# 8 fps (slow motion stays smooth at a low rate), ~1/4 of the focused cost.
+_HERO_BACKGROUND_SPEED = 0.35
+_HERO_BACKGROUND_INTERVAL_MS = 125
+
+
 def _hero_idle_interval_ms(platform_name: str | None = None) -> int | None:
     """Idle waveform cadence (the approved 30 fps on every desktop)."""
     del platform_name
@@ -21471,8 +21477,9 @@ class WayfinderApp(ctk.CTk):
             return  # Already running
         self._animate_idle_breath()
     
-    def _hero_idle_paused(self) -> bool:
-        """Linux: True while no Aura window has keyboard focus."""
+    def _hero_idle_backgrounded(self) -> bool:
+        """Linux: True while no Aura window has keyboard focus (the idle ribbon
+        then drifts slowly on a low frame rate instead of full speed)."""
         if not _IS_LINUX:
             return False
         try:
@@ -21536,23 +21543,26 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
-        # Linux: hold the calm ribbon still while another app has focus
-        # (LINUX-FOLLOWUPS 3.1). That is where the user is dictating, and the
-        # full-size shader ribbon cost ~10% of a core at 4K for a window
-        # nobody was looking at. Look again twice a second.
-        if self._hero_idle_paused():
-            self._idle_breath_job = self.after(500, self._animate_idle_breath)
-            return
+        # Linux: while another app has focus (LINUX-FOLLOWUPS 3.1) the calm
+        # ribbon drifts at a third of its speed on a low frame rate: still
+        # alive beside a side-by-side window, at a fraction of the ~10% of a
+        # core the full-rate shader ribbon costs at 4K. Minimized / tray
+        # windows stop entirely (above).
+        background = self._hero_idle_backgrounded()
 
         # Ease the morph toward 0 (calm dim breath) and advance wave time
         # delta-based so phase is continuous across the idle/active cadence
         # switch (no pop). idle_rate/active_rate reproduce today's on-screen
         # speeds (idle ~0.08/33ms, active ~0.6/66ms).
         now = time.monotonic()
-        dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.1)
+        # Background frames are 125 ms apart: allow that gap so the drift
+        # keeps wall-clock pace instead of being clipped to 100 ms.
+        dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.25 if background else 0.1)
         self._hero_last_frame_ts = now
         self._hero_morph += (0.0 - self._hero_morph) * 0.25
         speed = 2.4 + (9.0 - 2.4) * self._hero_morph
+        if background:
+            speed *= _HERO_BACKGROUND_SPEED
         self._hero_wave_time += dt * speed
         self._hero_audio_level = 0.0
 
@@ -21572,6 +21582,7 @@ class WayfinderApp(ctk.CTk):
 
         interval = (
             66 if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate"
+            else _HERO_BACKGROUND_INTERVAL_MS if background
             else _hero_idle_interval_ms()
         )
         if IS_WINDOWS and not IS_MACOS:

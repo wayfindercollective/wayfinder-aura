@@ -57,11 +57,14 @@ def test_recording_hint_names_stop_and_cancel_idle_hint_unchanged():
         "press to start/stop  ·  words appear at your cursor")
 
 
-def test_idle_ribbon_pauses_while_another_app_has_focus(monkeypatch):
+def test_idle_ribbon_goes_to_background_pace_while_another_app_has_focus(monkeypatch):
     monkeypatch.setattr(wm, "_IS_LINUX", True)
     focused = SimpleNamespace(focus_displayof=lambda: object())
     elsewhere = SimpleNamespace(focus_displayof=lambda: None)
-    assert wm.WayfinderApp._hero_idle_paused(focused) is False
-    assert wm.WayfinderApp._hero_idle_paused(elsewhere) is True
+    assert wm.WayfinderApp._hero_idle_backgrounded(focused) is False
+    assert wm.WayfinderApp._hero_idle_backgrounded(elsewhere) is True
     monkeypatch.setattr(wm, "_IS_LINUX", False)
-    assert wm.WayfinderApp._hero_idle_paused(elsewhere) is False  # macOS/Windows unchanged
+    assert wm.WayfinderApp._hero_idle_backgrounded(elsewhere) is False  # macOS/Windows unchanged
+    # Background drift: slower and on a lower frame rate, never frozen.
+    assert 0 < wm._HERO_BACKGROUND_SPEED < 1
+    assert wm._HERO_BACKGROUND_INTERVAL_MS > wm._hero_idle_interval_ms("linux")
