@@ -535,8 +535,8 @@ class PortalKeyboard:
 
             self._set(self.WAITING)
             if not restore_token:
-                say("⌨️ Asking your desktop to let Aura type in every app — choose "
-                    "Allow (and keep 'remember' checked) in the dialog")
+                say("⌨️ Your desktop is asking whether Aura may type in every app: "
+                    "approve it once and leave 'restore on future sessions' on")
             # No timeout: the dialog waits for the user (maybe away at login).
             started = request("Start", "(osa{sv})", (self._session, parent_window or "", {}),
                               None)
