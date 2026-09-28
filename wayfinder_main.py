@@ -21471,6 +21471,15 @@ class WayfinderApp(ctk.CTk):
             return  # Already running
         self._animate_idle_breath()
     
+    def _hero_idle_paused(self) -> bool:
+        """Linux: True while no Aura window has keyboard focus."""
+        if not _IS_LINUX:
+            return False
+        try:
+            return self.focus_displayof() is None
+        except Exception:
+            return False
+
     def _stop_idle_breath(self):
         """Stop the idle breathing animation."""
         if hasattr(self, '_idle_breath_job') and self._idle_breath_job:
@@ -21527,6 +21536,14 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
+        # Linux: hold the calm ribbon still while another app has focus
+        # (LINUX-FOLLOWUPS 3.1). That is where the user is dictating, and the
+        # full-size shader ribbon cost ~10% of a core at 4K for a window
+        # nobody was looking at. Look again twice a second.
+        if self._hero_idle_paused():
+            self._idle_breath_job = self.after(500, self._animate_idle_breath)
+            return
+
         # Ease the morph toward 0 (calm dim breath) and advance wave time
         # delta-based so phase is continuous across the idle/active cadence
         # switch (no pop). idle_rate/active_rate reproduce today's on-screen
