@@ -3,10 +3,10 @@ Text injection module for Wayfinder Aura.
 
 Platform dispatch:
 - Linux/X11: xdotool (preferred — no daemon, no uinput, present in stock SteamOS image)
-- Linux/Wayland: ydotool when its daemon is live (kernel-level, compositor-proof), else wtype
-  (virtual-keyboard protocol — refused outright by GNOME/Mutter and revocable by KWin); a
-  wtype failure at injection time falls back to ydotool when possible. (A RemoteDesktop-portal
-  backend — the universal path — is planned but NOT yet implemented.)
+- Linux/Wayland desktop: the RemoteDesktop portal once the user has allowed it
+  (core/portal_keyboard.py — the compositor types, so every app receives it, Wayland-native
+  or XWayland); until then or when declined, ydotool when its daemon is live, else wtype
+  (refused outright by GNOME/Mutter and revocable by KWin), and xdotool in the Flatpak.
 - Linux/X11 fallback: ydotool if xdotool unavailable
 - macOS: native pasteboard snapshot + Cmd-V
 """
@@ -1281,6 +1281,115 @@ def prime_wayland_injection() -> "tuple[bool, str]":
         return False, "wtype not found — can't pre-arm Wayland injection approval"
 
 
+# --- RemoteDesktop portal (Wayland desktops) --------------------------------
+# Characters the compositor's layout has no key for are dropped by KWin and
+# Mutter, so such text is pasted instead: the app's Tk window owns the X11
+# CLIPBOARD (the Flatpak has no clipboard tools) and KWin hands it to Wayland
+# apps; then the portal presses Ctrl+V. The app registers the clipboard hooks.
+_PORTAL_CLIPBOARD_WRITE = None   # Callable[[str], bool], set by the app
+_PORTAL_CLIPBOARD_READ = None    # Callable[[], "str | None"], set by the app
+_PORTAL_PASTE_SETTLE_S = 0.05
+_PORTAL_RESTORE_AFTER_S = 0.4
+
+
+def set_portal_clipboard_hooks(write, read=None) -> None:
+    """The app's clipboard writer/reader for the portal paste fallback."""
+    global _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ
+    _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ = write, read
+
+
+class _X11Keymap:
+    """``has_keysym(keysym)``: does the current layout have a key for it?
+    XWayland mirrors the compositor's layout. Connects on first use (plain
+    ASCII never needs it); unknown = assume yes."""
+
+    def __init__(self):
+        self._disp = None
+        self._failed = False
+
+    def __call__(self, keysym: int) -> bool:
+        if self._disp is None and not self._failed:
+            try:
+                from Xlib import display
+                self._disp = display.Display()
+            except Exception:
+                self._failed = True
+        if self._disp is None:
+            return True
+        try:
+            return bool(self._disp.keysym_to_keycode(keysym))
+        except Exception:
+            return True
+
+    def close(self) -> None:
+        if self._disp is not None:
+            try:
+                self._disp.close()
+            except Exception:
+                pass
+            self._disp = None
+
+
+def _portal_fallback_tool() -> str:
+    from ..utils.platform import is_xdotool_available
+    return "xdotool" if is_xdotool_available() else "none"
+
+
+def _portal_press(combo: str, hold_s: float = 0.0) -> None:
+    from . import portal_keyboard
+    try:
+        portal_keyboard.keyboard().press_keys(combo, hold_s)
+    except portal_keyboard.PortalKeyboardError as e:
+        raise InjectionError(str(e)) from e
+
+
+def _portal_paste(text: str) -> None:
+    """Clipboard + Ctrl+V through the portal, restoring the old clipboard."""
+    previous = None
+    if _PORTAL_CLIPBOARD_READ is not None:
+        try:
+            previous = _PORTAL_CLIPBOARD_READ()
+        except Exception:
+            previous = None
+    if _PORTAL_CLIPBOARD_WRITE is None or not _PORTAL_CLIPBOARD_WRITE(text):
+        raise InjectionError("Could not set the clipboard for the paste")
+    time.sleep(_PORTAL_PASTE_SETTLE_S)
+    _portal_press("ctrl+v", 0.02)
+    if previous is not None and previous != text:
+        time.sleep(_PORTAL_RESTORE_AFTER_S)
+        try:
+            _PORTAL_CLIPBOARD_WRITE(previous)
+        except Exception:
+            pass
+
+
+def _inject_text_portal(text: str, typing_speed: str = "instant") -> None:
+    """Type through the RemoteDesktop portal (see core/portal_keyboard.py)."""
+    from . import portal_keyboard
+
+    key_delay = TYPING_SPEEDS.get(typing_speed, (2, 2))[0]
+    text = fold_typography_for_typing(text)
+    _require_modifier_release()
+    keymap = _X11Keymap()
+    try:
+        missing = portal_keyboard.untypeable_chars(text, keymap)
+    finally:
+        keymap.close()
+    if missing:
+        if _PORTAL_CLIPBOARD_WRITE is not None:
+            _portal_paste(text)
+            return
+        # Nothing can paste: keep the letters rather than drop them.
+        text = portal_keyboard.ascii_fold(text)
+    try:
+        portal_keyboard.keyboard().type_text(text, key_delay)
+    except portal_keyboard.PortalKeyboardError as e:
+        err = InjectionError(str(e))
+        # Part of the text already landed: a fallback would type it twice.
+        err.uncertain_delivery = bool(getattr(e, "typed", 0))
+        raise err from e
+
+
 def _clipboard_write_linux(text: str) -> None:
     """Write *text* to the session clipboard. Raises InjectionError on failure."""
     # Prefer Wayland tools when available; fall back to X11 clipboard utilities.
@@ -1330,6 +1439,9 @@ def _send_ctrl_v_linux(tool: str) -> None:
     # A physically-held Shift would turn this into Ctrl+Shift+V (app-dependent
     # behavior) — same XWayland --clearmodifiers gap as the type path.
     _require_modifier_release()
+    if tool == "portal":
+        _portal_press("ctrl+v")
+        return
     if tool == "xdotool":
         result = subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
@@ -1403,6 +1515,12 @@ def press_enter() -> None:
     # chat inputs, silently breaking the auto-Enter promise.
     _require_modifier_release()
     tool = get_text_injector()
+    if tool == "portal":
+        try:
+            _portal_press("Return")
+            return
+        except InjectionError:
+            tool = _portal_fallback_tool()
     if tool == "xdotool":
         result = subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "Return"],
@@ -1475,7 +1593,7 @@ def inject_text_clipboard_paste(text: str) -> None:
     _clipboard_write_linux(text)
     time.sleep(0.05)
     try:
-        _send_ctrl_v_linux(tool if tool in ("xdotool", "wtype", "ydotool") else "ydotool")
+        _send_ctrl_v_linux(tool if tool in ("portal", "xdotool", "wtype", "ydotool") else "ydotool")
     finally:
         # Best-effort restore: only if clipboard still holds our text.
         if old_clipboard is not None:
@@ -1497,6 +1615,16 @@ def _inject_text_type_linux(
     from ..utils.platform import get_text_injector
 
     tool = get_text_injector()
+    if tool == "portal":
+        try:
+            _inject_text_portal(text, typing_speed)
+            return
+        except InjectionError as e:
+            # The session ended between the check and the keys (revoked,
+            # portal restart): fall back, unless part of the text landed.
+            if getattr(e, "uncertain_delivery", False):
+                raise
+            tool = _portal_fallback_tool()
     if tool == "xdotool":
         _inject_text_xdotool(text, typing_speed, target_window)
         return

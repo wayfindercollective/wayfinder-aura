@@ -16,6 +16,12 @@ Games tab list and verdicts). What differs on Linux:
 * Some chats take no paste (Dark Age of Camelot): there the player opens the
   chat box with Enter and Aura *types* the text into it at a game-safe rate,
   pressing no game keys itself (letters are keybinds when chat is closed).
+* Keys go through the desktop's RemoteDesktop portal when the player allowed it
+  (KDE/GNOME Wayland: the compositor delivers them like a real keyboard) and
+  through xdotool otherwise (X11 sessions, SteamOS Game Mode).
+* Wine can leave X keyboard focus on another of its windows (a launcher) while
+  the game is the active window; keys then go nowhere. Before typing, focus is
+  handed back to the game window (``ensure_game_focus``).
 
 Linux-only helpers return Nones elsewhere.
 """
@@ -65,7 +71,9 @@ DAOC = GameProfile(
     open_chat=False, auto_send=True, max_chars=100_000,
     note="Press Enter to open chat, then dictate: Aura types it into the chat box "
          "(DAoC's chat has no paste) and sends it with Enter. Aura never opens chat "
-         "for you.",
+         "for you. If keys stop reaching the game after Alt+Tab, Wine is giving focus "
+         "to the launcher window: set UseTakeFocus=N in the game's Wine prefix "
+         "(registry HKCU\\Software\\Wine\\X11 Driver) and restart the game.",
     vocabulary=("realm", "RvR", "keep", "relic", "frontier", "Albion", "Midgard",
                 "Hibernia", "Emain", "Agramon", "Thidranki", "zerg", "stealther",
                 "caster", "bodyguard", "speed", "rez", "RA", "RR"),
@@ -261,6 +269,59 @@ def hold_keys(seconds: float):
     yield
 
 
+def ensure_game_focus(window_id: Optional[int]) -> bool:
+    """Give X keyboard focus back to the active game window when Wine left it
+    on another window. True when focus was moved.
+
+    Seen live with Dark Age of Camelot (Eden, Lutris): after Alt+Tab back,
+    KWin activated the game window but Wine set the input focus on the hidden
+    launcher window, so typed keys never reached the game. Wine's
+    ``UseTakeFocus=N`` avoids it for good; this repairs it for one dictation.
+    """
+    if not window_id or not sys.platform.startswith("linux"):
+        return False
+    try:
+        from Xlib import X, display
+    except Exception:
+        return False
+    try:
+        disp = display.Display()
+    except Exception:
+        return False
+    try:
+        root = disp.screen().root
+        focus = disp.get_input_focus().focus
+        if not isinstance(focus, int) and focus not in (None, X.NONE, X.PointerRoot):
+            win = focus
+            for _ in range(16):  # the focus may sit on a child of the game window
+                if int(win.id) == int(window_id):
+                    return False
+                parent = win.query_tree().parent
+                if not parent or int(parent.id) == int(root.id):
+                    break
+                win = parent
+        game = disp.create_resource_object("window", int(window_id))
+        game.set_input_focus(X.RevertToParent, X.CurrentTime)
+        disp.sync()
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            disp.close()
+        except Exception:
+            pass
+
+
+def _portal():
+    """The portal keyboard when it is ready, else None (xdotool)."""
+    try:
+        from . import portal_keyboard
+        return portal_keyboard.keyboard() if portal_keyboard.ready() else None
+    except Exception:
+        return None
+
+
 def _xdotool(*args: str) -> None:
     result = subprocess.run(["xdotool", *args], capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
@@ -270,9 +331,17 @@ def _xdotool(*args: str) -> None:
 
 def press_held(keys: str, hold_s: float = KEY_HOLD_S) -> None:
     """Press ``keys`` (e.g. "Return", "ctrl+v") down for ``hold_s``, then release."""
-    from .injector import _require_modifier_release
+    from .injector import InjectionError, _require_modifier_release
 
     _require_modifier_release()
+    kb = _portal()
+    if kb is not None:
+        from .portal_keyboard import PortalKeyboardError
+        try:
+            kb.press_keys(keys, max(0.0, hold_s))
+            return
+        except PortalKeyboardError as e:
+            raise InjectionError(str(e)) from e
     _xdotool("keydown", "--clearmodifiers", keys)
     time.sleep(max(0.0, hold_s))
     _xdotool("keyup", "--clearmodifiers", keys)
@@ -289,7 +358,23 @@ def paste_clipboard() -> None:
 
 def type_text(text: str) -> None:
     """Type into the chat box the player opened (games without paste)."""
-    from .injector import _require_modifier_release
+    from .injector import InjectionError, _require_modifier_release, fold_typography_for_typing
 
     _require_modifier_release()
+    kb = _portal()
+    if kb is not None:
+        from .injector import _X11Keymap
+        from .portal_keyboard import PortalKeyboardError, ascii_fold, untypeable_chars
+        text = fold_typography_for_typing(text)
+        keymap = _X11Keymap()
+        try:
+            if untypeable_chars(text, keymap):
+                text = ascii_fold(text)  # no paste in these chats: keep the letters
+        finally:
+            keymap.close()
+        try:
+            kb.type_text(text, TYPE_DELAY_MS)
+            return
+        except PortalKeyboardError as e:
+            raise InjectionError(f"{e} (typed {getattr(e, 'typed', 0)} characters)") from e
     _xdotool("type", "--clearmodifiers", "--delay", str(TYPE_DELAY_MS), "--", text)

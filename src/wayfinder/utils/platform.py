@@ -619,13 +619,20 @@ def get_text_injector() -> str:
     Determine the best text injection method for the current platform.
     
     Returns:
-        - Linux/Wayland: "wtype" (preferred) or "ydotool"
+        - Linux, Wayland desktop with the portal allowed: "portal" (RemoteDesktop portal)
+        - Linux/Wayland: "ydotool" (daemon live) or "wtype"
         - Linux/X11: "xdotool" or "ydotool"
         - macOS: "pyautogui"
         - Windows: "windows" (native Win32 SendInput Unicode injection)
         - If unavailable: "none"
     """
     if is_linux():
+        try:
+            from ..core import portal_keyboard
+            if portal_keyboard.ready():
+                return "portal"
+        except Exception:
+            pass
         if is_wayland():
             # Prefer ydotool when its daemon is reachable: KDE Plasma's KWin shows a per-use
             # "allow input control" security prompt for wtype's Wayland virtual-keyboard

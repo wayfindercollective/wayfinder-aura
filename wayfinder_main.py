@@ -1557,6 +1557,12 @@ SETTING_TOOLTIPS = {
         "The language you dictate in. Other languages need a multilingual "
         "model (one without .en in its name)."
     ),
+    "linux_portal_typing": (
+        "Lets Aura type into every app on a Wayland desktop, native Wayland apps "
+        "included, through your desktop's remote-control permission. Your desktop "
+        "asks once; KDE shows a Remote Control icon in the tray while Aura runs.\n"
+        "Off: Aura types with xdotool, which reaches X11 apps and games only."
+    ),
     "press_enter_after_dictation": (
         "Press Enter after the text is typed. Off by default.\n"
         "This sends chat messages, runs terminal commands and submits AI prompts "
@@ -9483,6 +9489,9 @@ class WayfinderApp(ctk.CTk):
             ),
         )
 
+        if _IS_LINUX and not (IS_MACOS or IS_WINDOWS):
+            self._create_portal_typing_row(system_content)
+
         if IS_MACOS or IS_WINDOWS:
             self._create_login_item_row(system_content)
 
@@ -12607,6 +12616,102 @@ class WayfinderApp(ctk.CTk):
         state = "on" if self.config["press_enter_after_dictation"] else "off"
         self.log(f"↵ Auto press Enter after dictation: {state}")
 
+    def _start_portal_keyboard(self, ask_again: bool = False) -> None:
+        """Wayland desktops: open the RemoteDesktop portal keyboard so dictation
+        reaches native Wayland apps too (core/portal_keyboard.py). Tk thread."""
+        if not _IS_LINUX or IS_MACOS or IS_WINDOWS:
+            return
+        if not self.config.get("linux_portal_typing", True):
+            return
+        try:
+            from wayfinder.core import portal_keyboard
+            from wayfinder.core.injector import set_portal_clipboard_hooks
+            if not portal_keyboard.host_is_wayland_desktop():
+                return
+        except Exception:
+            return
+        # Characters the keyboard layout lacks are pasted: our Tk window owns
+        # the clipboard (the Flatpak has no clipboard tools).
+        set_portal_clipboard_hooks(self._set_clipboard_from_worker)
+        try:
+            parent = f"x11:{int(self.wm_frame(), 16):x}"
+        except Exception:
+            parent = ""
+        kb = portal_keyboard.keyboard()
+        if not getattr(self, "_portal_listener_added", False):
+            kb.on_change(self._on_portal_keyboard_state)
+            self._portal_listener_added = True
+
+        def _go():
+            if not portal_keyboard.portal_keyboard_offered():
+                self.log("⌨️ This desktop offers no remote-control keyboard: "
+                         "Aura types with xdotool (X11 apps and games only)")
+                return
+            kb.start(parent_window=parent, ask_again=ask_again, log=self.log)
+
+        threading.Thread(target=_go, daemon=True, name="wayfinder-portal-start").start()
+
+    def _on_portal_keyboard_state(self, state: str, detail: str) -> None:
+        """Portal keyboard state changes (session thread; self.log is thread-safe)."""
+        from wayfinder.core.portal_keyboard import PortalKeyboard as _PK
+
+        if state == _PK.READY:
+            self.log("✓ Text injection: desktop portal (types into every app, "
+                     "Wayland and X11)")
+        elif state == _PK.DECLINED:
+            self.log("⌨️ Desktop portal typing not allowed: Aura types into X11 apps "
+                     "and games only. Turn on 'Type into every app' in Settings to ask again.")
+        elif state == _PK.FAILED:
+            self.log(f"⚠️ Desktop portal typing unavailable ({detail}): using xdotool")
+        elif state == _PK.CLOSED:
+            self.log(f"⚠️ Desktop portal typing ended ({detail}): using xdotool until "
+                     "Aura restarts")
+
+    def _on_portal_typing_toggled(self) -> None:
+        """Settings switch: type through the desktop portal (Wayland)."""
+        on = bool(self._portal_typing_var.get())
+        self.config["linux_portal_typing"] = on
+        save_config(self.config)
+        if on:
+            self.log("⌨️ Type into every app: on")
+            self._start_portal_keyboard(ask_again=True)
+        else:
+            try:
+                from wayfinder.core import portal_keyboard
+                portal_keyboard.keyboard().close()
+            except Exception:
+                pass
+            self.log("⌨️ Type into every app: off (xdotool: X11 apps and games only)")
+
+    def _create_portal_typing_row(self, parent) -> None:
+        """Linux on a Wayland desktop: the portal typing switch."""
+        try:
+            from wayfinder.core.portal_keyboard import host_is_wayland_desktop
+            if not host_is_wayland_desktop():
+                return
+        except Exception:
+            return
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            row, text="Type into every app",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        self._portal_typing_var = ctk.BooleanVar(
+            value=bool(self.config.get("linux_portal_typing", True))
+        )
+        ctk.CTkSwitch(
+            row, text="",
+            variable=self._portal_typing_var,
+            command=self._on_portal_typing_toggled,
+            width=40, height=22, switch_width=36, switch_height=18,
+            corner_radius=RADIUS["sm"] + 1,  # pill: height/2, intentional off-token
+            fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"], button_hover_color=COLORS["text_bright"],
+        ).pack(side="right")
+        ToolTip(row, SETTING_TOOLTIPS["linux_portal_typing"])
+
     def _on_overlay_enabled_toggled(self) -> None:
         """Persist Show Overlay and apply immediately — no app restart required.
 
@@ -14739,6 +14844,9 @@ class WayfinderApp(ctk.CTk):
                 _tool = get_text_injector()
             except Exception:
                 _tool = None
+            # Wayland desktops: the portal keyboard types into every app; it
+            # takes over from xdotool once the desktop allows it.
+            self._start_portal_keyboard()
             if _tool == "xdotool":
                 self.log("✓ Text injection: xdotool")
             elif _tool == "wtype":
@@ -23489,6 +23597,10 @@ class WayfinderApp(ctk.CTk):
             )
         press_return = press_enter
         if _IS_LINUX and not (IS_MACOS or IS_WINDOWS):
+            # Wine may have left keyboard focus on a hidden launcher window.
+            if game_chat.ensure_game_focus(pid):
+                self.log(f"🎮 {profile.name}: keyboard focus was on another Wine window; "
+                         "gave it back to the game")
             # Clipboard (owned by our Tk window, which Wine reads) + held Ctrl+V;
             # games whose chat takes no paste get typed text instead.
             hold_keys = game_chat.hold_keys

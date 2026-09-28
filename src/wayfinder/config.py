@@ -313,6 +313,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enable_tray_icon": True,
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
+    # Linux Wayland desktops: type through the RemoteDesktop portal (every app).
+    "linux_portal_typing": True,
     
     # Processing mode: local (100% private, offline) or remote (cloud APIs for speed/quality)
     "processing_mode": "local",  # local | remote
