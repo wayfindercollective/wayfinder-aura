@@ -29,8 +29,8 @@ def test_unlisted_reasons():
     assert gc.unlisted_game_reason("konsole") is None
 
 
-def test_daoc_is_typed_into_the_open_chat_and_no_game_keys_are_pressed():
-    profile = gc.match_profile("camelot.exe", None)
+def test_daoc_types_into_the_open_chat_then_sends_once():
+    profile = gc.match_profile("eden_2gb.dll", None)
     assert profile.key in gc.TYPE_PROFILES
     typed, returns = [], []
     result = gc.send_to_chat(
@@ -39,8 +39,27 @@ def test_daoc_is_typed_into_the_open_chat_and_no_game_keys_are_pressed():
         frontmost_pid=lambda: 42, sleep=lambda _s: None,
     )
     assert typed == ["inc two on the left keep door"]
-    assert returns == []             # the player opened chat and sends it
-    assert result.sent == 0
+    assert returns == [1]            # send only: the player opened the chat
+    assert result.sent == 1
+
+
+def test_daoc_never_types_a_second_part_into_a_closed_chat():
+    profile = gc.match_profile("eden_2gb.dll", None)
+    long_text = " ".join(["word"] * 400)  # far past any chat limit
+    typed, returns = [], []
+    gc.send_to_chat(long_text, profile, game_pid=42, send=True, paste=typed.append,
+                    press_return=lambda: returns.append(1), frontmost_pid=lambda: 42,
+                    sleep=lambda _s: None)
+    assert typed == [long_text] and returns == [1]
+
+
+def test_daoc_with_send_off_only_types():
+    profile = gc.match_profile("eden_2gb.dll", None)
+    typed, returns = [], []
+    gc.send_to_chat("hello", profile, game_pid=42, send=False, paste=typed.append,
+                    press_return=lambda: returns.append(1), frontmost_pid=lambda: 42,
+                    sleep=lambda _s: None)
+    assert typed == ["hello"] and returns == []
 
 
 def test_daoc_stops_if_the_game_left_the_front():

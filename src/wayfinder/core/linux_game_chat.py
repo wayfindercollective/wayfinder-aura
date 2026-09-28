@@ -54,15 +54,18 @@ from .windows_game_chat import EXE_PROFILES as _WINDOWS_EXE_PROFILES
 from .windows_game_chat import INFO_ONLY, windows_note  # Windows facts hold under Wine too
 
 # Dark Age of Camelot (e.g. the Eden freeshard under Lutris): Enter opens chat
-# and Enter sends, but the client has no paste, so Aura types into a chat box
-# the player opened and never presses a key in the game.
+# and Enter sends, but the client has no paste, so Aura types into the chat box
+# the player opened and then sends it with Enter (the "send" toggle in Games).
+# Aura never opens chat itself, and never splits: a second part would be typed
+# into a closed chat, where letters are keybinds (max_chars is effectively off;
+# the game trims an overlong line).
 DAOC = GameProfile(
     "daoc", "Dark Age of Camelot",
     name_markers=("dark age of camelot",),
-    open_chat=False, auto_send=False, max_chars=200,
-    note="Press Enter to open chat, then dictate: Aura types into the chat box "
-         "(DAoC's chat has no paste) and you press Enter to send. Aura presses no "
-         "game keys here.",
+    open_chat=False, auto_send=True, max_chars=100_000,
+    note="Press Enter to open chat, then dictate: Aura types it into the chat box "
+         "(DAoC's chat has no paste) and sends it with Enter. Aura never opens chat "
+         "for you.",
     vocabulary=("realm", "RvR", "keep", "relic", "frontier", "Albion", "Midgard",
                 "Hibernia", "Emain", "Agramon", "Thidranki", "zerg", "stealther",
                 "caster", "bodyguard", "speed", "rez", "RA", "RR"),
