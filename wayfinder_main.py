@@ -6042,9 +6042,7 @@ class WayfinderApp(ctk.CTk):
                     ),
                     # Sign-out/shutdown or an installer closing Aura: quit for
                     # real (closing the window only hides it to the tray).
-                    on_end_session=lambda: self.event_queue.put(
-                        (EventType.QUIT_APP, None)
-                    ),
+                    on_end_session=self._on_windows_end_session,
                 )
             except Exception as exc:
                 self.log(f"⚠ Windows sleep/wake integration unavailable: {exc}")
@@ -16169,6 +16167,19 @@ class WayfinderApp(ctk.CTk):
                     banner.pack(fill="x", pady=(0, SPACING["md"]))
         except Exception:
             pass
+
+    def _on_windows_end_session(self) -> None:
+        """Lifecycle thread: Windows is ending the session, or an installer is
+        closing Aura. Windows may end the process as soon as this returns, so
+        put ducked audio back first (the ducker is lock-protected and makes its
+        own COM calls), then quit on the Tk thread."""
+        try:
+            ducker = getattr(self, "audio_ducker", None)
+            if ducker is not None and ducker.is_ducked:
+                ducker.restore()
+        except Exception:
+            pass
+        self.event_queue.put((EventType.QUIT_APP, None))
 
     def _log_windows_hotkey_conflict(self) -> None:
         try:

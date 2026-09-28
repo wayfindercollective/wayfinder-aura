@@ -1152,3 +1152,29 @@ def test_installer_ends_a_running_aura_before_replacing_files():
            / "installer.iss").read_text(encoding="utf-8")
     assert "function PrepareToInstall" in iss and "usUninstall" in iss
     assert "taskkill.exe'), '/F /T /IM \"{#MyAppExeName}\"'" in iss
+
+
+def test_end_session_restores_ducked_audio_before_quitting():
+    from queue import Queue
+
+    import wayfinder_main
+    from wayfinder.hotkeys.types import EventType
+
+    order = []
+    ducker = SimpleNamespace(is_ducked=True, restore=lambda: order.append("restore"))
+    q = Queue()
+    app = SimpleNamespace(audio_ducker=ducker, event_queue=SimpleNamespace(
+        put=lambda item: order.append(item)))
+    wayfinder_main.WayfinderApp._on_windows_end_session(app)
+    assert order == ["restore", (EventType.QUIT_APP, None)]
+    assert q.empty()
+
+
+def test_installer_asks_aura_to_quit_before_forcing_it():
+    from pathlib import Path
+
+    iss = (Path(__file__).resolve().parent.parent / "packaging" / "windows"
+           / "installer.iss").read_text(encoding="utf-8")
+    ask = iss.index("SendMessage(Wnd, WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP)")
+    force = iss.index("taskkill.exe")
+    assert "FindWindowByClassName('WayfinderAuraLifecycle')" in iss and ask < force

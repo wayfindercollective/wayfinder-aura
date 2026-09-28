@@ -63,17 +63,34 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupA
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
-{ Aura's window close button hides it to the tray (as on the Mac), so older
-  builds could not be closed by the installer's Restart Manager and an upgrade
-  stopped at "Setup was unable to automatically close all applications".
-  Current builds quit when Windows asks (WM_ENDSESSION); this is the safety
-  net for older ones: end any running copy and its helpers before files are
-  replaced. Settings are saved as they change, ducked audio is restored by the
-  app's crash recovery on next launch, and the helpers die with the app. }
+{ Aura's window close button hides it to the tray (as on the Mac), so the
+  installer's Restart Manager could not close it and an upgrade stopped at
+  "Setup was unable to automatically close all applications".
+  First ask a running Aura to quit the way Windows does at sign-out: its hidden
+  lifecycle window gets WM_ENDSESSION, puts ducked audio back, and quits. Wait
+  up to 5 s for it to go. Only a copy that doesn't answer (builds from before
+  this handler) is then ended with its helpers; its ducked audio, if any, is
+  restored by the app's crash recovery the next time it starts. }
+const
+  WM_ENDSESSION = $0016;
+  ENDSESSION_CLOSEAPP = 1;
+
 procedure StopRunningAura();
 var
-  ResultCode: Integer;
+  ResultCode, Waited: Integer;
+  Wnd: HWND;
 begin
+  Wnd := FindWindowByClassName('WayfinderAuraLifecycle');
+  if Wnd <> 0 then
+  begin
+    SendMessage(Wnd, WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP);
+    Waited := 0;
+    while (FindWindowByClassName('WayfinderAuraLifecycle') <> 0) and (Waited < 50) do
+    begin
+      Sleep(100);
+      Waited := Waited + 1;
+    end;
+  end;
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM "{#MyAppExeName}"', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
