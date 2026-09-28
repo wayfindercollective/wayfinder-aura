@@ -1201,6 +1201,7 @@ def test_installer_asks_aura_to_quit_before_forcing_it():
 
     iss = (Path(__file__).resolve().parent.parent / "packaging" / "windows"
            / "installer.iss").read_text(encoding="utf-8")
-    ask = iss.index("SendMessage(Wnd, WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP)")
+    ask = iss.index("SendMessageTimeout(Wnd, WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP")
+    assert "SendMessage(Wnd" not in iss  # never an unbounded send
     force = iss.index("taskkill.exe")
     assert "FindWindowByClassName('WayfinderAuraLifecycle')" in iss and ask < force
