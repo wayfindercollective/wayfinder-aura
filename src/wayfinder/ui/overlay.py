@@ -129,9 +129,11 @@ def configure_macos_overlay_as_accessory(
     """Keep the overlay subprocess out of the Dock while retaining its window.
 
     The main Tk process is the regular macOS app. The PyQt overlay is a helper
-    process launched from the same bundle, so without an explicit activation
-    policy macOS gives it a second Dock icon. Accessory policy is the native
-    AppKit mode for a UI-capable helper that should not appear in the Dock.
+    process launched from the same bundle. In the packaged app the bundle's
+    LSUIElement already keeps it out of the Dock from its first moment (see
+    utils/macos_dock.py); this call covers source runs, where the helper runs
+    as Python.app. Accessory policy is the native AppKit mode for a UI-capable
+    helper that should not appear in the Dock.
     """
     active_platform = platform_name or sys.platform
     if active_platform != "darwin":
