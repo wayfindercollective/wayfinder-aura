@@ -1073,3 +1073,12 @@ def test_dictation_is_not_pasted_into_aura_itself(monkeypatch):
     assert clip == ["hello", "hello"] and sent == []   # nothing typed into Aura
     monkeypatch.setattr(w, "_foreground_is_own_process", lambda: False)
     assert os.getpid() > 0
+
+
+def test_reduce_motion_holds_the_idle_hero_only_on_windows(monkeypatch):
+    import inspect
+
+    import wayfinder_main
+
+    src = inspect.getsource(wayfinder_main.WayfinderApp._animate_idle_breath)
+    assert "if IS_WINDOWS and not IS_MACOS:" in src and "interval = 2000" in src

@@ -21113,7 +21113,7 @@ class WayfinderApp(ctk.CTk):
             66 if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate"
             else _hero_idle_interval_ms()
         )
-        if IS_WINDOWS:
+        if IS_WINDOWS and not IS_MACOS:
             from wayfinder.ui.windows_window import animations_enabled
 
             if not animations_enabled():
