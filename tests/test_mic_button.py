@@ -25,26 +25,26 @@ def test_renders_every_state_at_the_requested_size():
             assert img.size == (phys, phys) and img.mode == "RGB"
 
 
-def test_idle_disc_is_dark_glass_with_a_light_glyph():
+def test_ready_chip_has_a_light_line_glyph_on_a_dark_chip():
     img = render_mic_button(160, BLUE, card=CARD, ink=INK, light=LIGHT)
-    corner = _px(img, 2, 2)
-    assert _dist(corner, (0x15, 0x1B, 0x25)) < 12        # the card shows at the corners
-    assert _dist(_px(img, 80, 72), (0xE8, 0xE8, 0xE8)) < 40  # glyph capsule, light
-    assert _dist(_px(img, 60, 80), (0xE8, 0xE8, 0xE8)) > 120  # beside it: dark disc
+    assert _dist(_px(img, 2, 2), (0x15, 0x1B, 0x25)) < 12       # the card at the corners
+    assert _dist(_px(img, 76, 72), (0xE8, 0xE8, 0xE8)) < 60     # capsule outline: light
+    assert _dist(_px(img, 80, 72), (0xE8, 0xE8, 0xE8)) > 150    # inside the line glyph: chip
 
 
-def test_recording_fills_the_disc_with_the_state_colour_and_a_stop_square():
+def test_recording_is_a_solid_state_disc_with_a_white_stop_square():
     img = render_mic_button(160, ROSE, card=CARD, ink=INK, light=LIGHT, pulse=0.9)
-    assert _dist(_px(img, 80, 80), (0x0B, 0x0F, 0x15)) < 20  # stop square: ink
-    ring = _px(img, 80, 80 + 36)                                 # disc below the square
-    assert ring[0] > ring[2] + 40                                # rose, not dark
+    assert _dist(_px(img, 80, 80), (255, 255, 255)) < 20        # stop square
+    below = _px(img, 80, 80 + 36)                                # disc below the square
+    assert _dist(below, (0xE8, 0x70, 0x7F)) < 20                 # solid rose, no gradient
 
 
-def test_hover_glows_brighter_than_rest():
+def test_hover_colours_the_rim():
     rest = render_mic_button(160, BLUE, card=CARD, ink=INK, light=LIGHT)
     hover = render_mic_button(160, BLUE, card=CARD, ink=INK, light=LIGHT, hover=True)
-    # Just outside the disc (radius 24 of 80 units -> 48 px at 160) the halo shows.
-    assert sum(_px(hover, 80, 80 - 52)) > sum(_px(rest, 80, 80 - 52))
+    # The rim at the top of the disc (radius 24 of 80 units -> 48 px at 160).
+    r_rest, r_hover = _px(rest, 80, 33), _px(hover, 80, 33)
+    assert r_hover[2] - r_hover[0] > r_rest[2] - r_rest[0] + 30  # blue, not neutral
 
 
 def test_mic_canvas_follows_zoom_on_linux_only():
@@ -65,3 +65,13 @@ def test_linux_default_zoom_matches_the_desktop_scale(monkeypatch):
     # No Xft.dpi: the resolution table (4K -> 200%).
     monkeypatch.setattr(tk_dpi, "read_xft_dpi", lambda: None)
     assert wm.WayfinderApp._get_recommended_scale(app) == 2.0
+
+
+def test_linux_brand_mark_is_rendered_for_the_zoom(monkeypatch):
+    from wayfinder.ui.macos_brand_mark import MARK_HEIGHT, MARK_WIDTH
+
+    app = SimpleNamespace(ui_scale=1.95)
+    image, size = wm.WayfinderApp._linux_brand_mark_image(app, False)
+    assert size == (MARK_WIDTH, MARK_HEIGHT)
+    # Drawn at the real pixel size CTkImage will show, not stretched from 1x.
+    assert image.size == (round(MARK_WIDTH * 1.95), round(MARK_HEIGHT * 1.95))

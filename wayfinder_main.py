@@ -7278,6 +7278,7 @@ class WayfinderApp(ctk.CTk):
         # Form-row measure max is design units × scale → re-pad after scale change.
         self._sync_all_form_measures(force=True)
         self._update_scale_labels()
+        self._refresh_linux_brand_mark()
         if resized_mic:
             try:
                 self.mic_button_canvas.update_idletasks()
@@ -7573,6 +7574,26 @@ class WayfinderApp(ctk.CTk):
 
         return canvas, (logical_w, logical_h)
 
+    def _linux_brand_mark_image(self, is_ultra: bool):
+        """The header mark rendered at the widget scaling (Linux)."""
+        from wayfinder.ui.macos_brand_mark import MARK_HEIGHT, MARK_WIDTH, render_brand_mark
+
+        scale = max(1.0, float(getattr(self, "ui_scale", 1.0) or 1.0))
+        image = render_brand_mark(ICON_PATH, scale=scale, is_ultra=is_ultra,
+                                  accent=COLORS["accent"], gold=COLORS["accent_yellow"])
+        return image, (MARK_WIDTH, MARK_HEIGHT)
+
+    def _refresh_linux_brand_mark(self) -> None:
+        """Re-render the header mark for a new zoom (CTkImage would only stretch it)."""
+        logo = getattr(self, "_header_logo_img", None)
+        if not _IS_LINUX or logo is None:
+            return
+        try:
+            image, _size = self._linux_brand_mark_image(bool(getattr(self, "_header_logo_ultra", False)))
+            logo.configure(light_image=image, dark_image=image)
+        except Exception:
+            pass
+
     def _create_macos_brand_mark(self, title_frame, is_ultra: bool) -> bool:
         """macOS: reserve the logo slot; a Core Animation layer draws the mark.
 
@@ -7656,8 +7677,14 @@ class WayfinderApp(ctk.CTk):
                 # Cosmic signature: the brand arrow "in space" with a baked, static
                 # stardust trail (placement A · visible). Works for BOTH tiers — the
                 # Ultra gold glow composites on top of the trail inside the helper.
-                logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
+                if _IS_LINUX:
+                    # The Mac's mark (arrow + a few crisp stardust points), drawn
+                    # for the current zoom so it is never a stretched 24 px bitmap.
+                    logo_img, display_size = self._linux_brand_mark_image(is_ultra)
+                else:
+                    logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
                 self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
+                self._header_logo_ultra = is_ultra
                 logo_label = ctk.CTkLabel(
                     title_frame,
                     image=self._header_logo_img,
