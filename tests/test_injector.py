@@ -974,9 +974,22 @@ class TestXdotoolShiftIsolation:
         assert argv == [
             "xdotool",
             "type", "--clearmodifiers", "--delay", "2", "--args", "1", "--", "C",
+            # A second Shift release after the shifted run (a dropped release
+            # left the rest of a dictation shifted: "... BUGS>").
+            "sleep", f"{SHIFT_ISOLATION_GAP_S:.3f}", "keyup", "Shift_L", "Shift_R",
             "sleep", f"{SHIFT_ISOLATION_GAP_S:.3f}",
             "type", "--clearmodifiers", "--delay", "2", "--args", "1", "--", "an you",
         ]
+
+    def test_every_shifted_run_is_followed_by_a_shift_release(self):
+        argv = build_xdotool_type_command("Don't worry. Just WORRY about bugs.", 4)
+        runs = [i for i, a in enumerate(argv) if a == "type"]
+        for i in runs:
+            seg = argv[i + 7]
+            after = argv[i + 8:i + 13]
+            if seg[0].isupper() or seg[0] in "?!:\"<>":
+                assert after == ["sleep", f"{SHIFT_ISOLATION_GAP_S:.3f}",
+                                 "keyup", "Shift_L", "Shift_R"], (seg, after)
 
     def test_build_command_single_run_has_no_sleep(self):
         argv = build_xdotool_type_command("no shifts here", 12)
@@ -1080,12 +1093,15 @@ class TestXdotoolFirstKeyWarmup:
 
     def test_warmup_prepends_noop_key_and_gap(self):
         argv = build_xdotool_type_command("hi", 4, warmup=True)
-        assert argv[:6] == [
+        assert argv[:9] == [
             "xdotool", "key", "--clearmodifiers", XWAYLAND_WARMUP_KEY,
             "sleep", f"{XWAYLAND_WARMUP_GAP_S:.3f}",
+            # The warm-up Shift is released again: if its release were
+            # dropped, the whole dictation would be typed shifted.
+            "keyup", "Shift_L", "Shift_R",
         ]
         # The real text still follows as a normal type run.
-        assert argv[6] == "type"
+        assert argv[9] == "type"
         assert "".join(_type_runs(argv)) == "hi"
 
     def test_no_warmup_by_default(self):

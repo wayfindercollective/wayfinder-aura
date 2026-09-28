@@ -176,6 +176,14 @@ XWAYLAND_MIN_KEY_DELAY_MS = 4
 XWAYLAND_WARMUP_KEY = "Shift_L"
 XWAYLAND_WARMUP_GAP_S = 0.020
 
+# --- Dropped Shift release --------------------------------------------------
+# The EI bridge can also drop a *release*: the compositor then keeps Shift held
+# and everything after it is typed shifted (". " becomes "> ", "just" becomes
+# "JUST"), though X itself saw the release. A second release after each shifted
+# run (and after the warm-up tap) repairs it; releasing a key that is already
+# up is a no-op, so it costs nothing when nothing was dropped.
+SHIFT_RELEASE_SWEEP = ("keyup", "Shift_L", "Shift_R")
+
 _TYPOGRAPHY_FOLD = str.maketrans({
     "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'",
     "“": '"', "”": '"', "„": '"', "‟": '"', "″": '"',
@@ -247,6 +255,7 @@ def build_xdotool_type_command(
         argv += [
             "key", "--clearmodifiers", XWAYLAND_WARMUP_KEY,
             "sleep", f"{XWAYLAND_WARMUP_GAP_S:.3f}",
+            *SHIFT_RELEASE_SWEEP,
         ]
     for i, seg in enumerate(split_shift_segments(text)):
         if i:
@@ -255,6 +264,11 @@ def build_xdotool_type_command(
             "type", "--clearmodifiers", "--delay", str(key_delay_ms),
             "--args", "1", "--", seg,
         ]
+        if _char_class(seg[0]) == "shift":
+            # Release Shift again after every shifted run: when the bridge
+            # dropped the real release, the rest of the dictation came out
+            # shifted in the field ("... JUST WORRY ABOUT ... BUGS>").
+            argv += ["sleep", f"{gap_s:.3f}", *SHIFT_RELEASE_SWEEP]
     return argv
 
 
