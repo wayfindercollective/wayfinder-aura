@@ -1282,8 +1282,8 @@ def prime_wayland_injection() -> "tuple[bool, str]":
 
 
 # --- RemoteDesktop portal (Wayland desktops) --------------------------------
-# Characters the compositor's layout has no key for are dropped by KWin and
-# Mutter, so such text is pasted instead: the app's Tk window owns the X11
+# Characters the layout has no plain or Shift key for cannot be typed as keys,
+# so such text is pasted instead: the app's Tk window owns the X11
 # CLIPBOARD (the Flatpak has no clipboard tools) and KWin hands it to Wayland
 # apps; then the portal presses Ctrl+V. The app registers the clipboard hooks.
 _PORTAL_CLIPBOARD_WRITE = None   # Callable[[str], bool], set by the app
@@ -1298,38 +1298,6 @@ def set_portal_clipboard_hooks(write, read=None) -> None:
     _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ = write, read
 
 
-class _X11Keymap:
-    """``has_keysym(keysym)``: does the current layout have a key for it?
-    XWayland mirrors the compositor's layout. Connects on first use (plain
-    ASCII never needs it); unknown = assume yes."""
-
-    def __init__(self):
-        self._disp = None
-        self._failed = False
-
-    def __call__(self, keysym: int) -> bool:
-        if self._disp is None and not self._failed:
-            try:
-                from Xlib import display
-                self._disp = display.Display()
-            except Exception:
-                self._failed = True
-        if self._disp is None:
-            return True
-        try:
-            return bool(self._disp.keysym_to_keycode(keysym))
-        except Exception:
-            return True
-
-    def close(self) -> None:
-        if self._disp is not None:
-            try:
-                self._disp.close()
-            except Exception:
-                pass
-            self._disp = None
-
-
 def _portal_fallback_tool() -> str:
     from ..utils.platform import is_xdotool_available
     return "xdotool" if is_xdotool_available() else "none"
@@ -1337,10 +1305,13 @@ def _portal_fallback_tool() -> str:
 
 def _portal_press(combo: str, hold_s: float = 0.0) -> None:
     from . import portal_keyboard
+    layout = portal_keyboard.X11Layout()
     try:
-        portal_keyboard.keyboard().press_keys(combo, hold_s)
+        portal_keyboard.keyboard().press_keys(combo, hold_s, layout)
     except portal_keyboard.PortalKeyboardError as e:
         raise InjectionError(str(e)) from e
+    finally:
+        layout.close()
 
 
 def _portal_paste(text: str) -> None:
@@ -1370,24 +1341,28 @@ def _inject_text_portal(text: str, typing_speed: str = "instant") -> None:
     key_delay = TYPING_SPEEDS.get(typing_speed, (2, 2))[0]
     text = fold_typography_for_typing(text)
     _require_modifier_release()
-    keymap = _X11Keymap()
+    layout = portal_keyboard.X11Layout()
     try:
-        missing = portal_keyboard.untypeable_chars(text, keymap)
+        missing = portal_keyboard.untypeable_chars(text, layout) if layout.available else set()
+        if missing:
+            if _PORTAL_CLIPBOARD_WRITE is not None:
+                layout.close()
+                _portal_paste(text)
+                return
+            # Nothing can paste: keep the letters rather than drop them.
+            text = portal_keyboard.ascii_fold(text)
+            if portal_keyboard.untypeable_chars(text, layout):
+                text = "".join(ch for ch in text if layout.key_for(
+                    portal_keyboard.keysym_for_char(ch)) is not None)
+        try:
+            portal_keyboard.keyboard().type_text(text, key_delay, layout)
+        except portal_keyboard.PortalKeyboardError as e:
+            err = InjectionError(str(e))
+            # Part of the text already landed: a fallback would type it twice.
+            err.uncertain_delivery = bool(getattr(e, "typed", 0))
+            raise err from e
     finally:
-        keymap.close()
-    if missing:
-        if _PORTAL_CLIPBOARD_WRITE is not None:
-            _portal_paste(text)
-            return
-        # Nothing can paste: keep the letters rather than drop them.
-        text = portal_keyboard.ascii_fold(text)
-    try:
-        portal_keyboard.keyboard().type_text(text, key_delay)
-    except portal_keyboard.PortalKeyboardError as e:
-        err = InjectionError(str(e))
-        # Part of the text already landed: a fallback would type it twice.
-        err.uncertain_delivery = bool(getattr(e, "typed", 0))
-        raise err from e
+        layout.close()
 
 
 def _clipboard_write_linux(text: str) -> None:

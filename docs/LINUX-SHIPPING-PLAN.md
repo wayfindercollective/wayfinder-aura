@@ -31,7 +31,12 @@ behaves the same everywhere.
    2026-09-28): keyboard-only session, `persist_mode=2`, restore token in
    `portal-keyboard.json` next to the config, started at app launch on
    Wayland desktops so the approval dialog appears once, never mid-dictation.
-   Text is typed as keysyms; Enter, Ctrl+V and Gamer mode's held keys too.
+   Text is typed as key codes from the current layout (XWayland mirrors the
+   compositor's keymap), with Shift pressed around Shift-level runs; Enter,
+   Ctrl+V and Gamer mode's held keys too. Keysyms were the first design and
+   remain the fallback without an X server: KWin 6.4 (SteamOS 3.8) types a
+   keysym's key without Shift into XWayland windows ("X11: Hello, World!"
+   arrived as "x11; hello, world1"), and XWayland is where games live.
    Characters the keyboard layout has no key for (é on a US layout, emoji) are
    pasted: the Tk window owns the X11 clipboard, KWin hands it to Wayland
    apps, the portal presses Ctrl+V. Falls back to xdotool when the portal is
@@ -85,7 +90,7 @@ Manual: a short pass on real hardware and games.
 | Setup | How it is covered | Status |
 |---|---|---|
 | KDE Plasma 6 Wayland (desktop) | off-screen KWin rig (same KWin/portal versions) + live on Peter's machine | rig passed; live pending |
-| KDE Plasma 6 Wayland (SteamOS desktop mode) | Steam machine | pending |
+| KDE Plasma 6.4 Wayland (SteamOS 3.8 desktop mode) | same isolated rig on the Steam machine (KWin 6.4.3, portal-kde 6.4.3; its CreateSession needs KWin's screencast protocol, so the rig's KWin runs with permission checks off) | rig passed with key codes (keysyms lost Shift in XWayland); live pending |
 | GNOME 45+ Wayland | not available here: unit tests + portal spec; needs a manual pass | open |
 | KDE X11 | nested X server harness (xdotool path) | covered by harness |
 | SteamOS Game Mode | gamescope harness; Steam machine | pending |

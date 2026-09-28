@@ -37,16 +37,39 @@ def test_keysym_for_name():
         pk.keysym_for_name("hyperdrive")
 
 
-def test_untypeable_chars_asks_the_layout_only_for_non_ascii():
-    asked = []
+class _Disp:
+    """keysym_to_keycodes for a US layout: (X keycode, index) pairs."""
+    US = {0x61: 38, 0x62: 56, 0x68: 43, 0x69: 31, 0x31: 10, 0x3B: 47, 0x76: 55,
+          0x20: 65, 0xFF0D: 36, 0xFFE1: 50, 0xFFE3: 37}
+    SHIFTED = {0x41: 38, 0x48: 43, 0x21: 10, 0x3A: 47}
 
-    def has_keysym(ks):
-        asked.append(ks)
-        return ks == 0xE9  # this layout has é, nothing else
+    def keysym_to_keycodes(self, keysym):
+        if keysym in self.US:
+            yield self.US[keysym], 0
+        if keysym in self.SHIFTED:
+            yield self.SHIFTED[keysym], 1
+        if keysym == 0xE9:
+            yield 26, 4          # é on an AltGr level only: not typeable
 
-    missing = pk.untypeable_chars("Hello café naïve 😀\n", has_keysym)
-    assert missing == {"ï", "😀"}
-    assert all(ks > 0x7E for ks in asked)
+    def close(self):
+        pass
+
+
+def test_layout_gives_evdev_codes_and_the_shift_level():
+    layout = pk.X11Layout(display_factory=_Disp)
+    assert layout.available
+    assert layout.key_for(0x61) == (30, False)       # a  (X 38 - 8)
+    assert layout.key_for(0x41) == (30, True)        # A: same key, Shift
+    assert layout.key_for(0x21) == (2, True)         # ! is Shift+1
+    assert layout.key_for(0xE9) is None              # AltGr level: pasted instead
+    assert pk.untypeable_chars("Hi! é", layout) == {"é"}
+
+
+def test_no_x_server_means_no_layout():
+    def boom():
+        raise OSError("no display")
+    layout = pk.X11Layout(display_factory=boom)
+    assert not layout.available and layout.key_for(0x61) is None
 
 
 def test_ascii_fold_keeps_the_letters():
@@ -85,6 +108,7 @@ class _FakeBus:
         self.subs = {}
         self.calls = []
         self.keys = []
+        self.codes = []
         self._pending = []
         self._lock = threading.Lock()
         self._n = 0
@@ -103,11 +127,14 @@ class _FakeBus:
     def call_sync(self, dest, path, iface, method, params, reply_type, flags, timeout, cancel):
         fmt, body = params if params is not None else (None, None)
         self.calls.append((iface, method, fmt, body))
-        if method == "NotifyKeyboardKeysym":
+        if method in ("NotifyKeyboardKeysym", "NotifyKeyboardKeycode"):
             assert fmt == "(oa{sv}iu)" and body[0] == SESSION
-            if self.fail_after is not None and len(self.keys) >= self.fail_after:
+            if self.fail_after is not None and len(self.keys) + len(self.codes) >= self.fail_after:
                 raise RuntimeError("session gone")
-            self.keys.append((body[2], body[3]))
+            if method == "NotifyKeyboardKeycode":
+                self.codes.append((body[2], body[3]))
+            else:
+                self.keys.append((body[2], body[3]))
             return None
         if method == "Close":
             return None
@@ -222,6 +249,38 @@ def test_approved_session_types_every_character(monkeypatch, tmp_path):
     assert _settle(kb, kb.IDLE) == kb.IDLE and not kb.ready()
 
 
+def test_layout_typing_sends_keys_with_shift_around_shifted_runs(monkeypatch, tmp_path):
+    """KWin 6.4 drops Shift for keysyms typed into XWayland windows; keys
+    with an explicit Shift type the same everywhere."""
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    try:
+        kb.start()
+        _settle(kb, kb.READY)
+        kb.type_text("HA! a\n", 0, pk.X11Layout(display_factory=_Disp))
+        shift = 42
+        assert bus.codes == [
+            (shift, 1), (35, 1), (35, 0), (30, 1), (30, 0), (2, 1), (2, 0),   # "HA!" under Shift
+            (shift, 0), (57, 1), (57, 0), (30, 1), (30, 0), (28, 1), (28, 0),  # " a\n"
+        ]
+        assert bus.keys == []
+    finally:
+        kb.close()
+
+
+def test_layout_typing_reports_what_landed_when_a_key_fails(monkeypatch, tmp_path):
+    bus = _FakeBus(fail_after=3)          # Shift down, H down, H up, then gone
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    try:
+        kb.start()
+        _settle(kb, kb.READY)
+        with pytest.raises(pk.PortalKeyboardError) as err:
+            kb.type_text("HA", 0, pk.X11Layout(display_factory=_Disp))
+        assert err.value.typed == 1
+    finally:
+        kb.close()
+
+
 def test_combo_presses_modifiers_first_and_releases_them_last(monkeypatch, tmp_path):
     bus = _FakeBus()
     kb, _path = _session(monkeypatch, tmp_path, bus)
@@ -230,6 +289,8 @@ def test_combo_presses_modifiers_first_and_releases_them_last(monkeypatch, tmp_p
         _settle(kb, kb.READY)
         kb.press_keys("ctrl+v")
         assert bus.keys == [(0xFFE3, 1), (0x76, 1), (0x76, 0), (0xFFE3, 0)]
+        kb.press_keys("ctrl+v", 0, pk.X11Layout(display_factory=_Disp))
+        assert bus.codes == [(29, 1), (47, 1), (47, 0), (29, 0)]
     finally:
         kb.close()
 
@@ -344,14 +405,14 @@ class _Keyboard:
         self.pressed = []
         self.fail_at = fail_at
 
-    def type_text(self, text, delay):
+    def type_text(self, text, delay, layout=None):
         if self.fail_at is not None:
             err = pk.PortalKeyboardError("gone")
             err.typed = self.fail_at
             raise err
         self.typed.append((text, delay))
 
-    def press_keys(self, combo, hold_s=0.0):
+    def press_keys(self, combo, hold_s=0.0, layout=None):
         self.pressed.append(combo)
 
 
@@ -363,7 +424,7 @@ def portal_ready(monkeypatch):
     monkeypatch.setattr(pk, "ready", lambda: True)
     monkeypatch.setattr(pk, "keyboard", lambda: kb)
     monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
-    monkeypatch.setattr(injector, "_X11Keymap", lambda: _Layout(set()))
+    monkeypatch.setattr(pk, "X11Layout", lambda: _Layout(set()))
     monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE", None)
     monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", None)
     monkeypatch.setattr("sys.platform", "linux")
@@ -371,13 +432,17 @@ def portal_ready(monkeypatch):
 
 
 class _Layout:
-    """has_keysym for a layout that has exactly ``keysyms`` beyond ASCII."""
+    """A layout with every ASCII key plus exactly ``extra`` keysyms."""
 
-    def __init__(self, keysyms):
-        self.keysyms = keysyms
+    available = True
 
-    def __call__(self, keysym):
-        return keysym in self.keysyms
+    def __init__(self, extra):
+        self.extra = extra
+
+    def key_for(self, keysym):
+        return (30, False) if keysym <= 0x7E or keysym in self.extra else None
+
+    __call__ = key_for
 
     def close(self):
         pass

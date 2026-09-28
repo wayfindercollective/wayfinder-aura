@@ -336,12 +336,15 @@ def press_held(keys: str, hold_s: float = KEY_HOLD_S) -> None:
     _require_modifier_release()
     kb = _portal()
     if kb is not None:
-        from .portal_keyboard import PortalKeyboardError
+        from .portal_keyboard import PortalKeyboardError, X11Layout
+        layout = X11Layout()
         try:
-            kb.press_keys(keys, max(0.0, hold_s))
+            kb.press_keys(keys, max(0.0, hold_s), layout)
             return
         except PortalKeyboardError as e:
             raise InjectionError(str(e)) from e
+        finally:
+            layout.close()
     _xdotool("keydown", "--clearmodifiers", keys)
     time.sleep(max(0.0, hold_s))
     _xdotool("keyup", "--clearmodifiers", keys)
@@ -363,18 +366,19 @@ def type_text(text: str) -> None:
     _require_modifier_release()
     kb = _portal()
     if kb is not None:
-        from .injector import _X11Keymap
-        from .portal_keyboard import PortalKeyboardError, ascii_fold, untypeable_chars
+        from .portal_keyboard import (PortalKeyboardError, X11Layout, ascii_fold,
+                                      keysym_for_char, untypeable_chars)
         text = fold_typography_for_typing(text)
-        keymap = _X11Keymap()
+        layout = X11Layout()
         try:
-            if untypeable_chars(text, keymap):
-                text = ascii_fold(text)  # no paste in these chats: keep the letters
-        finally:
-            keymap.close()
-        try:
-            kb.type_text(text, TYPE_DELAY_MS)
+            if layout.available and untypeable_chars(text, layout):
+                # No paste in these chats: keep the letters, drop what has no key.
+                text = "".join(ch for ch in ascii_fold(text)
+                               if layout.key_for(keysym_for_char(ch)) is not None)
+            kb.type_text(text, TYPE_DELAY_MS, layout)
             return
         except PortalKeyboardError as e:
             raise InjectionError(f"{e} (typed {getattr(e, 'typed', 0)} characters)") from e
+        finally:
+            layout.close()
     _xdotool("type", "--clearmodifiers", "--delay", str(TYPE_DELAY_MS), "--", text)

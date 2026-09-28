@@ -9,7 +9,16 @@ alike (Wine and Proton games included) and never cross XWayland's XTest bridge
 that dropped keys.
 
     CreateSession → SelectDevices(keyboard, persist until revoked) → Start
-    → NotifyKeyboardKeysym press/release for every character
+    → NotifyKeyboardKeycode press/release for every character
+
+Keys are sent the way a keyboard sends them: the key that carries the
+character in the current layout, with Shift pressed around it when the
+character is on the Shift level. The layout is read from the X server's
+keymap (XWayland mirrors the compositor's; X keycode - 8 = evdev code).
+Keysyms were tried first and are kept as the fallback when no X server is
+reachable: KWin 6.4 (SteamOS 3.8) types a keysym's key without Shift into
+XWayland windows ("Hello!" arrived as "hello1"), and XWayland is where
+Wine and Proton games live.
 
 Start shows the desktop's "allow remote control" dialog once. The restore
 token from Start (stored next to the config) lets every later launch start
@@ -43,6 +52,7 @@ _SESSION_IFACE = "org.freedesktop.portal.Session"
 _REMOTE_IFACE = "org.freedesktop.portal.RemoteDesktop"
 
 DEVICE_KEYBOARD = 1
+KEY_LEFTSHIFT = 42  # evdev; used when the layout has no Shift_L
 PERSIST_UNTIL_REVOKED = 2
 _RESPONSE_OK = 0
 _RESPONSE_CANCELLED = 1
@@ -89,20 +99,68 @@ def keysym_for_name(name: str) -> int:
     raise PortalKeyboardError(f"unknown key name {name!r}")
 
 
-def untypeable_chars(text: str, has_keysym: Callable[[int], bool]) -> set:
-    """Characters the compositor's keymap has no key for.
+def untypeable_chars(text: str, key_for: Callable[[int], Optional[tuple]]) -> set:
+    """Characters the current layout has no plain or Shift key for.
 
-    KWin and Mutter type a keysym only when the current layout has a key for
-    it (pressing Shift/AltGr as needed); anything else is dropped. The caller
-    pastes such text instead of losing letters.
+    Typing them would drop them (or need AltGr, which the portal cannot be
+    trusted to add), so the caller pastes such text instead.
     """
-    missing = set()
-    for ch in set(text):
-        if ch in _CHAR_KEYSYMS or 0x20 <= ord(ch) <= 0x7E:
-            continue
-        if not has_keysym(keysym_for_char(ch)):
-            missing.add(ch)
-    return missing
+    return {ch for ch in set(text) if key_for(keysym_for_char(ch)) is None}
+
+
+class X11Layout:
+    """Where each keysym sits on the keyboard: ``key_for(keysym)`` gives
+    (evdev keycode, needs Shift) or None. Read from the X server's keymap,
+    which XWayland keeps equal to the compositor's layout. Connects on first
+    use; ``available`` is False when there is no X server to ask.
+    """
+
+    def __init__(self, display_factory=None):
+        self._factory = display_factory
+        self._disp = None
+        self._failed = False
+
+    def _display(self):
+        if self._disp is None and not self._failed:
+            try:
+                if self._factory is not None:
+                    self._disp = self._factory()
+                else:
+                    from Xlib import display
+                    self._disp = display.Display()
+            except Exception:
+                self._failed = True
+        return self._disp
+
+    @property
+    def available(self) -> bool:
+        return self._display() is not None
+
+    def key_for(self, keysym: int) -> Optional[tuple]:
+        disp = self._display()
+        if disp is None:
+            return None
+        try:
+            codes = list(disp.keysym_to_keycodes(keysym))
+        except Exception:
+            return None
+        # Core keymap index: 0 = plain, 1 = Shift (2, 3 = second group,
+        # 4, 5 = AltGr levels: not typed, pasted instead).
+        for level in (0, 1):
+            for code, index in codes:
+                if index == level and code >= 8:
+                    return code - 8, level == 1
+        return None
+
+    __call__ = key_for
+
+    def close(self) -> None:
+        if self._disp is not None:
+            try:
+                self._disp.close()
+            except Exception:
+                pass
+            self._disp = None
 
 
 def ascii_fold(text: str) -> str:
@@ -523,7 +581,7 @@ class PortalKeyboard:
                 pass
 
     # -- keys -----------------------------------------------------------------
-    def _notify(self, keysym: int, pressed: bool) -> None:
+    def _notify(self, method: str, value: int, pressed: bool) -> None:
         bus, session = self._bus, self._session
         if bus is None or not session:
             raise PortalKeyboardError("the portal keyboard is not ready")
@@ -532,51 +590,95 @@ class PortalKeyboard:
             raise PortalKeyboardError("PyGObject unavailable")
         Gio, GLib = gi
         try:
-            bus.call_sync(_PORTAL_DEST, _PORTAL_PATH, _REMOTE_IFACE, "NotifyKeyboardKeysym",
-                          GLib.Variant("(oa{sv}iu)", (session, {}, int(keysym), 1 if pressed else 0)),
+            bus.call_sync(_PORTAL_DEST, _PORTAL_PATH, _REMOTE_IFACE, method,
+                          GLib.Variant("(oa{sv}iu)", (session, {}, int(value), 1 if pressed else 0)),
                           None, Gio.DBusCallFlags.NONE, _CALL_TIMEOUT_MS, None)
         except Exception as exc:
             raise PortalKeyboardError(f"portal key failed: {exc}") from exc
 
-    def _tap(self, keysym: int) -> None:
-        self._notify(keysym, True)
+    def _key(self, code: int, pressed: bool) -> None:
+        self._notify("NotifyKeyboardKeycode", code, pressed)
+
+    def _keysym(self, keysym: int, pressed: bool) -> None:
+        self._notify("NotifyKeyboardKeysym", keysym, pressed)
+
+    @staticmethod
+    def _tap(send, value: int) -> None:
+        send(value, True)
         # Always release, retrying once: a key left down auto-repeats in the
         # target app until the next press.
         try:
-            self._notify(keysym, False)
+            send(value, False)
         except PortalKeyboardError:
-            self._notify(keysym, False)
+            send(value, False)
 
-    def type_text(self, text: str, key_delay_ms: float = 0.0) -> None:
-        """Type ``text`` as key presses; Enter for newlines."""
+    def type_text(self, text: str, key_delay_ms: float = 0.0,
+                  layout: Optional[X11Layout] = None) -> None:
+        """Type ``text`` as key presses; Enter for newlines.
+
+        With a ``layout``: key codes, Shift pressed around Shift-level runs.
+        Without one: keysyms (the compositor picks the key).
+        """
         delay = max(0.0, key_delay_ms) / 1000.0
         with self._type_lock:
-            for typed, ch in enumerate(text):
-                try:
-                    self._tap(keysym_for_char(ch))
-                except PortalKeyboardError as e:
-                    e.typed = typed  # characters that already landed
-                    raise
-                if delay:
-                    time.sleep(delay)
+            if layout is None or not layout.available:
+                for typed, ch in enumerate(text):
+                    try:
+                        self._tap(self._keysym, keysym_for_char(ch))
+                    except PortalKeyboardError as e:
+                        e.typed = typed
+                        raise
+                    if delay:
+                        time.sleep(delay)
+                return
+            shift_code = (layout.key_for(0xFFE1) or (KEY_LEFTSHIFT, False))[0]
+            shift_down = False
+            try:
+                for typed, ch in enumerate(text):
+                    try:
+                        key = layout.key_for(keysym_for_char(ch))
+                        if key is None:
+                            raise PortalKeyboardError(f"no key for {ch!r} in this layout")
+                        code, shifted = key
+                        if shifted != shift_down:
+                            self._key(shift_code, shifted)
+                            shift_down = shifted
+                        self._tap(self._key, code)
+                    except PortalKeyboardError as e:
+                        e.typed = typed  # characters that already landed
+                        raise
+                    if delay:
+                        time.sleep(delay)
+            finally:
+                if shift_down:
+                    try:
+                        self._key(shift_code, False)
+                    except PortalKeyboardError:
+                        pass
 
-    def press_keys(self, combo: str, hold_s: float = 0.0) -> None:
+    def press_keys(self, combo: str, hold_s: float = 0.0,
+                   layout: Optional[X11Layout] = None) -> None:
         """Press "Return", "ctrl+v"...: modifiers first, released last."""
         keysyms = [keysym_for_name(part) for part in combo.split("+") if part.strip()]
         if not keysyms:
             return
+        send, values = self._keysym, keysyms
+        if layout is not None and layout.available:
+            keys = [layout.key_for(ks) for ks in keysyms]
+            if all(key is not None for key in keys):
+                send, values = self._key, [key[0] for key in keys]
         with self._type_lock:
             pressed: list = []
             try:
-                for ks in keysyms:
-                    self._notify(ks, True)
-                    pressed.append(ks)
+                for value in values:
+                    send(value, True)
+                    pressed.append(value)
                 if hold_s > 0:
                     time.sleep(hold_s)
             finally:
-                for ks in reversed(pressed):
+                for value in reversed(pressed):
                     try:
-                        self._notify(ks, False)
+                        send(value, False)
                     except PortalKeyboardError:
                         pass
 
