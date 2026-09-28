@@ -13,6 +13,7 @@ from typing import Any
 
 from wayfinder.utils.platform import (
     WAYFINDER_FLATPAK_ID,
+    get_cache_dir,
     get_legacy_flatpak_model_dirs,
     get_steam_platform,
     get_user_llm_models_dir,
@@ -79,7 +80,20 @@ PROJECT_ROOT = PACKAGE_DIR.parent.parent  # src/wayfinder -> project root
 # --filesystem=xdg-run/wayfinder-aura:create), so bind the socket under it instead.
 # Falls back to /tmp where no runtime dir exists (e.g. macOS) — unchanged behavior there.
 _runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-if _runtime_dir and os.path.isdir(_runtime_dir):
+if sys.platform == "darwin":
+    # macOS does not define XDG_RUNTIME_DIR. A predictable socket directly in
+    # /tmp can be pre-created by another local account and prevents Aura from
+    # starting its control channel. Keep every runtime artifact in a private,
+    # per-user cache directory instead.
+    _macos_runtime_dir = get_cache_dir() / "runtime"
+    _macos_runtime_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(_macos_runtime_dir, 0o700)
+    except OSError:
+        pass
+    SOCKET_PATH = str(_macos_runtime_dir / "wayfinder-aura.sock")
+    STATUS_PATH = str(_macos_runtime_dir / "status.json")
+elif _runtime_dir and os.path.isdir(_runtime_dir):
     SOCKET_PATH = os.path.join(_runtime_dir, "wayfinder-aura", "wayfinder-aura.sock")
     # A tiny status breadcrumb (tab + state) written next to the socket. The control
     # socket is fire-and-forget with no reply, so this file is how an external harness
@@ -100,20 +114,20 @@ elif IS_APPIMAGE and APPDIR:
 else:
     ICON_PATH = PROJECT_ROOT / "assets" / "icon.png"
 
-# Preferred local post-processing models, best-first. The June 2026 tone eval
-# found Gemma 3 1B the most consistent "gentle guide" cleaner — it reliably
-# applies per-tone formatting (e.g. professional "oh thats tight bro" ->
-# "Oh, very cool brother.") where Qwen 3.5 2B was inconsistent and LFM2.5 echoed
-# the input verbatim. Keep Qwen 3.5 / 2.5 as fallbacks. New models added here are
-# picked up automatically by _pick_llm (no per-environment edits needed).
+# Preferred local post-processing models, best-first among those INSTALLED.
+# The 2026-09-24 speech x style matrix (docs/EVAL-2026-09-24.md) graded Qwen3
+# 4B A on every style; Gemma 3 1B reworded meaning ("diff" -> "difference")
+# and Qwen 3.5 2B mostly echoed its input, so styles need Qwen3 4B (Ultra).
+# Normal needs no model at all (instant filler removal).
 _LLM_PREFERENCE = [
+    "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
     "google_gemma-3-1b-it-Q4_K_M.gguf",
     "Qwen3.5-2B-Q4_K_M.gguf",
-    # Strong/caricature flagship — preferred over the legacy Qwen 2.5 as a
-    # default, but Gemma/Qwen3.5 stay first (faster for everyday cleanup).
-    "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
     "qwen2.5-1.5b-instruct-q4_k_m.gguf",
 ]
+# When nothing is installed yet, the default target is the free model: a Free
+# install must never default to an Ultra-only download.
+_LLM_DEFAULT_DOWNLOAD = "google_gemma-3-1b-it-Q4_K_M.gguf"
 
 
 def _pick_llm(*dirs: str) -> str:
@@ -124,7 +138,7 @@ def _pick_llm(*dirs: str) -> str:
             p = os.path.join(d, fname)
             if os.path.exists(p):
                 return p
-    return os.path.join(dirs[-1], _LLM_PREFERENCE[0])
+    return os.path.join(dirs[-1], _LLM_DEFAULT_DOWNLOAD)
 
 
 def _windows_bundled_whisper() -> str | None:
@@ -179,7 +193,17 @@ else:
     _default_whisper_binary = (
         _windows_bundled_whisper() or f"~/whisper.cpp/build/bin/whisper-cli{_exe}"
     )
-    _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
+    if sys.platform == "darwin":
+        _default_model_path = str(
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "wayfinder-aura"
+            / "whisper-models"
+            / "ggml-base.en.bin"
+        )
+    else:
+        _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
     # LLM model for post-processing - best-first from _LLM_PREFERENCE.
     # Platform-appropriate data dir (macOS: ~/Library/Application Support/,
     # Linux: ~/.local/share/). The Windows default has always been
@@ -191,27 +215,51 @@ else:
     _default_llm_model_path = _pick_llm(_user_llm_dir)
     _default_llama_binary = f"~/llama.cpp/build/bin/llama-cli{_exe}"
 
+# Platform-native shortcut defaults. macOS records with Right Option alone:
+# tap to start/stop, hold to talk (released = stop). Every Mac keyboard has
+# it — including third-party keyboards that cannot send Fn (Keychron, Logitech
+# in some modes), where the earlier Fn+Space default was silently dead — and a
+# bare Right Option collides with nothing: Spotlight is Cmd+Space, input
+# sources are Ctrl(+Option)+Space, Raycast/Alfred/ChatGPT use Option+Space,
+# and Option+letter still types accents (any other key cancels the gesture).
+if sys.platform == "darwin":
+    _default_hotkey_key = 100  # Right Option
+    _default_hotkey_modifiers = []
+    _default_style_toggle_key = 28  # Enter
+    _default_style_toggle_modifiers = ["fn"]
+    _default_overlay_anchor = "bottom-right"
+else:
+    _default_hotkey_key = 57  # Space
+    _default_hotkey_modifiers = ["ctrl", "alt"]
+    _default_style_toggle_key = 28  # Enter
+    _default_style_toggle_modifiers = ["ctrl", "alt"]
+    _default_overlay_anchor = "bottom-center"
+
+
 # Default configuration values
 DEFAULT_CONFIG: dict[str, Any] = {
     # Whisper settings
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
     
-    # Hotkey settings — Ctrl+Alt+Space / Ctrl+Alt+Enter by default.
+    # Hotkey settings — Fn+Space on macOS; Ctrl+Alt+Space elsewhere.
     # Chosen 2026-07 over Super+F2: first-run users didn't know what the
     # "Super" key was (launch feedback), and every keyboard labels Ctrl/Alt/
     # Space. Still game-safe: bare F-keys collide with countless game keybinds
     # (e.g. DAoC qbinds) but Ctrl+Alt chords are as rare in games as Super+F*,
     # and the GameMode pause covers the rest. DE conflicts checked: unassigned
     # by default on KDE and GNOME. Existing user configs keep what they saved.
-    "hotkey_key": 57,  # Space
-    "hotkey_modifiers": ["ctrl", "alt"],
+    "hotkey_key": _default_hotkey_key,  # Space; Right Option on macOS
+    "hotkey_modifiers": _default_hotkey_modifiers,
 
     # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal).
     # Enter (not a letter): KEY_CODES/display maps carry no letter keys, and
-    # Ctrl+Alt+letter chords collide with IDE bindings (e.g. Ctrl+Alt+S).
-    "style_toggle_key": 28,  # Enter
-    "style_toggle_modifiers": ["ctrl", "alt"],
+    # Non-macOS Ctrl+Alt+letter chords collide with IDE bindings (e.g. Ctrl+Alt+S).
+    "style_toggle_key": _default_style_toggle_key,
+    "style_toggle_modifiers": _default_style_toggle_modifiers,
+    "macos_hotkey_defaults_v2": sys.platform == "darwin",
+    "macos_hotkey_defaults_v3": sys.platform == "darwin",
+    "macos_overlay_anchor_defaults_v1": sys.platform == "darwin",
 
     # Auto press Enter after dictation (opt-in): dictate → text lands → Enter
     # fires, so chat inputs submit hands-free. Off by default — implicitly
@@ -254,6 +302,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # UI settings
     "start_minimized": False,
+    "enable_tray_icon": True,
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
     
@@ -261,8 +310,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "processing_mode": "local",  # local | remote
     
     # Accuracy enhancement settings
-    "beam_size": 5,  # Beam search size (1-5 recommended, higher is slow)
-    "best_of": 3,  # Number of best candidates to consider
+    # beam_size/best_of (and accuracy_mode) now only feed Faster-Whisper.
+    # whisper.cpp decodes greedily: beam 2-8 never beat greedy in testing
+    # (docs/EVAL-2026-09-24.md). Hidden override, clamped to 1-8:
+    "whisper_beam_size": 1,
+    "beam_size": 5,  # Faster-Whisper beam search size
+    "best_of": 3,  # Faster-Whisper candidates for temperature fallback
     "language": "en",  # Language code: "en", "auto" for auto-detect
     "entropy_threshold": 2.6,  # Filter low-confidence outputs (higher = accept more)
     "no_speech_threshold": 0.5,  # Silence detection threshold (lower = more sensitive)
@@ -274,6 +327,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Vocabulary and hallucination suppression
     "custom_vocabulary": [],  # User's personal terms appended to prompt
+    "vocabulary_replacements": [],  # Ultra: [[heard, write], ...] corrections
+    "normal_llm_cleanup": False,  # Normal style via the cleanup model (default: instant filler removal)
     "suppress_nst": False,  # Suppress non-speech tokens (can drop words if True)
     
     # Voice profile learning (auto-enabled when output_tone is "personal")
@@ -326,6 +381,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Master switch for the on-screen status pill. Off = no visual overlay; a
     # tray-only overlay subprocess still hosts the Qt StatusNotifier tray on Linux.
     "overlay_enabled": True,
+    # macOS Gamer mode: when World of Warcraft (or another supported MMO) is in
+    # front, prime Whisper with its chat slang, keep cleanup Normal, then open
+    # its chat box, paste and send (src/wayfinder/core/macos_game_chat.py).
+    "gamer_mode": True,
+    "game_chat_send": True,
     # SteamOS Game Mode dictation (audio cues + rumble, no overlay). This module is the
     # single source of DEFAULT_CONFIG — wayfinder_main.py imports it (no mirror to keep in sync).
     "game_mode_dictation": False,
@@ -354,7 +414,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Negative = higher on screen, positive = lower (can sit near/over the panel).
     # UI slider spans roughly -900..+120 (asymmetric: upward travel needs more range).
     "overlay_vertical_offset": 0,
-    "overlay_anchor": "bottom-center",  # {top,bottom}-{left,center,right}
+    "overlay_anchor": _default_overlay_anchor,  # {top,bottom}-{left,center,right}
     # Overlay render quality: "high" = the ambient corner wave animates continuously (smoothest
     # look); "performance" = the overlay holds still when idle to save CPU/battery on handhelds.
     # The wave still animates while recording/processing. Decks default to the battery-friendly
@@ -411,7 +471,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Cloud API settings (keys stored in config, loaded into environment on startup)
     "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
-    "anthropic_model": "claude-3-haiku-20240307",  # Claude model to use
+    # Claude 3 Haiku was retired 2026-04-20; macOS ships the current Haiku.
+    "anthropic_model": (
+        "claude-haiku-4-5-20251001" if sys.platform == "darwin" else "claude-3-haiku-20240307"
+    ),
     "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
     "openai_whisper_model": "whisper-1",  # OpenAI Whisper transcription model
@@ -485,6 +548,9 @@ KEY_CODES: dict[str, int] = {
     "mouse_forward": 277,   # BTN_FORWARD (0x115)
     "mouse_back": 278,      # BTN_BACK (0x116)
 }
+if sys.platform == "darwin":
+    # Bare right-hand modifiers: the macOS tap/hold record hotkey.
+    KEY_CODES.update({"right_option": 100, "right_command": 126})
 
 # Modifier key codes (left and right variants)
 MODIFIER_CODES: dict[str, list[int]] = {
@@ -1012,6 +1078,7 @@ def load_config() -> dict:
             # Merge with defaults (user config overrides defaults)
             config = DEFAULT_CONFIG.copy()
             config.update(user_config)
+            _save_migrations = False
 
             # Duck Amount was historically limited to 50 in the UI. Keep every
             # valid saved choice while accepting the expanded 0-100 public range;
@@ -1082,6 +1149,46 @@ def load_config() -> dict:
                 if _key not in user_config:
                     config[_key] = _legacy
 
+            # The first macOS port inherited Ctrl+Alt+Space from Linux. On a
+            # Mac that reads as Control+Option+Space, colliding with both input
+            # source switching and VoiceOver. Migrate only the exact shipped
+            # defaults once; custom shortcuts remain untouched.
+            if sys.platform == "darwin" and not user_config.get("macos_hotkey_defaults_v2", False):
+                if (
+                    config.get("hotkey_key") == 57
+                    and config.get("hotkey_modifiers") == ["ctrl", "alt"]
+                ):
+                    config["hotkey_modifiers"] = ["fn"]
+                if (
+                    config.get("style_toggle_key") == 28
+                    and config.get("style_toggle_modifiers") == ["ctrl", "alt"]
+                ):
+                    config["style_toggle_modifiers"] = ["fn"]
+                config["macos_hotkey_defaults_v2"] = True
+                _save_migrations = True
+
+            # Fn+Space (v2) could not be pressed on keyboards without an Fn
+            # key the Mac can see. Move only that exact untouched default to
+            # Right Option tap/hold; custom shortcuts remain untouched.
+            if sys.platform == "darwin" and not user_config.get("macos_hotkey_defaults_v3", False):
+                if (
+                    config.get("hotkey_key") == 57
+                    and config.get("hotkey_modifiers") == ["fn"]
+                ):
+                    config["hotkey_key"] = 100
+                    config["hotkey_modifiers"] = []
+                config["macos_hotkey_defaults_v3"] = True
+                _save_migrations = True
+
+            if (
+                sys.platform == "darwin"
+                and not user_config.get("macos_overlay_anchor_defaults_v1", False)
+            ):
+                if config.get("overlay_anchor", "bottom-center") == "bottom-center":
+                    config["overlay_anchor"] = "bottom-right"
+                config["macos_overlay_anchor_defaults_v1"] = True
+                _save_migrations = True
+
             # Repair colliding combos (recording == style toggle). Merging new
             # default modifiers onto a partially-saved old config could land both
             # actions on one chord; style yields and returns to its legacy default.
@@ -1120,6 +1227,25 @@ def load_config() -> dict:
             if config.get("audio_device") is not None and not config.get("audio_device_name"):
                 config["audio_device"] = None
 
+            if sys.platform == "darwin":
+                # Retired cloud model IDs fail every request; move them to the
+                # provider's documented replacement.
+                try:
+                    from wayfinder.core.cloud_keys import RETIRED_MODEL_REPLACEMENTS
+
+                    for _mkey, _table in RETIRED_MODEL_REPLACEMENTS.items():
+                        _replacement = _table.get(config.get(_mkey))
+                        if _replacement:
+                            config[_mkey] = _replacement
+                            _save_migrations = True
+                except Exception:
+                    pass
+
+            if sys.platform == "darwin" and _load_macos_secrets(config, user_config):
+                _save_migrations = True
+
+            if _save_migrations:
+                save_config(config)
             return config
         except (json.JSONDecodeError, IOError) as e:
             # Don't silently wipe a corrupt config — preserve it for recovery.
@@ -1144,8 +1270,84 @@ def load_config() -> dict:
         config = DEFAULT_CONFIG.copy()
         for key in ("whisper_binary", "model_path", "llama_cpp_model_path", "llama_cpp_binary"):
             config[key] = _repair_config_path(key, config.get(key, ""))
+        if sys.platform == "darwin":
+            # A reinstall keeps the Keychain: bring saved keys back.
+            _load_macos_secrets(config, {})
         save_config(config)
         return config.copy()
+
+
+# Cloud API keys. On macOS they live in the login Keychain, not config.json.
+SECRET_CONFIG_KEYS = ("groq_api_key", "openai_api_key", "anthropic_api_key")
+_KEYCHAIN_SYNCED: dict[str, str] = {}
+
+
+def _macos_keychain():
+    """The Keychain module on macOS (None elsewhere, or when disabled/unavailable)."""
+    if sys.platform != "darwin" or os.environ.get("WAYFINDER_DISABLE_KEYCHAIN"):
+        return None
+    try:
+        from wayfinder.utils import macos_keychain
+    except Exception:
+        return None
+    return macos_keychain if macos_keychain.available() else None
+
+
+def _keychain_sync(keychain, name: str, value: str) -> bool:
+    """Make the Keychain hold exactly ``value`` ("" = no item). True on success."""
+    if _KEYCHAIN_SYNCED.get(name) == value:
+        return True
+    ok = keychain.set(name, value) if value else keychain.delete(name)
+    if ok:
+        _KEYCHAIN_SYNCED[name] = value
+    return ok
+
+
+def _scrub_secret_backups() -> None:
+    """Blank API keys left in owner-only config backups once they are in the Keychain."""
+    for path in CONFIG_DIR.glob("config.json.*"):
+        if path.suffix == ".tmp" or not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            continue  # corrupt/foreign backup: leave it (it is 0600)
+        if not isinstance(data, dict) or not any(data.get(k) for k in SECRET_CONFIG_KEYS):
+            continue
+        for k in SECRET_CONFIG_KEYS:
+            if k in data:
+                data[k] = ""
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError:
+            pass
+
+
+def _load_macos_secrets(config: dict, user_config: dict) -> bool:
+    """macOS: fill API keys from the Keychain; move any plain-text key into it.
+
+    Returns True when config.json must be rewritten (a key moved out of it).
+    """
+    keychain = _macos_keychain()
+    if keychain is None:
+        return False
+    moved = False
+    for name in SECRET_CONFIG_KEYS:
+        plain = str(user_config.get(name) or "").strip()
+        if plain:
+            if _keychain_sync(keychain, name, plain):
+                moved = True
+            config[name] = plain
+            continue
+        stored = keychain.get(name)
+        if stored is not None:
+            _KEYCHAIN_SYNCED[name] = stored
+            config[name] = stored
+    if moved:
+        _scrub_secret_backups()
+    return moved
 
 
 def save_config(config: dict) -> None:
@@ -1156,11 +1358,34 @@ def save_config(config: dict) -> None:
         config: Configuration dictionary to save.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    on_disk = config
+    if sys.platform == "darwin":
+        try:
+            os.chmod(CONFIG_DIR, 0o700)
+        except OSError:
+            pass
+        keychain = _macos_keychain()
+        if keychain is not None:
+            on_disk = dict(config)
+            for name in SECRET_CONFIG_KEYS:
+                value = str(config.get(name) or "").strip()
+                # Only a key the Keychain now holds leaves config.json; if the
+                # Keychain refused it, the owner-only file keeps it as before.
+                if _keychain_sync(keychain, name, value):
+                    on_disk[name] = ""
     # Atomic write: dump to a temp file, then os.replace() onto the real path so a
     # crash mid-write can never truncate/corrupt the existing config.
     tmp_file = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
-    with open(tmp_file, "w") as f:
-        json.dump(config, f, indent=2)
+    if sys.platform == "darwin":
+        # Owner-only before any byte is written, so the content is never
+        # briefly world-readable (fchmod also fixes a stale .tmp's mode).
+        _fd = os.open(tmp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(_fd, 0o600)
+        _tmp_handle = os.fdopen(_fd, "w")
+    else:
+        _tmp_handle = open(tmp_file, "w")
+    with _tmp_handle as f:
+        json.dump(on_disk, f, indent=2)
         f.flush()
         try:
             os.fsync(f.fileno())
@@ -1196,6 +1421,10 @@ def load_api_keys_to_env(config: dict) -> None:
     
     for config_key, env_var in api_key_mappings.items():
         key_value = config.get(config_key, "")
+        if sys.platform == "darwin":
+            # A pasted/hand-edited key can carry a newline, which breaks the
+            # Authorization header and reads as "check your internet".
+            key_value = str(key_value or "").strip()
         if key_value:
             os.environ[env_var] = key_value
 

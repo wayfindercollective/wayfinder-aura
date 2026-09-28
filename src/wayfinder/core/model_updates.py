@@ -7,14 +7,19 @@ Results are cached for 24 hours to avoid unnecessary API calls.
 
 import json
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..config import CONFIG_DIR
+from ..config import CONFIG_DIR as _CONFIG_DIR
+from ..utils.platform import get_cache_dir
 
 # Cache file for update check results
+# macOS keeps update caches in ~/Library/Caches; Linux/Windows keep them in the
+# config dir, as on main.
+CONFIG_DIR = get_cache_dir() if sys.platform == "darwin" else _CONFIG_DIR
 UPDATE_CACHE_FILE = CONFIG_DIR / "model_updates_cache.json"
 
 # Check interval: once per week (seconds)
@@ -29,7 +34,7 @@ CHECK_INTERVAL = 604800
 MONITORED_MODELS = {
     "llm_gemma3_1b": {
         "repo_id": "bartowski/google_gemma-3-1b-it-GGUF",
-        "description": "Gemma 3 1B (post-processing, recommended)",
+        "description": "Gemma 3 1B (post-processing)",
         "current_filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
         "category": "llm",
     },
@@ -177,7 +182,7 @@ def _load_cache() -> Optional[Dict[str, Any]]:
 def _save_cache(data: Dict[str, Any]) -> None:
     """Save update check results to cache."""
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        UPDATE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(UPDATE_CACHE_FILE, "w") as f:
             json.dump(data, f, indent=2)
     except IOError:

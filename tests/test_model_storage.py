@@ -207,16 +207,22 @@ def test_host_app_model_dirs_are_unchanged(host_home, monkeypatch, platform):
         llm_dir = wm._get_llm_models_dir()
         search_dirs = wm._whisper_model_search_dirs()
 
-    assert whisper_dir == home / "whisper.cpp" / "models"
-    if platform == "darwin":
-        assert llm_dir == home / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
-    else:
-        assert llm_dir == home / ".local" / "share" / "wayfinder-aura" / "llm-models"
-    assert search_dirs == [
+    host_dirs = [
         home / "whisper.cpp" / "models",
         home / ".local" / "share" / "whisper.cpp",
         Path("/app/share/whisper-models"),
     ]
+    if platform == "darwin":
+        # The macOS app downloads into its Application Support dir; developer
+        # models in ~/whisper.cpp/models stay visible behind it.
+        app_support = home / "Library" / "Application Support" / "wayfinder-aura"
+        assert whisper_dir == app_support / "whisper-models"
+        assert llm_dir == app_support / "llm-models"
+        assert search_dirs == [app_support / "whisper-models", *host_dirs]
+    else:
+        assert whisper_dir == home / "whisper.cpp" / "models"
+        assert llm_dir == home / ".local" / "share" / "wayfinder-aura" / "llm-models"
+        assert search_dirs == host_dirs
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])

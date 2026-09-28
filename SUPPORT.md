@@ -39,9 +39,10 @@ License responses have these meanings:
 A good report gets a fast fix. Please include:
 
 1. What you did, what you expected, and what actually happened.
-2. Your platform: Linux distro + desktop (KDE/GNOME), or **Steam Deck**
-   (Desktop Mode vs Game Mode), or Windows version.
-3. How you installed it: Windows installer, Flatpak bundle, Flathub, or from source.
+2. Your platform: Linux distro + desktop (KDE/GNOME), **Steam Deck**
+   (Desktop Mode vs Game Mode), macOS version + Mac model, or Windows version.
+3. How you installed it: DMG, Windows installer, Flatpak bundle, AppImage,
+   Flathub, or from source.
 4. The relevant **logs** (below).
 
 ### Logs to attach
@@ -50,6 +51,12 @@ A good report gets a fast fix. Please include:
 
 ```
 ~/.cache/wayfinder-aura/activity.log
+```
+
+On macOS the log is:
+
+```
+~/Library/Caches/wayfinder-aura/activity.log
 ```
 
 On Windows the log is:
@@ -98,6 +105,10 @@ Try these before filing an issue — they cover the most common problems.
 
 ### Hotkey does nothing
 
+- **macOS:** use **Fn+Space**. Enable the Applications copy of Aura under
+  Privacy & Security → Accessibility and Input Monitoring. Input Monitoring
+  may require clicking **+** and selecting
+  `/Applications/Wayfinder Aura.app`; quit and reopen Aura afterward.
 - **Windows:** the default is **Ctrl+Alt+Space**. If another app already owns
   that shortcut, pick a different one in Settings. Hotkeys and typing do not
   reach apps running as Administrator unless Aura is also elevated (a Windows

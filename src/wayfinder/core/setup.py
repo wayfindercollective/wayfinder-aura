@@ -82,13 +82,13 @@ MODEL_DOWNLOAD_BASE = (
 # LLM models for post-processing (dictation cleanup)
 LLM_MODELS: dict[str, dict] = {
     "google_gemma-3-1b-it-Q4_K_M": {
-        "label": "Gemma 3 1B (Recommended)",
+        "label": "Gemma 3 1B",
         "size": "806 MB",
         "url": "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116f76234503685a98f572982177b11d44ec8ff1/google_gemma-3-1b-it-Q4_K_M.gguf",
         "bytes": 806_058_496,
         "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
         "sha256": "12bf0fff8815d5f73a3c9b586bd8fee8e7b248c935de70dec367679873d0f29d",
-        "note": "Most consistent gentle-guide cleanup across tones; smaller and faster than Qwen 3.5",
+        "note": "Fast and free. Normal needs no model; for styles use Qwen3 4B (Ultra)",
     },
     "Qwen3.5-2B-Q4_K_M": {
         "label": "Qwen 3.5 2B",
@@ -97,7 +97,7 @@ LLM_MODELS: dict[str, dict] = {
         "bytes": 1_280_835_840,
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
         "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
-        "note": "Capable reasoning model; less consistent than Gemma 3 for light cleanup",
+        "note": "Leaves text largely unchanged in testing; fine for Normal only",
     },
     "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M": {
         "label": "Qwen3 4B Instruct 2507 (Strong/Caricature)",
@@ -178,11 +178,13 @@ def check_text_injection() -> DependencyStatus:
     bundled ydotool binary as sufficient — Codex review / STEAMDECK-INSTALL-LOG Issue 4).
     """
     if sys.platform == "darwin":
+        # Injection posts Cmd+V / Return through Quartz (core/macos_paste);
+        # importing PyAutoGUI here only cost ~0.2 s of startup.
         try:
-            import pyautogui
-            return DependencyStatus(True, detail="pyautogui (macOS)")
+            import Quartz  # noqa: F401
+            return DependencyStatus(True, detail="Quartz events (macOS)")
         except ImportError:
-            return DependencyStatus(False, error="pyautogui not installed. Run: pip install pyautogui")
+            return DependencyStatus(False, error="PyObjC Quartz is missing from this build.")
 
     if sys.platform == "win32":
         # Native Win32 SendInput injection needs no external tool or daemon.
@@ -959,7 +961,18 @@ def download_whisper_model(
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _download_model_file(
+def _download_model_file(*args, **kwargs) -> None:
+    """Keep the Mac awake for the download (no-op elsewhere); see _impl."""
+    if sys.platform != "darwin":
+        return _download_model_file_impl(*args, **kwargs)
+    from wayfinder.utils import macos_activity
+
+    target = kwargs.get("target", args[1] if len(args) > 1 else "model")
+    with macos_activity.held(f"download:{Path(str(target)).name}", "Downloading a model"):
+        return _download_model_file_impl(*args, **kwargs)
+
+
+def _download_model_file_impl(
     url: str,
     target: Path,
     part_suffix: str,

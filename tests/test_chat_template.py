@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from wayfinder import license as license_module
-from wayfinder.config import _LLM_PREFERENCE, DEFAULT_CONFIG
+from wayfinder.config import _LLM_PREFERENCE, DEFAULT_CONFIG, _pick_llm
 from wayfinder.core.postprocessor import (
     _CHAT_TEMPLATE_MODELS,
     LlamaCppCliBackend,
@@ -82,9 +82,11 @@ class TestTemplateSelection:
         """Family substrings would wrongly enable all three shipped Qwen models."""
         assert _chat_template_for(model) is None
 
-    def test_packaged_default_model_gets_no_template(self):
-        """The default resolves to Gemma, which is deliberately excluded."""
-        assert _chat_template_for(DEFAULT_CONFIG["llama_cpp_model_path"]) is None
+    def test_packaged_default_model_gets_no_template(self, tmp_path):
+        """With no model installed the default resolves to Gemma (the free
+        download), which is deliberately excluded. An empty dir keeps this
+        independent of whatever models the machine running the tests has."""
+        assert _chat_template_for(_pick_llm(str(tmp_path))) is None
 
     def test_off_disables_even_for_a_validated_model(self):
         assert _chat_template_for(QWEN, "off") is None

@@ -17,6 +17,13 @@ INDIGO = (0x7B, 0x8B, 0xD9)
 BG = hr.BG_CARD
 
 
+@pytest.fixture(autouse=True)
+def _linux_reference_path(monkeypatch):
+    """These pin the USER-APPROVED Linux/Windows renderer, identical to main."""
+    monkeypatch.setattr(hr.sys, "platform", "linux")
+    hr._HERO_CACHE.clear()
+
+
 def _dist(a, b):
     return math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3)))
 

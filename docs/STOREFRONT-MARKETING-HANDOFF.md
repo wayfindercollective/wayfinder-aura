@@ -180,7 +180,7 @@ Unsafe / avoid:
 
 ### Hotkeys to advertise
 - **Super+F2** — start/stop dictation  
-- **Super+F3** — cycle styles (Minimal → Professional → Casual → Dev → Personal)  
+- **Super+F3** — cycle styles (Normal → Professional → Casual → Dev → Personal)  
 
 ---
 

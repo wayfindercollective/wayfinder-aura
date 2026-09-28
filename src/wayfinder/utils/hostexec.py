@@ -83,6 +83,9 @@ def host_env(overrides: dict | None = None) -> dict:
     return env
 
 
+_CLOUD_KEY_ENV_VARS = ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+
+
 def bundle_binary_env(overrides: dict | None = None) -> dict:
     """Environment for native binaries shipped beside a frozen Python app.
 
@@ -118,6 +121,11 @@ def bundle_binary_env(overrides: dict | None = None) -> dict:
                 env["LD_LIBRARY_PATH"] = os.pathsep.join(kept)
             else:
                 env.pop("LD_LIBRARY_PATH", None)
+    if sys.platform == "darwin":
+        # Native helpers (whisper/llama servers) never need cloud credentials;
+        # keep the user's API keys out of their environment.
+        for name in _CLOUD_KEY_ENV_VARS:
+            env.pop(name, None)
     if overrides:
         env.update(overrides)
     return env

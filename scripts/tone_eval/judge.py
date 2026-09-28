@@ -22,6 +22,8 @@ RUBRIC = {
     "professional": "Keep ~90% of words. Tighten punctuation/capitalization, "
                     "lightly clean slang as the MAX change. Do NOT rewrite.",
     "minimal": "Remove only um/uh/ah. Change nothing else.",
+    "personal": "Keep the speaker's own words, quirks and order (~90%). Remove "
+                "um/uh. Light punctuation cleanup only; it must still sound like them.",
 }
 
 JUDGE_PROMPT = """You are grading a dictation post-processor whose goal is to be a

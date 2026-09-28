@@ -1007,7 +1007,7 @@ def get_optimal_thread_count() -> int:
     """
     Get optimal thread count based on CPU cores.
 
-    On Apple Silicon, uses performance core count (not efficiency cores) capped at 8,
+    On Apple Silicon, uses performance core count (not efficiency cores) capped at 12,
     since Metal handles GPU-heavy work and too many CPU threads cause contention.
     On other platforms, uses 75% of total cores (2-16 range).
 
@@ -1023,7 +1023,7 @@ def get_optimal_thread_count() -> int:
                     ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
                     text=True, timeout=5
                 ).strip())
-                return max(2, min(8, perf_cores))
+                return max(2, min(12, perf_cores))  # measured: 8->12 threads = -13% on 12+ P-core chips
             except Exception:
                 pass  # Fall through to generic logic
 

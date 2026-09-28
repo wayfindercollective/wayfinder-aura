@@ -36,6 +36,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -346,6 +347,12 @@ def _browser_command(url: str, env: dict) -> list[str] | None:
 
 def _exec_candidates(url: str, env: dict) -> Iterator[tuple[str, list[str]]]:
     """Exec openers to try, best first, once the portal is out of the picture."""
+    if sys.platform == "darwin":
+        # LaunchServices is present on every supported Mac. Homebrew's `gio`
+        # happened to hide this omission on development machines, but a clean
+        # Mac has neither gio nor xdg-open.
+        yield ("macOS open", ["/usr/bin/open", url])
+        return
     yield ("gio", ["gio", "open", url])
     yield ("xdg-open", ["xdg-open", url])
     browser = _browser_command(url, env)

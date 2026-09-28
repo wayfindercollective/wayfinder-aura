@@ -137,12 +137,39 @@ CORPUS = [
         "text": "um just commit the boolean fix",
         "dev_terms": ["commit", "boolean"],
     },
+    # --------------------------- PERSONAL --------------------------
+    # The speaker's own voice: journal lines, family texts, notes to self.
+    # Personal must keep their wording and quirks; strong only lightly polishes.
+    {
+        "id": "personal_01_journal",
+        "stresses": ["personal"],
+        "text": "honestly today was kind of a lot um but i'm proud of how i handled "
+                "the call with my sister and i want to remember that feeling",
+    },
+    {
+        "id": "personal_02_family_text",
+        "stresses": ["personal"],
+        "text": "hey mom uh just landed safe and sound the flight was bumpy but "
+                "totally fine i'll call you when i get to the hotel",
+    },
+    {
+        "id": "personal_03_note_to_self",
+        "stresses": ["personal"],
+        "text": "note to self um book the dentist for next week and uh don't forget "
+                "to water the tomatoes before the trip",
+    },
+    {
+        "id": "personal_04_thanks",
+        "stresses": ["personal"],
+        "text": "i just wanted to say thank you so much for dinner last night it "
+                "really um meant a lot to both of us and the kids loved it",
+    },
 ]
 
 
 # Schema version — part of the eval fingerprint, so a candidate run cannot be
 # compared against a baseline captured under a different corpus.
-CORPUS_VERSION = 2
+CORPUS_VERSION = 3  # v3: personal_01-04 (Personal had no samples)
 
 # Unambiguous filler SOUNDS only. word_retention cannot serve as a
 # filler-removal canary: its _content_tokens() excludes the whole FILLER set

@@ -17,6 +17,20 @@ class TestWelcomeFlow:
         assert flow.index == 0
         assert flow.is_complete is False
 
+    def test_packaged_flow_detects_mic_before_downloading_free_model(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow(include_model=True)
+        assert flow.steps == ["mic", "model", "hotkey", "dictate"]
+        flow.pass_mic_test()
+        assert flow.advance() is True
+        assert flow.current == "model"
+        assert flow.advance() is False
+        assert flow.begin_model_download() is True
+        assert flow.complete_model_download() is True
+        assert flow.advance() is True
+        assert flow.current == "hotkey"
+
     def test_advance_through_all_steps_completes(self):
         from wayfinder.ui.welcome import WelcomeFlow
 
@@ -219,3 +233,125 @@ class TestWelcomeMicrophoneGuidance:
         message = microphone_error_guidance("audio device open timed out")
         assert "Reconnect" in message
         assert "restart Aura" in message
+
+
+class TestWelcomeCardFit:
+    """The welcome card shrinks to fit a compact window instead of overflowing."""
+
+    PREFERRED = (520, 360)
+    MINIMUM = (320, 300)
+
+    def test_roomy_area_keeps_preferred_size(self):
+        from wayfinder.ui.welcome import fit_card_size
+
+        assert fit_card_size(900, 700, self.PREFERRED, self.MINIMUM) == self.PREFERRED
+
+    def test_compact_area_shrinks_card_within_margin(self):
+        from wayfinder.ui.welcome import fit_card_size
+
+        # A 640pt macOS window leaves roughly 400x330 for the tab content.
+        width, height = fit_card_size(400, 330, self.PREFERRED, self.MINIMUM)
+        assert width <= 400 - 2 * 12
+        assert height <= 330 - 2 * 12
+        assert (width, height) >= self.MINIMUM
+
+    def test_never_below_minimum(self):
+        from wayfinder.ui.welcome import fit_card_size
+
+        assert fit_card_size(200, 150, self.PREFERRED, self.MINIMUM) == self.MINIMUM
+
+
+class TestWelcomePermissionsDetour:
+    """macOS permissions checklist: a detour that resumes the current step."""
+
+    def test_permissions_step_is_first_when_requested(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow(include_permissions=True)
+        assert flow.steps == ["permissions", "mic", "hotkey", "dictate"]
+        assert flow.current == "permissions"
+
+    def test_linux_default_has_no_permissions_step(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        assert "permissions" not in WelcomeFlow().steps
+
+    def test_detour_from_hotkey_resumes_hotkey(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow()
+        flow.pass_mic_test()
+        flow.advance()
+        assert flow.current == "hotkey"
+        flow.detour_to("permissions")
+        assert flow.current == "permissions"
+        flow.advance()
+        assert flow.current == "hotkey"
+
+    def test_detour_moves_an_earlier_permissions_step_instead_of_replaying_mic(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow(include_permissions=True)
+        flow.advance()           # past permissions ("not now")
+        flow.pass_mic_test()
+        flow.advance()
+        assert flow.current == "hotkey"
+        flow.detour_to("permissions")
+        assert flow.current == "permissions"
+        assert flow.steps.count("permissions") == 1
+        flow.advance()
+        assert flow.current == "hotkey"  # mic test is not repeated
+
+    def test_detour_is_a_noop_once_complete(self):
+        from wayfinder.ui.welcome import WelcomeFlow
+
+        flow = WelcomeFlow()
+        flow.skip()
+        flow.detour_to("permissions")
+        assert flow.current is None
+
+
+class TestMacPermissionRecovery:
+    def test_input_monitoring_stays_reachable_until_granted(self):
+        from wayfinder.ui.welcome import permission_row_plan
+
+        missing = {"microphone": True, "accessibility": True,
+                   "input_monitoring": False}
+        hint, actions = permission_row_plan(
+            "input_monitoring", "to hear your hotkey anywhere", missing,
+            {"input_monitoring"})
+        assert "use +" in hint
+        assert actions == ("settings",)
+
+        granted = {**missing, "input_monitoring": True}
+        _, actions = permission_row_plan(
+            "input_monitoring", "to hear your hotkey anywhere", granted,
+            {"input_monitoring"})
+        assert actions == ("relaunch",)
+
+    def test_accessibility_is_requested_before_input_monitoring(self):
+        from wayfinder.ui.welcome import permission_row_plan
+
+        _, actions = permission_row_plan(
+            "input_monitoring", "to hear your hotkey anywhere",
+            {"accessibility": False, "input_monitoring": False}, set())
+        assert actions == ()
+
+    def test_permissions_shortcut_survives_continue(self):
+        from wayfinder.ui.welcome import needs_permissions_shortcut
+
+        ready = {"microphone": True, "accessibility": True,
+                 "input_monitoring": True}
+        assert needs_permissions_shortcut(ready, set()) is False
+        assert needs_permissions_shortcut(ready, {"input_monitoring"}) is True
+        assert needs_permissions_shortcut({**ready, "input_monitoring": False}, set()) is True
+
+    def test_settings_view_can_reopen_every_granted_permission(self):
+        from wayfinder.ui.welcome import permission_row_plan
+
+        ready = {"microphone": True, "accessibility": True,
+                 "input_monitoring": True}
+        for name in ready:
+            _, actions = permission_row_plan(
+                name, "why", ready, set(), always_open_settings=True)
+            assert actions == ("settings",)

@@ -18,6 +18,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 
 # When launched as a bare-script subprocess on the desktop source run (the parent does
 # `python .../src/wayfinder/ui/overlay.py`), only ui/ is on sys.path — so `import wayfinder`
@@ -63,6 +64,97 @@ except ImportError:  # standalone script run — no bundle env to scrub
         if overrides:
             env.update(overrides)
         return env
+
+
+_MACOS_QUIT_HANDLER = None
+
+
+def _fourcc(code: str) -> int:
+    return int.from_bytes(code.encode("ascii"), "big")
+
+
+def _forward_quit_to_main_app(timeout: float = 0.5) -> bool:
+    """Ask the main Aura process to quit through its control socket."""
+    try:
+        import socket as _socket
+        from wayfinder.config import SOCKET_PATH
+
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(str(SOCKET_PATH))
+            sock.sendall(b"quit\n")
+        finally:
+            sock.close()
+        return True
+    except Exception:
+        return False
+
+
+def install_macos_quit_handler(platform_name: str | None = None) -> bool:
+    """Never refuse a Quit Apple event in the overlay helper (macOS).
+
+    The helper runs from the same bundle, so macOS treats it as a second
+    "Wayfinder Aura" app: logout/restart/shutdown and AppleScript's `quit` can
+    be delivered to it. Qt refused that event here (the pill stayed up, which
+    interrupts a logout). Take over kAEQuitApplication: hand the quit to the
+    main app - which stops everything, including this helper - and exit now.
+    Must run after Qt finished launching, or Qt re-registers its own handler.
+    """
+    global _MACOS_QUIT_HANDLER
+    if (platform_name or sys.platform) != "darwin":
+        return False
+    try:
+        from Foundation import NSAppleEventManager, NSObject
+
+        class _QuitHandler(NSObject):
+            def handleQuit_withReplyEvent_(self, _event, _reply):
+                _forward_quit_to_main_app()
+                os._exit(0)
+
+        handler = _QuitHandler.alloc().init()
+        NSAppleEventManager.sharedAppleEventManager().setEventHandler_andSelector_forEventClass_andEventID_(
+            handler, "handleQuit:withReplyEvent:", _fourcc("aevt"), _fourcc("quit"),
+        )
+        _MACOS_QUIT_HANDLER = handler  # keep the delegate alive
+        return True
+    except Exception as exc:
+        print(f"overlay: could not install the macOS quit handler ({exc})", file=sys.stderr, flush=True)
+        return False
+
+
+def configure_macos_overlay_as_accessory(
+    platform_name: str | None = None,
+) -> bool:
+    """Keep the overlay subprocess out of the Dock while retaining its window.
+
+    The main Tk process is the regular macOS app. The PyQt overlay is a helper
+    process launched from the same bundle, so without an explicit activation
+    policy macOS gives it a second Dock icon. Accessory policy is the native
+    AppKit mode for a UI-capable helper that should not appear in the Dock.
+    """
+    active_platform = platform_name or sys.platform
+    if active_platform != "darwin":
+        return False
+
+    try:
+        from AppKit import (
+            NSApplication,
+            NSApplicationActivationPolicyAccessory,
+        )
+
+        return bool(
+            NSApplication.sharedApplication().setActivationPolicy_(
+                NSApplicationActivationPolicyAccessory
+            )
+        )
+    except Exception as exc:
+        print(
+            f"overlay: could not select macOS accessory policy ({exc})",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
 
 
 def _load_kwin_script(script_path: str) -> bool:
@@ -334,6 +426,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QBrush,
     QColor,
+    QCursor,
     QFont,
     QFontDatabase,
     QLinearGradient,
@@ -434,7 +527,7 @@ class StyleColors:
 # so these are DUPLICATED by design; the parity test fails if they drift.
 STYLE_PALETTES = {
     "minimal": StyleColors(
-        letter="Raw",       # Raw/unprocessed — reads quiet
+        letter="Normal",    # the "Normal" style: only um/uh removed — reads quiet
         color="#8B8B8F",    # app text_secondary (muted gray)
     ),
     "professional": StyleColors(
@@ -575,6 +668,24 @@ class LiquidWaveRenderer:
     def render(self, painter: QPainter, rect: QRectF, color: QColor):
         """
         Render the liquid wave within the given rectangle.
+
+        Linux/Windows keep main's per-segment strokes (the production look).
+        macOS draws each strand as one continuous path with a gradient edge
+        fade: per-segment round caps overlap at every joint on Retina.
+
+        Args:
+            painter: QPainter to draw with
+            rect: Bounding rectangle for the wave
+            color: Base color for the wave
+        """
+        if sys.platform == "darwin":
+            self._render_paths(painter, rect, color)
+        else:
+            self._render_segments(painter, rect, color)
+
+    def _render_segments(self, painter: QPainter, rect: QRectF, color: QColor):
+        """
+        Render the liquid wave within the given rectangle.
         
         Args:
             painter: QPainter to draw with
@@ -679,6 +790,128 @@ class LiquidWaveRenderer:
                 painter.drawLine(QPointF(prev_point[0], prev_point[1]), QPointF(x_pixel, y))
             
             prev_point = (x_pixel, y)
+        
+        painter.restore()
+
+
+    def _render_paths(self, painter: QPainter, rect: QRectF, color: QColor):
+        """
+        Render the liquid wave within the given rectangle.
+        
+        Args:
+            painter: QPainter to draw with
+            rect: Bounding rectangle for the wave
+            color: Base color for the wave
+        """
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        width = rect.width()
+        height = rect.height()
+        if width <= 0 or height <= 0:
+            painter.restore()
+            return
+        center_y = rect.center().y()
+        max_amp = height * 0.4  # Maximum amplitude
+        
+        # Edge fade zone (pixels from edge where fade applies)
+        fade_zone = min(12, width * 0.25)  # 25% of width or 12px max
+        
+        fade_fraction = min(0.5, fade_zone / width) if width > 0 else 0.0
+
+        def edge_fade_brush(alpha: float) -> QBrush:
+            """Horizontal alpha ramp: transparent edges, solid center."""
+            gradient = QLinearGradient(
+                rect.left(), center_y, rect.right(), center_y
+            )
+            transparent = QColor(color)
+            transparent.setAlpha(0)
+            solid = QColor(color)
+            solid.setAlphaF(max(0.0, min(1.0, alpha)))
+            gradient.setColorAt(0.0, transparent)
+            gradient.setColorAt(fade_fraction, solid)
+            gradient.setColorAt(1.0 - fade_fraction, solid)
+            gradient.setColorAt(1.0, transparent)
+            return QBrush(gradient)
+
+        def wave_path(freq: float, phase: float, amp: float) -> QPainterPath:
+            path = QPainterPath()
+            first = True
+            for x_pixel in range(int(rect.left()), int(rect.right()) + 1, 2):
+                x = x_pixel - rect.left()
+                y = center_y + amp * math.sin(freq * x + self.time + phase)
+                y += (amp * 0.4) * math.sin(
+                    freq * 2.3 * x + self.time * 1.6 + phase
+                )
+                y += (amp * 0.2) * math.sin(
+                    freq * 3.7 * x + self.time * 2.1 + phase * 0.5
+                )
+                y = max(rect.top(), min(rect.bottom(), y))
+                point = QPointF(x_pixel, y)
+                if first:
+                    path.moveTo(point)
+                    first = False
+                else:
+                    path.lineTo(point)
+            return path
+        
+        # Calculate amplitude based on audio level and breathing
+        base_breath = 0.15 + 0.12 * (0.5 + 0.5 * math.sin(self.breath))
+        voice_boost = (self.audio_level ** 0.6) * 12.0
+        amplitude_factor = min(1.0, base_breath + voice_boost)
+        
+        # Wave configurations: (frequency, phase_offset, alpha, thickness)
+        wave_configs = [
+            (0.07, 0.0, 0.15, 6),      # Slow background wave
+            (0.11, 1.0, 0.25, 5),      # Medium wave
+            (0.16, 2.2, 0.40, 4),      # Faster wave
+            (0.22, 0.7, 0.55, 3),      # Quick wave
+        ]
+        
+        for freq, phase, base_alpha, thickness in wave_configs:
+            amp = max_amp * amplitude_factor
+            path = wave_path(freq, phase, amp)
+
+            glow_pen = QPen(edge_fade_brush(base_alpha * 0.3), thickness + 4)
+            glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(glow_pen)
+            painter.drawPath(path)
+
+            pen = QPen(edge_fade_brush(base_alpha), thickness)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPath(path)
+        
+        # Draw bright center highlight wave with edge fade
+        highlight_amp = max_amp * amplitude_factor
+        highlight_path = QPainterPath()
+        first = True
+        for x_pixel in range(int(rect.left()), int(rect.right()) + 1, 2):
+            x = x_pixel - rect.left()
+            y = center_y + highlight_amp * math.sin(0.13 * x + self.time * 1.4)
+            y += (highlight_amp * 0.5) * math.sin(0.26 * x + self.time * 2.0 + 0.8)
+            y = max(rect.top(), min(rect.bottom(), y))
+            
+            point = QPointF(x_pixel, y)
+            if first:
+                highlight_path.moveTo(point)
+                first = False
+            else:
+                highlight_path.lineTo(point)
+
+        highlight_glow = QPen(edge_fade_brush(0.4), 6)
+        highlight_glow.setCapStyle(Qt.PenCapStyle.RoundCap)
+        highlight_glow.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(highlight_glow)
+        painter.drawPath(highlight_path)
+
+        highlight_core = QPen(edge_fade_brush(1.0), 2)
+        highlight_core.setCapStyle(Qt.PenCapStyle.RoundCap)
+        highlight_core.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(highlight_core)
+        painter.drawPath(highlight_path)
         
         painter.restore()
 
@@ -913,6 +1146,9 @@ class GlassmorphicOverlay(QWidget):
         # changes (i.e. during the brief 250ms state transitions), reused otherwise.
         self._chrome_pixmap: Optional[QPixmap] = None
         self._chrome_key = None
+        self._macos_wave_layer = None
+        self._macos_wave_retry_at = 0.0
+        self._last_wave_rect = None
         
         # Setup KWin positioning rule BEFORE creating window
         # This ensures the window is positioned correctly from the first frame
@@ -991,7 +1227,21 @@ class GlassmorphicOverlay(QWidget):
     def widget_height(self):
         """Total widget height including glow margins."""
         return self.scaled_height + (self.glow_margin * 2)
-    
+
+    @staticmethod
+    def _target_screen():
+        """Screen the pill is placed on.
+
+        macOS follows the display under the pointer (the active display). Linux
+        keeps the primary screen: on Wayland QCursor.pos() is unreliable for a
+        window that never has pointer focus.
+        """
+        if sys.platform == "darwin":
+            screen = QApplication.screenAt(QCursor.pos())
+            if screen:
+                return screen
+        return QApplication.primaryScreen()
+
     def _calculate_position(self, widget_width: int, widget_height: int) -> tuple[int, int]:
         """
         Calculate overlay position: centered horizontally, at bottom of available screen area.
@@ -1013,7 +1263,7 @@ class GlassmorphicOverlay(QWidget):
         Returns:
             (x, y) position tuple
         """
-        screen = QApplication.primaryScreen()
+        screen = self._target_screen()
         if not screen:
             return (0, 0)
         
@@ -1033,6 +1283,12 @@ class GlassmorphicOverlay(QWidget):
             widget_height, self._vertical_offset, self.TASKBAR_GAP,
             vertical=vertical, visual_inset=self.glow_margin,
         )
+
+        # macOS: availableGeometry is NSScreen.visibleFrame, which already
+        # excludes the Dock's band at its real size (and follows Dock resizes
+        # via screen-parameter changes). The pill used to be dropped into that
+        # band beside a centred Dock, which put it behind any Dock wide enough
+        # to reach the corner.
 
         return (x, y)
     
@@ -1107,6 +1363,11 @@ class GlassmorphicOverlay(QWidget):
             # taskbar (field bug: pinned at the panel strut). Override-redirect
             # escapes the clamp and renders above the panel.
             flags |= Qt.WindowType.X11BypassWindowManagerHint
+        if sys.platform == "darwin":
+            # The pill paints its own glow. AppKit's window shadow is traced from
+            # the translucent pixels and not refreshed as the waves animate, so
+            # it rendered as a dark, stale halo around the indicator.
+            flags |= Qt.WindowType.NoDropShadowWindowHint
         self.setWindowFlags(flags)
         
         # Critical for ARGB transparency on all platforms
@@ -1174,8 +1435,10 @@ class GlassmorphicOverlay(QWidget):
                     # NSFloatingWindowLevel = 3 — above normal, below modal/alerts
                     nswin.setLevel_(3)
                     # canJoinAllSpaces (1<<0) + stationary (1<<4) = visible on all desktops
-                    nswin.setCollectionBehavior_((1 << 0) | (1 << 4))
+                    # canJoinAllSpaces + stationary + fullScreenAuxiliary.
+                    nswin.setCollectionBehavior_((1 << 0) | (1 << 4) | (1 << 8))
                     nswin.setHidesOnDeactivate_(False)  # Don't hide when app loses focus
+                    nswin.setHasShadow_(False)  # pill draws its own glow (see _setup_window)
                     break
             else:
                 # Window not found yet, retry
@@ -1198,6 +1461,8 @@ class GlassmorphicOverlay(QWidget):
     def showEvent(self, event):
         """Handle show event to setup blur, mask, position, and KDE always-on-top."""
         super().showEvent(event)
+        if sys.platform == "darwin":
+            QTimer.singleShot(0, self._ensure_macos_wave_layer)
         self._setup_kde_blur()
         self._apply_squircle_mask()
         
@@ -1284,6 +1549,7 @@ class GlassmorphicOverlay(QWidget):
     def _setup_timers(self):
         """Setup animation timers."""
         # Main render timer (15 FPS - optimized for CPU usage while keeping smooth feel)
+        self._last_frame_ts = time.monotonic()
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self._on_frame)
         self._render_timer.setInterval(66)  # ~15 FPS
@@ -1350,7 +1616,7 @@ class GlassmorphicOverlay(QWidget):
         x, y = self._calculate_position(w, h)
         
         # Validate position - if y is negative or unreasonable, use fallback
-        screen = QApplication.primaryScreen()
+        screen = self._target_screen()
         if screen:
             full = screen.geometry()
             # Sanity check: visible content should be on screen. The transparent
@@ -1501,8 +1767,13 @@ class GlassmorphicOverlay(QWidget):
         import time
         def _log(msg):
             try:
-                _xdg_cache = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-                _log_dir = os.path.join(_xdg_cache, "wayfinder-aura")
+                if sys.platform == "darwin":
+                    from wayfinder.utils.platform import get_cache_dir
+
+                    _log_dir = str(get_cache_dir())
+                else:  # Linux/Windows as on main
+                    _xdg_cache = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+                    _log_dir = os.path.join(_xdg_cache, "wayfinder-aura")
                 os.makedirs(_log_dir, mode=0o700, exist_ok=True)
                 _log_path = os.path.join(_log_dir, "overlay-debug.log")
                 # Owner-only create/open (no create-then-chmod race for new files).
@@ -1608,6 +1879,8 @@ class GlassmorphicOverlay(QWidget):
         duration = 250 if animate else 0  # 250ms ease-out = engineered, not vibe-coded
         
         if state == OverlayState.HIDDEN:
+            if self._macos_wave_layer is not None:
+                self._macos_wave_layer.set_hidden(True)
             self._render_timer.stop()
             self._raise_timer.stop()
 
@@ -1621,6 +1894,11 @@ class GlassmorphicOverlay(QWidget):
             )
             return
         
+        if self._macos_wave_layer is not None:
+            # READY may settle to a still, CA-breathed frame after a while;
+            # any other state animates at full rate immediately.
+            self._macos_wave_layer.set_idle(state == OverlayState.READY)
+
         # Get colors for new state
         palette = STATE_PALETTES.get(state, STATE_PALETTES[OverlayState.READY])
         label = STATE_LABELS.get(state, "")
@@ -1783,6 +2061,13 @@ class GlassmorphicOverlay(QWidget):
             return
         level = max(0.0, min(1.0, level))  # clamp to the expected range
         self.wave_renderer.update_audio_level(level)
+        if self._macos_wave_layer is not None and self._last_wave_rect is not None:
+            self._macos_wave_layer.update(
+                self._last_wave_rect,
+                self._wave_color.color,
+                self.wave_renderer.audio_level,
+                hidden=False,
+            )
     
     def set_style_indicator(self, style: str, animate: bool = True):
         """
@@ -1827,16 +2112,30 @@ class GlassmorphicOverlay(QWidget):
                 return
             self._idle_frozen = False
 
-            dt = 0.066  # 15 FPS (optimized for CPU usage)
+            # Advance by real elapsed time. A busy event-loop tick used to move
+            # the wave by a fixed 66ms regardless of delay, making animation
+            # visibly slow down under transient load even though rendering was
+            # otherwise healthy.
+            now = time.monotonic()
+            dt = min(max(now - self._last_frame_ts, 0.0), 0.1)
+            self._last_frame_ts = now
 
-            # Update wave animation
-            self.wave_renderer.advance_time(dt)
+            # The native Mac Metal layer owns waveform time. Qt only needs to
+            # repaint during property transitions and the processing chaser.
+            if self._macos_wave_layer is None:
+                self.wave_renderer.advance_time(dt)
 
             # Update border chaser if processing
             if self._state == OverlayState.PROCESSING:
                 self.border_chaser.advance(dt)
 
             self.update()
+            if (
+                self._macos_wave_layer is not None
+                and self._state != OverlayState.PROCESSING
+                and not self._transitions_active()
+            ):
+                self._render_timer.stop()
         except Exception:
             # Never let a frame update raise out of the render timer and stop it. (Rule #10)
             pass
@@ -2001,7 +2300,19 @@ class GlassmorphicOverlay(QWidget):
                         wave_width,
                         bar_rect.height() - 8
                     )
-                self.wave_renderer.render(painter, wave_rect, self._wave_color.color)
+                self._last_wave_rect = QRectF(wave_rect)
+                self._ensure_macos_wave_layer()
+                if self._macos_wave_layer is not None:
+                    self._macos_wave_layer.update(
+                        wave_rect,
+                        self._wave_color.color,
+                        self.wave_renderer.audio_level,
+                        hidden=False,
+                    )
+                else:
+                    self.wave_renderer.render(painter, wave_rect, self._wave_color.color)
+            elif self._macos_wave_layer is not None:
+                self._macos_wave_layer.set_hidden(True)
 
             # Draw text (only if there's text to draw)
             if label:
@@ -2018,6 +2329,36 @@ class GlassmorphicOverlay(QWidget):
                 painter.end()
             except Exception:
                 pass
+
+    def _ensure_macos_wave_layer(self) -> None:
+        if sys.platform != "darwin" or self._macos_wave_layer is not None:
+            return
+        now = time.monotonic()
+        if now < self._macos_wave_retry_at or not self.isVisible():
+            return
+        self._macos_wave_retry_at = now + 1.0
+        try:
+            from wayfinder.ui.macos_overlay_metal import MacOSOverlayMetalLayer
+
+            self._macos_wave_layer = MacOSOverlayMetalLayer.try_create(
+                self.windowTitle()
+            )
+            if self._macos_wave_layer is not None:
+                print("overlay: native Metal waveform active", flush=True)
+                self._macos_wave_layer.set_idle(self._state == OverlayState.READY)
+                self.update()
+        except Exception:
+            self._macos_wave_layer = None
+
+    def closeEvent(self, event):
+        layer = self._macos_wave_layer
+        self._macos_wave_layer = None
+        if layer is not None:
+            try:
+                layer.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
     
     def _draw_outer_glow(self, painter: QPainter, path: QPainterPath, rect: QRectF):
         """Draw the outer glow effect.
@@ -2244,8 +2585,16 @@ def run_overlay():
             tray_only = True
             enable_tray = True  # tray-only implies StatusNotifier tray
 
-    app = QApplication(sys.argv)
+    # Aura's --style/--scale flags are not Qt flags. Passing --style=minimal to
+    # QApplication makes Qt treat "minimal" as a widget-style plugin and emit
+    # a misleading launch warning on every Mac helper process.
+    app = QApplication([sys.argv[0]])
+    configure_macos_overlay_as_accessory()
     app.setQuitOnLastWindowClosed(False)
+    if sys.platform == "darwin":
+        # After [NSApp finishLaunching] (first event-loop turn), so Qt's own
+        # quit handler cannot replace ours.
+        QTimer.singleShot(0, install_macos_quit_handler)
 
     # Give KDE's StatusNotifier host the identity it needs to render our tray item.
     # Without an app name / desktop-file name / window icon, Plasma's systemtray reads
@@ -2347,18 +2696,12 @@ def run_overlay():
         """Check for and process stdin commands."""
         try:
             if _stdin_eof[0]:
-                if enable_tray:
-                    # Parent process is gone — don't leave an orphan tray whose menu actions
-                    # would hit a dead socket. Quit so the tray dies with the app. (Codex #3)
-                    _debug_log("STDIN EOF in tray mode — quitting overlay")
-                    app.quit()
-                    return
-                # Stdin pipe broke — auto-hide to READY after timeout
-                if overlay._state in (OverlayState.LISTENING, OverlayState.PROCESSING):
-                    elapsed = _time_mod.time() - _last_command_time[0]
-                    if elapsed > _COMMAND_TIMEOUT:
-                        _debug_log(f"TIMEOUT: no commands for {elapsed:.0f}s, returning to READY")
-                        overlay.set_state(OverlayState.READY)
+                # The overlay is always a child of the main app. Once its command
+                # pipe reaches EOF there is no owner left to update or close it, so
+                # keeping even a READY pill alive creates a visible orphan after a
+                # main-process crash. Quit for visual and tray modes alike.
+                _debug_log("STDIN EOF — parent gone, quitting overlay")
+                app.quit()
                 return
 
             # Read ALL commands received since the last tick — the reader thread
@@ -2401,9 +2744,14 @@ def run_overlay():
         except Exception as e:
             _debug_log(f"process_commands error: {e}")
     
-    # Debug log file for tracing overlay commands (XDG-compliant, not world-readable /tmp)
-    _cache_dir = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-    _debug_log_dir = os.path.join(_cache_dir, "wayfinder-aura")
+    # Debug log file for tracing overlay commands (platform cache, never /tmp).
+    if sys.platform == "darwin":
+        from wayfinder.utils.platform import get_cache_dir
+
+        _debug_log_dir = str(get_cache_dir())
+    else:  # Linux/Windows as on main
+        _cache_dir = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+        _debug_log_dir = os.path.join(_cache_dir, "wayfinder-aura")
     os.makedirs(_debug_log_dir, exist_ok=True)
     _debug_log_file = os.path.join(_debug_log_dir, "overlay-debug.log")
     
@@ -2546,6 +2894,9 @@ def run_overlay():
         elif command == "anchor":
             overlay.set_anchor(str(cmd.get("value", "bottom-center")))
 
+        elif command == "reposition":
+            overlay._position_at_bottom()
+
         elif command == "style":
             style = cmd.get("value", "professional")
             overlay.set_style_indicator(style)
@@ -2646,7 +2997,12 @@ def run_overlay():
     # never withdraws the window when there is no tray to restore it from.
     print(json.dumps({"status": "ready", "tray_available": tray_available}), flush=True)
     
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    # stdin_reader may still be blocked inside TextIOWrapper.readline while
+    # the parent pipe remains open. Python finalization then aborts trying to
+    # acquire that buffered-reader lock. This process owns no user data after
+    # Qt has unwound; exit directly and let the OS close the pipe/thread.
+    os._exit(int(exit_code))
 
 
 # === Direct Test Mode ===

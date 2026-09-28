@@ -86,6 +86,11 @@ class TestEventType:
 
         assert hasattr(EventType, "STYLE_TOGGLE")
 
+    def test_cancel_recording_exists(self):
+        from wayfinder.hotkeys.evdev import EventType
+
+        assert hasattr(EventType, "CANCEL_RECORDING")
+
     def test_transcription_events_exist(self):
         from wayfinder.hotkeys.evdev import EventType
 
@@ -336,6 +341,7 @@ class TestSocketListener:
             (b"show", EventType.SHOW_WINDOW, None),
             (b"hide", EventType.HIDE_WINDOW, None),
             (b"reset", EventType.FORCE_RESET, None),
+            (b"cancel", EventType.CANCEL_RECORDING, None),
             (b"quit", EventType.QUIT_APP, None),
             (b"tab:settings", EventType.SWITCH_TAB, "settings"),
         ]
