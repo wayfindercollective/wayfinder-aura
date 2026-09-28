@@ -762,7 +762,9 @@ def test_windows_games_tab_has_no_mac_only_notes():
 
     for entry in g.game_list():
         assert "Cmd+V" not in entry.note and "on a Mac" not in entry.note, entry.name
-    assert len(g.game_list()) == len(g.PROFILES) + len(g.INFO_ONLY)
+    # Profiles + hand-written entries, then the researched list (no duplicates).
+    names = [e.name.lower() for e in g.game_list()]
+    assert len(names) == len(set(names)) >= len(g.PROFILES) + len(g.INFO_ONLY)
 
 
 def test_windows_unlisted_game_reasons():
@@ -1032,3 +1034,42 @@ def test_unplugged_endpoint_recovery_survives_later_dictations(monkeypatch, tmp_
     assert levels["headset"] == pytest.approx(0.90)
     d.restore()
     assert not journal.exists()                     # nothing left to recover
+
+
+# --- Peter's 2026-09-25/26 macOS additions, Windows side --------------------------
+
+def test_windows_games_tab_has_the_researched_list_without_mac_notes():
+    import re
+
+    from wayfinder.core import macos_game_chat, windows_game_chat
+
+    win = windows_game_chat.game_list()
+    assert len(win) == len(macos_game_chat.game_list())  # the same 84 games
+    mac_only = re.compile(r"\bMacs?\b|Apple Silicon|Rosetta|CrossOver|Cmd\+V")
+    assert not [e.name for e in win if mac_only.search(e.note)]
+    assert windows_game_chat.windows_note(
+        "No Mac version; play through GeForce NOW. Chat opens with Enter, but paste "
+        "into the cloud stream is not confirmed (check in game)."
+    ) == "Chat opens with Enter, but paste is not confirmed (check in game)."
+    assert windows_game_chat.windows_note("Chat opens with T.") == "Chat opens with T."
+
+
+@windows_only
+def test_dictation_is_not_pasted_into_aura_itself(monkeypatch):
+    import os
+
+    from wayfinder.core import injector_windows as w
+    from wayfinder.core.injector import InjectionError
+
+    clip, sent = [], []
+    monkeypatch.setattr(w, "_foreground_is_own_process", lambda: True)
+    monkeypatch.setattr(w, "_clipboard_set_windows", lambda text, transient=False: clip.append(text) or True)
+    monkeypatch.setattr(w, "_send", lambda inputs: sent.append(inputs))
+    monkeypatch.setattr(w._user32, "GetForegroundWindow", lambda: 1)
+    with pytest.raises(InjectionError, match="Wayfinder Aura was frontmost"):
+        w.inject_text_paste_windows("hello")
+    with pytest.raises(InjectionError, match="press Ctrl\+V"):
+        w.inject_text_windows("hello")
+    assert clip == ["hello", "hello"] and sent == []   # nothing typed into Aura
+    monkeypatch.setattr(w, "_foreground_is_own_process", lambda: False)
+    assert os.getpid() > 0

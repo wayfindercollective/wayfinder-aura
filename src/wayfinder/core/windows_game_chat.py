@@ -19,6 +19,7 @@ Windows-only helpers return Nones elsewhere.
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import replace
 from typing import Optional
@@ -83,9 +84,44 @@ INFO_ONLY: tuple[GameEntry, ...] = tuple(
 )
 
 
+# The researched list (core/game_list_data.py) was built for Mac players, so
+# some notes explain Mac access (Apple Silicon, Rosetta, CrossOver, "no Mac
+# version, so stream it"). Those sentences don't apply on Windows, where the
+# games run natively; what's left is the chat how-to.
+_MAC_ONLY = re.compile(
+    r"\bMacs?\b|macOS|Apple Silicon|Rosetta|CrossOver|Cmd\+V|App Store|Intel-only",
+    re.IGNORECASE)
+_STREAM_PASTE = re.compile(
+    r"(?:pasting|paste) (?:into|through) the (?:cloud )?stream (?:is|are) "
+    r"(?:unconfirmed|not confirmed)", re.IGNORECASE)
+
+
+def windows_note(note: str) -> str:
+    """A researched note with its Mac-only sentences removed."""
+    sentences = re.split(r"(?<=[.!?])\s+", (note or "").strip())
+    kept = [s for s in sentences if s and not _MAC_ONLY.search(s)]
+    if len(kept) < len(sentences):
+        # The Mac had to stream it; on Windows it runs natively.
+        kept = [_STREAM_PASTE.sub("paste is not confirmed", s) for s in kept]
+    text = " ".join(kept).strip()
+    return text or "Aura pastes (check in game)."
+
+
+def _researched() -> list[GameEntry]:
+    try:
+        from .game_list_data import RESEARCHED_GAMES
+    except ImportError:
+        return []
+    return [GameEntry(name, status, windows_note(note), tuple(aliases))
+            for name, status, note, aliases, _sources in RESEARCHED_GAMES]
+
+
 def game_list() -> list[GameEntry]:
-    """Every game the Games tab shows (Windows notes), sorted by name."""
+    """Every game the Games tab shows (Windows notes), sorted by name. As on
+    the Mac, profiles and hand-written entries win over researched ones."""
     entries = [profile_entry(p) for p in PROFILES] + list(INFO_ONLY)
+    names = {e.name.lower() for e in entries}
+    entries += [e for e in _researched() if e.name.lower() not in names]
     return sorted(entries, key=lambda e: e.name.lower())
 
 

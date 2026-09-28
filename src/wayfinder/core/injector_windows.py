@@ -22,6 +22,7 @@ Safety, per the contract's Windows checklist:
 from __future__ import annotations
 
 import ctypes
+import os
 import threading
 import time
 from contextlib import contextmanager
@@ -233,6 +234,33 @@ def _require_foreground_window() -> None:
         )
 
 
+def _foreground_is_own_process() -> bool:
+    """True when Aura's own main window is in front (the pill never takes focus)."""
+    if _user32 is None:
+        return False
+    hwnd = _user32.GetForegroundWindow()
+    if not hwnd:
+        return False
+    pid = wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value == os.getpid()
+
+
+def _refuse_own_window(text: str) -> None:
+    """The Mac's self-target check: a global hotkey pressed while Aura itself
+    is in front would paste into Aura and report success though nothing reached
+    the intended app. Keep the text on the clipboard and say so instead."""
+    if not _foreground_is_own_process():
+        return
+    copied = _clipboard_set_windows(text)
+    where = ("on the clipboard — click a text field in another app and press Ctrl+V"
+             if copied else "in Aura History")
+    raise InjectionError(
+        "Wayfinder Aura was frontmost, so there was no external paste target. "
+        f"Your text is {where}."
+    )
+
+
 def foreground_window_id() -> str | None:
     """The foreground window handle as a string, or None.
 
@@ -268,6 +296,7 @@ def inject_text_windows(text: str, typing_speed: str = "instant") -> None:
     if not text:
         return
     _require_foreground_window()
+    _refuse_own_window(text)
     require_modifier_release_windows()
 
     interval = _TYPING_INTERVALS.get(typing_speed, 0.0)
@@ -470,6 +499,7 @@ def inject_text_paste_windows(text: str) -> None:
     if not text:
         return
     _require_foreground_window()
+    _refuse_own_window(text)
     require_modifier_release_windows()
 
     previous = _clipboard_get_windows()
