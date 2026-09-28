@@ -68,3 +68,20 @@ def test_idle_ribbon_goes_to_background_pace_while_another_app_has_focus(monkeyp
     # Background drift: slower and on a lower frame rate, never frozen.
     assert 0 < wm._HERO_BACKGROUND_SPEED < 1
     assert wm._HERO_BACKGROUND_INTERVAL_MS > wm._hero_idle_interval_ms("linux")
+
+
+def test_benchmark_bar_is_placed_by_wall_clock_at_30_fps(monkeypatch):
+    drawn, scheduled = [], []
+    bar = SimpleNamespace(_indeterminate_value=0.0, _draw=lambda: drawn.append(bar._indeterminate_value),
+                          step=lambda: None, pack_forget=lambda: None)
+    clock = {"t": 100.0}
+    monkeypatch.setattr(wm.time, "monotonic", lambda: clock["t"])
+    app = SimpleNamespace(_benchmark_running=True, benchmark_progress=bar, _benchmark_bar_t0=100.0,
+                          after=lambda ms, fn: scheduled.append(ms), _tick_benchmark_bar=None)
+    clock["t"] = 101.5  # a late frame: 1.5 s in
+    wm.WayfinderApp._tick_benchmark_bar(app)
+    assert drawn == [15.0]          # CTk's .step() pace (10 units/s), from elapsed time
+    assert scheduled == [33]        # ~30 fps while a benchmark runs
+    app._benchmark_running = False
+    wm.WayfinderApp._tick_benchmark_bar(app)
+    assert scheduled == [33]        # stops (and hides) when the run ends

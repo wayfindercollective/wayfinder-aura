@@ -9699,8 +9699,9 @@ class WayfinderApp(ctk.CTk):
         self.benchmark_status_label.pack(side="left", padx=(15, 0))
 
         # Thin indeterminate busy bar under the button row — hidden until a run starts.
-        # Driven by our own 100ms (~10fps) tick (_tick_benchmark_bar); NEVER .start()
-        # (its internal loop re-arms every 20ms, banned by rule 1 + the ratchet test).
+        # Driven by our own ~30 fps, wall-clock-placed tick (_tick_benchmark_bar) that
+        # only runs during a benchmark; NEVER .start() (its internal loop re-arms every
+        # 20ms, banned by rule 1 + the ratchet test).
         self.benchmark_progress = ctk.CTkProgressBar(
             benchmark_content,
             height=4,
@@ -9961,8 +9962,13 @@ class WayfinderApp(ctk.CTk):
         self.log("   📊 Updated tooltips with new benchmark data")
     
     def _tick_benchmark_bar(self) -> None:
-        """Advance the indeterminate benchmark bar at 100ms (~10fps, ratchet-safe;
-        NEVER .start() — that re-arms every 20ms). Self-cancels and hides the bar once
+        """Animate the indeterminate benchmark bar at ~30 fps while a benchmark runs.
+
+        At 10 fps (.step() every 100 ms) the sweep looked jittery. The bar is now
+        placed from wall-clock time at CTk's own .step() pace (10 units/s), so a
+        frame delayed by the CPU benchmark lands where the bar should be instead
+        of stuttering; a 4 px bar redraw costs nothing measurable. NEVER .start()
+        (that re-arms every 20ms). Self-cancels and hides the bar once
         _benchmark_running clears (set in the benchmark's completion/error path)."""
         if not getattr(self, "_benchmark_running", False):
             try:
@@ -9970,12 +9976,20 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
             return
+        bar = self.benchmark_progress
         try:
-            self.benchmark_progress.step()
+            t0 = getattr(self, "_benchmark_bar_t0", None)
+            if t0 is None:
+                t0 = self._benchmark_bar_t0 = time.monotonic()
+            bar._indeterminate_value = (time.monotonic() - t0) * 10.0
+            bar._draw()
         except Exception:
-            pass
+            try:
+                bar.step()
+            except Exception:
+                pass
         try:
-            self.after(100, self._tick_benchmark_bar)
+            self.after(33, self._tick_benchmark_bar)
         except Exception:
             pass
 
@@ -10045,7 +10059,7 @@ class WayfinderApp(ctk.CTk):
             timer_state["seconds"] += 1
             phase = timer_state["phase"]
             try:
-                self.benchmark_test_btn.configure(text=f"⏳ {phase} {timer_state['seconds']}s")
+                self.benchmark_test_btn.configure(text=f"{phase} · {timer_state['seconds']}s")
                 timer_state["timer_id"] = self.after(1000, update_timer)
             except Exception:
                 pass
@@ -10059,10 +10073,15 @@ class WayfinderApp(ctk.CTk):
                     pass
         
         # Disable button and start timer
-        self.benchmark_test_btn.configure(state="disabled", text="⏳ Starting 0s", fg_color=COLORS["accent_green"])
+        # Disabled while running: keep the label dark on the mint fill (CTk's
+        # default disabled grey washed out); no emoji as UI chrome (rule 11).
+        self.benchmark_test_btn.configure(state="disabled", text="Starting · 0s",
+                                          fg_color=COLORS["accent_green"],
+                                          text_color_disabled="#000000")
         self.benchmark_status_label.configure(text=f"Preparing {model_name}...")
-        # Show + drive the indeterminate busy bar (our own >=100ms tick, never .start()).
+        # Show + drive the indeterminate busy bar (our own ~30 fps tick, never .start()).
         self._benchmark_running = True
+        self._benchmark_bar_t0 = time.monotonic()
         try:
             self.benchmark_progress.pack(fill="x", pady=(8, 0))
             self._tick_benchmark_bar()
