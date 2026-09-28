@@ -41,6 +41,16 @@ _SYSTEM = (
 )
 
 
+def magnifier_running() -> bool:
+    """Windows Magnifier is on (its window class exists)."""
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.user32.FindWindowW("MagUIClass", None))
+    except Exception:
+        return False
+
+
 def _local_appdata() -> Path:
     return Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
 
@@ -69,11 +79,19 @@ def _installed_apps(roots=None) -> set[str]:
     return found
 
 
-def conflict_for(code, modifiers, *, installed=None) -> str | None:
+def conflict_for(code, modifiers, *, installed=None, magnifier=None) -> str | None:
     """A one-line warning for this chord on this PC, or None."""
     if sys.platform != "win32":
         return None
     mods = {str(m).lower() for m in (modifiers or ())}
+    if mods == {"ctrl", "alt"} and code == _SPACE:
+        # Aura's default. Only Magnifier claims it: with Magnifier on, the
+        # same keys also zoom out to a full-screen preview and back.
+        if magnifier_running() if magnifier is None else magnifier:
+            return ("Windows Magnifier is on, and Ctrl+Alt+Space is also its "
+                    "full-screen preview (it zooms out and back). Pick another key, "
+                    "such as Right Ctrl or F9, or close Magnifier.")
+        return None
     for wanted, key, message in _SYSTEM:
         if mods == wanted and code == key:
             return message + " Pick another key."

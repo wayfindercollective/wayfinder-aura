@@ -6044,6 +6044,9 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"⚠ Windows sleep/wake integration unavailable: {exc}")
             # The Mac's blocked-microphone banner, from Windows' privacy switches.
             self.after(1200, self._refresh_macos_permission_banner)
+            # Say once at startup if the record hotkey collides with something
+            # (e.g. Magnifier's Ctrl+Alt+Space) - most people never open Settings.
+            self.after(2000, self._log_windows_hotkey_conflict)
         if WINDOWS_MAC_LOOK:
             # Caption bar in the app's ink, rim-coloured border (the Mac's
             # unified title bar). After mapping: DWM needs the real HWND.
@@ -16160,6 +16163,17 @@ class WayfinderApp(ctk.CTk):
                     banner.pack(fill="x", pady=(0, SPACING["md"]))
         except Exception:
             pass
+
+    def _log_windows_hotkey_conflict(self) -> None:
+        try:
+            from wayfinder.utils.windows_hotkey_conflicts import conflict_for
+
+            message = conflict_for(self.config.get("hotkey_key"),
+                                   self.config.get("hotkey_modifiers", []))
+        except Exception:
+            message = None
+        if message:
+            self.log(f"⚠ Hotkey {self.get_hotkey_display()}: {message}")
 
     def _refresh_windows_microphone_banner(self, banner, label, button, anchor) -> None:
         """Windows: the Mac's "microphone is blocked" banner, from the privacy switches."""

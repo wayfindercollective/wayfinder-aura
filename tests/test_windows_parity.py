@@ -506,7 +506,7 @@ def test_windows_hotkey_clear_chords(monkeypatch):
     from wayfinder.utils import windows_hotkey_conflicts as c
 
     monkeypatch.setattr(c.sys, "platform", "win32")
-    assert c.conflict_for(57, ["ctrl", "alt"], installed=()) is None  # the default
+    assert c.conflict_for(57, ["ctrl", "alt"], installed=(), magnifier=False) is None  # the default
     assert c.conflict_for(67, [], installed=()) is None               # bare F9
     assert "1Password" in c.conflict_for(57, ["ctrl", "shift"], installed={"1Password"})
     assert c.conflict_for(57, ["ctrl", "shift"], installed=()) is None
@@ -1082,3 +1082,14 @@ def test_reduce_motion_holds_the_idle_hero_only_on_windows(monkeypatch):
 
     src = inspect.getsource(wayfinder_main.WayfinderApp._animate_idle_breath)
     assert "if IS_WINDOWS and not IS_MACOS:" in src and "interval = 2000" in src
+
+
+def test_default_hotkey_warns_only_while_magnifier_is_on(monkeypatch):
+    from wayfinder.utils import windows_hotkey_conflicts as c
+
+    monkeypatch.setattr(c.sys, "platform", "win32")
+    assert "Magnifier" in c.conflict_for(57, ["ctrl", "alt"], magnifier=True)
+    assert c.conflict_for(57, ["ctrl", "alt"], magnifier=False) is None
+    monkeypatch.setattr(c, "magnifier_running", lambda: True)
+    assert "Right Ctrl" in c.conflict_for(57, ["alt", "ctrl"])
+    assert c.conflict_for(67, [], installed=()) is None  # F9 is clear either way
