@@ -805,7 +805,10 @@ def test_app_picks_the_windows_game_backend(monkeypatch):
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
     assert wayfinder_main._game_chat_module().__name__.endswith("windows_game_chat")
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+    monkeypatch.setattr(wayfinder_main, "_IS_LINUX", False)
     assert wayfinder_main._game_chat_module().__name__.endswith("macos_game_chat")
+    monkeypatch.setattr(wayfinder_main, "_IS_LINUX", True)
+    assert wayfinder_main._game_chat_module().__name__.endswith("linux_game_chat")
 
 
 # --- Tap / hold with Right Ctrl (the Mac's Right Option gesture) -----------------

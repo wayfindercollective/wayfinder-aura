@@ -12,10 +12,11 @@ from wayfinder.core import macos_game_chat as gc
 
 @pytest.fixture(autouse=True)
 def _mac_game_backend(monkeypatch):
-    """These exercise macos_game_chat; on a Windows host the app would pick its
-    Windows twin (covered in tests/test_windows_parity.py)."""
+    """These exercise macos_game_chat; on a Windows or Linux host the app would
+    pick its twin (tests/test_windows_parity.py, tests/test_linux_game_chat.py)."""
     import wayfinder_main
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+    monkeypatch.setattr(wayfinder_main, "_IS_LINUX", False)
 
 
 # --- which apps are games -----------------------------------------------------

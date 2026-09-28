@@ -102,10 +102,13 @@ WINDOWS_GLASS_SURFACE = "#07090D"
 
 
 def _game_chat_module():
-    """Gamer mode backend: macos_game_chat, or its Windows twin (same interface)."""
+    """Gamer mode backend: macos_game_chat, or its Windows / Linux twin (same interface)."""
     if IS_WINDOWS and not IS_MACOS:
         from wayfinder.core import windows_game_chat
         return windows_game_chat
+    if _IS_LINUX and not IS_MACOS:
+        from wayfinder.core import linux_game_chat
+        return linux_game_chat
     from wayfinder.core import macos_game_chat
     return macos_game_chat
 
@@ -8376,7 +8379,7 @@ class WayfinderApp(ctk.CTk):
             ("settings", "settings-2", "Settings"),
             ("style", style_icon, style_label),
         ]
-        if IS_MACOS or IS_WINDOWS:
+        if IS_MACOS or IS_WINDOWS or _IS_LINUX:
             tabs.append(("games", "gamepad-2", "Games"))
         tabs.append(("history", "history", "History"))
 
@@ -12834,7 +12837,7 @@ class WayfinderApp(ctk.CTk):
     def _socket_tab_ids() -> tuple[str, ...]:
         """Tabs the control socket may open (tab:/inspect:)."""
         return ("dictate", "settings", "style", "history") + (
-            ("games",) if (IS_MACOS or IS_WINDOWS) else ())
+            ("games",) if (IS_MACOS or IS_WINDOWS or _IS_LINUX) else ())
 
     def _create_games_tab(self) -> None:
         """Games tab (macOS): Gamer mode switches, how it works, and a searchable
@@ -22477,8 +22480,8 @@ class WayfinderApp(ctk.CTk):
         self._set_output_style(next_style)
 
     def _gamer_profile_now(self):
-        """macOS/Windows Gamer mode: the supported game in front right now, or None."""
-        if not ((IS_MACOS or IS_WINDOWS) and self.config.get("gamer_mode", True)):
+        """Gamer mode: the supported game in front right now, or None."""
+        if not ((IS_MACOS or IS_WINDOWS or _IS_LINUX) and self.config.get("gamer_mode", True)):
             return None
         try:
             game_chat = _game_chat_module()
@@ -23328,7 +23331,7 @@ class WayfinderApp(ctk.CTk):
             # macOS game chat: an MMO (World of Warcraft first) is in front, so
             # open its chat box, paste and send instead of a plain paste.
             game_chat = getattr(self, "_inject_into_game_chat", None)
-            if ((IS_MACOS or IS_WINDOWS) and game_chat is not None
+            if ((IS_MACOS or IS_WINDOWS or _IS_LINUX) and game_chat is not None
                     and self.config.get("gamer_mode", True)):
                 if game_chat(text, gen):
                     self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
@@ -23419,8 +23422,35 @@ class WayfinderApp(ctk.CTk):
         inject_text_paste_windows(text)
         return True
 
+    def _set_clipboard_from_worker(self, text: str, timeout: float = 2.0) -> bool:
+        """Set the clipboard on the Tk thread and wait (Linux game paste).
+
+        The Flatpak ships no clipboard CLI; Tk owns the X11 CLIPBOARD selection
+        and serves it to the game (Wine bridges it to the Windows clipboard).
+        """
+        done = threading.Event()
+        ok = [False]
+
+        def _set():
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(text)
+                self.update_idletasks()
+                ok[0] = True
+            except Exception:
+                pass
+            finally:
+                done.set()
+
+        try:
+            self.after(0, _set)
+        except Exception:
+            return False
+        done.wait(timeout)
+        return ok[0]
+
     def _inject_into_game_chat(self, text: str, gen=None) -> bool:
-        """macOS/Windows: dictate into a supported game's chat. False = not a game.
+        """Gamer mode: dictate into a supported game's chat. False = not a game.
 
         Runs on the injection worker. Raises (-> INJECTION_ERROR) if the game
         left the foreground mid-send; the text stays in History.
@@ -23448,11 +23478,29 @@ class WayfinderApp(ctk.CTk):
                 return self._windows_game_paste_only(text)
             return False
         send = bool(self.config.get("game_chat_send", True)) and profile.auto_send
-        self.log(
-            f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste for you to send'}"
-            f"{'' if profile.open_chat else ' (click into chat first)'}"
-        )
-        if IS_WINDOWS and not IS_MACOS:
+        typed = profile.key in getattr(game_chat, "TYPE_PROFILES", ())
+        if typed:
+            self.log(f"🎮 {profile.name} chat: typing into the chat box you opened "
+                     "(press Enter first; you press Enter to send)")
+        else:
+            self.log(
+                f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste for you to send'}"
+                f"{'' if profile.open_chat else ' (click into chat first)'}"
+            )
+        press_return = press_enter
+        if _IS_LINUX and not (IS_MACOS or IS_WINDOWS):
+            # Clipboard (owned by our Tk window, which Wine reads) + held Ctrl+V;
+            # games whose chat takes no paste get typed text instead.
+            hold_keys = game_chat.hold_keys
+            press_return = game_chat.press_return
+            if typed:
+                paste = game_chat.type_text
+            else:
+                def paste(message):
+                    if not self._set_clipboard_from_worker(message):
+                        raise InjectionError("Could not set the clipboard for the game paste")
+                    game_chat.paste_clipboard()
+        elif IS_WINDOWS and not IS_MACOS:
             # Ctrl+V only: never the SendInput typing fallback in a game,
             # where letters are keybinds.
             from wayfinder.core.injector_windows import hold_keys, inject_text_paste_windows
@@ -23471,7 +23519,7 @@ class WayfinderApp(ctk.CTk):
                     game_pid=pid,
                     send=send,
                     paste=paste,
-                    press_return=press_enter,
+                    press_return=press_return,
                     frontmost_pid=lambda: game_chat.frontmost_app()[0],
                     still_current=lambda: gen is None or gen == self.session_generation,
                 )
