@@ -344,6 +344,9 @@ class TestSocketListener:
             (b"cancel", EventType.CANCEL_RECORDING, None),
             (b"quit", EventType.QUIT_APP, None),
             (b"tab:settings", EventType.SWITCH_TAB, "settings"),
+            (b"zoom:in", EventType.UI_ZOOM, "in"),
+            (b"zoom:out", EventType.UI_ZOOM, "out"),
+            (b"zoom:reset", EventType.UI_ZOOM, "reset"),
         ]
 
         for payload, expected_type, expected_data in cases:

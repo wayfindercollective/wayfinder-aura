@@ -136,6 +136,9 @@ def socket_listener(
                     # Live verification: switch the main-window tab deterministically.
                     tab_id = data_str.split(":", 1)[1]
                     event_queue.put((EventType.SWITCH_TAB, tab_id))
+                elif data_str in ("zoom:in", "zoom:out", "zoom:reset"):
+                    # The header -/+/reset buttons (desktop shortcuts, UI checks).
+                    event_queue.put((EventType.UI_ZOOM, data_str.split(":", 1)[1]))
                 elif data_str.startswith("inspect:"):
                     # Headless UI check: dump that tab's widget tree (works with the
                     # display asleep) to ui-inspect-<tab>.json beside this socket.

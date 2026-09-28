@@ -1310,7 +1310,7 @@ def test_hero_canvas_layout_windows_and_linux_match_mac(monkeypatch):
 
     assert wayfinder_main._hero_visual_scale(1.25, "win32") == 1.25
     assert wayfinder_main._hero_canvas_pady("win32") == wayfinder_main._hero_canvas_pady("darwin")
-    assert wayfinder_main._hero_visual_scale(1.25, "linux") == 1.0
+    assert wayfinder_main._hero_visual_scale(1.25, "linux") == 1.25
     assert wayfinder_main._hero_canvas_pady("linux") == wayfinder_main._hero_canvas_pady("darwin")
     monkeypatch.setenv("WAYFINDER_LINUX_MAC_LOOK", "0")
     assert wayfinder_main._hero_canvas_pady("linux") == (0, 8)

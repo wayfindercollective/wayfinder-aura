@@ -82,6 +82,7 @@ except ImportError:
 import sys as _sys
 IS_MACOS = _sys.platform == 'darwin'
 IS_WINDOWS = _sys.platform == 'win32'
+_IS_LINUX = _sys.platform.startswith('linux')
 # Windows wears the macOS design (docs/WINDOWS-FROM-MACOS.md): the glass
 # palette and pane rims on a flat deep-ink surface (Tk cannot show real
 # vibrancy), a rounded content pane, no gradient, a dark caption bar.
@@ -1314,14 +1315,24 @@ def _windows_logical(value: float) -> int:
 def _hero_visual_scale(
     ui_scale: float, platform_name: str | None = None
 ) -> float:
-    """Scale the raw Tk hero canvas on Aqua (and Windows, which draws the same
-    ribbon) alongside CTk widgets. Windows also carries its display scale: the
-    canvas is sized in real pixels there."""
+    """Scale the raw Tk hero canvas alongside CTk widgets (CTk's scaler skips
+    raw canvases, so at 200% the ribbon stayed 64 px tall on Linux). Windows
+    also carries its display scale: the canvas is sized in real pixels there."""
     active_platform = platform_name or sys.platform
-    if active_platform not in ("darwin", "win32"):
+    if active_platform not in ("darwin", "win32") and not active_platform.startswith("linux"):
         return 1.0
     scale = max(0.7, min(2.5, float(ui_scale)))
     return scale * _windows_dpi_scale() if active_platform == "win32" else scale
+
+
+def _mic_canvas_px(ui_scale: float, platform_name: str | None = None) -> int:
+    """The raw mic canvas in real pixels. Linux follows UI zoom (CTk doesn't
+    scale raw canvases, so at 200% the button was half the size of its text);
+    macOS and Windows keep their established 80 (Windows: DPI-scaled) px."""
+    active_platform = platform_name or sys.platform
+    if active_platform.startswith("linux"):
+        return round(80 * max(0.7, min(2.5, float(ui_scale))))
+    return _windows_px(80)
 
 
 def _hero_canvas_pady(platform_name: str | None = None):
@@ -7008,7 +7019,8 @@ class WayfinderApp(ctk.CTk):
                 pass
 
     def _get_recommended_scale(self) -> float:
-        """Calculate recommended UI scale based on screen resolution for READABILITY.
+        """Recommended UI scale: the desktop's own scale on Linux (Xft.dpi),
+        else one based on screen resolution for READABILITY.
         
         Focus: Make text readable on high-DPI screens out of the box.
         
@@ -7018,6 +7030,19 @@ class WayfinderApp(ctk.CTk):
         - 1080p (1920x1080): 100% - baseline
         - Lower: 100% minimum
         """
+        # Linux: match the desktop. X11/XWayland apps are told the desktop's
+        # scale through Xft.dpi (192 at 200%; 96 when the compositor scales
+        # legacy apps itself), which also covers fractional scales and 1440p
+        # at 100% that the resolution table below gets wrong.
+        if _IS_LINUX:
+            try:
+                from wayfinder.utils.tk_dpi import read_xft_dpi
+                dpi = read_xft_dpi()
+            except Exception:
+                dpi = None
+            if dpi and dpi > 0:
+                return max(0.7, min(2.5, round(dpi / 96.0 * 20) / 20))
+
         # Windows: logical height, since the display scale is applied separately
         screen_h = _windows_logical(self.winfo_screenheight())
 
@@ -7097,8 +7122,27 @@ class WayfinderApp(ctk.CTk):
             self.ui_scale = new_scale
             self.config["ui_scale"] = new_scale
             save_config(self.config)
-            self._apply_scale()
-            self.log(f"⚙ UI Scale: {int(new_scale * 100)}%")
+            if not _IS_LINUX:
+                self._apply_scale()
+                self.log(f"⚙ UI Scale: {int(new_scale * 100)}%")
+                return
+            # Linux: show the new value at once and rebuild once the clicks
+            # stop, so 200% -> 150% by two quick clicks is one rebuild, not two.
+            self._update_scale_labels()
+            job = getattr(self, "_scale_apply_job", None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+            self._scale_apply_job = self.after(250, self._apply_scale_debounced)
+
+    def _apply_scale_debounced(self) -> None:
+        self._scale_apply_job = None
+        t0 = time.perf_counter()
+        self._apply_scale()
+        ms = (time.perf_counter() - t0) * 1000
+        self.log(f"⚙ UI Scale: {int(self.ui_scale * 100)}% (applied in {ms:.0f} ms)")
     
     def reset_scale(self):
         """Reset UI scale to optimal for current display."""
@@ -7122,8 +7166,51 @@ class WayfinderApp(ctk.CTk):
             self._apply_scale_staged_macos()
             return
 
-        ctk.set_widget_scaling(self.ui_scale * _windows_dpi_scale())
-        self._finish_scale_layout(force_idle_flush=True)
+        # Linux: hold a still of the window over it while every widget
+        # re-lays out, then reveal the finished layout in one frame, instead
+        # of showing each widget resize in turn.
+        cover = self._freeze_window_for_rescale() if _IS_LINUX else None
+        try:
+            ctk.set_widget_scaling(self.ui_scale * _windows_dpi_scale())
+            self._finish_scale_layout(force_idle_flush=True)
+            if cover is not None:
+                self.update_idletasks()
+        finally:
+            if cover is not None:
+                try:
+                    cover.destroy()
+                except Exception:
+                    pass
+
+    def _freeze_window_for_rescale(self):
+        """Cover the window with a still of itself (X11/XWayland). Returns the
+        cover widget to destroy after the re-layout, or None if unavailable."""
+        try:
+            from PIL import ImageTk
+            from Xlib import X, display as xdisplay
+
+            self.update_idletasks()
+            w, h = self.winfo_width(), self.winfo_height()
+            if w < 50 or h < 50:
+                return None
+            conn = xdisplay.Display()
+            try:
+                win = conn.create_resource_object("window", self.winfo_id())
+                raw = win.get_image(0, 0, w, h, X.ZPixmap, 0xFFFFFFFF)
+            finally:
+                conn.close()
+            if len(raw.data) < w * h * 4:
+                return None
+            img = Image.frombytes("RGB", (w, h), raw.data, "raw", "BGRX")
+            photo = ImageTk.PhotoImage(img)
+            cover = tk.Label(self, image=photo, borderwidth=0, highlightthickness=0)
+            cover._wf_photo = photo  # keep a ref - Tk doesn't
+            cover.place(x=0, y=0, width=w, height=h)
+            cover.lift()
+            cover.update_idletasks()
+            return cover
+        except Exception:
+            return None
 
     def _apply_scale_staged_macos(self) -> None:
         """Rescale Aqua widgets in bounded batches so input keeps dispatching."""
@@ -7174,6 +7261,14 @@ class WayfinderApp(ctk.CTk):
             )
         except Exception:
             pass
+        mic_size = _mic_canvas_px(self.ui_scale)
+        try:
+            resized_mic = int(float(self.mic_button_canvas.cget("width"))) != mic_size
+            if resized_mic:
+                self.mic_button_canvas.configure(width=mic_size, height=mic_size)
+                self._mic_photo_cache = {}  # every cached frame is the old size
+        except Exception:
+            resized_mic = False
 
         if force_idle_flush:
             # Preserve Linux's established synchronous behavior. Aqua's staged
@@ -7183,6 +7278,12 @@ class WayfinderApp(ctk.CTk):
         # Form-row measure max is design units × scale → re-pad after scale change.
         self._sync_all_form_measures(force=True)
         self._update_scale_labels()
+        if resized_mic:
+            try:
+                self.mic_button_canvas.update_idletasks()
+                self._draw_mic_button(STATE_COLORS[self.app_state])
+            except Exception:
+                pass
     
     def setup_ui(self) -> None:
         # === Typography ===
@@ -7821,8 +7922,8 @@ class WayfinderApp(ctk.CTk):
         # Glowing mic button canvas
         self.mic_button_canvas = ctk.CTkCanvas(
             mic_container,
-            width=_windows_px(80),   # raw canvas: real pixels on Windows
-            height=_windows_px(80),
+            width=_mic_canvas_px(self.ui_scale),   # raw canvas: real pixels
+            height=_mic_canvas_px(self.ui_scale),
             bg=COLORS["bg_card"],
             highlightthickness=0,
             cursor="hand2",
@@ -7889,26 +7990,22 @@ class WayfinderApp(ctk.CTk):
             phys = max(self.mic_button_canvas.winfo_width(),
                        self.mic_button_canvas.winfo_height())
         except Exception:
-            phys = _windows_px(80)
-        return phys if phys >= 10 else _windows_px(80)
+            phys = _mic_canvas_px(getattr(self, "ui_scale", 1.0))
+        return phys if phys >= 10 else _mic_canvas_px(getattr(self, "ui_scale", 1.0))
 
     def _render_mic_button_photo(self, color: str, pressed: bool = False,
-                                 is_active: bool = False, pulse: float | None = None):
-        """Render the quiet-minimal mic button as a supersampled PIL image (4x,
-        LANCZOS downscale).
+                                 is_active: bool = False, pulse: float | None = None,
+                                 hover: bool = False):
+        """Render the mic button (``wayfinder.ui.mic_button``: a lit glass disc
+        with a state-colour glow, top-lit rim and a filled mic glyph; recording
+        shows a stop square and a breathing glow).
 
-        Reads as a "pro tool", not a glossy button: at rest a thin state-colour
-        outline + a tinted Lucide `mic` glyph; while recording the circle fills
-        with the state colour and shows a rounded bg_base stop-square (with a
-        subtle expanding breath ring); PROCESSING/PASTING follow the is_active
-        fill. Supersampled 4x then LANCZOS-downscaled for crisp HiDPI edges;
-        results are cached per (color, state, quantized pulse) so a state change
-        renders once and the recording pulse is a dict hit + itemconfig.
-        tint_icon runs only on cache misses (no per-frame I/O). Pre-composited
-        over bg_card (the canvas bg).
+        Results are cached per (color, state, quantized pulse, size) so a state
+        change renders once and the recording pulse is a dict hit + itemconfig.
+        Pre-composited over bg_card (the canvas bg).
         """
         phys = self._mic_button_phys()
-        key = (color, bool(pressed), bool(is_active), pulse, phys)
+        key = (color, bool(pressed), bool(is_active), pulse, phys, bool(hover))
         cache = getattr(self, "_mic_photo_cache", None)
         if cache is None:
             cache = self._mic_photo_cache = {}
@@ -7919,71 +8016,12 @@ class WayfinderApp(ctk.CTk):
             cache.clear()
 
         from PIL import ImageTk
-        SS = 4
-        S = phys * SS
-        k = S / 80.0  # the design is authored in 80px units
-        img = Image.new("RGB", (S, S), COLORS["bg_card"])
-        draw = ImageDraw.Draw(img)
-        cx = cy = S / 2.0
+        from wayfinder.ui.mic_button import render_mic_button
 
-        r = int(color[1:3], 16); g = int(color[3:5], 16); b = int(color[5:7], 16)
-        bg_r = int(COLORS["bg_card"][1:3], 16)
-        bg_g = int(COLORS["bg_card"][3:5], 16)
-        bg_b = int(COLORS["bg_card"][5:7], 16)
-
-        def blend(intensity: float) -> tuple:
-            i = min(intensity, 1.0)
-            return (int(bg_r + (r - bg_r) * i),
-                    int(bg_g + (g - bg_g) * i),
-                    int(bg_b + (b - bg_b) * i))
-
-        def circle(radius: float, fill) -> None:
-            draw.ellipse([cx - radius * k, cy - radius * k,
-                          cx + radius * k, cy + radius * k], fill=fill)
-
-        stroke = max(1, round(2 * k))
-        r_units = 24  # button radius in design units (80px canvas)
-        icon_px = max(1, int(30 * k))  # Lucide glyph box in SS px
-
-        def paste_glyph(hex_color: str) -> None:
-            # tint_icon is pure-PIL and only runs on a cache miss (this whole
-            # render is memoized per key) — no per-frame decode.
-            glyph = tint_icon("mic", hex_color, icon_px)
-            img.paste(glyph, (int(cx - icon_px / 2), int(cy - icon_px / 2)), glyph)
-
-        if pulse is not None:
-            # Recording: filled circle + rounded bg_base stop-square, with a
-            # subtle expanding breath ring driven by the (quantized) pulse. The
-            # caller's pulse breathes in [0.8,1.0]; map it to a 0..1 expand.
-            # Ring floor/range tuned at real 80px: the first cut (0.05+0.28)
-            # faded to imperceptible in the wide frames, so the breath didn't
-            # read — 0.10+0.45 with a 3-unit stroke tracks visibly through the
-            # whole cycle while staying low-alpha.
-            expand = min(max((pulse - 0.8) / 0.2, 0.0), 1.0)
-            rr = (r_units + 4 + 8 * expand) * k
-            ring_intensity = 0.10 + 0.45 * (1.0 - expand)  # bright small -> dim wide
-            ring_stroke = max(1, round(3 * k))
-            draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr],
-                         outline=blend(ring_intensity), width=ring_stroke)
-            circle(r_units * (0.98 + 0.02 * expand), color)
-            sq = 9 * k
-            rad = max(1, round(3 * k))
-            draw.rounded_rectangle([cx - sq, cy - sq, cx + sq, cy + sq],
-                                   radius=rad, fill=COLORS["bg_base"])
-        elif is_active:
-            # PROCESSING / PASTING (and the transient first RECORDING frame):
-            # circle fills with the state colour, dark mic glyph on top.
-            circle(r_units, color)
-            paste_glyph(COLORS["bg_base"])
-        else:
-            # Idle / hover: thin state-colour outline + muted mic glyph. Hover
-            # brightening of `color` is applied by _draw_mic_button upstream.
-            draw.ellipse([cx - r_units * k, cy - r_units * k,
-                          cx + r_units * k, cy + r_units * k],
-                         outline=color, width=stroke)
-            paste_glyph(COLORS["text_secondary"])
-
-        img = img.resize((phys, phys), Image.LANCZOS)
+        img = render_mic_button(
+            phys, color, card=COLORS["bg_card"], ink=COLORS["bg_base"],
+            light=COLORS["text_primary"], active=is_active, pulse=pulse, hover=hover,
+        )
         photo = ImageTk.PhotoImage(img)
         cache[key] = photo
         return photo
@@ -8010,7 +8048,8 @@ class WayfinderApp(ctk.CTk):
 
         try:
             phys = self._mic_button_phys()
-            photo = self._render_mic_button_photo(color, pressed=pressed, is_active=is_active)
+            photo = self._render_mic_button_photo(color, pressed=pressed, is_active=is_active,
+                                                  hover=hover)
             canvas.delete("all")
             canvas.create_image(phys // 2, phys // 2, image=photo)
             self._mic_photo = photo  # keep a ref — Tk doesn't
@@ -14622,7 +14661,19 @@ class WayfinderApp(ctk.CTk):
             _svc = ("systemctl --user enable --now ydotool.service"
                     if _detect_package_manager() == "pacman"
                     else "sudo systemctl enable --now ydotoold")
-            if not shutil.which("ydotool"):
+            # Report the tool that will actually type (the injector's own choice):
+            # the Flatpak types with xdotool, so a missing ydotool is not a problem
+            # there and warning "text injection won't work" was false.
+            try:
+                from wayfinder.utils.platform import get_text_injector
+                _tool = get_text_injector()
+            except Exception:
+                _tool = None
+            if _tool == "xdotool":
+                self.log("✓ Text injection: xdotool")
+            elif _tool == "wtype":
+                self.log("✓ Text injection: wtype (Wayland virtual keyboard)")
+            elif not shutil.which("ydotool"):
                 self.log("⚠️ ydotool not found - text injection won't work")
                 self.log(f"💡 Install: {_get_install_hint('ydotool')}")
                 self.log(f"💡 Then enable the daemon: {_svc}")
@@ -16020,7 +16071,10 @@ class WayfinderApp(ctk.CTk):
             progress_color=COLORS["accent_bright"] if "accent_bright" in COLORS else COLORS["accent"],
             button_color=COLORS["text_bright"],
             button_hover_color=COLORS["text_primary"],
-            fg_color=COLORS["bg_input"],
+            # Off track: bg_elevated like every other switch. bg_input is nearly
+            # the card colour on the glass palette, so the track vanished and
+            # only the knob showed.
+            fg_color=COLORS["bg_elevated"],
             switch_width=44,
             switch_height=24,
             corner_radius=RADIUS["md"],
@@ -22147,6 +22201,13 @@ class WayfinderApp(ctk.CTk):
             self.cancel_recording()
         elif event_type == EventType.QUIT_APP:
             self.quit_app()
+        elif event_type == EventType.UI_ZOOM:
+            if data == "in":
+                self.scale_ui_step(0.25)
+            elif data == "out":
+                self.scale_ui_step(-0.25)
+            elif data == "reset":
+                self.reset_scale()
         elif event_type == EventType.SWITCH_TAB:
             if data in self._socket_tab_ids():
                 self._switch_tab(data)
