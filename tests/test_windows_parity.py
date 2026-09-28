@@ -888,7 +888,7 @@ def test_tap_hold_keys_per_platform():
 
     assert wm.is_tap_hold_hotkey(97, [], platform_name="win32")
     assert not wm.is_tap_hold_hotkey(97, ["shift"], platform_name="win32")
-    assert not wm.is_tap_hold_hotkey(100, [], platform_name="win32")   # Right Alt = AltGr
+    assert wm.is_tap_hold_hotkey(100, [], platform_name="win32")       # Right Alt / Alt Gr
     assert wm.is_tap_hold_hotkey(100, [], platform_name="darwin")
     assert not wm.is_tap_hold_hotkey(97, [], platform_name="linux")
     assert "Right Ctrl" in wm.hotkey_key_options(platform_name="win32", available_pynput_codes={97, 57})
@@ -1093,3 +1093,23 @@ def test_default_hotkey_warns_only_while_magnifier_is_on(monkeypatch):
     monkeypatch.setattr(c, "magnifier_running", lambda: True)
     assert "Right Ctrl" in c.conflict_for(57, ["alt", "ctrl"])
     assert c.conflict_for(67, [], installed=()) is None  # F9 is clear either way
+
+
+def test_alt_gr_taps_and_holds_like_right_alt(monkeypatch):
+    """UK/European layouts report Right Alt as Alt Gr, after a synthetic Left
+    Ctrl: it must still be the tap/hold key, and Alt Gr + a key must not record."""
+    from wayfinder.hotkeys.types import EventType
+
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100)
+    press(pl.Key.ctrl_l)
+    press(pl.Key.alt_gr)
+    release(pl.Key.ctrl_l)
+    release(pl.Key.alt_gr)
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, None)]
+    press(pl.Key.ctrl_l)
+    press(pl.Key.alt_gr)
+    press(pl.KeyCode.from_char("e"))       # Alt Gr+E types an accented e
+    release(pl.KeyCode.from_char("e"))
+    release(pl.Key.ctrl_l)
+    release(pl.Key.alt_gr)
+    assert _drain(events) == []

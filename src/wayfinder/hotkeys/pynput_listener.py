@@ -145,9 +145,21 @@ _ALL_MODIFIER_KEYS = {k for ks in MODIFIER_KEYS.values() for k in ks}
 # macOS Detect may bind these alone (tap/hold). Right-hand keys only: the left
 # ones are pressed constantly as part of ordinary shortcuts.
 _SOLO_CAPTURE_KEYS = {k for k in (_k("alt_r"), _k("cmd_r")) if k is not None}
-# Windows: Right Ctrl only. Right Alt is AltGr on most non-US layouts (it types
-# characters), and the Windows keys belong to the Start menu.
-_WIN32_SOLO_CAPTURE_KEYS = {k for k in (_k("ctrl_r"),) if k is not None}
+# Windows: Right Ctrl, and Right Alt / Alt Gr (the Mac's Right Option). Many
+# laptops (e.g. LG Gram) have no Right Ctrl. Alt Gr alone types nothing, and
+# an Alt Gr + key combo (Alt Gr+4 = euro) cancels the gesture. The Windows keys
+# belong to the Start menu.
+_WIN32_SOLO_CAPTURE_KEYS = {k for k in (_k("ctrl_r"), _k("alt_r")) if k is not None}
+
+
+def _win32_normalize_key(key):
+    """Windows reports Right Alt as Key.alt_gr on layouts with Alt Gr (UK, most
+    of Europe), preceded by a synthetic Left Ctrl. Same physical key, same vk
+    (165): treat it as alt_r, which is what the stored hotkey code maps to."""
+    alt_gr = _k("alt_gr")
+    if alt_gr is not None and key == alt_gr:
+        return _k("alt_r") or key
+    return key
 
 
 def _solo_capture_keys() -> set:
@@ -632,7 +644,8 @@ def pynput_hotkey_listener(
     solo_capture: dict = {"key": None}
 
     def _solo_target_active() -> bool:
-        """macOS/Windows: the record hotkey is one bare modifier (Right Option / Right Ctrl)."""
+        """macOS/Windows: the record hotkey is one bare modifier (Right Option;
+        Windows: Right Ctrl or Right Alt / Alt Gr)."""
         return (
             sys.platform in ("darwin", "win32")
             and not required_modifiers
@@ -664,6 +677,8 @@ def pynput_hotkey_listener(
         if sys.platform == "darwin" and injected:
             return
 
+        if sys.platform == "win32":
+            key = _win32_normalize_key(key)
         if sys.platform == "darwin":
             key = _darwin_normalize_key(key)
             if _darwin_fn_pressed():
@@ -759,6 +774,8 @@ def pynput_hotkey_listener(
         if sys.platform == "darwin" and injected:
             return
 
+        if sys.platform == "win32":
+            key = _win32_normalize_key(key)
         if sys.platform == "darwin":
             key = _darwin_normalize_key(key)
 
@@ -998,7 +1015,7 @@ def pynput_hotkey_listener(
                     not _solo_target_active()
                     or _win32_key_pressed(current_record_code) is False
                 ):
-                    # Lost Right Ctrl release (lock screen, UAC) or the hotkey
+                    # Lost Right Ctrl/Alt release (lock screen, UAC) or the hotkey
                     # changed mid-gesture: end it so push-to-talk can't run on.
                     solo_gesture.release_target()
                 if "style" in active_actions and _win32_key_pressed(current_style_code) is False:

@@ -3501,9 +3501,10 @@ def _macos_cloud_models(provider: str) -> list[str]:
 # macOS: bare right-hand modifiers usable as a tap/hold record hotkey (evdev
 # KEY_RIGHTALT / KEY_RIGHTMETA). Right Option is the macOS default.
 MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command"}
-# Windows: Right Ctrl (evdev KEY_RIGHTCTRL). Right Alt is AltGr on most
-# non-US keyboards, so it can't be a bare hotkey there.
-WINDOWS_SOLO_HOTKEYS = {97: "Right Ctrl"}
+# Windows: Right Ctrl (evdev KEY_RIGHTCTRL) and Right Alt / Alt Gr
+# (KEY_RIGHTALT, the Mac's Right Option). Many laptops have no Right Ctrl.
+# Alt Gr alone types nothing; Alt Gr + a key cancels the gesture.
+WINDOWS_SOLO_HOTKEYS = {97: "Right Ctrl", 100: "Right Alt (Alt Gr)"}
 
 
 def _solo_hotkeys(platform_name: str | None = None) -> dict:
@@ -18273,7 +18274,7 @@ class WayfinderApp(ctk.CTk):
         if is_tap_hold_hotkey(code, modifiers):
             text, color = (
                 f"Tap {_keycode_display(code)} to start and stop, or hold it while you "
-                + ("talk. Shortcuts with it (like Ctrl+C) never start a recording."
+                + ("talk. Shortcuts with it (like Ctrl+C or Alt Gr+E) never start a recording."
                    if sys.platform == "win32" else
                    "talk. Typing with it (like ⌥E) never starts a recording.")
             ), COLORS["text_secondary"]
@@ -18315,7 +18316,7 @@ class WayfinderApp(ctk.CTk):
         new_code = self._hotkey_key_codes.get(value, 67)
         self.config["hotkey_key"] = new_code
         if new_code in _solo_hotkeys():
-            # Right Option/Command (Windows: Right Ctrl) work alone (tap/hold);
+            # Right Option/Command (Windows: Right Ctrl/Alt) work alone (tap/hold);
             # a leftover modifier would turn them back into a chord.
             self.config["hotkey_modifiers"] = []
             for var in getattr(self, "_hotkey_mod_vars", {}).values():
