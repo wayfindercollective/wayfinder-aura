@@ -1331,6 +1331,21 @@ def _hero_visual_scale(
     return scale * _windows_dpi_scale() if active_platform == "win32" else scale
 
 
+def _collect_vocabulary_corrections(rows) -> tuple[list[tuple[str, str]], int]:
+    """Vocabulary editor rows [(heard, write), ...] -> (valid pairs, incomplete).
+
+    Blank rows are ignored; a row with only one side filled counts as
+    incomplete. Validation (trim, dedupe by heard, heard != write, caps) is
+    parse_vocabulary_replacements', the same rules the transcriber applies.
+    """
+    from wayfinder.core.transcriber import parse_vocabulary_replacements
+
+    filled = [(str(h or "").strip(), str(w or "").strip()) for h, w in rows]
+    incomplete = sum(1 for h, w in filled if bool(h) != bool(w))
+    pairs = parse_vocabulary_replacements([[h, w] for h, w in filled if h and w])
+    return pairs, incomplete
+
+
 def _mic_canvas_px(ui_scale: float, platform_name: str | None = None) -> int:
     """The raw mic canvas in real pixels. Linux follows UI zoom (CTk doesn't
     scale raw canvases, so at 200% the button was half the size of its text);
@@ -17904,12 +17919,92 @@ class WayfinderApp(ctk.CTk):
         if words:
             words_box.insert("1.0", "\n".join(words))
 
-        _label("Corrections — one per line:  heard -> write", muted=False, top=SPACING["md"])
-        fixes_box = _box(72)
+        _label("Corrections — when Aura hears the left, it writes the right",
+               muted=False, top=SPACING["md"])
         from wayfinder.core.transcriber import parse_vocabulary_replacements
         fixes = parse_vocabulary_replacements(self.config.get("vocabulary_replacements") or [])
-        if fixes:
-            fixes_box.insert("1.0", "\n".join(f"{h} -> {w}" for h, w in fixes))
+
+        # Two fields per correction (no "heard -> write" syntax to type).
+        fixes_grid = ctk.CTkFrame(body, fg_color="transparent")
+        fixes_grid.pack(fill="x")
+        fixes_grid.grid_columnconfigure(0, weight=1, uniform="vocab_fix")
+        fixes_grid.grid_columnconfigure(2, weight=1, uniform="vocab_fix")
+        for col, text in ((0, "Heard"), (2, "Write as")):
+            ctk.CTkLabel(
+                fixes_grid, text=text, font=(fam, fs["caption"]),
+                text_color=COLORS["text_muted"], anchor="w",
+            ).grid(row=0, column=col, sticky="w", padx=(SPACING["xs"], 0), pady=(0, SPACING["xs"]))
+        fix_rows: list[dict] = []
+        next_grid_row = [1]
+
+        def _entry(placeholder):
+            return ctk.CTkEntry(
+                fixes_grid, font=(fam, fs["body"]), fg_color=COLORS["bg_input"],
+                text_color=COLORS["text_primary"], border_width=0,
+                corner_radius=RADIUS["sm"], placeholder_text=placeholder,
+                placeholder_text_color=COLORS["text_muted"],
+            )
+
+        def _remove_row(row) -> None:
+            for widget in row["widgets"]:
+                try:
+                    widget.destroy()
+                except Exception:
+                    pass
+            if row in fix_rows:
+                fix_rows.remove(row)
+            if not fix_rows:
+                _add_row()
+
+        def _add_row(heard: str = "", write: str = "", focus: bool = False) -> dict:
+            r = next_grid_row[0]
+            next_grid_row[0] += 1
+            first = not fix_rows and not heard
+            heard_entry = _entry("what Aura hears" if first else "")
+            write_entry = _entry("what to write" if first else "")
+            arrow = ctk.CTkLabel(fixes_grid, text="→", font=(fam, fs["body"]),
+                                 text_color=COLORS["text_muted"])
+            row: dict = {"heard": heard_entry, "write": write_entry}
+            remove = ctk.CTkButton(
+                fixes_grid, text="", image=get_icon("x", 14, COLORS["text_muted"]),
+                width=28, height=28, fg_color="transparent",
+                hover_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"],
+                command=lambda: _remove_row(row),
+            )
+            row["widgets"] = (heard_entry, arrow, write_entry, remove)
+            pad = (0, SPACING["xs"])
+            heard_entry.grid(row=r, column=0, sticky="ew", pady=pad)
+            arrow.grid(row=r, column=1, padx=SPACING["sm"], pady=pad)
+            write_entry.grid(row=r, column=2, sticky="ew", pady=pad)
+            remove.grid(row=r, column=3, padx=(SPACING["xs"], 0), pady=pad)
+            if heard:
+                heard_entry.insert(0, heard)
+            if write:
+                write_entry.insert(0, write)
+            # Enter moves Heard -> Write as -> a new row, so a list types quickly.
+            heard_entry.bind("<Return>", lambda _e: (write_entry.focus_set(), "break")[1])
+
+            def _next_row(_event=None):
+                if fix_rows and fix_rows[-1] is row and heard_entry.get().strip():
+                    _add_row(focus=True)
+                return "break"
+
+            write_entry.bind("<Return>", _next_row)
+            fix_rows.append(row)
+            if focus:
+                heard_entry.focus_set()
+            return row
+
+        for heard, write in fixes:
+            _add_row(heard, write)
+        if not fix_rows:
+            _add_row()
+        ctk.CTkButton(
+            body, text="+ Add correction", font=(fam, fs["small"]), anchor="w",
+            fg_color="transparent", hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["accent"], height=28, corner_radius=RADIUS["sm"],
+            command=lambda: _add_row(focus=True),
+        ).pack(anchor="w", pady=(SPACING["xs"], 0))
 
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", pady=(SPACING["md"], 0))
@@ -17921,15 +18016,15 @@ class WayfinderApp(ctk.CTk):
             # One per line, but "Wayfinder, Aura, Kubernetes" on one line works too.
             new_words = normalize_vocabulary_terms(
                 _re.split(r"[\n,;]+", words_box.get("1.0", "end")))
-            lines = [l for l in fixes_box.get("1.0", "end").splitlines() if l.strip()]
-            pairs = parse_vocabulary_replacements(lines)
+            pairs, incomplete = _collect_vocabulary_corrections(
+                [(row["heard"].get(), row["write"].get()) for row in fix_rows])
             self.config["custom_vocabulary"] = new_words
             self.config["vocabulary_replacements"] = [[h, w] for h, w in pairs]
             save_config(self.config)
-            skipped = len(lines) - len(pairs)
+            skipped = incomplete
             msg = f"Saved · {len(new_words)} words · {len(pairs)} corrections"
             if skipped:
-                msg += f" · {skipped} skipped (use: heard -> write)"
+                msg += f" · {skipped} need both Heard and Write as"
             status.configure(text=msg, text_color=COLORS["error"] if skipped else COLORS["accent"])
             self.log(f"✎ Vocabulary: {len(new_words)} words, {len(pairs)} corrections")
 
