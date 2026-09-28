@@ -89,12 +89,27 @@ Manual: a short pass on real hardware and games.
 
 | Setup | How it is covered | Status |
 |---|---|---|
-| KDE Plasma 6 Wayland (desktop) | off-screen KWin rig (same KWin/portal versions) + live on Peter's machine | rig passed; live pending |
-| KDE Plasma 6.4 Wayland (SteamOS 3.8 desktop mode) | same isolated rig on the Steam machine (KWin 6.4.3, portal-kde 6.4.3; its CreateSession needs KWin's screencast protocol, so the rig's KWin runs with permission checks off) | rig passed with key codes (keysyms lost Shift in XWayland); live pending |
-| GNOME 45+ Wayland | not available here: unit tests + portal spec; needs a manual pass | open |
-| KDE X11 | nested X server harness (xdotool path) | covered by harness |
-| SteamOS Game Mode | gamescope harness; Steam machine | pending |
-| Proton game | Path of Exile 2 (Steam) | pending |
-| Lutris / Wine game | Wine console (wine-ge 8-26, throwaway prefix) in the KWin rig; Dark Age of Camelot (Eden) live | rig: every character arrives through the portal (after preferring main-block keys: the keypad "(" key Wine drops); DAoC xdotool typing verified 2026-09-28, portal live pending |
-| Native Linux game | stand-in Tk game | harness |
-| Windowed / borderless / fullscreen | stand-in game in each mode; DAoC | pending |
+| KDE Plasma 6.7 Wayland (desktop) | isolated KWin rig: portal module + the real Aura Flatpak end to end (golden clips → GTK4 Wayland and X11 windows, 0.8 s to first text) | rig passed; live on Peter's desktop pending his one-time Approve |
+| KDE Plasma 6.4 Wayland (SteamOS 3.8 desktop mode) | same rig on the Steam machine (KWin 6.4.3; its CreateSession needs KWin's screencast protocol, so the rig's KWin runs with permission checks off) | rig passed with key codes (keysyms lost Shift in XWayland); live pending |
+| GNOME 45+ Wayland | not available here: unit tests + portal spec; mutter documents NotifyKeyboardKeycode | open: needs one manual pass |
+| KDE X11 session | xdotool path, unchanged; the portal is not started (KDE refuses remote control on X11) | covered by existing tests |
+| SteamOS Game Mode | headless gamescope harness with the new build (xdotool): 4 golden clips into a stand-in game, WER 0-0.15, 0.80-0.85 s, cues, no frame hitches; gamescope is detected and the portal skipped | passed; live on the Steam machine pending |
+| Proton game | Path of Exile 2 (Steam) | pending (manual) |
+| Lutris / Wine game | Wine console (wine-ge 8-26, throwaway prefix) in the KWin rig: 'Hello, World! ABC xyz 123 ?:{}~@#$*()_+=-[]"Q" a(b)c' exact; DAoC (Eden) typed via xdotool 2026-09-28 | rig passed; DAoC through the portal pending (manual) |
+| Native Linux game | stand-in Tk game (gamescope harness) | passed |
+| Windowed / borderless / fullscreen | the portal types to whatever has keyboard focus, so window mode does not change the path; DAoC windowed verified | fullscreen pass pending (manual) |
+## Manual pass (Peter)
+
+1. Desktop: approve "Wayfinder Aura … Control input devices" once (leave
+   "Allow restoring on future sessions" on). The log then says
+   "✓ Text injection: desktop portal". Dictate into a native Wayland app
+   (Kate, Dolphin's location bar, a KDE settings search) and into Claude.
+2. Restart Aura: no dialog the second time (restore token).
+3. Dark Age of Camelot: restart the game and launcher (Wine UseTakeFocus=N
+   applies from the next start), Enter, dictate, Alt+Tab away and back,
+   dictate again.
+4. Steam machine: install ~/Downloads/wayfinder-aura-linux-gamers-2026-09-28.flatpak
+   (`flatpak install --user --bundle …`; it installs the "integration" branch
+   next to master), approve once in desktop mode, dictate; then Game Mode.
+5. Proton: Path of Exile 2 chat (windowed and fullscreen).
+6. GNOME: one pass on any GNOME 45+ machine when available.
