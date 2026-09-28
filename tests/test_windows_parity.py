@@ -394,7 +394,9 @@ def test_send_command_without_a_running_app_is_none(tmp_path, monkeypatch):
 
 # --- Global Escape cancels a recording (hotkeys/pynput_listener.py) -----------
 
-@pytest.mark.parametrize("platform_name, queued", [("win32", True), ("linux", False)])
+# Linux too: pynput runs there only on X11 (Flatpak X11 fallback, native X11);
+# portal sessions bind the cancel-dictation shortcut instead.
+@pytest.mark.parametrize("platform_name, queued", [("win32", True), ("linux", True)])
 def test_escape_cancels_recording_from_any_app(monkeypatch, platform_name, queued):
     from queue import Empty, Queue
     from threading import Event

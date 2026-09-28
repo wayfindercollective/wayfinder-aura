@@ -3606,7 +3606,7 @@ def _keycode_display(code: int) -> str:
     known = {
         59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
         65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
-        70: "ScrollLock", 119: "Pause", 57: "Space", 28: "Enter",
+        70: "ScrollLock", 119: "Pause", 57: "Space", 28: "Enter", 1: "Esc",
         274: "Mouse Middle", 275: "Mouse Side", 276: "Mouse Extra",
         277: "Mouse Forward", 278: "Mouse Back",
     }
@@ -17894,6 +17894,35 @@ class WayfinderApp(ctk.CTk):
             return "tap to start/stop  ·  hold to talk  ·  words appear at your cursor"
         return "press to start/stop  ·  words appear at your cursor"
 
+    def _cancel_hotkey_display(self) -> str | None:
+        """The key that discards a recording from any app, or None if unbound.
+
+        Linux portal sessions bind the cancel-dictation shortcut, so the
+        desktop's own trigger is the truth; every other listener (macOS,
+        Windows, X11 pynput, evdev) takes a bare Escape.
+        """
+        if getattr(self, "_hotkey_backend", None) != "portal":
+            return "Esc"
+        triggers = getattr(self, "_portal_triggers", None)
+        if triggers is None:  # bind still in flight: what the app asked for
+            from wayfinder.hotkeys.dbus import encode_trigger
+            if not encode_trigger(self.config.get("cancel_hotkey_key", 1),
+                                  self.config.get("cancel_hotkey_modifiers", ["shift"])):
+                return None
+            key = _keycode_display(self.config.get("cancel_hotkey_key", 1))
+            mods = self.config.get("cancel_hotkey_modifiers", ["shift"]) or []
+            return "+".join([_modifier_display(m) for m in mods] + [key])
+        return triggers.get("cancel-dictation") or None
+
+    def _hero_state_hint_text(self, state) -> str:
+        """Hero hint for ``state``: while recording, how to stop and how to cancel."""
+        if state != AppState.RECORDING:
+            return self._hero_hotkey_hint_text()
+        verb = "tap" if self._record_hotkey_is_tap_hold() else "press"
+        stop = f"{verb} {self.get_hotkey_display()} to stop"
+        cancel = self._cancel_hotkey_display()
+        return f"{stop}  ·  {cancel} cancels, nothing is typed" if cancel else stop
+
     def _refresh_record_hotkey_surfaces(self) -> None:
         """Refresh returning-user surfaces after a live/config hotkey change."""
         new_hotkey = self.get_hotkey_display()
@@ -21123,6 +21152,9 @@ class WayfinderApp(ctk.CTk):
             # Update status label
             if hasattr(self, 'status_label'):
                 self.status_label.configure(text=STATE_LABELS[new_state], text_color=color)
+            hint = getattr(self, "_hero_hotkey_hint", None)
+            if hint is not None:
+                hint.configure(text=self._hero_state_hint_text(new_state))
             
             # Update hero frame border for subtle glow effect
             if hasattr(self, 'hero_frame'):
@@ -21598,6 +21630,7 @@ class WayfinderApp(ctk.CTk):
             sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
             os.environ.get("XDG_SESSION_TYPE", ""),
         )
+        self._hotkey_backend = backend
         if backend == "portal":
             self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
             self._start_portal_listener()

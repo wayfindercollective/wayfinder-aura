@@ -722,12 +722,13 @@ def pynput_hotkey_listener(
 
         now = time.time()
 
-        # macOS has no compositor-owned global-shortcut portal. While Aura is
-        # recording, the app consumes this event as "discard"; at all other
-        # times it is a harmless no-op. Do not suppress the physical Escape —
-        # the foreground application should still receive its normal key.
-        # Windows likewise (pynput's low-level hook sees Esc from any app).
-        if sys.platform in ("darwin", "win32") and key == _k("esc"):
+        # While Aura is recording, the app consumes this event as "discard"; at
+        # all other times it is a harmless no-op. Do not suppress the physical
+        # Escape — the foreground application should still receive its normal
+        # key. macOS has no compositor-owned global-shortcut portal; pynput's
+        # hooks see Esc from any app on Windows and from any X11 client on Linux
+        # (Linux portal sessions use the cancel-dictation shortcut instead).
+        if key == _k("esc"):
             event_queue.put((EventType.CANCEL_RECORDING, None))
 
         solo_mode = _solo_target_active()

@@ -257,6 +257,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Non-macOS Ctrl+Alt+letter chords collide with IDE bindings (e.g. Ctrl+Alt+S).
     "style_toggle_key": _default_style_toggle_key,
     "style_toggle_modifiers": _default_style_toggle_modifiers,
+
+    # Cancel dictation: discard the recording and type nothing. Linux desktops
+    # bind it through the GlobalShortcuts portal, which grabs its key in every
+    # app all the time, so it is Shift+Esc rather than a bare Escape (rebind it
+    # in the desktop's shortcut settings). macOS, Windows and X11/evdev
+    # listeners also take a bare Escape while recording, never swallowing it.
+    "cancel_hotkey_key": 1,  # Escape
+    "cancel_hotkey_modifiers": ["shift"],
     "macos_hotkey_defaults_v2": sys.platform == "darwin",
     "macos_hotkey_defaults_v3": sys.platform == "darwin",
     "macos_overlay_anchor_defaults_v1": sys.platform == "darwin",
