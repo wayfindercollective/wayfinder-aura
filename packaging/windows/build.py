@@ -99,14 +99,12 @@ def main() -> int:
               "Install it with: python -m pip install -r requirements-windows.txt")
         return 1
 
-    # The .exe icon: generated from the shared PNG if not already present.
-    ico = ROOT / "assets" / "icon.ico"
-    if not ico.exists():
-        from PIL import Image
-        Image.open(ROOT / "assets" / "icon.png").convert("RGBA").save(
-            ico, sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-        )
-        print(f"generated {ico}")
+    # The app icon (.exe, installer, window/taskbar): re-rendered every build
+    # from the shared app-icon artwork, so it can never go stale again.
+    sys.path.insert(0, str(HERE))
+    import make_icon
+
+    make_icon.main()
 
     _stage_whisper()
 

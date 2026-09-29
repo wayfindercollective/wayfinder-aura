@@ -6104,6 +6104,14 @@ class WayfinderApp(ctk.CTk):
             # Say once at startup if the record hotkey collides with something
             # (e.g. Magnifier's Ctrl+Alt+Space) - most people never open Settings.
             self.after(2000, self._log_windows_hotkey_conflict)
+            # Some GPU setups hand parts of the window back black after a focus
+            # change ("little black squares"); repaint once after each.
+            try:
+                from wayfinder.ui.windows_window import repaint_after_activation
+
+                repaint_after_activation(self)
+            except Exception:
+                pass
         if WINDOWS_MAC_LOOK:
             # Caption bar in the app's ink, rim-coloured border (the Mac's
             # unified title bar). After mapping: DWM needs the real HWND.
@@ -6429,6 +6437,14 @@ class WayfinderApp(ctk.CTk):
                 from AppKit import NSApplication
 
                 NSApplication.sharedApplication().setApplicationIconImage_(None)
+            except Exception:
+                pass
+        elif IS_WINDOWS and (SCRIPT_DIR / "assets" / "icon.ico").exists():
+            try:
+                # The multi-size app icon the .exe carries (packaging/windows/
+                # make_icon.py): Windows picks the right size per DPI for the
+                # title bar, taskbar and Alt+Tab.
+                self.iconbitmap(default=str(SCRIPT_DIR / "assets" / "icon.ico"))
             except Exception:
                 pass
         elif ICON_PATH.exists():
@@ -7217,8 +7233,13 @@ class WayfinderApp(ctk.CTk):
 
             self._content_pane = self.tab_content_container
             self.tab_content_container = ctk.CTkFrame(self._content_pane, fg_color="transparent")
+            # Tk cannot clip a scroll view to a rounded shape: at the Mac's 6px
+            # inset, a card scrolled under the top/bottom edge was cut square
+            # inside the pane's rounded corner. Half the pane radius, plus the
+            # scroll frame's own corner inset (6), puts the cut where the arc
+            # is within a pixel of the straight edge.
             self.tab_content_container.pack(
-                fill="both", expand=True, padx=CONTENT_PANE_INSET, pady=CONTENT_PANE_INSET)
+                fill="both", expand=True, padx=CONTENT_PANE_INSET, pady=RADIUS["lg"] // 2)
         
         # Create tab frames
         self.tab_frames = {}
@@ -7489,10 +7510,26 @@ class WayfinderApp(ctk.CTk):
         # bitmap on an opaque chip below stays as the fallback (and on Linux).
         if not (IS_MACOS and self._create_macos_brand_mark(title_frame, is_ultra)):
             try:
-                # Cosmic signature: the brand arrow "in space" with a baked, static
-                # stardust trail (placement A · visible). Works for BOTH tiers — the
-                # Ultra gold glow composites on top of the trail inside the helper.
-                logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
+                if IS_WINDOWS and not IS_MACOS:
+                    # The Mac's refined mark (gradient arrow, halo - gold for
+                    # Ultra - and glowing stardust). Pure PIL, rendered at 4x so
+                    # CTkImage stays crisp at any Windows scaling.
+                    from wayfinder.ui.macos_brand_mark import (
+                        MARK_HEIGHT,
+                        MARK_WIDTH,
+                        render_brand_mark,
+                    )
+                    logo_img = render_brand_mark(
+                        ICON_PATH, scale=4.0, is_ultra=is_ultra,
+                        accent=COLORS["accent"], gold=COLORS["accent_yellow"],
+                    )
+                    display_size = (MARK_WIDTH, MARK_HEIGHT)
+                else:
+                    # Cosmic signature: the brand arrow "in space" with a baked,
+                    # static stardust trail (placement A · visible). Works for
+                    # BOTH tiers — the Ultra gold glow composites on top of the
+                    # trail inside the helper.
+                    logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
                 self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
                 logo_label = ctk.CTkLabel(
                     title_frame,
@@ -8848,6 +8885,21 @@ class WayfinderApp(ctk.CTk):
             anchor="w",
         )
         self.transcription_label.pack(fill="x", padx=16, pady=(0, 8))
+        if IS_WINDOWS and not IS_MACOS:
+            # Wrap to the card, capped at a readable measure: the fixed 380
+            # filled a quarter of the card on a wide window. CTkFrame.bind
+            # lands on its canvas, and CTk scales wraplength itself, so pass
+            # design units.
+            def _rewrap_transcription(event, label=self.transcription_label):
+                if event.width <= 40:
+                    return
+                try:
+                    width = event.width / label._get_widget_scaling() - 32
+                    label.configure(wraplength=int(min(760, max(240, width))))
+                except Exception:
+                    pass
+
+            trans_card.bind("<Configure>", _rewrap_transcription, add="+")
 
         # Compact setup row: model · Local/Remote · hotkey (always useful, no dead void).
         setup_row = ctk.CTkFrame(trans_card, fg_color="transparent")

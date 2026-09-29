@@ -65,6 +65,64 @@ def apply_window_chrome(root, caption: str, border: str, text: str = "#E6EDF3") 
         return False
 
 
+_RDW_INVALIDATE = 0x0001
+_RDW_ERASE = 0x0004
+_RDW_ALLCHILDREN = 0x0080
+_RDW_UPDATENOW = 0x0100
+_RDW_FRAME = 0x0400
+
+# One-shot, and above the app's 100 ms timer floor.
+REPAINT_DELAY_MS = 120
+
+
+def repaint(root) -> bool:
+    """Invalidate and repaint the whole window, every child widget included."""
+    if sys.platform != "win32":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.RedrawWindow.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+        flags = (_RDW_INVALIDATE | _RDW_ERASE | _RDW_FRAME
+                 | _RDW_ALLCHILDREN | _RDW_UPDATENOW)
+        return bool(user32.RedrawWindow(_hwnd(root), None, None, flags))
+    except Exception:
+        return False
+
+
+def repaint_after_activation(root, delay_ms: int = REPAINT_DELAY_MS) -> bool:
+    """Repaint the window once after it gains/loses focus or (re)maps a page.
+
+    On some GPU setups (hardware GPU scheduling, two adapters) Windows hands
+    back parts of the window's image black after an activation change and
+    never asks Tk to repaint them, so small black rectangles stay where CTk
+    widgets are until each happens to redraw. One full repaint shortly after
+    restores them. Focus and Map events arrive once per child widget, so the
+    repaint is coalesced into a single pending ``after``. True if installed.
+    """
+    if sys.platform != "win32":
+        return False
+    pending = {"id": None}
+
+    def _run():
+        pending["id"] = None
+        repaint(root)
+
+    def _schedule(_event=None):
+        if pending["id"] is None:
+            try:
+                pending["id"] = root.after(delay_ms, _run)
+            except Exception:
+                pending["id"] = None
+
+    try:
+        for sequence in ("<FocusIn>", "<FocusOut>", "<Map>"):
+            root.bind(sequence, _schedule, add="+")  # CTk binds <FocusIn> itself
+        return True
+    except Exception:
+        return False
+
+
 _SPI_GETCLIENTAREAANIMATION = 0x1042
 
 

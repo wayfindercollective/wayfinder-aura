@@ -24,6 +24,9 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
 | Frosted glass window, deeper ink panes, lifted rim on every pane, rounded content pane | Same palette and rims on a flat deep-ink surface (Tk can't show real vibrancy), rounded rimmed content pane with inset pages, no gradient. `WAYFINDER_WINDOWS_MAC_LOOK=0` restores the old look | `WINDOWS_MAC_LOOK` in `wayfinder_main.py` |
 | Retina-sharp at any display scale | Sharp at 125-175% too: the app is system-DPI aware and scales itself (it was bitmap-stretched, so soft). Same on-screen size; old saved window sizes carry over. A second monitor at a different scale is stretched as before. `WAYFINDER_WINDOWS_DPI_AWARE=0` reverts | `utils/windows_dpi.py` |
 | Unified title bar | Dark caption bar in the app's ink, rim-coloured border, rounded corners (DWM) | `ui/windows_window.py` |
+| App icon: dark squircle, glass rim, glowing arrow | The same artwork without the Mac grid margin and drop shadow (muddy in a taskbar), as one multi-size `.ico` for the exe, installer, title bar, taskbar and pill; re-rendered on every build | `packaging/windows/make_icon.py` |
+| Header mark (gradient arrow, halo, stardust) drawn by Core Animation | The same `render_brand_mark`, as a 4x CTkImage (sharp at any scale) | `ui/macos_brand_mark.py` |
+| Scroll views clipped by the rounded pane | Tk can't clip to a rounded shape: pages are inset half the pane radius, so a card scrolled under the edge is cut where the pane's side is straight, not inside its corner | `WINDOWS_MAC_LOOK` in `wayfinder_main.py` |
 | Opens content-sized (800x780), centred | Same size, centred in the work area (taskbar excluded) | `ui/window_geometry.py` |
 | No emoji as UI chrome | Same: lock icon on a locked Style tab, "Auto-detect", "GPU Acceleration (Ultra)" | |
 | No duplicate close/hide in the header | Same (Windows has caption buttons) | |
@@ -43,7 +46,7 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
 | Control socket (tray, second launch, CLI, `tab:`/`inspect:`) | Token-guarded loopback channel with the same verbs (`hotkeys/windows_control.py`). **This also fixes the Windows tray menu, which never reached the app (no AF_UNIX on Windows)** |
 | First run: the tour downloads the free Base model, then resumes | Same (the installer bundles no model either); "this PC" copy |
 | After the first dictation: "open aura when I log in" | Same, via the per-user Run key; Settings ▸ System ▸ Open at login; removed on uninstall |
-| Right Option tap/hold hotkey | Right Ctrl or Right Alt / Alt Gr tap/hold (many laptops have no Right Ctrl). Alt Gr alone types nothing; Alt Gr + a key cancels the gesture. Default stays Ctrl+Alt+Space |
+| Right Option tap/hold hotkey (the default) | Right Alt / Alt Gr tap/hold is the default (many laptops have no Right Ctrl; Right Ctrl is offered too). Alt Gr alone types nothing; Alt Gr + a key cancels the gesture. On US layouts a lone Alt would open the front app's menu bar, so every Right Alt press sends the unassigned mask key 0xE8. Untouched Ctrl+Alt+Space configs move once (`windows_hotkey_defaults_v2`) |
 | Hotkey conflict caption | Windows collisions: Alt+Space, Ctrl/Shift+Space (IME), Alt/Ctrl+Enter, bare F-keys, 1Password, Magnifier's Ctrl+Alt+Space (`utils/windows_hotkey_conflicts.py`) |
 | Hotkey changes apply live | Same (no evdev restart and its "evdev not installed" warning) |
 | Escape cancels a recording from any app | Same |
@@ -82,8 +85,13 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
   notifications (the Mac shows them top-right).
 - **30 s warm mic** (the Mac uses 5-10 s). Opening a WASAPI/MME stream costs
   0.25-0.55 s (measured), not Core Audio's ~0.1 s.
-- **Ctrl+Alt+Space stays the default hotkey**; Right Ctrl and Right Alt / Alt Gr
-  tap/hold are offered.
+- **Right Alt / Alt Gr tap/hold is the default hotkey** (2026-09-28), not
+  Ctrl+Alt+Space: the Claude desktop app owns Ctrl+Alt+Space as its global
+  shortcut, so both apps reacted. Right Ctrl and the chord keys are offered.
+- **One full repaint after each focus change or page switch.** On a PC with
+  two AMD GPUs and hardware GPU scheduling, parts of the window came back as
+  small black rectangles after activation until each widget redrew
+  (`windows_window.repaint_after_activation`, coalesced, 120 ms).
 
 ## Not ported, with reasons
 
@@ -105,3 +113,5 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
 - Try Gamer mode in the real games (as on the Mac, nothing is "Verified" yet).
 - Label fitting for scaled Windows displays.
 - Authenticode signing (SmartScreen).
+- Confirm on the reporting PC that the focus-change repaint clears the black
+  squares, and that a lone Right Alt tap never opens the front app's menus.

@@ -1443,3 +1443,46 @@ def test_tooltips_and_fallback_pill_use_the_real_work_area(monkeypatch):
     real = window_geometry.windows_work_area(0, 0, physical=True)
     logical = window_geometry.windows_work_area(0, 0)
     assert logical[2] == int(real[2] / 2.0) and logical[3] == int(real[3] / 2.0)
+
+
+# --- Repaint after focus changes (black squares on some GPU setups) -----------
+
+def test_repaint_after_activation_coalesces_one_repaint_per_change(monkeypatch):
+    from wayfinder.ui import windows_window as ww
+
+    monkeypatch.setattr(ww.sys, "platform", "win32")
+    painted = []
+    monkeypatch.setattr(ww, "repaint", lambda root: painted.append(root))
+
+    class FakeRoot:
+        def __init__(self):
+            self.bindings, self.pending = {}, []
+
+        def bind(self, sequence, func, add=None):
+            assert add == "+"  # CTk binds <FocusIn> on the root itself
+            self.bindings[sequence] = func
+
+        def after(self, ms, func):
+            assert ms >= 100  # the app's timer floor
+            self.pending.append(func)
+            return len(self.pending)
+
+    root = FakeRoot()
+    assert ww.repaint_after_activation(root)
+    assert set(root.bindings) == {"<FocusIn>", "<FocusOut>", "<Map>"}
+    for _ in range(5):  # one event per child widget
+        root.bindings["<FocusIn>"](None)
+    root.bindings["<Map>"](None)
+    assert len(root.pending) == 1
+    root.pending.pop()()
+    assert painted == [root]
+    root.bindings["<FocusOut>"](None)  # the next change schedules again
+    assert len(root.pending) == 1
+
+
+def test_repaint_after_activation_is_windows_only(monkeypatch):
+    from wayfinder.ui import windows_window as ww
+
+    monkeypatch.setattr(ww.sys, "platform", "linux")
+    assert ww.repaint_after_activation(object()) is False
+    assert ww.repaint(object()) is False

@@ -102,3 +102,30 @@ def test_source_runs_do_not_use_bundled_whisper(monkeypatch, tmp_path):
     monkeypatch.delattr(config.sys, "frozen", raising=False)
     monkeypatch.setattr(config.sys, "_MEIPASS", str(tmp_path), raising=False)
     assert config._windows_bundled_whisper() is None
+
+
+def test_windows_app_icon_carries_every_windows_size(tmp_path, monkeypatch):
+    """The .ico is re-rendered from the shared app-icon art on every build."""
+    from PIL import Image
+
+    # Import it the way build.py does: as "make_icon", the macOS script's name,
+    # and keep it imported while it renders (it must still reach the Mac art).
+    monkeypatch.syspath_prepend(str(REPO / "packaging" / "windows"))
+    previous = sys.modules.pop("make_icon", None)
+    target = tmp_path / "icon.ico"
+    try:
+        import make_icon
+
+        make_icon.write_ico(make_icon.render_master(), target)
+    finally:
+        sys.modules.pop("make_icon", None)
+        if previous is not None:
+            sys.modules["make_icon"] = previous
+    ico = Image.open(target)
+    assert sorted(ico.info["sizes"]) == sorted((s, s) for s in make_icon.SIZES)
+    # The dark squircle fills the tile (no Mac grid margin): the centre is
+    # opaque and the corners are transparent.
+    big = ico.convert("RGBA")
+    assert big.getpixel((big.width // 2, big.height // 2))[3] == 255
+    assert big.getpixel((0, 0))[3] == 0
+    assert "make_icon" in (REPO / "packaging" / "windows" / "build.py").read_text(encoding="utf-8")

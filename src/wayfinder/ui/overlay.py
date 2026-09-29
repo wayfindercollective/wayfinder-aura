@@ -2620,6 +2620,11 @@ def run_overlay():
         app.setDesktopFileName(get_portal_app_id())
         try:
             from wayfinder.config import ICON_PATH as _APP_ICON
+            if sys.platform == "win32":
+                # The app icon the .exe carries, not the bare arrow silhouette.
+                _ico = os.path.join(os.path.dirname(str(_APP_ICON)), "icon.ico")
+                if os.path.exists(_ico):
+                    _APP_ICON = _ico
             if _APP_ICON and os.path.exists(str(_APP_ICON)):
                 app.setWindowIcon(_QIcon(str(_APP_ICON)))
         except Exception:
