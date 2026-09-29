@@ -556,6 +556,10 @@ class TestHotkeyDefaultMigration:
             assert config["hotkey_key"] == 100  # Right Option, tap/hold
             assert config["hotkey_modifiers"] == []
             assert config["style_toggle_modifiers"] == ["fn"]
+        elif sys.platform == "win32":
+            assert config["hotkey_key"] == 100  # Right Alt / Alt Gr, tap/hold
+            assert config["hotkey_modifiers"] == []
+            assert config["style_toggle_modifiers"] == ["ctrl", "alt"]
         else:
             assert config["hotkey_key"] == 57  # Space
             assert config["hotkey_modifiers"] == ["ctrl", "alt"]
@@ -634,6 +638,45 @@ class TestHotkeyDefaultMigration:
         config = config_module.load_config()
 
         assert config["hotkey_modifiers"] == ["ctrl", "alt"]
+
+    def test_old_windows_default_moves_to_right_alt_once(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "win32")
+        self._write_config({
+            "hotkey_key": 57,
+            "hotkey_modifiers": ["ctrl", "alt"],
+            "style_toggle_key": 28,
+            "style_toggle_modifiers": ["ctrl", "alt"],
+        })
+        config = config_module.load_config()
+
+        # Ctrl+Alt+Space is also the Claude desktop app's shortcut.
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (100, [])
+        assert (config["style_toggle_key"], config["style_toggle_modifiers"]) == (28, ["ctrl", "alt"])
+        assert config["windows_hotkey_defaults_v2"] is True
+
+        # Choosing Ctrl+Alt+Space again afterwards is respected.
+        config["hotkey_key"], config["hotkey_modifiers"] = 57, ["ctrl", "alt"]
+        config_module.save_config(config)
+        again = config_module.load_config()
+        assert (again["hotkey_key"], again["hotkey_modifiers"]) == (57, ["ctrl", "alt"])
+
+    def test_custom_windows_hotkey_is_not_migrated(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "win32")
+        self._write_config({"hotkey_key": 67, "hotkey_modifiers": ["ctrl", "alt"]})
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (67, ["ctrl", "alt"])
+
+    def test_linux_never_runs_the_windows_hotkey_migration(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "linux")
+        self._write_config({"hotkey_key": 57, "hotkey_modifiers": ["ctrl", "alt"]})
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (57, ["ctrl", "alt"])
 
     def test_old_macos_overlay_default_moves_to_bottom_right_once(
         self, temp_config_dir: Path, monkeypatch

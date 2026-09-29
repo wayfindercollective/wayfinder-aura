@@ -808,7 +808,7 @@ def test_app_picks_the_windows_game_backend(monkeypatch):
 
 # --- Tap / hold with Right Ctrl (the Mac's Right Option gesture) -----------------
 
-def _win_listener(monkeypatch, hotkey_key=97, modifiers=()):
+def _win_listener(monkeypatch, hotkey_key=97, modifiers=(), masks=None):
     from queue import Queue
     from threading import Event
 
@@ -817,6 +817,9 @@ def _win_listener(monkeypatch, hotkey_key=97, modifiers=()):
     if pl.keyboard is None:
         pytest.skip("pynput unavailable on this host")
     captured = {}
+    # Never inject real keys from a test; record the menu-mask sends instead.
+    sent = masks if masks is not None else []
+    monkeypatch.setattr(pl, "_win32_send_menu_mask", lambda: sent.append("mask"))
 
     class FakeListener:
         def __init__(self, **kwargs):
@@ -892,6 +895,57 @@ def test_tap_hold_keys_per_platform():
     assert wm.is_tap_hold_hotkey(100, [], platform_name="darwin")
     assert not wm.is_tap_hold_hotkey(97, [], platform_name="linux")
     assert "Right Ctrl" in wm.hotkey_key_options(platform_name="win32", available_pynput_codes={97, 57})
+    # Right Alt is the Windows default, so it is offered first.
+    options = wm.hotkey_key_options(platform_name="win32", available_pynput_codes={97, 100, 57})
+    assert list(options)[0] == "Right Alt (Alt Gr)"
+
+
+def test_right_alt_tap_masks_the_menu_bar_and_toggles_once(monkeypatch):
+    """A lone Alt release opens the front app's menu bar; the mask key sent
+    while Right Alt is down prevents that, and must not cancel the tap."""
+    from wayfinder.hotkeys.types import EventType
+
+    masks = []
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
+    mask_key = pl.KeyCode.from_vk(pl._WIN32_MENU_MASK_VK)
+    press(pl.Key.alt_r)
+    press(mask_key)          # the injected mask comes back through the hook
+    release(mask_key)
+    release(pl.Key.alt_r)
+    assert masks == ["mask"]
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, None)]
+
+
+def test_right_alt_masks_every_auto_repeat_while_held(monkeypatch):
+    from wayfinder.hotkeys.types import EventType
+
+    masks = []
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
+    press(pl.Key.alt_r)
+    time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+    press(pl.Key.alt_r)      # keyboard auto-repeat
+    press(pl.Key.alt_r)
+    release(pl.Key.alt_r)
+    assert masks == ["mask"] * 3
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
+                              (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
+
+
+def test_only_a_right_alt_hotkey_sends_the_menu_mask(monkeypatch):
+    masks = []
+    pl, press, release, _events = _win_listener(monkeypatch, hotkey_key=97, masks=masks)
+    press(pl.Key.alt_r)      # Right Alt is not the hotkey: leave its menus alone
+    release(pl.Key.alt_r)
+    press(pl.Key.ctrl_r)     # Right Ctrl alone never opens a menu
+    release(pl.Key.ctrl_r)
+    assert masks == []
+
+    pl, press, release, _events = _win_listener(
+        monkeypatch, hotkey_key=57, modifiers=("ctrl", "alt"), masks=masks)
+    press(pl.Key.ctrl_l)
+    press(pl.Key.alt_r)
+    press(pl.Key.space)
+    assert masks == []
 
 
 
@@ -1100,12 +1154,14 @@ def test_alt_gr_taps_and_holds_like_right_alt(monkeypatch):
     Ctrl: it must still be the tap/hold key, and Alt Gr + a key must not record."""
     from wayfinder.hotkeys.types import EventType
 
-    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100)
+    masks = []
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
     press(pl.Key.ctrl_l)
     press(pl.Key.alt_gr)
     release(pl.Key.ctrl_l)
     release(pl.Key.alt_gr)
     assert _drain(events) == [(EventType.HOTKEY_PRESSED, None)]
+    assert masks == ["mask"]  # harmless on Alt Gr layouts, needed on US ones
     press(pl.Key.ctrl_l)
     press(pl.Key.alt_gr)
     press(pl.KeyCode.from_char("e"))       # Alt Gr+E types an accented e

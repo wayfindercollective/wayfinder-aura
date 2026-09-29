@@ -3530,10 +3530,10 @@ def _macos_cloud_models(provider: str) -> list[str]:
 # macOS: bare right-hand modifiers usable as a tap/hold record hotkey (evdev
 # KEY_RIGHTALT / KEY_RIGHTMETA). Right Option is the macOS default.
 MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command"}
-# Windows: Right Ctrl (evdev KEY_RIGHTCTRL) and Right Alt / Alt Gr
-# (KEY_RIGHTALT, the Mac's Right Option). Many laptops have no Right Ctrl.
-# Alt Gr alone types nothing; Alt Gr + a key cancels the gesture.
-WINDOWS_SOLO_HOTKEYS = {97: "Right Ctrl", 100: "Right Alt (Alt Gr)"}
+# Windows: Right Alt / Alt Gr (KEY_RIGHTALT, the Mac's Right Option; the
+# Windows default) and Right Ctrl (evdev KEY_RIGHTCTRL). Many laptops have no
+# Right Ctrl. Alt Gr alone types nothing; Alt Gr + a key cancels the gesture.
+WINDOWS_SOLO_HOTKEYS = {100: "Right Alt (Alt Gr)", 97: "Right Ctrl"}
 
 
 def _solo_hotkeys(platform_name: str | None = None) -> dict:
@@ -3618,11 +3618,10 @@ def hotkey_key_options(
             **_hotkey_key_codes,
         }
     elif active_platform == "win32":
-        # The Windows tap/hold key, offered after the chord keys (the default
-        # stays Ctrl+Alt+Space).
+        # Tap/hold keys first: Right Alt is the Windows default, as on the Mac.
         _hotkey_key_codes = {
-            **_hotkey_key_codes,
             **{name: code for code, name in WINDOWS_SOLO_HOTKEYS.items()},
+            **_hotkey_key_codes,
         }
     if available_pynput_codes is None:
         try:

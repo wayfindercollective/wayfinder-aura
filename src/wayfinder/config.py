@@ -224,6 +224,17 @@ if sys.platform == "darwin":
     _default_style_toggle_key = 28  # Enter
     _default_style_toggle_modifiers = ["fn"]
     _default_overlay_anchor = "bottom-right"
+elif sys.platform == "win32":
+    # Windows records with Right Alt (Alt Gr) alone, the Mac's Right Option
+    # gesture: Ctrl+Alt+Space is also the Claude desktop app's global shortcut
+    # (and Magnifier's preview), so both apps reacted to it. Every keyboard
+    # has Right Alt (many laptops have no Right Ctrl); the listener masks the
+    # lone Alt so the app in front never opens its menu bar.
+    _default_hotkey_key = 100  # Right Alt / Alt Gr
+    _default_hotkey_modifiers = []
+    _default_style_toggle_key = 28  # Enter
+    _default_style_toggle_modifiers = ["ctrl", "alt"]
+    _default_overlay_anchor = "bottom-center"
 else:
     _default_hotkey_key = 57  # Space
     _default_hotkey_modifiers = ["ctrl", "alt"]
@@ -238,14 +249,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
     
-    # Hotkey settings — Fn+Space on macOS; Ctrl+Alt+Space elsewhere.
-    # Chosen 2026-07 over Super+F2: first-run users didn't know what the
+    # Hotkey settings — Right Option on macOS and Right Alt on Windows (tap/hold,
+    # see above); Ctrl+Alt+Space on Linux. Chosen 2026-07 over Super+F2: first-run users didn't know what the
     # "Super" key was (launch feedback), and every keyboard labels Ctrl/Alt/
     # Space. Still game-safe: bare F-keys collide with countless game keybinds
     # (e.g. DAoC qbinds) but Ctrl+Alt chords are as rare in games as Super+F*,
     # and the GameMode pause covers the rest. DE conflicts checked: unassigned
     # by default on KDE and GNOME. Existing user configs keep what they saved.
-    "hotkey_key": _default_hotkey_key,  # Space; Right Option on macOS
+    "hotkey_key": _default_hotkey_key,  # Space; Right Option (macOS) / Right Alt (Windows)
     "hotkey_modifiers": _default_hotkey_modifiers,
 
     # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal).
@@ -256,6 +267,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "macos_hotkey_defaults_v2": sys.platform == "darwin",
     "macos_hotkey_defaults_v3": sys.platform == "darwin",
     "macos_overlay_anchor_defaults_v1": sys.platform == "darwin",
+    "windows_hotkey_defaults_v2": sys.platform == "win32",
 
     # Auto press Enter after dictation (opt-in): dictate → text lands → Enter
     # fires, so chat inputs submit hands-free. Off by default — implicitly
@@ -964,6 +976,19 @@ def load_config() -> dict:
                     config["hotkey_key"] = 100
                     config["hotkey_modifiers"] = []
                 config["macos_hotkey_defaults_v3"] = True
+                _save_migrations = True
+
+            # Windows shipped Ctrl+Alt+Space, which the Claude desktop app also
+            # owns. Move only that exact untouched default to Right Alt tap/hold
+            # once; custom shortcuts remain untouched.
+            if sys.platform == "win32" and not user_config.get("windows_hotkey_defaults_v2", False):
+                if (
+                    config.get("hotkey_key") == 57
+                    and config.get("hotkey_modifiers") == ["ctrl", "alt"]
+                ):
+                    config["hotkey_key"] = 100
+                    config["hotkey_modifiers"] = []
+                config["windows_hotkey_defaults_v2"] = True
                 _save_migrations = True
 
             if (

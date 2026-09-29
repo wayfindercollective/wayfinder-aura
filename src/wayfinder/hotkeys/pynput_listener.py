@@ -152,6 +152,29 @@ _SOLO_CAPTURE_KEYS = {k for k in (_k("alt_r"), _k("cmd_r")) if k is not None}
 _WIN32_SOLO_CAPTURE_KEYS = {k for k in (_k("ctrl_r"), _k("alt_r")) if k is not None}
 
 
+# Released on its own, Alt opens the menu bar / KeyTips of the app in front
+# (Notepad, Explorer, Office, Firefox), and the words Aura then types would run
+# menu commands. A key event while Alt is down makes it an Alt+key chord
+# instead; 0xE8 is unassigned, so no app acts on it (AutoHotkey's mask key).
+_WIN32_MENU_MASK_VK = 0xE8
+
+
+def _win32_send_menu_mask() -> None:
+    """Inject the mask key's press and release. Never raises."""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        user32.keybd_event(_WIN32_MENU_MASK_VK, 0, 0, 0)
+        user32.keybd_event(_WIN32_MENU_MASK_VK, 0, 0x0002, 0)  # KEYEVENTF_KEYUP
+    except Exception:
+        pass
+
+
+def _is_win32_menu_mask(key) -> bool:
+    return getattr(key, "vk", None) == _WIN32_MENU_MASK_VK
+
+
 def _win32_normalize_key(key):
     """Windows reports Right Alt as Key.alt_gr on layouts with Alt Gr (UK, most
     of Europe), preceded by a synthetic Left Ctrl. Same physical key, same vk
@@ -678,6 +701,8 @@ def pynput_hotkey_listener(
             return
 
         if sys.platform == "win32":
+            if _is_win32_menu_mask(key):
+                return  # our own mask key: not "another key" for the gesture
             key = _win32_normalize_key(key)
         if sys.platform == "darwin":
             key = _darwin_normalize_key(key)
@@ -733,6 +758,10 @@ def pynput_hotkey_listener(
         solo_mode = _solo_target_active()
         if solo_mode:
             if key == target_key:
+                if sys.platform == "win32" and key == _k("alt_r"):
+                    # On every press, auto-repeat included: a repeat after the
+                    # mask would make the release a lone Alt again.
+                    _win32_send_menu_mask()
                 solo_gesture.press_target()
             else:
                 solo_gesture.press_other()
@@ -775,6 +804,8 @@ def pynput_hotkey_listener(
             return
 
         if sys.platform == "win32":
+            if _is_win32_menu_mask(key):
+                return
             key = _win32_normalize_key(key)
         if sys.platform == "darwin":
             key = _darwin_normalize_key(key)
