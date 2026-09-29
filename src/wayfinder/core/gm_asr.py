@@ -55,9 +55,11 @@ def _pick_light_model_path(user_model_path: str, explicit: str) -> str | None:
         search_dirs.append("/app/share/whisper-models")
     # Common download locations (best-effort)
     home = os.path.expanduser("~")
+    from wayfinder.utils.platform import get_whisper_host_model_dirs
+
     for extra in (
         os.path.join(home, ".local", "share", "wayfinder-aura", "models"),
-        os.path.join(home, "whisper.cpp", "models"),
+        *(str(d) for d in get_whisper_host_model_dirs()),
     ):
         if extra not in search_dirs:
             search_dirs.append(extra)

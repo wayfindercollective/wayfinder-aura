@@ -7,9 +7,12 @@ Handles Vulkan device selection for systems with multiple GPUs (iGPU + dGPU).
 
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List
+
+from wayfinder.utils.platform import get_whisper_host_model_dirs
 
 
 @dataclass
@@ -313,7 +316,7 @@ def detect_ggml_devices() -> List[GgmlDevice]:
     
     # Find the smallest model available for quick probing
     model_dirs = [
-        Path.home() / "whisper.cpp" / "models",
+        *get_whisper_host_model_dirs(),
         Path.home() / ".local" / "share" / "whisper.cpp",
         Path("/app/share/whisper-models"),
     ]
@@ -491,7 +494,7 @@ def benchmark_gpu_devices(
     # Find a model to test with (prefer tiny for speed)
     if not model_path:
         model_dirs = [
-            Path.home() / "whisper.cpp" / "models",
+            *get_whisper_host_model_dirs(),
             Path.home() / ".local" / "share" / "whisper.cpp",
             Path("/app/share/whisper-models"),
         ]
@@ -823,6 +826,12 @@ def detect_gpu() -> GPUInfo:
     Returns:
         GPUInfo with vendor, name, and driver information.
     """
+    if sys.platform == "win32":
+        # No lspci or /sys: the display adapters Windows lists in the registry.
+        from wayfinder.utils.windows_sysinfo import primary_gpu
+
+        found = primary_gpu()
+        return GPUInfo(found[0], found[1], "windows") if found else GPUInfo("unknown", "Unknown GPU", "")
     try:
         # Try lspci first (most reliable on Linux)
         result = subprocess.run(

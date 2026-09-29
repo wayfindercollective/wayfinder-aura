@@ -16,6 +16,8 @@ from wayfinder.utils.platform import (
     get_cache_dir,
     get_steam_platform,
     get_wayfinder_appimage_dir,
+    get_whisper_download_dir,
+    get_whisper_host_model_dirs,
     is_wayfinder_flatpak_env,
 )
 
@@ -198,6 +200,9 @@ else:
             / "whisper-models"
             / "ggml-base.en.bin"
         )
+    elif sys.platform == "win32":
+        # %LOCALAPPDATA%\wayfinder-aura\whisper-models (platform.get_whisper_download_dir).
+        _default_model_path = str(get_whisper_download_dir() / "ggml-base.en.bin")
     else:
         _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
     # LLM model for post-processing - prefer Qwen 3.5 if available, fall back to Qwen 2.5
@@ -622,7 +627,7 @@ def _usable_model_candidates() -> list:
         except Exception:
             return name.lower() in ("ggml-base.bin", "ggml-base.en.bin")
 
-    dirs = [Path(os.path.expanduser("~/whisper.cpp/models"))]
+    dirs = list(get_whisper_host_model_dirs())
     if IS_APPIMAGE and APPDIR:
         dirs.append(Path(APPDIR) / "usr" / "share" / "whisper-models")
     if IS_FLATPAK:
@@ -722,7 +727,7 @@ def enforce_license_config(config: dict, gate) -> list[str]:
         dirs: list[Path] = []
         if str(current.parent) not in ("", "."):
             dirs.append(current.parent)
-        dirs.append(Path(os.path.expanduser("~/whisper.cpp/models")))
+        dirs.extend(get_whisper_host_model_dirs())
         if IS_APPIMAGE and APPDIR:
             dirs.append(Path(APPDIR) / "usr" / "share" / "whisper-models")
         if IS_FLATPAK:

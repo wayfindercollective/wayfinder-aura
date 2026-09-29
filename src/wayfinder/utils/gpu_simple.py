@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
 
+from wayfinder.utils.platform import get_whisper_host_model_dirs
+
 
 @dataclass
 class GpuDevice:
@@ -36,6 +38,9 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
         List of GpuDevice in ggml's ordering.
     """
     devices = []
+
+    if sys.platform == "win32":
+        return _detect_windows_vulkan_devices(config)
 
     # Find whisper-cli. Order matters: the user's configured binary, then PATH
     # (the AppImage AppRun prepends its bundled usr/bin — without this the
@@ -68,7 +73,7 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
     
     # Find smallest model for quick probe
     model_dirs = [
-        Path.home() / "whisper.cpp" / "models",
+        *get_whisper_host_model_dirs(),
         Path.home() / ".local" / "share" / "whisper.cpp",
         Path("/app/share/whisper-models"),
     ]
@@ -111,41 +116,7 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
             timeout=30,
         )
         
-        # Parse device list from output
-        output = result.stdout + result.stderr
-        
-        for line in output.split("\n"):
-            # Look for: "ggml_vulkan: 0 = Name | uma: 1 | ... | matrix cores: ..."
-            if "ggml_vulkan:" not in line or "=" not in line or "|" not in line:
-                continue
-            
-            try:
-                parts = line.split("=", 1)
-                idx_str = parts[0].split(":")[-1].strip()
-                
-                # Skip "Found N devices" line
-                if not idx_str.isdigit():
-                    continue
-                
-                idx = int(idx_str)
-                rest = parts[1]
-                name = rest.split("|")[0].strip()
-                
-                # uma: 1 = integrated (unified memory), uma: 0 = discrete
-                is_discrete = "uma: 0" in rest
-                
-                # Check for matrix core support (fast for ML)
-                has_matrix = "coopmat" in rest.lower() and "none" not in rest.lower().split("matrix cores")[-1][:20]
-                
-                devices.append(GpuDevice(
-                    index=idx,
-                    name=name,
-                    is_discrete=is_discrete,
-                    has_matrix_cores=has_matrix,
-                ))
-            except (ValueError, IndexError):
-                continue
-        
+        devices = parse_ggml_vulkan_devices(result.stdout + result.stderr)
     except Exception:
         pass
     finally:
@@ -155,6 +126,64 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
             pass
     
     return devices
+
+
+def parse_ggml_vulkan_devices(output: str) -> List[GpuDevice]:
+    """Devices from ggml's init lines, in ggml's own ordering:
+    "ggml_vulkan: 0 = Name | uma: 1 | ... | matrix cores: KHR_coopmat"."""
+    devices: List[GpuDevice] = []
+    for line in output.split("\n"):
+        if "ggml_vulkan:" not in line or "=" not in line or "|" not in line:
+            continue
+        try:
+            parts = line.split("=", 1)
+            idx_str = parts[0].split(":")[-1].strip()
+            if not idx_str.isdigit():  # the "Found N devices" line
+                continue
+            rest = parts[1]
+            devices.append(GpuDevice(
+                index=int(idx_str),
+                name=rest.split("|")[0].strip(),
+                # uma: 1 = integrated (unified memory), uma: 0 = discrete
+                is_discrete="uma: 0" in rest,
+                # Matrix core support (fast for ML)
+                has_matrix_cores=(
+                    "coopmat" in rest.lower()
+                    and "none" not in rest.lower().split("matrix cores")[-1][:20]
+                ),
+            ))
+        except (ValueError, IndexError):
+            continue
+    return devices
+
+
+def windows_vulkan_whisper(config: Optional[dict] = None) -> Optional[str]:
+    """Windows: the bundled Vulkan whisper-cli (utils/windows_whisper.py), if any."""
+    from wayfinder.utils.windows_whisper import gpu_twin
+
+    configured = os.path.expanduser(str((config or {}).get("whisper_binary") or ""))
+    return gpu_twin(configured)
+
+
+def _detect_windows_vulkan_devices(config: Optional[dict]) -> List[GpuDevice]:
+    """Windows: ask the bundled Vulkan whisper-cli for ggml's device list.
+
+    ``--help`` prints it once the backends load, without a model or any VRAM,
+    in well under a second; no console window flashes.
+    """
+    cli = windows_vulkan_whisper(config)
+    if not cli:
+        return []
+    try:
+        from wayfinder.utils.platform import subprocess_no_window_kwargs
+
+        env = dict(os.environ)
+        env.pop("GGML_VK_VISIBLE_DEVICES", None)  # list every device, not the chosen one
+        result = subprocess.run([cli, "--help"], capture_output=True, text=True,
+                                timeout=20, env=env, **subprocess_no_window_kwargs())
+        return parse_ggml_vulkan_devices(result.stdout + result.stderr)
+    except Exception:
+        return []
 
 
 def get_discrete_gpu(config: Optional[dict] = None) -> Optional[int]:
@@ -217,7 +246,15 @@ def setup_gpu_environment(config: Optional[dict] = None) -> dict:
             print("[GPU] macOS transcription — CPU mode (Metal available when enabled)")
         return env_set
 
-    # 3. Linux: Auto-detect discrete Vulkan GPU
+    # Windows: only GPU mode runs the Vulkan build (use_gpu is already
+    # license-enforced at startup), so CPU users skip the probe entirely.
+    if sys.platform == "win32" and not (
+        config and config.get("use_gpu", False) and windows_vulkan_whisper(config)
+    ):
+        print("[GPU] Windows transcription — CPU mode")
+        return env_set
+
+    # 3. Linux/Windows: Auto-detect discrete Vulkan GPU
     discrete = get_discrete_gpu(config)
 
     if discrete is not None:

@@ -69,11 +69,12 @@ _SCIPY_IMPORT_LOCK = threading.Lock()
 
 
 def _get_scipy_signal_functions():
-    """Return ``(butter, filtfilt, resample_poly)`` when SciPy is available.
+    """Return ``(butter, filtfilt, resample_poly)``: SciPy's, or the NumPy twins.
 
     The import is deliberately lazy so microphone discovery and recorder construction stay
-    fast. A failed optional import is cached too; repeated dictations then use the existing
-    NumPy fallback without repeatedly probing SciPy.
+    fast. Without SciPy (the Windows bundle leaves it out) the same algorithms come from
+    ``core.audio_dsp``, checked against SciPy by tests/test_audio_dsp.py. The result is
+    cached, so repeated dictations never probe the import again.
     """
     global _SCIPY_SIGNAL_FUNCTIONS, _SCIPY_IMPORT_ATTEMPTED
     if _SCIPY_IMPORT_ATTEMPTED:
@@ -84,9 +85,8 @@ def _get_scipy_signal_functions():
         try:
             from scipy.signal import butter, filtfilt, resample_poly
         except ImportError:
-            _SCIPY_SIGNAL_FUNCTIONS = None
-        else:
-            _SCIPY_SIGNAL_FUNCTIONS = (butter, filtfilt, resample_poly)
+            from wayfinder.core.audio_dsp import butter, filtfilt, resample_poly
+        _SCIPY_SIGNAL_FUNCTIONS = (butter, filtfilt, resample_poly)
         _SCIPY_IMPORT_ATTEMPTED = True
     return _SCIPY_SIGNAL_FUNCTIONS
 

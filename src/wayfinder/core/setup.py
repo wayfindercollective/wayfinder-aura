@@ -568,9 +568,12 @@ def check_whisper_model(config: dict) -> DependencyStatus:
         size_mb = Path(model_path).stat().st_size / 1_000_000
         return DependencyStatus(True, detail=f"{Path(model_path).name} ({size_mb:.0f} MB)")
 
-    # Check model directory for any usable models
-    model_dir = Path.home() / "whisper.cpp" / "models"
-    if model_dir.exists():
+    # Check the model directories for any usable models
+    from wayfinder.utils.platform import get_whisper_host_model_dirs
+
+    for model_dir in get_whisper_host_model_dirs():
+        if not model_dir.exists():
+            continue
         models = [p for p in model_dir.glob("ggml-*.bin") if _usable(str(p))]
         if models:
             best = max(models, key=lambda p: p.stat().st_size)
@@ -945,9 +948,10 @@ def download_whisper_model(
         done: Called with (success, path_or_error) when finished
         progress: Called with (downloaded_bytes, total_bytes) during download
     """
+    from wayfinder.utils.platform import get_whisper_download_dir
+
     url = f"{MODEL_DOWNLOAD_BASE}/ggml-{model_name}.bin"
-    model_dir = Path.home() / "whisper.cpp" / "models"
-    target = model_dir / f"ggml-{model_name}.bin"
+    target = get_whisper_download_dir() / f"ggml-{model_name}.bin"
 
     def _run():
         model_info = WHISPER_MODELS.get(model_name, {})

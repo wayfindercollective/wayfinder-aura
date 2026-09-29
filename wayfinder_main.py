@@ -236,7 +236,10 @@ def _get_whisper_models_dir() -> Path:
         return get_data_dir() / "whisper-models"
     if IS_FLATPAK:
         return Path.home() / ".local" / "share" / "wayfinder-aura" / "whisper-models"
-    return Path.home() / "whisper.cpp" / "models"
+    # Windows: %LOCALAPPDATA%\wayfinder-aura\whisper-models; Linux: ~/whisper.cpp/models.
+    from wayfinder.utils.platform import get_whisper_download_dir
+
+    return get_whisper_download_dir()
 
 
 def _whisper_model_search_dirs() -> list[Path]:
@@ -309,6 +312,12 @@ def detect_gpu() -> GPUInfo:
     Returns:
         GPUInfo with vendor, name, and driver information.
     """
+    if IS_WINDOWS and not IS_MACOS:
+        # No lspci or /sys: the display adapters Windows lists in the registry.
+        from wayfinder.utils.windows_sysinfo import primary_gpu
+
+        found = primary_gpu()
+        return GPUInfo(found[0], found[1], "windows") if found else GPUInfo("unknown", "Unknown GPU", "")
     # macOS: detect Apple Silicon or Intel GPU
     if sys.platform == "darwin":
         try:
@@ -1502,11 +1511,21 @@ SETTING_TOOLTIPS = {
         )
         if IS_MACOS
         else (
+            "Use your graphics card for transcription. Ultra.\n"
+            "Vulkan on AMD, NVIDIA and Intel GPUs; text cleanup stays on the CPU.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
+        if IS_WINDOWS
+        else (
             "Use your GPU for transcription and local cleanup. Ultra.\n"
             "whisper.cpp: Vulkan (AMD/Intel), CUDA or Metal. "
             "Faster-Whisper (experimental): NVIDIA CUDA only.\n"
             "Free runs Base on the CPU. Benchmark shows what the GPU would do."
         )
+    ),
+    "gpu_device": (
+        "Which graphics card transcribes. Automatic picks the dedicated GPU;\n"
+        "choose the integrated one if the big card is busy with games or a local AI model."
     ),
 }
 
@@ -1809,7 +1828,14 @@ class BenchmarkRunner:
         """Find whisper-cli in source, Flatpak, or the current AppImage mount."""
         from wayfinder.utils.runtime_assets import find_whisper_binary
 
-        return find_whisper_binary(self.config)
+        found = find_whisper_binary(self.config)
+        if IS_WINDOWS and not IS_MACOS and found:
+            # The GPU side of Compare CPU vs GPU runs the bundled Vulkan build
+            # (a benchmark only times it; dictation stays license-gated).
+            from wayfinder.utils.windows_whisper import gpu_twin
+
+            found = gpu_twin(found) or found
+        return found
 
     def _find_whisper_cpu_binary(self) -> str | None:
         """Prefer the independently linked CPU safety twin when packaged."""
@@ -10729,7 +10755,9 @@ class WayfinderApp(ctk.CTk):
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
             tooltip_key="gpu_acceleration",
         )
-        
+        if IS_WINDOWS and not IS_MACOS and _gpu_unlocked:
+            self._create_windows_gpu_device_row(parent)
+
         # No Accuracy Mode control: beam search never beat greedy decoding in
         # testing (docs/EVAL-2026-09-24.md), so whisper.cpp always runs greedy.
 
@@ -10748,7 +10776,11 @@ class WayfinderApp(ctk.CTk):
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("openai_whisper", "groq_whisper"):
             backend = "whisper_cpp"  # Default to local backend
-        show_fw = bool(get_gpu_info().is_nvidia) or backend == "faster_whisper"
+        # The Windows bundle has no Faster-Whisper/PyTorch: never offer it there,
+        # even now that Windows detects an NVIDIA GPU.
+        show_fw = (
+            bool(get_gpu_info().is_nvidia) and not (IS_WINDOWS and not IS_MACOS)
+        ) or backend == "faster_whisper"
         self._backend_display_map = {
             "Auto (whisper.cpp)": "auto",
             "whisper.cpp": "whisper_cpp",
@@ -13080,6 +13112,60 @@ class WayfinderApp(ctk.CTk):
             self.preprocess_desc_label.configure(text=self._get_preprocess_desc(value))
         self.log(f"⚙ Audio processing: {value}")
     
+    def _create_windows_gpu_device_row(self, parent) -> None:
+        """Windows + Ultra: which GPU transcribes, when there is a choice.
+
+        Automatic picks the discrete GPU; a PC may prefer its integrated Radeon
+        while the big card is busy with games or a local LLM. Devices come from
+        the bundled Vulkan whisper build (ggml's own ordering, sub-second probe).
+        """
+        try:
+            from wayfinder.utils.gpu_simple import detect_gpu_devices
+
+            devices = detect_gpu_devices(self.config)
+        except Exception:
+            devices = []
+        if len(devices) < 2:
+            return
+        choices = {"Automatic": "auto"}
+        for device in devices:
+            label = device.name.split(" (")[0]  # drop "(AMD proprietary driver)"
+            if label in choices:
+                label = f"{label} #{device.index}"
+            choices[label] = str(device.index)
+        self._gpu_device_map = choices
+        current = str(self.config.get("gpu_device", "auto"))
+        shown = next((k for k, v in choices.items() if v == current), "Automatic")
+        self.gpu_device_var = ctk.StringVar(value=shown)
+        self.create_dropdown_row(
+            parent, "GPU", list(choices), self.gpu_device_var, self._on_gpu_device_changed,
+            tooltip=SETTING_TOOLTIPS["gpu_device"], width=220,
+        )
+
+    def _on_gpu_device_changed(self, shown: str) -> None:
+        """Apply a GPU choice live: the next dictation respawns whisper-server on it."""
+        value = getattr(self, "_gpu_device_map", {}).get(shown, "auto")
+        self.config["gpu_device"] = value
+        save_config(self.config)
+        if value == "auto":
+            os.environ.pop("GGML_VK_VISIBLE_DEVICES", None)
+            try:
+                from wayfinder.utils.gpu_simple import setup_gpu_environment
+
+                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
+                                 daemon=True).start()
+            except Exception:
+                pass
+        else:
+            os.environ["GGML_VK_VISIBLE_DEVICES"] = value
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+
+            WhisperServerBackend.shutdown()
+        except Exception:
+            pass
+        self.log(f"⚙ GPU: {shown} — applied")
+
     def on_language_changed(self, value: str):
         """Handle language change from dropdown."""
         self.config["language"] = value
@@ -13286,6 +13372,16 @@ class WayfinderApp(ctk.CTk):
             return
         self.config["use_gpu"] = want
         save_config(self.config)
+        if want and IS_WINDOWS and not IS_MACOS:
+            # Startup skips the GPU probe in CPU mode: pick the device now (the
+            # configured gpu_device, else the discrete GPU), off the Tk thread.
+            try:
+                from wayfinder.utils.gpu_simple import setup_gpu_environment
+
+                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
+                                 daemon=True).start()
+            except Exception:
+                pass
         # Apply live: drop the resident whisper-server so the next dictation respawns
         # it in the new CPU/GPU mode — no app restart needed.
         try:
@@ -21223,6 +21319,15 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
+        if IS_WINDOWS and not IS_MACOS:
+            # Buried under another window (the Mac's compositor stops drawing an
+            # occluded window by itself): hold the frame, look again in 0.5 s.
+            from wayfinder.ui.windows_window import window_exposure
+
+            if window_exposure(self) == "covered":
+                self._idle_breath_job = self.after(500, self._animate_idle_breath)
+                return
+
         # Also skip if the hero canvas is not visible (e.g. on a different tab)
         try:
             if not self.hero_canvas.winfo_viewable():

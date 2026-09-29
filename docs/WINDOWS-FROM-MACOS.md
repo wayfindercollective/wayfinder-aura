@@ -76,8 +76,14 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
 | Platform-aware update check (DMG) | Only releases carrying `WayfinderAura-Setup-<v>.exe` count (none today: Windows is internal) |
 | Transient clipboard | Excluded from Win+V history and Cloud Clipboard |
 | Packaged logs in ~/Library/Logs | `%LOCALAPPDATA%\wayfinder-aura\logs\app.log` (the windowed exe dropped all output) |
-| Benchmark system info | Registry + GlobalMemoryStatusEx (was "Unknown") |
+| Benchmark system info | Present PCI display adapters (EnumDisplayDevices; the registry also lists removed cards) + GlobalMemoryStatusEx (was "Unknown") |
 | CTk DPI poll hourly | Same (the app turns CTk DPI awareness off, so the poll can never find a change) |
+| Metal transcription in Ultra's GPU mode | A Vulkan build of the same pinned whisper.cpp (`_internal/whisper-vulkan`, `utils/windows_whisper.py`) for AMD, NVIDIA and Intel GPUs; the CPU build is its crash fallback (Windows crashes are NTSTATUS codes, not signals). Measured on a 32 s clip, Large v3 Turbo Q5: 16.97 s on 12 CPU threads, 1.12 s on an RX 7900 XTX, 3.41 s on a Radeon 780M. Cleanup stays on the CPU (no Vulkan llama-cpp-python wheel) |
+| GPU picked by Metal | Automatic = the discrete Vulkan device (probed with `whisper-cli --help`, only in GPU mode); Settings > GPU lists the devices when there are two or more |
+| Speech models in Application Support | `%LOCALAPPDATA%\wayfinder-aura\whisper-models` (was `%USERPROFILE%\whisper.cpp\models`, still searched) |
+| Hero idle at 30 fps, stopped by the compositor when hidden | Same rate; held while another window covers all of Aura (`windows_window.window_exposure`), as when minimized |
+| Cleanup threads follow the P-core count | Kept at 4: Gemma 3 1B cleanup measured 1.02 s at 4, 0.97 s at 6, 1.01 s at 8, 1.16 s at 16 threads on a Ryzen 7 7840HS (memory-bound; prompt processing already uses every core). whisper stays at 75% of logical cores: 16.97 s at 12 vs 18.49 s at 8 |
+| Audio resampling and rumble filter via SciPy | NumPy twins (`core/audio_dsp.py`), exact to 1e-9 against SciPy; the bundle drops SciPy (~72 MB) |
 
 ## Deliberately different on Windows
 
@@ -106,12 +112,13 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
   the bundled in-process llama-cpp-python wheel.
 - **Tk self-pipe wake-up**: `createfilehandler` doesn't exist on Windows Tk.
 - **Permissions checklist (TCC), Dock, Metal, App Nap, DMG, notarization**:
-  macOS concepts. Signing the Windows installer (Authenticode) is its own task.
+  macOS concepts. Windows signing (Authenticode) is in `packaging/windows/build.py`
+  and turns on when a code-signing identity is configured.
 
 ## Follow-ups
 
 - Try Gamer mode in the real games (as on the Mac, nothing is "Verified" yet).
 - Label fitting for scaled Windows displays.
-- Authenticode signing (SmartScreen).
+- A code-signing identity for the Authenticode step (SmartScreen).
 - Confirm on the reporting PC that the focus-change repaint clears the black
   squares, and that a lone Right Alt tap never opens the front app's menus.

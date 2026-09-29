@@ -1486,3 +1486,24 @@ def test_repaint_after_activation_is_windows_only(monkeypatch):
     monkeypatch.setattr(ww.sys, "platform", "linux")
     assert ww.repaint_after_activation(object()) is False
     assert ww.repaint(object()) is False
+
+
+def test_idle_hero_holds_while_another_window_covers_aura():
+    import inspect
+
+    import wayfinder_main
+
+    src = inspect.getsource(wayfinder_main.WayfinderApp._animate_idle_breath)
+    assert 'window_exposure(self) == "covered"' in src
+    assert "self.after(500, self._animate_idle_breath)" in src
+
+
+def test_windows_never_offers_faster_whisper():
+    """The Windows bundle has no Faster-Whisper/PyTorch; detecting an NVIDIA GPU
+    must not put it in the backend menu."""
+    import inspect
+
+    import wayfinder_main
+
+    src = inspect.getsource(wayfinder_main.WayfinderApp)
+    assert "and not (IS_WINDOWS and not IS_MACOS)" in src.split("show_fw = (", 1)[1][:200]

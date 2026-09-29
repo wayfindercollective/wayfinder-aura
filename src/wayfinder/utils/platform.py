@@ -575,7 +575,8 @@ def subprocess_no_window_kwargs() -> dict:
     dict on Linux/macOS, so callers can splat it unconditionally: ``**kwargs``.
     """
     if sys.platform == "win32":
-        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+        # The constant only exists in Windows' subprocess module (tests fake win32).
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
     return {}
 
 
@@ -657,6 +658,31 @@ def get_default_llama_binary() -> str:
     if is_windows():
         return str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli.exe")
     return str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli")
+
+
+def get_whisper_download_dir() -> Path:
+    """Where the app downloads speech (Whisper GGML) models.
+
+    Windows: <data dir>/whisper-models (%LOCALAPPDATA%\\wayfinder-aura), beside
+    its cleanup models. Elsewhere the long-standing ~/whisper.cpp/models, which
+    existing installs, docs and from-source builds use.
+    """
+    if is_windows():
+        return get_data_dir() / "whisper-models"
+    return Path.home() / "whisper.cpp" / "models"
+
+
+def get_whisper_host_model_dirs() -> list[Path]:
+    """Host folders that may hold speech models, the download folder first.
+
+    Always includes ~/whisper.cpp/models: Windows downloaded there before 2026-09,
+    and from-source users keep models there.
+    """
+    dirs = [get_whisper_download_dir()]
+    legacy = Path.home() / "whisper.cpp" / "models"
+    if legacy not in dirs:
+        dirs.append(legacy)
+    return dirs
 
 
 def get_default_model_dir() -> Path:

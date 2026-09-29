@@ -55,13 +55,85 @@ WHISPER_STAGE = ROOT / "build" / "windows-whisper"
 WHISPER_FILES = ("whisper-cli.exe", "whisper-server.exe")
 
 
-def _whisper_zip_url() -> str:
+def _whisper_build_tag() -> str:
     text = (ROOT / "src" / "wayfinder" / "core" / "setup.py").read_text(encoding="utf-8")
     build = re.search(r'^WHISPER_WINDOWS_BUILD = "([^"]+)"', text, re.MULTILINE)
     if build is None:
         raise SystemExit("could not read WHISPER_WINDOWS_BUILD from setup.py")
+    return build.group(1)
+
+
+def _whisper_zip_url() -> str:
     return ("https://github.com/ggml-org/whisper.cpp/releases/download/"
-            f"{build.group(1)}/whisper-bin-x64.zip")
+            f"{_whisper_build_tag()}/whisper-bin-x64.zip")
+
+
+# The same pinned whisper.cpp built with the Vulkan backend (AMD, Intel and
+# NVIDIA GPUs) for Ultra's GPU acceleration. whisper.cpp publishes no Vulkan
+# build for Windows x64, so it is compiled here with its release job's own
+# Windows flags (MSVC, shared libs, dynamically loaded backends with every CPU
+# variant) plus GGML_VULKAN. Loading backends dynamically matters: on a PC
+# without a Vulkan driver the GPU backend is skipped instead of the exe failing
+# to start. Bundled beside the CPU build, which stays the default.
+WHISPER_VULKAN_STAGE = ROOT / "build" / "windows-whisper-vulkan"
+WHISPER_SRC = ROOT / "build" / "whisper.cpp-src"
+WHISPER_REPO = "https://github.com/ggml-org/whisper.cpp.git"
+
+
+def _vulkan_sdk() -> Path | None:
+    """The Vulkan SDK (glslc compiles the backend's shaders), newest first."""
+    env = os.environ.get("VULKAN_SDK")
+    if env and (Path(env) / "Bin" / "glslc.exe").exists():
+        return Path(env)
+    found = sorted(Path("C:/VulkanSDK").glob("*/Bin/glslc.exe"), reverse=True)
+    return found[0].parent.parent if found else None
+
+
+def _stage_whisper_vulkan(required: bool) -> bool:
+    """Build and stage the Vulkan whisper-cli/whisper-server + DLLs. True if staged."""
+    wanted = (*WHISPER_FILES, "ggml-vulkan.dll")
+    if all((WHISPER_VULKAN_STAGE / name).exists() for name in wanted):
+        return True
+    sdk = _vulkan_sdk()
+    if sdk is None:
+        message = "Vulkan SDK not found (set VULKAN_SDK): GPU whisper build skipped"
+        if required:
+            raise SystemExit(message)
+        print(message)
+        return False
+    tag = _whisper_build_tag()
+    if not (WHISPER_SRC / ".git").exists():
+        print(f"== Cloning whisper.cpp {tag} ==")
+        subprocess.run(["git", "clone", "--depth", "1", "--branch", tag, WHISPER_REPO,
+                        str(WHISPER_SRC)], check=True)
+    def _rev(ref: str) -> str:
+        return subprocess.run(["git", "-C", str(WHISPER_SRC), "rev-parse", "--verify", "-q", ref],
+                              capture_output=True, text=True).stdout.strip()
+
+    if not _rev(f"{tag}^{{commit}}") or _rev("HEAD") != _rev(f"{tag}^{{commit}}"):
+        raise SystemExit(f"{WHISPER_SRC} is not at whisper.cpp {tag}; delete it to re-clone")
+    # Short on purpose: the Vulkan shader generator is a nested CMake project
+    # whose MSBuild logs overrun Windows' 260-character path limit otherwise.
+    build_dir = ROOT / "build" / "wvk"
+    env = dict(os.environ, VULKAN_SDK=str(sdk))
+    print(f"== Building whisper.cpp {tag} with Vulkan (SDK {sdk.name}) ==")
+    subprocess.run([
+        "cmake", "-S", str(WHISPER_SRC), "-B", str(build_dir), "-A", "x64",
+        "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON", "-DWHISPER_SDL2=OFF",
+        "-DGGML_NATIVE=OFF", "-DGGML_BACKEND_DL=ON", "-DGGML_CPU_ALL_VARIANTS=ON",
+        "-DGGML_VULKAN=ON", "-DWHISPER_BUILD_TESTS=OFF",
+    ], check=True, env=env)
+    subprocess.run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel"],
+                   check=True, env=env)
+    out = build_dir / "bin" / "Release"
+    WHISPER_VULKAN_STAGE.mkdir(parents=True, exist_ok=True)
+    for path in out.iterdir():
+        if path.name in WHISPER_FILES or path.suffix == ".dll":
+            shutil.copy2(path, WHISPER_VULKAN_STAGE / path.name)
+    missing = [name for name in wanted if not (WHISPER_VULKAN_STAGE / name).exists()]
+    if missing:
+        raise SystemExit(f"Vulkan whisper build is missing {', '.join(missing)}")
+    return True
 
 
 def _stage_whisper() -> None:
@@ -88,6 +160,43 @@ def _stage_whisper() -> None:
                 (WHISPER_STAGE / name).write_bytes(zf.read(member))
 
 
+# Authenticode. An unsigned installer draws a SmartScreen warning, so a release
+# is signed whenever the build machine provides a code-signing identity:
+#   WAYFINDER_SIGN_CERT_SHA1   thumbprint of a code-signing certificate in the
+#                              Windows certificate store (OV/EV), or
+#   WAYFINDER_SIGN_DLIB and WAYFINDER_SIGN_METADATA
+#                              Azure Trusted Signing (Azure.CodeSigning.Dlib.dll
+#                              and its metadata.json).
+# WAYFINDER_SIGN_TIMESTAMP_URL overrides the RFC 3161 timestamp server, SIGNTOOL
+# the signtool.exe path. WAYFINDER_REQUIRE_SIGNING=1 fails a build without one.
+def _signtool() -> Path | None:
+    if os.environ.get("SIGNTOOL"):
+        return Path(os.environ["SIGNTOOL"])
+    kits = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10"
+    found = sorted((kits / "bin").glob("*/x64/signtool.exe"), reverse=True)
+    return found[0] if found else None
+
+
+def _sign_command() -> list[str] | None:
+    """signtool argv without the file names, or None when signing isn't set up."""
+    thumbprint = os.environ.get("WAYFINDER_SIGN_CERT_SHA1", "").strip()
+    dlib = os.environ.get("WAYFINDER_SIGN_DLIB", "").strip()
+    metadata = os.environ.get("WAYFINDER_SIGN_METADATA", "").strip()
+    if not thumbprint and not (dlib and metadata):
+        return None
+    tool = _signtool()
+    if tool is None or not tool.exists():
+        raise SystemExit("A signing identity is set but signtool.exe was not found "
+                         "(install the Windows SDK or set SIGNTOOL)")
+    if thumbprint:
+        stamp = os.environ.get("WAYFINDER_SIGN_TIMESTAMP_URL", "http://timestamp.digicert.com")
+        return [str(tool), "sign", "/sha1", thumbprint, "/fd", "SHA256",
+                "/tr", stamp, "/td", "SHA256"]
+    stamp = os.environ.get("WAYFINDER_SIGN_TIMESTAMP_URL", "http://timestamp.acs.microsoft.com")
+    return [str(tool), "sign", "/fd", "SHA256", "/tr", stamp, "/td", "SHA256",
+            "/dlib", dlib, "/dmdf", metadata]
+
+
 def main() -> int:
     require_installer = "--require-installer" in sys.argv[1:]
     if sys.platform != "win32":
@@ -107,6 +216,14 @@ def main() -> int:
     make_icon.main()
 
     _stage_whisper()
+    # Release builds must carry the GPU build; a dev build without the Vulkan
+    # SDK still produces a working (CPU-only) app.
+    _stage_whisper_vulkan(required=require_installer)
+
+    sign = _sign_command()
+    if sign is None and os.environ.get("WAYFINDER_REQUIRE_SIGNING") == "1":
+        print("WAYFINDER_REQUIRE_SIGNING=1 but no signing identity is configured.")
+        return 1
 
     print("== PyInstaller: building the onedir bundle ==")
     subprocess.run(
@@ -114,6 +231,14 @@ def main() -> int:
          str(HERE / "wayfinder-aura-windows.spec"), "--clean", "--noconfirm"],
         cwd=str(ROOT), check=True,
     )
+
+    if sign is not None:
+        bundle = ROOT / "dist" / "Wayfinder Aura"
+        exes = [bundle / "Wayfinder Aura.exe", *sorted((bundle / "_internal").glob("whisper*/*.exe"))]
+        print(f"== Signing {len(exes)} executables ==")
+        subprocess.run(sign + [str(path) for path in exes], check=True)
+    else:
+        print("(unsigned build: no signing identity configured)")
 
     iscc = _find_iscc()
     if iscc is None:
@@ -127,10 +252,12 @@ def main() -> int:
 
     print("== Inno Setup: building the installer ==")
     version = _project_version()
-    subprocess.run(
-        [str(iscc), f"/DMyAppVersion={version}", str(HERE / "installer.iss")],
-        cwd=str(ROOT), check=True,
-    )
+    iscc_args = [str(iscc), f"/DMyAppVersion={version}"]
+    if sign is not None:
+        # Inno Setup signs Setup.exe and the uninstaller with the same identity
+        # ($f is the file it hands over, already quoted).
+        iscc_args += ["/DSignAura", f"/Saura={subprocess.list2cmdline(sign)} $f"]
+    subprocess.run(iscc_args + [str(HERE / "installer.iss")], cwd=str(ROOT), check=True)
     print("\nDone → dist/installer/WayfinderAura-Setup-*.exe")
     return 0
 

@@ -136,6 +136,9 @@ def measure_transcription(
     surface a real problem on its own).
     """
     argv = [a for a in argv if a != "--no-prints"]
+    from wayfinder.utils.platform import subprocess_no_window_kwargs
+
+    no_window = subprocess_no_window_kwargs()  # no console flash on Windows
 
     warmed_ok = False
     if warmup_audio_path:
@@ -145,6 +148,7 @@ def measure_transcription(
                 capture_output=True,
                 timeout=warmup_timeout if warmup_timeout is not None else timeout,
                 env=env,
+                **no_window,
             )
             warmed_ok = warmup.returncode == 0
         except Exception:
@@ -157,6 +161,7 @@ def measure_transcription(
             capture_output=True,
             timeout=timeout,
             env=env,
+            **no_window,
         )
         wall = time.perf_counter() - start
     except subprocess.TimeoutExpired:

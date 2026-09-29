@@ -303,10 +303,15 @@ if "--audio-processing-self-test" in sys.argv:
         import numpy as np
         from wayfinder.core import recorder as _recorder
 
-        if _recorder._get_scipy_signal_functions() is None:
-            raise RuntimeError("scipy.signal unavailable; Medium rumble filter is disabled")
-
         _rate = 16000
+        # The Medium rumble filter must really run (SciPy, or the NumPy twins the
+        # Windows bundle ships instead): a 20 Hz hum under a 300 Hz tone.
+        _t = np.arange(_rate) / _rate
+        _hum = (0.2 * np.sin(2 * np.pi * 20 * _t) + 0.2 * np.sin(2 * np.pi * 300 * _t)).astype(np.float32)
+        _spectrum = np.abs(np.fft.rfft(_recorder.preprocess_audio(_hum, _rate, "medium")))
+        if _spectrum[20] > _spectrum[300] * 0.2:
+            raise RuntimeError("Medium rumble filter did not remove a 20 Hz hum")
+
         _rng = np.random.default_rng(20260731)
         _noise = _rng.normal(0.0, 0.002, _rate * 2).astype(np.float32)
         _light = _recorder.preprocess_audio(_noise, _rate, "light")

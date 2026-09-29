@@ -249,6 +249,13 @@ def _cpu_fallback_binary(binary: str) -> Optional[str]:
     """
     if not binary or binary.endswith("-cpu"):
         return None
+    if sys.platform == "win32":
+        # whisper-vulkan\whisper-cli.exe -> whisper\whisper-cli.exe (utils/windows_whisper.py)
+        from wayfinder.utils.windows_whisper import cpu_twin
+
+        twin = cpu_twin(binary)
+        if twin:
+            return twin
     p = Path(binary)
     candidate = p.with_name(p.name + "-cpu")
     return str(candidate) if candidate.is_file() else None
@@ -590,10 +597,17 @@ class WhisperCppBackend(TranscriptionBackend):
                 raise TranscriptionError(f"Could not execute whisper.cpp: {binary}")
 
             if not is_last:
-                died_by_signal = result.returncode < 0
+                from wayfinder.utils.windows_whisper import crashed
+
+                # A crash, not an error exit: a POSIX signal, or on Windows an
+                # NTSTATUS code such as 0xC0000005 (a positive returncode).
+                died_by_signal = crashed(result.returncode)
                 vulkan_error = result.returncode != 0 and "vulkan" in (result.stderr or "").lower()
                 if died_by_signal:
-                    _activate_fallback(f"died with signal {-result.returncode}")
+                    _activate_fallback(
+                        f"died with signal {-result.returncode}" if result.returncode < 0
+                        else f"crashed ({result.returncode & 0xFFFFFFFF:#010x})"
+                    )
                     continue
                 if vulkan_error:
                     _activate_fallback("failed with a Vulkan error")
@@ -868,9 +882,17 @@ class WhisperServerBackend(TranscriptionBackend):
         full modern flags -> v1.7.2-safe flags -> v1.7.2-safe + no-GPU (the same
         degradation whisper-cli's binary auto-fallback provides).
         """
-        cpu_server = self.whisper_server_binary.replace(
-            "whisper-server", "whisper-server-cpu"
-        )
+        # The CPU twin: on Windows the same exe in the sibling CPU-build folder
+        # (utils/windows_whisper.py), else a whisper-server-cpu beside it.
+        cpu_server = None
+        if sys.platform == "win32":
+            from wayfinder.utils.windows_whisper import cpu_twin
+
+            cpu_server = cpu_twin(self.whisper_server_binary)
+        if not cpu_server:
+            cpu_server = self.whisper_server_binary.replace(
+                "whisper-server", "whisper-server-cpu"
+            )
         cpu_server_exists = (
             cpu_server != self.whisper_server_binary and _existing_file(cpu_server)
         )
@@ -1228,6 +1250,10 @@ class WhisperServerBackend(TranscriptionBackend):
             derived,
             derived.replace("whisper-cli", "whisper-cli-cpu"),  # CPU twin, same dir
         ]
+        if sys.platform == "win32":
+            from wayfinder.utils.windows_whisper import cpu_twin
+
+            candidates.insert(1, cpu_twin(derived) or derived)  # CPU twin, sibling dir
         if IS_FLATPAK:
             candidates.extend([
                 "/app/bin/whisper-cli",       # Flatpak bundle (Vulkan)
@@ -2339,6 +2365,12 @@ def get_backend(config: dict) -> TranscriptionBackend:
         cli_binary = _resolve_whisper_cli_binary(
             config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
         )
+        if sys.platform == "win32" and use_gpu_effective:
+            # Windows bundles the Vulkan build beside the CPU one; GPU mode (already
+            # license-gated above) runs it, and its CPU twin stays the fallback.
+            from wayfinder.utils.windows_whisper import gpu_twin
+
+            cli_binary = gpu_twin(cli_binary) or cli_binary
         _wc_beam, _wc_best_of = whisper_decoding(config)
         if config.get("whisper_server_mode", True):
             server_binary = _derive_whisper_server_binary(cli_binary)

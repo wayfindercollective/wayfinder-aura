@@ -39,6 +39,20 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
+      # build.py compiles the pinned whisper.cpp with the Vulkan backend (GPU
+      # transcription); its shaders need the SDK's glslc. whisper.cpp publishes
+      # no Vulkan build for Windows x64.
+      - name: Install Vulkan SDK
+        shell: pwsh
+        env:
+          VULKAN_VERSION: "1.4.357.0"
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "vulkansdk.exe"
+          curl.exe -sSfL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          & $installer --accept-licenses --default-answer --confirm-command install
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK install failed ($LASTEXITCODE)" }
+          "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION" >> $env:GITHUB_ENV
+
       - name: Run Windows tests
         run: python -m pytest tests/ -q --tb=short -m "not ui and not slow and not network and not perf"
 
@@ -75,15 +89,23 @@ jobs:
 
           $app = Join-Path $installDir 'Wayfinder Aura.exe'
           try {
-            foreach ($probe in @('--app-import-self-test', '--tls-self-test', '--llm-engine-self-test')) {
+            foreach ($probe in @('--app-import-self-test', '--tls-self-test', '--llm-engine-self-test',
+                                 '--audio-processing-self-test')) {
               Invoke-CheckedProcess -FilePath $app -Arguments @($probe)
             }
-            # The bundled whisper.cpp engine must be present and launchable.
-            foreach ($tool in @('whisper-cli.exe', 'whisper-server.exe')) {
-              $toolPath = Join-Path $installDir "_internal\whisper\$tool"
-              if (-not (Test-Path -LiteralPath $toolPath)) { throw "Bundle is missing $tool" }
+            # Both bundled whisper.cpp engines (CPU, and Vulkan for GPU mode) must be
+            # present and launchable; the runner has no GPU, so the Vulkan build's
+            # backend loads without devices and --help still exits 0.
+            foreach ($dir in @('whisper', 'whisper-vulkan')) {
+              foreach ($tool in @('whisper-cli.exe', 'whisper-server.exe')) {
+                $toolPath = Join-Path $installDir "_internal\$dir\$tool"
+                if (-not (Test-Path -LiteralPath $toolPath)) { throw "Bundle is missing $dir\$tool" }
+              }
+              Invoke-CheckedProcess -FilePath (Join-Path $installDir "_internal\$dir\whisper-cli.exe") -Arguments @('--help')
             }
-            Invoke-CheckedProcess -FilePath (Join-Path $installDir '_internal\whisper\whisper-cli.exe') -Arguments @('--help')
+            if (-not (Test-Path -LiteralPath (Join-Path $installDir '_internal\whisper-vulkan\ggml-vulkan.dll'))) {
+              throw 'Bundle is missing whisper-vulkan\ggml-vulkan.dll'
+            }
           } finally {
             Invoke-CheckedProcess -FilePath (Join-Path $installDir 'unins000.exe') -Arguments @(
               '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
