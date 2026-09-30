@@ -37,11 +37,11 @@ retain their native-platform gates. A Linux-only manual run does not prove
 Windows/macOS compatibility. `develop` and the older polish branch retain their
 branch-specific CI jobs and do not expose the `platforms` input.
 
-As of 2026-09-30, Mini-inf's Linux Quality job is verified (2,533 tests passed
-on the initial migration candidate). Native Windows is not registered, the Mac
-runner is offline pending capacity acceptance, and no `aura-build` runner is
-enabled. Those jobs queue; they never fall back to hosted execution. Publishing
-this routing change is not installer or application-release signoff.
+The Linux Quality job is verified on the integrated application. Native and
+packaging runners require the fleet owner's capacity acceptance before intake;
+query the runner inventory above for current availability. Ineligible jobs
+queue and never fall back to hosted execution. Publishing routing changes is
+not installer or application-release signoff.
 
 ## Routine validation
 
@@ -122,7 +122,7 @@ the job workspace; a workflow must never install or update it.
 | --- | --- | --- |
 | mini-inf-aura | `aura-linux` | 2 CPU cores, 6 GiB RAM |
 | mini-infinity-aura-linux (old WSL; disabled) | pending shared-capacity integration | stopped |
-| Native Windows | `aura-windows` | not registered yet |
+| Native Windows | `aura-windows` after admission | one bounded native job at a time |
 | mac-studio-aura (offline) | `aura-macos` | peak-model admission required |
 
 Linux runners use a dedicated `aurarunner` account and systemd service caps.
