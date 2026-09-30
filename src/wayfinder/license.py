@@ -185,7 +185,7 @@ FREE_FEATURES = {
     "light_preprocessing": ("Light Audio Processing", "Gain normalization"),
     "instant_typing": ("Instant Paste", "Clipboard-based text injection"),
     "basic_overlay": ("Status Overlay", "Real-time recording status display"),
-    "basic_postprocessing": ("LLM Cleanup", "Local llama.cpp text post-processing"),
+    "basic_postprocessing": ("Text Cleanup", "Normal style: instant um/uh removal, no model"),
 }
 
 

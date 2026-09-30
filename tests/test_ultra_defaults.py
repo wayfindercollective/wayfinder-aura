@@ -12,10 +12,13 @@ import wayfinder_main
 from wayfinder.config import DEFAULT_CONFIG, enforce_license_config
 from wayfinder.core.ultra_defaults import (
     RECOMMENDED_SPEECH_MODEL,
+    RECOMMENDED_SPEECH_MODEL_ID,
     ULTRA_DEFAULTS_KEY,
     apply_ultra_defaults,
     describe_changes,
     gpu_is_default_capable,
+    ultra_setup_due,
+    wants_recommended_speech_model,
 )
 
 REPO = Path(__file__).resolve().parent.parent
@@ -206,6 +209,7 @@ def _app(gate, config, state=None):
         _gpu_default_capable=lambda: True,
         _recommended_speech_model_on_disk=lambda: None,
         _apply_transcription_hardware_change=lambda on: events.append(("hardware", on)),
+        _download_recommended_speech_model=lambda: events.append(("download", RECOMMENDED_SPEECH_MODEL_ID)),
     )
     return app, events
 
@@ -277,3 +281,90 @@ def test_launch_and_background_refresh_both_settle_the_record():
     refresh = refresh[: refresh.index("threading.Thread(")]
     assert refresh.index("enforce_license_config") < refresh.index("self._apply_ultra_defaults()")
     assert refresh.index("self._apply_ultra_defaults()") < refresh.index("self._refresh_entitlement_ui()")
+
+
+# --- Large v3 Turbo Q5 is the Ultra speech model ------------------------------
+
+
+def test_the_recommended_id_is_the_shipped_catalog_entry():
+    info = wayfinder_main.WHISPER_CPP_MODELS[RECOMMENDED_SPEECH_MODEL_ID]
+    assert info["filename"] == RECOMMENDED_SPEECH_MODEL
+    assert info["requires_feature"] == "large_models"  # never a Free download
+    assert info.get("recommended") is True
+
+
+def test_turbo_q5_is_wanted_only_on_ultra_with_the_gpu_on_base():
+    ultra_gpu = _free_config(use_gpu=True)
+    assert wants_recommended_speech_model(ultra_gpu, _gate())
+    assert not wants_recommended_speech_model(ultra_gpu, _gate(premium=False))
+    assert not wants_recommended_speech_model(_free_config(), _gate())  # CPU only
+    picked = _free_config(use_gpu=True, model_path="~/models/ggml-small.en.bin")
+    assert not wants_recommended_speech_model(picked, _gate())
+
+
+def test_setup_due_only_at_the_switch():
+    assert ultra_setup_due(_free_config(), _gate())
+    assert not ultra_setup_due(_free_config(), _gate(premium=False))
+    assert not ultra_setup_due(_free_config(**{ULTRA_DEFAULTS_KEY: None}), _gate())
+    assert ultra_setup_due(_free_config(**{ULTRA_DEFAULTS_KEY: None}), _gate(), activated_now=True)
+    assert not ultra_setup_due(_free_config(**{ULTRA_DEFAULTS_KEY: True}), _gate(), activated_now=True)
+
+
+def test_first_switch_downloads_turbo_q5_when_it_is_not_on_disk(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    gate = _gate()
+    gate.refresh_pending = False
+    app, events = _app(gate, _free_config())
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app, activated_now=True)
+    assert ("download", RECOMMENDED_SPEECH_MODEL_ID) in events
+
+
+def test_no_download_without_the_gpu_or_for_an_existing_ultra_install(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    gate = _gate()
+    gate.refresh_pending = False
+    app, events = _app(gate, _free_config())
+    app._gpu_default_capable = lambda: False
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app, activated_now=True)
+    assert not any(kind == "download" for kind, *_ in events)
+
+    app, events = _app(gate, _free_config(**{ULTRA_DEFAULTS_KEY: None}))
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app)  # launch, already Ultra
+    assert not any(kind == "download" for kind, *_ in events)
+
+
+def test_the_finished_download_switches_unless_the_user_picked_a_model():
+    activated = []
+    logs = []
+    gate = _gate()
+    app = SimpleNamespace(
+        config=_free_config(use_gpu=True),
+        feature_gate=gate,
+        log=logs.append,
+        _activate_downloaded_model=lambda role, path, info=None: activated.append((role, path)),
+    )
+    wayfinder_main.WayfinderApp._finish_recommended_speech_model(app, "/m/" + RECOMMENDED_SPEECH_MODEL)
+    assert activated == [("whisper", "/m/" + RECOMMENDED_SPEECH_MODEL)]
+
+    activated.clear()
+    app.config["model_path"] = "~/models/ggml-medium.en.bin"
+    wayfinder_main.WayfinderApp._finish_recommended_speech_model(app, "/m/" + RECOMMENDED_SPEECH_MODEL)
+    assert activated == [] and "keeping the model you chose" in logs[-1]
+
+
+def test_one_model_downloads_once_at_a_time(tmp_path, monkeypatch):
+    errors = []
+    monkeypatch.setattr(wayfinder_main.ModelDownloader, "_in_flight", {RECOMMENDED_SPEECH_MODEL_ID})
+    wayfinder_main.ModelDownloader(models_dir=tmp_path).download_model(
+        RECOMMENDED_SPEECH_MODEL_ID, error_callback=errors.append
+    )
+    assert errors == ["This model is already downloading"]
+
+
+def test_free_settings_show_no_cleanup_model_manager():
+    source = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
+    body = source[source.index("def _build_local_mode_settings"):]
+    body = body[: body.index("def _build_remote_mode_settings")]
+    free = body.index('if postproc_enabled and not self.feature_gate.has_feature("tone_system"):')
+    manager = body.index("self._build_inline_model_section(parent, postproc_backend)")
+    assert free < body.index("elif postproc_enabled:") < manager

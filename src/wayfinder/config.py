@@ -463,10 +463,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
     "caricature_mode": False,  # 🎭 Secret easter egg! Unlocked by typing "lol" on Style tab.
     
-    # Post-processing settings (LLM cleanup)
-    # First-run default is raw Whisper output: fastest and least surprising.
-    # Existing installs preserve their saved cleanup preference during migration.
-    "post_processing_enabled": False,  # Enable LLM post-processing
+    # Text cleanup. On for new installs: with the Normal style it only removes
+    # um/uh (normal_filler_removal, ~1 ms, no model), Free included. Cleanup
+    # models run only for Ultra (the styles). Existing installs keep their saved
+    # choice.
+    "post_processing_enabled": True,  # Text cleanup (Normal: um/uh removal)
     "post_processing_backend": "llama_cpp",  # llama_cpp | anthropic | openai
     "fast_filler_removal": False,  # When True, use instant regex-based filler removal (no LLM) - best for "minimal" style
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response

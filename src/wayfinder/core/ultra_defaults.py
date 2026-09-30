@@ -14,9 +14,9 @@ On the first switch to Ultra this turns on what the evaluation says helps
   (docs/EVAL-2026-09-30-chunking.md).
 - Text cleanup on. With the Normal style it only removes um/uh (no model, about
   a millisecond); Turbo Q5 writes fillers down far more often than Base.
-- Large v3 Turbo Q5 as the speech model, but only when it is already on disk
-  and the GPU is on (on CPU it is about 9x slower than Base). Otherwise the
-  Ultra tip offers the download.
+- Large v3 Turbo Q5 as the speech model when the GPU is on (on the CPU it is
+  about 9x slower than Base): straight away if it is on disk, otherwise the
+  app downloads it and switches once it lands (wants_recommended_speech_model).
 
 It runs once per install. Every later change is the user's, so nothing here is
 reapplied on launch. An install that was already Ultra before this existed
@@ -35,6 +35,7 @@ from pathlib import Path
 ULTRA_DEFAULTS_KEY = "ultra_defaults_applied"
 
 RECOMMENDED_SPEECH_MODEL = "ggml-large-v3-turbo-q5_0.bin"
+RECOMMENDED_SPEECH_MODEL_ID = "large-v3-turbo-q5_0"  # WHISPER_CPP_MODELS key
 
 # Vendors whose GPU beats the CPU for whisper.cpp by default. Integrated Intel
 # graphics can be slower than the CPU, so it stays an explicit choice.
@@ -57,6 +58,34 @@ def gpu_is_default_capable(vendor: str, platform_name: str) -> bool:
 def _has(gate, feature: str) -> bool:
     try:
         return bool(gate is not None and gate.has_feature(feature))
+    except Exception:
+        return False
+
+
+def ultra_setup_due(config: dict, gate, *, activated_now: bool = False) -> bool:
+    """Whether apply_ultra_defaults would switch settings (not just record)."""
+    try:
+        if not getattr(gate, "is_premium", False):
+            return False
+    except Exception:
+        return False
+    state = config.get(ULTRA_DEFAULTS_KEY)
+    return state is False or (state is None and activated_now)
+
+
+def wants_recommended_speech_model(config: dict, gate) -> bool:
+    """Whether Large v3 Turbo Q5 should replace the current speech model.
+
+    Ultra with the speech-model feature, GPU on, and still on the Free Base
+    model: a model the user picked is never replaced.
+    """
+    if not (_has(gate, "large_models") and config.get("use_gpu", False)):
+        return False
+    try:
+        from wayfinder.license import is_free_transcription_model
+
+        current = str(config.get("model_path", "") or "")
+        return not current or is_free_transcription_model(current)
     except Exception:
         return False
 
@@ -113,17 +142,12 @@ def apply_ultra_defaults(
     if not config.get("post_processing_enabled", False):
         _set("post_processing_enabled", True)
 
-    if recommended_model_path and gpu_on and _has(gate, "large_models"):
-        try:
-            from wayfinder.license import is_free_transcription_model
-
-            current = str(config.get("model_path", "") or "")
-            # Only replace the Free model, never another model the user picked.
-            if not current or is_free_transcription_model(current):
-                if Path(recommended_model_path).name == RECOMMENDED_SPEECH_MODEL:
-                    _set("model_path", str(recommended_model_path))
-        except Exception:
-            pass
+    if (
+        recommended_model_path
+        and Path(recommended_model_path).name == RECOMMENDED_SPEECH_MODEL
+        and wants_recommended_speech_model(config, gate)
+    ):
+        _set("model_path", str(recommended_model_path))
 
     _set(ULTRA_DEFAULTS_KEY, True)
     return changed

@@ -2864,6 +2864,12 @@ class ModelDownloader:
     only touches *writable* copies and never the Flatpak-bundled `/app/share/...`.
     """
     
+    # Model ids being downloaded by any instance. Two downloads of one model
+    # share its ".downloading" file, so the second is refused (the Ultra setup
+    # fetches Turbo Q5 in the background while the models panel stays usable).
+    _in_flight: set[str] = set()
+    _in_flight_lock = threading.Lock()
+
     def __init__(self, models_dir: Path = None):
         self.models_dir = models_dir or _get_whisper_models_dir()
         self.models_dir.mkdir(parents=True, exist_ok=True)
@@ -2977,7 +2983,13 @@ class ModelDownloader:
             if error_callback:
                 error_callback(f"Cannot write models dir: {e}")
             return
-        
+        with ModelDownloader._in_flight_lock:
+            if model_id in ModelDownloader._in_flight:
+                if error_callback:
+                    error_callback("This model is already downloading")
+                return
+            ModelDownloader._in_flight.add(model_id)
+
         def download_thread():
             temp_path = None
             try:
@@ -3200,6 +3212,8 @@ class ModelDownloader:
                         temp_path.unlink(missing_ok=True)
                     except Exception:
                         pass
+                with ModelDownloader._in_flight_lock:
+                    ModelDownloader._in_flight.discard(model_id)
         
         self._current_download = threading.Thread(
             target=_macos_keep_awake(download_thread, f"download:{model_id}",
@@ -8962,9 +8976,9 @@ class WayfinderApp(ctk.CTk):
         ).pack(side="right", padx=(SPACING["sm"], 0))
 
         # (F) Ultra utilization tip — light launch cue for Ultra owners who
-        # haven't switched their upgrades on yet (an activated install starts
-        # exactly like Free: GPU off, Base model, free cleanup model). Built
-        # once, packed on demand like the other banners; text set at show time.
+        # aren't using an upgrade (the one-time Ultra setup can't cover a failed
+        # model download or a later switch-off). Built once, packed on demand
+        # like the other banners; text set at show time.
         self.ultra_tips_banner = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"],
         )
@@ -11036,8 +11050,21 @@ class WayfinderApp(ctk.CTk):
             ),
         )
         
-        # Post-processing backend and options (only show if enabled)
-        if postproc_enabled:
+        # Post-processing backend and options (only show if enabled). Free runs
+        # no cleanup model (Normal is um/uh removal), so it gets no model manager
+        # to download one into.
+        if postproc_enabled and not self.feature_gate.has_feature("tone_system"):
+            ctk.CTkLabel(
+                parent,
+                text=("Normal removes um/uh instantly, with no model to download. "
+                      "Cleanup models power the writing styles in Ultra."),
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+                wraplength=420,
+                justify="left",
+                anchor="w",
+            ).pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"]))
+        elif postproc_enabled:
             postproc_backend = self.config.get("post_processing_backend", "llama_cpp")
             # Ensure we're using llama_cpp for local mode
             if postproc_backend != "llama_cpp":
@@ -13742,9 +13769,15 @@ class WayfinderApp(ctk.CTk):
         if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
             return []
         try:
-            from wayfinder.core.ultra_defaults import apply_ultra_defaults, describe_changes
+            from wayfinder.core.ultra_defaults import (
+                apply_ultra_defaults,
+                describe_changes,
+                ultra_setup_due,
+                wants_recommended_speech_model,
+            )
 
             premium = bool(gate.is_premium)
+            due = ultra_setup_due(self.config, gate, activated_now=activated_now)
             changed = apply_ultra_defaults(
                 self.config,
                 gate,
@@ -13757,6 +13790,9 @@ class WayfinderApp(ctk.CTk):
         except Exception as exc:
             print(f"[license] Ultra setup skipped: {exc}", flush=True)
             return []
+        # Turbo Q5 is the Ultra speech model: fetch it if it is not on disk yet.
+        if due and wants_recommended_speech_model(self.config, gate):
+            self._download_recommended_speech_model()
         if not changed:
             return []
         save_config(self.config)
@@ -13771,6 +13807,54 @@ class WayfinderApp(ctk.CTk):
         if message:
             self.log(message)
         return changed
+
+    def _download_recommended_speech_model(self) -> None:
+        """Ultra setup: download Large v3 Turbo Q5, then switch to it.
+
+        Through the same authenticated downloader as the models panel (which
+        refuses a second copy of the same download). A failure only logs: the
+        Ultra tip keeps offering the model.
+        """
+        from wayfinder.core.ultra_defaults import RECOMMENDED_SPEECH_MODEL_ID
+
+        info = WHISPER_CPP_MODELS.get(RECOMMENDED_SPEECH_MODEL_ID) or {}
+        self.log(f"⬇ Ultra setup: downloading Large v3 Turbo Q5 ({info.get('size', '574 MB')})")
+
+        def _on_ui(fn):
+            self.event_queue.put((EventType.UI_CALLBACK, fn))
+
+        def _complete(path: str) -> None:
+            _on_ui(lambda: self._finish_recommended_speech_model(path))
+
+        def _error(message: str) -> None:
+            _on_ui(lambda: self.log(
+                f"⚠ Large v3 Turbo Q5 download: {message}. "
+                "Get it any time in Settings ▸ Whisper Model."
+            ))
+
+        try:
+            ModelDownloader().download_model(
+                RECOMMENDED_SPEECH_MODEL_ID,
+                complete_callback=_complete,
+                error_callback=_error,
+            )
+        except Exception as exc:
+            _error(str(exc))
+
+    def _finish_recommended_speech_model(self, path: str) -> None:
+        """Switch to the downloaded Turbo Q5 unless the user picked a model meanwhile."""
+        from wayfinder.core.ultra_defaults import (
+            RECOMMENDED_SPEECH_MODEL_ID,
+            wants_recommended_speech_model,
+        )
+
+        if not wants_recommended_speech_model(self.config, self.feature_gate):
+            self.log("✓ Large v3 Turbo Q5 downloaded — keeping the model you chose")
+            return
+        # Deferred to the next IDLE if a dictation is running.
+        self._activate_downloaded_model(
+            "whisper", path, WHISPER_CPP_MODELS.get(RECOMMENDED_SPEECH_MODEL_ID)
+        )
 
     # === Post-Processing Handlers ===
 
@@ -19975,8 +20059,9 @@ class WayfinderApp(ctk.CTk):
         """Make a model the user just fetched with Get/Download the active one.
 
         ``role`` names the list it came from: ``"whisper"`` (speech model) or
-        ``"llm"`` (cleanup model). Only the user's own download buttons call
-        this; nothing that downloads in the background switches models.
+        ``"llm"`` (cleanup model). The user's own download buttons call this,
+        and the one-time Ultra setup's Turbo Q5 download (the user's switch to
+        Ultra); nothing else that downloads in the background switches models.
 
         Mid-dictation (any state but IDLE) the switch is queued and applied on
         the next IDLE transition, so a model is never swapped under a running

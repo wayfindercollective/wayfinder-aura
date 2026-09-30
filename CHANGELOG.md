@@ -25,10 +25,14 @@ Linux: dictation for gamers on every desktop.
 - **Vocabulary corrections as Heard / Write-as pairs.**
 - **Ultra switches on its recommended setup once.** The first time an install
   becomes Ultra, GPU acceleration turns on (Apple silicon, NVIDIA, AMD),
-  Chunk Processing goes to Auto, text cleanup turns on (Normal only removes
-  um/uh, no model), and Large v3 Turbo Q5 becomes the speech model if it is
-  already downloaded. It never runs again, so later choices stick; installs
-  that were Ultra before keep their settings.
+  Chunk Processing goes to Auto, text cleanup turns on, and with the GPU on
+  Large v3 Turbo Q5 becomes the speech model (downloaded if needed, then
+  switched to). It never runs again, so later choices stick; installs that
+  were Ultra before keep their settings.
+- **Free removes um/uh out of the box.** Text cleanup is on for new installs;
+  with the Normal style it removes filler sounds instantly and runs no model.
+  Cleanup models are for the Ultra writing styles, so Free no longer shows a
+  model manager or loads one.
 
 ### Changed
 

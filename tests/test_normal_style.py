@@ -45,12 +45,14 @@ def test_normal_skips_the_cleanup_model(monkeypatch):
     assert P.process_with_config("Um, the the report is ready.", cfg) == "The report is ready."
 
 
-def test_normal_can_still_opt_into_the_model(monkeypatch):
+@pytest.mark.parametrize("ultra", [True, False])
+def test_normal_can_opt_into_the_model_on_ultra_only(monkeypatch, ultra):
+    # Owner decision 2026-09-30: Free cleanup is um/uh removal with no model.
     import wayfinder.license as lic
     from types import SimpleNamespace
 
     monkeypatch.setattr(lic, "get_feature_gate",
-                        lambda *a, **k: SimpleNamespace(is_premium=False, has_feature=lambda f: False))
+                        lambda *a, **k: SimpleNamespace(is_premium=ultra, has_feature=lambda f: ultra))
     called = []
 
     class _Backend:
@@ -64,7 +66,7 @@ def test_normal_can_still_opt_into_the_model(monkeypatch):
     monkeypatch.setattr(P, "get_backend", lambda cfg: _Backend())
     cfg = {"post_processing_enabled": True, "output_tone": "minimal", "normal_llm_cleanup": True}
     P.process_with_config("please send the quarterly report to the whole team", cfg)
-    assert called
+    assert bool(called) is ultra
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -111,10 +113,15 @@ class TestCleanupResidency:
                                        "llama_cpp_model_path": str(model)}) is False
 
     def test_opting_normal_into_the_model(self, monkeypatch):
-        self._gate(monkeypatch, False)
+        self._gate(monkeypatch, True)
         cfg = {"post_processing_enabled": True, "output_tone": "minimal", "normal_llm_cleanup": True}
         assert P.cleanup_model_needed(cfg) is True
         cfg["fast_filler_removal"] = True
+        assert P.cleanup_model_needed(cfg) is False
+
+    def test_free_cannot_opt_normal_into_the_model(self, monkeypatch):
+        self._gate(monkeypatch, False)
+        cfg = {"post_processing_enabled": True, "output_tone": "minimal", "normal_llm_cleanup": True}
         assert P.cleanup_model_needed(cfg) is False
 
     def test_warm_up_skips_when_no_model_is_needed(self, monkeypatch):

@@ -3707,7 +3707,12 @@ def cleanup_model_needed(config: dict) -> bool:
         # A greyed-out style runs as Normal, which needs no model.
         if effective_style(config)[0] != "minimal":
             return True
-    return bool(config.get("normal_llm_cleanup")) and not config.get("fast_filler_removal")
+    # Free runs no cleanup model: Normal is um/uh removal only.
+    return (
+        styled
+        and bool(config.get("normal_llm_cleanup"))
+        and not config.get("fast_filler_removal")
+    )
 
 
 def warm_up_postprocessing(config: dict) -> None:
@@ -4086,6 +4091,8 @@ def _process_with_config(text: str, config: dict) -> str:
             config["output_tone"] = "minimal"
             config["strong_mode"] = False
             config["caricature_mode"] = False
+            # Free cleanup is um/uh removal only; no cleanup model runs.
+            config["normal_llm_cleanup"] = False
         if not _vocabulary_allowed:
             config["custom_vocabulary"] = []
     if _vocabulary_allowed and config.get("vocabulary_replacements"):
