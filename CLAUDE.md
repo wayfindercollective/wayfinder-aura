@@ -12,7 +12,9 @@ Local voice dictation for Linux. CustomTkinter UI + PyQt6 overlay + whisper.cpp 
   plus the `Quality` and `Platform smoke (macOS)` checks, admins included). Each
   task gets its own worktree and branch from the latest `origin/main`, named
   `mac/`, `win/`, `linux/`, `deck/`, `ci/` or `docs/`. Never cherry-pick one
-  commit onto several branches. `macos`, `windows` and `develop` are retired;
+  commit onto several branches. Releases are `vX.Y.Z` tags on `main`; a
+  `release/<version>` branch (all OSes, never per OS) only patches a shipped
+  version. `macos`, `windows` and `develop` are retired;
   `release/windows-public-pending-signoff` is parked on purpose. Full rules:
   "Branches and merges" in `docs/PLATFORM-DEVELOPMENT.md`.
 

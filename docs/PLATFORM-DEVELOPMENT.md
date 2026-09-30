@@ -57,10 +57,11 @@ although 174 of its 179 commits were already on `main`.
 - **Land shared changes once.** CI, docs, runner policy and test infrastructure
   go to `main` in one pull request. Never cherry-pick a commit onto several
   branches; a branch picks up `main` by merging or rebasing on it.
-- **Releases are tags.** A release is a `vX.Y.Z` tag on `main` (see
-  [CI.md](CI.md#user-update-contract)). To patch an old release, cut
-  `release/<os>-<version>` from its tag and carry fixes from `main` into it,
-  never the other way.
+- **One release line for every OS.** A release is a `vX.Y.Z` tag on `main`
+  that builds every platform's packages (see
+  [CI.md](CI.md#user-update-contract)). To patch a shipped release, cut
+  `release/<version>` from its tag: one branch for all operating systems, never
+  one per OS. Carry fixes from `main` into it, never the other way.
 - **One parked branch.** `release/windows-public-pending-signoff` keeps the
   release workflow from before the 2026-09-21 decision, which attached the
   Windows installer. At sign-off, redo that change as a fresh pull request from
