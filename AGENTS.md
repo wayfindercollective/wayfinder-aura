@@ -6,8 +6,8 @@
 
 Read [docs/CI.md](docs/CI.md) before changing workflows or running remote builds.
 All jobs must use explicit Aura `self-hosted` labels. Do not introduce
-GitHub-hosted runners or a hosted fallback. Pull the latest version of your
-shared branch before editing CI; preserve these changes when merging older work.
+GitHub-hosted runners or a hosted fallback. Start from the latest `origin/main`
+before editing CI; preserve these changes when merging older work.
 Run `python scripts/ci/check-runner-policy.py` before pushing workflow changes.
 An offline runner means the job waits; it does not mean validation passed.
 Host provisioning and Fox Grid resource admission belong to the runner owner.
@@ -76,6 +76,11 @@ post-processing, state, licensing, and config behavior must not be forked by
 operating system. OS behavior belongs at the seams documented in
 `docs/PLATFORM-DEVELOPMENT.md`. Every macOS or Windows change still has to pass
 the Linux suite, plus the native platform-smoke CI jobs.
+
+Separate platforms in code, not branches. `main` is the only long-lived branch
+and is protected: work arrives by pull request from a short task branch, one
+worktree per task. `macos`, `windows` and `develop` are retired. See "Branches
+and merges" in `docs/PLATFORM-DEVELOPMENT.md`.
 
 ---
 

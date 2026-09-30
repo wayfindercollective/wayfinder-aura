@@ -8,6 +8,13 @@ Local voice dictation for Linux. CustomTkinter UI + PyQt6 overlay + whisper.cpp 
 - CI: use only the owner's self-hosted Aura runners; read `docs/CI.md` and run
   `python scripts/ci/check-runner-policy.py` before workflow changes. Preserve
   runner limits and the Mac model/server/agent memory reserves.
+- Branches: `main` is the only long-lived branch and is protected (pull request
+  plus the `Quality` and `Platform smoke (macOS)` checks, admins included). Each
+  task gets its own worktree and branch from the latest `origin/main`, named
+  `mac/`, `win/`, `linux/`, `deck/`, `ci/` or `docs/`. Never cherry-pick one
+  commit onto several branches. `macos`, `windows` and `develop` are retired;
+  `release/windows-public-pending-signoff` is parked on purpose. Full rules:
+  "Branches and merges" in `docs/PLATFORM-DEVELOPMENT.md`.
 
 ## STOP — License & freemium integrity (for AI coding agents)
 

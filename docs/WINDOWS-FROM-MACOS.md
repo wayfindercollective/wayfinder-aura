@@ -1,8 +1,10 @@
 # Windows: parity with the macOS app
 
-The `windows` branch is `macos` plus the Windows side of everything the Mac
-port built, so the two apps look, feel and behave the same wherever Windows
-allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
+Windows carries the Windows side of everything the Mac port built, so the two
+apps look, feel and behave the same wherever Windows allows it. It was built on
+a `windows` branch kept in step with `macos`; both are merged into `main` and
+retired (2026-09-30). New Windows work uses a short `win/*` branch from `main`
+([branch rules](PLATFORM-DEVELOPMENT.md#branches-and-merges)).
 
 **Ground rules** (the platform contract, as for the Mac port):
 
