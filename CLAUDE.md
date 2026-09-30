@@ -1,5 +1,11 @@
 # Wayfinder Aura
 
+## Shared CI
+
+Use only the owner's self-hosted Aura runners. Read [docs/CI.md](docs/CI.md),
+pull the latest branch changes, and run `python scripts/ci/check-runner-policy.py`
+before editing workflows. Preserve host limits and model/server/agent reserves.
+
 Local voice dictation for Linux. CustomTkinter UI + PyQt6 overlay + whisper.cpp + llama.cpp.
 
 - Run: `python main.py`

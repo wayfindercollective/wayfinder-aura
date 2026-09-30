@@ -2,6 +2,12 @@
 
 > **For AI Agents**: See [AGENTS.md](AGENTS.md) for comprehensive technical documentation including architecture diagrams, module guides, and common pitfalls.
 
+## Shared CI
+
+Use only the owner's self-hosted Aura runners. Read [docs/CI.md](docs/CI.md),
+pull the latest branch changes, and run `python scripts/ci/check-runner-policy.py`
+before editing workflows. Preserve host limits and model/server/agent reserves.
+
 ## Project Overview
 
 Wayfinder Aura is a local voice dictation app for Linux. It uses whisper.cpp for speech-to-text and injects the transcribed text at the cursor position.

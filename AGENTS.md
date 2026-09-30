@@ -1,5 +1,17 @@
 # Wayfinder Aura - Agent Documentation
 
+## CI uses the owner's hardware
+
+Read [docs/CI.md](docs/CI.md) before changing workflows or running remote builds.
+All jobs must use explicit Aura `self-hosted` labels. Do not introduce
+GitHub-hosted runners or a hosted fallback. Pull the latest version of your
+shared branch before editing CI; preserve these changes when merging older work.
+Run `python scripts/ci/check-runner-policy.py` before pushing workflow changes.
+An offline runner means the job waits; it does not mean validation passed.
+Host provisioning and Fox Grid resource admission belong to the runner owner.
+Workflows must not install host packages, change host swap, restart services,
+or reduce the Mac model's context/memory allowance to make CI fit.
+
 > **For AI Agents**: This document provides technical context to help you understand and work with this codebase effectively. Read this before making changes.
 
 ## Quick Reference
