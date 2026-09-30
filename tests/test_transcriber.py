@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestTranscriptionBackends:
     """Test transcription backend selection."""
 
@@ -1770,6 +1771,7 @@ class TestGpuRecoveryProbe:
         assert backend.transcribe(audio) == "cpu-text"
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestWhisperServerWarmup:
     """whisper-server backend: instant first dictation via startup warm-up."""
 
@@ -2276,6 +2278,7 @@ class TestMacServerRequestFields:
         assert b"no_timestamps" not in body
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestGreedyDecoding:
     """docs/EVAL-2026-09-24.md: beam search never beat greedy on whisper.cpp."""
 
@@ -2292,11 +2295,20 @@ class TestGreedyDecoding:
         assert whisper_decoding({"whisper_beam_size": value}) == expected
 
     @pytest.mark.parametrize("server_mode", [True, False])
-    def test_server_and_cli_backends_get_greedy(self, server_mode):
-        from wayfinder.core.transcriber import get_backend
+    def test_server_and_cli_backends_get_greedy(self, server_mode, tmp_path):
+        from wayfinder.core.transcriber import WhisperServerBackend, get_backend
+        # Its own binaries: without a whisper-server, server mode quietly falls
+        # back to the CLI and the server case would test the CLI twice.
+        for name in ("whisper-cli", "whisper-server"):
+            (tmp_path / name).write_text("#!/bin/sh\n")
+            (tmp_path / name).chmod(0o755)
+        (tmp_path / "ggml-base.en.bin").write_bytes(b"\x00")
         cfg = {"transcription_backend": "whisper_cpp", "accuracy_mode": "high",
-               "beam_size": 8, "best_of": 5, "whisper_server_mode": server_mode}
+               "beam_size": 8, "best_of": 5, "whisper_server_mode": server_mode,
+               "whisper_binary": str(tmp_path / "whisper-cli"),
+               "model_path": str(tmp_path / "ggml-base.en.bin")}
         backend = get_backend(cfg)
+        assert isinstance(backend, WhisperServerBackend) is server_mode
         assert (backend.beam_size, backend.best_of) == (1, 1)
 
 

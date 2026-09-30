@@ -146,6 +146,7 @@ class TestFullDictationPipeline:
 # =============================================================================
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestChunkedRecordingPipeline:
     """Test chunked recording accumulation and transcription."""
 
@@ -266,6 +267,7 @@ class TestStyleChangeMidSession:
 # =============================================================================
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestErrorRecovery:
     """Test that errors return the state machine to IDLE."""
 

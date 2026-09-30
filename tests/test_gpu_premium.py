@@ -1,6 +1,9 @@
 """GPU acceleration is a PREMIUM feature — enforced at the backend factory so a
 config.json edit can't unlock it without a license. (Pairs with the UI gate.)"""
 import pytest
+
+# GPU gating decisions must not depend on a whisper.cpp build on the host.
+pytestmark = pytest.mark.usefixtures("no_host_binaries")
 from wayfinder.core.transcriber import get_backend, WhisperCppBackend
 from wayfinder.license import LicenseInfo
 

@@ -263,6 +263,7 @@ class TestTokenBudget:
         assert b._token_budget("x" * 100_000) == 100
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestFactoryDataflow:
     """The config key alone is inert unless the factory threads it to the backend."""
 

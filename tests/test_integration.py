@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestE2ETranscriptionFlow:
     """Test end-to-end transcription workflow."""
 
@@ -160,6 +161,7 @@ class TestAudioPreprocessingPipeline:
             assert len(result) > 0
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestErrorRecovery:
     """Test error recovery scenarios."""
 

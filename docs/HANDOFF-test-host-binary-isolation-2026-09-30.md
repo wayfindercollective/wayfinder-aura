@@ -72,49 +72,53 @@ Run on the Mac Studio (venv-mac, Python 3.12.10) with
   head. The macOS job needs the infra agent's supervised admission
   (docs/CI.md), which is not the Aura agent's to grant.
 
-## Remaining work (next steps, in order)
+## Follow-up done (branch `fix/test-host-binary-isolation-followup`)
 
-Run the probe below on the Mac (not on CI). On this branch, 104 tests still
-reach a host binary while running. Most of them are incidental: `load_config()`
-repairs `llama_cpp_binary` to the Homebrew copy, and the test never asserts on
-it. The ones worth doing first choose server mode because the host
-`whisper-server` exists:
+Taken over by the Aura agent on 2026-09-30, stacked on this pull request.
 
-- `test_transcriber.py::TestTranscriptionBackends::test_get_backend_default`
-- `test_transcriber.py::TestTranscriptionBackends::test_get_backend_whisper_cpp`
-- `test_transcriber.py::TestTranscriptionBackends::test_large_model_downgrade_fails_closed_when_no_free_alternative`
-- `test_transcriber.py::TestTranscriptionBackends::test_large_model_downgrade_never_points_at_missing_path`
-- `test_transcriber.py::TestGreedyDecoding::test_server_and_cli_backends_get_greedy[True]`
-- `test_transcriber.py::TestWhisperServerWarmup::test_module_warm_up_routes_to_server_backend`
-- `test_e2e_flows.py::TestChunkedRecordingPipeline::test_multiple_chunks_transcribed`
-- `test_e2e_flows.py::TestErrorRecovery::test_transcription_failure_raises`
-- `test_integration.py::TestErrorRecovery::test_invalid_audio_path_handled`
-- `test_integration.py::TestErrorRecovery::test_transcription_error_handled`
+- `no_host_binaries` now also covers the classes about backend selection:
+  - `test_transcriber.py`: `TestTranscriptionBackends`, `TestWhisperServerWarmup`,
+    `TestGreedyDecoding`.
+  - `test_e2e_flows.py`: `TestChunkedRecordingPipeline`, `TestErrorRecovery`.
+  - `test_integration.py`: `TestE2ETranscriptionFlow`, `TestErrorRecovery`.
+  - `test_chat_template.py::TestFactoryDataflow`.
+  - `test_gpu_premium.py`, module-wide.
+  - `test_macos_game_chat.py::test_transcriber_primes_whisper_with_gamer_vocabulary_without_ultra`.
+- **One false pass fixed.** `TestGreedyDecoding::test_server_and_cli_backends_get_greedy[True]`
+  only tested the server backend on a machine with a host `whisper-server`.
+  Everywhere else, CI included, server mode fell back to the CLI, so the CLI
+  was tested twice. The test now creates its own fake `whisper-cli`,
+  `whisper-server` and model, and asserts which backend it got.
+- **Other risk removed.** The `ErrorRecovery` tests could spawn the host's
+  real `whisper-server` with a fake model. They now take the mocked CLI path
+  they were written for.
+- **Probe on the Mac.** Hits went from 104 to 72 tests, and none reach
+  `whisper-server`. The marked suite in a worktree: 3200 passed, 1 failed,
+  201 skipped. The failure is the worktree-only overlay bootstrap test that
+  PR #13 fixes.
 
-For each test, decide whether its assertion depends on the host binary (a real
-false pass) or merely touches it. Apply `no_host_binaries` at class level where
-the class is about backend selection, then check the result on the Mac with the
-probe. Other files that reach host binaries, with test counts: test_config 28,
-test_transcriber 21 (the list above plus whisper-cli-only cases), test_model_download 9,
-test_model_downloader 9, test_e2e_setup 7, test_macos_keychain 6, test_e2e_flows 6,
-test_integration 4, test_gpu_premium 3, test_config_unification 3, test_vocabulary 2,
-test_cloud_keys 2, test_chat_template 2, test_voice_profile 1,
-test_macos_game_chat 1.
+## Remaining work
 
-Don't make the fixture autouse for the whole suite without checking the tests
-that use real binaries on purpose, such as golden ASR and live smoke.
+The remaining 72 hits are incidental:
+- `load_config()` repairs `llama_cpp_binary` or `whisper_binary` to the
+  Homebrew or `~/whisper.cpp` copy.
+- `test_config`, `test_model_download(er)`, `test_e2e_setup`,
+  `test_macos_keychain`, `test_config_unification`, `test_vocabulary`,
+  `test_cloud_keys` and `test_voice_profile` load a config, but none of them
+  assert on a binary path.
+- Hiding binaries there would change nothing they check. Leave them unless
+  one starts asserting on binaries.
 
-Related pending work: the license-gate reset (autouse `reset_feature_gate`) was
-uncommitted in worktree `.claude/worktrees/stoic-tharp-8b5e72`, based on
-`ac6a102`. It also edits `tests/conftest.py`. At 21:15Z its diff applied
-cleanly on top of this work (a line offset only), and the combined tree passed
-the marked suite on the Mac: 3202 passed / 201 skipped / 10 deselected. Once
-it lands, the free-tier model name described above is extra safety rather than
-required. PR #13 also edits `tests/conftest.py`, prepending the checkout's
-`src/` to `PYTHONPATH`.
+The licence-gate reset (autouse `reset_feature_gate`) is PR #16
+(`fix/test-order-isolation`, from `main` 297d3e0). It also fixes the
+order-dependent `test_loopback_http.py::test_windows_bypasses_a_configured_proxy`.
+PRs #13, #14, #16, #12 and #15 merge cleanly in that order, including their
+three `tests/conftest.py` edits. The full suite on that combination passes on
+the Mac: 3261 passed, 207 skipped. Once #16 lands, the free-tier model name
+described above is extra safety rather than required.
 
-Do the remaining work per docs/PLATFORM-DEVELOPMENT.md "Branches and merges":
-branch from the latest `origin/main`, use one short task branch (for example
+Do new work per docs/PLATFORM-DEVELOPMENT.md "Branches and merges": branch
+from the latest `origin/main`, use one short task branch (for example
 `fix/...`), and open a pull request into `main`.
 
 ## Probe used to find host-binary hits
