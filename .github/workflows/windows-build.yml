@@ -22,7 +22,9 @@ env:
 jobs:
   build:
     name: Build unsigned Windows candidate
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # PR candidates wait for the Windows runner's admission (AURA_WINDOWS_CI,
+    # docs/CI.md); manual runs and release calls always build.
+    if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && vars.AURA_WINDOWS_CI == 'true')
     runs-on: [self-hosted, Windows, X64, aura-windows]
     timeout-minutes: 45
     steps:

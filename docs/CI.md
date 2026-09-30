@@ -154,6 +154,15 @@ the job workspace; a workflow must never install or update it.
 | Native Windows | `aura-windows` after admission | one bounded native job at a time |
 | mac-studio-aura (offline) | `aura-macos` | peak-model admission required |
 
+**Windows jobs wait for admission.** Until the Windows runner takes jobs, the
+`Windows tests` job (CI) and the PR `Windows Candidate` build are skipped on
+pushes and pull requests. A queued Windows job used to keep every run open, and
+GitHub refuses to rerun a failed job in a run that is still open. Set the repo
+variable `AURA_WINDOWS_CI` to `true` once the runner is admitted:
+`gh variable set AURA_WINDOWS_CI --body true`. At that point also add
+`Windows tests` to `main`'s required checks. Tag releases (`refs/tags/v*`) and
+manual `workflow_dispatch` runs always include Windows.
+
 Linux runners use a dedicated `aurarunner` account and systemd service caps.
 The prepared WSL builder's private **rootless** Docker daemon is also disabled;
 it must join the shared admission policy before use. It does not require

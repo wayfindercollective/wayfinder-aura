@@ -1485,3 +1485,23 @@ LICENSE_API_URL = os.environ.get("WAYFINDER_LICENSE_API_URL", "{dotted}")
         cwd=REPO, capture_output=True, text=True, timeout=10,
     )
     assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_windows_jobs_wait_for_admission_but_never_skip_a_release():
+    """Queued Windows jobs kept every run open (no failed job could be rerun).
+
+    Pushes and PRs skip them until AURA_WINDOWS_CI is 'true'; tag releases and
+    manual runs always build Windows (docs/CI.md).
+    """
+    ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci[ci.index("  windows-tests:"):]
+    gate = job[job.index("    if:"):job.index("\n", job.index("    if:"))]
+    assert "vars.AURA_WINDOWS_CI == 'true'" in gate
+    assert "startsWith(github.ref, 'refs/tags/')" in gate
+    assert "github.event_name == 'workflow_dispatch'" in gate
+
+    build = (REPO / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
+    gate = build[build.index("    if:"):build.index("\n", build.index("    if:"))]
+    # Only the pull_request branch is gated: release calls and manual runs build.
+    assert gate.startswith("    if: github.event_name != 'pull_request' || (")
+    assert "vars.AURA_WINDOWS_CI == 'true'" in gate
