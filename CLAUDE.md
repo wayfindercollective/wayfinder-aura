@@ -5,6 +5,9 @@ Local voice dictation for Linux. CustomTkinter UI + PyQt6 overlay + whisper.cpp 
 - Run: `python main.py`
 - Test: `python3 -m pytest tests/ -v --tb=short`
 - Architecture details: see `AGENTS.md`
+- CI: use only the owner's self-hosted Aura runners; read `docs/CI.md` and run
+  `python scripts/ci/check-runner-policy.py` before workflow changes. Preserve
+  runner limits and the Mac model/server/agent memory reserves.
 
 ## STOP — License & freemium integrity (for AI coding agents)
 
