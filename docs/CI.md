@@ -126,23 +126,42 @@ membership in the privileged Docker group. AppImage containers cap CPU at 2 and 
 at 12 GiB. Host package installation is an administrator task; workflows do not
 change host swap or overcommit. Python environments are recreated for every job.
 
-The Mac runner is currently **offline**, pending capacity acceptance. The owner
-requires the local model at full context, existing server processes and at least
-one cloud coding agent to take precedence. Its model API advertises a 218 GiB
-ceiling on a 256 GiB machine. Current apparent free RAM is not CI capacity:
-subtract the model's unused future allocation before admitting any work.
+The Mac runner is currently **offline**, pending shared-capacity acceptance. The
+owner requires the local model at full context, existing server processes and
+at least one cloud coding agent to take precedence. On 2026-09-30, the owner
+approved testing a smaller, model-specific budget on the 256 GiB Mac Studio.
+The exact Qwen 3.8 Flash Next oQ5e build now has a **160 GiB** oMLX guard ceiling;
+its **131,072-token context**, MTP and PLE SSD offload remain enabled.
 
-The revised native supervisor reserves that model growth, plus 24 GiB for one
-cloud agent, server growth and OS safety (8 GiB each), beyond current process
-usage. CI's sampled process-group stop limit is 4 GiB, not the originally
-suggested 20 GiB. This is a watchdog, **not a hard memory reservation**. Missing
-model/OS telemetry refuses work. No model limit, context setting or guardian is
-changed. The 218 GiB configured ceiling is not a measurement of full-context
-inference demand. A 20 GiB CI allocation remains a possibility after measuring
-that demand alongside the normal services and cloud agent, and verifying a safe
-admission/cleanup contract. The Mac is deferred, not permanently excluded.
-Browser CI stays on Linux: the existing Mac guardian kills Chromium while the
-local model is loaded.
+The acceptance trial used cold and repeated requests with approximately 130,489
+input tokens and checked retrieval from the beginning, middle and end. The kernel
+recorded a peak of approximately **115.2 GiB** for the serving process, normal host
+memory pressure and **no additional swap**. These are measurements of the tested
+profile with existing services running, not a guarantee for every workload or
+acceptance of simultaneous CI. Evidence is retained on the Mac at
+`~/litellm-proxy/aura-memory-trial-20260930/` (including the confirmation run).
+The near-limit repeat reported zero cached tokens; full-context cache reuse is
+not established. A separate 16k repeat did reuse 14,336 cached tokens. Keep this
+performance observation separate from the successful memory-capacity test.
+
+The host's `~/litellm-proxy/model-swap.sh` selects 160 GiB only for the tested
+5-bit snapshot/configuration with one concurrent request. Switching to the 8-bit,
+4-bit or a different snapshot/context/MTP/offload/concurrency configuration
+restores the previous **218 GiB** budget.
+The switcher serializes against memory trials, requires Aura CI to be disabled,
+and refuses a switch when a CI worker or inference request is busy. Other model
+management paths must restore the larger allowance before loading an unverified
+model; this host setting is not an oMLX per-model API feature. Fleet admission
+must re-evaluate reservations after every model/configuration change.
+
+The native supervisor reserves unused model growth, plus 24 GiB for one cloud
+agent, server growth and OS safety (8 GiB each), beyond current process usage.
+CI's sampled process-group stop limit remains **4 GiB**, not the proposed 20 GiB.
+This is a watchdog, **not a hard memory reservation**. Missing model/OS telemetry
+refuses work. The supervisor and workflows must not change model settings.
+A 20 GiB CI allocation still needs concurrent-load measurements and a verified
+shared admission/cleanup contract. Browser CI stays on Linux: the existing Mac
+guardian kills Chromium while the local model is loaded.
 
 The newly added Aura runner and rootless Docker on mini-infinity's old
 Ubuntu-24.04 distro are **stopped and disabled**. The existing Arawn CI runner
