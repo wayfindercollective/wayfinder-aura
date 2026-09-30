@@ -1,5 +1,48 @@
 # CI and release builds
 
+## For developers and agents
+
+The shared branch workflows use the owner's hardware. GitHub still coordinates
+Actions and stores artifacts; it does not supply the execution machines.
+Update your current branch without discarding local work:
+
+```bash
+git fetch origin
+git pull --ff-only
+python scripts/ci/check-runner-policy.py
+```
+
+If your local branch has diverged, integrate its upstream CI changes explicitly.
+Do not restore hosted workflow files while resolving a merge. Older commits and
+tags retain their historical workflows: do not rerun them if they target hosted
+machines; validate an updated branch instead.
+
+| Workload | Required `runs-on` labels |
+| --- | --- |
+| Linux tests and lightweight checks | `[self-hosted, Linux, X64, aura-linux]` |
+| Linux packaging | `[self-hosted, Linux, X64, aura-build]` |
+| Native Windows tests and installers | `[self-hosted, Windows, X64, aura-windows]` |
+| Native macOS tests and DMGs | `[self-hosted, macOS, ARM64, aura-macos]` |
+
+Inspect available runners and request a Linux-only check with:
+
+```bash
+gh api repos/wayfindercollective/wayfinder-aura/actions/runners \
+  --jq '.runners[] | {name,status,busy,labels:[.labels[].name]}'
+gh workflow run CI --ref main -f platforms=linux
+```
+
+Runner inventory requires repository access. Pull requests and release checks
+retain their native-platform gates. A Linux-only manual run does not prove
+Windows/macOS compatibility. `develop` and the older polish branch retain their
+branch-specific CI jobs and do not expose the `platforms` input.
+
+As of 2026-09-30, Mini-inf's Linux Quality job is verified (2,533 tests passed
+on the initial migration candidate). Native Windows is not registered, the Mac
+runner is offline pending capacity acceptance, and no `aura-build` runner is
+enabled. Those jobs queue; they never fall back to hosted execution. Publishing
+this routing change is not installer or application-release signoff.
+
 ## Routine validation
 
 Trusted repository pull requests plus pushes to `main` and `develop` run a
@@ -29,7 +72,7 @@ gh workflow run Release --ref main -f artifacts=appimage
 gh workflow run Release --ref main -f artifacts=flatpak
 
 # Rerun Quality without artifacts
-gh workflow run CI --ref main
+gh workflow run CI --ref main -f platforms=linux
 ```
 
 Version tags build the AppImage and Flatpak on the self-hosted `aura-build`
@@ -77,8 +120,9 @@ the job workspace; a workflow must never install or update it.
 | mac-studio-aura (offline) | `aura-macos` | peak-model admission required |
 
 Linux runners use a dedicated `aurarunner` account and systemd service caps.
-The WSL builder uses a private **rootless** Docker daemon, not membership in the
-privileged Docker group. AppImage containers additionally cap CPU at 2 and RAM
+The prepared WSL builder's private **rootless** Docker daemon is also disabled;
+it must join the shared admission policy before use. It does not require
+membership in the privileged Docker group. AppImage containers cap CPU at 2 and RAM
 at 12 GiB. Host package installation is an administrator task; workflows do not
 change host swap or overcommit. Python environments are recreated for every job.
 
@@ -93,7 +137,10 @@ cloud agent, server growth and OS safety (8 GiB each), beyond current process
 usage. CI's sampled process-group stop limit is 4 GiB, not the originally
 suggested 20 GiB. This is a watchdog, **not a hard memory reservation**. Missing
 model/OS telemetry refuses work. No model limit, context setting or guardian is
-changed. A 20 GiB Fox Grid VM is deferred because it does not fit these priorities.
+changed. The 218 GiB configured ceiling is not a measurement of full-context
+inference demand. A 20 GiB CI allocation remains a possibility after measuring
+that demand alongside the normal services and cloud agent, and verifying a safe
+admission/cleanup contract. The Mac is deferred, not permanently excluded.
 Browser CI stays on Linux: the existing Mac guardian kills Chromium while the
 local model is loaded.
 
@@ -112,6 +159,21 @@ Fox Grid's CI adapter source is at
 needs a same-user systemd manager; its notes explicitly identify cross-user,
 cross-distro admission as an activation gate. Do not start another systemd in
 the new CI distro or assume GitHub's idle-runner matching implements these leases.
+
+The active harness owner is the Steam Machine Codex session titled
+`Investigate PersonalOS agent hang` (session
+`01a0eb16-e7f8-7703-a17c-16d88d32ffd2`). Its shared infrastructure handoff is
+`/home/deck/dev/personal/PersonalOS/workspace/projects/fox-grid-ci-runner-awareness-handoff-2026-09-30.md`
+on Steam Machine. Consult its newest dated section; early sections describe the
+superseded systemd setup. The v217 adapter passed a disposable live completion
+and descendant-cleanup check, but that is not whole-fleet activation evidence.
+Cross-user reservations, WSL accounting and pre-intake eligibility still need
+coordinated deployment. The Arawn registration cannot substitute for Aura's.
+
+Package maintenance must preserve running jobs. Mini-inf has a needrestart
+exclusion for `actions.runner.*.service` after an apt transaction restarted an
+active runner. Keep that exclusion and schedule host maintenance with the runner
+owner. Do not start another service manager in the `arawn-ci` WSL distro.
 
 `scripts/ci/check-runner-policy.py` fails CI if any workflow reintroduces hosted
 or dynamic runner targets. Candidate artifacts expire after 3–7 days. GitHub

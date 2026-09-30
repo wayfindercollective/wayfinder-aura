@@ -25,6 +25,8 @@ def trusted_event(name: str, payload: dict) -> bool:
         return run.get("head_repository", {}).get("full_name") == REPOSITORY and run.get("event") in {
             "push", "pull_request", "workflow_dispatch", "schedule"
         }
+    if name == "release":
+        return payload.get("action") == "published" and payload.get("release", {}).get("draft") is False
     return name in {"push", "workflow_dispatch", "schedule"}
 
 

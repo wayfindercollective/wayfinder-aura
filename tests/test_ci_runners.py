@@ -68,6 +68,19 @@ def test_workflow_run_from_a_fork_is_refused():
     })
 
 
+@pytest.mark.parametrize("action,draft,accepted", [
+    ("published", False, True), ("published", True, False),
+    ("published", None, False), ("edited", False, False),
+])
+def test_only_published_repository_releases_are_accepted(action, draft, accepted):
+    guard = load("trusted-runner")
+    payload = {"repository": {"full_name": guard.REPOSITORY},
+               "action": action, "release": {"draft": draft}}
+    assert guard.trusted_event("release", payload) is accepted
+    payload["repository"]["full_name"] = "stranger/fork"
+    assert not guard.trusted_event("release", payload)
+
+
 def test_mac_admission_reserves_future_model_growth_before_ci():
     capacity = load("mac-runner-supervisor")
     gb = capacity.GIB
