@@ -128,6 +128,9 @@ def test_ultra_gpu_toggle_on_persists_and_restarts_runtime(monkeypatch):
         gpu_var=_Var(True),
         log=lambda _message: None,
     )
+    app._apply_transcription_hardware_change = (
+        lambda on: wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, on)
+    )
     monkeypatch.setattr(wayfinder_main, "save_config", lambda cfg: saved.append(dict(cfg)))
 
     with patch("wayfinder.core.transcriber.WhisperServerBackend.shutdown") as shutdown:
@@ -144,6 +147,9 @@ def test_ultra_gpu_toggle_off_persists_cpu_and_restarts_runtime(monkeypatch):
         config={"use_gpu": True},
         gpu_var=_Var(False),
         log=lambda _message: None,
+    )
+    app._apply_transcription_hardware_change = (
+        lambda on: wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, on)
     )
     monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
 
@@ -431,6 +437,7 @@ def test_successful_activation_replaces_form_with_active_state():
         _license_feedback=feedback,
         update_idletasks=lambda: events.append("paint"),
         log=lambda _message: events.append("log"),
+        _apply_ultra_defaults=lambda **_kw: events.append("ultra-defaults"),
         _rebuild_header=lambda: events.append("header"),
         _refresh_entitlement_ui=lambda: events.append("entitlements"),
         _render_license_tile=lambda: events.append("license"),
@@ -448,7 +455,7 @@ def test_successful_activation_replaces_form_with_active_state():
     assert app.feature_gate is gate
     assert feedback.options["text"] == "Activating…"
     ui = [e for e in events if e != "permissions-check"]
-    assert ui[-4:] == ["header", "entitlements", "license", "banner"]
+    assert ui[-5:] == ["ultra-defaults", "header", "entitlements", "license", "banner"]
     # macOS offers the permissions checklist after the gold banner; never elsewhere.
     assert ("permissions-check" in events) == bool(wayfinder_main.IS_MACOS)
     # Entitlements changed, so locked_tabs must be republished — a stale

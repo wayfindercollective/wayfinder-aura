@@ -34,8 +34,7 @@ gh workflow run CI --ref main -f platforms=linux
 
 Runner inventory requires repository access. Pull requests and release checks
 retain their native-platform gates. A Linux-only manual run does not prove
-Windows/macOS compatibility. `develop` and the older polish branch retain their
-branch-specific CI jobs and do not expose the `platforms` input.
+Windows/macOS compatibility.
 
 The Linux Quality job is verified on the integrated application. Native and
 packaging runners require the fleet owner's capacity acceptance before intake;
@@ -52,7 +51,7 @@ boundary; the runner owner's host supervision still supplies those limits.
 
 ## Routine validation
 
-Trusted repository pull requests plus pushes to `main` and `develop` run a
+Trusted repository pull requests plus pushes to `main` run a
 self-hosted `Quality` job. Linux jobs select any available machine with the
 `aura-linux` label; no workflow falls back to a GitHub-hosted runner. It installs the application once, then runs:
 
@@ -65,6 +64,13 @@ the platform contract smoke, using the candidate's pinned Python 3.12.10 and
 macOS constraints. Windows also runs the suite and contract smoke, followed by
 the separate installer candidate workflow on pull requests. Passing Linux
 alone is insufficient to merge shared application changes to Main.
+
+`main` is protected, for admins too: changes arrive only by pull request, and
+`Quality` plus `Platform smoke (macOS)` must pass first. `Windows tests` becomes
+required once the Windows runner is admitted; until then it runs but does not
+block. Do not put `[skip ci]` in a pull request's head commit: the required
+checks never report and the pull request cannot merge. Branch rules are in
+[PLATFORM-DEVELOPMENT.md](PLATFORM-DEVELOPMENT.md#branches-and-merges).
 
 The Mac runner owner provisions the Python.org 3.12.10 ARM64 framework and
 registers its interpreter at
@@ -124,7 +130,7 @@ rollout and would provide no stable version for Flatpak/AppStream metadata.
 
 The release boundary is a version tag:
 
-1. Push the release commit to `main` and wait for `Quality`.
+1. Merge the release commit into `main` by pull request and wait for `Quality`.
 2. Build and test the exact commit with
    `scripts/ci/build-flatpak-on-mini-inf.sh`.
 3. After hands-on signoff, push the matching `vX.Y.Z` tag.
@@ -153,6 +159,15 @@ the job workspace; a workflow must never install or update it.
 | mini-infinity-aura-linux (old WSL; disabled) | pending shared-capacity integration | stopped |
 | Native Windows | `aura-windows` after admission | one bounded native job at a time |
 | mac-studio-aura (offline) | `aura-macos` | peak-model admission required |
+
+**Windows jobs wait for admission.** Until the Windows runner takes jobs, the
+`Windows tests` job (CI) and the PR `Windows Candidate` build are skipped on
+pushes and pull requests. A queued Windows job used to keep every run open, and
+GitHub refuses to rerun a failed job in a run that is still open. Set the repo
+variable `AURA_WINDOWS_CI` to `true` once the runner is admitted:
+`gh variable set AURA_WINDOWS_CI --body true`. At that point also add
+`Windows tests` to `main`'s required checks. Tag releases (`refs/tags/v*`) and
+manual `workflow_dispatch` runs always include Windows.
 
 Linux runners use a dedicated `aurarunner` account and systemd service caps.
 The prepared WSL builder's private **rootless** Docker daemon is also disabled;

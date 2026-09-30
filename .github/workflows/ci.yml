@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -102,7 +102,11 @@ jobs:
 
   windows-tests:
     name: Windows tests
-    if: (github.event_name != 'workflow_dispatch' || inputs.platforms != 'linux') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    # Until the Windows runner is admitted, a queued Windows job kept every run
+    # open, so no failed job could be rerun. Pushes and PRs skip it unless the
+    # repo variable AURA_WINDOWS_CI is 'true'; tag releases and manual runs
+    # always include it (docs/CI.md).
+    if: (github.event_name != 'workflow_dispatch' || inputs.platforms != 'linux') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.AURA_WINDOWS_CI == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
     runs-on: [self-hosted, Windows, X64, aura-windows]
     timeout-minutes: 45
     # UTF-8 mode: the console defaults to cp1252 on Windows runners, which can't

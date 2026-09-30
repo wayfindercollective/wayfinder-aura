@@ -136,7 +136,10 @@ def test_overlay_bare_script_import_bootstraps_wayfinder_package():
     bootstrap near the top of overlay.py, the Qt tray setup later fails with
     ``No module named 'wayfinder'`` and the notification tray dies on state
     changes. Run this in a child process so the current test runner's imported
-    packages and ``PYTHONPATH=src`` cannot mask the failure.
+    packages and ``PYTHONPATH=src`` cannot mask the failure. The child also
+    drops any other checkout's ``src/`` (e.g. a shared venv's editable-install
+    ``.pth`` pointing at the main checkout while this runs from a git
+    worktree); site-packages stays, since PyQt6 lives there.
     """
     pytest.importorskip("PyQt6")
     repo = Path(__file__).resolve().parent.parent
@@ -149,9 +152,14 @@ from pathlib import Path
 overlay = Path({str(overlay)!r})
 src_root = overlay.parents[2]
 repo_root = overlay.parents[3]
+def _is_wayfinder_src_checkout(p):
+    path = Path(p)
+    return path.name == 'src' and (path / 'wayfinder' / 'ui' / 'overlay.py').is_file()
+
 sys.path = [
     p for p in sys.path
     if p not in ('', str(src_root), str(repo_root))
+    and not _is_wayfinder_src_checkout(p)
 ]
 sys.path.insert(0, str(overlay.parent))
 spec = importlib.util.spec_from_file_location('wayfinder_overlay_bare', overlay)

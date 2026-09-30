@@ -73,6 +73,13 @@ if str(src_dir) not in sys.path:
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+# Child Pythons (subprocess tests) must import this checkout too. A shared
+# venv's editable install can point at another checkout (the main checkout
+# while this runs from a git worktree) and would otherwise win silently.
+_pythonpath = os.environ.get("PYTHONPATH", "")
+if str(src_dir) not in _pythonpath.split(os.pathsep):
+    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, [str(src_dir), _pythonpath]))
+
 
 # =============================================================================
 # Directory Fixtures
@@ -505,6 +512,40 @@ def reset_voice_profile():
         reset_voice_profile()
     except (ImportError, OSError):
         pass
+
+
+@pytest.fixture(autouse=True)
+def reset_feature_gate(monkeypatch: pytest.MonkeyPatch):
+    """Reset the license FeatureGate singleton and keep a rebuilt gate Free.
+
+    ``wayfinder.license._feature_gate`` caches the first gate anyone builds, so
+    a premium gate from one test (a mock_online_license activation, a
+    test_gpu_premium Ultra gate) used to leak into later tests and flip their
+    Free/Ultra code paths depending on test order. Clear it on both sides of
+    every test.
+
+    A rebuilt gate runs load_stored_license(), which reads
+    ``CONFIG_DIR/license.json``. Unless the test points CONFIG_DIR at its own
+    directory (temp_config_dir), serve that path from an empty temp dir, so the
+    default gate is Free and tests never read, refresh online, or delete the
+    developer's real license. Tests that need Ultra opt in explicitly:
+    temp_config_dir + mock_online_license, or a patched get_feature_gate.
+    """
+    from wayfinder import config as _config
+    from wayfinder import license as _license
+
+    default_config_dir = _config.CONFIG_DIR
+    real_get_license_path = _license.get_license_path
+    with tempfile.TemporaryDirectory() as no_license_dir:
+        def _hermetic_license_path() -> Path:
+            if _config.CONFIG_DIR != default_config_dir:
+                return real_get_license_path()
+            return Path(no_license_dir) / "license.json"
+
+        monkeypatch.setattr(_license, "get_license_path", _hermetic_license_path)
+        _license._feature_gate = None
+        yield
+        _license._feature_gate = None
 
 
 @pytest.fixture(autouse=True)

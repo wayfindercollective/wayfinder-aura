@@ -10,7 +10,7 @@ and tests drift, so they are not the development model for this project.
 | Platform | Status | Release promise |
 |---|---|---|
 | Linux | Production baseline | AppImage and Flatpak behavior must not regress |
-| macOS | Active port | Source and bundle work may proceed behind macOS-specific branches |
+| macOS | Active port | Source and bundle work lands on `main` through short `mac/*` branches |
 | Windows | Internal candidate | Installer built and smoke-tested in CI; not attached to public releases until sign-off |
 
 Do not advertise macOS or Windows as generally available until their manual
@@ -38,10 +38,45 @@ Keep one backward-compatible config schema: a config written on one supported
 platform must load safely on another, with platform-specific defaults computed
 at runtime rather than persisted into new duplicate schemas.
 
+## Branches and merges
+
+`main` is the only long-lived branch. Operating systems are separated in code
+(the seams above), not in branches. Adopted 2026-09-30, after per-OS branches
+drifted: one commit existed as seven copies across branches, pushes to `macos`
+and `windows` ran no CI, and a Linux branch would have conflicted in 109 files
+although 174 of its 179 commits were already on `main`.
+
+- **One task, one short branch.** Branch from the latest `origin/main` and name
+  it by area: `mac/`, `win/`, `linux/`, `deck/`, `ci/`, `docs/` (`fix/` and
+  `feat/` also fine). Merge within days, then delete it.
+- **`main` is protected.** Changes land only by pull request, after the
+  `Quality` (Linux) and `Platform smoke (macOS)` checks pass. The rule applies to
+  admins and agents too; nobody pushes to `main` directly. `Windows tests` still
+  runs on every pull request but is not yet required, because the Windows runner
+  awaits admission ([CI.md](CI.md)); make it required once the runner takes jobs.
+- **Land shared changes once.** CI, docs, runner policy and test infrastructure
+  go to `main` in one pull request. Never cherry-pick a commit onto several
+  branches; a branch picks up `main` by merging or rebasing on it.
+- **One release line for every OS.** A release is a `vX.Y.Z` tag on `main`
+  that builds every platform's packages (see
+  [CI.md](CI.md#user-update-contract)). To patch a shipped release, cut
+  `release/<version>` from its tag: one branch for all operating systems, never
+  one per OS. Carry fixes from `main` into it, never the other way.
+- **One parked branch.** `release/windows-public-pending-signoff` keeps the
+  release workflow from before the 2026-09-21 decision, which attached the
+  Windows installer. At sign-off, redo that change as a fresh pull request from
+  `main`; do not merge the parked branch.
+- **Retired branches.** `macos`, `windows`, `develop` and
+  `feat/premium-feel-polish` are retired: do not commit to or recreate them.
+  Their tips are kept as `archive/<name>` tags. A machine with unpushed work on
+  one of them rebases that work onto `main` in a new task branch.
+- **AI agents.** One git worktree per task, created from the latest
+  `origin/main`, and a pull request back. Do not reuse another session's branch
+  or worktree.
+
 ## Change workflow
 
-1. Start from current `main` and use a narrow branch such as `feat/macos-*` or
-   `feat/windows-*`. Avoid long-lived platform branches.
+1. Start from current `main` on a short task branch (see Branches and merges).
 2. Put shared behavior in `src/wayfinder/`; add or extend an adapter at the
    seams above for OS behavior. Do not copy shared core modules into a platform
    folder.
