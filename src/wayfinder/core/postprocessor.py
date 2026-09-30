@@ -7,6 +7,7 @@ Supports llama-cpp-python for local inference and Anthropic Claude for cloud.
 import gc
 import os
 import subprocess
+import sys
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -254,7 +255,7 @@ MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
         "issues": [],  # Improved instruction following over Qwen 2.5
         "tier_override": "small",
         "best_for": ["standard", "strong"],
-        "recommended": True,  # Top recommendation (replaces Qwen 2.5 1.5B)
+        # Not recommended: echoed its input in the 2026-09-24 matrix.
     },
 }
 
@@ -667,6 +668,110 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
         }
 
 
+# Which styles each cleanup model handles reliably, from the speech x style
+# matrix (scripts/eval_matrix.py; grades A/B = offered, C/F = greyed out).
+# Keyed by a lowercase filename fragment. A model not listed here is limited
+# only by its size tier (MODEL_TIERS max_intensity).
+# Matrix 2026-09-24 (M3 Ultra, resident llama-server): Gemma 3 1B rewrote
+# meaning (diff -> "difference", "or nah" -> "Yeah, I'm hungry") and failed
+# Dev/Professional (F) and Casual/Personal (C); Qwen 3.5 2B echoed its input
+# (fillers kept, Professional F). Qwen3 4B was the most reliable in every
+# style (A, except Professional/Standard C on metrics - sentence splitting,
+# fine on reading - and Dev B end to end, from speech errors).
+_SMALL_MODEL_STYLE_GAPS = frozenset(
+    (tone, intensity)
+    for tone in ("professional", "casual", "dev", "personal")
+    for intensity in ("standard", "strong"))
+STYLE_SUPPORT: Dict[str, Dict[str, Any]] = {
+    "gemma-3-1b": {"name": "Gemma 3 1B", "unsupported": _SMALL_MODEL_STYLE_GAPS,
+                   "better": "Qwen3 4B"},
+    "qwen3.5-2b": {"name": "Qwen 3.5 2B", "unsupported": _SMALL_MODEL_STYLE_GAPS,
+                   "better": "Qwen3 4B"},
+}
+
+STYLE_IDS = ("minimal", "professional", "casual", "dev", "personal")
+STYLE_NAMES = {"minimal": "Normal", "professional": "Professional", "casual": "Casual",
+               "dev": "Dev", "personal": "Personal"}
+
+
+def _cleanup_model_name(config: dict) -> tuple[str, str]:
+    """(backend, model name) of the configured cleanup model."""
+    backend = config.get("post_processing_backend", "llama_cpp")
+    if backend == "llama_cpp":
+        path = config.get("llama_cpp_model_path", "") or ""
+        return backend, (Path(path).stem if path else "")
+    if backend == "openai":
+        return backend, config.get("openai_model", "gpt-4o-mini")
+    if backend == "anthropic":
+        return backend, config.get("anthropic_model", "claude-3-haiku")
+    return backend, ""
+
+
+def style_availability(config: dict, check_model_file: bool = True) -> Dict[str, Dict[str, tuple]]:
+    """What each style x strength can actually do with this cleanup setup.
+
+    Returns {tone: {"standard"|"strong": (available: bool, reason: str|None)}}.
+    Normal (minimal) always works. Everything else needs text cleanup on, a
+    cleanup model on disk, a model big enough for Strong, and a model that
+    passed that style in the evaluation matrix. The reasons are short,
+    user-facing sentences for the Style tab.
+    """
+    backend, model_name = _cleanup_model_name(config)
+    model_missing = False
+    if backend == "llama_cpp" and check_model_file:
+        path = os.path.expanduser(config.get("llama_cpp_model_path", "") or "")
+        model_missing = not (path and os.path.isfile(path))
+    tier = detect_model_tier(model_name, backend=backend) if model_name else "small"
+    strong_ok = MODEL_TIERS[tier]["max_intensity"] in ("strong",)
+    support = None
+    lowered = (model_name or "").lower()
+    for fragment, info in STYLE_SUPPORT.items():
+        if fragment in lowered:
+            support = info
+            break
+    pretty = (support or {}).get("name") or model_name or "this model"
+
+    result: Dict[str, Dict[str, tuple]] = {}
+    for tone in STYLE_IDS:
+        result[tone] = {}
+        for intensity in ("standard", "strong"):
+            if tone == "minimal":
+                result[tone][intensity] = (True, None)
+                continue
+            if not config.get("post_processing_enabled", True):
+                reason = "Turn on Post-Processing in Settings to use styles."
+            elif model_missing:
+                reason = "Download a cleanup model in Settings ▸ Post-Processing (Qwen3 4B for styles)."
+            elif intensity == "strong" and not strong_ok:
+                reason = f"Strong needs a larger model than {pretty} (Qwen3 4B or cloud)."
+            elif support and (tone, intensity) in support.get("unsupported", ()):
+                better = support.get("better", "Qwen3 4B")
+                label = STYLE_NAMES[tone] + (" Strong" if intensity == "strong" else "")
+                reason = f"{pretty} can't do {label} reliably — try {better}."
+            else:
+                reason = None
+            result[tone][intensity] = (reason is None, reason)
+    return result
+
+
+def effective_style(config: dict) -> tuple[str, str, Optional[str]]:
+    """(tone, intensity, note) actually run: an unavailable choice falls back to
+    the same style at Standard, else to Normal - never a style that fails."""
+    tone = config.get("output_tone", "minimal") or "minimal"
+    intensity = "strong" if config.get("strong_mode") else "standard"
+    if tone not in STYLE_IDS or config.get("caricature_mode"):
+        return tone, intensity, None
+    # A missing model file is a UI hint only: at runtime the model path already
+    # fails safely, and fake/remote paths shouldn't be second-guessed here.
+    table = style_availability(config, check_model_file=False)
+    ok, reason = table[tone][intensity]
+    if ok:
+        return tone, intensity, None
+    if intensity == "strong" and table[tone]["standard"][0]:
+        return tone, "standard", reason
+    return "minimal", "standard", reason
+
+
 def check_settings_compatibility(config: dict) -> Dict[str, Any]:
     """
     Check if current config settings are compatible with the selected model.
@@ -847,6 +952,53 @@ FILLER_REGEX_PATTERNS = [
 
 # Compiled regex for efficiency
 _FILLER_REGEX = re.compile('|'.join(FILLER_REGEX_PATTERNS), re.IGNORECASE)
+
+
+# Normal ("minimal") promises "just removes um/uh - your exact words": only
+# filler SOUNDS go, never words that carry meaning ("right", "you know",
+# "actually"), and only accidental doubles of small words ("the the").
+_NORMAL_F = r"(?<![\w'])(?:u+h+m*|u+m+|e+r+m+|er|a+h+|h+m+|m{2,})(?![\w'])"
+_NORMAL_STEPS = [
+    # "I, uh, think" -> "I think" (Whisper brackets fillers with commas)
+    (re.compile(r"\s*,\s*" + _NORMAL_F + r"\s*,\s*", re.I), " "),
+    # a sentence that is only a filler: "Hmm. Let me check." -> "Let me check."
+    (re.compile(r"(^|[.!?]\s+)" + _NORMAL_F + r"[.!?…]+\s*", re.I), r"\1"),
+    # clause-initial: "Um, so we..." -> "so we..."
+    (re.compile(r"(^|[.!?]\s+|\s|[\"\u201c(])" + _NORMAL_F + r"\s*,\s*", re.I), r"\1"),
+    # clause-final: "...ship it, um." -> "...ship it."
+    (re.compile(r"\s*,\s*" + _NORMAL_F + r"(?=\s*[.!?]|\s*$)", re.I), ""),
+    # anywhere else, bare: "need to um git" -> "need to git"
+    (re.compile(r"(^|\s|[\"\u201c(])" + _NORMAL_F + r"\s*(?=\S|$)", re.I), r"\1"),
+]
+_NORMAL_REPEAT_RE = re.compile(
+    r"\b(the|a|an|to|and|of|i|it|in|on|we|you|my|is)(\s+\1\b)+", re.IGNORECASE)
+
+
+def normal_filler_removal(text: str) -> str:
+    """Normal style: remove um/uh-type sounds and doubled small words. Instant,
+    deterministic, needs no cleanup model, and cannot change meaning.
+
+    The speech x style matrix showed small cleanup models rewriting Normal
+    ("a couple more days" -> "two more days") or echoing the fillers back.
+    Words that carry meaning ("right", "you know", "actually") always stay.
+    """
+    if not text or not text.strip():
+        return text
+    first_alpha = re.search(r"[A-Za-z]", text)
+    out = text
+    for pattern, repl in _NORMAL_STEPS:
+        out = pattern.sub(repl, out)
+    out = _NORMAL_REPEAT_RE.sub(r"\1", out)
+    out = re.sub(r"\s+([,.;!?])", r"\1", out)
+    out = re.sub(r",\s*,+", ",", out)
+    out = re.sub(r",\s*([.!?])", r"\1", out)
+    out = re.sub(r"^[\s,;.]+", "", out)
+    out = re.sub(r"[ \t]{2,}", " ", out).strip()
+    out_alpha = re.search(r"[A-Za-z]", out)
+    if first_alpha and out_alpha and first_alpha.group().isupper() and out_alpha.group().islower():
+        i = out_alpha.start()  # after a leading quote/bracket too: '"Um we' -> '"We'
+        out = out[:i] + out[i].upper() + out[i + 1:]
+    return out
 
 
 def fast_filler_removal(text: str) -> str:
@@ -1508,6 +1660,31 @@ def build_prompt(text: str, config: dict, apply_compatibility: bool = True) -> t
 PROMPT_TEMPLATES: Dict[str, str] = {
     "clean": STANDARD_PROMPT,
 }
+
+
+_MACOS_CLEANUP_THREADS: Optional[int] = None
+
+
+def _cleanup_threads(config: dict) -> int:
+    """llama.cpp CPU threads for cleanup.
+
+    macOS: an untouched default (4) follows the performance-core count instead
+    (the same Apple Silicon rule whisper uses, capped at 12). MEASURED on an
+    M3 Ultra with Gemma 3 1B on the resident server at -ngl 0: median cleanup
+    0.46s at 4 threads, 0.35s at 8, 0.32s at 12. Cleanup never overlaps
+    transcription, so the two do not compete. Linux/Windows keep the value.
+    """
+    configured = config.get("llama_cpp_n_threads", 4)
+    if sys.platform != "darwin" or configured != 4:
+        return configured
+    global _MACOS_CLEANUP_THREADS
+    if _MACOS_CLEANUP_THREADS is None:
+        try:
+            from wayfinder.utils.gpu import get_optimal_thread_count
+            _MACOS_CLEANUP_THREADS = max(4, int(get_optimal_thread_count()))
+        except Exception:
+            _MACOS_CLEANUP_THREADS = 4
+    return _MACOS_CLEANUP_THREADS
 
 
 def _cleanup_budget_from(config: dict) -> float:
@@ -3503,6 +3680,33 @@ class OpenAIBackend(PostProcessorBackend):
 # Factory Functions
 # =============================================================================
 
+def cleanup_model_needed(config: dict) -> bool:
+    """Whether the current settings run the local cleanup model at all.
+
+    Normal is instant filler removal, and Free is always Normal - so keeping a
+    1-3 GB model resident for them (measured: 2.6 GB for Qwen 3.5 2B) buys
+    nothing. Styled tones, caricature, and Normal-via-model do need it.
+    """
+    if not config.get("post_processing_enabled", True):
+        return False
+    if config.get("post_processing_backend", "llama_cpp") != "llama_cpp":
+        return False
+    try:
+        from ..license import get_feature_gate
+
+        styled = get_feature_gate().has_feature("tone_system")
+    except Exception:
+        styled = False
+    tone = config.get("output_tone", "minimal") or "minimal"
+    if styled and config.get("caricature_mode"):
+        return True
+    if styled and tone != "minimal":
+        # A greyed-out style runs as Normal, which needs no model.
+        if effective_style(config)[0] != "minimal":
+            return True
+    return bool(config.get("normal_llm_cleanup")) and not config.get("fast_filler_removal")
+
+
 def warm_up_postprocessing(config: dict) -> None:
     """Pre-load the local LLM so the first dictation's cleanup is instant.
 
@@ -3512,10 +3716,8 @@ def warm_up_postprocessing(config: dict) -> None:
     never raises.
     """
     try:
-        if config.get("post_processing_backend", "llama_cpp") != "llama_cpp":
-            return
-        if not config.get("post_processing_enabled", True):
-            return
+        if not cleanup_model_needed(config):
+            return  # Normal/Free: nothing to keep resident
         backend = get_backend(config)
         warm = getattr(backend, "warm_up", None)
         if callable(warm):
@@ -3635,7 +3837,17 @@ def get_backend(config: dict) -> PostProcessorBackend:
     else:
         # Default to llama.cpp - prefer CLI backend if available
         use_cli = config.get("llama_cpp_use_cli", True)
-        llama_binary = os.path.expanduser(config.get("llama_cpp_binary", "~/llama.cpp/build/bin/llama-cli"))
+        # macOS resolves the bundled/Homebrew llama-simple first. Linux keeps
+        # main's behaviour: only the configured binary (and its siblings below)
+        # decide between the CLI and llama-cpp-python backends.
+        bundled_llama = None
+        if sys.platform == "darwin":
+            from wayfinder.utils.runtime_assets import find_llama_binary
+
+            bundled_llama = find_llama_binary(config)
+        llama_binary = bundled_llama or os.path.expanduser(
+            config.get("llama_cpp_binary", "~/llama.cpp/build/bin/llama-cli")
+        )
 
         # Robust to upstream renames (llama-cli -> llama): the CLI backend is
         # usable if the configured binary OR any known sibling exists in its dir.
@@ -3650,7 +3862,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 llama_binary=llama_binary,
                 model_path=_effective_model_path,
                 n_ctx=config.get("llama_cpp_n_ctx", 2048),
-                n_threads=config.get("llama_cpp_n_threads", 4),
+                n_threads=_cleanup_threads(config),
                 n_gpu_layers=_effective_gpu_layers,
                 max_tokens=config.get("post_processing_max_tokens", 1024),
                 temperature=config.get("post_processing_temperature", 0.1),
@@ -3814,6 +4026,21 @@ def post_llm_hygiene(result: str, original: str) -> str:
 
 
 def process_with_config(text: str, config: dict) -> str:
+    """Post-process, then re-apply the user's vocabulary corrections (Ultra).
+
+    The cleanup model can re-spell a corrected term ("Wayfinder" -> "Way
+    finder"); applying the corrections to its output keeps them authoritative.
+    """
+    result = _process_with_config(text, config)
+    try:
+        from .transcriber import apply_vocabulary_replacements, licensed_vocabulary_replacements
+
+        return apply_vocabulary_replacements(result, licensed_vocabulary_replacements(config))
+    except Exception:
+        return result
+
+
+def _process_with_config(text: str, config: dict) -> str:
     """
     Post-process transcription using settings from config dictionary.
     This is the main entry point for post-processing.
@@ -3858,6 +4085,29 @@ def process_with_config(text: str, config: dict) -> str:
             config["caricature_mode"] = False
         if not _vocabulary_allowed:
             config["custom_vocabulary"] = []
+    if _vocabulary_allowed and config.get("vocabulary_replacements"):
+        try:
+            from .transcriber import parse_vocabulary_replacements
+
+            corrected = [w for _h, w in parse_vocabulary_replacements(
+                config.get("vocabulary_replacements"))]
+            if corrected:
+                config = dict(config)
+                config["custom_vocabulary"] = list(config.get("custom_vocabulary") or []) + corrected
+        except Exception:
+            pass
+
+    # Never run a style this setup can't do well (it's greyed out in the Style
+    # tab): Strong falls back to Standard, else the style to Normal.
+    if config.get("output_tone", "minimal") != "minimal" and not config.get("caricature_mode"):
+        _eff_tone, _eff_intensity, _note = effective_style(config)
+        if _note:
+            config = dict(config)
+            config["output_tone"] = _eff_tone
+            config["strong_mode"] = _eff_intensity == "strong"
+            print(f"[Post-processing] ↩ {_note} Using "
+                  f"{STYLE_NAMES.get(_eff_tone, _eff_tone)}"
+                  f"{' Strong' if _eff_intensity == 'strong' else ''}.")
 
     tone = config.get("output_tone", "professional")
 
@@ -3890,6 +4140,11 @@ def process_with_config(text: str, config: dict) -> str:
             else:
                 use_caricature = False
         use_fast_regex = bool(config.get("fast_filler_removal", False))
+        if not use_caricature and not use_fast_regex and not config.get("normal_llm_cleanup", False):
+            start_time = time.time()
+            result = normal_filler_removal(text)
+            print(f"[Normal] Filler sounds removed in {(time.time() - start_time) * 1000:.1f}ms")
+            return result
         if not use_caricature and use_fast_regex:
             start_time = time.time()
             input_words = len(text.split())
@@ -4133,12 +4388,14 @@ def get_recommended_models() -> list:
         {
             "tier": "recommended",
             # Order and ⭐ must agree with the shipped lineup: the catalog row
-            # flagged `recommended` is gemma3-1b, and components.MODEL_RECOMMENDATIONS
-            # already tells the user "gemma3:1b — ⭐ Best overall". Ratcheted by
+            # flagged `recommended` is qwen3-4b-2507 (most reliable in every style,
+            # docs/EVAL-2026-09-24.md), and components.MODEL_RECOMMENDATIONS says
+            # "qwen3:4b — ⭐ Best overall". Ratcheted by
             # tests/test_catalog_ratchet.py::TestRecommendationsMatchTheLineup.
             "models": [
-                {"name": "gemma3:1b", "description": "⭐ Best overall - fast + most consistent cleanup across tones"},
-                {"name": "qwen3.5:2b", "description": "Roomier alternative - excellent instruction following"},
+                {"name": "qwen3:4b", "description": "⭐ Best overall - most reliable in every style we tested (Ultra)"},
+                {"name": "gemma3:1b", "description": "Fast and free - fine for Normal; styles need Qwen3 4B"},
+                {"name": "qwen3.5:2b", "description": "Leaves text largely unchanged - Normal only"},
             ],
         },
         {
@@ -4187,42 +4444,48 @@ def get_model_recommendation_for_style(style: str, strong_mode: bool = False) ->
         }
 
     # Standard mode - need models that follow "keep exact words" instructions
+    # Graded in docs/EVAL-2026-09-24.md: only Qwen3 4B does the styles well;
+    # Gemma 3 1B rewrites meaning and Qwen 3.5 2B leaves text unchanged.
+    small_gap = ["gemma3:1b", "qwen3.5:2b"]
+    small_reason = "gemma3:1b rewords meaning and qwen3.5:2b leaves text unchanged in testing"
     if style == "minimal":
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": [],
-            "message": "Minimal mode just removes filler. Most models work well.",
+            # Only used when Normal is opted into a model (normal_llm_cleanup).
+            "recommended": ["qwen3:4b"],
+            "also_works": ["qwen3.5:2b"],
+            "avoid": ["gemma3:1b"],
+            "avoid_reason": "gemma3:1b rewords meaning in testing",
+            "message": "Normal needs no model - it removes um/uh instantly.",
         }
     elif style == "dev":
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": ["phi3:mini"],
-            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
-            "message": "Dev mode adds git/code context. qwen3.5:2b recommended.",
+            "recommended": ["qwen3:4b"],
+            "also_works": [],
+            "avoid": small_gap + ["phi3:mini"],
+            "avoid_reason": small_reason,
+            "message": "Dev keeps code and git terms exactly. Qwen3 4B recommended.",
         }
     elif style == "professional":
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": ["phi3:mini"],
-            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
-            "message": "Professional mode fixes punctuation. qwen3.5:2b keeps your words intact.",
+            "recommended": ["qwen3:4b"],
+            "also_works": [],
+            "avoid": small_gap + ["phi3:mini"],
+            "avoid_reason": small_reason,
+            "message": "Professional tidies punctuation and slang. Qwen3 4B recommended.",
         }
     elif style == "casual":
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": ["phi3:mini"],
-            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
-            "message": "Casual mode uses relaxed punctuation. Most small models work well.",
+            "recommended": ["qwen3:4b"],
+            "also_works": [],
+            "avoid": small_gap + ["phi3:mini"],
+            "avoid_reason": small_reason,
+            "message": "Casual keeps your words with a relaxed feel. Qwen3 4B recommended.",
         }
     else:  # personal or unknown
         return {
-            "recommended": ["qwen3.5:2b"],
-            "also_works": ["llama3.2:3b"],
-            "avoid": ["phi3:mini"],
-            "avoid_reason": "phi3:mini rewrites sentences even in standard mode",
-            "message": "Personal mode preserves your speaking style. qwen3.5:2b recommended.",
+            "recommended": ["qwen3:4b"],
+            "also_works": [],
+            "avoid": small_gap + ["phi3:mini"],
+            "avoid_reason": small_reason,
+            "message": "Personal keeps your natural voice. Qwen3 4B recommended.",
         }

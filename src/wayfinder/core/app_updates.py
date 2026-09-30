@@ -12,16 +12,38 @@ prereleases and stable releases, so beta testers are not stranded by GitHub's
 
 Results are cached for 24 hours. Every failure mode (no network, API change,
 unparseable tag) resolves to "no update" — a wrong nag is worse than a late one.
+
+macOS only: a release counts as an update only when it carries a Mac DMG
+(named as packaging/macos/build.py names it) for this machine, so a Linux-only
+release never nags a Mac user towards a page with nothing to install. The
+DMG's direct URL is returned as ``download_url`` for a one-click download.
+
+Windows likewise: only a release carrying ``WayfinderAura-Setup-<version>.exe``
+(packaging/windows/installer.iss) is an update, and that installer is the
+``download_url``. Releases without one (Windows is internal until sign-off, so
+tags currently carry no Setup exe) never nag a Windows user.
+
+Linux packages likewise: the Flatpak gets the release's
+``io.wayfindercollective.WayfinderAura.flatpak`` bundle and the AppImage its
+``Wayfinder_Aura-<version>-x86_64.AppImage`` as ``download_url``; a release
+without one for this package is not an update. Installs from source keep the
+release page only.
 """
 
 import json
+import platform
 import re
+import sys
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
-from ..config import CONFIG_DIR
+from ..config import CONFIG_DIR as _CONFIG_DIR
+from ..utils.platform import get_cache_dir
 
 # Cache file for update check results
+# macOS keeps update caches in ~/Library/Caches; Linux/Windows keep them in the
+# config dir, as on main.
+CONFIG_DIR = get_cache_dir() if sys.platform == "darwin" else _CONFIG_DIR
 APP_UPDATE_CACHE_FILE = CONFIG_DIR / "app_update_cache.json"
 
 # Check interval: once per day (seconds)
@@ -46,6 +68,22 @@ _VERSION_RE = re.compile(
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
+
+
+# Mac DMG naming — must match create_dmg() in packaging/macos/build.py:
+#   Wayfinder_Aura-<CFBundleShortVersionString>-macOS-<platform.machine()>.dmg
+# (tests/test_app_updates.py pins the two together).
+_MAC_DMG_RE = re.compile(r"^Wayfinder_Aura-(.+)-macOS-(arm64|x86_64)\.dmg$")
+# Windows installer naming — must match OutputBaseFilename in
+# packaging/windows/installer.iss: WayfinderAura-Setup-<version>.exe (x64 only).
+_WIN_SETUP_RE = re.compile(r"^WayfinderAura-Setup-(.+)\.exe$")
+# Linux release assets - must match scripts/ci/build-flatpak-candidate.sh (the
+# bundle name carries no version) and the AppImage build.
+_FLATPAK_BUNDLE_NAME = "io.wayfindercollective.WayfinderAura.flatpak"
+_APPIMAGE_RE = re.compile(r"^Wayfinder_Aura-(.+)-x86_64\.AppImage$")
+# Release assets are only ever served from GitHub; anything else is not a
+# download this module will hand to the browser.
+_DOWNLOAD_URL_PREFIX = "https://github.com/"
 
 
 def parse_version(text: str) -> Optional[Tuple[Tuple[int, int, int], Optional[Tuple[str, ...]]]]:
@@ -117,14 +155,165 @@ def _release_channel(version: str) -> Optional[str]:
     return "stable" if parsed[1] is None else "prerelease"
 
 
+def _is_macos() -> bool:
+    # Read at call time, not import time, so tests can simulate a platform.
+    return sys.platform == "darwin"
+
+
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _linux_package() -> Optional[str]:
+    """"flatpak" or "appimage" for packaged Linux installs, else None."""
+    if not sys.platform.startswith("linux"):
+        return None
+    from ..utils.platform import is_appimage, is_flatpak
+
+    if is_flatpak():
+        return "flatpak"
+    if is_appimage():
+        return "appimage"
+    return None
+
+
+def _mac_architectures() -> Tuple[str, ...]:
+    """DMG architectures this Mac accepts, most preferred first.
+
+    The Mac release is Apple Silicon only, so arm64 is always accepted; the
+    running machine's own architecture (e.g. x86_64 under Rosetta) is
+    preferred when a release carries more than one DMG.
+    """
+    machine = (platform.machine() or "").lower()
+    return tuple(dict.fromkeys(
+        arch for arch in (machine, "arm64") if arch in ("arm64", "x86_64")
+    ))
+
+
+def _platform_cache_key() -> Optional[str]:
+    """Which download filter produced a cached verdict (macOS/Windows only).
+
+    None on Linux, whose cache format is unchanged. On macOS a cache written
+    without the DMG filter (an older build) or for a different architecture
+    set is refetched rather than trusted; Windows the same for its installer
+    filter.
+    """
+    if _is_windows():
+        return "win32-x64"
+    if not _is_macos():
+        package = _linux_package()
+        return f"linux-{package}" if package else None
+    return "darwin-" + "+".join(_mac_architectures())
+
+
+def _mac_dmg_url(release: Dict[str, Any], tag: str) -> Optional[str]:
+    """browser_download_url of the release's DMG for this Mac, or None.
+
+    The version embedded in the DMG name must equal the tag: a stale DMG
+    attached to a newer release would otherwise nag forever (the "update"
+    reinstalls the old version). Incomplete uploads and non-GitHub URLs never
+    count.
+    """
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return None
+    tag_version = parse_version(tag)
+    if tag_version is None:
+        return None
+    by_arch: Dict[str, str] = {}
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("state") != "uploaded":
+            continue
+        name = asset.get("name")
+        url = asset.get("browser_download_url")
+        if not isinstance(name, str) or not isinstance(url, str):
+            continue
+        if not url.startswith(_DOWNLOAD_URL_PREFIX):
+            continue
+        match = _MAC_DMG_RE.match(name)
+        if match is None or parse_version(match.group(1)) != tag_version:
+            continue
+        by_arch.setdefault(match.group(2), url)
+    for arch in _mac_architectures():
+        if arch in by_arch:
+            return by_arch[arch]
+    return None
+
+
+def _windows_setup_url(release: Dict[str, Any], tag: str) -> Optional[str]:
+    """browser_download_url of the release's Windows installer, or None.
+
+    Same rules as the DMG: the installer's version must equal the tag, the
+    upload must be complete, and the URL must be a GitHub download.
+    """
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return None
+    tag_version = parse_version(tag)
+    if tag_version is None:
+        return None
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("state") != "uploaded":
+            continue
+        name = asset.get("name")
+        url = asset.get("browser_download_url")
+        if not isinstance(name, str) or not isinstance(url, str):
+            continue
+        if not url.startswith(_DOWNLOAD_URL_PREFIX):
+            continue
+        match = _WIN_SETUP_RE.match(name)
+        if match is not None and parse_version(match.group(1)) == tag_version:
+            return url
+    return None
+
+
+def _linux_download_url(release: Dict[str, Any], tag: str, package: str) -> Optional[str]:
+    """browser_download_url of the release's Flatpak bundle or AppImage.
+
+    The AppImage's version must equal the tag (same rule as the DMG); the
+    bundle's name carries no version, so the release it is attached to
+    decides. Incomplete uploads and non-GitHub URLs never count.
+    """
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return None
+    tag_version = parse_version(tag)
+    if tag_version is None:
+        return None
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("state") != "uploaded":
+            continue
+        name = asset.get("name")
+        url = asset.get("browser_download_url")
+        if not isinstance(name, str) or not isinstance(url, str):
+            continue
+        if not url.startswith(_DOWNLOAD_URL_PREFIX):
+            continue
+        if package == "flatpak" and name == _FLATPAK_BUNDLE_NAME:
+            return url
+        if package == "appimage":
+            match = _APPIMAGE_RE.match(name)
+            if match is not None and parse_version(match.group(1)) == tag_version:
+                return url
+    return None
+
+
 def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
-    """Select the newest release allowed by the running version's channel."""
+    """Select the newest release allowed by the running version's channel.
+
+    On macOS, releases without a DMG for this Mac are skipped (the newest
+    release that HAS one wins) and the DMG's URL is returned as download_url.
+    Windows does the same with the Setup exe.
+    """
     channel = _release_channel(current_version)
     if channel is None:
         return {}
     if not isinstance(payload, list):
         raise ValueError("GitHub releases response is not a list")
 
+    mac = _is_macos()
+    win = _is_windows()
+    linux_package = None if (mac or win) else _linux_package()
     selected: Dict[str, str] = {}
     for release in payload:
         if not isinstance(release, dict) or release.get("draft") is True:
@@ -140,11 +329,27 @@ def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
         if channel == "stable" and (release.get("prerelease") is True or tag_is_prerelease):
             continue
 
+        download_url = None
+        if mac:
+            download_url = _mac_dmg_url(release, tag)
+            if download_url is None:
+                continue  # nothing this Mac can install: not an update here
+        elif win:
+            download_url = _windows_setup_url(release, tag)
+            if download_url is None:
+                continue  # no Windows installer on this release
+        elif linux_package:
+            download_url = _linux_download_url(release, tag, linux_package)
+            if download_url is None:
+                continue  # nothing this package can install (e.g. a Mac-only release)
+
         if not selected or is_newer(tag, selected["tag_name"]):
             selected = {
                 "tag_name": tag,
                 "html_url": str(release.get("html_url", "") or RELEASES_PAGE),
             }
+            if mac or win or linux_package:
+                selected["download_url"] = download_url
     return selected
 
 
@@ -160,13 +365,21 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
         - update_available: bool
         - latest_version: str (tag as published, e.g. "v1.1.9")
         - release_url: str (page to send the user to)
+        - download_url: str (macOS/Windows/Linux packages: the DMG / Setup exe /
+          Flatpak bundle / AppImage, "" if none)
         - last_checked: ISO timestamp
         - error: optional error message
     """
     channel = _release_channel(current_version)
+    platform_key = _platform_cache_key()  # None on Linux
     if not force:
         cached = _load_cache()
-        if cached and cached.get("channel") == channel and _is_cache_fresh(cached):
+        if (
+            cached
+            and cached.get("channel") == channel
+            and (platform_key is None or cached.get("platform") == platform_key)
+            and _is_cache_fresh(cached)
+        ):
             return _with_comparison(cached, current_version)
 
     results: Dict[str, Any] = {
@@ -177,6 +390,9 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
         "channel": channel,
         "error": None,
     }
+    if platform_key is not None:
+        results["platform"] = platform_key
+        results["download_url"] = ""
 
     try:
         import requests
@@ -188,6 +404,8 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
         release = _select_release(response.json(), current_version)
         results["latest_version"] = release.get("tag_name", "")
         results["release_url"] = release.get("html_url", RELEASES_PAGE)
+        if platform_key is not None:
+            results["download_url"] = release.get("download_url") or ""
     except Exception as e:
         results["error"] = str(e)
 
@@ -220,7 +438,7 @@ def _load_cache() -> Optional[Dict[str, Any]]:
 
 def _save_cache(data: Dict[str, Any]) -> None:
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        APP_UPDATE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(APP_UPDATE_CACHE_FILE, "w") as f:
             json.dump(data, f, indent=2)
     except IOError:

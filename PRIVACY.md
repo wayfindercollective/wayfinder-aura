@@ -46,9 +46,10 @@ transcription or cleanup service.
 ## Secrets stored on your machine
 
 Your settings — including any cloud API keys — live in
-`~/.config/wayfinder-aura/config.json` (on Windows,
-`%APPDATA%\wayfinder-aura\config.json`). Your license token (if you buy Ultra)
-lives beside it as `license.json`.
+`~/.config/wayfinder-aura/config.json` on Linux,
+`~/Library/Application Support/wayfinder-aura/config.json` on macOS, or
+`%APPDATA%\wayfinder-aura\config.json` on Windows. Your license token (if you
+buy Ultra) lives beside it as `license.json`.
 
 These files are stored **in plaintext**, but both are written with file
 permissions `0600` (`os.chmod(..., 0o600)`), meaning only your user account can
@@ -84,7 +85,8 @@ involved. You can turn it off with the **Check for model updates** setting
 ## Local diagnostic log
 
 For troubleshooting, the app keeps a local activity log at
-`~/.cache/wayfinder-aura/activity.log`. Be aware:
+`~/.cache/wayfinder-aura/activity.log` on Linux or
+`~/Library/Caches/wayfinder-aura/activity.log` on macOS. Be aware:
 
 - It **may contain transcribed text**, so treat it as sensitive.
 - It is **local only** — it is never uploaded anywhere.
@@ -99,7 +101,7 @@ Wayfinder Aura contains no analytics or usage telemetry. It does not track how
 you use the app. The only network activity is the three things named above,
 each of which you control:
 
-1. The weekly model-update check (toggleable).
+1. The weekly model-update check and daily app-release check (toggleable).
 2. Cloud transcription/cleanup backends (off by default; your own keys).
 3. License activation (only if you activate an Ultra license).
 

@@ -203,6 +203,11 @@ def hotkey_listener(
                         if style_toggle_key and keycode == style_toggle_key and key_event.keystate == 1:
                             if check_modifiers(required_style_modifiers, style_toggle_modifiers):
                                 event_queue.put((EventType.STYLE_TOGGLE, None))
+
+                        # Escape discards an active recording (a no-op otherwise).
+                        # Not suppressed: the focused app still gets its Escape.
+                        if keycode == ecodes.KEY_ESC and key_event.keystate == 1:
+                            event_queue.put((EventType.CANCEL_RECORDING, None))
     except Exception as e:
         log(f"⚠️ Hotkey error: {e}")
 

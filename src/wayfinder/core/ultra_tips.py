@@ -13,7 +13,9 @@ import os
 
 # Signal keys are stable identifiers (tests/logging); order = display priority.
 SIGNAL_PHRASES = {
-    "model": "download a faster, more accurate speech model",
+    # Measured (scripts/eval_matrix.py, M3 Ultra): Large v3 Turbo Q5 on GPU makes
+    # 43% fewer word errors than Base on CPU at the same ~0.27 s per dictation.
+    "model": "switch to the Large v3 Turbo Q5 speech model (about 40% fewer mistakes, same speed)",
     "gpu": "switch on GPU acceleration",
     "cleanup": "grab a premium cleanup model",
     "chunking": "enable chunk processing for long dictations",

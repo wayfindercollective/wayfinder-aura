@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -20,6 +21,9 @@ from typing import Optional
 
 from wayfinder.config import IS_FLATPAK
 from wayfinder.utils.hostexec import bundle_binary_env
+from wayfinder.utils.loopback_http import urlopen_loopback
+from wayfinder.utils.macos_ggml_env import whisper_metal_env
+from wayfinder.utils.child_supervisor import bind_to_app_lifetime, wrap_macos_child_command
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
 # subprocess kwargs that hide the child console window on Windows (empty on
@@ -109,6 +113,12 @@ def _which_runtime_file(name: str) -> str | None:
 
 def _resolve_whisper_cli_binary(configured: object) -> str:
     """Return a real whisper-cli when possible, even if config saved a blank path."""
+    from wayfinder.utils.runtime_assets import find_whisper_binary
+
+    bundled_or_discovered = find_whisper_binary({"whisper_binary": configured})
+    if bundled_or_discovered:
+        return bundled_or_discovered
+
     candidates: list[object] = [
         configured,
         "~/whisper.cpp/build/bin/whisper-cli",
@@ -239,6 +249,13 @@ def _cpu_fallback_binary(binary: str) -> Optional[str]:
     """
     if not binary or binary.endswith("-cpu"):
         return None
+    if sys.platform == "win32":
+        # whisper-vulkan\whisper-cli.exe -> whisper\whisper-cli.exe (utils/windows_whisper.py)
+        from wayfinder.utils.windows_whisper import cpu_twin
+
+        twin = cpu_twin(binary)
+        if twin:
+            return twin
     p = Path(binary)
     candidate = p.with_name(p.name + "-cpu")
     return str(candidate) if candidate.is_file() else None
@@ -345,7 +362,7 @@ class WhisperCppBackend(TranscriptionBackend):
                 capture_output=True,
                 text=True,
                 timeout=5,
-                env=bundle_binary_env(),
+                env=bundle_binary_env(whisper_metal_env(gpu=False)),
                 **_NO_WINDOW,
             )
             # Check for GPU-related flags in help output
@@ -383,7 +400,7 @@ class WhisperCppBackend(TranscriptionBackend):
             h = subprocess.run(
                 [binary or self.whisper_binary, "--help"],
                 capture_output=True, text=True, timeout=probe_timeout,
-                env=bundle_binary_env(),
+                env=bundle_binary_env(whisper_metal_env(gpu=False)),
                 **_NO_WINDOW,
             )
             flags = set(re.findall(r"--[a-z][a-z0-9-]+", (h.stdout or "") + (h.stderr or "")))
@@ -560,7 +577,8 @@ class WhisperCppBackend(TranscriptionBackend):
                     timeout=attempt_timeout,
                     # Preserve Vulkan selection while dropping PyInstaller's
                     # private library directory from native GPU children.
-                    env=bundle_binary_env(),
+                    # macOS: no Metal init/heartbeat in CPU mode (macos_ggml_env).
+                    env=bundle_binary_env(whisper_metal_env(cmd)),
                     **_NO_WINDOW,
                 )
             except subprocess.TimeoutExpired:
@@ -579,10 +597,17 @@ class WhisperCppBackend(TranscriptionBackend):
                 raise TranscriptionError(f"Could not execute whisper.cpp: {binary}")
 
             if not is_last:
-                died_by_signal = result.returncode < 0
+                from wayfinder.utils.windows_whisper import crashed
+
+                # A crash, not an error exit: a POSIX signal, or on Windows an
+                # NTSTATUS code such as 0xC0000005 (a positive returncode).
+                died_by_signal = crashed(result.returncode)
                 vulkan_error = result.returncode != 0 and "vulkan" in (result.stderr or "").lower()
                 if died_by_signal:
-                    _activate_fallback(f"died with signal {-result.returncode}")
+                    _activate_fallback(
+                        f"died with signal {-result.returncode}" if result.returncode < 0
+                        else f"crashed ({result.returncode & 0xFFFFFFFF:#010x})"
+                    )
                     continue
                 if vulkan_error:
                     _activate_fallback("failed with a Vulkan error")
@@ -711,6 +736,7 @@ class WhisperServerBackend(TranscriptionBackend):
     # and respawn. Previously only toggle_gpu()'s explicit shutdown enforced
     # this — a single-write-site invariant nothing here guaranteed.
     _server_use_gpu: Optional[bool] = None
+    _server_threads: Optional[int] = None  # -t at spawn (macOS/Windows reuse check)
     # whisper-server is intentionally verbose (several KB per request). Its stdout
     # MUST be consumed continuously: leaving Popen(stdout=PIPE) unread eventually
     # fills the kernel pipe and blocks the server in write(), which looks exactly like
@@ -788,7 +814,7 @@ class WhisperServerBackend(TranscriptionBackend):
         elif self.prompt:
             parts.append(self.prompt)
         if self.custom_vocabulary:
-            vocab_str = ", ".join(self.custom_vocabulary[:50])
+            vocab_str = ", ".join(self.custom_vocabulary[-60:])  # tail = user terms
             # Keep vocabulary as bare recognition hints, matching the CLI backend.
             # A literal "Vocabulary:" label leaked into output when Whisper received
             # a silent trailing chunk and then continued hallucinating prose.
@@ -804,7 +830,7 @@ class WhisperServerBackend(TranscriptionBackend):
         try:
             import urllib.request
             req = urllib.request.Request(f"http://127.0.0.1:{port}/")
-            resp = urllib.request.urlopen(req, timeout=timeout)
+            resp = urlopen_loopback(req, timeout=timeout)
             # whisper-server returns an HTML page at root
             content = resp.read().decode("utf-8", errors="ignore")
             return "whisper" in content.lower()
@@ -826,8 +852,19 @@ class WhisperServerBackend(TranscriptionBackend):
             try:
                 if sock.connect_ex(("127.0.0.1", port)) != 0:
                     return port  # Port is free
-                # Port in use — reuse only if allowed AND it's our server.
-                if reuse_ok and self._is_our_server(port, timeout=probe_timeout):
+                # macOS never adopts an unowned HTTP service: a local process
+                # could serve a page containing "whisper" and receive Aura's
+                # audio at /inference. There the supervised child is the
+                # ownership proof and cannot outlive the app. Linux keeps
+                # main's reuse of our own server (no supervisor yet, so a
+                # crash would otherwise stack a second server per launch).
+                # Windows: the server is bound to the app by a job object
+                # (bind_to_app_lifetime), so it never outlives us either.
+                if (
+                    sys.platform not in ("darwin", "win32")
+                    and reuse_ok
+                    and self._is_our_server(port, timeout=probe_timeout)
+                ):
                     return port  # Reuse existing server
                 port += 1  # Try next port
             finally:
@@ -845,9 +882,17 @@ class WhisperServerBackend(TranscriptionBackend):
         full modern flags -> v1.7.2-safe flags -> v1.7.2-safe + no-GPU (the same
         degradation whisper-cli's binary auto-fallback provides).
         """
-        cpu_server = self.whisper_server_binary.replace(
-            "whisper-server", "whisper-server-cpu"
-        )
+        # The CPU twin: on Windows the same exe in the sibling CPU-build folder
+        # (utils/windows_whisper.py), else a whisper-server-cpu beside it.
+        cpu_server = None
+        if sys.platform == "win32":
+            from wayfinder.utils.windows_whisper import cpu_twin
+
+            cpu_server = cpu_twin(self.whisper_server_binary)
+        if not cpu_server:
+            cpu_server = self.whisper_server_binary.replace(
+                "whisper-server", "whisper-server-cpu"
+            )
         cpu_server_exists = (
             cpu_server != self.whisper_server_binary and _existing_file(cpu_server)
         )
@@ -952,6 +997,14 @@ class WhisperServerBackend(TranscriptionBackend):
             # Unknown mode (None: adopted server / reset state) never matches.
             and WhisperServerBackend._server_use_gpu is not None
             and WhisperServerBackend._server_use_gpu == bool(self.use_gpu)
+            # macOS/Windows: -t is also fixed at spawn. The warm-up server starts
+            # before first-run thread auto-tuning, so without this the first
+            # session kept the 4-thread default (0.90s vs 0.64s at 8 on a CPU
+            # request).
+            and (
+                sys.platform not in ("darwin", "win32")
+                or WhisperServerBackend._server_threads == self.threads
+            )
         )
 
     def _start_server(self, deadline: float = None, force: bool = False) -> None:
@@ -1010,9 +1063,14 @@ class WhisperServerBackend(TranscriptionBackend):
             # wedged-but-listening server we cannot prove we own must be treated as
             # unavailable, so port discovery skips it (reuse_ok=False) AND the reuse
             # branch is disabled — recovery MUST bind a fresh server, not the wedge.
+            # macOS never adopts (see _find_available_port).
             port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
 
-            if not force and self._is_our_server(port, timeout=_probe_budget()):
+            if (
+                sys.platform not in ("darwin", "win32")
+                and not force
+                and self._is_our_server(port, timeout=_probe_budget())
+            ):
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
                 # An adopted pre-existing server's actual spawn flags are
@@ -1038,17 +1096,24 @@ class WhisperServerBackend(TranscriptionBackend):
                 else:
                     print(f"[Whisper Server] Starting on port {port}...")
 
+                spawn_cmd, spawn_env = wrap_macos_child_command(
+                    cmd, bundle_binary_env(whisper_metal_env(cmd))
+                )
                 proc = subprocess.Popen(
-                    cmd,
+                    spawn_cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    env=bundle_binary_env(),
+                    env=spawn_env,
                     **_NO_WINDOW,
                 )
+                # Windows: the server dies with the app even on a crash (job
+                # object); no-op elsewhere.
+                bind_to_app_lifetime(proc)
                 WhisperServerBackend._server_process = proc
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
                 WhisperServerBackend._server_use_gpu = self.use_gpu
+                WhisperServerBackend._server_threads = self.threads
                 # Start draining BEFORE readiness probes. A chatty startup or repeated
                 # requests must never be able to fill stdout and deadlock inference.
                 WhisperServerBackend._start_server_output_drain(proc)
@@ -1058,8 +1123,14 @@ class WhisperServerBackend(TranscriptionBackend):
                 atexit.register(WhisperServerBackend.shutdown)
 
                 # Wait for server to be ready (model loading takes a few seconds).
+                # macOS/Windows poll every 0.1s: with a warm Metal cache (or the
+                # OS file cache on Windows) the server is up in ~0.2s, so the
+                # 0.5s first sleep was pure latency on every (re)start. Same ~30s
+                # ceiling either way.
+                poll = 0.1 if sys.platform in ("darwin", "win32") else 0.5
+                started = time.monotonic()
                 died = False
-                for i in range(60):  # up to ~30s (None) — or until the deadline
+                for i in range(int(30 / poll)):  # up to ~30s (None) — or until the deadline
                     if deadline is not None:
                         rem = _left()
                         if rem <= 0:
@@ -1068,13 +1139,13 @@ class WhisperServerBackend(TranscriptionBackend):
                             self._stop_server_internal(deadline=deadline)
                             raise TranscriptionError(
                                 "whisper-server startup exceeded the recovery deadline")
-                        sleep_to = min(0.5, rem)
+                        sleep_to = min(poll, rem)
                         probe_to = max(0.2, min(2.0, rem))
                     else:
-                        sleep_to, probe_to = 0.5, 2
+                        sleep_to, probe_to = poll, 2
                     time.sleep(sleep_to)
                     if self._is_our_server(port, timeout=probe_to):
-                        print(f"[Whisper Server] Ready on port {port} (took {(i+1)*0.5:.1f}s)")
+                        print(f"[Whisper Server] Ready on port {port} (took {time.monotonic() - started:.1f}s)")
                         return
                     if proc.poll() is not None:
                         last_error = WhisperServerBackend._server_output()[-500:]
@@ -1145,19 +1216,22 @@ class WhisperServerBackend(TranscriptionBackend):
     def supports_gpu(self) -> bool:
         return True
 
-    def warm_up(self) -> None:
+    def warm_up(self) -> bool:
         """Pre-load the model into the server so the FIRST dictation is instant.
 
         Safe to call from a background thread at app startup. Swallows failures
         (a broken warm-up must never block launch — the lazy start in transcribe()
         is the fallback). No-op if the binary/model aren't present.
+        Returns True only when the server really started (callers may ignore it).
         """
         if not self.is_available():
-            return
+            return False
         try:
             self._start_server()
+            return True
         except Exception as e:
             print(f"[Whisper Server] Warm-up skipped: {e}")
+            return False
 
     def _resolve_cli_binary(self) -> str:
         """Find a whisper-cli binary that ACTUALLY EXISTS for the salvage fallback.
@@ -1176,6 +1250,10 @@ class WhisperServerBackend(TranscriptionBackend):
             derived,
             derived.replace("whisper-cli", "whisper-cli-cpu"),  # CPU twin, same dir
         ]
+        if sys.platform == "win32":
+            from wayfinder.utils.windows_whisper import cpu_twin
+
+            candidates.insert(1, cpu_twin(derived) or derived)  # CPU twin, sibling dir
         if IS_FLATPAK:
             candidates.extend([
                 "/app/bin/whisper-cli",       # Flatpak bundle (Vulkan)
@@ -1282,6 +1360,20 @@ class WhisperServerBackend(TranscriptionBackend):
             body += f"--{boundary}\r\n".encode()
             body += b'Content-Disposition: form-data; name="response_format"\r\n\r\n'
             body += b"json\r\n"
+            # Per request, not only at spawn: whisper-server applies these to
+            # this request and resets after, so a changed setting takes effect
+            # without a restart (the spawn flags never changed on the fly).
+            for _field, _value in (("beam_size", self.beam_size), ("best_of", self.best_of)):
+                body += f"--{boundary}\r\n".encode()
+                body += f'Content-Disposition: form-data; name="{_field}"\r\n\r\n'.encode()
+                body += f"{int(_value)}\r\n".encode()
+            if sys.platform in ("darwin", "win32"):
+                # Only the text is read. The server otherwise computes per-token
+                # timestamps: MEASURED 3-14% slower (base.en, M3 Ultra), same WER;
+                # ~5% on Windows (pinned b4938 CPU build, base.en), one line of text.
+                body += f"--{boundary}\r\n".encode()
+                body += b'Content-Disposition: form-data; name="no_timestamps"\r\n\r\n'
+                body += b"true\r\n"
             if final_prompt:
                 body += f"--{boundary}\r\n".encode()
                 body += b'Content-Disposition: form-data; name="prompt"\r\n\r\n'
@@ -1298,7 +1390,7 @@ class WhisperServerBackend(TranscriptionBackend):
                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
                     method="POST",
                 )
-                resp = urllib.request.urlopen(req, timeout=_timeout)
+                resp = urlopen_loopback(req, timeout=_timeout)
                 return json.loads(resp.read().decode("utf-8")).get("text", "").strip()
 
             try:
@@ -2017,7 +2109,7 @@ class OpenAIWhisperBackend(TranscriptionBackend):
             raise TranscriptionError(_friendly_cloud_error(e))
 
 
-def warm_up_transcription(config: dict) -> None:
+def warm_up_transcription(config: dict) -> bool:
     """Pre-load the transcription model so the first dictation is instant.
 
     Only does work for backends that benefit from a persistent process — today
@@ -2030,9 +2122,10 @@ def warm_up_transcription(config: dict) -> None:
         backend = get_backend(config)
         warm = getattr(backend, "warm_up", None)
         if callable(warm):
-            warm()
+            return warm() is not False
     except Exception as e:
         print(f"[Transcription] Warm-up skipped: {e}")
+    return False
 
 
 def get_backend(config: dict) -> TranscriptionBackend:
@@ -2166,21 +2259,26 @@ def get_backend(config: dict) -> TranscriptionBackend:
     # paid custom vocabulary / voice-profile data while still allowing the
     # built-in Dev and Casual dictionaries as part of the licensed tone system.
     _effective_prompt = str(config.get("prompt", "") or "")
-    _effective_custom_vocabulary: list[str] = []
+    _user_vocabulary: list[str] = []
     if _has_feature("custom_vocabulary"):
-        raw_vocab = config.get("custom_vocabulary", [])
-        if isinstance(raw_vocab, (list, tuple)):
-            _effective_custom_vocabulary = [
-                str(term).strip() for term in raw_vocab if str(term).strip()
-            ]
+        # The spellings a user asked for in corrections are terms too.
+        _user_vocabulary = normalize_vocabulary_terms(
+            list(config.get("custom_vocabulary", []) or [])
+            + [write for _heard, write in parse_vocabulary_replacements(
+                config.get("vocabulary_replacements", []))]
+        )
 
     _effective_tone = str(config.get("output_tone", "minimal") or "minimal")
+    _builtin_vocabulary: list[str] = []
     if _has_feature("tone_system") and _effective_tone in ("dev", "casual"):
-        builtin_vocab = DEV_VOCABULARY if _effective_tone == "dev" else CASUAL_VOCABULARY
-        seen_vocab = {term.lower() for term in _effective_custom_vocabulary}
-        _effective_custom_vocabulary.extend(
-            term for term in builtin_vocab if term.lower() not in seen_vocab
-        )
+        _builtin_vocabulary = DEV_VOCABULARY if _effective_tone == "dev" else CASUAL_VOCABULARY
+    # Gamer mode (macOS game chat): the game in front primes Whisper with its
+    # chat slang. Free, like game chat itself; set per dictation by the app.
+    _gamer_vocabulary = [str(w) for w in (config.get("gamer_vocabulary") or []) if str(w).strip()]
+    if _gamer_vocabulary:
+        _builtin_vocabulary = _gamer_vocabulary
+    # User terms last and first in the budget: Whisper keeps the prompt's tail.
+    _effective_custom_vocabulary = vocabulary_prompt_terms(_user_vocabulary, _builtin_vocabulary)
 
     if (
         _effective_tone == "personal"
@@ -2203,7 +2301,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
         except Exception as exc:
             print(f"[Personal Style] ⚠ Could not load voice profile: {exc}")
 
-    # Map accuracy_mode to beam_size/best_of overrides
+    # accuracy_mode presets now only feed Faster-Whisper (not measured there);
+    # whisper.cpp uses whisper_decoding() - greedy - below.
     accuracy_mode = config.get("accuracy_mode", "balanced")
     accuracy_presets = {
         "fast": {"beam_size": 1, "best_of": 1},
@@ -2266,6 +2365,13 @@ def get_backend(config: dict) -> TranscriptionBackend:
         cli_binary = _resolve_whisper_cli_binary(
             config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
         )
+        if sys.platform == "win32" and use_gpu_effective:
+            # Windows bundles the Vulkan build beside the CPU one; GPU mode (already
+            # license-gated above) runs it, and its CPU twin stays the fallback.
+            from wayfinder.utils.windows_whisper import gpu_twin
+
+            cli_binary = gpu_twin(cli_binary) or cli_binary
+        _wc_beam, _wc_best_of = whisper_decoding(config)
         if config.get("whisper_server_mode", True):
             server_binary = _derive_whisper_server_binary(cli_binary)
             server_backend = WhisperServerBackend(
@@ -2278,8 +2384,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 # the dictation before the 120s PROCESSING watchdog abandons it.
                 timeout=config.get("whisper_server_timeout", 30),
                 use_gpu=use_gpu_effective,
-                beam_size=config.get("beam_size", 5),
-                best_of=config.get("best_of", 3),
+                beam_size=_wc_beam,
+                best_of=_wc_best_of,
                 language=config.get("language", "en"),
                 entropy_threshold=config.get("entropy_threshold", 2.6),
                 no_speech_threshold=config.get("no_speech_threshold", 0.5),
@@ -2289,8 +2395,15 @@ def get_backend(config: dict) -> TranscriptionBackend:
             )
             if server_backend.is_available():
                 return server_backend
-            print("[Transcription] whisper-server binary not found — using whisper-cli "
-                  "(per-dictation model load). Build whisper-server for instant mode.")
+            if sys.platform in ("darwin", "win32") and not Path(
+                    os.path.expanduser(str(server_backend.model_path or ""))).is_file():
+                # is_available() also needs the model; say which one is missing.
+                print("[Transcription] no speech model installed yet "
+                      f"({server_backend.model_path or 'none configured'}) — "
+                      "download one in Settings or the welcome guide.")
+            else:
+                print("[Transcription] whisper-server binary not found — using whisper-cli "
+                      "(per-dictation model load). Build whisper-server for instant mode.")
         return WhisperCppBackend(
             whisper_binary=cli_binary,
             model_path=config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"),
@@ -2299,8 +2412,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
             timeout=config.get("timeout", 120),
             use_gpu=use_gpu_effective,
             gpu_layers=config.get("gpu_layers", 0),
-            beam_size=config.get("beam_size", 5),
-            best_of=config.get("best_of", 3),
+            beam_size=_wc_beam,
+            best_of=_wc_best_of,
             language=config.get("language", "en"),
             entropy_threshold=config.get("entropy_threshold", 2.6),
             no_speech_threshold=config.get("no_speech_threshold", 0.5),
@@ -2415,6 +2528,30 @@ _WHISPER_PHRASE_HALLUCINATIONS = frozenset({
 })
 
 
+# whisper.cpp refuses more than 8 decoders ("too many decoders requested"),
+# which made a hand-edited beam_size of 9+ fail every dictation.
+WHISPER_MAX_DECODERS = 8
+
+
+def whisper_decoding(config: dict) -> tuple[int, int]:
+    """(beam_size, best_of) for the whisper.cpp backends: greedy by default.
+
+    docs/EVAL-2026-09-24.md (beam search): on 228 clips x base.en/small.en/
+    turbo, beam 2-8 never beat greedy (every CI includes zero or favours
+    greedy), cost 7-47% more time, and on the resident server made identical
+    requests return different text. The old Accuracy Mode presets and the
+    beam_size/best_of keys every saved config carries are therefore ignored;
+    the hidden ``whisper_beam_size`` key (1-8) remains for experiments.
+    """
+    try:
+        beam = int(config.get("whisper_beam_size", 1) or 1)
+    except (TypeError, ValueError):
+        beam = 1
+    beam = max(1, min(beam, WHISPER_MAX_DECODERS))
+    # best_of only matters for temperature fallback; keep it within the cap.
+    return beam, (1 if beam == 1 else min(beam, 5))
+
+
 def clean_whisper_artifacts(text: str) -> str:
     """
     Clean up common Whisper transcription artifacts.
@@ -2471,7 +2608,10 @@ def clean_whisper_artifacts(text: str) -> str:
         r'whispers|mumbling|mumbles|gasps?|gasping|groans?|groaning|'
         r'grunts?|grunting|snoring|yawning|swallowing|throat|clearing)'
     )
-    _noise_marker = r'\s*' + _noise_word + r'(?:\s+' + _noise_word + r'){0,2}\s*'
+    # Short joiners ("[sound of wind]", "(sound of the rain)") may sit between
+    # noise words; the annotation must still start and end with one.
+    _joiner = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
+    _noise_marker = r'\s*' + _noise_word + r'(?:' + _joiner + r'\s+' + _noise_word + r'){0,2}\s*'
     text = re.sub(r'\[' + _noise_marker + r'\]', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'\(' + _noise_marker + r'\)', ' ', text, flags=re.IGNORECASE)
 
@@ -2540,6 +2680,124 @@ def clean_whisper_artifacts(text: str) -> str:
             print(f"[Transcription] Cleaned {removed_chars} chars of Whisper artifacts")
 
     return text
+
+
+# =============================================================================
+# Custom Vocabulary (Ultra): prompt budget + "heard -> write" corrections
+# =============================================================================
+
+# whisper.cpp keeps only the LAST n_text_ctx/2 (224) tokens of the prompt, so
+# anything early in a long prompt is silently dropped. ~3.5 chars/token for
+# English terms; this leaves room for the base prompt and punctuation hint.
+VOCAB_PROMPT_CHAR_BUDGET = 560
+VOCAB_TERM_MAX_CHARS = 80
+VOCAB_MAX_REPLACEMENTS = 100
+
+
+def normalize_vocabulary_terms(raw) -> list[str]:
+    """User terms: stripped, <= 80 chars, case-insensitively de-duplicated."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    seen, terms = set(), []
+    for term in raw:
+        term = " ".join(str(term or "").split())[:VOCAB_TERM_MAX_CHARS]
+        if term and term.lower() not in seen:
+            seen.add(term.lower())
+            terms.append(term)
+    return terms
+
+
+def vocabulary_prompt_terms(user_terms, builtin_terms=(),
+                            budget: int = VOCAB_PROMPT_CHAR_BUDGET) -> list[str]:
+    """Order and trim vocabulary for Whisper's prompt window.
+
+    The user's own terms go LAST (the end of the prompt is what Whisper keeps
+    and weighs most) and take the budget first, in their order; built-in tone
+    lists (dev/casual) fill whatever room is left, in front of them.
+    """
+    user = normalize_vocabulary_terms(list(user_terms or []))
+    kept_user, used = [], 0
+    for term in user:
+        cost = len(term) + 2
+        if used + cost > budget:
+            break
+        kept_user.append(term)
+        used += cost
+    taken = {t.lower() for t in kept_user}
+    kept_builtin = []
+    for term in builtin_terms or ():
+        cost = len(term) + 2
+        if term.lower() in taken or used + cost > budget:
+            continue
+        kept_builtin.append(term)
+        taken.add(term.lower())
+        used += cost
+    return kept_builtin + kept_user
+
+
+def parse_vocabulary_replacements(raw) -> list[tuple[str, str]]:
+    """Accept [[heard, write]], [{"heard","write"}] or ["heard -> write"]."""
+    pairs, seen = [], set()
+    if not isinstance(raw, (list, tuple)):
+        return pairs
+    for item in raw:
+        heard = write = None
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            heard, write = item
+        elif isinstance(item, dict):
+            heard, write = item.get("heard"), item.get("write")
+        elif isinstance(item, str):
+            for arrow in ("->", "→", "=>"):
+                if arrow in item:
+                    heard, write = item.split(arrow, 1)
+                    break
+        heard = " ".join(str(heard or "").split())[:VOCAB_TERM_MAX_CHARS]
+        write = " ".join(str(write or "").split())[:VOCAB_TERM_MAX_CHARS]
+        if not heard or not write or heard == write or heard.lower() in seen:
+            continue
+        seen.add(heard.lower())
+        pairs.append((heard, write))
+        if len(pairs) >= VOCAB_MAX_REPLACEMENTS:
+            break
+    return pairs
+
+
+def apply_vocabulary_replacements(text: str, replacements) -> str:
+    """Replace each "heard" phrase (whole words, any case, any spacing) with its
+    exact "write" spelling, in ONE pass.
+
+    Idempotent - it runs after transcription and again after cleanup: text
+    already in a "write" spelling is matched first and kept (casing
+    normalised), so "aura -> Wayfinder Aura" never becomes "Wayfinder Wayfinder
+    Aura", and inserted text is never re-scanned. Longest phrases win.
+    """
+    import re
+
+    pairs = parse_vocabulary_replacements(replacements)
+    if not text or not pairs:
+        return text
+    target = {}
+    for heard, write in pairs:
+        target.setdefault(" ".join(write.lower().split()), write)
+        target.setdefault(" ".join(heard.lower().split()), write)
+    phrases = sorted(target, key=len, reverse=True)
+    pattern = re.compile(
+        "|".join(r"(?<!\w)" + r"\s+".join(re.escape(w) for w in phrase.split()) + r"(?!\w)"
+                 for phrase in phrases),
+        re.IGNORECASE)
+    return pattern.sub(lambda m: target[" ".join(m.group(0).lower().split())], text)
+
+
+def licensed_vocabulary_replacements(config: dict) -> list[tuple[str, str]]:
+    """The user's corrections, only when Custom Vocabulary is licensed."""
+    try:
+        from wayfinder.license import get_feature_gate
+
+        if not get_feature_gate().has_feature("custom_vocabulary"):
+            return []
+    except Exception:
+        return []
+    return parse_vocabulary_replacements(config.get("vocabulary_replacements", []))
 
 
 def drop_whisper_prompt_leak(text: str, custom_vocabulary: list | None = None) -> str:
@@ -2737,6 +2995,9 @@ def transcribe_with_config(
     if text:
         text = clean_whisper_artifacts(text)
         text = normalize_whisper_caps(text)
+        # Ultra "heard -> write" corrections run LAST, after caps normalisation,
+        # so the user's exact spelling (GitHub, iOS, McKenna) is what lands.
+        text = apply_vocabulary_replacements(text, licensed_vocabulary_replacements(config))
 
     # Apply basic post-processing if punctuation is enabled
     if ensure_punct and text:

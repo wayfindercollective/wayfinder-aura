@@ -108,6 +108,30 @@ def configure_tls_ca_bundle(
     return selected
 
 
+def use_macos_trust_store() -> bool:
+    """macOS/Windows: verify HTTPS against the system trust store.
+
+    Security.framework on macOS, the Windows certificate store (CryptoAPI) on
+    Windows, where corporate TLS inspection roots are pushed by Group Policy.
+
+    certifi only knows public roots. Managed Macs behind TLS inspection
+    (Zscaler, Netskope...) install their root in the Keychain, and without it
+    licence activation, model downloads, update checks and cloud APIs all fail
+    with CERTIFICATE_VERIFY_FAILED. truststore makes every ssl context use the
+    Keychain trust store; certifi (configured above) stays the fallback when
+    truststore is unavailable. Verification is never disabled.
+    """
+    if sys.platform not in ("darwin", "win32"):
+        return False
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+        return True
+    except Exception:
+        return False
+
+
 def probe_tls(url: str = DEFAULT_TLS_PROBE_URL, timeout: float = 15.0) -> tuple[int, Path]:
     """Complete a verified TLS handshake and return its HTTP status and CA path.
 

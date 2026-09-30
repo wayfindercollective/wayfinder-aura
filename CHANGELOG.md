@@ -7,6 +7,44 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Linux: dictation for gamers on every desktop.
+
+### Added
+
+- **Aura types into every app on Wayland desktops.** On KDE Plasma and GNOME
+  the desktop's remote-control (RemoteDesktop) portal delivers the keys, so
+  native Wayland apps receive dictation too, not only X11/XWayland windows.
+  The desktop asks once; Settings → System → "Type into every app" turns it
+  off. X11 sessions and SteamOS Game Mode keep xdotool.
+- **Gamer mode on Linux.** The Games tab and game-chat dictation now run on
+  Linux: games are recognised by their window (Wine/Lutris exe names, Proton
+  `steam_app_<id>`, SteamOS Game Mode). Dark Age of Camelot (Eden) is typed
+  into the chat box you opened and sent with Enter.
+- **Cancel a dictation from any app** (default Shift+Esc; Esc where Aura sees
+  keys) without anything being typed.
+- **Vocabulary corrections as Heard / Write-as pairs.**
+
+### Changed
+
+- **The macOS design on Linux:** header brand mark, a quiet hairline mic
+  button, labels that fit at any zoom, a smoother benchmark bar. Zoom
+  defaults to the desktop's own scale and rescales in one frame; the idle
+  ribbon drifts slowly while another app has focus and stops when hidden.
+- **Get Update on Linux downloads the new Flatpak bundle (or AppImage);**
+  open the file to install it. The banner no longer points at a software
+  center that cannot update a GitHub install.
+
+### Fixed
+
+- **Keys typed into games through Wine arrive intact:** Shift is pressed as
+  on a keyboard (KWin 6.4 dropped it for XWayland windows), and ( and ) use
+  the main keys Wine understands.
+- **Wine focus left on a launcher window after Alt+Tab** is handed back to
+  the game before Gamer mode types (Dark Age of Camelot; the Games tab names
+  Wine's UseTakeFocus=N as the permanent fix).
+- **A stale Alt/Shift state from XWayland no longer blocks or shifts a
+  dictation** ("…BUGS>" instead of "…bugs.").
+
 ## [1.1.8-beta.1] — 2026-08-04
 
 ### Added

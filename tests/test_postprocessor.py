@@ -119,10 +119,11 @@ class TestGetModelQuirks:
         assert "safety_filter_email" in quirks["issues"]
         assert "hallucination_prone" in quirks["issues"]
 
-    def test_qwen_3_5_2b_recommended(self):
-        # Qwen 3.5 2B is the top recommendation (replaced Qwen 2.5 1.5B, March 2026).
-        quirks = get_model_quirks("qwen3.5:2b")
-        assert quirks.get("recommended") is True
+    def test_qwen3_4b_is_the_recommendation_not_qwen_3_5_2b(self):
+        # docs/EVAL-2026-09-24.md: Qwen3 4B was the most reliable in every style; Qwen 3.5 2B
+        # mostly echoed its input, so it is no longer the recommendation.
+        assert get_model_quirks("qwen3:4b").get("recommended") is True
+        assert not get_model_quirks("qwen3.5:2b").get("recommended")
 
     def test_qwen_2_5_1_5b_not_recommended(self):
         # The superseded 2.5 1.5B is no longer flagged as the recommendation.
@@ -556,8 +557,12 @@ class TestCheckSettingsCompatibility:
 class TestGetBackend:
     """Tests for the get_backend() factory function."""
 
-    def test_returns_llama_cpp_backend_by_default(self):
+    def test_returns_llama_cpp_backend_by_default(self, monkeypatch):
         """When CLI binary doesn't exist, falls back to Python bindings."""
+        # macOS also searches bundled/Homebrew llama binaries; the host's must
+        # not decide this test.
+        import wayfinder.utils.runtime_assets as runtime_assets
+        monkeypatch.setattr(runtime_assets, "find_llama_binary", lambda *_a, **_k: None)
         config = {
             "post_processing_backend": "llama_cpp",
             "llama_cpp_use_cli": True,
@@ -847,7 +852,9 @@ class TestProcessWithConfig:
         result = process_with_config("um hello world", config)
         assert result[0].isupper()
 
-    def test_minimal_tone_uses_neutral_llm_cleanup_by_default(self):
+    def test_minimal_tone_uses_neutral_llm_cleanup_when_opted_in(self):
+        # Default Normal is instant filler removal (tests/test_normal_style.py);
+        # normal_llm_cleanup keeps the model path for users who want it.
         backend = SimpleNamespace(
             is_available=lambda: True,
             process=MagicMock(return_value="This is neutral cleaned text."),
@@ -855,6 +862,7 @@ class TestProcessWithConfig:
         config = {
             "output_tone": "minimal",
             "post_processing_enabled": True,
+            "normal_llm_cleanup": True,
             "fast_filler_removal": False,
             "post_processing_backend": "llama_cpp",
             "llama_cpp_model_path": "/tmp/model.gguf",
@@ -888,6 +896,7 @@ class TestProcessWithConfig:
             "post_processing_backend": "llama_cpp",
             "llama_cpp_model_path": "/tmp/model.gguf",
             "custom_vocabulary": ["Wayfinder Aura"],
+            "normal_llm_cleanup": True,  # minimal: exercise the model prompt
         }
 
         with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
@@ -911,6 +920,7 @@ class TestProcessWithConfig:
             "post_processing_backend": "llama_cpp",
             "llama_cpp_model_path": "/tmp/model.gguf",
             "custom_vocabulary": ["PaidTerm"],
+            "normal_llm_cleanup": True,  # Free -> Normal; exercise the model prompt
         }
 
         with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
@@ -1109,7 +1119,9 @@ class TestResidentLlamaFastPath:
         model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
         cfg = {"post_processing_backend": "llama_cpp", "post_processing_enabled": True,
                "llama_cpp_use_cli": True, "llama_cpp_binary": str(binary),
-               "llama_cpp_model_path": str(model)}
+               "llama_cpp_model_path": str(model),
+               # Normal needs no model unless opted in (cleanup_model_needed).
+               "normal_llm_cleanup": True}
         with patch.object(postprocessor.LlamaCppCliBackend, "warm_up") as warm:
             postprocessor.warm_up_postprocessing(cfg)
             warm.assert_called_once()
@@ -1775,10 +1787,16 @@ class TestPostLlmHygiene:
             "output_tone": "dev",
             "post_processing_enabled": True,
             "post_processing_backend": "llama_cpp",
-            "llama_cpp_model_path": "/tmp/google_gemma-3-1b-it-Q4_K_M.gguf",
+            # A model that passed Dev in the style matrix (Gemma 3 1B falls
+            # back to Normal on this branch, which never reaches the model).
+            "llama_cpp_model_path": "/tmp/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         }
         config.update(config_extra or {})
-        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
+        # Styles are licensed: pin the gate so the host's own license can't
+        # drop "dev" to Minimal (which never reaches the model).
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend), \
+                patch("wayfinder.license.get_feature_gate", return_value=gate):
             return process_with_config("um can you tell me about how humans work I'm not sure", config)
 
     def test_process_with_config_applies_hygiene_for_standard_cleanup(self):

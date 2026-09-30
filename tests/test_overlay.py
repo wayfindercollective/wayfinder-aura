@@ -175,6 +175,65 @@ assert str(src_root) in sys.path
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_macos_overlay_selects_accessory_activation_policy(
+    monkeypatch, overlay_module
+):
+    """The renderer helper must not create a second Dock icon on macOS."""
+    import types
+
+    calls = []
+
+    class NativeApp:
+        @staticmethod
+        def setActivationPolicy_(policy):
+            calls.append(policy)
+            return True
+
+    appkit = types.ModuleType("AppKit")
+    appkit.NSApplication = type(
+        "NSApplication",
+        (),
+        {"sharedApplication": staticmethod(lambda: NativeApp())},
+    )
+    appkit.NSApplicationActivationPolicyAccessory = 1
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+
+    assert overlay_module.configure_macos_overlay_as_accessory("darwin") is True
+    assert calls == [1]
+
+
+def test_macos_overlay_window_has_no_system_shadow(monkeypatch, overlay_module):
+    """AppKit's traced window shadow drew a stale halo around the pill's glow."""
+    import types
+
+    calls = []
+
+    class NativeWindow:
+        def title(self):
+            return "Wayfinder Aura Overlay"
+
+        def setLevel_(self, level):
+            calls.append(("level", level))
+
+        def setCollectionBehavior_(self, behavior):
+            calls.append(("behavior", behavior))
+
+        def setHidesOnDeactivate_(self, hides):
+            calls.append(("hides", hides))
+
+        def setHasShadow_(self, has_shadow):
+            calls.append(("shadow", has_shadow))
+
+    appkit = types.ModuleType("AppKit")
+    appkit.NSApp = types.SimpleNamespace(windows=lambda: [NativeWindow()])
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+
+    overlay_module.GlassmorphicOverlay._apply_macos_level(None)
+
+    assert ("shadow", False) in calls
+    assert ("level", 3) in calls
+
+
 def test_overlay_signal_handler_does_not_raise_through_qt():
     """SIGTERM during a Qt callback must stop the loop without aborting PyQt."""
     overlay = (
@@ -504,6 +563,93 @@ class TestLiquidWaveRenderer:
         renderer.advance_time(0.016)
         assert renderer.time > initial_time
 
+    def test_render_uses_ten_continuous_paths_not_overlapping_segments(
+        self, overlay_module, monkeypatch
+    ):
+        """macOS: four glow/core pairs + one highlight pair = ten draw calls.
+
+        The former 2px segments allocated hundreds of pens per frame and their
+        round caps accumulated alpha at every joint, producing fuzzy fringes.
+        """
+        from PyQt6.QtCore import QRectF
+        from PyQt6.QtGui import QColor
+
+        class Painter:
+            def __init__(self):
+                self.paths = []
+                self.pens = []
+
+            def save(self):
+                pass
+
+            def restore(self):
+                pass
+
+            def setRenderHint(self, *_args):
+                pass
+
+            def setPen(self, pen):
+                self.pens.append(pen)
+
+            def drawPath(self, path):
+                self.paths.append(path)
+
+        monkeypatch.setattr(overlay_module.sys, "platform", "darwin")
+        painter = Painter()
+        renderer = overlay_module.LiquidWaveRenderer()
+        renderer.render(painter, QRectF(0, 0, 90, 32), QColor("#5B8FD4"))
+
+        assert len(painter.paths) == 10
+        assert len(painter.pens) == 10
+
+    def test_linux_old_look_keeps_main_segment_strokes(self, overlay_module, monkeypatch):
+        """WAYFINDER_LINUX_MAC_LOOK=0 keeps main's per-segment strokes on Linux."""
+        from PyQt6.QtCore import QRectF
+        from PyQt6.QtGui import QColor
+
+        class Painter:
+            def __init__(self):
+                self.lines = 0
+                self.paths = 0
+
+            def save(self):
+                pass
+
+            def restore(self):
+                pass
+
+            def setRenderHint(self, *_args):
+                pass
+
+            def setPen(self, _pen):
+                pass
+
+            def drawLine(self, *_args):
+                self.lines += 1
+
+            def drawPath(self, _path):
+                self.paths += 1
+
+        monkeypatch.setattr(overlay_module.sys, "platform", "linux")
+        monkeypatch.setenv("WAYFINDER_LINUX_MAC_LOOK", "0")
+        painter = Painter()
+        overlay_module.LiquidWaveRenderer().render(
+            painter, QRectF(0, 0, 90, 32), QColor("#5B8FD4")
+        )
+
+        # x = 0..90 step 2 -> 46 samples, 45 segments; (4 waves + highlight) x (glow + core).
+        assert painter.lines == 45 * 10
+        assert painter.paths == 0
+
+        # Default Linux look: one path per strand, like macOS and Windows.
+        monkeypatch.delenv("WAYFINDER_LINUX_MAC_LOOK")
+        painter = Painter()
+        overlay_module.LiquidWaveRenderer().render(
+            painter, QRectF(0, 0, 90, 32), QColor("#5B8FD4")
+        )
+        assert painter.lines == 0
+        assert painter.paths > 0
+
 
 # =============================================================================
 # Click-through (input transparency)
@@ -584,3 +730,61 @@ class TestOverlayIsClickThrough:
             assert bool(ov.windowFlags() & Qt.WindowType.WindowTransparentForInput)
         finally:
             ov.deleteLater()
+
+
+@pytest.mark.parametrize("platform_name, expected", [("linux", "primary"), ("darwin", "pointer")])
+def test_overlay_screen_follows_pointer_on_macos_only(
+    monkeypatch, overlay_module, platform_name, expected
+):
+    """Linux keeps the primary screen (QCursor.pos() is unreliable on Wayland)."""
+    monkeypatch.setattr(overlay_module.sys, "platform", platform_name)
+    monkeypatch.setattr(overlay_module.QApplication, "primaryScreen", staticmethod(lambda: "primary"))
+    monkeypatch.setattr(overlay_module.QApplication, "screenAt", staticmethod(lambda pos: "pointer"))
+    monkeypatch.setattr(overlay_module.QCursor, "pos", staticmethod(lambda: None))
+
+    assert overlay_module.GlassmorphicOverlay._target_screen() == expected
+
+
+class TestMacQuitAppleEvent:
+    """The overlay helper must never refuse Quit (logout/restart/shutdown)."""
+
+    @pytest.mark.skipif(not hasattr(__import__("socket"), "AF_UNIX"), reason="needs AF_UNIX")
+    def test_quit_is_forwarded_to_the_main_app(self, tmp_path, monkeypatch):
+        import socket
+        import threading
+        import wayfinder.config as config_module
+        from wayfinder.ui import overlay as ov
+
+        import tempfile
+        # AF_UNIX paths are limited to 104 bytes on macOS; pytest's tmp_path is longer.
+        path = Path(tempfile.mkdtemp(prefix="wfq", dir="/tmp")) / "a.sock"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(path))
+        server.listen(1)
+        got = []
+
+        def accept():
+            conn, _ = server.accept()
+            got.append(conn.recv(64))
+            conn.close()
+
+        thread = threading.Thread(target=accept, daemon=True)
+        thread.start()
+        monkeypatch.setattr(config_module, "SOCKET_PATH", str(path))
+        assert ov._forward_quit_to_main_app() is True
+        thread.join(2)
+        server.close()
+        assert got == [b"quit\n"]
+
+    def test_forwarding_without_a_main_app_is_harmless(self, tmp_path, monkeypatch):
+        import wayfinder.config as config_module
+        from wayfinder.ui import overlay as ov
+        monkeypatch.setattr(config_module, "SOCKET_PATH", str(tmp_path / "missing.sock"))
+        assert ov._forward_quit_to_main_app() is False
+
+    def test_handler_installs_on_macos_only(self):
+        import sys as _sys
+        from wayfinder.ui import overlay as ov
+        assert ov.install_macos_quit_handler("linux") is False
+        if _sys.platform == "darwin":
+            assert ov.install_macos_quit_handler() is True

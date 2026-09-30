@@ -17,6 +17,16 @@ INDIGO = (0x7B, 0x8B, 0xD9)
 BG = hr.BG_CARD
 
 
+@pytest.fixture(autouse=True)
+def _linux_reference_path(monkeypatch):
+    """These pin the polyline reference renderer, identical to main: the Linux
+    fallback and its WAYFINDER_LINUX_MAC_LOOK=0 look (Linux now defaults to the
+    Mac's shader ribbon, covered in test_windows_parity)."""
+    monkeypatch.setattr(hr.sys, "platform", "linux")
+    monkeypatch.setenv("WAYFINDER_LINUX_MAC_LOOK", "0")
+    hr._HERO_CACHE.clear()
+
+
 def _dist(a, b):
     return math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3)))
 

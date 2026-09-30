@@ -33,10 +33,17 @@ def pytest_configure(config):
         "AF_UNIX sockets, POSIX file-mode bits, SteamOS/gamemode, GPU/Vulkan "
         "fallback, AppImage/Flatpak packaging); auto-skipped on macOS/Windows.",
     )
+    config.addinivalue_line(
+        "markers",
+        "macos_only: needs a real macOS backend (pynput's darwin key codes and "
+        "event tap); auto-skipped elsewhere. Prefer stubbing Quartz/AppKit/"
+        "Foundation so a macOS test runs everywhere.",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip ``@pytest.mark.linux_only`` tests when not on Linux.
+    """Skip ``@pytest.mark.linux_only`` tests when not on Linux (and
+    ``@pytest.mark.macos_only`` tests when not on macOS).
 
     Those tests cover mechanisms with no macOS/Windows equivalent, so they can
     only run on Linux. They STILL run on Linux — the production regression gate
@@ -44,14 +51,17 @@ def pytest_collection_modifyitems(config, items):
     without ever weakening Linux coverage. It is not a substitute for a proper
     adapter: shared behavior must stay unmarked and pass on every platform.
     """
-    if sys.platform == "linux":
-        return
-    skip_marker = pytest.mark.skip(
+    skip_linux = pytest.mark.skip(
         reason="Linux-only mechanism; not applicable on this platform"
     )
+    skip_macos = pytest.mark.skip(
+        reason="macOS-only backend; not applicable on this platform"
+    )
     for item in items:
-        if "linux_only" in item.keywords:
-            item.add_marker(skip_marker)
+        if "linux_only" in item.keywords and sys.platform != "linux":
+            item.add_marker(skip_linux)
+        if "macos_only" in item.keywords and sys.platform != "darwin":
+            item.add_marker(skip_macos)
 
 
 # Add src to path for imports
@@ -355,6 +365,20 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch):
     for key in ["APPIMAGE", "APPDIR", "FLATPAK_ID", "WAYFINDER_FLATPAK"]:
         monkeypatch.delenv(key, raising=False)
 
+    # macOS keeps API keys in the login Keychain. Tests must never read or
+    # write the developer's real items; tests/test_macos_keychain.py opts back
+    # in with a throwaway service name.
+    monkeypatch.setenv("WAYFINDER_DISABLE_KEYCHAIN", "1")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_windows_local_appdata(monkeypatch: pytest.MonkeyPatch, tmp_path_factory):
+    """Windows keeps app data (speech models, cache) under %LOCALAPPDATA%: tests
+    must never write the developer's real profile (a mocked model download
+    once left zero-filled "models" there)."""
+    if sys.platform == "win32":
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path_factory.mktemp("localappdata")))
+
 
 @pytest.fixture
 def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
@@ -410,3 +434,25 @@ def reset_voice_profile():
         reset_voice_profile()
     except (ImportError, OSError):
         pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_macos_keystrokes(monkeypatch):
+    """Tests must never post real Cmd+V to the developer's frontmost app.
+
+    core/macos_paste posts through Quartz; stub it (and report Accessibility as
+    granted) for every test. Tests that need a failing paste patch over this.
+    """
+    if sys.platform != "darwin":
+        yield
+        return
+    try:
+        import wayfinder.core.macos_paste as macos_paste
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(macos_paste, "post_command_v", lambda: None)
+    monkeypatch.setattr(macos_paste, "post_return", lambda: None)
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
+    yield
+    macos_paste.pending_restore.flush()

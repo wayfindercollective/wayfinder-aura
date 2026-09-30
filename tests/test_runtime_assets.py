@@ -47,6 +47,35 @@ def test_cpu_lookup_falls_back_to_primary_when_twin_is_absent(tmp_path, monkeypa
     assert runtime_assets.find_whisper_binary({"whisper_binary": str(primary)}, cpu=True) == str(primary)
 
 
+def test_frozen_macos_bundle_precedes_a_stale_configured_path(tmp_path, monkeypatch):
+    contents = tmp_path / "Wayfinder Aura.app" / "Contents"
+    executable = _make_executable(contents / "MacOS" / "Wayfinder Aura")
+    bundled = _make_executable(contents / "Resources" / "bin" / "whisper-cli")
+    stale = _make_executable(tmp_path / "old-location" / "whisper-cli")
+    monkeypatch.setattr(runtime_assets.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(runtime_assets.sys, "_MEIPASS", str(contents / "Frameworks"), raising=False)
+    monkeypatch.setattr(runtime_assets.sys, "executable", str(executable))
+    monkeypatch.setattr(runtime_assets, "get_wayfinder_appimage_dir", lambda: None)
+    monkeypatch.setattr(runtime_assets, "is_wayfinder_flatpak_env", lambda: False)
+    monkeypatch.setattr(runtime_assets.shutil, "which", lambda _name: None)
+
+    assert runtime_assets.find_whisper_binary({"whisper_binary": str(stale)}) == str(bundled)
+
+
+def test_frozen_macos_llama_simple_precedes_configured_cli(tmp_path, monkeypatch):
+    contents = tmp_path / "Wayfinder Aura.app" / "Contents"
+    executable = _make_executable(contents / "MacOS" / "Wayfinder Aura")
+    bundled = _make_executable(contents / "Resources" / "bin" / "llama-simple")
+    configured = _make_executable(tmp_path / "llama.cpp" / "build" / "bin" / "llama-cli")
+    monkeypatch.setattr(runtime_assets.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(runtime_assets.sys, "_MEIPASS", str(contents / "Frameworks"), raising=False)
+    monkeypatch.setattr(runtime_assets.sys, "executable", str(executable))
+    monkeypatch.setattr(runtime_assets, "is_wayfinder_flatpak_env", lambda: False)
+    monkeypatch.setattr(runtime_assets.shutil, "which", lambda _name: None)
+
+    assert runtime_assets.find_llama_binary({"llama_cpp_binary": str(configured)}) == str(bundled)
+
+
 @pytest.mark.linux_only
 def test_non_executable_candidate_is_rejected(tmp_path, monkeypatch):
     candidate = tmp_path / "whisper-cli"

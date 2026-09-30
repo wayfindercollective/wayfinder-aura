@@ -96,14 +96,27 @@ class TestDefaultsAreModifieredKeys:
     """Smoke check: DEFAULT_CONFIG ships modifiered chords, not bare keys.
 
     Bare keys collide with countless game keybinds. New users get
-    Ctrl+Alt+Space / Ctrl+Alt+Enter by default — discoverable on any keyboard
-    (2026-07 launch feedback: nobody knew what "Super" was) and as game-safe
-    as the old Super+F* chords.
+    macOS uses Fn chords; other platforms use Ctrl+Alt chords.
     """
 
     def test_defaults(self):
+        import sys
+
         from wayfinder.config import DEFAULT_CONFIG
-        assert DEFAULT_CONFIG["hotkey_key"] == 57  # Space
-        assert DEFAULT_CONFIG["hotkey_modifiers"] == ["ctrl", "alt"]
+        if sys.platform == "darwin":
+            # macOS records with a bare Right Option tap/hold (a lone modifier
+            # types nothing, so it cannot collide with text or game keys).
+            assert DEFAULT_CONFIG["hotkey_key"] == 100
+            assert DEFAULT_CONFIG["hotkey_modifiers"] == []
+            assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["fn"]
+        elif sys.platform == "win32":
+            # Windows: bare Right Alt / Alt Gr tap/hold, the same lone-modifier
+            # gesture (Ctrl+Alt+Space is the Claude desktop app's shortcut).
+            assert DEFAULT_CONFIG["hotkey_key"] == 100
+            assert DEFAULT_CONFIG["hotkey_modifiers"] == []
+            assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["ctrl", "alt"]
+        else:
+            assert DEFAULT_CONFIG["hotkey_key"] == 57  # Space
+            assert DEFAULT_CONFIG["hotkey_modifiers"] == ["ctrl", "alt"]
+            assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["ctrl", "alt"]
         assert DEFAULT_CONFIG["style_toggle_key"] == 28  # Enter
-        assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["ctrl", "alt"]

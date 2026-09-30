@@ -33,6 +33,7 @@ def socket_listener(
     echo "show"      | nc -U "$SOCK"   # Raise the main window
     echo "hide"      | nc -U "$SOCK"   # Hide main window to tray (keep running)
     echo "reset"     | nc -U "$SOCK"   # Abort stuck work and return to idle
+    echo "cancel"    | nc -U "$SOCK"   # Discard only the active recording
     echo "quit"      | nc -U "$SOCK"   # Quit cleanly
     echo "ping"      | nc -U "$SOCK"   # Health probe, replies "pong"
     ```
@@ -124,6 +125,9 @@ def socket_listener(
                     # Tray "Reset" — abort stuck/in-flight dictation, return to idle.
                     log("🔄 Reset received via socket")
                     event_queue.put((EventType.FORCE_RESET, None))
+                elif data_str == "cancel":
+                    log("✕ Cancel recording received via socket")
+                    event_queue.put((EventType.CANCEL_RECORDING, None))
                 elif data_str == "quit":
                     # Tray "Quit" — clean full shutdown.
                     log("👋 Quit received via socket")
@@ -132,6 +136,15 @@ def socket_listener(
                     # Live verification: switch the main-window tab deterministically.
                     tab_id = data_str.split(":", 1)[1]
                     event_queue.put((EventType.SWITCH_TAB, tab_id))
+                elif data_str in ("zoom:in", "zoom:out", "zoom:reset"):
+                    # The header -/+/reset buttons (desktop shortcuts, UI checks).
+                    event_queue.put((EventType.UI_ZOOM, data_str.split(":", 1)[1]))
+                elif data_str.startswith("inspect:"):
+                    # Headless UI check: dump that tab's widget tree (works with the
+                    # display asleep) to ui-inspect-<tab>.json beside this socket.
+                    tab_id = data_str.split(":", 1)[1]
+                    event_queue.put((EventType.INSPECT_UI, tab_id))
+                    conn.sendall(b"ok")
             except socket.timeout:
                 continue
             except Exception as e:
@@ -194,4 +207,3 @@ def send_style(style: Optional[str] = None):
         return True
     except Exception:
         return False
-

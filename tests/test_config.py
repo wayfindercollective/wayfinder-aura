@@ -509,6 +509,16 @@ class TestHotkeyDefaultMigration:
     mapped to bare F3 — and a later settings save baked the corruption in.
     """
 
+    @pytest.fixture(autouse=True)
+    def _fchmod_where_darwin_is_simulated(self, monkeypatch):
+        # Some tests simulate macOS; its private-write path uses os.fchmod,
+        # which Windows does not have.
+        if not hasattr(os, "fchmod"):
+            monkeypatch.setattr(os, "fchmod", lambda _fd, _mode: None, raising=False)
+        # These tests simulate OS names to exercise hotkey migrations. Do not
+        # ask shutil.which to call Windows APIs on the real Linux/macOS host.
+        monkeypatch.setattr("wayfinder.config._which_runtime_path", lambda _name: None)
+
     def _write_config(self, data: dict):
         from wayfinder.config import CONFIG_FILE
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -536,17 +546,157 @@ class TestHotkeyDefaultMigration:
         assert config["hotkey_key"] == 61
         assert config["hotkey_modifiers"] == []
 
-    def test_fresh_install_gets_ctrl_alt_space_defaults(self, temp_config_dir: Path):
+    def test_fresh_install_gets_platform_hotkey_defaults(self, temp_config_dir: Path):
+        import sys
+
         from wayfinder.config import load_config, CONFIG_FILE
 
         if CONFIG_FILE.exists():
             CONFIG_FILE.unlink()
         config = load_config()
 
-        assert config["hotkey_key"] == 57  # Space
-        assert config["hotkey_modifiers"] == ["ctrl", "alt"]
+        if sys.platform == "darwin":
+            assert config["hotkey_key"] == 100  # Right Option, tap/hold
+            assert config["hotkey_modifiers"] == []
+            assert config["style_toggle_modifiers"] == ["fn"]
+        elif sys.platform == "win32":
+            assert config["hotkey_key"] == 100  # Right Alt / Alt Gr, tap/hold
+            assert config["hotkey_modifiers"] == []
+            assert config["style_toggle_modifiers"] == ["ctrl", "alt"]
+        else:
+            assert config["hotkey_key"] == 57  # Space
+            assert config["hotkey_modifiers"] == ["ctrl", "alt"]
+            assert config["style_toggle_modifiers"] == ["ctrl", "alt"]
         assert config["style_toggle_key"] == 28  # Enter
-        assert config["style_toggle_modifiers"] == ["ctrl", "alt"]
+
+    def test_old_macos_default_migrates_to_fn_once(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({
+            "hotkey_key": 57,
+            "hotkey_modifiers": ["ctrl", "alt"],
+            "style_toggle_key": 28,
+            "style_toggle_modifiers": ["ctrl", "alt"],
+        })
+
+        config = config_module.load_config()
+
+        # v2 moved Ctrl+Option+Space to Fn+Space; v3 then moves that untouched
+        # default to Right Option tap/hold. Style keeps Fn+Enter.
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (100, [])
+        assert config["style_toggle_key"] == 28
+        assert config["style_toggle_modifiers"] == ["fn"]
+        assert config["macos_hotkey_defaults_v2"] is True
+        assert config["macos_hotkey_defaults_v3"] is True
+
+    def test_fn_space_default_moves_to_right_option_once(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({
+            "hotkey_key": 57,
+            "hotkey_modifiers": ["fn"],
+            "macos_hotkey_defaults_v2": True,
+        })
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (100, [])
+
+        # Choosing Fn+Space again afterwards is respected.
+        config["hotkey_key"], config["hotkey_modifiers"] = 57, ["fn"]
+        config_module.save_config(config)
+        again = config_module.load_config()
+        assert (again["hotkey_key"], again["hotkey_modifiers"]) == (57, ["fn"])
+
+    def test_custom_fn_chord_is_not_migrated(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({
+            "hotkey_key": 67,
+            "hotkey_modifiers": ["fn"],
+            "macos_hotkey_defaults_v2": True,
+        })
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (67, ["fn"])
+
+    def test_linux_never_runs_the_macos_hotkey_migration(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "linux")
+        self._write_config({"hotkey_key": 57, "hotkey_modifiers": ["fn"]})
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (57, ["fn"])
+
+    def test_explicit_post_migration_macos_shortcut_is_preserved(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({
+            "hotkey_key": 57,
+            "hotkey_modifiers": ["ctrl", "alt"],
+            "macos_hotkey_defaults_v2": True,
+        })
+
+        config = config_module.load_config()
+
+        assert config["hotkey_modifiers"] == ["ctrl", "alt"]
+
+    def test_old_windows_default_moves_to_right_alt_once(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "win32")
+        self._write_config({
+            "hotkey_key": 57,
+            "hotkey_modifiers": ["ctrl", "alt"],
+            "style_toggle_key": 28,
+            "style_toggle_modifiers": ["ctrl", "alt"],
+        })
+        config = config_module.load_config()
+
+        # Ctrl+Alt+Space is also the Claude desktop app's shortcut.
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (100, [])
+        assert (config["style_toggle_key"], config["style_toggle_modifiers"]) == (28, ["ctrl", "alt"])
+        assert config["windows_hotkey_defaults_v2"] is True
+
+        # Choosing Ctrl+Alt+Space again afterwards is respected.
+        config["hotkey_key"], config["hotkey_modifiers"] = 57, ["ctrl", "alt"]
+        config_module.save_config(config)
+        again = config_module.load_config()
+        assert (again["hotkey_key"], again["hotkey_modifiers"]) == (57, ["ctrl", "alt"])
+
+    def test_custom_windows_hotkey_is_not_migrated(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "win32")
+        self._write_config({"hotkey_key": 67, "hotkey_modifiers": ["ctrl", "alt"]})
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (67, ["ctrl", "alt"])
+
+    def test_linux_never_runs_the_windows_hotkey_migration(self, temp_config_dir: Path, monkeypatch):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "linux")
+        self._write_config({"hotkey_key": 57, "hotkey_modifiers": ["ctrl", "alt"]})
+        config = config_module.load_config()
+        assert (config["hotkey_key"], config["hotkey_modifiers"]) == (57, ["ctrl", "alt"])
+
+    def test_old_macos_overlay_default_moves_to_bottom_right_once(
+        self, temp_config_dir: Path, monkeypatch
+    ):
+        import wayfinder.config as config_module
+
+        monkeypatch.setattr(config_module.sys, "platform", "darwin")
+        self._write_config({"overlay_anchor": "bottom-center"})
+
+        config = config_module.load_config()
+
+        assert config["overlay_anchor"] == "bottom-right"
+        assert config["macos_overlay_anchor_defaults_v1"] is True
+
+        config["overlay_anchor"] = "top-left"
+        config_module.save_config(config)
+        assert config_module.load_config()["overlay_anchor"] == "top-left"
 
     def test_colliding_combos_repaired(self, temp_config_dir: Path):
         from wayfinder.config import load_config
@@ -843,7 +993,7 @@ class TestModelDirDefaults:
         assert dirs[0] == data / "wayfinder-aura" / "whisper-models"
 
     @pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
-    def test_host_candidate_dirs_unchanged(
+    def test_host_candidate_dirs_preserve_platform_storage(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
     ):
         from wayfinder import config as cfg
@@ -851,11 +1001,16 @@ class TestModelDirDefaults:
         # Path.home()/expanduser read HOME on POSIX but USERPROFILE on Windows.
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-data"))
         monkeypatch.setattr(cfg, "IS_FLATPAK", False)
         with monkeypatch.context() as m:
             m.setattr(sys, "platform", platform)
             dirs = cfg._user_whisper_model_dirs()
-        assert dirs == [tmp_path / "whisper.cpp" / "models"]
+        legacy = tmp_path / "whisper.cpp" / "models"
+        assert dirs == (
+            [tmp_path / "local-data" / "wayfinder-aura" / "whisper-models", legacy]
+            if platform == "win32" else [legacy]
+        )
 
     @pytest.mark.linux_only
     def test_flatpak_installed_model_found_for_repair(

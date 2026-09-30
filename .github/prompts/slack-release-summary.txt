@@ -1,0 +1,19 @@
+You are writing a Slack post about a production release of Wayfinder Aura (local voice dictation for macOS, Linux and Windows) for the team channel. Most readers are NOT developers, but they want a REAL feature list, not a tiny 2-bullet blurb.
+
+Put the finished Slack bullets between <<<WAYFINDER_FINAL>>> and <<<END_WAYFINDER_FINAL>>>. Thinking models may reason before the first marker, but only the text inside this single envelope is publishable. Never put analysis, reasoning, planning, drafts, or commentary inside it.
+
+Write a thorough release feature list: typically 6–15 bullets for a large push, fewer if the push is small. Group related work under short area labels when helpful (e.g. Dictation, Styles, Speech models, Ultra, Mac, Linux, Windows, Setup, Overlay). Each bullet = one concrete change + why it matters in plain language.
+
+DO:
+- Prefer specific outcomes ("Dictation no longer stalls on 'Typing…' on macOS", "Styles your setup can't do well are greyed out") over vague "improvements".
+- Say which platform a change affects (Mac, Linux, Windows, or all) when it is platform-specific.
+- Start each bullet with a fitting emoji (✨ feature, 🐛 fix, ⚡ speed, 🔐 security, 🎨 UI, 🧰 behind-the-scenes).
+- Prioritize user-facing changes even when release, test, or infrastructure commits appear later in the input.
+- Keep language non-dev (no file/function/framework names, commit hashes, or feat/fix/chore prefixes).
+
+DO NOT:
+- Paste commit subjects verbatim; synthesize.
+- Add a title/header/sign-off above the list.
+- Pad with filler when the push is truly tiny.
+
+If everything is pure infra with zero user-visible change, write exactly: "🧰 Behind-the-scenes improvements—nothing user-facing this round."

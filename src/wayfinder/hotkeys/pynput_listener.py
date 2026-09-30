@@ -9,6 +9,8 @@ Uses pynput for global keyboard monitoring.
 # unavailable — the import guard sets Key=KeyCode=None, and `None | None` is a TypeError.
 from __future__ import annotations
 
+import sys
+import threading
 import time
 from queue import Queue
 from threading import Event
@@ -133,8 +135,356 @@ for _mod, _key_names in [
     if _key is not None:
         MODIFIER_KEYS.setdefault(_mod, set()).add(_key)
 
+# Fn is a Quartz flag rather than a normal pynput Key on macOS. Keeping it in
+# this table lets the shared modifier matcher accept it; the live state is
+# populated from Quartz in ``pynput_hotkey_listener`` below.
+MODIFIER_KEYS.setdefault("fn", set())
+
 # Flat set of every modifier key — Detect skips pure modifier presses and waits for a real key.
 _ALL_MODIFIER_KEYS = {k for ks in MODIFIER_KEYS.values() for k in ks}
+# macOS Detect may bind these alone (tap/hold). Right-hand keys only: the left
+# ones are pressed constantly as part of ordinary shortcuts.
+_SOLO_CAPTURE_KEYS = {k for k in (_k("alt_r"), _k("cmd_r")) if k is not None}
+# Windows: Right Ctrl, and Right Alt / Alt Gr (the Mac's Right Option). Many
+# laptops (e.g. LG Gram) have no Right Ctrl. Alt Gr alone types nothing, and
+# an Alt Gr + key combo (Alt Gr+4 = euro) cancels the gesture. The Windows keys
+# belong to the Start menu.
+_WIN32_SOLO_CAPTURE_KEYS = {k for k in (_k("ctrl_r"), _k("alt_r")) if k is not None}
+
+
+# Released on its own, Alt opens the menu bar / KeyTips of the app in front
+# (Notepad, Explorer, Office, Firefox), and the words Aura then types would run
+# menu commands. A key event while Alt is down makes it an Alt+key chord
+# instead; 0xE8 is unassigned, so no app acts on it (AutoHotkey's mask key).
+_WIN32_MENU_MASK_VK = 0xE8
+
+
+def _win32_send_menu_mask() -> None:
+    """Inject the mask key's press and release. Never raises."""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        user32.keybd_event(_WIN32_MENU_MASK_VK, 0, 0, 0)
+        user32.keybd_event(_WIN32_MENU_MASK_VK, 0, 0x0002, 0)  # KEYEVENTF_KEYUP
+    except Exception:
+        pass
+
+
+def _is_win32_menu_mask(key) -> bool:
+    return getattr(key, "vk", None) == _WIN32_MENU_MASK_VK
+
+
+def _win32_normalize_key(key):
+    """Windows reports Right Alt as Key.alt_gr on layouts with Alt Gr (UK, most
+    of Europe), preceded by a synthetic Left Ctrl. Same physical key, same vk
+    (165): treat it as alt_r, which is what the stored hotkey code maps to."""
+    alt_gr = _k("alt_gr")
+    if alt_gr is not None and key == alt_gr:
+        return _k("alt_r") or key
+    return key
+
+
+def _solo_capture_keys() -> set:
+    if sys.platform == "darwin":
+        return _SOLO_CAPTURE_KEYS
+    if sys.platform == "win32":
+        return _WIN32_SOLO_CAPTURE_KEYS
+    return set()
+
+
+# macOS tap/hold gesture for a hotkey that is one bare modifier (Right Option).
+# Tap = press and release inside this window with no other key: toggles
+# recording. Held longer = push-to-talk: recording starts at the threshold and
+# stops on release. Any other key pressed first cancels (Option+e still types
+# an accent). 0.3s separates a deliberate tap from a hold without making the
+# hold feel laggy.
+SOLO_HOLD_SECONDS = 0.3
+HOLD_START = "hold_start"
+HOLD_END = "hold_end"
+
+
+class SoloModifierGesture:
+    """Turns presses of a single modifier key into tap / hold-start / hold-end.
+
+    ``emit`` receives "tap", HOLD_START or HOLD_END. Thread-safe: the hold
+    threshold fires from a one-shot timer thread while press/release arrive on
+    the event-tap thread.
+    """
+
+    def __init__(self, emit, hold_seconds: float = SOLO_HOLD_SECONDS,
+                 clock=time.monotonic, timer_factory=threading.Timer):
+        self._emit = emit
+        self._hold_seconds = hold_seconds
+        self._clock = clock
+        self._timer_factory = timer_factory
+        self._lock = threading.Lock()
+        self._down_at: float | None = None
+        self._interrupted = False
+        self._holding = False
+        self._timer = None
+
+    @property
+    def is_down(self) -> bool:
+        return self._down_at is not None
+
+    def press_target(self) -> None:
+        with self._lock:
+            if self._down_at is not None:
+                return  # repeat / duplicate press while held
+            self._down_at = self._clock()
+            self._interrupted = False
+            self._holding = False
+            timer = self._timer_factory(self._hold_seconds, self._on_hold)
+            timer.daemon = True
+            self._timer = timer
+        timer.start()
+
+    def press_other(self) -> None:
+        with self._lock:
+            if self._down_at is None or self._holding:
+                return
+            self._interrupted = True
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _on_hold(self) -> None:
+        with self._lock:
+            if self._down_at is None or self._interrupted or self._holding:
+                return
+            self._holding = True
+        self._emit(HOLD_START)
+
+    def release_target(self) -> None:
+        with self._lock:
+            if self._down_at is None:
+                return
+            held = self._clock() - self._down_at
+            holding, interrupted = self._holding, self._interrupted
+            timer, self._timer = self._timer, None
+            self._down_at = None
+            self._holding = self._interrupted = False
+        if timer is not None:
+            timer.cancel()
+        if holding:
+            self._emit(HOLD_END)
+        elif not interrupted and held < self._hold_seconds:
+            self._emit("tap")
+
+    def reset(self) -> None:
+        """Forget a gesture (hotkey changed) without emitting anything."""
+        with self._lock:
+            timer, self._timer = self._timer, None
+            self._down_at = None
+            self._holding = self._interrupted = False
+        if timer is not None:
+            timer.cancel()
+
+
+_DARWIN_KEYPAD_ENTER_VK = 76
+
+
+def _darwin_normalize_key(key):
+    """Keypad Enter (and Fn+Return on laptops) arrives as a bare vk 76 KeyCode;
+    treat it as Enter so an Enter-based hotkey works from either key."""
+    if KeyCode is not None and isinstance(key, KeyCode) and getattr(key, "vk", None) == _DARWIN_KEYPAD_ENTER_VK:
+        return _k("enter") or key
+    return key
+
+
+_SECURE_INPUT_FN = None
+
+
+def _darwin_secure_input_enabled() -> bool:
+    """True while some app holds macOS Secure Input (password fields, Terminal's
+    Secure Keyboard Entry). Keystrokes then reach no event tap, so the hotkey
+    cannot work. ~20 µs per call."""
+    global _SECURE_INPUT_FN
+    try:
+        if _SECURE_INPUT_FN is None:
+            import ctypes
+
+            carbon = ctypes.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+            carbon.IsSecureEventInputEnabled.restype = ctypes.c_bool
+            _SECURE_INPUT_FN = carbon.IsSecureEventInputEnabled
+        return bool(_SECURE_INPUT_FN())
+    except Exception:
+        return False
+
+
+def _darwin_secure_input_owner() -> str | None:
+    """Name of the app holding Secure Input, if macOS reports it."""
+    try:
+        import re
+        import subprocess
+
+        out = subprocess.run(["ioreg", "-l", "-w", "0", "-d", "1"], capture_output=True,
+                             text=True, timeout=2).stdout
+        match = re.search(r'"kCGSSessionSecureInputPID"=(\d+)', out)
+        if not match:
+            return None
+        from AppKit import NSRunningApplication
+
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(match.group(1)))
+        return str(app.localizedName()) if app is not None else None
+    except Exception:
+        return None
+
+
+def _darwin_fn_pressed() -> bool:
+    """Return whether the Mac Fn/Globe modifier is physically held."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        from Quartz import (
+            CGEventSourceFlagsState,
+            kCGEventFlagMaskSecondaryFn,
+            kCGEventSourceStateCombinedSessionState,
+        )
+
+        flags = CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState)
+        return bool(flags & kCGEventFlagMaskSecondaryFn)
+    except Exception:
+        return False
+
+
+_DARWIN_EVDEV_VK = {
+    # ANSI letters/numbers that pynput KeyCode.from_char does not expose with
+    # a virtual keycode. Special/function keys are resolved dynamically below.
+    30: 0, 31: 1, 32: 2, 33: 3, 35: 4, 34: 5,
+    44: 6, 45: 7, 46: 8, 47: 9, 48: 11,
+    16: 12, 17: 13, 18: 14, 19: 15, 21: 16, 20: 17,
+    2: 18, 3: 19, 4: 20, 5: 21, 7: 22, 6: 23,
+    10: 25, 8: 26, 9: 28, 11: 29,
+    24: 31, 22: 32, 23: 34, 25: 35,
+    38: 37, 36: 38, 37: 40, 49: 45, 50: 46,
+}
+
+
+def _darwin_virtual_keycode(evdev_code: object) -> int | None:
+    """Map a shared evdev-style key code to a macOS virtual keycode."""
+    try:
+        code = int(evdev_code)
+    except (TypeError, ValueError):
+        return None
+    if code in _DARWIN_EVDEV_VK:
+        return _DARWIN_EVDEV_VK[code]
+    key = evdev_code_to_pynput(code)
+    value = getattr(key, "value", key)
+    vk = getattr(value, "vk", None)
+    return int(vk) if isinstance(vk, int) else None
+
+
+def _win32_key_pressed(evdev_code: object) -> bool | None:
+    """Windows physical key state (GetAsyncKeyState); None when unknown.
+
+    The Mac's lost-key-up repair: a release swallowed by a UAC prompt, a lock
+    screen or an elevated window must not leave the chord latched.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        key = evdev_code_to_pynput(int(evdev_code))
+        value = getattr(key, "value", key)
+        vk = getattr(value, "vk", None)
+        if not isinstance(vk, int):
+            return None
+        import ctypes
+
+        return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+    except Exception:
+        return None
+
+
+def _win32_foreground_elevated() -> tuple[bool | None, str]:
+    """Whether the window in front runs as administrator (and its exe name).
+
+    Windows (UIPI) hides that window's keystrokes from a normal-rights app
+    and blocks typing into it - the closest thing to the Mac's Secure Input.
+    (None, "") when unknown or when Aura itself runs elevated.
+    """
+    if sys.platform != "win32":
+        return None, ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, kernel32, advapi32 = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.advapi32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+
+        def elevated(process) -> bool | None:
+            token = wintypes.HANDLE()
+            if not advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+                return True if ctypes.GetLastError() == 5 else None  # denied: a higher-rights token
+            try:
+                value, size = wintypes.DWORD(), wintypes.DWORD()
+                if not advapi32.GetTokenInformation(token, 20, ctypes.byref(value),  # TokenElevation
+                                                    ctypes.sizeof(value), ctypes.byref(size)):
+                    return None
+                return bool(value.value)
+            finally:
+                kernel32.CloseHandle(token)
+
+        if elevated(kernel32.GetCurrentProcess()):
+            return None, ""  # Aura is elevated too: nothing is hidden from it
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None, ""
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        process = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+        if not process:
+            return None, ""
+        try:
+            name = ""
+            buf = ctypes.create_unicode_buffer(520)
+            size = wintypes.DWORD(len(buf))
+            if kernel32.QueryFullProcessImageNameW(process, 0, buf, ctypes.byref(size)):
+                name = buf.value.rsplit("\\", 1)[-1]
+            return elevated(process), name
+        finally:
+            kernel32.CloseHandle(process)
+    except Exception:
+        return None, ""
+
+
+def _darwin_key_pressed(evdev_code: object) -> bool:
+    """Read physical key state so a missed key-up cannot wedge a latch."""
+    if sys.platform != "darwin":
+        return False
+    virtual_key = _darwin_virtual_keycode(evdev_code)
+    if virtual_key is None:
+        return False
+    try:
+        from Quartz import (
+            CGEventSourceKeyState,
+            kCGEventSourceStateCombinedSessionState,
+        )
+
+        return bool(
+            CGEventSourceKeyState(
+                kCGEventSourceStateCombinedSessionState,
+                virtual_key,
+            )
+        )
+    except Exception:
+        # Fail closed: only an observed physical key-up may clear the latch.
+        return True
+
+
+def _modifier_display_name(name: str) -> str:
+    if sys.platform == "darwin":
+        return {
+            "alt": "Option",
+            "ctrl": "Control",
+            "super": "Command",
+            "fn": "Fn",
+        }.get(name.lower(), name.capitalize())
+    return name.capitalize()
 
 
 def evdev_code_to_pynput(evdev_code: int) -> Optional[Key | KeyCode]:
@@ -177,6 +527,10 @@ def evdev_code_to_pynput(evdev_code: int) -> Optional[Key | KeyCode]:
 
 def get_key_name(key) -> str:
     """Get a human-readable name for a pynput key."""
+    if sys.platform == "darwin" and key is not None:
+        mac_names = {_k("alt_r"): "Right Option", _k("cmd_r"): "Right Command"}
+        if key in mac_names:
+            return mac_names[key]
     if key in PYNPUT_TO_NAME:
         return PYNPUT_TO_NAME[key]
     if isinstance(key, KeyCode):
@@ -197,12 +551,17 @@ def pynput_hotkey_listener(
     style_toggle_modifiers: Optional[list[str]] = None,
     config_ref: Optional[dict] = None,
     capture_state: Optional[dict] = None,
+    restart_event: Optional[Event] = None,
 ):
     """
     Cross-platform hotkey listener using pynput.
 
     If config_ref is provided, the listener reads hotkey settings from it
     on each keypress, allowing live hotkey changes without restarting.
+
+    restart_event (optional) ends just this listener, leaving the shared
+    stop_event untouched — macOS uses it to re-create the event tap once
+    Accessibility / Input Monitoring is granted, without a relaunch.
     """
     def log(msg: str):
         if log_callback:
@@ -217,32 +576,54 @@ def pynput_hotkey_listener(
 
     # Initial key setup
     target_key = evdev_code_to_pynput(hotkey_key)
+    record_fell_back = target_key is None
     if target_key is None:
-        log(f"⚠️ Unknown hotkey code: {hotkey_key}")
-        return
+        # A shared config may carry a Linux-only mouse/keyboard code to macOS
+        # or Windows. Keep that saved preference intact, but fail safely to the
+        # cross-platform default for this session instead of disabling the
+        # listener altogether.
+        target_key = evdev_code_to_pynput(57)  # Space
+        log(f"⚠️ Hotkey code {hotkey_key} is unavailable here; using Space")
+        if target_key is None:
+            return
 
     style_target_key = evdev_code_to_pynput(style_toggle_key) if style_toggle_key else None
+    style_fell_back = bool(style_toggle_key) and style_target_key is None
+    if style_toggle_key and style_target_key is None:
+        style_target_key = evdev_code_to_pynput(28)  # Enter
+        log(f"⚠️ Style hotkey code {style_toggle_key} is unavailable here; using Enter")
 
     def _build_mod_set(mod_list):
         return {m.lower() for m in (mod_list or []) if m.lower() in MODIFIER_KEYS}
 
     required_modifiers = _build_mod_set(hotkey_modifiers)
     style_required_modifiers = _build_mod_set(style_toggle_modifiers)
+    if record_fell_back:
+        required_modifiers = {"fn"} if sys.platform == "darwin" else {"ctrl", "alt"}
+    if style_fell_back:
+        style_required_modifiers = {"fn"} if sys.platform == "darwin" else {"ctrl", "alt"}
 
     # Track currently pressed modifiers
     pressed_modifiers = set()
+    active_actions: set[str] = set()
+    captured_darwin_vk: int | None = None
+
+    # Debounce
+    _last_hotkey_time = 0.0
+    _last_style_time = 0.0
+    DEBOUNCE_SECONDS = 0.5
 
     # Display hotkey info
     hotkey_display = get_key_name(target_key)
     if required_modifiers:
-        mod_str = "+".join(mod.capitalize() for mod in sorted(required_modifiers))
+        mod_str = "+".join(_modifier_display_name(mod) for mod in sorted(required_modifiers))
         hotkey_display = f"{mod_str}+{hotkey_display}"
     log(f"🎹 Listening for hotkey: {hotkey_display}")
 
     if style_target_key:
         style_display = get_key_name(style_target_key)
         if style_required_modifiers:
-            mod_str = "+".join(mod.capitalize() for mod in sorted(style_required_modifiers))
+            mod_str = "+".join(_modifier_display_name(mod) for mod in sorted(style_required_modifiers))
             style_display = f"{mod_str}+{style_display}"
         log(f"✎ Style toggle hotkey: {style_display}")
 
@@ -252,26 +633,83 @@ def pynput_hotkey_listener(
         if config_ref is not None:
             new_key = evdev_code_to_pynput(config_ref.get("hotkey_key", hotkey_key))
             new_style = evdev_code_to_pynput(config_ref.get("style_toggle_key", style_toggle_key or 0))
-            if new_key and new_key != target_key:
-                target_key = new_key
-                required_modifiers = _build_mod_set(config_ref.get("hotkey_modifiers", []))
+            new_required = _build_mod_set(config_ref.get("hotkey_modifiers", []))
+            new_style_required = _build_mod_set(config_ref.get("style_toggle_modifiers", []))
+            if new_key is None:
+                new_key = evdev_code_to_pynput(57)
+                new_required = {"fn"} if sys.platform == "darwin" else {"ctrl", "alt"}
+            changed = new_key != target_key or new_required != required_modifiers
+            target_key = new_key
+            required_modifiers = new_required
+            if changed:
                 log(f"🎹 Hotkey changed to: {get_key_name(target_key)}")
-            if new_style and new_style != style_target_key:
+            if sys.platform == "darwin":
+                if style_toggle_key:
+                    if new_style is None:
+                        new_style = evdev_code_to_pynput(28)
+                        new_style_required = {"fn"}
+                    style_target_key = new_style
+                    style_required_modifiers = new_style_required
+            elif new_style and (
+                new_style != style_target_key
+                or new_style_required != style_required_modifiers
+            ):
+                # Linux/Windows as on main: a style key set after start is picked
+                # up live, and an unset/unknown code keeps the current one.
                 style_target_key = new_style
-                style_required_modifiers = _build_mod_set(config_ref.get("style_toggle_modifiers", []))
+                style_required_modifiers = new_style_required
 
     def check_modifiers(required: set[str]) -> bool:
         if not required:
             return True
         return required <= pressed_modifiers
 
-    # Debounce
-    _last_hotkey_time = 0.0
-    _last_style_time = 0.0
-    DEBOUNCE_SECONDS = 0.5
+    solo_capture: dict = {"key": None}
 
-    def on_press(key):
-        nonlocal pressed_modifiers, _last_hotkey_time, _last_style_time
+    def _solo_target_active() -> bool:
+        """macOS/Windows: the record hotkey is one bare modifier (Right Option;
+        Windows: Right Ctrl or Right Alt / Alt Gr)."""
+        return (
+            sys.platform in ("darwin", "win32")
+            and not required_modifiers
+            and target_key in _ALL_MODIFIER_KEYS
+        )
+
+    def _emit_solo(kind: str) -> None:
+        nonlocal _last_hotkey_time
+        if kind == "tap":
+            now = time.time()
+            if now - _last_hotkey_time < DEBOUNCE_SECONDS:
+                return
+            _last_hotkey_time = now
+            print(f"[Hotkey] {get_key_name(target_key)} tap — activating!", flush=True)
+            event_queue.put((EventType.HOTKEY_PRESSED, None))
+            return
+        # Hold start/end are never debounced: a release must always be able to
+        # stop the push-to-talk recording its own hold began.
+        if kind == HOLD_START:
+            _last_hotkey_time = time.time()
+            print(f"[Hotkey] {get_key_name(target_key)} held — push-to-talk", flush=True)
+        event_queue.put((EventType.HOTKEY_PRESSED, kind))
+
+    solo_gesture = SoloModifierGesture(_emit_solo)
+
+
+    def on_press(key, injected=False):
+        nonlocal pressed_modifiers, _last_hotkey_time, _last_style_time, captured_darwin_vk
+        if sys.platform == "darwin" and injected:
+            return
+
+        if sys.platform == "win32":
+            if _is_win32_menu_mask(key):
+                return  # our own mask key: not "another key" for the gesture
+            key = _win32_normalize_key(key)
+        if sys.platform == "darwin":
+            key = _darwin_normalize_key(key)
+            if _darwin_fn_pressed():
+                pressed_modifiers.add("fn")
+            else:
+                pressed_modifiers.discard("fn")
 
         # Track modifier state
         for mod_name, mod_keys in MODIFIER_KEYS.items():
@@ -283,7 +721,10 @@ def pynput_hotkey_listener(
         # buttons grabbed by the host trigger daemon never reach here — this is keyboard keys.
         if capture_state is not None and capture_state.get("armed"):
             if key in _ALL_MODIFIER_KEYS:
+                if key in _solo_capture_keys():
+                    solo_capture["key"] = key  # captured on release if nothing else is pressed
                 return  # wait for a real (non-modifier) key
+            solo_capture["key"] = None
             code = PYNPUT_TO_EVDEV.get(key)
             if code is None:
                 return  # unmapped key (e.g. a letter) — keep waiting; Detect times out otherwise
@@ -291,6 +732,10 @@ def pynput_hotkey_listener(
             # this press with a newer Detect session id.
             cap_gen = capture_state.get("gen")
             capture_state["armed"] = False
+            if sys.platform == "darwin":
+                # pynput dispatches on_press before darwin_intercept for the
+                # same CGEvent. Let the intercept know Detect consumed it.
+                captured_darwin_vk = _darwin_virtual_keycode(code)
             event_queue.put((EventType.HOTKEY_CAPTURED,
                              {"code": code, "modifiers": sorted(pressed_modifiers),
                               "device": "keyboard",
@@ -302,8 +747,39 @@ def pynput_hotkey_listener(
 
         now = time.time()
 
-        # Check for main hotkey (with debounce)
-        if key == target_key and check_modifiers(required_modifiers):
+        # While Aura is recording, the app consumes this event as "discard"; at
+        # all other times it is a harmless no-op. Do not suppress the physical
+        # Escape — the foreground application should still receive its normal
+        # key. macOS has no compositor-owned global-shortcut portal; pynput's
+        # hooks see Esc from any app on Windows and from any X11 client on Linux
+        # (Linux portal sessions use the cancel-dictation shortcut instead).
+        if key == _k("esc"):
+            event_queue.put((EventType.CANCEL_RECORDING, None))
+
+        solo_mode = _solo_target_active()
+        if solo_mode:
+            if key == target_key:
+                if sys.platform == "win32" and key == _k("alt_r"):
+                    # On every press, auto-repeat included: a repeat after the
+                    # mask would make the release a lone Alt again.
+                    _win32_send_menu_mask()
+                solo_gesture.press_target()
+            else:
+                solo_gesture.press_other()
+
+        # On macOS, pynput calls this before darwin_intercept and exposes only
+        # a separately polled global Fn state. That state can disagree with the
+        # key's own event, or describe a synthetic event. The intercept below
+        # validates the actual physical CGEvent before any chord-based action.
+        # Bare-modifier tap/hold gestures remain here because they are driven
+        # by macOS modifier flag-change events rather than a key chord.
+        # (Windows tap/hold: the gesture above owns the key, never the chord path.)
+        if sys.platform != "darwin" and not solo_mode and (
+            key == target_key
+            and check_modifiers(required_modifiers)
+            and "record" not in active_actions
+        ):
+            active_actions.add("record")
             if now - _last_hotkey_time >= DEBOUNCE_SECONDS:
                 _last_hotkey_time = now
                 print(f"[Hotkey] {get_key_name(target_key)} — activating!", flush=True)
@@ -311,29 +787,271 @@ def pynput_hotkey_listener(
                 event_queue.put((EventType.HOTKEY_PRESSED, None))
 
         # Check for style toggle hotkey (with debounce)
-        if style_target_key and key == style_target_key and check_modifiers(style_required_modifiers):
+        if sys.platform != "darwin" and (
+            style_target_key
+            and key == style_target_key
+            and check_modifiers(style_required_modifiers)
+            and "style" not in active_actions
+        ):
+            active_actions.add("style")
             if now - _last_style_time >= DEBOUNCE_SECONDS:
                 _last_style_time = now
                 log("✎ Style toggle activated!")
                 event_queue.put((EventType.STYLE_TOGGLE, None))
     
-    def on_release(key):
+    def on_release(key, injected=False):
         nonlocal pressed_modifiers
+        if sys.platform == "darwin" and injected:
+            return
+
+        if sys.platform == "win32":
+            if _is_win32_menu_mask(key):
+                return
+            key = _win32_normalize_key(key)
+        if sys.platform == "darwin":
+            key = _darwin_normalize_key(key)
+
+        if (
+            capture_state is not None
+            and capture_state.get("armed")
+            and solo_capture["key"] is not None
+            and key == solo_capture["key"]
+        ):
+            # A bare right-side modifier pressed and released on its own
+            # during Detect: bind it as a tap/hold hotkey (macOS).
+            code = PYNPUT_TO_EVDEV.get(key)
+            solo_capture["key"] = None
+            if code is not None:
+                cap_gen = capture_state.get("gen")
+                capture_state["armed"] = False
+                event_queue.put((EventType.HOTKEY_CAPTURED,
+                                 {"code": code, "modifiers": [],
+                                  "device": "keyboard", "gen": cap_gen}))
+
+        if key == target_key:
+            active_actions.discard("record")
+            if _solo_target_active():
+                solo_gesture.release_target()
+        if key == style_target_key:
+            active_actions.discard("style")
         
         # Track modifier state
         for mod_name, mod_keys in MODIFIER_KEYS.items():
             if key in mod_keys:
                 pressed_modifiers.discard(mod_name)
+
+        if sys.platform == "darwin" and not _darwin_fn_pressed():
+            pressed_modifiers.discard("fn")
     
     # Start the listener
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener_kwargs = {}
+    if sys.platform == "darwin":
+        try:
+            from Quartz import (
+                CGEventGetFlags,
+                CGEventGetIntegerValueField,
+                kCGEventSourceUnixProcessID,
+                kCGEventFlagMaskSecondaryFn,
+                kCGEventFlagMaskAlternate,
+                kCGEventFlagMaskCommand,
+                kCGEventFlagMaskControl,
+                kCGEventFlagMaskShift,
+                kCGEventKeyDown,
+                kCGEventKeyUp,
+                kCGKeyboardEventKeycode,
+            )
+
+            suppressed_keycodes: set[int] = set()
+
+            modifier_masks = {
+                "fn": kCGEventFlagMaskSecondaryFn,
+                "alt": kCGEventFlagMaskAlternate,
+                "super": kCGEventFlagMaskCommand,
+                "ctrl": kCGEventFlagMaskControl,
+                "shift": kCGEventFlagMaskShift,
+            }
+
+            def _raw_chord_matches(keycode, configured_key, configured_modifiers, flags):
+                target_vk = _darwin_virtual_keycode(configured_key)
+                if target_vk is None or keycode != target_vk:
+                    return False
+                required = {str(value).lower() for value in configured_modifiers or ()}
+                if not required <= modifier_masks.keys():
+                    return False
+                return all(
+                    bool(flags & mask) == (name in required)
+                    for name, mask in modifier_masks.items()
+                )
+
+            def _darwin_intercept(event_type, event):
+                """Trigger only from a physical key event carrying the full chord."""
+                nonlocal _last_hotkey_time, _last_style_time, captured_darwin_vk
+                flags = CGEventGetFlags(event)
+                fn_active = bool(flags & kCGEventFlagMaskSecondaryFn)
+                if fn_active:
+                    pressed_modifiers.add("fn")
+                else:
+                    pressed_modifiers.discard("fn")
+
+                keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+                injected = bool(
+                    CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID)
+                )
+                current_key = (
+                    config_ref.get("hotkey_key", hotkey_key)
+                    if config_ref is not None else hotkey_key
+                )
+                current_modifiers = {
+                    str(value).lower()
+                    for value in (
+                        config_ref.get("hotkey_modifiers", hotkey_modifiers)
+                        if config_ref is not None else hotkey_modifiers
+                    )
+                }
+                current_style_key = (
+                    config_ref.get("style_toggle_key", style_toggle_key)
+                    if config_ref is not None else style_toggle_key
+                )
+                current_style_modifiers = (
+                    config_ref.get("style_toggle_modifiers", style_toggle_modifiers)
+                    if config_ref is not None else style_toggle_modifiers
+                ) or []
+                if _darwin_virtual_keycode(current_key) is None:
+                    current_key, current_modifiers = 57, {"fn"}
+                if current_style_key and _darwin_virtual_keycode(current_style_key) is None:
+                    current_style_key, current_style_modifiers = 28, {"fn"}
+
+                record_matches = _raw_chord_matches(
+                    keycode, current_key, current_modifiers, flags
+                )
+                style_matches = _raw_chord_matches(
+                    keycode, current_style_key, current_style_modifiers, flags
+                )
+                if event_type == kCGEventKeyDown and captured_darwin_vk is not None:
+                    consumed_by_capture = captured_darwin_vk == keycode
+                    captured_darwin_vk = None
+                    if consumed_by_capture:
+                        return event
+                if injected:
+                    return event
+                if event_type == kCGEventKeyDown and (record_matches or style_matches):
+                    suppressed_keycodes.add(int(keycode))
+                    now = time.time()
+                    if record_matches and "record" not in active_actions:
+                        active_actions.add("record")
+                        if now - _last_hotkey_time >= DEBOUNCE_SECONDS:
+                            _last_hotkey_time = now
+                            log("🎯 Hotkey activated! (physical macOS chord)")
+                            event_queue.put((EventType.HOTKEY_PRESSED, None))
+                    if style_matches and "style" not in active_actions:
+                        active_actions.add("style")
+                        if now - _last_style_time >= DEBOUNCE_SECONDS:
+                            _last_style_time = now
+                            log("✎ Style toggle activated! (physical macOS chord)")
+                            event_queue.put((EventType.STYLE_TOGGLE, None))
+                    return None
+                if event_type == kCGEventKeyUp and int(keycode) in suppressed_keycodes:
+                    suppressed_keycodes.discard(int(keycode))
+                    return None
+                return event
+
+            listener_kwargs["darwin_intercept"] = _darwin_intercept
+        except Exception as exc:
+            log(f"⚠️ macOS hotkeys disabled: physical-event verification unavailable ({exc})")
+
+    listener = keyboard.Listener(
+        on_press=on_press,
+        on_release=on_release,
+        **listener_kwargs,
+    )
     listener.start()
 
     print(f"[Hotkey] pynput listener started, waiting for: {get_key_name(target_key)}", flush=True)
     log("🎧 Cross-platform hotkey listener active (pynput)")
     
+    secure_input_on = False
+    win_ticks, elevated_front = 0, False  # Windows: elevated-foreground warning state
     try:
-        while not stop_event.is_set():
+        while not stop_event.is_set() and not (
+            restart_event is not None and restart_event.is_set()
+        ):
+            if sys.platform == "darwin":
+                secure_now = _darwin_secure_input_enabled()
+                if secure_now != secure_input_on:
+                    secure_input_on = secure_now
+                    if secure_now:
+                        owner = _darwin_secure_input_owner()
+                        log("⚠ macOS Secure Input is on"
+                            + (f" (held by {owner})" if owner else "")
+                            + " — keystrokes are hidden from every app, so the hotkey "
+                            "can't work until it's released (leave the password field, "
+                            "or turn off Terminal ▸ Secure Keyboard Entry).")
+                    else:
+                        log("✓ macOS Secure Input released — hotkey active again")
+                # Aqua can occasionally omit a key-up across sleep/wake or an
+                # event-tap restart. Reconcile our repeat-suppression latches
+                # against Quartz's physical state so one lost release cannot
+                # disable only that chord for the rest of the process.
+                current_record_code = (
+                    config_ref.get("hotkey_key", hotkey_key)
+                    if config_ref is not None else hotkey_key
+                )
+                current_style_code = (
+                    config_ref.get("style_toggle_key", style_toggle_key or 0)
+                    if config_ref is not None else (style_toggle_key or 0)
+                )
+                if (
+                    "record" in active_actions
+                    and not _darwin_key_pressed(current_record_code)
+                ):
+                    active_actions.discard("record")
+                if solo_gesture.is_down and (
+                    not _solo_target_active()
+                    or not _darwin_key_pressed(current_record_code)
+                ):
+                    # Lost key-up, or the hotkey changed mid-gesture: end it so
+                    # a push-to-talk recording cannot run on forever.
+                    solo_gesture.release_target()
+                if (
+                    "style" in active_actions
+                    and not _darwin_key_pressed(current_style_code)
+                ):
+                    active_actions.discard("style")
+                if not getattr(listener, "running", True):
+                    raise RuntimeError("macOS event tap stopped")
+            elif sys.platform == "win32":
+                win_ticks += 1
+                if win_ticks % 10 == 0:  # once a second: an elevated app in front
+                    elevated, exe = _win32_foreground_elevated()
+                    if elevated is not None and elevated != elevated_front:
+                        elevated_front = elevated
+                        if elevated:
+                            log("⚠ " + (exe or "The app in front") + " runs as administrator — "
+                                "Windows hides its keystrokes from Aura and blocks typing into "
+                                "it, so the hotkey can't work there. Switch to another window, "
+                                "or run Aura as administrator too.")
+                        else:
+                            log("✓ Hotkey active again (the administrator app is no longer in front)")
+                # Lost key-up repair (the Mac reconciles against Quartz state).
+                current_record_code = (
+                    config_ref.get("hotkey_key", hotkey_key)
+                    if config_ref is not None else hotkey_key
+                )
+                current_style_code = (
+                    config_ref.get("style_toggle_key", style_toggle_key or 0)
+                    if config_ref is not None else (style_toggle_key or 0)
+                )
+                if "record" in active_actions and _win32_key_pressed(current_record_code) is False:
+                    active_actions.discard("record")
+                if solo_gesture.is_down and (
+                    not _solo_target_active()
+                    or _win32_key_pressed(current_record_code) is False
+                ):
+                    # Lost Right Ctrl/Alt release (lock screen, UAC) or the hotkey
+                    # changed mid-gesture: end it so push-to-talk can't run on.
+                    solo_gesture.release_target()
+                if "style" in active_actions and _win32_key_pressed(current_style_code) is False:
+                    active_actions.discard("style")
             time.sleep(0.1)
     finally:
         # DELIBERATELY no liveness monitoring here. Watching the inner listener

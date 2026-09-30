@@ -637,6 +637,8 @@ def test_normal_ci_keeps_cached_quality_platform_smoke_and_cancels_stale_pushes(
     platform_job = _workflow_job_body("platform-smoke")
     assert "runs-on: [self-hosted, macOS, ARM64, aura-macos]" in platform_job
     assert "python scripts/platform_smoke.py --expected darwin" in platform_job
+    assert "python -m pytest tests/" in platform_job
+    assert "packaging/macos/constraints.txt" in platform_job
 
 
 def test_model_pin_drift_is_scheduled_and_only_pushes_for_pin_surfaces():

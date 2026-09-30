@@ -37,11 +37,18 @@ retain their native-platform gates. A Linux-only manual run does not prove
 Windows/macOS compatibility. `develop` and the older polish branch retain their
 branch-specific CI jobs and do not expose the `platforms` input.
 
-As of 2026-09-30, Mini-inf's Linux Quality job is verified (2,533 tests passed
-on the initial migration candidate). Native Windows is not registered, the Mac
-runner is offline pending capacity acceptance, and no `aura-build` runner is
-enabled. Those jobs queue; they never fall back to hosted execution. Publishing
-this routing change is not installer or application-release signoff.
+The Linux Quality job is verified on the integrated application. Native and
+packaging runners require the fleet owner's capacity acceptance before intake;
+query the runner inventory above for current availability. Ineligible jobs
+queue and never fall back to hosted execution. Publishing routing changes is
+not installer or application-release signoff.
+
+Native Mac and Windows compilation passes `CMAKE_BUILD_PARALLEL_LEVEL`
+explicitly to CMake; an unset or empty value defaults to two build jobs. The
+workflows currently set two. This prevents packaging from selecting every host
+CPU or overriding the configured limit with the build tool's default. Build
+parallelism is a workload setting, not an aggregate CPU or RAM enforcement
+boundary; the runner owner's host supervision still supplies those limits.
 
 ## Routine validation
 
@@ -52,6 +59,34 @@ self-hosted `Quality` job. Linux jobs select any available machine with the
 - the runtime-breaking Ruff rules;
 - `scripts/verify_structure.py`;
 - the non-UI/non-network pytest suite and coverage upload.
+
+The native macOS check runs the same automated test selection, in addition to
+the platform contract smoke, using the candidate's pinned Python 3.12.10 and
+macOS constraints. Windows also runs the suite and contract smoke, followed by
+the separate installer candidate workflow on pull requests. Passing Linux
+alone is insufficient to merge shared application changes to Main.
+
+The Mac runner owner provisions the Python.org 3.12.10 ARM64 framework and
+registers its interpreter at
+`$RUNNER_TOOL_CACHE/Python/3.12.10/arm64/bin/python3`. Mac CI, candidate and release
+workflows use that interpreter directly, verify its exact version and
+architecture, check the Tk 8.6 bindings and headless Tcl runtime (8.6.16+ within
+8.6), and create a
+fresh job virtualenv. A missing or incompatible interpreter stops the job;
+workflows never install a system Python or change host permissions. These
+headless checks do not replace the packaged application's native UI checks.
+We avoid `actions/setup-python` on Mac because its non-relocatable downloads
+require `/Users/runner/hostedtoolcache`, regardless of the runner's own cache.
+See its [self-hosted macOS requirements](https://github.com/actions/setup-python/blob/v7/docs/advanced-usage.md#macos).
+
+Native Keychain tests create private temporary databases and bind every native
+query to its test database. They do not require the runner's default Keychain
+to be writable or unlocked. The fixture checks that the default Keychain and
+search list stay unchanged, exercises real add/read/update/delete operations,
+and deletes the test database on normal teardown, including test failures.
+If the process is forcibly killed, the runner owner may remove only that
+attempt's recorded temporary test files after all its processes have exited.
+Do not unlock or reconfigure a developer's login Keychain to make CI pass.
 
 New pushes cancel older in-progress runs on the same ref. Model-pin drift is a
 separate weekly/manual metadata check that also runs only when its four pin
@@ -116,7 +151,7 @@ the job workspace; a workflow must never install or update it.
 | --- | --- | --- |
 | mini-inf-aura | `aura-linux` | 2 CPU cores, 6 GiB RAM |
 | mini-infinity-aura-linux (old WSL; disabled) | pending shared-capacity integration | stopped |
-| Native Windows | `aura-windows` | not registered yet |
+| Native Windows | `aura-windows` after admission | one bounded native job at a time |
 | mac-studio-aura (offline) | `aura-macos` | peak-model admission required |
 
 Linux runners use a dedicated `aurarunner` account and systemd service caps.

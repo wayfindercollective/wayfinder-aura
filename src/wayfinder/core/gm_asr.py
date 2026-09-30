@@ -56,12 +56,14 @@ def _pick_light_model_path(user_model_path: str, explicit: str) -> str | None:
         search_dirs.append("/app/share/whisper-models")
     # Common download locations (best-effort)
     home = os.path.expanduser("~")
+    from wayfinder.utils.platform import get_whisper_host_model_dirs
+
     extras = [
         os.path.join(home, ".local", "share", "wayfinder-aura", "models"),
-        os.path.join(home, "whisper.cpp", "models"),
+        *(str(d) for d in get_whisper_host_model_dirs()),
     ]
-    # Flatpak downloads live in the persistent XDG_DATA_HOME dir (plus the
-    # pre-fix dirs); the sandbox's ~/.local/share and ~/whisper.cpp do not persist.
+    # Flatpak downloads must survive restart; Windows uses LocalAppData while
+    # retaining discovery of models downloaded into the legacy home folder.
     if IS_FLATPAK:
         extras.extend(str(d) for d in get_whisper_model_search_dirs(flatpak=True))
     for extra in extras:

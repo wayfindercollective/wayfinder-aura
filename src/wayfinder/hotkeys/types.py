@@ -16,6 +16,7 @@ class EventType(Enum):
     SHOW_WINDOW = auto()   # Tray "Open" — raise/restore the main window
     HIDE_WINDOW = auto()   # Tray / desktop action — hide main window to tray
     FORCE_RESET = auto()   # Tray "Reset" — unstick overlay / abort in-flight dictation
+    CANCEL_RECORDING = auto()  # Escape — discard the active capture without transcribing
     QUIT_APP = auto()      # Tray "Quit" — clean full shutdown
     HOTKEY_CAPTURED = auto()  # Settings "Detect" — next pressed key reported to the UI
     PORTAL_TRIGGERS = auto()  # portal reported the triggers the COMPOSITOR actually bound
@@ -27,4 +28,8 @@ class EventType(Enum):
     CHUNKED_TRANSCRIPTION_DONE = auto()  # All chunks transcribed
     LOG_MESSAGE = auto()  # Thread-safe log message (avoids Tk threading crash)
     SWITCH_TAB = auto()  # Dev/verification: switch main-window tab via socket ("tab:<id>")
+    INSPECT_UI = auto()  # Dev/verification: dump a tab's widget tree ("inspect:<id>")
+    UI_ZOOM = auto()  # Header zoom via socket ("zoom:in" / "zoom:out" / "zoom:reset")
     URL_CLIPBOARD_OFFER = auto()  # Failed browser open — copy the link to the clipboard on the Tk thread
+    UI_CALLBACK = auto()  # Internal worker completion marshalled onto the Tk thread
+    CHECK_UPDATES = auto()  # Windows tray "Check for Updates…" (control channel "update")

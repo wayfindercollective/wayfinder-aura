@@ -1909,8 +1909,12 @@ class TestServerModeDefaultAndFallback:
                "model_path": str(model)}
         assert isinstance(get_backend(cfg), WhisperServerBackend)
 
-    def test_get_backend_falls_back_to_cli_when_server_missing(self, tmp_path):
+    def test_get_backend_falls_back_to_cli_when_server_missing(self, tmp_path, monkeypatch):
         from wayfinder.core.transcriber import get_backend, WhisperCppBackend
+        # Host isolation: discovery must not find a developer's ~/whisper.cpp
+        # build (which has a whisper-server beside it).
+        import wayfinder.utils.runtime_assets as runtime_assets
+        monkeypatch.setattr(runtime_assets, "find_whisper_binary", lambda *_a, **_k: None)
         # Only whisper-cli exists, no whisper-server next to it.
         cli = tmp_path / "whisper-cli"
         cli.write_text("#!/bin/sh\n")
@@ -2003,6 +2007,9 @@ class TestServerModeDefaultAndFallback:
 
         monkeypatch.setattr(transcriber, "IS_FLATPAK", True)
         monkeypatch.setattr(transcriber, "_existing_file", lambda path: path == "/app/bin/whisper-cli")
+        # Host isolation: a developer's ~/whisper.cpp build must not win discovery.
+        import wayfinder.utils.runtime_assets as runtime_assets
+        monkeypatch.setattr(runtime_assets, "find_whisper_binary", lambda *_a, **_k: None)
 
         assert transcriber._resolve_whisper_cli_binary("") == "/app/bin/whisper-cli"
 
@@ -2111,13 +2118,16 @@ class TestServerReuseIdentity:
 
     MODEL = "/models/ggml-base.en.bin"
 
-    def _set_state(self, alive=True, model=MODEL, gpu=False):
+    def _set_state(self, alive=True, model=MODEL, gpu=False, threads=4):
         from wayfinder.core.transcriber import WhisperServerBackend
         proc = MagicMock()
         proc.poll.return_value = None if alive else 1
         WhisperServerBackend._server_process = proc
         WhisperServerBackend._server_model_path = model
         WhisperServerBackend._server_use_gpu = gpu
+        # macOS/Windows also match -t (the backend's default is 4); set it
+        # rather than inherit whatever an earlier test left on the class.
+        WhisperServerBackend._server_threads = threads
 
     def _backend(self, gpu=False, model=MODEL):
         from wayfinder.core.transcriber import WhisperServerBackend
@@ -2128,6 +2138,7 @@ class TestServerReuseIdentity:
         WhisperServerBackend._server_process = None
         WhisperServerBackend._server_model_path = ""
         WhisperServerBackend._server_use_gpu = None
+        WhisperServerBackend._server_threads = None
 
     def test_same_model_same_mode_is_reusable(self):
         self._set_state(gpu=False)
@@ -2172,3 +2183,151 @@ class TestServerReuseIdentity:
         WhisperServerBackend._stop_server_internal()
         assert WhisperServerBackend._server_model_path == ""
         assert WhisperServerBackend._server_use_gpu is None
+
+
+class TestServerAdoptionPerPlatform:
+    """Linux keeps main's reuse of its own running server; macOS never adopts
+    (its supervised child cannot outlive the app, and adopting an unowned
+    listener would hand it recorded audio)."""
+
+    @pytest.mark.parametrize("platform_name, expected", [
+        ("linux", 8178), ("darwin", 8179), ("win32", 8179)])
+    def test_occupied_port_reuse(self, monkeypatch, platform_name, expected):
+        import socket as socket_module
+
+        import wayfinder.core.transcriber as transcriber
+
+        class FakeSocket:
+            def __init__(self, *a, **k):
+                pass
+
+            def connect_ex(self, address):
+                return 0 if address[1] == 8178 else 1  # only 8178 is occupied
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(transcriber.sys, "platform", platform_name)
+        monkeypatch.setattr(socket_module, "socket", FakeSocket)
+        backend = transcriber.WhisperServerBackend.__new__(transcriber.WhisperServerBackend)
+        backend.port = 8178
+        monkeypatch.setattr(backend, "_is_our_server", lambda port, timeout=2: True, raising=False)
+
+        assert backend._find_available_port() == expected
+
+
+class TestServerReuseThreadsOnMacOS:
+    """The resident server's -t is fixed at spawn; macOS respawns when it changes."""
+
+    @pytest.mark.parametrize("platform_name, expected", [
+        ("darwin", False), ("win32", False), ("linux", True)])
+    def test_thread_change_breaks_reuse_only_on_macos(self, monkeypatch, platform_name, expected):
+        import wayfinder.core.transcriber as transcriber
+
+        class Alive:
+            def poll(self):
+                return None
+
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(transcriber.sys, "platform", platform_name)
+        monkeypatch.setattr(cls, "_server_process", Alive())
+        monkeypatch.setattr(cls, "_server_model_path", "/m.bin")
+        monkeypatch.setattr(cls, "_server_use_gpu", False)
+        monkeypatch.setattr(cls, "_server_threads", 4)
+        backend = cls.__new__(cls)
+        backend.model_path, backend.use_gpu, backend.threads = "/m.bin", False, 12
+
+        assert backend._server_reusable() is expected
+
+
+
+class TestMacServerRequestFields:
+    """macOS asks whisper-server for text only (no per-token timestamps)."""
+
+    def _body_for(self, platform, sample_audio_file, monkeypatch):
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from wayfinder.core import transcriber
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        monkeypatch.setattr(transcriber.sys, "platform", platform)
+        WhisperServerBackend._server_disabled = False
+        backend = WhisperServerBackend(use_gpu=False, timeout=5)
+        resp = MagicMock()
+        resp.read.return_value = _json.dumps({"text": "hello"}).encode()
+        urlopen = MagicMock(return_value=resp)
+
+        def fake_start(*a, **k):
+            WhisperServerBackend._server_port = 8178
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(WhisperServerBackend, "_start_server", side_effect=fake_start), \
+             patch("urllib.request.urlopen", urlopen):
+            backend.transcribe(str(sample_audio_file))
+        return urlopen.call_args[0][0].data
+
+    def test_macos_disables_timestamps(self, sample_audio_file, monkeypatch):
+        body = self._body_for("darwin", sample_audio_file, monkeypatch)
+        assert b'name="no_timestamps"\r\n\r\ntrue' in body
+
+    def test_windows_disables_timestamps(self, sample_audio_file, monkeypatch):
+        body = self._body_for("win32", sample_audio_file, monkeypatch)
+        assert b'name="no_timestamps"\r\n\r\ntrue' in body
+
+    def test_linux_request_is_unchanged(self, sample_audio_file, monkeypatch):
+        body = self._body_for("linux", sample_audio_file, monkeypatch)
+        assert b"no_timestamps" not in body
+
+
+class TestGreedyDecoding:
+    """docs/EVAL-2026-09-24.md: beam search never beat greedy on whisper.cpp."""
+
+    def test_greedy_even_when_a_saved_config_carries_old_beam_keys(self):
+        from wayfinder.core.transcriber import whisper_decoding
+        assert whisper_decoding({}) == (1, 1)
+        assert whisper_decoding({"accuracy_mode": "high", "beam_size": 8, "best_of": 5}) == (1, 1)
+
+    @pytest.mark.parametrize("value,expected", [
+        (5, (5, 5)), (8, (8, 5)), (12, (8, 5)), (0, (1, 1)), (-3, (1, 1)), ("x", (1, 1)), (None, (1, 1)),
+    ])
+    def test_hidden_override_is_clamped_to_what_whisper_cpp_accepts(self, value, expected):
+        from wayfinder.core.transcriber import whisper_decoding
+        assert whisper_decoding({"whisper_beam_size": value}) == expected
+
+    @pytest.mark.parametrize("server_mode", [True, False])
+    def test_server_and_cli_backends_get_greedy(self, server_mode):
+        from wayfinder.core.transcriber import get_backend
+        cfg = {"transcription_backend": "whisper_cpp", "accuracy_mode": "high",
+               "beam_size": 8, "best_of": 5, "whisper_server_mode": server_mode}
+        backend = get_backend(cfg)
+        assert (backend.beam_size, backend.best_of) == (1, 1)
+
+
+class TestServerRequestDecoding(TestMacServerRequestFields):
+    """Decoding params ride on every request, so a change needs no restart."""
+
+    @pytest.mark.parametrize("platform", ["darwin", "linux"])
+    def test_every_request_carries_beam_and_best_of(self, platform, sample_audio_file, monkeypatch):
+        body = self._body_for(platform, sample_audio_file, monkeypatch)
+        assert b'name="beam_size"\r\n\r\n' in body
+        assert b'name="best_of"\r\n\r\n' in body
+
+
+class TestSoundAnnotations:
+    """base.en typed "[sound of wind]" on noise-only audio (beam eval, 2026-09-24)."""
+
+    @pytest.mark.parametrize("raw,clean", [
+        ("[sound of wind]", ""),
+        ("Hello (sound of the rain) there.", "Hello there."),
+        ("Ship it [audience noise] now", "Ship it now"),
+    ])
+    def test_noise_annotations_with_joiners_are_removed(self, raw, clean):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        assert clean_whisper_artifacts(raw) == clean
+
+    @pytest.mark.parametrize("text", [
+        "See [of course] here", "I said (and the wind) okay", "Tag [sound of] stays",
+    ])
+    def test_dictated_brackets_survive(self, text):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        assert clean_whisper_artifacts(text) == text

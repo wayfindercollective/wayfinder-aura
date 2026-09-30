@@ -1,15 +1,18 @@
 """The Settings hotkey dropdown must only offer keys the listener can match.
 
-Both tables are read as source (no pynput import, no Tk), so this runs
-anywhere. ScrollLock and Pause shipped in the dropdown without ever being in
-``_raw_evdev_map``: selecting either produced a hotkey that silently never
-fired, which is indistinguishable from a broken trigger chain.
+The full option and mapping tables are checked from source; platform filtering
+is also exercised through the pure helper. ScrollLock and Pause once shipped
+in the dropdown without ever being in ``_raw_evdev_map``: selecting either
+produced a hotkey that silently never fired.
 """
 
 import ast
+import sys
 from pathlib import Path
 
 import pytest
+
+from wayfinder_main import hotkey_key_options
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -87,7 +90,7 @@ def test_dropdown_keys_survive_the_runtime_none_filter():
     """
     unusable = {
         name: code
-        for name, code in _dropdown_codes().items()
+        for name, code in hotkey_key_options(sys.platform).items()
         if code not in MOUSE_BUTTON_CODES and code not in EVDEV_TO_PYNPUT
     }
 
@@ -101,10 +104,16 @@ def test_dropdown_keys_survive_the_runtime_none_filter():
 def test_dropdown_keys_round_trip_for_detect_capture():
     """Settings -> Detect maps pynput key -> evdev code, so a one-way entry
     would bind the hotkey but silently fail to capture it."""
-    for name, code in _dropdown_codes().items():
+    for name, code in hotkey_key_options(sys.platform).items():
         if code in MOUSE_BUTTON_CODES:
             continue
         key = EVDEV_TO_PYNPUT.get(code)
         assert PYNPUT_TO_EVDEV.get(key) == code, (
             f"{name} ({code}) does not round-trip: Detect cannot capture it"
         )
+
+
+def test_macos_dropdown_filters_linux_mouse_and_unavailable_keyboard_codes():
+    options = hotkey_key_options("darwin", available_pynput_codes={57, 28, 67})
+
+    assert options == {"Space": 57, "Enter": 28, "F9": 67}

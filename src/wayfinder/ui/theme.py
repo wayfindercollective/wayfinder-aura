@@ -42,7 +42,8 @@ COLORS: dict[str, str] = {
     # Legacy state color aliases for compatibility
     "accent_green": "#5DD4A8",      # Muted mint - success
     "accent_red": "#E8707F",        # Muted rose - recording
-    "accent_yellow": "#E5AC2A",     # Muted gold - processing
+    "accent_yellow": "#E5AC2A",     # Muted gold - processing / Ultra
+    "accent_yellow_hover": "#F0C24D",  # Lighter gold on hover (Ultra Buy Now)
     "accent_blue": "#4682DC",       # Brand blue (same as primary accent)
     
     # Text hierarchy - calculated for dark bg readability

@@ -1,0 +1,227 @@
+"""Headless tests for the macOS (Aqua) path of the pure-PIL hero renderer.
+
+No Tk — imports ``wayfinder.ui.hero_render`` directly (PYTHONPATH=src). Covers
+mode/size, determinism, edge-fade polarity, morph amplitude spread, NaN/inf
+robustness, colour plumbing, cache memoization, and a per-frame perf guard.
+"""
+import math
+import time
+
+import pytest
+
+from wayfinder.ui import hero_render as hr
+
+W, H = 640, 64
+ROSE = (0xE8, 0x70, 0x7F)
+INDIGO = (0x7B, 0x8B, 0xD9)
+BG = hr.BG_CARD
+
+
+@pytest.fixture(autouse=True)
+def _macos_aqua_path(monkeypatch):
+    """These pin the Aqua variant (macOS non-Metal fallback)."""
+    monkeypatch.setattr(hr.sys, "platform", "darwin")
+    hr._HERO_CACHE.clear()
+
+
+def _dist(a, b):
+    return math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3)))
+
+
+def _col(img, x):
+    """Mean colour of column x."""
+    px = img.load()
+    _w, h = img.size
+    n = h
+    r = g = b = 0
+    for y in range(h):
+        pr, pg, pb = px[x, y]
+        r += pr; g += pg; b += pb
+    return (r / n, g / n, b / n)
+
+
+def test_mode_and_size():
+    img = hr.render_hero_wave(W, H, 1.0, 0.5, 1.0, ROSE)
+    assert img.mode == "RGB"
+    assert img.size == (W, H)
+
+
+def test_determinism():
+    caches = hr.get_hero_caches(W, H, ROSE, BG)
+    a = hr.render_hero_wave(W, H, 2.5, 0.4, 1.0, ROSE, caches=caches)
+    b = hr.render_hero_wave(W, H, 2.5, 0.4, 1.0, ROSE, caches=caches)
+    assert a.tobytes() == b.tobytes()
+
+
+def test_edge_columns_are_background():
+    """Edge columns fade completely to the flat background."""
+    img = hr.render_hero_wave(W, H, 1.3, 0.9, 1.0, ROSE)
+    px = img.load()
+    for x in (0, W - 1):
+        for y in range(H):
+            assert px[x, y] == BG, f"edge col {x} row {y} = {px[x, y]} != bg"
+
+
+def test_top_row_has_no_hard_separator_line():
+    img = hr.render_hero_wave(W, H, 1.3, 0.9, 1.0, ROSE)
+    px = img.load()
+    assert all(px[x, 0] == BG for x in range(W))
+
+
+def test_center_differs_from_background():
+    """The ribbon paints meaningfully non-bg colour down the center column."""
+    img = hr.render_hero_wave(W, H, 1.3, 0.9, 1.0, ROSE)
+    assert _dist(_col(img, W // 2), BG) > 20.0
+
+
+def test_morph_increases_vertical_spread():
+    """morph=1 (active) spreads the ribbon further from center than morph=0
+    (idle), measured via non-bg extent."""
+    def spread(morph):
+        img = hr.render_hero_wave(W, H, 1.3, 0.6, morph, ROSE)
+        px = img.load()
+        ys = []
+        for y in range(H):
+            if _dist(px[W // 2, y], BG) > 20.0:
+                ys.append(y)
+        return (max(ys) - min(ys)) if ys else 0
+
+    assert spread(1.0) >= spread(0.0)
+
+
+def test_no_hard_clipping_at_max_level():
+    """At full energy (level=1, morph=1) the soft limiter keeps the ribbon off
+    the strip bounds: no non-bg pixel in the top/bottom rows across several
+    animation phases."""
+    for t in (0.0, 1.3, 2.9, 4.7, 7.1):
+        img = hr.render_hero_wave(W, H, t, 1.0, 1.0, ROSE)
+        px = img.load()
+        for y in (0, 1, 2, H - 2, H - 1):
+            for x in range(W):
+                assert px[x, y] == BG, (
+                    f"t={t}: ink at ({x},{y}) = {px[x, y]} — ribbon touches the "
+                    "strip bounds (hard clipping)"
+                )
+
+
+def test_soft_limit_preserves_idle_shape():
+    """The limiter's knee sits above the idle ribbon's max displacement, so the
+    approved idle look is untouched at low energy — and idle stays well clear of
+    the bounds too."""
+    # At morph=0 the max centerline displacement (~1.6 * 0.35 * 0.42h ≈ 15px at
+    # h=64) is below the knee (~16.8px), so soft_limit is identity there.
+    img = hr.render_hero_wave(W, H, 3.7, 0.0, 0.0, ROSE)
+    px = img.load()
+    # sanity: the idle ribbon still paints (limiter didn't crush it)
+    assert _dist(_col(img, W // 2), BG) > 5.0
+    # and it never reaches the guard rows either
+    for y in (1, 2, H - 2, H - 1):
+        for x in range(W):
+            assert px[x, y] == BG
+
+
+def test_nan_inf_do_not_crash():
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        img = hr.render_hero_wave(W, H, bad, bad, bad, ROSE)
+        assert img.size == (W, H)
+        # produced a valid image, no exception
+        assert img.mode == "RGB"
+
+
+def test_color_plumbing_rose_vs_indigo():
+    """The ribbon colour tracks the state colour argument."""
+    rose_img = hr.render_hero_wave(W, H, 1.3, 0.9, 1.0, ROSE)
+    indigo_img = hr.render_hero_wave(W, H, 1.3, 0.9, 1.0, INDIGO)
+    rc = _col(rose_img, W // 2)
+    ic = _col(indigo_img, W // 2)
+    # center column clearly differs between the two colours
+    assert _dist(rc, ic) > 15.0
+    # rose is redder-than-blue; indigo is bluer-than-red
+    assert rc[0] - rc[2] > ic[0] - ic[2]
+
+
+def test_stroke_scale_increases_wave_ink_without_changing_canvas_size():
+    normal = hr.render_hero_wave(W, H, 1.3, 0.6, 1.0, ROSE, stroke_scale=1.0)
+    scaled = hr.render_hero_wave(W, H, 1.3, 0.6, 1.0, ROSE, stroke_scale=1.25)
+
+    def ink_pixels(image):
+        return sum(
+            1
+            for pixel in image.getdata()
+            if _dist(pixel, BG) > 8.0
+        )
+
+    assert normal.size == scaled.size == (W, H)
+    assert ink_pixels(scaled) > ink_pixels(normal)
+
+
+def test_cache_memoization_and_mask_size():
+    c1 = hr.get_hero_caches(W, H, ROSE, BG)
+    c2 = hr.get_hero_caches(W, H, ROSE, BG)
+    assert c1 is c2  # same object returned (memoized)
+    assert c1["mask"].size == (W, H)
+    assert c1["mask"].mode == "L"
+    assert c1["bg_flat"].size == (W, H)
+
+
+def test_point_count_is_bounded_and_capped():
+    """Structural non-scaling invariant (the ship-safe replacement for the old
+    wall-clock ``test_perf_constant_at_wide_width``, which flaked under CI/Deck
+    load). Render cost is dominated by the polyline sample count; the renderer
+    holds it at the 640px mock density for narrow windows and caps it for wide
+    ones, so cost never scales unbounded with width. Asserting the count directly
+    catches a per-pixel-sampling regression without a load-sensitive timing budget."""
+    # At/under the 640px reference width the count is the constant mock density.
+    assert hr._N_POINTS_MIN == 109
+    assert hr._n_points(640) == hr._N_POINTS_MIN
+    assert hr._n_points(320) == hr._N_POINTS_MIN  # never below the mock density
+    # Wide windows raise the count but never past the hard cap.
+    assert hr._N_POINTS_MAX == 240
+    assert hr._n_points(2180) == hr._N_POINTS_MAX
+    assert hr._n_points(10000) == hr._N_POINTS_MAX  # ceiling holds at any width
+    # Monotonic non-decreasing in width, always within [MIN, MAX].
+    prev = 0
+    for w in range(160, 4000, 37):
+        n = hr._n_points(w)
+        assert hr._N_POINTS_MIN <= n <= hr._N_POINTS_MAX
+        assert n >= prev
+        prev = n
+
+
+@pytest.mark.perf
+def test_perf_under_budget():
+    """100 renders at 640x64 must average < 5ms/frame (generous CI margin over
+    the ~1.5ms target — catches a joint='curve'-class regression).
+
+    ``perf``-marked: wall-clock, load-sensitive — excluded from the gating run,
+    run locally/nightly. The structural guard above covers CI."""
+    caches = hr.get_hero_caches(W, H, ROSE, BG)
+    # warmup
+    for _ in range(10):
+        hr.render_hero_wave(W, H, 1.0, 0.5, 1.0, ROSE, caches=caches)
+    n = 100
+    t0 = time.perf_counter()
+    for i in range(n):
+        hr.render_hero_wave(W, H, i * 0.05, 0.5, 1.0, ROSE, caches=caches)
+    mean_ms = (time.perf_counter() - t0) / n * 1000.0
+    assert mean_ms < 5.0, f"hero_render mean {mean_ms:.3f} ms/frame >= 5ms budget"
+
+
+@pytest.mark.perf
+def test_perf_constant_at_wide_width():
+    """Render cost must NOT scale with window width: waves are sampled at a
+    fixed point count in 640px reference space (live-measured regression: per-
+    pixel sampling at a 2180px window cost ~2.4ms/frame = +5% idle CPU @30fps).
+
+    ``perf``-marked: wall-clock, load-sensitive — excluded from the gating run.
+    ``test_point_count_is_bounded_and_capped`` is the structural CI guard."""
+    ww = 2180
+    caches = hr.get_hero_caches(ww, H, ROSE, BG)
+    for _ in range(10):
+        hr.render_hero_wave(ww, H, 1.0, 0.5, 1.0, ROSE, caches=caches)
+    n = 100
+    t0 = time.perf_counter()
+    for i in range(n):
+        hr.render_hero_wave(ww, H, i * 0.05, 0.5, 1.0, ROSE, caches=caches)
+    mean_ms = (time.perf_counter() - t0) / n * 1000.0
+    assert mean_ms < 5.0, f"wide hero_render mean {mean_ms:.3f} ms/frame >= 5ms budget"

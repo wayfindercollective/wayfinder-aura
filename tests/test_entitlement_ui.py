@@ -70,6 +70,7 @@ def test_ultra_style_selection_persists_and_updates_ui(monkeypatch):
         config={"output_tone": "minimal", "prompt": "old"},
         log=lambda _message: None,
         _apply_style_to_ui=applied.append,
+        _sync_cleanup_residency=lambda: None,
     )
     monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
 
@@ -351,7 +352,8 @@ def test_base_tooltip_is_candid_about_free_default_accuracy():
 
     assert "free default" in tip
     assert "fast" in tip
-    assert "inaccurate" in tip
+    assert "less accurate" in tip
+    assert "43% fewer mistakes" in tip  # the measured gap, not a vague claim
 
 
 def test_benchmark_can_compare_gpu_while_free_pipeline_remains_cpu():
@@ -416,7 +418,7 @@ def test_root_tooltip_retires_legacy_cold_benchmarks():
     )
 
     assert "0.6" not in tip and "0.8" not in tip
-    assert "Run benchmark" in tip
+    assert "Run Benchmark" in tip
 
 
 def test_successful_activation_replaces_form_with_active_state():
@@ -434,6 +436,8 @@ def test_successful_activation_replaces_form_with_active_state():
         _render_license_tile=lambda: events.append("license"),
         _show_ultra_banner=lambda: events.append("banner"),
         _write_status_breadcrumb=lambda: events.append("breadcrumb"),
+        after=lambda _ms, _fn: events.append("permissions-check"),
+        show_permissions_setup=lambda: None,
     )
 
     with patch("wayfinder.license.store_license", return_value=result), patch(
@@ -443,7 +447,10 @@ def test_successful_activation_replaces_form_with_active_state():
 
     assert app.feature_gate is gate
     assert feedback.options["text"] == "Activating…"
-    assert events[-4:] == ["header", "entitlements", "license", "banner"]
+    ui = [e for e in events if e != "permissions-check"]
+    assert ui[-4:] == ["header", "entitlements", "license", "banner"]
+    # macOS offers the permissions checklist after the gold banner; never elsewhere.
+    assert ("permissions-check" in events) == bool(wayfinder_main.IS_MACOS)
     # Entitlements changed, so locked_tabs must be republished — a stale
     # breadcrumb would misreport the Style tab as locked after activation.
     assert "breadcrumb" in events
@@ -528,6 +535,34 @@ class _Destroyable:
 
     def destroy(self):
         self.destroyed = True
+
+    def place_forget(self):
+        pass
+
+
+def test_premium_prompt_dismissal_is_idempotent_and_keeps_root_bindings():
+    """Dismissal never unbinds <Escape>: on Python < 3.11.7 unbind(seq, funcid)
+    drops every root <Escape> binding, including the dropdown-close one."""
+    banner = _Destroyable()
+    unbound = []
+    app = SimpleNamespace(
+        _premium_banner=banner,
+        _premium_prompt_open=True,
+        unbind=lambda *args: unbound.append(args),
+        _write_status_breadcrumb=lambda: None,
+    )
+    app._dismiss_premium_prompt = lambda _event=None: wayfinder_main.WayfinderApp._dismiss_premium_prompt(app)
+
+    assert wayfinder_main.WayfinderApp._dismiss_premium_prompt(app) == "break"
+    assert banner.destroyed
+    assert app._premium_banner is None
+    assert app._premium_prompt_open is False
+    assert unbound == []
+
+    # A second exit route (for example Escape after Maybe later) is harmless,
+    # and the permanent Escape handler is inert once the panel is closed.
+    assert wayfinder_main.WayfinderApp._dismiss_premium_prompt(app) == "break"
+    assert wayfinder_main.WayfinderApp._on_premium_escape(app) is None
 
 
 def test_refresh_entitlement_ui_retires_visible_upsell_surfaces():

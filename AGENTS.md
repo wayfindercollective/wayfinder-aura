@@ -44,12 +44,14 @@ See also `CLAUDE.md` (same rule) and notices in `src/wayfinder/license.py` / `sr
 ## Project Overview
 
 **Wayfinder Aura** is a local voice dictation application. Linux is the
-production baseline, macOS is an active port, and Windows is planned. Read
-`docs/PLATFORM-DEVELOPMENT.md` before changing platform-sensitive code.
+production baseline; macOS and Windows have native candidate builds. Read
+`docs/PLATFORM-DEVELOPMENT.md` before changing platform-sensitive code, and
+`docs/MACOS-PORT.md` for what the macOS port changes (and what it suggests
+for Linux/Windows).
 
 It:
 
-1. **Records audio** when the user presses the record hotkey (Ctrl+Alt+Space default)
+1. **Records audio** when the user presses the record hotkey (Right Option tap/hold on macOS, Right Alt tap/hold on Windows, Ctrl+Alt+Space on Linux)
 2. **Transcribes speech** using whisper.cpp or Faster-Whisper
 3. **Post-processes text** with an LLM (llama.cpp or cloud APIs)
 4. **Injects text** at the cursor position using a platform adapter
