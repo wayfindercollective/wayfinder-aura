@@ -68,6 +68,22 @@ def test_workflow_run_from_a_fork_is_refused():
     })
 
 
+def test_mac_admission_reserves_future_model_growth_before_ci():
+    capacity = load("mac-runner-supervisor")
+    gb = capacity.GIB
+    # The observed machine looks idle enough if only current usage is counted,
+    # but the model is entitled to grow to its configured 218 GiB ceiling.
+    assert capacity.spare_after_reserves(133 * gb, 88 * gb, 218 * gb) < capacity.CI_BUDGET
+    # A genuinely available machine still permits work after the same reserves.
+    assert capacity.spare_after_reserves(64 * gb, 218 * gb, 218 * gb) >= capacity.CI_BUDGET
+
+
+@pytest.mark.parametrize("used,maximum", [(219, 218), (-1, 218), (0, float("nan")), (None, 218)])
+def test_mac_admission_refuses_invalid_model_telemetry(used, maximum):
+    with pytest.raises(ValueError):
+        load("mac-runner-supervisor").spare_after_reserves(133, used, maximum)
+
+
 @pytest.mark.parametrize("head,expected", [("wayfindercollective/wayfinder-aura", 0), ("stranger/fork", 1)])
 def test_installed_hook_entrypoint_accepts_owned_pr_and_blocks_fork(tmp_path, head, expected):
     event = tmp_path / "event.json"

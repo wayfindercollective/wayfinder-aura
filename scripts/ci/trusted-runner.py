@@ -45,8 +45,8 @@ def main() -> int:
         spec = importlib.util.spec_from_file_location("mac_capacity", Path(__file__).with_name("mac-runner-supervisor.py"))
         capacity = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(capacity)
-        if capacity.headroom() < 40 * 1024**3:
-            print("::error::Mac CI needs 40 GiB headroom before accepting a job.")
+        if capacity.ci_headroom() < capacity.CI_BUDGET:
+            print("::error::Mac CI cannot borrow the model's peak budget or server/agent reserves.")
             return 1
     minimum = float(os.environ.get("AURA_MIN_FREE_GB", "2"))
     disk = Path(os.environ.get("RUNNER_TEMP", "."))

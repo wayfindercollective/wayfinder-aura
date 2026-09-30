@@ -2,19 +2,26 @@
 """Native Mac CI watchdog, installed beside (not inside) the runner checkout.
 
 macOS has no cgroup memory.max. This is a sampled stop limit, not a hard RAM
-reservation. A VM is required for a hard 20 GiB boundary. Never touch model or
+reservation. Model peak, server growth and a cloud agent take priority. Never touch model or
 desktop processes: the only signal target is our own runner process group.
 """
 from __future__ import annotations
 
 import os
+import json
+import math
 import re
 import signal
 import subprocess
 import sys
 import time
+import urllib.request
 
 GIB = 1024**3
+CI_BUDGET = 4 * GIB
+# Additional headroom beyond current server/process RSS: one cloud coding
+# agent, server growth, and an OS safety margin. Never borrow model headroom.
+PROTECTED_HEADROOM = 24 * GIB
 
 
 def headroom() -> int:
@@ -33,17 +40,30 @@ def group_rss(group: int) -> int:
                if len(row.split()) == 2 and int(row.split()[0]) == group)
 
 
+def spare_after_reserves(available: int, model_used: int, model_max: int) -> int:
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+           for v in (available, model_used, model_max)) or not 0 <= model_used <= model_max:
+        raise ValueError("Invalid model capacity telemetry")
+    return available - (model_max - model_used) - PROTECTED_HEADROOM
+
+
+def ci_headroom() -> int:
+    with urllib.request.urlopen("http://127.0.0.1:1236/api/status", timeout=5) as response:
+        status = json.load(response)
+    return spare_after_reserves(headroom(), status["model_memory_used"], status["model_memory_max"])
+
+
 def main() -> int:
     if sys.platform != "darwin" or len(sys.argv) < 2:
         raise SystemExit("Use on macOS with a runner command")
     while True:
         try:
-            ready = headroom() >= 40 * GIB and os.getloadavg()[0] < (os.cpu_count() or 1) * 0.8
+            ready = ci_headroom() >= CI_BUDGET and os.getloadavg()[0] < (os.cpu_count() or 1) * 0.8
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             ready = False
         if ready:
             break
-        print("Aura runner offline: waiting for 40 GiB headroom and CPU capacity", flush=True)
+        print("Aura runner offline: model peak, server and agent reserves leave insufficient CI capacity", flush=True)
         time.sleep(15)
     runner = subprocess.Popen(sys.argv[1:], start_new_session=True)
 
@@ -64,7 +84,9 @@ def main() -> int:
     try:
         while runner.poll() is None:
             try:
-                safe = headroom() >= 20 * GIB and group_rss(runner.pid) <= 20 * GIB
+                # Existing CI RSS is already deducted from host headroom.
+                rss = group_rss(runner.pid)
+                safe = rss <= CI_BUDGET and ci_headroom() >= CI_BUDGET - rss
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                 safe = False
             if not safe:

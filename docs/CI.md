@@ -72,9 +72,9 @@ the job workspace; a workflow must never install or update it.
 | Runner | Eligible jobs | Initial limits |
 | --- | --- | --- |
 | mini-inf-aura | `aura-linux` | 2 CPU cores, 6 GiB RAM |
-| mini-infinity-aura-linux (WSL) | `aura-linux`, `aura-build` | 2 CPU cores, 16 GiB RAM |
-| mini-infinity-aura-windows | `aura-windows` | one native Windows job; 2 build threads |
-| mac-studio-aura | `aura-macos` | one native Mac job; 2 build threads; low priority |
+| mini-infinity-aura-linux (old WSL; disabled) | pending shared-capacity integration | stopped |
+| Native Windows | `aura-windows` | not registered yet |
+| mac-studio-aura (offline) | `aura-macos` | peak-model admission required |
 
 Linux runners use a dedicated `aurarunner` account and systemd service caps.
 The WSL builder uses a private **rootless** Docker daemon, not membership in the
@@ -82,19 +82,36 @@ privileged Docker group. AppImage containers additionally cap CPU at 2 and RAM
 at 12 GiB. Host package installation is an administrator task; workflows do not
 change host swap or overcommit. Python environments are recreated for every job.
 
-The Mac runner requires 40 GiB headroom before starting. Its supervisor stops
-only its own CI process group if sampled RSS exceeds 20 GiB or host headroom
-falls below 20 GiB. This is a watchdog, **not a hard memory reservation**. It uses
-the existing memory monitor's anonymous/wired/compressed page accounting.
-Browser CI stays on Linux: the Mac's existing guardian kills Chromium while the
-local model is loaded. Neither the model server nor its guardian is reconfigured.
+The Mac runner is currently **offline**, pending capacity acceptance. The owner
+requires the local model at full context, existing server processes and at least
+one cloud coding agent to take precedence. Its model API advertises a 218 GiB
+ceiling on a 256 GiB machine. Current apparent free RAM is not CI capacity:
+subtract the model's unused future allocation before admitting any work.
 
-Fox Grid already has Linux memory reservations, CPU admission and durable job
-tracking. Its bounded fleet worker currently depends on systemd/cgroups; native
-macOS worker enrollment and shared CI reservation accounting are not yet wired.
-A capped Linux VM is the compatible path for Fox Grid agents on Mac Studio;
-native Mac packaging still requires the host's macOS runner. Ordinary GitHub
-runner matching handles availability, not Fox Grid resource reservations.
+The revised native supervisor reserves that model growth, plus 24 GiB for one
+cloud agent, server growth and OS safety (8 GiB each), beyond current process
+usage. CI's sampled process-group stop limit is 4 GiB, not the originally
+suggested 20 GiB. This is a watchdog, **not a hard memory reservation**. Missing
+model/OS telemetry refuses work. No model limit, context setting or guardian is
+changed. A 20 GiB Fox Grid VM is deferred because it does not fit these priorities.
+Browser CI stays on Linux: the existing Mac guardian kills Chromium while the
+local model is loaded.
+
+The newly added Aura runner and rootless Docker on mini-infinity's old
+Ubuntu-24.04 distro are **stopped and disabled**. The existing Arawn CI runner
+uses the separate Ubuntu-26.04 `arawn-ci` distro, a Windows task, a fixed 22 GiB
+cgroup and a private network. Aura must integrate with that owner's shared
+capacity contract before its second Linux slot is re-enabled. A repository-level
+runner registered to `aenect/arawn` cannot directly accept Aura jobs merely by
+adding a label; sharing hardware requires a separate registration coordinated
+under the same resource admission policy. Native Windows packaging likewise
+requires Windows execution, not the WSL Linux runner.
+
+Fox Grid's CI adapter source is at
+`PersonalOS-harness-release-6134576/docs/ci-resource-admission.md`. It currently
+needs a same-user systemd manager; its notes explicitly identify cross-user,
+cross-distro admission as an activation gate. Do not start another systemd in
+the new CI distro or assume GitHub's idle-runner matching implements these leases.
 
 `scripts/ci/check-runner-policy.py` fails CI if any workflow reintroduces hosted
 or dynamic runner targets. Candidate artifacts expire after 3–7 days. GitHub

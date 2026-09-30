@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Validation scope (release and PR checks always include native platforms)"
+        type: choice
+        options: [all, linux]
+        default: all
   workflow_call:
 
 concurrency:
@@ -73,7 +79,7 @@ jobs:
 
   platform-smoke:
     name: Platform smoke (macOS)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event_name != 'workflow_dispatch' || inputs.platforms != 'linux') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, macOS, ARM64, aura-macos]
     timeout-minutes: 45
     steps:
@@ -97,7 +103,7 @@ jobs:
 
   windows-tests:
     name: Windows tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event_name != 'workflow_dispatch' || inputs.platforms != 'linux') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, Windows, X64, aura-windows]
     timeout-minutes: 45
     # UTF-8 mode: the console defaults to cp1252 on Windows runners, which can't
