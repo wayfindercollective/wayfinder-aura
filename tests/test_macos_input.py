@@ -334,6 +334,9 @@ def test_macos_injection_restores_full_snapshot_when_paste_fails(monkeypatch):
 
     # Quartz post fails, then the PyAutoGUI fallback fails too.
     monkeypatch.setattr(macos_paste, "post_command_v", quartz_denied)
+    # Another app is frontmost (the suite's own Tk windows can make pytest
+    # frontmost, which the self-target guard would rightly refuse).
+    monkeypatch.setattr(macos_paste, "frontmost_window_id", lambda: "1:1")
 
     with pytest.raises(injector.InjectionError, match="denied"):
         injector._inject_text_pyautogui("hello")
@@ -357,6 +360,7 @@ def test_macos_injection_defers_restore_and_keeps_text_without_accessibility(mon
     monkeypatch.setattr(injector, "_restore_macos_pasteboard", lambda _pb, items: restored.append(items))
     monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", lambda: True)
     monkeypatch.setattr(macos_paste, "post_command_v", lambda: posted.append(True))
+    monkeypatch.setattr(macos_paste, "frontmost_window_id", lambda: "1:1")  # another app
 
     # Successful paste: the restore is deferred, then lands on flush.
     injector._inject_text_pyautogui("hello")

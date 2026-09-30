@@ -324,10 +324,10 @@ jobs:
   # DMG afterwards. Setup: packaging/macos/README.md ("Releasing a signed DMG").
   build-macos:
     name: Build (macOS)
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64, aura-macos]
     needs: [quality, release-readiness]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'macos' || inputs.artifacts == 'all'))
-    # notarytool --wait has no deadline of its own; cap billed macOS minutes.
+    # Bound the time spent waiting for notarization on shared hardware.
     timeout-minutes: 150
     outputs:
       signed: ${{ steps.signing.outputs.signed }}
@@ -345,6 +345,9 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             packaging/macos/constraints.txt
+
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
 
       - name: Install application and build dependencies
         run: python -m pip install -c packaging/macos/constraints.txt -e '.[dev]'
@@ -562,7 +565,7 @@ jobs:
   # so an unsigned DMG cannot reach the release even if this `if:` were wrong.
   publish-macos:
     name: Publish (macOS)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
     needs: [release, build-macos]
     if: startsWith(github.ref, 'refs/tags/v') && needs.build-macos.outputs.signed == 'true'
     permissions:

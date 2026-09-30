@@ -834,6 +834,13 @@ def main():
     if _signal_existing_instance():
         sys.exit(0)
 
+    # The bundle starts every process without a Dock icon (LSUIElement), so
+    # the overlay helper never shows a second one; the app asks for its own.
+    if sys.platform == "darwin":
+        from wayfinder.utils.macos_dock import show_in_dock
+
+        show_in_dock()
+
     # Delete audio remnants left by a prior crash before any recorder can
     # create files for this process. The legacy wayfinder_main.py entry point
     # did this, but the real packaged entry point is this module.
