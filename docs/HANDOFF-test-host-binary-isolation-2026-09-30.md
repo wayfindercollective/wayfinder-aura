@@ -56,10 +56,13 @@ Run on the Mac Studio (venv-mac, Python 3.12.10) with
   premium gate cached.
 - The two `linux_only` tests in `TestServerModeDefaultAndFallback` also pass on
   macOS with their skip lifted.
-- Linux CI: find the run with
-  `gh run list --branch claude/zen-spence-b22d22 --workflow CI`
-  (manual dispatch, `platforms=linux`). Mac and Windows jobs were not requested:
-  they need the infra agent's admission, per docs/CI.md.
+- Linux CI run 36777188316 was a manual dispatch with `platforms=linux`. Its
+  Quality job, 110097946905, validated `97eafb9` on the `aura-linux` runner:
+  3320 passed / 117 skipped / 10 deselected, the same counts as the PR #11
+  Linux gate. The only later change on this branch is this doc. Mac and
+  Windows jobs were skipped by the input: they need the infra agent's
+  admission (docs/CI.md), and the Mac runner was offline anyway. The native
+  Mac suite was run locally instead (first bullet).
 
 ## Remaining work (next steps, in order)
 
@@ -93,11 +96,13 @@ test_macos_game_chat 1.
 Don't make the fixture autouse for the whole suite without checking the tests
 that use real binaries on purpose, such as golden ASR and live smoke.
 
-Also watch for a pending conflict. The license-gate reset (autouse
-`reset_feature_gate`) was uncommitted in worktree
-`.claude/worktrees/stoic-tharp-8b5e72`, based on `ac6a102`. It also edits
-`tests/conftest.py`, so expect a small, mechanical conflict next to the
-"Host binary isolation" section.
+Related pending work: the license-gate reset (autouse `reset_feature_gate`) was
+uncommitted in worktree `.claude/worktrees/stoic-tharp-8b5e72`, based on
+`ac6a102`. It also edits `tests/conftest.py`, but at 21:15Z its diff applied
+cleanly on top of this branch (a line offset only). The combined tree passed
+the marked suite on the Mac: 3202 passed / 201 skipped / 10 deselected. Once
+it lands, the "free-tier model name" workaround above is belt-and-braces
+rather than required.
 
 ## Probe used to find host-binary hits
 
