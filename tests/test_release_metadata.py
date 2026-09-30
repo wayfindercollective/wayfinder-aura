@@ -349,7 +349,8 @@ def test_tagged_github_release_is_gated_by_release_readiness_check():
     assert "Release readiness check only runs for version tags and manual artifact builds." in workflow
     assert "python scripts/ci/check-release-license-defaults.py" in workflow
     assert "python -m pip install playwright" in workflow
-    assert "python -m playwright install --with-deps chromium" in workflow
+    assert "python -m playwright install chromium" in workflow
+    assert "playwright install --with-deps" not in workflow
     assert "python scripts/ci/check-storefront-readiness.py --browser --timeout 30" in workflow
     assert "python flatpak/prepare-release-manifest.py" in workflow
     assert '--tag "${GITHUB_REF_NAME}"' in workflow
@@ -369,8 +370,8 @@ def test_release_artifact_jobs_do_not_build_dev_license_artifacts_on_normal_push
     appimage_job = _workflow_job_body("build-appimage")
 
     artifact_condition = "startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'"
-    assert f"if: {artifact_condition}" in pyinstaller_job
-    assert f"if: {artifact_condition}" in appimage_job
+    assert f"if: ({artifact_condition}) &&" in pyinstaller_job
+    assert f"if: ({artifact_condition}) &&" in appimage_job
 
 
 def test_release_license_defaults_checker_rejects_dev_and_accepts_non_dev(tmp_path):
@@ -531,7 +532,9 @@ self.config.get("premium_price_regular", "$60")
 def test_appimage_ci_build_uses_older_glibc_runner_and_smoke_test():
     job = _workflow_job_body("build-appimage")
 
-    assert "runs-on: ubuntu-22.04" in job
+    assert "runs-on: [self-hosted, Linux, X64, aura-build]" in job
+    assert "image: ubuntu:22.04" in job
+    assert "--memory 12g" in job
     assert "libvulkan-dev vulkan-tools" in job
     assert "scripts/ci/install-glslc-if-needed.sh" in job
     # ydotool is deliberately NOT installed/bundled at build: the client must

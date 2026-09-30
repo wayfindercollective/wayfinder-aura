@@ -9,13 +9,25 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: aura-ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
 env:
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+  BUILD_JOBS: "2"
+  QT_QPA_PLATFORM: offscreen
   PYTHON_VERSION: "3.12"
 
 jobs:
   lint:
     name: Runtime Syntax Checks
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +35,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
+      - name: Enforce self-hosted runner policy
+        run: python scripts/ci/check-runner-policy.py
 
       - name: Install linting tools
         run: |
@@ -38,7 +56,9 @@ jobs:
 
   type-check:
     name: Type Check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
 
@@ -46,6 +66,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
+      - name: Enforce self-hosted runner policy
+        run: python scripts/ci/check-runner-policy.py
 
       - name: Install dependencies
         run: |
@@ -58,7 +84,9 @@ jobs:
 
   test:
     name: Tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
 
@@ -67,13 +95,11 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          # python3-tk / portaudio: app deps
-          # libegl1 + GL stack: PyQt6 QtGui imports (overlay tests) need libEGL.so.1
-          sudo apt-get install -y python3-tk portaudio19-dev \
-            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libxcb-cursor0
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
+      - name: Enforce self-hosted runner policy
+        run: python scripts/ci/check-runner-policy.py
 
       - name: Install Python dependencies
         run: |
@@ -83,7 +109,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest tests/ -v --tb=short --cov=src/wayfinder --cov-report=xml -m "not ui and not slow and not network and not perf"
+          pytest tests/ -v --tb=short --basetemp=/tmp/aci --cov=src/wayfinder --cov-report=xml -m "not ui and not slow and not network and not perf"
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -94,7 +120,9 @@ jobs:
 
   structure-check:
     name: Structure Verification
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
 
@@ -103,6 +131,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
+      - name: Enforce self-hosted runner policy
+        run: python scripts/ci/check-runner-policy.py
+
       - name: Verify project structure
         run: |
           python scripts/verify_structure.py
@@ -110,8 +144,10 @@ jobs:
 
   release-readiness:
     name: Release Readiness
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
     needs: [lint, test]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,6 +157,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
+      - name: Enforce self-hosted runner policy
+        run: python scripts/ci/check-runner-policy.py
 
       - name: Skip non-tag release check
         if: ${{ !startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
@@ -135,7 +177,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install playwright
-          python -m playwright install --with-deps chromium
+          python -m playwright install chromium
 
       - name: Verify storefront readiness
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
@@ -150,9 +192,10 @@ jobs:
 
   build-pyinstaller:
     name: Build (PyInstaller)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-build]
+    timeout-minutes: 120
     needs: [lint, release-readiness]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - uses: actions/checkout@v4
 
@@ -161,10 +204,11 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk portaudio19-dev
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
+      - name: Enforce self-hosted runner policy
+        run: python scripts/ci/check-runner-policy.py
 
       - name: Install dependencies
         run: |
@@ -187,17 +231,36 @@ jobs:
   build-appimage:
     name: Build (AppImage)
     # Pin the AppImage build to an older glibc baseline for wider distro
-    # compatibility. Keep the other CI jobs on ubuntu-latest.
-    runs-on: ubuntu-22.04
+    # compatibility inside a bounded self-hosted container.
+    runs-on: [self-hosted, Linux, X64, aura-build]
+    timeout-minutes: 120
     needs: [lint, release-readiness]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    container:
+      image: ubuntu:22.04
+      options: --cpus 2 --memory 12g --memory-swap 13g
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Prepare Jammy container
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y sudo git curl ca-certificates libicu70
+          printf 'AURA_WORKSPACE_OWNER=%s\n' "$(stat -c '%u:%g' "$GITHUB_WORKSPACE")" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
+      - name: Enforce self-hosted runner policy
+        run: python scripts/ci/check-runner-policy.py
 
       - name: Install system dependencies
         # spirv-headers/spirv-tools: whisper.cpp/llama.cpp GGML_VULKAN cmake
@@ -302,12 +365,20 @@ jobs:
             Wayfinder_Aura-*.AppImage.zsync
           retention-days: 14
 
+      - name: Restore workspace ownership
+        if: always()
+        run: |
+          if [[ -n "${AURA_WORKSPACE_OWNER:-}" ]]; then
+            chown -R "$AURA_WORKSPACE_OWNER" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          fi
+
   # Flatpak build (optional, requires flatpak-builder)
   build-flatpak:
     name: Build (Flatpak)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-build]
+    timeout-minutes: 120
     needs: [lint, release-readiness]
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v')
+    if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -318,10 +389,11 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Flatpak tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
+      - name: Enforce self-hosted runner policy
+        run: python scripts/ci/check-runner-policy.py
 
       - name: Add Flathub remote
         run: |
@@ -346,24 +418,6 @@ jobs:
             echo "manifest=io.wayfindercollective.WayfinderAura.yml" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Expand memory headroom for Vulkan shader generation
-        # vulkan-shaders-gen accumulates the mul_mm shader family in-process and
-        # forks glslc per variant; under the runner's default HEURISTIC
-        # overcommit, forking that multi-GB parent dies with ENOMEM ("Cannot
-        # allocate memory ... Failed to fork") even at --jobs=2 — which then
-        # surfaces as undefined matmul_id_subgroup_* at link. fork+exec never
-        # actually copies the pages, so always-overcommit makes the forks safe;
-        # the swapfile covers the true peak. A resource-rich machine builds the
-        # identical manifest clean (verified 2026-07-30), proving this is a
-        # runner-resource issue, not a toolchain bug.
-        run: |
-          sudo sysctl vm.overcommit_memory=1
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
-
       - name: Build Flatpak
         run: |
           cd flatpak
@@ -387,9 +441,10 @@ jobs:
   # Release job (only on tags)
   release:
     name: Create Release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
     needs: [lint, test, release-readiness, build-pyinstaller, build-appimage, build-flatpak]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: (startsWith(github.ref, 'refs/tags/v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: write
     steps:
