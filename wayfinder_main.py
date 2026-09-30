@@ -360,6 +360,12 @@ def detect_gpu() -> GPUInfo:
     Returns:
         GPUInfo with vendor, name, and driver information.
     """
+    if IS_WINDOWS and not IS_MACOS:
+        # No lspci or /sys: the display adapters Windows lists in the registry.
+        from wayfinder.utils.windows_sysinfo import primary_gpu
+
+        found = primary_gpu()
+        return GPUInfo(found[0], found[1], "windows") if found else GPUInfo("unknown", "Unknown GPU", "")
     # macOS: detect Apple Silicon or Intel GPU
     if sys.platform == "darwin":
         try:
@@ -1602,11 +1608,21 @@ SETTING_TOOLTIPS = {
         )
         if IS_MACOS
         else (
+            "Use your graphics card for transcription. Ultra.\n"
+            "Vulkan on AMD, NVIDIA and Intel GPUs; text cleanup stays on the CPU.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
+        if IS_WINDOWS
+        else (
             "Use your GPU for transcription and local cleanup. Ultra.\n"
             "whisper.cpp: Vulkan (AMD/Intel), CUDA or Metal. "
             "Faster-Whisper (experimental): NVIDIA CUDA only.\n"
             "Free runs Base on the CPU. Benchmark shows what the GPU would do."
         )
+    ),
+    "gpu_device": (
+        "Which graphics card transcribes. Automatic picks the dedicated GPU;\n"
+        "choose the integrated one if the big card is busy with games or a local AI model."
     ),
 }
 
@@ -1909,7 +1925,14 @@ class BenchmarkRunner:
         """Find whisper-cli in source, Flatpak, or the current AppImage mount."""
         from wayfinder.utils.runtime_assets import find_whisper_binary
 
-        return find_whisper_binary(self.config)
+        found = find_whisper_binary(self.config)
+        if IS_WINDOWS and not IS_MACOS and found:
+            # The GPU side of Compare CPU vs GPU runs the bundled Vulkan build
+            # (a benchmark only times it; dictation stays license-gated).
+            from wayfinder.utils.windows_whisper import gpu_twin
+
+            found = gpu_twin(found) or found
+        return found
 
     def _find_whisper_cpu_binary(self) -> str | None:
         """Prefer the independently linked CPU safety twin when packaged."""
@@ -3630,10 +3653,10 @@ def _macos_cloud_models(provider: str) -> list[str]:
 # macOS: bare right-hand modifiers usable as a tap/hold record hotkey (evdev
 # KEY_RIGHTALT / KEY_RIGHTMETA). Right Option is the macOS default.
 MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command"}
-# Windows: Right Ctrl (evdev KEY_RIGHTCTRL) and Right Alt / Alt Gr
-# (KEY_RIGHTALT, the Mac's Right Option). Many laptops have no Right Ctrl.
-# Alt Gr alone types nothing; Alt Gr + a key cancels the gesture.
-WINDOWS_SOLO_HOTKEYS = {97: "Right Ctrl", 100: "Right Alt (Alt Gr)"}
+# Windows: Right Alt / Alt Gr (KEY_RIGHTALT, the Mac's Right Option; the
+# Windows default) and Right Ctrl (evdev KEY_RIGHTCTRL). Many laptops have no
+# Right Ctrl. Alt Gr alone types nothing; Alt Gr + a key cancels the gesture.
+WINDOWS_SOLO_HOTKEYS = {100: "Right Alt (Alt Gr)", 97: "Right Ctrl"}
 
 
 def _solo_hotkeys(platform_name: str | None = None) -> dict:
@@ -3718,11 +3741,10 @@ def hotkey_key_options(
             **_hotkey_key_codes,
         }
     elif active_platform == "win32":
-        # The Windows tap/hold key, offered after the chord keys (the default
-        # stays Ctrl+Alt+Space).
+        # Tap/hold keys first: Right Alt is the Windows default, as on the Mac.
         _hotkey_key_codes = {
-            **_hotkey_key_codes,
             **{name: code for code, name in WINDOWS_SOLO_HOTKEYS.items()},
+            **_hotkey_key_codes,
         }
     if available_pynput_codes is None:
         try:
@@ -6205,6 +6227,14 @@ class WayfinderApp(ctk.CTk):
             # Say once at startup if the record hotkey collides with something
             # (e.g. Magnifier's Ctrl+Alt+Space) - most people never open Settings.
             self.after(2000, self._log_windows_hotkey_conflict)
+            # Some GPU setups hand parts of the window back black after a focus
+            # change ("little black squares"); repaint once after each.
+            try:
+                from wayfinder.ui.windows_window import repaint_after_activation
+
+                repaint_after_activation(self)
+            except Exception:
+                pass
         if WINDOWS_MAC_LOOK:
             # Caption bar in the app's ink, rim-coloured border (the Mac's
             # unified title bar). After mapping: DWM needs the real HWND.
@@ -6530,6 +6560,14 @@ class WayfinderApp(ctk.CTk):
                 from AppKit import NSApplication
 
                 NSApplication.sharedApplication().setApplicationIconImage_(None)
+            except Exception:
+                pass
+        elif IS_WINDOWS and (SCRIPT_DIR / "assets" / "icon.ico").exists():
+            try:
+                # The multi-size app icon the .exe carries (packaging/windows/
+                # make_icon.py): Windows picks the right size per DPI for the
+                # title bar, taskbar and Alt+Tab.
+                self.iconbitmap(default=str(SCRIPT_DIR / "assets" / "icon.ico"))
             except Exception:
                 pass
         elif ICON_PATH.exists():
@@ -7409,8 +7447,13 @@ class WayfinderApp(ctk.CTk):
 
             self._content_pane = self.tab_content_container
             self.tab_content_container = ctk.CTkFrame(self._content_pane, fg_color="transparent")
+            # Tk cannot clip a scroll view to a rounded shape: at the Mac's 6px
+            # inset, a card scrolled under the top/bottom edge was cut square
+            # inside the pane's rounded corner. Half the pane radius, plus the
+            # scroll frame's own corner inset (6), puts the cut where the arc
+            # is within a pixel of the straight edge.
             self.tab_content_container.pack(
-                fill="both", expand=True, padx=CONTENT_PANE_INSET, pady=CONTENT_PANE_INSET)
+                fill="both", expand=True, padx=CONTENT_PANE_INSET, pady=RADIUS["lg"] // 2)
         
         # Create tab frames
         self.tab_frames = {}
@@ -7704,13 +7747,20 @@ class WayfinderApp(ctk.CTk):
         # bitmap on an opaque chip below stays as the fallback (and on Linux).
         if not (IS_MACOS and self._create_macos_brand_mark(title_frame, is_ultra)):
             try:
-                # Cosmic signature: the brand arrow "in space" with a baked, static
-                # stardust trail (placement A · visible). Works for BOTH tiers — the
-                # Ultra gold glow composites on top of the trail inside the helper.
                 if _IS_LINUX:
-                    # The Mac's mark (arrow + a few crisp stardust points), drawn
-                    # for the current zoom so it is never a stretched 24 px bitmap.
+                    # Preserve the Linux mark's sizing at the current zoom.
                     logo_img, display_size = self._linux_brand_mark_image(is_ultra)
+                elif IS_WINDOWS:
+                    from wayfinder.ui.macos_brand_mark import (
+                        MARK_HEIGHT,
+                        MARK_WIDTH,
+                        render_brand_mark,
+                    )
+                    logo_img = render_brand_mark(
+                        ICON_PATH, scale=4.0, is_ultra=is_ultra,
+                        accent=COLORS["accent"], gold=COLORS["accent_yellow"],
+                    )
+                    display_size = (MARK_WIDTH, MARK_HEIGHT)
                 else:
                     logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
                 self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
@@ -9005,6 +9055,21 @@ class WayfinderApp(ctk.CTk):
             anchor="w",
         )
         self.transcription_label.pack(fill="x", padx=16, pady=(0, 8))
+        if IS_WINDOWS and not IS_MACOS:
+            # Wrap to the card, capped at a readable measure: the fixed 380
+            # filled a quarter of the card on a wide window. CTkFrame.bind
+            # lands on its canvas, and CTk scales wraplength itself, so pass
+            # design units.
+            def _rewrap_transcription(event, label=self.transcription_label):
+                if event.width <= 40:
+                    return
+                try:
+                    width = event.width / label._get_widget_scaling() - 32
+                    label.configure(wraplength=int(min(760, max(240, width))))
+                except Exception:
+                    pass
+
+            trans_card.bind("<Configure>", _rewrap_transcription, add="+")
 
         # Compact setup row: model · Local/Remote · hotkey (always useful, no dead void).
         setup_row = ctk.CTkFrame(trans_card, fg_color="transparent")
@@ -10855,7 +10920,9 @@ class WayfinderApp(ctk.CTk):
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
             tooltip_key="gpu_acceleration",
         )
-        
+        if IS_WINDOWS and not IS_MACOS and _gpu_unlocked:
+            self._create_windows_gpu_device_row(parent)
+
         # No Accuracy Mode control: beam search never beat greedy decoding in
         # testing (docs/EVAL-2026-09-24.md), so whisper.cpp always runs greedy.
 
@@ -10874,7 +10941,11 @@ class WayfinderApp(ctk.CTk):
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("openai_whisper", "groq_whisper"):
             backend = "whisper_cpp"  # Default to local backend
-        show_fw = bool(get_gpu_info().is_nvidia) or backend == "faster_whisper"
+        # The Windows bundle has no Faster-Whisper/PyTorch: never offer it there,
+        # even now that Windows detects an NVIDIA GPU.
+        show_fw = (
+            bool(get_gpu_info().is_nvidia) and not (IS_WINDOWS and not IS_MACOS)
+        ) or backend == "faster_whisper"
         self._backend_display_map = {
             "Auto (whisper.cpp)": "auto",
             "whisper.cpp": "whisper_cpp",
@@ -13302,6 +13373,60 @@ class WayfinderApp(ctk.CTk):
             self.preprocess_desc_label.configure(text=self._get_preprocess_desc(value))
         self.log(f"⚙ Audio processing: {value}")
     
+    def _create_windows_gpu_device_row(self, parent) -> None:
+        """Windows + Ultra: which GPU transcribes, when there is a choice.
+
+        Automatic picks the discrete GPU; a PC may prefer its integrated Radeon
+        while the big card is busy with games or a local LLM. Devices come from
+        the bundled Vulkan whisper build (ggml's own ordering, sub-second probe).
+        """
+        try:
+            from wayfinder.utils.gpu_simple import detect_gpu_devices
+
+            devices = detect_gpu_devices(self.config)
+        except Exception:
+            devices = []
+        if len(devices) < 2:
+            return
+        choices = {"Automatic": "auto"}
+        for device in devices:
+            label = device.name.split(" (")[0]  # drop "(AMD proprietary driver)"
+            if label in choices:
+                label = f"{label} #{device.index}"
+            choices[label] = str(device.index)
+        self._gpu_device_map = choices
+        current = str(self.config.get("gpu_device", "auto"))
+        shown = next((k for k, v in choices.items() if v == current), "Automatic")
+        self.gpu_device_var = ctk.StringVar(value=shown)
+        self.create_dropdown_row(
+            parent, "GPU", list(choices), self.gpu_device_var, self._on_gpu_device_changed,
+            tooltip=SETTING_TOOLTIPS["gpu_device"], width=220,
+        )
+
+    def _on_gpu_device_changed(self, shown: str) -> None:
+        """Apply a GPU choice live: the next dictation respawns whisper-server on it."""
+        value = getattr(self, "_gpu_device_map", {}).get(shown, "auto")
+        self.config["gpu_device"] = value
+        save_config(self.config)
+        if value == "auto":
+            os.environ.pop("GGML_VK_VISIBLE_DEVICES", None)
+            try:
+                from wayfinder.utils.gpu_simple import setup_gpu_environment
+
+                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
+                                 daemon=True).start()
+            except Exception:
+                pass
+        else:
+            os.environ["GGML_VK_VISIBLE_DEVICES"] = value
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+
+            WhisperServerBackend.shutdown()
+        except Exception:
+            pass
+        self.log(f"⚙ GPU: {shown} — applied")
+
     def on_language_changed(self, value: str):
         """Handle language change from dropdown."""
         self.config["language"] = value
@@ -13508,6 +13633,16 @@ class WayfinderApp(ctk.CTk):
             return
         self.config["use_gpu"] = want
         save_config(self.config)
+        if want and IS_WINDOWS and not IS_MACOS:
+            # Startup skips the GPU probe in CPU mode: pick the device now (the
+            # configured gpu_device, else the discrete GPU), off the Tk thread.
+            try:
+                from wayfinder.utils.gpu_simple import setup_gpu_environment
+
+                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
+                                 daemon=True).start()
+            except Exception:
+                pass
         # Apply live: drop the resident whisper-server so the next dictation respawns
         # it in the new CPU/GPU mode — no app restart needed.
         try:
@@ -21761,6 +21896,15 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
+        if IS_WINDOWS and not IS_MACOS:
+            # Buried under another window (the Mac's compositor stops drawing an
+            # occluded window by itself): hold the frame, look again in 0.5 s.
+            from wayfinder.ui.windows_window import window_exposure
+
+            if window_exposure(self) == "covered":
+                self._idle_breath_job = self.after(500, self._animate_idle_breath)
+                return
+
         # Also skip if the hero canvas is not visible (e.g. on a different tab)
         try:
             if not self.hero_canvas.winfo_viewable():

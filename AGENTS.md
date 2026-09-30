@@ -51,7 +51,7 @@ for Linux/Windows).
 
 It:
 
-1. **Records audio** when the user presses the record hotkey (Right Option tap/hold on macOS, Ctrl+Alt+Space elsewhere)
+1. **Records audio** when the user presses the record hotkey (Right Option tap/hold on macOS, Right Alt tap/hold on Windows, Ctrl+Alt+Space on Linux)
 2. **Transcribes speech** using whisper.cpp or Faster-Whisper
 3. **Post-processes text** with an LLM (llama.cpp or cloud APIs)
 4. **Injects text** at the cursor position using a platform adapter

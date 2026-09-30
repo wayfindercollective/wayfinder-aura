@@ -1787,18 +1787,20 @@ class TestPostLlmHygiene:
             "output_tone": "dev",
             "post_processing_enabled": True,
             "post_processing_backend": "llama_cpp",
-            "llama_cpp_model_path": "/tmp/google_gemma-3-1b-it-Q4_K_M.gguf",
+            # A model that passed Dev in the style matrix (Gemma 3 1B falls
+            # back to Normal on this branch, which never reaches the model).
+            "llama_cpp_model_path": "/tmp/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         }
         config.update(config_extra or {})
-        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
+        # Styles are licensed: pin the gate so the host's own license can't
+        # drop "dev" to Minimal (which never reaches the model).
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend), \
+                patch("wayfinder.license.get_feature_gate", return_value=gate):
             return process_with_config("um can you tell me about how humans work I'm not sure", config)
 
     def test_process_with_config_applies_hygiene_for_standard_cleanup(self):
-        # Gemma 3 1B now falls back to Normal for Dev (STYLE_SUPPORT), which never
-        # reaches the LLM; Qwen3-4B runs the Dev cleanup whose output gets hygiene.
-        out = self._run("Um, can you tell me about HOW HUMANS WORK? I 'm not sure.", {
-            "llama_cpp_model_path": "/tmp/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-        })
+        out = self._run("Um, can you tell me about HOW HUMANS WORK? I 'm not sure.")
         assert out == "Can you tell me about how humans work? I'm not sure."
 
     def test_process_with_config_skips_hygiene_for_caricature(self):

@@ -39,6 +39,16 @@ from wayfinder.core.setup import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _model_dirs_in_fake_home(monkeypatch, temp_dir: Path):
+    """These tests stage models under a fake home's whisper.cpp/models. The
+    download and search folders come from utils.platform (on Windows
+    %LOCALAPPDATA%), so point them at that fake home too."""
+    fake = temp_dir / "whisper.cpp" / "models"
+    monkeypatch.setattr("wayfinder.utils.platform.get_whisper_download_dir", lambda: fake)
+    monkeypatch.setattr("wayfinder.utils.platform.get_whisper_host_model_dirs", lambda: [fake])
+
+
 # =============================================================================
 # Helpers
 # =============================================================================

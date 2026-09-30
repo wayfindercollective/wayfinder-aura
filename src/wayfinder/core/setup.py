@@ -569,9 +569,16 @@ def check_whisper_model(config: dict) -> DependencyStatus:
         size_mb = Path(model_path).stat().st_size / 1_000_000
         return DependencyStatus(True, detail=f"{Path(model_path).name} ({size_mb:.0f} MB)")
 
-    # Check the writable model directory for any usable models
-    model_dir = get_user_whisper_models_dir(flatpak=IS_FLATPAK)
-    if model_dir.exists():
+    # Search the persistent download directory first, then legacy host
+    # locations outside Flatpak (including Windows' pre-AppData downloads).
+    from wayfinder.utils.platform import get_whisper_host_model_dirs
+
+    model_dirs = [get_user_whisper_models_dir(flatpak=IS_FLATPAK)]
+    if not IS_FLATPAK:
+        model_dirs.extend(d for d in get_whisper_host_model_dirs() if d not in model_dirs)
+    for model_dir in model_dirs:
+        if not model_dir.exists():
+            continue
         models = [p for p in model_dir.glob("ggml-*.bin") if _usable(str(p))]
         if models:
             best = max(models, key=lambda p: p.stat().st_size)

@@ -37,12 +37,25 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#ifdef SignAura
+; build.py passes /DSignAura and the "aura" sign tool when a code-signing
+; identity is configured: Setup.exe and the uninstaller are then signed too.
+SignTool=aura
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[InstallDelete]
+; An upgrade replaces the whole PyInstaller payload. Otherwise every file an
+; older version shipped and this one dropped (SciPy, Qt pieces, DLLs: 125 MB on
+; one PC) stays behind in _internal, where the app can still import it. Runs
+; after Aura has been asked to quit; user data never lives under {app}.
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 ; The entire PyInstaller onedir output.

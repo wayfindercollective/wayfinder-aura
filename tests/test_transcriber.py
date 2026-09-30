@@ -2118,13 +2118,16 @@ class TestServerReuseIdentity:
 
     MODEL = "/models/ggml-base.en.bin"
 
-    def _set_state(self, alive=True, model=MODEL, gpu=False):
+    def _set_state(self, alive=True, model=MODEL, gpu=False, threads=4):
         from wayfinder.core.transcriber import WhisperServerBackend
         proc = MagicMock()
         proc.poll.return_value = None if alive else 1
         WhisperServerBackend._server_process = proc
         WhisperServerBackend._server_model_path = model
         WhisperServerBackend._server_use_gpu = gpu
+        # macOS/Windows also match -t (the backend's default is 4); set it
+        # rather than inherit whatever an earlier test left on the class.
+        WhisperServerBackend._server_threads = threads
 
     def _backend(self, gpu=False, model=MODEL):
         from wayfinder.core.transcriber import WhisperServerBackend
@@ -2135,6 +2138,7 @@ class TestServerReuseIdentity:
         WhisperServerBackend._server_process = None
         WhisperServerBackend._server_model_path = ""
         WhisperServerBackend._server_use_gpu = None
+        WhisperServerBackend._server_threads = None
 
     def test_same_model_same_mode_is_reusable(self):
         self._set_state(gpu=False)

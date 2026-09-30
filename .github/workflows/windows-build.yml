@@ -48,6 +48,18 @@ jobs:
         run: |
           if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { throw "Provision Inno Setup on the runner before building" }
 
+      # build.py compiles the pinned whisper.cpp with the Vulkan backend (GPU
+      # transcription); its shaders need the SDK's glslc. whisper.cpp publishes
+      # no Vulkan build for Windows x64.
+      - name: Verify provisioned Vulkan SDK
+        shell: pwsh
+        env:
+          VULKAN_VERSION: "1.4.357.0"
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          if (-not (Test-Path -LiteralPath "$sdk\Bin\glslc.exe")) { throw "Provision Vulkan SDK $env:VULKAN_VERSION on the runner before building" }
+          "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+
       - name: Run Windows tests
         run: python -m pytest tests/ -q --tb=short -m "not ui and not slow and not network and not perf"
 
@@ -84,15 +96,23 @@ jobs:
 
           $app = Join-Path $installDir 'Wayfinder Aura.exe'
           try {
-            foreach ($probe in @('--app-import-self-test', '--tls-self-test', '--llm-engine-self-test')) {
+            foreach ($probe in @('--app-import-self-test', '--tls-self-test', '--llm-engine-self-test',
+                                 '--audio-processing-self-test')) {
               Invoke-CheckedProcess -FilePath $app -Arguments @($probe)
             }
-            # The bundled whisper.cpp engine must be present and launchable.
-            foreach ($tool in @('whisper-cli.exe', 'whisper-server.exe')) {
-              $toolPath = Join-Path $installDir "_internal\whisper\$tool"
-              if (-not (Test-Path -LiteralPath $toolPath)) { throw "Bundle is missing $tool" }
+            # Both bundled whisper.cpp engines (CPU, and Vulkan for GPU mode) must be
+            # present and launchable; the runner has no GPU, so the Vulkan build's
+            # backend loads without devices and --help still exits 0.
+            foreach ($dir in @('whisper', 'whisper-vulkan')) {
+              foreach ($tool in @('whisper-cli.exe', 'whisper-server.exe')) {
+                $toolPath = Join-Path $installDir "_internal\$dir\$tool"
+                if (-not (Test-Path -LiteralPath $toolPath)) { throw "Bundle is missing $dir\$tool" }
+              }
+              Invoke-CheckedProcess -FilePath (Join-Path $installDir "_internal\$dir\whisper-cli.exe") -Arguments @('--help')
             }
-            Invoke-CheckedProcess -FilePath (Join-Path $installDir '_internal\whisper\whisper-cli.exe') -Arguments @('--help')
+            if (-not (Test-Path -LiteralPath (Join-Path $installDir '_internal\whisper-vulkan\ggml-vulkan.dll'))) {
+              throw 'Bundle is missing whisper-vulkan\ggml-vulkan.dll'
+            }
           } finally {
             Invoke-CheckedProcess -FilePath (Join-Path $installDir 'unins000.exe') -Arguments @(
               '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'

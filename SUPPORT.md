@@ -109,8 +109,9 @@ Try these before filing an issue — they cover the most common problems.
   Privacy & Security → Accessibility and Input Monitoring. Input Monitoring
   may require clicking **+** and selecting
   `/Applications/Wayfinder Aura.app`; quit and reopen Aura afterward.
-- **Windows:** the default is **Ctrl+Alt+Space**. If another app already owns
-  that shortcut, pick a different one in Settings. Hotkeys and typing do not
+- **Windows:** the default is **Right Alt** (Alt Gr): tap to start/stop, hold
+  to talk. If another app already owns your shortcut, pick a different one in
+  Settings. Hotkeys and typing do not
   reach apps running as Administrator unless Aura is also elevated (a Windows
   security boundary).
 - **Flatpak installs:** the app registers its hotkeys through the

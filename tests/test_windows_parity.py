@@ -813,7 +813,7 @@ def test_app_picks_the_windows_game_backend(monkeypatch):
 
 # --- Tap / hold with Right Ctrl (the Mac's Right Option gesture) -----------------
 
-def _win_listener(monkeypatch, hotkey_key=97, modifiers=()):
+def _win_listener(monkeypatch, hotkey_key=97, modifiers=(), masks=None):
     from queue import Queue
     from threading import Event
 
@@ -822,6 +822,9 @@ def _win_listener(monkeypatch, hotkey_key=97, modifiers=()):
     if pl.keyboard is None:
         pytest.skip("pynput unavailable on this host")
     captured = {}
+    # Never inject real keys from a test; record the menu-mask sends instead.
+    sent = masks if masks is not None else []
+    monkeypatch.setattr(pl, "_win32_send_menu_mask", lambda: sent.append("mask"))
 
     class FakeListener:
         def __init__(self, **kwargs):
@@ -897,6 +900,57 @@ def test_tap_hold_keys_per_platform():
     assert wm.is_tap_hold_hotkey(100, [], platform_name="darwin")
     assert not wm.is_tap_hold_hotkey(97, [], platform_name="linux")
     assert "Right Ctrl" in wm.hotkey_key_options(platform_name="win32", available_pynput_codes={97, 57})
+    # Right Alt is the Windows default, so it is offered first.
+    options = wm.hotkey_key_options(platform_name="win32", available_pynput_codes={97, 100, 57})
+    assert list(options)[0] == "Right Alt (Alt Gr)"
+
+
+def test_right_alt_tap_masks_the_menu_bar_and_toggles_once(monkeypatch):
+    """A lone Alt release opens the front app's menu bar; the mask key sent
+    while Right Alt is down prevents that, and must not cancel the tap."""
+    from wayfinder.hotkeys.types import EventType
+
+    masks = []
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
+    mask_key = pl.KeyCode.from_vk(pl._WIN32_MENU_MASK_VK)
+    press(pl.Key.alt_r)
+    press(mask_key)          # the injected mask comes back through the hook
+    release(mask_key)
+    release(pl.Key.alt_r)
+    assert masks == ["mask"]
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, None)]
+
+
+def test_right_alt_masks_every_auto_repeat_while_held(monkeypatch):
+    from wayfinder.hotkeys.types import EventType
+
+    masks = []
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
+    press(pl.Key.alt_r)
+    time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+    press(pl.Key.alt_r)      # keyboard auto-repeat
+    press(pl.Key.alt_r)
+    release(pl.Key.alt_r)
+    assert masks == ["mask"] * 3
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
+                              (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
+
+
+def test_only_a_right_alt_hotkey_sends_the_menu_mask(monkeypatch):
+    masks = []
+    pl, press, release, _events = _win_listener(monkeypatch, hotkey_key=97, masks=masks)
+    press(pl.Key.alt_r)      # Right Alt is not the hotkey: leave its menus alone
+    release(pl.Key.alt_r)
+    press(pl.Key.ctrl_r)     # Right Ctrl alone never opens a menu
+    release(pl.Key.ctrl_r)
+    assert masks == []
+
+    pl, press, release, _events = _win_listener(
+        monkeypatch, hotkey_key=57, modifiers=("ctrl", "alt"), masks=masks)
+    press(pl.Key.ctrl_l)
+    press(pl.Key.alt_r)
+    press(pl.Key.space)
+    assert masks == []
 
 
 
@@ -1105,12 +1159,14 @@ def test_alt_gr_taps_and_holds_like_right_alt(monkeypatch):
     Ctrl: it must still be the tap/hold key, and Alt Gr + a key must not record."""
     from wayfinder.hotkeys.types import EventType
 
-    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100)
+    masks = []
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
     press(pl.Key.ctrl_l)
     press(pl.Key.alt_gr)
     release(pl.Key.ctrl_l)
     release(pl.Key.alt_gr)
     assert _drain(events) == [(EventType.HOTKEY_PRESSED, None)]
+    assert masks == ["mask"]  # harmless on Alt Gr layouts, needed on US ones
     press(pl.Key.ctrl_l)
     press(pl.Key.alt_gr)
     press(pl.KeyCode.from_char("e"))       # Alt Gr+E types an accented e
@@ -1399,3 +1455,67 @@ def test_tooltips_and_fallback_pill_use_the_real_work_area(monkeypatch):
     real = window_geometry.windows_work_area(0, 0, physical=True)
     logical = window_geometry.windows_work_area(0, 0)
     assert logical[2] == int(real[2] / 2.0) and logical[3] == int(real[3] / 2.0)
+
+
+# --- Repaint after focus changes (black squares on some GPU setups) -----------
+
+def test_repaint_after_activation_coalesces_one_repaint_per_change(monkeypatch):
+    from wayfinder.ui import windows_window as ww
+
+    monkeypatch.setattr(ww.sys, "platform", "win32")
+    painted = []
+    monkeypatch.setattr(ww, "repaint", lambda root: painted.append(root))
+
+    class FakeRoot:
+        def __init__(self):
+            self.bindings, self.pending = {}, []
+
+        def bind(self, sequence, func, add=None):
+            assert add == "+"  # CTk binds <FocusIn> on the root itself
+            self.bindings[sequence] = func
+
+        def after(self, ms, func):
+            assert ms >= 100  # the app's timer floor
+            self.pending.append(func)
+            return len(self.pending)
+
+    root = FakeRoot()
+    assert ww.repaint_after_activation(root)
+    assert set(root.bindings) == {"<FocusIn>", "<FocusOut>", "<Map>"}
+    for _ in range(5):  # one event per child widget
+        root.bindings["<FocusIn>"](None)
+    root.bindings["<Map>"](None)
+    assert len(root.pending) == 1
+    root.pending.pop()()
+    assert painted == [root]
+    root.bindings["<FocusOut>"](None)  # the next change schedules again
+    assert len(root.pending) == 1
+
+
+def test_repaint_after_activation_is_windows_only(monkeypatch):
+    from wayfinder.ui import windows_window as ww
+
+    monkeypatch.setattr(ww.sys, "platform", "linux")
+    assert ww.repaint_after_activation(object()) is False
+    assert ww.repaint(object()) is False
+
+
+def test_idle_hero_holds_while_another_window_covers_aura():
+    import inspect
+
+    import wayfinder_main
+
+    src = inspect.getsource(wayfinder_main.WayfinderApp._animate_idle_breath)
+    assert 'window_exposure(self) == "covered"' in src
+    assert "self.after(500, self._animate_idle_breath)" in src
+
+
+def test_windows_never_offers_faster_whisper():
+    """The Windows bundle has no Faster-Whisper/PyTorch; detecting an NVIDIA GPU
+    must not put it in the backend menu."""
+    import inspect
+
+    import wayfinder_main
+
+    src = inspect.getsource(wayfinder_main.WayfinderApp)
+    assert "and not (IS_WINDOWS and not IS_MACOS)" in src.split("show_fw = (", 1)[1][:200]
