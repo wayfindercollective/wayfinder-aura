@@ -53,6 +53,12 @@ self-hosted `Quality` job. Linux jobs select any available machine with the
 - `scripts/verify_structure.py`;
 - the non-UI/non-network pytest suite and coverage upload.
 
+The native macOS check runs the same automated test selection, in addition to
+the platform contract smoke, using the candidate's pinned Python 3.12.10 and
+macOS constraints. Windows also runs the suite and contract smoke, followed by
+the separate installer candidate workflow on pull requests. Passing Linux
+alone is insufficient to merge shared application changes to Main.
+
 New pushes cancel older in-progress runs on the same ref. Model-pin drift is a
 separate weekly/manual metadata check that also runs only when its four pin
 surfaces or workflow change; it does not run on ordinary source edits.

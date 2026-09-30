@@ -69,13 +69,18 @@ jobs once one exists. Without one the build is unsigned, as before.
 ## CI candidate and releases
 
 The **Windows Candidate** workflow (`.github/workflows/windows-build.yml`) runs
-the Windows suite, the platform smoke check, and this build on `windows-latest`,
+the Windows suite, the platform smoke check, and this build on the owner's
+native `[self-hosted, Windows, X64, aura-windows]` runner,
 then silently installs it, runs the packaged import, TLS, and LLM engine
 self-tests, and uninstalls it. Each process has a timeout and must exit with
 code zero; uninstall must remove the app executable. Only then does CI upload
 the unsigned installer as the `wayfinder-aura-windows-x64`
 artifact (kept 7 days). Run it from **Actions → Windows Candidate → Run
 workflow**; it also runs on every PR targeting `main`.
+The runner owner provisions Inno Setup, Visual Studio C++ Build Tools and
+Vulkan SDK 1.4.357.0 before admitting jobs. Workflows verify these tools without
+installing host packages. An unavailable runner leaves jobs queued; see
+[CI and resource admission](../../docs/CI.md).
 
 The Release workflow reuses this build after quality and release-readiness
 checks, but the installer is **not attached to public releases**: Windows stays

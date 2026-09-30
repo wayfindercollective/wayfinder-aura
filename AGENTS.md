@@ -44,7 +44,7 @@ See also `CLAUDE.md` (same rule) and notices in `src/wayfinder/license.py` / `sr
 ## Project Overview
 
 **Wayfinder Aura** is a local voice dictation application. Linux is the
-production baseline, macOS is an active port, and Windows is planned. Read
+production baseline; macOS and Windows have native candidate builds. Read
 `docs/PLATFORM-DEVELOPMENT.md` before changing platform-sensitive code, and
 `docs/MACOS-PORT.md` for what the macOS port changes (and what it suggests
 for Linux/Windows).
