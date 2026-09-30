@@ -12,6 +12,14 @@ Platform contributors must read [docs/PLATFORM-DEVELOPMENT.md](docs/PLATFORM-DEV
 Aura stays in one repository; operating-system work is isolated behind the
 documented adapters and protected by Linux plus native platform CI.
 
+## Shared CI
+
+CI runs on the owner's self-hosted hardware. Pull the latest version of your
+branch before making changes; [docs/CI.md](docs/CI.md) lists runner labels,
+availability, commands, and the remaining platform acceptance gates. Keep its
+runner policy when merging older branches. GitHub-hosted execution is disabled
+in the maintained branch workflows; waiting jobs require runner capacity.
+
 ## Development Setup
 
 ```bash

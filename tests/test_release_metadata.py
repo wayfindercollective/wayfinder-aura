@@ -578,7 +578,7 @@ def test_tagged_github_release_is_gated_by_release_readiness_check():
     assert "if: startsWith(github.ref, 'refs/tags/v')" in workflow
     assert "python scripts/ci/check-release-license-defaults.py" in workflow
     assert "python -m pip install playwright" in workflow
-    assert "python -m playwright install --with-deps chromium" in workflow
+    assert "python -m playwright install chromium" in workflow
     assert "python scripts/ci/check-storefront-readiness.py --browser --timeout 30" in workflow
     assert "python flatpak/prepare-release-manifest.py" in workflow
     assert '--tag "${GITHUB_REF_NAME}"' in workflow
@@ -604,14 +604,12 @@ def test_release_artifact_jobs_are_manual_or_tag_only_and_raw_binary_is_removed(
     assert "wayfinder-aura-linux" not in workflow
     assert "dist/wayfinder-aura" not in release_job
     assert "inputs.artifacts == 'appimage' || inputs.artifacts == 'all'" in appimage_job
-    assert "inputs.artifacts == 'hosted-flatpak' || inputs.artifacts == 'all'" in workflow
+    assert "inputs.artifacts == 'flatpak' || inputs.artifacts == 'all'" in workflow
     assert "uses: ./.github/workflows/flatpak-build.yml" in workflow
     assert "pull_request:" not in workflow.split("jobs:", 1)[0]
     assert "pull_request:" not in flatpak_workflow.split("jobs:", 1)[0]
     assert "if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'" in flatpak_workflow
-    assert "runs-on: ubuntu-latest" in flatpak_workflow
-    assert "self-hosted" not in workflow
-    assert "self-hosted" not in flatpak_workflow
+    assert "runs-on: [self-hosted, Linux, X64, aura-build]" in flatpak_workflow
     assert "uses: ./.github/workflows/ci.yml" in workflow
 
 
@@ -630,9 +628,8 @@ def test_normal_ci_keeps_cached_quality_platform_smoke_and_cancels_stale_pushes(
     assert "aura-flatpak" not in workflow
     assert "workflow_call:" in workflow
     platform_job = _workflow_job_body("platform-smoke")
-    assert "macos-latest" in platform_job
-    assert "windows-latest" in platform_job
-    assert "python scripts/platform_smoke.py --expected ${{ matrix.expected }}" in platform_job
+    assert "runs-on: [self-hosted, macOS, ARM64, aura-macos]" in platform_job
+    assert "python scripts/platform_smoke.py --expected darwin" in platform_job
 
 
 def test_model_pin_drift_is_scheduled_and_only_pushes_for_pin_surfaces():
@@ -678,8 +675,8 @@ def test_mini_inf_build_accepts_only_pushed_main_history_and_uses_no_runner():
     assert "systemd-run --user --scope" in script
     assert 'remote_tag=${TAG:--}' in script
     assert "scp --" in script
-    assert "permanently registered repository runner" in docs
-    assert "**not** registered" in docs
+    assert "trusted-runner.py" in docs
+    assert "fork" in docs
 
 
 @pytest.mark.linux_only
@@ -869,7 +866,8 @@ self.config.get("premium_price_regular", "$60")
 def test_appimage_ci_build_uses_older_glibc_runner_and_smoke_test():
     job = _workflow_job_body("build-appimage")
 
-    assert "runs-on: ubuntu-22.04" in job
+    assert "image: ubuntu:22.04" in job
+    assert "runs-on: [self-hosted, Linux, X64, aura-build]" in job
     assert "libvulkan-dev vulkan-tools" in job
     assert "scripts/ci/install-glslc-if-needed.sh" in job
     # ydotool is deliberately NOT installed/bundled at build: the client must

@@ -9,7 +9,7 @@ on:
       artifacts:
         description: "Artifacts to build"
         type: choice
-        options: [appimage, hosted-flatpak, windows, all]
+        options: [appimage, flatpak, windows, all]
         default: appimage
 
 concurrency:
@@ -21,6 +21,9 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+  BUILD_JOBS: "2"
+  QT_QPA_PLATFORM: offscreen
 
 jobs:
   quality:
@@ -28,7 +31,8 @@ jobs:
 
   release-readiness:
     name: Release Readiness
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
     needs: [quality]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
@@ -41,13 +45,16 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
       - name: Verify production license defaults
         run: python scripts/ci/check-release-license-defaults.py
 
       - name: Install storefront browser checker
         run: |
           python -m pip install playwright
-          python -m playwright install --with-deps chromium
+          python -m playwright install chromium
 
       - name: Verify storefront readiness
         run: python scripts/ci/check-storefront-readiness.py --browser --timeout 30
@@ -61,18 +68,33 @@ jobs:
 
   build-appimage:
     name: Build (AppImage)
-    # Pin the AppImage build to an older glibc baseline for wider distro
-    # compatibility. Keep the other CI jobs on ubuntu-latest.
-    runs-on: ubuntu-22.04
+    # Preserve the older glibc baseline inside a bounded local container.
+    runs-on: [self-hosted, Linux, X64, aura-build]
+    timeout-minutes: 120
+    container:
+      image: ubuntu:22.04
+      options: --cpus 2 --memory 12g --memory-swap 13g
+    defaults:
+      run:
+        shell: bash
     needs: [quality, release-readiness]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'appimage' || inputs.artifacts == 'all'))
     steps:
+      - name: Prepare Jammy container
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y sudo git curl ca-certificates libicu70
+          printf 'AURA_WORKSPACE_OWNER=%s\n' "$(stat -c '%u:%g' "$GITHUB_WORKSPACE")" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
 
       - name: Install system dependencies
         # spirv-headers/spirv-tools: whisper.cpp/llama.cpp GGML_VULKAN cmake
@@ -108,18 +130,6 @@ jobs:
           cmake -S /tmp/vulkan-headers -B /tmp/vulkan-headers/build \
             -DCMAKE_INSTALL_PREFIX=/usr/local
           sudo cmake --install /tmp/vulkan-headers/build
-
-      - name: Expand memory headroom for Vulkan shader generation
-        # Same prophylaxis as the Flatpak job: vulkan-shaders-gen forks glslc
-        # from a large parent; default heuristic overcommit can ENOMEM those
-        # forks on runners.
-        run: |
-          sudo sysctl vm.overcommit_memory=1
-          sudo fallocate -l 8G /mnt/wf-swap || sudo dd if=/dev/zero of=/mnt/wf-swap bs=1M count=8192
-          sudo chmod 600 /mnt/wf-swap
-          sudo mkswap /mnt/wf-swap
-          sudo swapon /mnt/wf-swap
-          free -h
 
       - name: Install Python dependencies
         # PyGObject/dbus-python: setup-python is hermetic — without these pip
@@ -205,7 +215,7 @@ jobs:
             || { echo "bundle is missing Tk runtime data" >&2; exit 1; }
           grep -Eq "lib(tcl[^/ ]*tk|tk)[^/ ]*\.so" /tmp/pyi-contents.txt \
             || { echo "bundle is missing the Tk native library" >&2; exit 1; }
-          HOME=$(mktemp -d) xvfb-run -a squashfs-root/AppRun \
+          XDG_CONFIG_HOME=$(mktemp -d) xvfb-run -a squashfs-root/AppRun \
             --ui-renderer-self-test | tee /tmp/ui-renderer-self-test.log
           grep -Fq "UI_RENDERER_SELF_TEST_OK" /tmp/ui-renderer-self-test.log
           # Design fonts MUST ship: without them fontconfig substitutes a random
@@ -223,7 +233,9 @@ jobs:
           # for the packaged playback probe; actual AppImage launch is tested
           # on Bazzite before tagging because Xvfb cannot emulate evdev, ALSA,
           # D-Bus, a compositor, GameMode, or a tray coherently.
-          pulseaudio --daemonize=yes --exit-idle-time=-1 || true
+          export PULSE_SERVER=unix:/tmp/aura-ci-pulse
+          pulseaudio --system --daemonize=yes --exit-idle-time=-1 \
+            --load="module-native-protocol-unix socket=/tmp/aura-ci-pulse auth-anonymous=1"
           pactl load-module module-null-sink sink_name=ci_null || true
           pactl load-module module-null-source source_name=ci_mic || true
           pactl set-default-sink ci_null || true
@@ -232,29 +244,29 @@ jobs:
           # real 16 kHz recording rate. A GUI boot does not catch a broken ALSA
           # plugin, default sink, or native-rate fallback.
           AUDIO_HOME=$(mktemp -d)
-          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
+          XDG_CONFIG_HOME="$AUDIO_HOME" \
             squashfs-root/AppRun --audio-output-self-test | tee /tmp/audio-self-test.log
           grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/audio-self-test.log
           grep -Fq "PulseAudio/PipeWire" /tmp/audio-self-test.log
-          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
+          XDG_CONFIG_HOME="$AUDIO_HOME" \
             squashfs-root/AppRun --audio-input-self-test | tee /tmp/audio-input-self-test.log
           grep -Fq "AUDIO_INPUT_SELF_TEST_OK" /tmp/audio-input-self-test.log
           # Medium depends on a dynamically imported scipy.signal module, and
           # preprocessing's stationary-noise guard is a release-critical defense
           # against confident Whisper hallucinations. Exercise the packaged path.
-          HOME=$(mktemp -d) squashfs-root/AppRun \
+          XDG_CONFIG_HOME=$(mktemp -d) squashfs-root/AppRun \
             --audio-processing-self-test | tee /tmp/audio-processing-self-test.log
           grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/audio-processing-self-test.log
           # Import the complete frozen application module. This catches missing
           # PyInstaller hidden imports/native extensions without constructing
           # fake desktop hardware inside Xvfb.
-          HOME=$(mktemp -d) squashfs-root/AppRun \
+          XDG_CONFIG_HOME=$(mktemp -d) squashfs-root/AppRun \
             --app-import-self-test | tee /tmp/app-import-self-test.log
           grep -Fq "APP_IMPORT_SELF_TEST_OK" /tmp/app-import-self-test.log
           # Exercise a real verified handshake from the finished AppImage.
           # The CDN may reject an anonymous request; an HTTP response still
           # proves the packaged OpenSSL trusted its certificate chain.
-          HOME=$(mktemp -d) squashfs-root/AppRun \
+          XDG_CONFIG_HOME=$(mktemp -d) squashfs-root/AppRun \
             --tls-self-test | tee /tmp/tls-self-test.log
           grep -Fq "TLS_SELF_TEST_OK" /tmp/tls-self-test.log
           desktop-file-validate squashfs-root/io.wayfindercollective.WayfinderAura.desktop
@@ -275,13 +287,17 @@ jobs:
             echo "appstreamcli non-zero exit ($VALIDATE_RC) with only warnings/info/pedantic — accepting for jammy CI"
           fi
 
-  # Routine candidates are built directly on mini-inf with the documented SSH
-  # helper. This hosted path is retained for tags and explicit emergencies so
-  # publishing never depends on the private server.
+      - name: Restore workspace ownership
+        if: always()
+        run: |
+          if [[ -n "${AURA_WORKSPACE_OWNER:-}" ]]; then
+            chown -R "$AURA_WORKSPACE_OWNER" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          fi
+
   build-flatpak:
     name: Build (Flatpak)
     needs: [quality, release-readiness]
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'hosted-flatpak' || inputs.artifacts == 'all'))
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'flatpak' || inputs.artifacts == 'all'))
     uses: ./.github/workflows/flatpak-build.yml
     with:
       source_sha: ${{ github.sha }}
@@ -295,7 +311,8 @@ jobs:
   # Release job (only on tags)
   release:
     name: Create Release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
     needs: [quality, release-readiness, build-appimage, build-flatpak, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
