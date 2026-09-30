@@ -59,6 +59,18 @@ macOS constraints. Windows also runs the suite and contract smoke, followed by
 the separate installer candidate workflow on pull requests. Passing Linux
 alone is insufficient to merge shared application changes to Main.
 
+The Mac runner owner provisions the Python.org 3.12.10 ARM64 framework and
+registers its interpreter at
+`$RUNNER_TOOL_CACHE/Python/3.12.10/arm64/bin/python3`. Both Mac workflows use
+that interpreter directly, verify its exact version and architecture, check
+the Tk 8.6 bindings and headless Tcl runtime (8.6.16+ within 8.6), and create a
+fresh job virtualenv. A missing or incompatible interpreter stops the job;
+workflows never install a system Python or change host permissions. These
+headless checks do not replace the packaged application's native UI checks.
+We avoid `actions/setup-python` on Mac because its non-relocatable downloads
+require `/Users/runner/hostedtoolcache`, regardless of the runner's own cache.
+See its [self-hosted macOS requirements](https://github.com/actions/setup-python/blob/v7/docs/advanced-usage.md#macos).
+
 Native Keychain tests create private temporary databases and bind every native
 query to its test database. They do not require the runner's default Keychain
 to be writable or unlocked. The fixture checks that the default Keychain and
