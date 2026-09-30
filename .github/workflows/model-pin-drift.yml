@@ -35,7 +35,7 @@ permissions:
 
 jobs:
   verify-pins:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -43,6 +43,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
 
       - name: Catalog pins are internally consistent
         run: |
