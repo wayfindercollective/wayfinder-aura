@@ -165,7 +165,7 @@ from wayfinder.utils.platform import (
     get_whisper_model_search_dirs,
 )
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude, wav_has_speech_activity
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude, get_wav_duration_seconds, wav_has_speech_activity
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
@@ -1541,8 +1541,13 @@ SETTING_TOOLTIPS = {
         "dictation: past WoW's 255-character limit, the next part waits in chat "
         "for your Enter.\n"
         "Also set up for Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings "
-        "Online, Albion Online, RuneScape and EVE Online. In games Aura only pastes, "
-        "never types keys, so dictation can't trigger a keybind."
+        "Online, Albion Online, RuneScape and EVE Online. In games Aura pastes "
+        "rather than typing keys, so dictation can't trigger a keybind."
+        + (
+            " Dark Age of Camelot has no paste: open its chat first and Aura types "
+            "into it."
+            if sys.platform.startswith("linux") else ""
+        )
     ),
     "game_chat_send": (
         "On: Aura presses Enter to send each message.\n"
@@ -1575,28 +1580,35 @@ SETTING_TOOLTIPS = {
         "straight away, so leave it off if you want to check the text first."
     ),
     "audio_preprocessing": (
-        "Cleans up microphone audio before transcription.\n\n"
-        "Off: audio is left untouched.\n"
-        "Light: evens out quiet or uneven levels. Best for most mics.\n"
-        "Medium: Light plus a filter for hum, rumble and desk bumps.\n"
-        "Heavy: Medium plus quieting steady noise between words. It can swallow "
-        "soft speech, so use it only if noise remains.\n\n"
-        "It can't fix clipping or a wrong mic level."
+        "Sound processing on your mic before Whisper hears it. It never changes "
+        "words; text cleanup is separate (Post-Processing).\n\n"
+        "Off: the raw mic signal.\n"
+        "Light (recommended): raises quiet recordings toward a normal level, at "
+        "most 8x, so faint noise isn't blown up.\n"
+        "Medium: Light plus an 80 Hz filter for hum, rumble and desk bumps. For a "
+        "fan, air conditioning or a mic on the desk.\n"
+        "Heavy: Medium plus turning steady noise between words down. For a noisy "
+        "room when Medium isn't enough; it can swallow soft speech.\n\n"
+        "None of them can fix clipping or a mic set far too loud."
     ),
     "chunked_mode": (
-        "Splits long recordings so most of the work is done by the time you stop.\n\n"
+        "Transcribes long dictations in pieces while you speak, so the text is "
+        "ready soon after you stop. Ultra.\n\n"
         "Off: one pass for the whole recording.\n"
-        "Auto: one pass under 30 s; longer recordings are split. Recommended.\n"
-        "On: split from the start, in 15 s pieces."
+        "Auto: one pass under 30 s; longer recordings go in 15 s pieces that "
+        "overlap by 2 s. Recommended: in testing, 2-minute dictations on Large "
+        "v3 Turbo Q5 lost words in one pass and kept them all on Auto.\n"
+        "On: 15 s pieces from the start."
     ),
     "whisper_model": (
         "The speech model. It runs on your computer; nothing is sent to the cloud."
     ),
     "backend": (
         "Local transcription engine.\n\n"
-        "• Auto / default — Free uses Base on CPU with whisper.cpp. Ultra uses\n"
-        "  whisper.cpp and respects the GPU toggle. Never selects Faster-Whisper.\n\n"
-        "• whisper.cpp — CPU for Free; Vulkan/CUDA/Metal acceleration with Ultra.\n\n"
+        "• Auto / default — always whisper.cpp. Free uses Base on the CPU; Ultra\n"
+        "  follows the GPU toggle. Never selects Faster-Whisper.\n\n"
+        "• whisper.cpp — CPU for Free; with Ultra's GPU toggle, Metal on a Mac\n"
+        "  and Vulkan on Linux and Windows.\n\n"
         "• Faster-Whisper (experimental) — Manual only, NVIDIA hosts only.\n"
         "  CTranslate2 CUDA path; not fully dogfooded. May fall back to slow CPU.\n"
         "  Ultra feature. Manual pick turns Auto off."
@@ -1615,8 +1627,8 @@ SETTING_TOOLTIPS = {
         if IS_WINDOWS
         else (
             "Use your GPU for transcription and local cleanup. Ultra.\n"
-            "whisper.cpp: Vulkan (AMD/Intel), CUDA or Metal. "
-            "Faster-Whisper (experimental): NVIDIA CUDA only.\n"
+            "whisper.cpp uses Vulkan on AMD, NVIDIA and Intel GPUs. "
+            "Faster-Whisper (experimental, manual): NVIDIA CUDA only.\n"
             "Free runs Base on the CPU. Benchmark shows what the GPU would do."
         )
     ),
@@ -1645,7 +1657,8 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
         if selected_name in ("ggml-base.en.bin", "ggml-base.bin"):
             base_text += (
                 "\n\nBase is the Free default: fast and light, but less accurate. "
-                "Large v3 Turbo (Ultra) made 43% fewer mistakes in our tests."
+                "Large v3 Turbo Q5 (Ultra) on a GPU made 43% fewer mistakes in our "
+                "tests, at the same speed; on the CPU it is much slower."
             )
         
         if not benchmark_results:
@@ -1722,7 +1735,7 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
             "whisper_cpp": "whisper.cpp",
             "faster_whisper": "Faster-Whisper (experimental)",
         }.get(active, active)
-        mode = "Auto (safe GPU path)" if auto_on else "Manual (your choice)"
+        mode = "Auto" if auto_on else "Manual (your choice)"
         return (
             f"{base}\n\n"
             f"This PC → Auto picks: {rec_label}\n"
@@ -2430,8 +2443,9 @@ class BenchmarkRunner:
 # speed_rating / accuracy_rating are relative 1–5 scores within this catalog
 # (not absolute WER). Calibrated from OpenAI large-v3-turbo guidance + common
 # whisper.cpp practice: tiny→large accuracy climbs, size climbs; turbo is near
-# large-v3 quality at far higher speed; Q5 is the default balance (smaller/faster
-# than full turbo with only a small accuracy tradeoff).
+# large-v3 quality at far higher speed. Q5 is the default balance: measured as
+# accurate as full turbo (6.6% vs 6.7% WER, docs/EVAL-2026-09-24.md) at a third
+# of the download.
 WHISPER_CPP_MODELS = {
     "tiny.en": {
         "name": "Tiny (English)",
@@ -2506,7 +2520,7 @@ WHISPER_CPP_MODELS = {
         "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
         "speed": "Fastest high-quality · best balance",
         "speed_rating": 4,
-        "accuracy_rating": 4,
+        "accuracy_rating": 5,
         "recommended": True,
         # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
         "cdn_object": "whisper/ggml-large-v3-turbo-q5_0.bin",
@@ -2635,7 +2649,7 @@ def format_model_tile_title(name: str, model_id: str | None = None) -> tuple[str
         "tiny.en": ("Tiny", "EN"),
         "medium": ("Medium", "Multi"),
         "small": ("Small", "Multi"),
-        "base": ("Base", "Free default"),
+        "base": ("Base", "Free"),
         "tiny": ("Tiny", "Multi"),
     }
     if cat in id_map:
@@ -2746,9 +2760,9 @@ LLM_GGUF_MODELS = {
         "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
         "sha256": "12bf0fff8815d5f73a3c9b586bd8fee8e7b248c935de70dec367679873d0f29d",
         "cdn_object": "llm/google_gemma-3-1b-it-Q4_K_M.gguf",
-        "description": "Small and fast. Great for Normal cleanup; for styles use Qwen3 4B (in testing Gemma reworded technical terms).",
+        "description": "Small and fast. Normal needs no model; in styles Gemma changed meaning in testing (\"diff\" became \"difference\"), so styles use Qwen3 4B.",
         "speed": "Very Fast",
-        "accuracy": "Excellent",
+        "accuracy": "Fair",
         # Explicit False: old clients built with it True must drop the flag.
         "recommended": False,
     },
@@ -2760,9 +2774,9 @@ LLM_GGUF_MODELS = {
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
         "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
         "cdn_object": "llm/Qwen3.5-2B-Q4_K_M.gguf",
-        "description": "Leaves text largely unchanged in testing; fine for Normal cleanup only.",
+        "description": "Leaves text almost unchanged in testing, fillers included. Normal already removes um/uh without a model; styles use Qwen3 4B.",
         "speed": "Very Fast",
-        "accuracy": "Excellent",
+        "accuracy": "Fair",
     },
     # 2026-09 lineup refresh — three tiers:
     #   light  = Gemma 3 1B (Free; Normal needs no model since 2026-09)
@@ -2790,7 +2804,7 @@ LLM_GGUF_MODELS = {
         "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
-        "description": "Best for styles: the most reliable in every style we tested, at ~0.3 s on Apple silicon. Keeps your meaning.",
+        "description": "Best for styles: the most reliable in every style we tested and the only one here for Strong. About 0.3 s per dictation on an M3 Ultra; slower on smaller Macs.",
         "speed": "Fast",
         "accuracy": "Excellent",
         # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
@@ -5976,6 +5990,9 @@ class WayfinderApp(ctk.CTk):
                 "[license] Repaired unavailable settings: "
                 + ", ".join(_entitlement_repairs)
             )
+        # One-time Ultra setup, for a license that turned Ultra outside the app
+        # (the in-app activation runs it directly). Settles the record on Free.
+        self._apply_ultra_defaults()
 
         # Resolve audio device (intelligent selection if not explicitly set). This is a
         # RUNTIME value only — do NOT write it back into config["audio_device"]. Persisting
@@ -6374,6 +6391,7 @@ class WayfinderApp(ctk.CTk):
                             WhisperServerBackend.shutdown()
                         except Exception:
                             pass
+                    self._apply_ultra_defaults()
                     self._refresh_entitlement_ui()
 
                 self.event_queue.put((EventType.UI_CALLBACK, _apply))
@@ -11009,7 +11027,13 @@ class WayfinderApp(ctk.CTk):
         self.create_toggle_row(
             parent, "Enable Post-Processing",
             self.postproc_enabled_var, self.toggle_post_processing,
-            tooltip="Clean up transcriptions using a local LLM.\nRemoves filler words (um, uh, like) and fixes punctuation.\nRuns 100% on your device — no data sent anywhere.",
+            tooltip=(
+                "Tidies the text after transcription, on this device.\n"
+                "Off: you get Whisper's text as it is.\n"
+                "On, Normal style: removes um/uh instantly, with no model.\n"
+                "Professional, Casual, Dev and Personal (Ultra) rewrite with a local "
+                "model; Qwen3 4B is the one that does them well."
+            ),
         )
         
         # Post-processing backend and options (only show if enabled)
@@ -11057,8 +11081,10 @@ class WayfinderApp(ctk.CTk):
                 self.residency_var, self._on_residency_changed,
                 tooltip=("Instant: the cleanup model stays loaded, so cleanup takes "
                          f"~0.15s instead of ~0.6s. Holds {_resident_hint} while idle "
-                         "(in video memory when GPU acceleration is on, otherwise in "
-                         "RAM).\n"
+                         + ("(in RAM: cleanup runs on the CPU on Windows).\n"
+                            if IS_WINDOWS and not IS_MACOS else
+                            "(in video memory when GPU acceleration is on, otherwise "
+                            "in RAM).\n") +
                          "Save memory: the model loads for each cleanup and is freed "
                          "afterwards — slower, but nothing is held while you are not "
                          "dictating."),
@@ -11612,7 +11638,7 @@ class WayfinderApp(ctk.CTk):
         # from STYLE_ICONS (wayfinder.ui.icons); the emoji that used to prefix the
         # titles were retired with the icon system.
         tones = [
-            ("minimal", "Normal", "Just removes um/uh. Your exact words, nothing changed."),
+            ("minimal", "Normal", "Removes um/uh when text cleanup is on. Nothing is rewritten."),
             ("professional", "Professional", "Clean + business-appropriate tone"),
             ("casual", "Casual", "Clean + relaxed texting style"),
             ("dev", "Dev", "Developer mode - recognizes git & code terms"),
@@ -11759,7 +11785,9 @@ class WayfinderApp(ctk.CTk):
             ).pack(fill="x", padx=12, pady=(0, 8))
         
         # Add tooltip for strong mode
-        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your exact words.\nNeeds Qwen3 4B or a cloud model (Ultra).")
+        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your sentences and "
+                                  "only tidies them in the style (slang like \"gonna\" can still change).\n"
+                                  "Needs Qwen3 4B or a cloud model (Ultra).")
         
         # Caricature mode toggle (right side) - always visible now!
         caricature_container = ctk.CTkFrame(toggles_row, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
@@ -13061,7 +13089,9 @@ class WayfinderApp(ctk.CTk):
             "Aura hears gamer talk (inc, pull, LFG, M+...) and keeps your words as said.",
             "One message per dictation: if it's too long, the next part waits in chat for your "
             "Enter. Send it before dictating again.",
-            "In games Aura only pastes, never types keys, so dictation can't trigger a keybind.",
+            "In games Aura pastes rather than typing keys, so dictation can't trigger a keybind."
+            + (" Dark Age of Camelot has no paste: open its chat first and Aura types into it."
+               if sys.platform.startswith("linux") else ""),
         ):
             note(mode, "•  " + line, color=COLORS["text_secondary"])
         ctk.CTkFrame(mode, fg_color="transparent", height=SPACING["tile_pad_y"]).pack()
@@ -13621,8 +13651,9 @@ class WayfinderApp(ctk.CTk):
     def toggle_gpu(self):
         """Toggle GPU acceleration (applies live, no app restart).
 
-        GPU processing is Ultra-only for every model. The setting remains off on
-        new installs until an Ultra user explicitly enables it.
+        GPU processing is Ultra-only for every model. Installs start on CPU; the
+        first switch to Ultra turns it on once where the hardware suits it
+        (core/ultra_defaults.py), and from then on this switch decides.
         """
         if not hasattr(self, 'gpu_var'):
             return
@@ -13633,7 +13664,12 @@ class WayfinderApp(ctk.CTk):
             return
         self.config["use_gpu"] = want
         save_config(self.config)
-        if want and IS_WINDOWS and not IS_MACOS:
+        self._apply_transcription_hardware_change(want)
+        self.log(f"⚙ GPU acceleration: {'enabled (GPU)' if want else 'disabled (CPU)'} — applied")
+
+    def _apply_transcription_hardware_change(self, gpu_on: bool) -> None:
+        """Make a CPU/GPU or speech-model change take effect without a restart."""
+        if gpu_on and IS_WINDOWS and not IS_MACOS:
             # Startup skips the GPU probe in CPU mode: pick the device now (the
             # configured gpu_device, else the discrete GPU), off the Tk thread.
             try:
@@ -13656,7 +13692,85 @@ class WayfinderApp(ctk.CTk):
             _release_cleanup_residency()
         except Exception:
             pass
-        self.log(f"⚙ GPU acceleration: {'enabled (GPU)' if want else 'disabled (CPU)'} — applied")
+
+    # === One-time Ultra setup (core/ultra_defaults.py) ===
+
+    def _gpu_default_capable(self) -> bool:
+        """Whether the one-time Ultra setup may switch GPU acceleration on here."""
+        try:
+            from wayfinder.core.ultra_defaults import gpu_is_default_capable
+
+            if not gpu_is_default_capable(get_gpu_info().vendor, sys.platform):
+                return False
+            if IS_WINDOWS and not IS_MACOS:
+                # Windows ships the Vulkan whisper.cpp build beside the CPU one;
+                # without it GPU mode would only ever run the CPU build.
+                from wayfinder.core.transcriber import _resolve_whisper_cli_binary
+                from wayfinder.utils.windows_whisper import gpu_twin
+
+                cli = _resolve_whisper_cli_binary(self.config.get("whisper_binary", ""))
+                return bool(cli and gpu_twin(cli))
+            return True
+        except Exception:
+            return False
+
+    def _recommended_speech_model_on_disk(self) -> str | None:
+        """Large v3 Turbo Q5, if it is already downloaded somewhere Aura looks."""
+        from wayfinder.core.ultra_defaults import RECOMMENDED_SPEECH_MODEL
+
+        home = str(Path.home())
+        for directory in _whisper_model_search_dirs():
+            candidate = directory / RECOMMENDED_SPEECH_MODEL
+            try:
+                if candidate.is_file():
+                    path = str(candidate)
+                    # Stored like _set_active_whisper_model stores it.
+                    return "~" + path[len(home):] if path.startswith(home) else path
+            except OSError:
+                continue
+        return None
+
+    def _apply_ultra_defaults(self, *, activated_now: bool = False) -> list[str]:
+        """Run the one-time Ultra setup if it is due. Returns the changed keys."""
+        gate = getattr(self, "feature_gate", None)
+        # An offline-first read that still needs its online refresh proves
+        # nothing about the tier yet; the background refresh calls this again.
+        if gate is None or getattr(gate, "refresh_pending", False):
+            return []
+        # Never swap the GPU mode or model under a running dictation; the next
+        # launch (or activation) runs it instead.
+        if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+            return []
+        try:
+            from wayfinder.core.ultra_defaults import apply_ultra_defaults, describe_changes
+
+            premium = bool(gate.is_premium)
+            changed = apply_ultra_defaults(
+                self.config,
+                gate,
+                gpu_capable=premium and self._gpu_default_capable(),
+                recommended_model_path=(
+                    self._recommended_speech_model_on_disk() if premium else None
+                ),
+                activated_now=activated_now,
+            )
+        except Exception as exc:
+            print(f"[license] Ultra setup skipped: {exc}", flush=True)
+            return []
+        if not changed:
+            return []
+        save_config(self.config)
+        if "use_gpu" in changed or "model_path" in changed:
+            self._apply_transcription_hardware_change(bool(self.config.get("use_gpu")))
+        if "model_path" in changed and hasattr(self, "model_btn"):
+            try:
+                self.model_btn.configure(text=self.get_model_display())
+            except Exception:
+                pass
+        message = describe_changes(changed)
+        if message:
+            self.log(message)
+        return changed
 
     # === Post-Processing Handlers ===
 
@@ -17323,15 +17437,16 @@ class WayfinderApp(ctk.CTk):
     # License tile) — one list so the copy never drifts. Lucide row markers
     # (CLAUDE.md: no decorative emoji as UI chrome).
     # Claims are measured (docs/EVAL-2026-09-24.md): Turbo Q5 6.6% vs Base 11.5%
-    # WER; Qwen3 4B was the most reliable cleanup model in every style and kept
-    # meaning (Professional/Standard scored C on metrics, fine on reading).
+    # WER, at Base's CPU speed on the GPU; Qwen3 4B was the most reliable cleanup
+    # model in every style and kept meaning (Professional/Standard scored C on
+    # metrics, fine on reading). Chunking: docs/EVAL-2026-09-30-chunking.md.
     ULTRA_BENEFITS = [
-        ("check", "Higher Accuracy", "Large v3 Turbo made 43% fewer mistakes than Base in our tests"),
+        ("check", "Higher Accuracy", "Large v3 Turbo Q5 on a GPU: 43% fewer mistakes than Base, same speed"),
         ("pen-line", "Writing Styles", "Four styles, tested to keep your meaning"),
         ("message-circle", "Your Vocabulary", "Names and terms spelled your way, plus your own corrections"),
         ("sparkles", "GPU Acceleration", "Faster transcription and local cleanup on supported GPUs"),
         ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),
-        ("audio-waveform", "Chunked Recording", "Unlimited length with live feedback"),
+        ("audio-waveform", "Chunk Processing", "Long dictations transcribe while you speak"),
     ]
 
     def _build_ultra_benefit_rows(self, parent, icon_color: str | None = None) -> None:
@@ -17833,6 +17948,8 @@ class WayfinderApp(ctk.CTk):
         self._write_status_breadcrumb()
         if result.is_valid and self.feature_gate.is_premium:
             self.log("😇 Ultra activated — halo on. Thanks for supporting Wayfinder!")
+            # Before the UI refresh, so Settings shows the new GPU/chunking state.
+            self._apply_ultra_defaults(activated_now=True)
             self._rebuild_header()
             self._refresh_entitlement_ui()
             # Replace the activation form with persistent confirmation.
@@ -23066,7 +23183,11 @@ class WayfinderApp(ctk.CTk):
                         if len(store) >= chunk_index:
                             prev_text = store[chunk_index - 1]
                             if prev_text and prev_text not in ("[error]", "[empty]"):
-                                context = prev_text
+                                # Minus its cut edge, so this chunk re-hears the
+                                # overlap and the join can match it.
+                                from wayfinder.core.chunking import chunk_prompt_context
+
+                                context = chunk_prompt_context(prev_text)
                                 break
                             if prev_text in ("[error]", "[empty]"):
                                 break  # prior chunk is terminal; no useful context
@@ -23086,6 +23207,23 @@ class WayfinderApp(ctk.CTk):
                 context=context,
                 skip_post_processing=True,
             )
+            if context:
+                # A prompt can make Whisper return a fragment for a whole chunk
+                # of speech; hear it once more without one and keep the fuller.
+                from wayfinder.core.chunking import (
+                    chunk_text_looks_truncated,
+                    prefer_fuller_chunk_text,
+                )
+
+                if chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
+                    retry = transcribe_with_config(
+                        chunk_path, asr_cfg, context="", skip_post_processing=True,
+                    )
+                    fuller = prefer_fuller_chunk_text(text, retry)
+                    if fuller is not text:
+                        self.log(f"↻ Chunk {chunk_index + 1} re-heard without context "
+                                 f"({len(text.split())} → {len(fuller.split())} words)")
+                    text = fuller
             # Write into this session's private store — never touches a newer session's list.
             with self.chunk_transcription_lock:
                 while len(store) <= chunk_index:

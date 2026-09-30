@@ -153,10 +153,17 @@ PREMIUM_FEATURES = {
     ),
     "gpu_acceleration": (
         "GPU Acceleration",
-        "Use Vulkan, CUDA, ROCm, or Metal acceleration for much faster transcription and local cleanup",
+        "Metal on a Mac, Vulkan on Linux and Windows: much faster transcription, "
+        "and local cleanup on Mac and Linux",
     ),
-    "cloud_backends": ("Cloud Processing", "Groq/OpenAI Whisper transcription + GPT/Claude text cleanup — best quality for Strong & Caricature modes"),
-    "chunked_recording": ("Chunked Recording", "Unlimited duration with real-time feedback"),
+    "cloud_backends": (
+        "Cloud Processing",
+        "Groq/OpenAI Whisper transcription and GPT/Claude text cleanup, with your own API keys",
+    ),
+    "chunked_recording": (
+        "Chunk Processing",
+        "Long dictations transcribe in pieces while you speak, so the text is ready sooner",
+    ),
     # Note: advanced_preprocessing / high_beam_search / typing_speeds were paper
     # tigers (never enforced) and are intentionally free — not listed here.
     "custom_vocabulary": ("Custom Vocabulary", "Add your own terms and names"),

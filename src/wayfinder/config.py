@@ -363,8 +363,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Chunked recording settings. Auto keeps short dictations as one Whisper
     # request, then begins background chunks only after 30 seconds. This is the
-    # first-run Ultra default; existing boolean preferences migrate to Off/On.
-    # The feature gate is still enforced at the recording boundary.
+    # first-run Ultra default (core/ultra_defaults.py sets it again on the first
+    # switch to Ultra, since Free forces it off); existing boolean preferences
+    # migrate to Off/On. The feature gate is still enforced at the recording
+    # boundary.
     "chunked_mode": "auto",  # off | auto | on
     "chunk_auto_threshold": 30,  # First chunk boundary in Auto mode (seconds)
     "chunk_duration": 15,  # Empirical balance: fewer ASR boundary errors than 10s
@@ -380,9 +382,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Manual Backend dropdown sets this False. Auto never picks Faster-Whisper
     # (CUDA load can fail closed to slow CPU-large — Manual only).
     "transcription_backend_auto": True,
-    # GPU is an explicit Ultra opt-in. Even a newly activated Ultra install starts
-    # on CPU until the user enables this toggle; Free is also enforced at runtime.
+    # GPU is Ultra-only (enforced at runtime too), so installs start on CPU. The
+    # first switch to Ultra turns it on once on Apple Silicon/NVIDIA/AMD
+    # (core/ultra_defaults.py); after that it is the user's choice.
     "use_gpu": False,
+    # None = not decided yet, False = seen on Free, True = the one-time Ultra
+    # setup has run (or the install was Ultra before it existed).
+    "ultra_defaults_applied": None,
     "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
     "gpu_device": "auto",  # "auto" = benchmark and pick fastest, or "0", "1", "2" for manual selection
     "gpu_benchmark_cache": {},  # Cached GPU benchmark results: {"0": 0.6, "1": 7.5, "2": 52.0, "fastest": "0"}

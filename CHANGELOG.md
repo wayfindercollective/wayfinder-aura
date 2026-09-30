@@ -23,6 +23,12 @@ Linux: dictation for gamers on every desktop.
 - **Cancel a dictation from any app** (default Shift+Esc; Esc where Aura sees
   keys) without anything being typed.
 - **Vocabulary corrections as Heard / Write-as pairs.**
+- **Ultra switches on its recommended setup once.** The first time an install
+  becomes Ultra, GPU acceleration turns on (Apple silicon, NVIDIA, AMD),
+  Chunk Processing goes to Auto, text cleanup turns on (Normal only removes
+  um/uh, no model), and Large v3 Turbo Q5 becomes the speech model if it is
+  already downloaded. It never runs again, so later choices stick; installs
+  that were Ultra before keep their settings.
 
 ### Changed
 
@@ -36,6 +42,12 @@ Linux: dictation for gamers on every desktop.
 
 ### Fixed
 
+- **Long chunked dictations keep their words at the chunk boundaries.** The
+  prompt for each piece no longer ends on the half-heard word at the cut, the
+  join matches the overlap even when that word came out wrong, and a piece
+  that comes back nearly empty is heard again without the prompt. Auto on
+  Large v3 Turbo Q5: 8.2% → 5.7% word errors on 2-minute dictations, where a
+  single pass lost up to half the words (docs/EVAL-2026-09-30-chunking.md).
 - **Keys typed into games through Wine arrive intact:** Shift is pressed as
   on a keyboard (KWin 6.4 dropped it for XWayland windows), and ( and ) use
   the main keys Wine understands.

@@ -36,10 +36,19 @@ class TestUnderutilizationSignals:
         signals = underutilization_signals(dict(FRESH_ULTRA_CONFIG), _gate(), True)
         assert signals == ["model", "gpu", "cleanup", "chunking"]
 
-    def test_no_gpu_hardware_suppresses_only_the_gpu_signal(self):
+    def test_no_gpu_hardware_suppresses_the_gpu_signal(self):
         signals = underutilization_signals(dict(FRESH_ULTRA_CONFIG), _gate(), False)
         assert "gpu" not in signals
-        assert "model" in signals
+        # Turbo Q5 is ~9x slower than Base on CPU: suggest Small (EN) instead.
+        assert signals == ["model_cpu", "cleanup", "chunking"]
+
+    def test_model_tip_promises_same_speed_only_on_the_gpu(self):
+        assert "same speed on the GPU" in SIGNAL_PHRASES["model"]
+        assert "Turbo" not in SIGNAL_PHRASES["model_cpu"]
+        no_gpu_feature = _gate(features={"large_models"})
+        assert underutilization_signals(dict(FRESH_ULTRA_CONFIG), no_gpu_feature, True) == [
+            "model_cpu"
+        ]
 
     def test_each_signal_clears_when_the_upgrade_is_in_use(self):
         cfg = dict(FRESH_ULTRA_CONFIG)
@@ -48,6 +57,13 @@ class TestUnderutilizationSignals:
         cfg["llama_cpp_model_requires_feature"] = "large_cleanup_models"
         cfg["chunked_mode"] = "auto"
         assert underutilization_signals(cfg, _gate(), True) == []
+
+    def test_only_the_free_base_files_count_as_base(self):
+        cfg = dict(FRESH_ULTRA_CONFIG)
+        cfg["model_path"] = "/models/my-database-tuned.bin"
+        assert "model" not in underutilization_signals(cfg, _gate(), True)
+        cfg["model_path"] = "/models/ggml-base.bin"
+        assert "model" in underutilization_signals(cfg, _gate(), True)
 
     def test_custom_premium_cleanup_model_does_not_nag(self):
         # Browse stores the catalog marker as None for CUSTOM models, but the
@@ -89,7 +105,8 @@ class TestNudgeText:
         assert ", and " not in text  # serial comma is for 3+ items only
 
     def test_many_signals_use_serial_comma(self):
-        text = nudge_text(["model", "gpu", "cleanup", "chunking"])
-        for phrase in SIGNAL_PHRASES.values():
-            assert phrase in text
+        signals = ["model", "gpu", "cleanup", "chunking"]
+        text = nudge_text(signals)
+        for signal in signals:
+            assert SIGNAL_PHRASES[signal] in text
         assert ", and " in text

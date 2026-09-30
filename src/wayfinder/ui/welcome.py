@@ -931,7 +931,8 @@ class WelcomePane:
         token.pack(anchor="w", pady=(0, SPACING["md"]))
         tap_hold = False
         try:
-            tap_hold = sys.platform == "darwin" and bool(self.app._record_hotkey_is_tap_hold())
+            # A bare Right Option (Mac) or Right Alt (Windows); never on Linux.
+            tap_hold = bool(self.app._record_hotkey_is_tap_hold())
         except Exception:
             pass
         self._body_label(

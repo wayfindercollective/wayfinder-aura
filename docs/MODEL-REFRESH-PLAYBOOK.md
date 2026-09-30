@@ -8,9 +8,13 @@ Current lineup (2026-09):
 
 | Tier | Model | Tier gate | Why |
 |------|-------|-----------|-----|
-| Light | Gemma 3 1B (`google_gemma-3-1b-it-Q4_K_M.gguf`) | Free, `recommended` | Most consistent gentle-guide cleanup across tones |
-| Medium | Qwen 3.5 2B (`Qwen3.5-2B-Q4_K_M.gguf`) | Free | Capable, roomier; less consistent than Gemma for light cleanup |
-| Heavy | Qwen3 4B Instruct 2507 (`Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf`) | Ultra (`large_cleanup_models`) | Sharpest instruction follower at 4B, **no reasoning latency** |
+| Light | Gemma 3 1B (`google_gemma-3-1b-it-Q4_K_M.gguf`) | Free; the default download target | Small and fast, but it changed meaning in every style (docs/EVAL-2026-09-24.md), so styles are greyed out on it |
+| Medium | Qwen 3.5 2B (`Qwen3.5-2B-Q4_K_M.gguf`) | Free | Leaves text almost unchanged; styles greyed out |
+| Heavy | Qwen3 4B Instruct 2507 (`Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf`) | Ultra (`large_cleanup_models`), `recommended` | The only shipped model that does the styles reliably; **no reasoning latency** |
+
+Everyday cleanup needs no model at all: the Normal style removes um/uh in about
+a millisecond (`normal_filler_removal`). Gemma 3 1B is not the everyday
+recommendation; nothing in the measured evidence supports it over Normal.
 
 ---
 

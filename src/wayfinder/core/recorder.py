@@ -205,6 +205,16 @@ def get_wav_peak_amplitude(audio_path: str | Path) -> float | None:
         return None
 
 
+def get_wav_duration_seconds(audio_path: str | Path) -> float | None:
+    """Return a WAV's length in seconds, or ``None`` if unreadable."""
+    try:
+        with wave.open(str(audio_path), "rb") as wav_file:
+            rate = wav_file.getframerate()
+            return wav_file.getnframes() / float(rate) if rate else None
+    except (OSError, EOFError, wave.Error):
+        return None
+
+
 def wav_has_speech_activity(audio_path: str | Path) -> bool | None:
     """Return speech activity for a 16-bit PCM WAV, or ``None`` if unreadable."""
     try:
