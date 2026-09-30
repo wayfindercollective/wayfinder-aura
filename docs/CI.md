@@ -43,6 +43,13 @@ query the runner inventory above for current availability. Ineligible jobs
 queue and never fall back to hosted execution. Publishing routing changes is
 not installer or application-release signoff.
 
+Native Mac and Windows compilation passes `CMAKE_BUILD_PARALLEL_LEVEL`
+explicitly to CMake; an unset or empty value defaults to two build jobs. The
+workflows currently set two. This prevents packaging from selecting every host
+CPU or overriding the configured limit with the build tool's default. Build
+parallelism is a workload setting, not an aggregate CPU or RAM enforcement
+boundary; the runner owner's host supervision still supplies those limits.
+
 ## Routine validation
 
 Trusted repository pull requests plus pushes to `main` and `develop` run a

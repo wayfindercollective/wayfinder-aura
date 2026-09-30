@@ -122,7 +122,8 @@ def build_whisper() -> None:
     ])
     run([
         "cmake", "--build", WHISPER_BUILD_DIR, "--config", "Release",
-        "--parallel", str(os.cpu_count() or 4),
+        # Respect the runner allocation instead of using every host CPU.
+        "--parallel", os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL") or "2",
     ])
 
     NATIVE_BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -171,7 +172,7 @@ def build_llama() -> None:
     ])
     run([
         "cmake", "--build", LLAMA_BUILD_DIR, "--config", "Release",
-        "--parallel", str(os.cpu_count() or 4),
+        "--parallel", os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL") or "2",
         "--target", *LLAMA_BINARIES,
     ])
 

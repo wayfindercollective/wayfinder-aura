@@ -123,7 +123,9 @@ def _stage_whisper_vulkan(required: bool) -> bool:
         "-DGGML_NATIVE=OFF", "-DGGML_BACKEND_DL=ON", "-DGGML_CPU_ALL_VARIANTS=ON",
         "-DGGML_VULKAN=ON", "-DWHISPER_BUILD_TESTS=OFF",
     ], check=True, env=env)
-    subprocess.run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel"],
+    # Bare --parallel ignores the environment default and lets MSBuild choose.
+    subprocess.run(["cmake", "--build", str(build_dir), "--config", "Release",
+                    "--parallel", os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL") or "2"],
                    check=True, env=env)
     out = build_dir / "bin" / "Release"
     WHISPER_VULKAN_STAGE.mkdir(parents=True, exist_ok=True)
