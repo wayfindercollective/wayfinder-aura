@@ -109,11 +109,13 @@ The remaining 72 hits are incidental:
 - Hiding binaries there would change nothing they check. Leave them unless
   one starts asserting on binaries.
 
-Still open: the licence-gate reset (autouse `reset_feature_gate`) in worktree
-`.claude/worktrees/stoic-tharp-8b5e72`, uncommitted and based on `ac6a102`.
-It edits `tests/conftest.py`. Rebase it onto `origin/main` after this work
-and PR #13 land, then open its own pull request. Once it lands, the
-free-tier model name described above is extra safety rather than required.
+The licence-gate reset (autouse `reset_feature_gate`) is PR #16
+(`fix/test-order-isolation`, from `main` 297d3e0). It also fixes the
+order-dependent `test_loopback_http.py::test_windows_bypasses_a_configured_proxy`.
+PRs #13, #14, #16, #12 and #15 merge cleanly in that order, including their
+three `tests/conftest.py` edits. The full suite on that combination passes on
+the Mac: 3261 passed, 207 skipped. Once #16 lands, the free-tier model name
+described above is extra safety rather than required.
 
 Do new work per docs/PLATFORM-DEVELOPMENT.md "Branches and merges": branch
 from the latest `origin/main`, use one short task branch (for example
